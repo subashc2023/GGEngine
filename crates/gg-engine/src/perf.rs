@@ -39,6 +39,9 @@ pub(crate) struct Sample {
     pub(crate) wait: u64,
     /// Of the render, copying the game's view into the memory of the client it's published to.
     pub(crate) publish: u64,
+    /// The time on the GPU of the frame whose timestamps that render read, two before it, from
+    /// its first pass's beginning to its last's end; 0 where none came back.
+    pub(crate) gpu: u64,
     /// Instanced draws in the game's view.
     pub(crate) draws: u64,
     /// The meshes they drew.
@@ -65,6 +68,7 @@ impl Sample {
         self.render = f(self.render, other.render);
         self.wait = f(self.wait, other.wait);
         self.publish = f(self.publish, other.publish);
+        self.gpu = f(self.gpu, other.gpu);
         self.draws = f(self.draws, other.draws);
         self.instances = f(self.instances, other.instances);
         self.triangles = f(self.triangles, other.triangles);
@@ -87,6 +91,8 @@ pub(crate) struct Perf {
     /// The first frame's time.
     first: Option<u64>,
     measured: u64,
+    /// Of those, the frames whose GPU time came back.
+    gpu_measured: u64,
     sum: Sample,
     max: Sample,
 }
@@ -129,6 +135,7 @@ impl Perf {
             sample.render = nanos(rendered.render.saturating_sub(rendered.wait));
             sample.wait = nanos(rendered.wait);
             sample.publish = nanos(rendered.publish);
+            sample.gpu = rendered.gpu.map_or(0, nanos);
             sample.draws = rendered.drawn.draws as u64;
             sample.instances = rendered.drawn.instances as u64;
             sample.triangles = rendered.drawn.triangles as u64;
@@ -161,6 +168,7 @@ impl Perf {
             self.next = (self.next + 1) % KEPT;
         }
         self.measured += 1;
+        self.gpu_measured += u64::from(sample.gpu > 0);
         self.sum.merge(&sample, |a, b| a + b);
         self.max.merge(&sample, u64::max);
     }
@@ -175,23 +183,18 @@ impl Perf {
     /// The run's frames summed up, in milliseconds.
     pub(crate) fn summary(&self) -> Summary {
         let stats = |field: fn(&Sample) -> u64| {
-            if self.measured == 0 {
-                return Stats::default();
-            }
-            let mut sorted: Vec<u64> = self.kept.iter().map(field).collect();
-            sorted.sort_unstable();
-            // Nearest rank: the smallest at or above `percent` of them.
-            let at = |percent: usize| {
-                let rank = (percent * sorted.len()).div_ceil(100);
-                Some(ms(sorted[rank - 1] as f64))
-            };
-            Stats {
-                p50: at(50),
-                p95: at(95),
-                p99: at(99),
-                mean: Some(ms(field(&self.sum) as f64 / self.measured as f64)),
-                max: Some(ms(field(&self.max) as f64)),
-            }
+            let kept = self.kept.iter().map(field).collect();
+            Stats::of(kept, field(&self.sum), self.measured, field(&self.max))
+        };
+        // Of the frames whose GPU time came back alone.
+        let gpu = {
+            let kept = self.kept.iter().map(|s| s.gpu).filter(|&gpu| gpu > 0);
+            Stats::of(
+                kept.collect(),
+                self.sum.gpu,
+                self.gpu_measured,
+                self.max.gpu,
+            )
         };
         Summary {
             measured: self.measured,
@@ -205,6 +208,7 @@ impl Perf {
             render: stats(|s| s.render),
             wait: stats(|s| s.wait),
             publish: stats(|s| s.publish),
+            gpu,
             draws_max: self.max.draws,
             instances_max: self.max.instances,
             triangles_max: self.max.triangles,
@@ -229,6 +233,8 @@ pub(crate) struct Summary {
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
     pub(crate) publish: Stats,
+    /// Of the frames whose GPU time came back, which the percentiles, mean and maximum cover.
+    pub(crate) gpu: Stats,
     pub(crate) draws_max: u64,
     pub(crate) instances_max: u64,
     pub(crate) triangles_max: u64,
@@ -242,6 +248,29 @@ pub(crate) struct Stats {
     pub(crate) p99: Option<f64>,
     pub(crate) mean: Option<f64>,
     pub(crate) max: Option<f64>,
+}
+
+impl Stats {
+    /// The percentiles of `kept`, nanoseconds of the frames kept, and the mean of `count` frames
+    /// that took `sum` in all, the longest `max`; none of them if no frame was measured.
+    fn of(mut kept: Vec<u64>, sum: u64, count: u64, max: u64) -> Self {
+        if count == 0 || kept.is_empty() {
+            return Self::default();
+        }
+        kept.sort_unstable();
+        // Nearest rank: the smallest at or above `percent` of them.
+        let at = |percent: usize| {
+            let rank = (percent * kept.len()).div_ceil(100);
+            Some(ms(kept[rank - 1] as f64))
+        };
+        Self {
+            p50: at(50),
+            p95: at(95),
+            p99: at(99),
+            mean: Some(ms(sum as f64 / count as f64)),
+            max: Some(ms(max as f64)),
+        }
+    }
 }
 
 /// `duration` in milliseconds, rounded to the microsecond.
@@ -342,12 +371,14 @@ const PARTS: [Part; 5] = [
     },
 ];
 
-/// What the render thread spent on the frame before each frame, beside it: the panel lists it, but
-/// the graph doesn't stack it on the main thread's parts, which it overlaps.
+/// What the render thread spent on the frame before each frame, beside it, and the GPU on a frame
+/// two before that: the panel lists them, but the graph doesn't stack them on the main thread's
+/// parts, which they overlap.
 #[cfg(feature = "dev")]
-const RENDERING: [(&str, Time); 2] = [
+const RENDERING: [(&str, Time); 3] = [
     ("Render thread: rendering", |s| s.render),
     ("Render thread: waiting for the GPU and display", |s| s.wait),
+    ("GPU: the frame's passes", |s| s.gpu),
 ];
 
 /// The sum and the maximum of some times.
@@ -608,6 +639,7 @@ mod tests {
             wait,
             publish: Duration::ZERO,
             drawn,
+            gpu: None,
         }
     }
 
@@ -735,6 +767,7 @@ mod tests {
                     render: ms(6),
                     wait: ms(4),
                     publish: 0,
+                    gpu: 0,
                     draws: 7,
                     instances: 900,
                     triangles: 1800,
@@ -746,6 +779,37 @@ mod tests {
         let summary = perf.summary();
         let maxima = (summary.draws_max, summary.instances_max);
         assert_eq!((maxima, summary.triangles_max), ((7, 900), 1800));
+    }
+
+    /// The GPU's times are of the frames whose times came back alone, as the first frames' don't.
+    #[test]
+    fn gpu_times_cover_the_frames_they_came_back_for() {
+        let mut perf = Perf::default();
+        let none = DrawCounts::default();
+        perf.start_frame(Duration::ZERO);
+        for (gpu, next) in [
+            (None, MS),
+            (None, MS),
+            (Some(2 * MS), MS),
+            (Some(4 * MS), MS),
+        ] {
+            let render = Rendered {
+                gpu,
+                ..rendered(Duration::ZERO, Duration::ZERO, none, true)
+            };
+            perf.rendered(Duration::ZERO, Duration::ZERO, Some(&render));
+            perf.start_frame(next);
+        }
+        perf.finish(MS);
+        let summary = perf.summary();
+        // The first frame isn't measured; of the four that are, two had GPU times come back.
+        assert_eq!(summary.measured, 4);
+        let gpu = summary.gpu;
+        assert_eq!(
+            (gpu.mean, gpu.max, gpu.p50),
+            (Some(3.0), Some(4.0), Some(2.0))
+        );
+        assert_eq!(Perf::default().summary().gpu, Stats::default());
     }
 
     #[test]

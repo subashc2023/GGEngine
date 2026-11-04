@@ -208,7 +208,9 @@ impl UiPass {
                             size: view.size,
                             ..Viewport::from_points(callback.rect, ppp)
                         };
+                        pass.begin_label(c"view");
                         view.pass.draw(pass, viewport, view.image, Some(clip));
+                        pass.end_label();
                         pass.set_viewport([0, 0], [width, height]);
                         pass.set_pipeline(pipeline);
                     }

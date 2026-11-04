@@ -49,15 +49,16 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 
 - **`gg-core`:** math, logging, profiling and error types.
 - **`gg-gpu`:** Vulkan through `ash`. It turns ash's unsafe API into safe types: device, memory,
-  buffers, images, descriptors, pipelines, swapchain, synchronization and submission. They keep
-  the CPU's side safe whatever safe code does with them: each checks that what it's given was made
-  by its device, or a surface by its instance, and a frame or a pass forgotten rather than dropped
-  is caught at the next call. What runs on the GPU is trusted: a shader's SPIR-V, and the
-  addresses and texture indices it's given, none of which Vulkan checks, so a shader that reads
-  past what it's given, or samples by an index no filled texture holds, can fault the device.
-  gg-renderer checks games' shaders against their contract, and makes every address a draw reads.
-- **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
-  the GPU resources and hands out handles to them.
+  buffers, images, descriptors, pipelines, swapchain, the render graph, synchronization and
+  submission. They keep the CPU's side safe whatever safe code does with them: each checks that
+  what it's given was made by its device, or a surface by its instance, and a frame or a pass
+  forgotten rather than dropped is caught at the next call. What runs on the GPU is trusted: a
+  shader's SPIR-V, and the addresses and texture indices it's given, none of which Vulkan checks,
+  so a shader that reads past what it's given, or samples by an index no filled texture holds, can
+  fault the device. gg-renderer checks games' shaders against their contract, and makes every
+  address a draw reads.
+- **`gg-renderer`:** the frame's passes, declared in gg-gpu's render graph, materials, lighting and
+  post-processing. It owns the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
   and assets, fonts and text, a game's UI, sounds and music, plus hot reload and the tool API in
   development builds: what apps and games build on.
@@ -1212,6 +1213,21 @@ image beside them, of 32-bit floats, which every draw into the view tests. Depth
 1 at the near plane to 0 far away, which keeps a float's precision where it's needed and lets
 perspective see infinitely far; each frame clears it to 0, and a draw shows where it's as near as
 what's drawn there or nearer, so that at one depth the later goes over, as 2D draws at one z stack.
+
+Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
+adds them, each saying how it uses the images it touches, drawing into them, sampling them or
+copying from them, from which the frame places every barrier and layout transition as each pass
+begins, each use waiting for the uses before it that it must and no more, so that no pass records
+one itself. The passes run in that order, on the graphics queue. The view's images, its colors,
+IDs and depth, are the graph's own: each lasts for a frame, undefined until a pass there writes it,
+and is made from what the passes say of it, in a block of memory that the graph's own images whose
+uses in a frame don't overlap share, kept for the frames after that declare it alike, by its name,
+kind and size; a pass that's an image's last use doesn't store it. Each pass is a debug label, and
+the draws inside it have labels of their own, each run of draws its shader's name, and the
+canvas's, and the frame pass's view and UI, apart. Each pass writes a timestamp as it begins and as
+it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy's GPU
+timeline shows each pass, and every run's `engine.perf` logs the frames' time on the GPU
+(`gpu_ms_mean`, `gpu_ms_p95`) and the memory of the graph's own images (`transient_bytes`).
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's

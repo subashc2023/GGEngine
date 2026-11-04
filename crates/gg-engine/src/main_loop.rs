@@ -777,6 +777,8 @@ pub(crate) struct Ran {
     gpu_memory: Option<u64>,
     /// What the frames' arenas held as the run ended, and the most a frame took of its own.
     arenas: Arenas,
+    /// The GPU memory the frames' own images, the view's among them, were in as the run ended.
+    transient_bytes: u64,
     /// The most of the process's memory that was resident, if the OS says.
     memory_peak: Option<u64>,
     /// When its first frame started, if one did.
@@ -807,6 +809,9 @@ impl Ran {
             .as_ref()
             .map(|renderer| renderer.memory_budget().usage);
         let arenas = renderer.as_ref().map(Renderer::arenas).unwrap_or_default();
+        let transient_bytes = (renderer.as_ref())
+            .map(Renderer::transient_bytes)
+            .unwrap_or_default();
         drop(renderer);
         Self {
             frames,
@@ -816,6 +821,7 @@ impl Ran {
             gpu,
             gpu_memory,
             arenas,
+            transient_bytes,
             memory_peak: memory::resident().peak,
             first_frame_at: clock.first,
             shutdown: stopping.elapsed(),
@@ -861,6 +867,8 @@ impl Ran {
             wait_ms_p95 = perf.wait.p95,
             publish_ms_mean = perf.publish.mean,
             publish_ms_p95 = perf.publish.p95,
+            gpu_ms_mean = perf.gpu.mean,
+            gpu_ms_p95 = perf.gpu.p95,
             draws_max = perf.draws_max,
             instances_max = perf.instances_max,
             triangles_max = perf.triangles_max,
@@ -868,6 +876,7 @@ impl Ran {
             gpu_memory_bytes = self.gpu_memory,
             arena_bytes = self.arenas.held,
             arena_peak_bytes = self.arenas.peak,
+            transient_bytes = self.transient_bytes,
             gpu = self.gpu.as_deref(),
             build = BUILD,
             headless = args.headless,

@@ -273,6 +273,87 @@ impl Allocator {
         Ok((image, allocation(raw, &allocation_info)))
     }
 
+    /// Allocates memory of its own, in the GPU's own memory where a type that `requirements`
+    /// allow is, for images that [`Allocator::create_aliasing_image`] makes in it: memory, named
+    /// `name` in its errors, that images used at different times share.
+    pub(crate) fn allocate_memory(
+        &self,
+        requirements: &vk::MemoryRequirements,
+        name: &str,
+    ) -> Result<Allocation> {
+        // Its own, so that what it holds goes back as it's freed, as the images' sizes change.
+        let info = VmaAllocationCreateInfo {
+            flags: VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT.0 as u32,
+            usage: VmaMemoryUsage::VMA_MEMORY_USAGE_UNKNOWN,
+            requiredFlags: vk::MemoryPropertyFlags::empty(),
+            preferredFlags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ..creation(Memory::Gpu)
+        };
+        let mut raw = ptr::null_mut();
+        // SAFETY: as in `create_buffer`.
+        let mut allocation_info: VmaAllocationInfo = unsafe { std::mem::zeroed() };
+        // SAFETY: the allocator is live, and the requirements and info outlive the call.
+        let result = unsafe {
+            vmaAllocateMemory(
+                self.raw,
+                ptr::from_ref(requirements).cast(),
+                &info,
+                &mut raw,
+                &mut allocation_info,
+            )
+        };
+        let size = requirements.size;
+        check(
+            "vmaAllocateMemory",
+            format_args!("{name:?}, {size} bytes"),
+            result,
+        )?;
+        Ok(allocation(raw, &allocation_info))
+    }
+
+    /// Makes an image from `info` at the start of `allocation`, which
+    /// [`Allocator::allocate_memory`] gave, for the image named `name`. It's destroyed with
+    /// `vkDestroyImage`, before or after the memory is freed.
+    ///
+    /// # Safety
+    ///
+    /// The allocation must be live, and meet the image's memory requirements.
+    pub(crate) unsafe fn create_aliasing_image(
+        &self,
+        allocation: &Allocation,
+        info: &vk::ImageCreateInfo<'_>,
+        name: &str,
+    ) -> Result<vk::Image> {
+        let mut image = vk::Image::null();
+        // SAFETY: the caller guarantees the allocation; the info outlives the call, and its
+        // lifetime only constrains its pointers, which VMA reads during the call.
+        let result = unsafe {
+            vmaCreateAliasingImage(
+                self.raw,
+                allocation.raw,
+                ptr::from_ref(info).cast(),
+                &mut image,
+            )
+        };
+        let vk::Extent3D { width, height, .. } = info.extent;
+        let format = info.format;
+        check(
+            "vmaCreateAliasingImage",
+            format_args!("image {name:?} of {width}x{height} {format:?} pixels"),
+            result,
+        )?;
+        Ok(image)
+    }
+
+    /// # Safety
+    ///
+    /// The allocation must have come from `allocate_memory`, and the GPU must be done with the
+    /// images made in it.
+    pub(crate) unsafe fn free_memory(&self, allocation: Allocation) {
+        // SAFETY: the caller guarantees it.
+        unsafe { vmaFreeMemory(self.raw, allocation.raw) };
+    }
+
     /// # Safety
     ///
     /// The buffer and allocation must have come from `create_buffer` together, and the GPU

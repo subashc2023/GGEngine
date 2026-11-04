@@ -72,9 +72,8 @@ impl ViewPass {
         Ok(Self { pipeline })
     }
 
-    /// Draws the view's image, whose index [`Frame::begin_sampling`](gg_gpu::Frame::begin_sampling)
-    /// gave this frame, into `viewport` of the pass's target, which is the image's size, within
-    /// `clip` of the target if it's given.
+    /// Draws the view's image, whose index [`Pass::sampled`] gave this pass, into `viewport` of the
+    /// pass's target, which is the image's size, within `clip` of the target if it's given.
     ///
     /// # Panics
     ///
@@ -126,8 +125,7 @@ impl OutlinePass {
     }
 
     /// Draws `outline` over the whole of the pass's target, the view's image, from the view's IDs,
-    /// whose index [`Frame::begin_sampling_ids`](gg_gpu::Frame::begin_sampling_ids) gave this
-    /// frame as `ids`.
+    /// whose index [`Pass::sampled`] gave this pass as `ids`.
     ///
     /// # Panics
     ///

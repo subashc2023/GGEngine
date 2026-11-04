@@ -3,6 +3,7 @@
 //! as its camera sees them.
 
 use std::collections::{HashSet, VecDeque};
+use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -525,6 +526,8 @@ pub(crate) struct MeshPass {
 
 struct GpuShader {
     pipeline: Pipeline,
+    /// Its name, which captures label its runs of draws with.
+    label: CString,
     /// The size of the vertices it reads.
     vertex_size: usize,
     /// The size of the parameters it takes.
@@ -863,6 +866,9 @@ impl MeshPass {
                 Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
                 None => self.shaders.push(Some(GpuShader {
                     pipeline: made?,
+                    // A name with a nul is labeled as far as it goes.
+                    label: CString::new(added.name.split('\0').next().unwrap_or_default())
+                        .expect("cut at its first nul"),
                     vertex_size: added.vertex_size,
                     params_size: added.params_size,
                     writes_depth,
@@ -1267,10 +1273,12 @@ impl MeshPass {
                 },
                 opaque: shader.writes_depth,
             };
+            pass.begin_label(&shader.label);
             drawn += match mesh.lods.levels.as_slice() {
                 [level] => batch.draw(pass, *level, instances)?,
                 _ => batch.draw_levels(pass, &mut self.scratch, &lod_view, instances)?,
             };
+            pass.end_label();
         }
         Ok(drawn)
     }

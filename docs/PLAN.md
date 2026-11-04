@@ -102,10 +102,40 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Rollback** (2026-11-03)
 - **A server that owns the world** (2026-11-04)
 - **Phase 11, networking beyond lockstep** (2026-11-04)
+- **The render graph** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it, its milestones to be set out as it starts.
+**Phase 12, render graph and PBR**, as Next has it. Its milestones after the render graph, in
+order:
+
+- **HDR and tonemapping.** The view renders into colors of 16-bit floats, which a pass tonemaps
+  into the 8-bit sRGB image the frame shows, captures read and outlines draw over. A world's
+  exposure and tonemapper are an `Environment` component's, on an entity, which the view renders
+  with whatever viewpoint it sees from, so that the editor's view and agents' looks show what the
+  game does: Khronos PBR Neutral by default; a world without one isn't tonemapped, so that 2D games
+  and today's references draw as they do. Shaders read the frame's data from a buffer: the camera's
+  position, the time and the exposure.
+- **Lights and PBR materials.** `Light` components, directional, point and spot, in glTF's units,
+  lux and candela, which glTF's `KHR_lights_punctual` brings too, saved in scenes and set in the
+  Inspector; models drawn by glTF's metallic-roughness, its base color, metallic-roughness, normal,
+  occlusion and emissive maps and factors, shaded forward by every light, with tangents made by
+  MikkTSpace where a primitive has none, as some of Sponza's haven't; textures of data, sampled as
+  stored, which the cooker compresses as BC5 for normals; and materials kept on the GPU, written as
+  they change. A world without lights draws its models unlit, as now. Reference images on lavapipe
+  of spheres across metallic and roughness.
+- **Image-based lighting.** An environment's sky, from an HDR equirectangular image (`.hdr`),
+  prefiltered on the GPU by compute passes as it loads, into diffuse irradiance, specular levels by
+  roughness and the split sum's table, lights its world and shows behind it, reloads as its file
+  changes, and is cooked as BC6H.
+- **Cascaded shadow maps.** The directional light's shadows, in four cascades fitted to the view,
+  steadied against shimmering, with depth bias and filtered edges, the cascades the graph's own.
+- **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky: Khronos
+  glTF-Sample-Assets' Sponza, fetched by a command at a pinned commit and checked against SHA-256
+  hashes into a folder git ignores, since Crytek's CRYENGINE Limited License it's under is no open
+  one, and CI's references take small scenes made in code. Done when Phase 12's *Done when* holds,
+  its frame time and memory in `engine.perf`, from its package too.
+
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
 
@@ -133,17 +163,18 @@ Each phase ends in something you can run and check.
 Phase 11 is done, as Done has it, but for what Deferred holds.
 
 12. **Render graph and PBR.** Passes declare the resources they read and write; the graph
-    places barriers and layout transitions, aliases transient memory and schedules async
-    compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
-    shadow maps, HDR and tonemapping; reference-image tests on lavapipe. *Done when* Sponza
-    renders lit and shadowed, synchronization validation is clean, and per-pass GPU timings
-    show in Tracy.
+    places barriers and layout transitions and aliases transient memory. Physically based shading
+    (glTF metallic-roughness), image-based lighting, cascaded shadow maps, HDR and tonemapping;
+    reference-image tests on lavapipe. *Done when* Sponza renders lit and shadowed,
+    synchronization validation is clean, and per-pass GPU timings show in Tracy.
 13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
-    pyramid); indirect draws; meshlets, which the cooker builds, drawn through mesh shaders where
-    supported and a compute path elsewhere; vertices the cooker packs into 8- and 16-bit fields; a
-    visibility buffer; clustered lighting; TAA. *Done when* CPU frame time stays
-    flat as the instance count grows, and a cooked Amazon Lumberyard Bistro with many instances
-    meets a frame-time target set in this phase on the RTX 4090 and an Apple Silicon Mac.
+    pyramid); async compute, which the graph schedules on a queue of its own where the device has
+    one, culling and light culling beside the shadows' passes; indirect draws; meshlets, which the
+    cooker builds, drawn through mesh shaders where supported and a compute path elsewhere;
+    vertices the cooker packs into 8- and 16-bit fields; a visibility buffer; clustered lighting;
+    TAA. *Done when* CPU frame time stays flat as the instance count grows, and a cooked Amazon
+    Lumberyard Bistro with many instances meets a frame-time target set in this phase on the
+    RTX 4090 and an Apple Silicon Mac.
 
 Later: 3D physics, animation (sprite flipbooks and tweens, then skeletal), particles, linked
 prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
@@ -183,7 +214,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Mods' files reloaded as they're saved, as a game's scripts are, and mods' scripts debugged, as the debugger debugs the game's alone; and a run's mods listed in `status` or the editor, where a run logs `Mod loaded` for each | Someone writes a mod against a running game |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `hello`, `ping`, `view`, `patch`, `note` and `quit`, and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
-| Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
+| Ordering a graph's passes by what they use, rather than as they're added, and leaving out those whose results nothing uses | Passes come from more than one place, as games' own would |
+| Buffers in the graph: a pass that writes a buffer for a later one to read, as the graph tracks images alone | The first such pass, as Phase 13's culling |
+| Reading the GPU's clock again for Tracy's timeline as a run goes on: it's read once, as the frames start, so a GPU whose clock drifts from the CPU's, or resets in a low-power state, as AMD's may, misplaces later zones | Someone profiles a long run whose GPU zones drift |
+| Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
 | The renderer's UI pass in builds without `dev`, which hand it no UI: it makes the pass's pipeline, `egui`, as it starts | A shipped game's start is measured to wait on it |

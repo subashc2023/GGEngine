@@ -26,6 +26,11 @@ pub(crate) enum Retired {
     Image(vk::Image, vk::ImageView, Allocation),
     /// An image with a slot in the bindless sets.
     Texture(vk::Image, vk::ImageView, Allocation, u32),
+    /// An image made in memory that others share, with its slot in the bindless sets, if it has
+    /// one.
+    Alias(vk::Image, vk::ImageView, Option<u32>),
+    /// Memory that images were made in, which goes once they're done with.
+    Memory(Allocation),
     /// A slot in the bindless sets that shows another texture's image.
     Slot(u32),
     Pipeline(vk::Pipeline),
@@ -164,6 +169,9 @@ pub struct Device {
     /// The least a copy to an image moves on the queue that copies textures, in texels, or in
     /// blocks of a compressed image.
     copy_granularity: vk::Extent3D,
+    /// How many of the bits of the timestamps the graphics queue writes count; 0 for a queue
+    /// that writes none.
+    timestamp_bits: u32,
     /// Which memory heaps are the GPU's own, by their indices' bits.
     device_local_heaps: u32,
     /// RenderDoc, for a device it can capture: one its layer is active on.
@@ -356,6 +364,7 @@ impl Device {
                 .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
             uploads,
             copy_granularity,
+            timestamp_bits: chosen.timestamp_bits,
             device_local_heaps,
             renderdoc,
             debug_utils,
@@ -704,6 +713,14 @@ impl Device {
                     self.allocator.destroy_image(image, allocation);
                     self.bindless.remove(slot);
                 }
+                Retired::Alias(image, view, slot) => {
+                    self.raw.destroy_image_view(view, None);
+                    self.raw.destroy_image(image, None);
+                    if let Some(slot) = slot {
+                        self.bindless.remove(slot);
+                    }
+                }
+                Retired::Memory(allocation) => self.allocator.free_memory(allocation),
                 Retired::Slot(slot) => self.bindless.remove(slot),
                 Retired::Pipeline(pipeline) => self.raw.destroy_pipeline(pipeline, None),
             }
@@ -716,6 +733,12 @@ impl Device {
 
     pub(crate) fn graphics_family(&self) -> u32 {
         self.graphics.family
+    }
+
+    /// How many of the bits of the timestamps the graphics queue writes count; 0 for a queue
+    /// that writes none.
+    pub(crate) fn timestamp_bits(&self) -> u32 {
+        self.timestamp_bits
     }
 
     /// The transfer queue's family, for a device that uploads through one.

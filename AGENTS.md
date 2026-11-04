@@ -15,8 +15,8 @@ crate, or adding or removing a dependency.
 Cargo.toml        the workspace: members, shared package settings, lints, internal crates
 crates/           libraries
   gg-core/        math, logging, profiling, errors
-  gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
-  gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
+  gg-gpu/         Vulkan through ash, the render graph too: the only crate that touches Vulkan
+  gg-renderer/    passes, materials; gets plain render data, never the scene
   gg-engine/      what games use: main loop, window, input, scene, assets, hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
   gg-api/         the tool API, a game's shared view, projects' manifests, assets' ID files

@@ -15,9 +15,10 @@ use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
 use ash::vk;
+use gg_core::label;
 use gg_gpu::{
-    Arenas, Blend, ColorImage, DepthImage, Device, Frame, Frames, GpuBuffer, GraphicsDesc, IdImage,
-    Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pipeline, Sampler, Target, Texture,
+    Arenas, Blend, ColorImage, Device, Frame, Frames, GpuBuffer, Graph, GraphicsDesc, Instance,
+    InstanceDesc, MAX_READS, PLACED_TEXTURES, PassId, Pipeline, Sampler, Target, Texture,
     TextureFormat, UploadPath, Validation, mip_sizes,
 };
 
@@ -69,6 +70,8 @@ fn main() -> ExitCode {
         dropped_images_free_their_slots,
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
+        the_graphs_own_images_share_memory_where_their_uses_dont_overlap,
+        frames_time_their_passes_on_the_gpu,
         streamed_textures_can_be_written_over_on_every_path,
         bc7_textures_stream_and_decode_on_every_path,
         textures_refill_between_rgba8_and_bc7_on_every_path,
@@ -358,19 +361,20 @@ fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
     Pipeline::graphics(device, &desc).expect("a pipeline")
 }
 
-/// A pass over target `target` of `frame`, an image a pixel across for each of `probes`, in which
-/// the GPU samples `texture` at each probe, into a pixel of its own: by three vertices, or by the
-/// first three of `indices`, a buffer of indices frames have taken, if given.
+/// Records `pass` of `frame`, a pass that clears its target, an image a pixel across for each of
+/// `probes`, in which the GPU samples `texture` at each probe, into a pixel of its own: by three
+/// vertices, or by the first three of `indices`, a buffer of indices frames have taken, if given.
 fn draw_probes(
     frame: &mut Frame<'_>,
-    target: usize,
+    pass: PassId,
     pipeline: &Pipeline,
     texture: &Texture,
     probes: &[Probe],
     indices: Option<&GpuBuffer>,
 ) {
-    let pass = frame.begin_pass(target, c"probes", [0.0; 4], None, None);
-    let mut pass = pass.expect("an offscreen image is always there");
+    let mut pass = frame
+        .render(pass)
+        .expect("an offscreen image is always there");
     pass.set_pipeline(pipeline);
     for (x, probe) in (0..).zip(probes) {
         pass.set_viewport([x, 0], [1, 1]);
@@ -434,6 +438,19 @@ fn stream_whole(frame: &mut Frame<'_>, texture: &mut Texture, pixels: &[u8]) {
     );
 }
 
+/// A graph of a pass for each of the frame's first `targets` targets, in order, that clears it to
+/// `color` and draws whatever the frame draws there.
+fn clearing(targets: usize, color: [f32; 4]) -> (Graph, Vec<PassId>) {
+    let mut graph = Graph::default();
+    let passes = (0..targets)
+        .map(|target| {
+            let image = graph.target(target);
+            graph.render(label!("clear")).clear(image, color).add()
+        })
+        .collect();
+    (graph, passes)
+}
+
 /// Clears two offscreen images in the same frames, each to a color of its own, over more frames
 /// than are in flight, then reads the colors back.
 fn clear_reads_back() {
@@ -456,17 +473,25 @@ fn clear_reads_back() {
             gg_core::math::libm::powf((c + 0.055) / 1.055, 2.4)
         }
     };
+    let mut graph = Graph::default();
+    let passes: Vec<PassId> = (0..)
+        .zip(srgb)
+        .map(|(target, srgb)| {
+            let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
+            let image = graph.target(target);
+            graph.render(label!("clear")).clear(image, color).add()
+        })
+        .collect();
     for _ in 0..3 {
         let mut frame = frames
-            .begin(images.iter_mut().map(Target::Image))
+            .begin(images.iter_mut().map(Target::Image), &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
         // In the first two frames, the arena has no buffer yet.
         frame.upload(&[]).expect("an upload of nothing");
-        for (target, srgb) in srgb.iter().enumerate() {
-            let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
+        for &pass in &passes {
             // A pass that draws nothing clears its target.
-            drop(frame.begin_pass(target, c"clear", color, None, None));
+            drop(frame.render(pass));
         }
         frame.submit().expect("the frame's submission");
     }
@@ -496,15 +521,16 @@ fn arenas_hold_more_than_a_frame_took() {
     let mut image = ColorImage::new(&device, 8, 8, "arena test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     assert_eq!(frames.arenas(), Arenas::default());
+    let (graph, passes) = clearing(1, [0.0; 4]);
     for uploads in [&[100, 7][..], &[20]] {
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
         for &len in uploads {
             frame.upload(&vec![1; len]).expect("an upload");
         }
-        drop(frame.begin_pass(0, c"arena", [0.0; 4], None, None));
+        drop(frame.render(passes[0]));
         frame.submit().expect("the frame's submission");
     }
     let arenas = frames.arenas();
@@ -514,23 +540,37 @@ fn arenas_hold_more_than_a_frame_took() {
     check(&validation);
 }
 
-/// Clears an image, then lets the frame's later passes sample it, in more frames than are in
-/// flight, and reads it back. The read-back's barrier starts from the layout the frames recorded,
-/// so validation reports sampling that didn't change the image's layout, or didn't record the
-/// change.
+/// Clears an image, then samples it from a pass into another, in more frames than are in flight,
+/// and reads it back. The read-back's barrier starts from the layout the frames recorded, so
+/// validation reports sampling that didn't change the image's layout, or didn't record the change.
 fn sampled_images_keep_their_layout() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 16, 16, "sampled test target").expect("an image");
+    let mut drawn = ColorImage::new(&device, 16, 16, "sampling test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let (sampled, into) = (graph.target(0), graph.target(1));
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let clear = graph.render(label!("clear")).clear(sampled, red).add();
+    let sample = (graph.render(label!("sample")))
+        .clear(into, [0.0; 4])
+        .sample(sampled)
+        .add();
     for _ in 0..3 {
+        let targets = [Target::Image(&mut image), Target::Image(&mut drawn)];
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin(targets, &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0], None, None));
-        frame.begin_sampling(0);
+        drop(frame.render(clear));
+        let pass = frame
+            .render(sample)
+            .expect("an offscreen image is always there");
+        // The same slot whichever frame samples it.
+        assert_eq!(pass.sampled(sampled), pass.sampled(sampled));
+        drop(pass);
         frame.submit().expect("the frame's submission");
     }
     let pixels = image.read_back().expect("the image's pixels");
@@ -538,30 +578,50 @@ fn sampled_images_keep_their_layout() {
         assert_eq!(*pixel, [255, 0, 0, 255]);
     }
 
-    drop((frames, image, device, instance));
+    drop((frames, image, drawn, device, instance));
     check(&validation);
 }
 
-/// Clears an image, then starts a pass over it that draws nothing, and samples it, in more frames
-/// than are in flight, and reads it back as the clear left it: synchronization validation sees the
-/// second pass's load wait for the first's writes. A pass over the image before the frame's clear,
-/// which it was made or sampled before, is refused before anything is recorded.
+/// Clears an image, then draws over it in a pass that draws nothing, and samples it from a pass
+/// into another, in more frames than are in flight, and reads it back as the clear left it:
+/// synchronization validation sees the second pass's load wait for the first's writes, and the
+/// next frame's clear wait for the sampling. A pass over the image before anything has drawn into
+/// it is refused before anything is recorded.
 fn passes_over_keep_what_their_target_holds() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 16, 16, "kept test target").expect("an image");
+    let mut drawn = ColorImage::new(&device, 16, 16, "kept test sampler").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
+    let mut too_soon = Graph::default();
+    let kept = too_soon.target(0);
+    let over = too_soon.render(label!("too soon")).keep(kept).add();
+    let mut frame = frames
+        .begin([Target::Image(&mut image)], &too_soon)
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let message = panics(|| drop(frame.render(over)));
+    assert!(message.contains("no pass has drawn into it"), "{message}");
+    drop(frame);
+    let mut graph = Graph::default();
+    let (kept, into) = (graph.target(0), graph.target(1));
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    let clear = graph.render(label!("clear")).clear(kept, blue).add();
+    let over = graph.render(label!("kept")).keep(kept).add();
+    let sample = (graph.render(label!("sample")))
+        .clear(into, [0.0; 4])
+        .sample(kept)
+        .add();
     for _ in 0..3 {
+        let targets = [Target::Image(&mut image), Target::Image(&mut drawn)];
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin(targets, &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        let message = panics(|| drop(frame.begin_pass_over(0, c"too soon")));
-        assert!(message.contains("none has since"), "{message}");
-        drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 1.0, 1.0], None, None));
-        drop(frame.begin_pass_over(0, c"kept"));
-        frame.begin_sampling(0);
+        for pass in [clear, over, sample] {
+            drop(frame.render(pass));
+        }
         frame.submit().expect("the frame's submission");
     }
     let pixels = image.read_back().expect("the image's pixels");
@@ -569,7 +629,7 @@ fn passes_over_keep_what_their_target_holds() {
         assert_eq!(*pixel, [0, 0, 255, 255]);
     }
 
-    drop((frames, image, device, instance));
+    drop((frames, image, drawn, device, instance));
     check(&validation);
 }
 
@@ -585,6 +645,7 @@ fn images_read_back_once_their_frame_has_finished() {
         ColorImage::new(&device, 8, 4, "small read target").expect("an image"),
         ColorImage::new(&device, 16, 16, "large read target").expect("an image"),
     ];
+    let mut drawn = ColorImage::new(&device, 4, 4, "read sampler").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     let pixels_of = |frames: &Frames, frame: u64| {
         let read = frames.image_read(frame).expect("a wait for the frame")?;
@@ -596,21 +657,35 @@ fn images_read_back_once_their_frame_has_finished() {
     let red = [1.0, 0.0, 0.0, 1.0];
     let green = [0.0, 1.0, 0.0, 1.0];
     let blue = [0.0, 0.0, 1.0, 1.0];
-    // The image, small or large, its color, and whether the frame reads it back.
-    for (image, color, read) in [
-        (0, red, true),
-        (0, green, true),
-        (1, blue, true),
-        (0, red, false),
-    ] {
+    // A graph for each color, whose frames read back what it clears, and sample it after.
+    let reading = |color| {
+        let mut graph = Graph::default();
+        let (read, into) = (graph.target(0), graph.target(1));
+        let clear = graph.render(label!("clear")).clear(read, color).add();
+        let read_back = graph.read_image(label!("read"), read);
+        let sample = (graph.render(label!("sample")))
+            .clear(into, [0.0; 4])
+            .sample(read)
+            .add();
+        (graph, vec![clear, read_back, sample])
+    };
+    let graphs = [
+        reading(red),
+        reading(green),
+        reading(blue),
+        clearing(1, red),
+    ];
+    // The image, small or large, of each graph's frame, which reads it back or doesn't.
+    for (image, (graph, passes)) in [0, 0, 1, 0].into_iter().zip(&graphs) {
+        let targets = [Target::Image(&mut images[image]), Target::Image(&mut drawn)];
         let mut frame = frames
-            .begin([Target::Image(&mut images[image])])
+            .begin(targets, graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        drop(frame.begin_pass(0, c"clear", color, None, None));
-        if read {
-            let index = frame.read_image(0).expect("a read");
-            assert_eq!(frame.begin_sampling(0), index, "sampled as it was read");
+        drop(frame.render(passes[0]));
+        if let &[_, read, sample] = &passes[..] {
+            frame.read_image(read).expect("a read");
+            drop(frame.render(sample));
         }
         frame.submit().expect("the frame's submission");
     }
@@ -626,7 +701,7 @@ fn images_read_back_once_their_frame_has_finished() {
     assert_eq!(pixels_of(&frames, 4), None, "it read nothing back");
     assert_eq!(pixels_of(&frames, 0), None);
 
-    drop((frames, images, device, instance));
+    drop((frames, images, drawn, device, instance));
     check(&validation);
 }
 
@@ -645,57 +720,103 @@ fn dropped_images_free_their_slots() {
     check(&validation);
 }
 
-/// Clears an image and a depth image in two passes each frame, over more frames than are in
-/// flight, so that every pass but the first follows another's use of the depth image, in its own
+/// Clears an image and the graph's own depth in two passes each frame, over more frames than are
+/// in flight, so that every pass but the first follows another's use of the depth, in its own
 /// submission or the last: synchronization validation reports a pass whose barrier doesn't wait
-/// for that use, and core validation one that leaves the depth image in the wrong layout.
+/// for that use, and core validation one that leaves the depth in the wrong layout.
 fn depth_clears_in_every_pass() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 16, 16, "depth test target").expect("an image");
-    let depth = DepthImage::new(&device, 16, 16, "depth test depth").expect("a depth image");
     let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let (target, depth) = (graph.target(0), graph.depth("depth test depth", [16, 16]));
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let passes: Vec<PassId> = (0..2)
+        .map(|_| {
+            graph
+                .render(label!("clear"))
+                .clear(target, black)
+                .depth(depth)
+                .add()
+        })
+        .collect();
     for _ in 0..3 {
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        for _ in 0..2 {
-            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], Some(&depth), None));
+        for &pass in &passes {
+            drop(frame.render(pass));
         }
         frame.submit().expect("the frame's submission");
     }
 
-    drop((frames, image, depth, device, instance));
+    drop((frames, image, device, instance));
     check(&validation);
 }
 
-/// Renders IDs beside an image in eight frames, each pass clearing them to 0, and reads pixels of
-/// them back: one in the first frame, none in the second, three in the third, none in the fourth,
-/// two in the fifth; in the sixth, sixty, then after another pass the four of ten more that the
-/// most a frame reads leaves, then none; and none in the last two. Each frame finds what the one two
-/// before it read, by its number, and none after a frame that read none, as the first two find of
-/// frame 0. Each frame then begins sampling them, from the layout its reads left them in, or its
-/// pass where it read none, and the sixth between its reads too, before its second pass.
+/// Renders the graph's own IDs beside an image in eight frames, each pass clearing them to 0, and
+/// reads pixels of them back: one in the first frame, none in the second, three in the third,
+/// none in the fourth, two in the fifth; in the sixth, sixty, then after another pass the four of
+/// ten more that the most a frame reads leaves, then none; and none in the last two. Each frame
+/// finds what the one two before it read, by its number, and none after a frame that read none, as
+/// the first two find of frame 0. Each frame then samples them from a pass, from the layout its
+/// reads left them in, and the sixth between its reads too, before its second pass.
 /// Synchronization validation sees each copy wait for the pass before it, a pass for the copies
-/// and the sampling before it, and the host for the copies. A pixel outside the IDs, IDs no pass of
-/// the frame rendered, and a read once the frame samples them, are refused before anything is
-/// recorded.
+/// and the sampling before it, and the host for the copies. A pixel outside the IDs is refused
+/// before anything is recorded, and a read of IDs no pass has rendered before the graph has it.
 fn ids_read_back_two_frames_later() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 8, 4, "read test target").expect("an image");
-    let mut ids = IdImage::new(&device, 8, 4, "read test IDs").expect("an ID image");
     let mut frames = Frames::new(&device).expect("frames");
     let black = [0.0, 0.0, 0.0, 1.0];
     let pixels: Vec<[u32; 2]> = (0..70).map(|i| [i % 8, i / 8 % 4]).collect();
+    let message = panics(|| {
+        let mut unread = Graph::default();
+        let unrendered = unread.ids("unrendered", [8, 4]);
+        unread.read_ids(label!("too soon"), unrendered);
+    });
+    assert!(message.contains("before any pass writes it"), "{message}");
+    // A pass that renders IDs, one that reads them, and one that samples them, as often as given,
+    // then two more reads after the last, if `twice`.
+    let graph_of = |times: usize, twice: bool| {
+        let mut graph = Graph::default();
+        let (target, ids) = (graph.target(0), graph.ids("read test IDs", [8, 4]));
+        let mut passes = Vec::new();
+        for _ in 0..times {
+            passes.push(
+                graph
+                    .render(label!("ids"))
+                    .clear(target, black)
+                    .ids(ids)
+                    .add(),
+            );
+            passes.push(graph.read_ids(label!("read ids"), ids));
+            passes.push(
+                (graph.render(label!("sample ids")))
+                    .keep(target)
+                    .sample(ids)
+                    .add(),
+            );
+        }
+        if twice {
+            passes.push(graph.read_ids(label!("read ids"), ids));
+            passes.push(graph.read_ids(label!("read ids"), ids));
+        }
+        (graph, ids, passes)
+    };
+    let once = graph_of(1, false);
+    let sixth = graph_of(2, true);
     // How many IDs each frame reads.
     let counts = [1, 0, 3, 0, 2, MAX_READS, 0, 0];
     for (number, count) in (1..).zip(counts) {
+        let (graph, ids, passes) = if count == MAX_READS { &sixth } else { &once };
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
         assert_eq!(frame.number(), number);
@@ -706,52 +827,164 @@ fn ids_read_back_two_frames_later() {
         };
         assert_eq!((before, read.len()), expected, "frame {number}");
         assert!(read.iter().all(|&id| id == [0; 2]), "IDs read {read:?}");
-        if number == 2 {
-            // Frame 1's pass rendered them.
-            let message = panics(|| {
-                let _ = frame.read_ids(&mut ids, &pixels[..1]);
-            });
-            assert!(message.contains("no pass of frame 2"), "{message}");
-            let message = panics(|| {
-                let _ = frame.begin_sampling_ids(&mut ids);
-            });
-            assert!(message.contains("no pass of frame 2"), "{message}");
-        }
-        drop(frame.begin_pass(0, c"ids", black, None, Some(&mut ids)));
+        let mut passes = passes.iter().copied();
+        let mut pass = || passes.next().expect("a pass left");
+        let sample = |frame: &mut Frame<'_>, pass| {
+            let drawn = frame
+                .render(pass)
+                .expect("an offscreen image is always there");
+            let _ = drawn.sampled(*ids);
+        };
+        drop(frame.render(pass()));
+        let read = pass();
         if number == 3 {
             let message = panics(|| {
-                let _ = frame.read_ids(&mut ids, &[[8, 0]]);
+                let _ = frame.read_ids(read, &[[8, 0]]);
             });
             assert!(message.contains("outside the 8x4 IDs"), "{message}");
         }
         if count < MAX_READS {
-            let read = frame.read_ids(&mut ids, &pixels[..count]);
+            let read = frame.read_ids(read, &pixels[..count]);
             assert_eq!(read.expect("a read"), count, "frame {number}");
+            sample(&mut frame, pass());
         } else {
-            let read = |frame: &mut gg_gpu::Frame<'_>, ids: &mut IdImage, pixels| {
-                frame.read_ids(ids, pixels).expect("a read")
+            let read_ids = |frame: &mut Frame<'_>, pass: PassId, pixels: &[[u32; 2]]| {
+                frame.read_ids(pass, pixels).expect("a read")
             };
-            assert_eq!(read(&mut frame, &mut ids, &pixels[..60]), 60);
-            frame.begin_sampling_ids(&mut ids);
-            drop(frame.begin_pass(0, c"ids again", black, None, Some(&mut ids)));
-            assert_eq!(read(&mut frame, &mut ids, &pixels[60..]), 4);
-            assert_eq!(read(&mut frame, &mut ids, &pixels[..1]), 0);
-        }
-        let index = frame.begin_sampling_ids(&mut ids);
-        assert_eq!(frame.begin_sampling_ids(&mut ids), index, "sampled already");
-        if number == 3 {
-            let message = panics(|| {
-                let _ = frame.read_ids(&mut ids, &pixels[..1]);
-            });
-            assert!(
-                message.contains("before the frame samples them"),
-                "{message}"
-            );
+            assert_eq!(read_ids(&mut frame, read, &pixels[..60]), 60);
+            sample(&mut frame, pass());
+            drop(frame.render(pass()));
+            assert_eq!(read_ids(&mut frame, pass(), &pixels[60..]), 4);
+            sample(&mut frame, pass());
+            assert_eq!(read_ids(&mut frame, pass(), &pixels[60..]), 0);
+            assert_eq!(read_ids(&mut frame, pass(), &pixels[..1]), 0);
         }
         frame.submit().expect("the frame's submission");
     }
 
-    drop((frames, image, ids, device, instance));
+    drop((frames, image, device, instance));
+    check(&validation);
+}
+
+/// A graph's own images whose uses in a frame don't overlap share memory, and keep what each pass
+/// left for the next to use, over more frames than are in flight: a color image cleared red and
+/// read back, then another cleared blue and sampled into the target, after the first's last use,
+/// take no more memory than the larger of them, where the same images used together take more.
+/// Synchronization validation, which tracks the memory they share, sees each first use wait for
+/// the last use of the memory before it, in its frame or the one before.
+fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = sampling_spirv();
+    let pipeline = sampling_pipeline(&device, &spirv);
+    let mut image = ColorImage::new(&device, 2, 1, "shared test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    // The red image read back, then the blue sampled; with `together`, the red sampled with it.
+    let graph_of = |together: bool| {
+        let mut graph = Graph::default();
+        let target = graph.target(0);
+        let first = graph.color("first", [2, 1]);
+        let second = graph.color("second", [2, 1]);
+        let clear_red = graph.render(label!("red")).clear(first, red).add();
+        let read_red = graph.read_image(label!("read red"), first);
+        let clear_blue = graph.render(label!("blue")).clear(second, blue).add();
+        let mut sampling = (graph.render(label!("sample")))
+            .clear(target, [0.0; 4])
+            .sample(second);
+        if together {
+            sampling = sampling.sample(first);
+        }
+        let sample = sampling.add();
+        (graph, second, [clear_red, read_red, clear_blue, sample])
+    };
+    let mut bytes = Vec::new();
+    for together in [false, true] {
+        let (graph, second, [clear_red, read_red, clear_blue, sample]) = graph_of(together);
+        for _ in 0..4 {
+            let mut frame = frames
+                .begin([Target::Image(&mut image)], &graph)
+                .expect("a frame")
+                .expect("an offscreen image can always be rendered into");
+            let number = frame.number();
+            drop(frame.render(clear_red));
+            frame.read_image(read_red).expect("a read");
+            drop(frame.render(clear_blue));
+            let mut pass = (frame.render(sample)).expect("an offscreen image is always there");
+            pass.set_pipeline(&pipeline);
+            for x in 0..2 {
+                pass.set_viewport([x, 0], [1, 1]);
+                // As `sample.slang` takes them: the image, a sampler, its level and a point of it.
+                let words = [
+                    pass.sampled(second),
+                    Sampler::NearestClamp.index(),
+                    0.0f32.to_bits(),
+                    (x as f32 * 0.5 + 0.25).to_bits(),
+                    0.5f32.to_bits(),
+                ];
+                pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+                pass.draw(3, 1);
+            }
+            drop(pass);
+            frame.submit().expect("the frame's submission");
+            let read = frames.image_read(number).expect("a wait for the frame");
+            let read = read.expect("the frame read the red image back");
+            let mut pixels = [0; 8];
+            read.read_into(&mut pixels).expect("the pixels");
+            assert_eq!(pixels, [255, 0, 0, 255].repeat(2)[..], "frame {number}");
+        }
+        let pixels = image.read_back().expect("the image's pixels");
+        assert_eq!(pixels, [0, 0, 255, 255].repeat(2), "the blue image sampled");
+        bytes.push(frames.transient_bytes());
+    }
+    let [apart, together] = bytes[..] else {
+        unreachable!("one for each graph");
+    };
+    assert!(
+        0 < apart && apart < together,
+        "images used apart hold {apart} bytes, and used together {together}"
+    );
+
+    drop((frames, image, pipeline, device, instance));
+    check(&validation);
+}
+
+/// Each frame's passes are timed on the GPU, and the frame two later, which reuses its resources,
+/// finds how long they took, from the first's beginning to the last's end; none before.
+fn frames_time_their_passes_on_the_gpu() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 64, 64, "timed test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let once = clearing(1, [0.0, 1.0, 0.0, 1.0]);
+    let mut twice = Graph::default();
+    let target = twice.target(0);
+    let passes: Vec<PassId> = (0..2)
+        .map(|_| twice.render(label!("timed")).clear(target, [0.0; 4]).add())
+        .collect();
+    let twice = (twice, passes);
+    for number in 1..=4 {
+        let (graph, passes) = if number % 2 == 0 { &twice } else { &once };
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        for &pass in passes {
+            drop(frame.render(pass));
+        }
+        frame.submit().expect("the frame's submission");
+        let timed = frames.gpu_time();
+        // As frame 3 began, it read frame 1's timestamps.
+        assert_eq!(
+            timed.is_some(),
+            number >= 3,
+            "after frame {number}: {timed:?}"
+        );
+    }
+
+    drop((frames, image, device, instance));
     check(&validation);
 }
 
@@ -784,10 +1017,11 @@ fn streamed_textures_can_be_written_over_on_every_path() {
         let mut levels = levels.expect("a texture");
         let mut buffer = GpuBuffer::new(&device, 64, "streamed test buffer").expect("a buffer");
         let mut frames = Frames::new(&device).expect("frames");
+        let (graph, passes) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
         let mut writes = 0;
         for i in 0..20 {
             let mut frame = frames
-                .begin([Target::Image(&mut image)])
+                .begin([Target::Image(&mut image)], &graph)
                 .expect("a frame")
                 .expect("an offscreen image can always be rendered into");
             if i == 0 {
@@ -811,7 +1045,7 @@ fn streamed_textures_can_be_written_over_on_every_path() {
                 write.expect("a write");
                 writes += 1;
             }
-            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None, None));
+            drop(frame.render(passes[0]));
             frame.submit().expect("the frame's submission");
             if writes == 2 && i >= 2 {
                 break;
@@ -874,10 +1108,11 @@ fn bc7_textures_stream_and_decode_on_every_path() {
             fills.push(fill);
         }
         let mut frames = Frames::new(&device).expect("frames");
+        let (graph, passes) = clearing(images.len(), [0.0; 4]);
         let mut shown_at = None;
         for i in 0..20 {
             let mut frame = frames
-                .begin(images.iter_mut().map(Target::Image))
+                .begin(images.iter_mut().map(Target::Image), &graph)
                 .expect("a frame")
                 .expect("an offscreen image can always be rendered into");
             if i == 0 {
@@ -897,8 +1132,8 @@ fn bc7_textures_stream_and_decode_on_every_path() {
                 });
                 assert!(message.contains("BC7 texture is streamed"), "{message}");
             }
-            for (target, (texture, (_, probes))) in textures.iter().zip(&fills).enumerate() {
-                draw_probes(&mut frame, target, &pipeline, texture, probes, None);
+            for (&pass, (texture, (_, probes))) in passes.iter().zip(textures.iter().zip(&fills)) {
+                draw_probes(&mut frame, pass, &pipeline, texture, probes, None);
             }
             frame.submit().expect("the frame's submission");
             for ((image, (_, probes)), (name, ..)) in images.iter_mut().zip(&fills).zip(cases) {
@@ -954,6 +1189,7 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
         let texture = Texture::placed(&device, 5, &stand_in, "refilled format test texture");
         let mut texture = texture.expect("a texture");
         let mut frames = Frames::new(&device).expect("frames");
+        let (graph, passes) = clearing(1, [0.0; 4]);
         // What the slot showed before the step, to sample until the step's image is shown.
         let mut before: Option<([u32; 2], Vec<Probe>)> = None;
         for (i, (format, size, mipmapped)) in steps.into_iter().enumerate() {
@@ -968,7 +1204,7 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
             let mut shown = false;
             for frame_in_step in 0..20 {
                 let mut frame = frames
-                    .begin([Target::Image(&mut image)])
+                    .begin([Target::Image(&mut image)], &graph)
                     .expect("a frame")
                     .expect("an offscreen image can always be rendered into");
                 if i == 0 && frame_in_step == 0 {
@@ -993,7 +1229,7 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
                     (Some((_, probes)), false) => (probes, "before"),
                     (None, false) => (&white_probes(&probes), "the stand-in"),
                 };
-                draw_probes(&mut frame, 0, &pipeline, &texture, expected, None);
+                draw_probes(&mut frame, passes[0], &pipeline, &texture, expected, None);
                 frame.submit().expect("the frame's submission");
                 let what = format!("{format:?} {size:?}, uploading by {path}, step {i}, {what}");
                 check_probes(&mut image, expected, &what);
@@ -1054,13 +1290,14 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
         let indices: Vec<u8> = (0..1024u32).flat_map(|i| (i % 3).to_ne_bytes()).collect();
         texture.refill(64, 64, format, true).expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
+        let (graph, passes) = clearing(1, [0.0; 4]);
         let (mut texture_copied, mut buffer_copied) = (0, 0);
         let (mut texture_parts, mut buffer_parts) = (0, 0);
         let (mut shown_at, mut taken_at) = (None, None);
         let mut hidden_at = None;
         for i in 0..40 {
             let mut frame = frames
-                .begin([Target::Image(&mut image)])
+                .begin([Target::Image(&mut image)], &graph)
                 .expect("a frame")
                 .expect("an offscreen image can always be rendered into");
             if i == 0 {
@@ -1133,7 +1370,7 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
             };
             draw_probes(
                 &mut frame,
-                0,
+                passes[0],
                 &pipeline,
                 &texture,
                 expected,
@@ -1181,11 +1418,11 @@ fn textures_come_to_show_images_before_the_frames_passes() {
     let texture = Texture::placed(&device, 4, &stand_in, "refilled test texture");
     let mut texture = texture.expect("a texture");
     let mut frames = Frames::new(&device).expect("frames");
-    let black = [0.0, 0.0, 0.0, 1.0];
+    let (graph, passes) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
     let mut refused = false;
     for i in 0..20 {
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
         if i == 0 {
@@ -1197,10 +1434,11 @@ fn textures_come_to_show_images_before_the_frames_passes() {
             let shown = frame.finish_texture(&mut texture).expect("a finish");
             assert!(shown, "shown before the next frame's passes");
             assert_eq!(texture.size(), [3, 1]);
+            drop(frame.render(passes[0]));
             frame.submit().expect("the frame's submission");
             break;
         }
-        drop(frame.begin_pass(0, c"clear", black, None, None));
+        drop(frame.render(passes[0]));
         match tries(|| frame.finish_texture(&mut texture)) {
             Ok(Ok(false)) => {}
             Ok(Ok(true)) => panic!("shown after the frame's pass"),
@@ -1227,25 +1465,31 @@ fn textures_come_to_show_images_before_the_frames_passes() {
 fn forgotten_frames_and_passes_are_caught(log: &Path) {
     let instance = instance();
     let validation = instance.validation();
-    let black = [0.0, 0.0, 0.0, 1.0];
+    let (graph, _) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
     // Each on a device of its own, since a device has one `Frames`, and a caught leak ends it.
     {
         let device =
             Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
         let mut image = ColorImage::new(&device, 4, 4, "forgotten frame target").expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
+        let mut read_graph = Graph::default();
+        let target = read_graph.target(0);
+        let cleared = (read_graph.render(label!("cleared")))
+            .clear(target, [0.0; 4])
+            .add();
+        let read = read_graph.read_image(label!("read"), target);
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &read_graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        drop(frame.begin_pass(0, c"cleared", black, None, None));
-        frame.read_image(0).expect("a read");
+        drop(frame.render(cleared));
+        frame.read_image(read).expect("a read");
         mem::forget(frame);
         // What it read is never waited for, as the GPU never gets the frame.
         let read = frames.image_read(1).expect("no wait");
         assert!(read.is_none(), "a frame never submitted read nothing");
         let message = panics(|| {
-            let _ = frames.begin([Target::Image(&mut image)]);
+            let _ = frames.begin([Target::Image(&mut image)], &graph);
         });
         assert!(message.contains("frame 1 was forgotten"), "{message}");
         drop((frames, image, device));
@@ -1255,12 +1499,15 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
             Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
         let mut image = ColorImage::new(&device, 4, 4, "forgotten pass target").expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
+        let (mut two, passes_of_two) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
+        let target = two.target(0);
+        let next = two.render(label!("next")).keep(target).add();
         let mut frame = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &two)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        mem::forget(frame.begin_pass(0, c"forgotten", black, None, None));
-        let message = panics(|| drop(frame.begin_pass(0, c"next", black, None, None)));
+        mem::forget(frame.render(passes_of_two[0]));
+        let message = panics(|| drop(frame.render(next)));
         assert!(message.contains("a pass was forgotten"), "{message}");
         let message = panics(|| {
             let _ = frame.submit();
@@ -1268,7 +1515,7 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
         assert!(message.contains("a pass was forgotten"), "{message}");
         // The frame's drop, as the submission unwound, failed it instead of submitting it.
         let error = frames
-            .begin([Target::Image(&mut image)])
+            .begin([Target::Image(&mut image)], &graph)
             .err()
             .expect("no frame begins after a failed one");
         assert_eq!(error.code(), "gpu.frame_failed");
@@ -1288,9 +1535,9 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
 }
 
 /// Opens two devices, and gives a frame of the one objects the other made: a target, textures to
-/// write, stream, finish and hide, a stand-in, a buffer to stream and finish, a depth image, an
-/// ID image to render into and to sample, and an upload's indices. Each is refused before anything
-/// is recorded, so the frame goes on to submit.
+/// write, stream, finish and hide, a stand-in, a buffer to stream and finish, and an upload's
+/// indices. Each is refused before anything is recorded, so the frame goes on to submit. The
+/// graph's own images are the frame's device's.
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -1298,8 +1545,6 @@ fn another_devices_objects_are_refused() {
     let other = Device::new(&instance, None, None, None).expect("a second device");
     let mut image = ColorImage::new(&device, 4, 4, "identity test target").expect("an image");
     let mut others_image = ColorImage::new(&other, 4, 4, "the other's image").expect("an image");
-    let others_depth = DepthImage::new(&other, 4, 4, "the other's depth").expect("a depth image");
-    let mut others_ids = IdImage::new(&other, 4, 4, "the other's IDs").expect("an ID image");
     let format = TextureFormat::Rgba8Srgb;
     let others_texture = Texture::new(&other, 1, 1, format, false, "the other's texture");
     let mut others_texture = others_texture.expect("a texture");
@@ -1312,16 +1557,16 @@ fn another_devices_objects_are_refused() {
     let refused = |message: String| {
         assert!(message.contains("made by another device"), "{message}");
     };
-    let black = [0.0, 0.0, 0.0, 1.0];
+    let (graph, passes) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
     refused(panics(|| {
         let targets = [Target::Image(&mut image), Target::Image(&mut others_image)];
-        let _ = frames.begin(targets);
+        let _ = frames.begin(targets, &graph);
     }));
     refused(panics(|| {
         let _ = Texture::placed(&device, 7, &others_texture, "stood in by the other's");
     }));
     let mut frame = frames
-        .begin([Target::Image(&mut image)])
+        .begin([Target::Image(&mut image)], &graph)
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
     write_stand_in(&mut frame, &mut own_stand_in);
@@ -1344,36 +1589,22 @@ fn another_devices_objects_are_refused() {
     refused(panics(|| {
         let _ = frame.finish_buffer(&mut others_buffer);
     }));
-    refused(panics(|| {
-        drop(frame.begin_pass(0, c"depth", black, Some(&others_depth), None));
-    }));
-    refused(panics(|| {
-        drop(frame.begin_pass(0, c"ids", black, None, Some(&mut others_ids)));
-    }));
-    refused(panics(|| {
-        let _ = frame.begin_sampling_ids(&mut others_ids);
-    }));
     let mut others_frame = others_frames
-        .begin([Target::Image(&mut others_image)])
+        .begin([Target::Image(&mut others_image)], &graph)
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
     let others_indices = others_frame.upload(&[0; 12]).expect("an upload");
     let mut pass = frame
-        .begin_pass(0, c"identity", black, None, None)
+        .render(passes[0])
         .expect("an offscreen image is always there");
     refused(panics(|| pass.draw_indexed(others_indices, 0, 3, 0, 1)));
     drop(pass);
     frame.submit().expect("the frame's submission");
+    drop(others_frame.render(passes[0]));
     others_frame.submit().expect("the other frame's submission");
 
-    drop((frames, others_frames, image, others_image, others_depth));
-    drop((
-        others_ids,
-        others_texture,
-        others_buffer,
-        placed,
-        own_stand_in,
-    ));
+    drop((frames, others_frames, image, others_image));
+    drop((others_texture, others_buffer, placed, own_stand_in));
     drop((device, other, instance));
     check(&validation);
 }
@@ -1425,12 +1656,13 @@ fn passes_refuse_what_the_device_cant_draw() {
     let mut image = ColorImage::new(&device, 4, 4, "limits test target").expect("an image");
     let buffer = GpuBuffer::new(&device, 12, "unfilled test buffer").expect("a buffer");
     let mut frames = Frames::new(&device).expect("frames");
+    let (graph, passes) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
     let mut frame = frames
-        .begin([Target::Image(&mut image)])
+        .begin([Target::Image(&mut image)], &graph)
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
     let mut pass = frame
-        .begin_pass(0, c"limits", [0.0, 0.0, 0.0, 1.0], None, None)
+        .render(passes[0])
         .expect("an offscreen image is always there");
     let message = panics(|| pass.set_viewport([0, 0], [u32::MAX, 1]));
     assert!(message.contains("viewports of up to"), "{message}");

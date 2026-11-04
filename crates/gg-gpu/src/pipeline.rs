@@ -9,10 +9,14 @@ use gg_core::{Error, Result};
 use tracing::debug;
 
 use crate::device::Retired;
-use crate::{DepthImage, Device, IdImage, vk_error};
+use crate::frame::graph::Kind;
+use crate::{Device, vk_error};
 
-/// The pixel formats of what a pass renders into, which pipelines are made for: its target's, its
-/// [`IdImage`]'s, if it has one, and its depth image's, if it has one.
+/// The pixel formats of what a pass renders into, which pipelines are made for: its color
+/// target's, its IDs', if it has them, and its depth's, if it has it, as a [`Graph`]'s passes
+/// declare them.
+///
+/// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
     pub(crate) color: vk::Format,
@@ -32,20 +36,20 @@ impl Format {
         }
     }
 
-    /// This format with an [`IdImage`]'s: what a pass into a target of this format with IDs
-    /// renders into, as a second color target.
+    /// This format with IDs': what a pass into a target of this format with IDs beside it
+    /// ([`RenderPass::ids`](crate::RenderPass::ids)) renders into, as a second color target.
     pub const fn with_ids(self) -> Self {
         Self {
-            ids: IdImage::FORMAT,
+            ids: Kind::Ids.format(),
             ..self
         }
     }
 
-    /// This format with a [`DepthImage`]'s: what a pass into a target of this format with a depth
-    /// image renders into.
+    /// This format with depth's: what a pass into a target of this format with depth
+    /// ([`RenderPass::depth`](crate::RenderPass::depth)) renders into.
     pub const fn with_depth(self) -> Self {
         Self {
-            depth: DepthImage::FORMAT,
+            depth: Kind::Depth.format(),
             ..self
         }
     }

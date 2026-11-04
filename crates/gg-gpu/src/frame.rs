@@ -1,12 +1,17 @@
 //! Frames in flight. Each frame records its commands and submits them, and a timeline semaphore
 //! paces them, so that the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU. A frame
-//! can render into several targets, such as an app's windows, and presents all their swapchains at
-//! once; its later passes can sample what its earlier ones rendered offscreen. It reads back a few
-//! pixels of the IDs its passes render, which the frame two later, which reuses its resources once
-//! it has finished, finds read. On a device that uploads through a transfer queue, a frame's copies
-//! go in a submission of their own, which another timeline paces, and no frame waits for.
+//! runs the passes of a [`Graph`], in order, which place every barrier between them, and can
+//! render into several targets, such as an app's windows, presenting all their swapchains at once;
+//! its later passes can sample what its earlier ones rendered offscreen. It reads back a few pixels
+//! of the IDs its passes render, which the frame two later, which reuses its resources once it has
+//! finished, finds read, with the times its passes took on the GPU. On a device that uploads
+//! through a transfer queue, a frame's copies go in a submission of their own, which another
+//! timeline paces, and no frame waits for.
 
+pub(crate) mod graph;
 mod pass;
+mod timer;
+mod transients;
 mod upload;
 
 use std::ffi::{CStr, CString};
@@ -20,9 +25,13 @@ use tracing::error;
 
 use crate::buffer::Buffer;
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, ColorImage, Device, IdImage, Swapchain, copy_region, vk_error};
+use crate::{COLOR_RANGE, ColorImage, Device, Swapchain, copy_region, vk_error};
+use graph::{Hazard, ImageDecl, PassKind, Use};
+use timer::Timer;
+use transients::Transients;
 use upload::Arena;
 
+pub use graph::{Graph, ImageId, PassId, RenderPass};
 pub use pass::{Indices, Pass};
 pub use upload::Upload;
 
@@ -89,10 +98,15 @@ pub struct Frames {
     /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in the
     /// slots' order.
     image_reads: Vec<ImageReads>,
-    /// For each target of the frame being recorded, its image: the swapchain image's index, or 0
-    /// for an offscreen image, and the layout the frame's commands so far leave it in. `None` for
-    /// a swapchain that had no image ready.
-    images: Vec<Option<(u32, vk::ImageLayout)>>,
+    /// For each target of the frame being recorded, its image as the frame's commands so far
+    /// leave it. `None` for a swapchain that had no image ready.
+    images: Vec<Option<Tracked>>,
+    /// The images of the graphs' own.
+    transients: Transients,
+    /// The passes' timestamps.
+    timer: Timer,
+    /// The barriers before the pass being recorded, kept so that frames don't allocate.
+    barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
     /// The last frame's list of targets, emptied, whose memory the next frame reuses.
     spare_targets: Vec<Target<'static>>,
     scratch: Scratch,
@@ -104,6 +118,17 @@ pub struct Frames {
     /// Whether a frame failed after acquiring an image, or to submit or present, which can leave
     /// the semaphores its acquires signaled with no wait pending: no frame begins after that.
     failed: bool,
+}
+
+/// A target's image as the frame being recorded uses it.
+#[derive(Clone, Copy, Debug)]
+struct Tracked {
+    /// The swapchain image's index, or 0 for an offscreen image.
+    index: u32,
+    /// The layout the frame's commands so far leave it in.
+    layout: vk::ImageLayout,
+    /// What its uses before left for its next to wait for.
+    hazard: Hazard,
 }
 
 /// What one frame in flight records into and synchronizes with.
@@ -201,6 +226,8 @@ impl Frames {
     /// If the device has had a `Frames` before, whose frame numbers this one's would repeat.
     pub fn new(device: &Arc<Device>) -> Result<Self> {
         device.claim_frames();
+        // Before anything that `Frames`' drop would destroy, as a failure here would leave it.
+        let timer = Timer::new(device)?;
         let raw = device.raw();
         let mut timeline_info =
             vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
@@ -231,6 +258,9 @@ impl Frames {
                 .map(|_| ImageReads::default())
                 .collect(),
             images: Vec::new(),
+            transients: Transients::new(device),
+            timer,
+            barriers: Vec::new(),
             spare_targets: Vec::new(),
             scratch: Scratch::default(),
             waited: Duration::ZERO,
@@ -262,17 +292,23 @@ impl Frames {
         Ok(frames)
     }
 
-    /// Starts a frame that renders into `targets`, once the GPU has finished the frame that last
-    /// used this one's resources. The first target paces the frame: for a swapchain, it waits
-    /// until the display has let go of an image. The others are rendered into only if their
-    /// swapchains have an image to give at once, so that a window on a slower display doesn't
-    /// slow the frame; an offscreen image is always rendered into. Returns `None` if the first
-    /// target has nothing to render into this time, as with the swapchain of a minimized window.
+    /// Starts a frame that runs `graph`'s passes, rendering into `targets`, which the graph's
+    /// targets are by their indices, once the GPU has finished the frame that last used this
+    /// one's resources. The first target paces the frame: for a swapchain, it waits until the
+    /// display has let go of an image. The others are rendered into only if their swapchains have
+    /// an image to give at once, so that a window on a slower display doesn't slow the frame; an
+    /// offscreen image is always rendered into. Returns `None` if the first target has nothing to
+    /// render into this time, as with the swapchain of a minimized window.
+    ///
+    /// The graph's own images are those an earlier frame made, for a graph that declared them
+    /// alike, by their names, kinds and sizes, while the uses of those that share memory still
+    /// don't overlap; otherwise they're made again, as the frame begins, and those before retire.
+    /// A failure to make them fails the frame before it acquires anything.
     ///
     /// Once the frame that last used this one's resources has finished, it copies what that frame
-    /// read back ([`Frame::read_ids`]), which the frame begun gives ([`Frame::ids_read`]). A frame
-    /// that doesn't begin leaves them for the next that does: the slot forgets them only as one
-    /// begins.
+    /// read back ([`Frame::read_ids`]), which the frame begun gives ([`Frame::ids_read`]), and the
+    /// time its passes took on the GPU ([`Frames::gpu_time`]). A frame that doesn't begin leaves
+    /// its IDs for the next that does: the slot forgets them only as one begins.
     ///
     /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, or to
     /// submit or present: the semaphores its acquires signaled may have no wait pending, so no
@@ -280,11 +316,13 @@ impl Frames {
     ///
     /// # Panics
     ///
-    /// If `targets` is empty or holds one another device made, or the last frame was forgotten
-    /// rather than submitted or dropped.
+    /// If `targets` is empty or holds one another device made; if the graph uses a target that
+    /// `targets` hasn't, or uses a swapchain's other than to draw into it; or if the last frame
+    /// was forgotten rather than submitted or dropped.
     pub fn begin<'a>(
         &'a mut self,
         targets: impl IntoIterator<Item = Target<'a>>,
+        graph: &'a Graph,
     ) -> Result<Option<Frame<'a>>> {
         assert!(
             !self.recording,
@@ -329,12 +367,13 @@ impl Frames {
         // SAFETY: the slot's last frame has finished, so no submitted frame that the GPU may still
         // run uses its set.
         unsafe { self.device.bindless().apply(self.device.raw(), slot) };
-        // The slot's last frame has finished, and its reads with it.
+        // The slot's last frame has finished, and its reads and timestamps with it.
         self.find_read(slot)?;
+        self.timer.finished(&self.device, slot)?;
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
         list.extend(targets);
         assert!(!list.is_empty(), "a frame renders into at least one target");
-        // Before any image is acquired, which a panic would leave unpresented.
+        // Before any image is acquired, which a panic or a failure would leave unpresented.
         for target in &list {
             match target {
                 Target::Swapchain(swapchain) => self
@@ -344,6 +383,11 @@ impl Frames {
                     .device
                     .check_made("an offscreen image among the targets", image.device()),
             }
+        }
+        check_targets(graph, &list);
+        if let Err(error) = self.transients.prepare(graph) {
+            self.spare_targets = recycle(list);
+            return Err(error);
         }
         let acquired = &mut self.slots[slot].acquired;
         while acquired.len() < list.len() {
@@ -360,7 +404,7 @@ impl Frames {
             acquired.push(semaphore);
         }
         self.images.clear();
-        if let Err(error) = self.start(slot, &mut list) {
+        if let Err(error) = self.start(slot, &mut list, graph.passes.len()) {
             // A swapchain image acquired before the failure goes unpresented, and its semaphore
             // stays signaled, so no frame may acquire with it again.
             self.failed |= (list.iter().zip(&self.images))
@@ -377,6 +421,8 @@ impl Frames {
         Ok(Some(Frame {
             frames: self,
             targets: list,
+            graph,
+            next: 0,
             slot,
             submitted: false,
             transfers: None,
@@ -386,9 +432,9 @@ impl Frames {
     }
 
     /// Acquires `targets`' images into `images`, as [`Frames::begin`] says, and, given one for
-    /// the first, readies slot `slot`'s arena and commands for the frame and begins recording
-    /// them. `images` stays empty if the first target has no image.
-    fn start(&mut self, slot: usize, targets: &mut [Target<'_>]) -> Result<()> {
+    /// the first, readies slot `slot`'s arena, commands and timestamps for a frame of `passes`
+    /// passes and begins recording them. `images` stays empty if the first target has no image.
+    fn start(&mut self, slot: usize, targets: &mut [Target<'_>], passes: usize) -> Result<()> {
         for (i, target) in targets.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
@@ -397,10 +443,19 @@ impl Frames {
                     // on it or left it unsignaled and has finished, so it's unsignaled with no
                     // wait pending: a frame forgotten or failed, which could have left it
                     // signaled, keeps frames from beginning.
-                    unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) }?
-                        .map(|image| (image, vk::ImageLayout::UNDEFINED))
+                    unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) }?.map(|index| {
+                        Tracked {
+                            index,
+                            layout: vk::ImageLayout::UNDEFINED,
+                            hazard: Hazard::ACQUIRED,
+                        }
+                    })
                 }
-                Target::Image(image) => Some((0, image.layout())),
+                Target::Image(image) => Some(Tracked {
+                    index: 0,
+                    layout: image.layout(),
+                    hazard: Hazard::ANYTHING,
+                }),
             };
             if i == 0 && image.is_none() {
                 return Ok(());
@@ -430,7 +485,7 @@ impl Frames {
                 &[],
             );
         }
-        Ok(())
+        self.timer.begin_frame(&self.device, commands, slot, passes)
     }
 
     /// Copies what slot `slot`'s last frame read back, once it has finished, for the frame begun
@@ -458,6 +513,20 @@ impl Frames {
     /// this one's resources, and for the display to let go of the first target's image.
     pub fn waited(&self) -> Duration {
         self.waited
+    }
+
+    /// The time on the GPU of the last frame whose timestamps came back, which a frame's begin
+    /// reads from the frame two before it: from its first pass's beginning to its last's end,
+    /// their barriers' waits among it. `None` before then, after a frame of no passes, and for a
+    /// GPU whose graphics queue writes no timestamps.
+    pub fn gpu_time(&self) -> Option<Duration> {
+        self.timer.last()
+    }
+
+    /// The bytes of GPU memory the graphs' own images are in, as the last frame begun made them,
+    /// or kept them: those whose uses in a frame don't overlap share it.
+    pub fn transient_bytes(&self) -> u64 {
+        self.transients.bytes()
     }
 
     /// How many frames have been submitted: the number of the last, as frames count from 1. A
@@ -522,6 +591,44 @@ fn read_offset(slot: usize, read: usize) -> u64 {
     ((slot * MAX_READS + read) * ID_BYTES) as u64
 }
 
+/// Checks that `graph` uses only targets of `targets`, and swapchains' only to draw into.
+///
+/// # Panics
+///
+/// If it doesn't.
+fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
+    for (i, &decl) in graph.images.iter().enumerate() {
+        let ImageDecl::Target(target) = decl else {
+            continue;
+        };
+        let Some(found) = targets.get(target) else {
+            panic!(
+                "the graph uses target {target}, but the frame has {} targets",
+                targets.len()
+            );
+        };
+        if matches!(found, Target::Swapchain(_)) {
+            let image = ImageId(i as u32);
+            let misused = (graph.uses.iter())
+                .find(|&&(used, use_)| used == image && !matches!(use_, Use::Color(_)));
+            if let Some((_, use_)) = misused {
+                panic!(
+                    "target {target} is a swapchain's, which passes only draw into, but one uses \
+                     it as {use_:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A target's image, its view and its size: for a swapchain's, its image `index`.
+fn target_parts(target: &Target<'_>, index: u32) -> (vk::Image, vk::ImageView, vk::Extent2D) {
+    match target {
+        Target::Swapchain(swapchain) => swapchain.image(index),
+        Target::Image(image) => image.parts(),
+    }
+}
+
 /// Empties `targets` for the next frame's, which borrow for another lifetime. Collecting a
 /// `vec::IntoIter` into a `Vec` of a type with the same layout reuses its memory.
 fn recycle(mut targets: Vec<Target<'_>>) -> Vec<Target<'static>> {
@@ -564,6 +671,7 @@ impl Drop for Frames {
         // Null handles, left by a failed `new` or by a device that doesn't upload through a
         // transfer queue, are allowed.
         unsafe {
+            self.timer.destroy(&self.device);
             for slot in &self.slots {
                 for &semaphore in &slot.acquired {
                     raw.destroy_semaphore(semaphore, None);
@@ -586,6 +694,10 @@ impl Drop for Frames {
 pub struct Frame<'a> {
     frames: &'a mut Frames,
     targets: Vec<Target<'a>>,
+    /// The passes it runs.
+    graph: &'a Graph,
+    /// The graph's next pass to record.
+    next: usize,
     slot: usize,
     submitted: bool,
     /// The command buffer the frame's copies on the transfer queue record into, among
@@ -631,151 +743,155 @@ impl<'a> Frame<'a> {
         );
     }
 
-    /// Lets the frame's later passes sample the `target`th target, as its last pass left it, from
-    /// their fragment shaders, through the index this returns in the bindless set. Shaders may
-    /// sample through the index only until the image's next pass, which renders into it and so
-    /// takes it out of the layout the bindless set declares: after that pass, call this again.
+    /// Checks that `pass` is the graph's next pass to record, and of `kind`, and counts it
+    /// recorded.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, the frame has no `target`th target, the target is a
-    /// swapchain's, or it's an offscreen image no pass has rendered into since it was made or
-    /// read back.
-    pub fn begin_sampling(&mut self, target: usize) -> u32 {
+    /// If a forgotten pass is still open, or `pass` isn't the next, or of `kind`.
+    fn take_pass(&mut self, pass: PassId, kind: PassKind) -> &'a graph::PassDecl {
         self.outside_pass();
-        let Target::Image(image) = &self.targets[target] else {
-            panic!("target {target} is a swapchain's, and only offscreen images are sampled");
-        };
-        let (index, layout) =
-            self.frames.images[target].expect("an offscreen image is always there");
-        match layout {
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {}
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => return image.index(),
-            _ => panic!("target {target} is sampled before a pass renders into it"),
-        }
-        let (raw_image, _, _) = image.parts();
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(raw_image)
-            .subresource_range(COLOR_RANGE);
-        let device = &self.frames.device;
-        let commands = self.frames.slots[self.slot].commands;
-        // SAFETY: the commands are recording outside a pass, as checked, and the image lives until
-        // the frame has finished: it retires until then.
-        unsafe {
-            device.begin_label(commands, c"begin sampling");
-            device.raw().cmd_pipeline_barrier2(
-                commands,
-                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
-            );
-            device.end_label(commands);
-        }
-        self.frames.images[target] = Some((index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
-        image.index()
-    }
-
-    /// Lets the frame's later passes sample `ids`, as this frame's pass left them, from their
-    /// fragment shaders, as unsigned integers, through the index this returns in the bindless set:
-    /// once the frame has read back what it reads of them ([`Frame::read_ids`]). Shaders may sample
-    /// through the index only until the image's next pass, which renders into it and so takes it
-    /// out of the layout the bindless set declares: after that pass, call this again.
-    ///
-    /// # Panics
-    ///
-    /// If a forgotten pass is still open, another device made `ids`, or no pass of this frame has
-    /// rendered into it.
-    pub fn begin_sampling_ids(&mut self, ids: &mut IdImage) -> u32 {
-        self.outside_pass();
-        let number = self.number();
-        let device = &self.frames.device;
-        device.check_made("the ID image sampled", ids.device());
+        let graph = self.graph;
+        let decl = (graph.passes.get(pass.0 as usize)).expect("a pass of the frame's graph");
         assert!(
-            ids.rendered() == number,
-            "IDs are sampled in the frame whose pass rendered them, and no pass of frame {number} \
-             has"
+            pass.0 as usize == self.next,
+            "a frame records its graph's passes in the order they were added: pass {} next, not \
+             pass {} ({:?})",
+            self.next,
+            pass.0,
+            decl.label
         );
-        let (src_stage, src_access) = match ids.layout() {
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => return ids.index(),
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            ),
-            // Read back, by copies that wrote nothing of it.
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
-                (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::NONE)
-            }
-            layout => unreachable!("a frame's pass leaves its IDs in no layout such as {layout:?}"),
-        };
-        let (image, _, _) = ids.parts();
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(src_stage)
-            .src_access_mask(src_access)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-            .old_layout(ids.layout())
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(image)
-            .subresource_range(COLOR_RANGE);
-        let commands = self.frames.slots[self.slot].commands;
-        // SAFETY: the commands are recording outside a pass, as checked, and the image lives until
-        // the frame has finished: it retires until then.
-        unsafe {
-            device.begin_label(commands, c"begin sampling ids");
-            device.raw().cmd_pipeline_barrier2(
-                commands,
-                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
-            );
-            device.end_label(commands);
-        }
-        ids.set_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        ids.index()
+        assert_eq!(
+            decl.kind, kind,
+            "pass {:?} is recorded as what it was added as",
+            decl.label
+        );
+        self.next += 1;
+        self.pass_begun = true;
+        decl
     }
 
-    /// Reads the `target`th target back, as the frame's passes left it, for [`Frames::image_read`]
-    /// to give once the frame has finished, and lets the frame's later passes sample it, as
-    /// [`Frame::begin_sampling`] does, through the index this returns. The slot's first read, and
-    /// a read of a larger image than it read before, makes the buffer it reads into, and fails if
-    /// it can't be made.
+    /// Starts `pass`: its timestamp and its label, and the barriers its uses need after the uses
+    /// before them, which put each image it uses in the layout it uses it in.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, the frame has no `target`th target, the target is a
-    /// swapchain's, or it's an offscreen image no pass has rendered into since it was made or
-    /// read back.
-    pub fn read_image(&mut self, target: usize) -> Result<u32> {
-        self.outside_pass();
+    /// If it draws over, samples or copies from a target that no pass has drawn into since it was
+    /// made, or since its swapchain's image was acquired.
+    fn open_pass(&mut self, pass: PassId) {
+        let graph = self.graph;
+        let decl = &graph.passes[pass.0 as usize];
+        // Before anything is recorded, as a refusal records nothing.
+        for &(image, use_) in graph.uses(pass) {
+            if let ImageDecl::Target(target) = graph.images[image.0 as usize] {
+                let tracked = self.frames.images[target]
+                    .as_ref()
+                    .expect("a pass that records has its targets' images");
+                assert!(
+                    use_.access().discards || tracked.layout != vk::ImageLayout::UNDEFINED,
+                    "pass {:?} uses target {target} as {use_:?}, but no pass has drawn into it \
+                     since it was made, or since its swapchain's image was acquired",
+                    decl.label
+                );
+            }
+        }
+        let commands = self.commands();
+        let device = &self.frames.device;
+        self.frames
+            .timer
+            .begin(device, commands, self.slot, decl.label);
+        // SAFETY: the commands are recording outside a pass.
+        unsafe { device.begin_label(commands, decl.label.name()) };
+        let mut barriers = std::mem::take(&mut self.frames.barriers);
+        barriers.clear();
+        for &(image, use_) in graph.uses(pass) {
+            let access = use_.access();
+            let (raw, range) = match graph.images[image.0 as usize] {
+                ImageDecl::Target(target) => {
+                    let tracked = self.frames.images[target]
+                        .as_mut()
+                        .expect("a pass that records has its targets' images");
+                    if let Some(barrier) = tracked.hazard.follow(&mut tracked.layout, access) {
+                        let (raw, ..) = target_parts(&self.targets[target], tracked.index);
+                        barriers.push(barrier.on(raw, COLOR_RANGE));
+                    }
+                    continue;
+                }
+                ImageDecl::Transient { kind, .. } => {
+                    (self.frames.transients.image(image).raw, kind.range())
+                }
+            };
+            let (layout, hazard) = self.frames.transients.state(image);
+            if let Some(barrier) = hazard.follow(layout, access) {
+                barriers.push(barrier.on(raw, range));
+            }
+        }
+        if !barriers.is_empty() {
+            // SAFETY: the commands are recording outside a pass, and the images live until the
+            // frame has finished.
+            unsafe {
+                self.frames.device.raw().cmd_pipeline_barrier2(
+                    commands,
+                    &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+                );
+            }
+        }
+        self.frames.barriers = barriers;
+    }
+
+    /// Ends the pass started last: its label, and its timestamp.
+    fn close_pass(&mut self) {
+        let commands = self.commands();
+        let device = &self.frames.device;
+        // SAFETY: the commands are recording outside a pass, with the pass's label open.
+        unsafe { device.end_label(commands) };
+        self.frames.timer.end(device, commands, self.slot);
+    }
+
+    /// `image`'s image, its view and its size, for recording commands that use it: for a target,
+    /// the one the frame acquired.
+    ///
+    /// # Panics
+    ///
+    /// If it's a swapchain's that had no image ready.
+    fn parts(&self, image: ImageId) -> (vk::Image, vk::ImageView, vk::Extent2D) {
+        match self.graph.images[image.0 as usize] {
+            ImageDecl::Target(target) => {
+                let tracked = self.frames.images[target].expect("the target has an image");
+                target_parts(&self.targets[target], tracked.index)
+            }
+            ImageDecl::Transient { size, .. } => {
+                let made = self.frames.transients.image(image);
+                let [width, height] = size;
+                (made.raw, made.view, vk::Extent2D { width, height })
+            }
+        }
+    }
+
+    fn commands(&self) -> vk::CommandBuffer {
+        self.frames.slots[self.slot].commands
+    }
+
+    /// Records `pass`, a pass of the frame's graph that reads an image back, which must be the
+    /// next of its passes to record: the image, as the passes before left it, for
+    /// [`Frames::image_read`] to give once the frame has finished. The slot's first read, and a
+    /// read of a larger image than it read before, makes the buffer it reads into, and fails if it
+    /// can't be made.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't read an image
+    /// back, or reads a target back that no pass has drawn into since it was made.
+    pub fn read_image(&mut self, pass: PassId) -> Result<()> {
+        self.take_pass(pass, PassKind::ReadImage);
+        let [(image, _)] = *self.graph.uses(pass) else {
+            unreachable!("a read uses its image alone");
+        };
         let number = self.number();
-        let Target::Image(image) = &self.targets[target] else {
-            panic!("target {target} is a swapchain's, and only offscreen images are read back");
-        };
-        let Frames {
-            device,
-            slots,
-            image_reads,
-            images,
-            ..
-        } = &mut *self.frames;
-        let (index, layout) = images[target].expect("an offscreen image is always there");
-        let (src_stage, src_access) = match layout {
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            ),
-            // Sampled, which wrote nothing of it.
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
-                vk::PipelineStageFlags2::FRAGMENT_SHADER,
-                vk::AccessFlags2::NONE,
-            ),
-            _ => panic!("target {target} is read back before a pass renders into it"),
-        };
-        let size = image.size();
+        let (raw_image, _, extent) = self.parts(image);
+        let size = [extent.width, extent.height];
         let bytes = u64::from(size[0]) * u64::from(size[1]) * 4;
-        let reads = &mut image_reads[self.slot];
+        let reads = &mut self.frames.image_reads[self.slot];
         if reads
             .buffer
             .as_ref()
@@ -784,30 +900,14 @@ impl<'a> Frame<'a> {
             // The slot's last frame has finished, and its read with it.
             let name = format!("frame {} image read", self.slot);
             let usage = vk::BufferUsageFlags::TRANSFER_DST;
+            let device = &self.frames.device;
             reads.buffer = Some(Buffer::new(device, bytes, usage, Memory::Readback, &name)?);
         }
+        self.open_pass(pass);
+        let reads = &mut self.frames.image_reads[self.slot];
         let buffer = (reads.buffer.as_ref())
             .map(Buffer::raw)
             .expect("the buffer was just made");
-        let (raw_image, _, _) = image.parts();
-        let to_copy = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(src_stage)
-            .src_access_mask(src_access)
-            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-            .old_layout(layout)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .image(raw_image)
-            .subresource_range(COLOR_RANGE);
-        let to_sample = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::NONE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(raw_image)
-            .subresource_range(COLOR_RANGE);
         let to_host = vk::BufferMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -816,18 +916,13 @@ impl<'a> Frame<'a> {
             .buffer(buffer)
             .size(bytes);
         let region = copy_region(0, [0, 0], size, 0);
-        let commands = slots[self.slot].commands;
-        let raw = device.raw();
-        // SAFETY: the commands are recording outside a pass, as checked; the region is the whole
-        // image and lies within the buffer, which is at least its size; and both live until the
-        // frame has finished: the image retires until then, and the buffer is replaced only once
-        // the slot's next frame begins, which waits for this one.
+        let commands = self.frames.slots[self.slot].commands;
+        let raw = self.frames.device.raw();
+        // SAFETY: the commands are recording outside a pass, with the image in the layout copies
+        // read it in; the region is the whole image and lies within the buffer, which is at least
+        // its size; and both live until the frame has finished: the image retires until then, and
+        // the buffer is replaced only once the slot's next frame begins, which waits for this one.
         unsafe {
-            device.begin_label(commands, c"read image");
-            raw.cmd_pipeline_barrier2(
-                commands,
-                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_copy)),
-            );
             raw.cmd_copy_image_to_buffer(
                 commands,
                 raw_image,
@@ -837,119 +932,91 @@ impl<'a> Frame<'a> {
             );
             raw.cmd_pipeline_barrier2(
                 commands,
-                &vk::DependencyInfo::default()
-                    .image_memory_barriers(slice::from_ref(&to_sample))
-                    .buffer_memory_barriers(slice::from_ref(&to_host)),
+                &vk::DependencyInfo::default().buffer_memory_barriers(slice::from_ref(&to_host)),
             );
-            device.end_label(commands);
         }
-        images[target] = Some((index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
         reads.frame = number;
         reads.size = size;
-        Ok(image.index())
+        self.close_pass();
+        Ok(())
     }
 
-    /// Reads back the IDs at `pixels` of `ids`, each a pixel's column and row from its top left,
-    /// as this frame's last pass into it left them: the first of them, in order, up to
-    /// [`MAX_READS`] a frame, less those this frame has read already. Returns how many it read.
-    /// They're read once the frame has finished, which the frame that next uses its resources,
-    /// two later, waits for as it begins: [`Frame::ids_read`] gives them there. The first read
-    /// makes the buffer the frames read into, of a kibibyte, and fails if it can't be made.
+    /// Records `pass`, a pass of the frame's graph that reads IDs back, which must be the next of
+    /// its passes to record: the IDs at `pixels`, each a pixel's column and row from its top left,
+    /// as the passes before left them, the first of them, in order, up to [`MAX_READS`] a frame,
+    /// less those this frame has read already. Returns how many it read. They're read once the
+    /// frame has finished, which the frame that next uses its resources, two later, waits for as
+    /// it begins: [`Frame::ids_read`] gives them there. The first read makes the buffer the frames
+    /// read into, of a kibibyte, and fails if it can't be made.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made `ids`, no pass of this frame has
-    /// rendered into it, the frame samples it already ([`Frame::begin_sampling_ids`]), or a pixel
-    /// is outside it.
-    pub fn read_ids(&mut self, ids: &mut IdImage, pixels: &[[u32; 2]]) -> Result<usize> {
-        self.outside_pass();
-        let number = self.number();
-        let device = &self.frames.device;
-        device.check_made("the ID image read", ids.device());
-        assert!(
-            ids.rendered() == number,
-            "IDs are read back in the frame whose pass rendered them, and no pass of frame \
-             {number} has"
-        );
-        assert!(
-            ids.layout() != vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            "IDs are read back before the frame samples them"
-        );
-        let [width, height] = ids.size();
-        if let Some(pixel) = pixels.iter().find(|&&[x, y]| x >= width || y >= height) {
-            panic!("pixel {pixel:?} is outside the {width}x{height} IDs read");
+    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't read IDs back,
+    /// or a pixel is outside them.
+    pub fn read_ids(&mut self, pass: PassId, pixels: &[[u32; 2]]) -> Result<usize> {
+        let [(ids, _)] = *self.graph.uses(pass) else {
+            panic!("pass {} reads IDs back from an image alone", pass.0);
+        };
+        // Before the pass is taken, as a refusal records nothing.
+        if let ImageDecl::Transient { size, .. } = self.graph.images[ids.0 as usize] {
+            let [width, height] = size;
+            if let Some(pixel) = pixels.iter().find(|&&[x, y]| x >= width || y >= height) {
+                panic!("pixel {pixel:?} is outside the {width}x{height} IDs read");
+            }
         }
+        self.take_pass(pass, PassKind::ReadIds);
+        let (image, _, _) = self.parts(ids);
         let read = self.frames.slots[self.slot].reads.1;
         let count = pixels.len().min(MAX_READS - read);
-        if count == 0 {
-            return Ok(0);
-        }
-        if self.frames.reads.is_none() {
+        if count > 0 && self.frames.reads.is_none() {
             let (device, memory) = (&self.frames.device, Memory::Readback);
             let size = read_offset(FRAMES_IN_FLIGHT as usize, 0);
             let usage = vk::BufferUsageFlags::TRANSFER_DST;
             let reads = Buffer::new(device, size, usage, memory, "ids read")?;
             self.frames.reads = Some(reads);
         }
-        let buffer = (self.frames.reads.as_ref())
-            .map(Buffer::raw)
-            .expect("the buffer was just made");
-        let (image, _, _) = ids.parts();
-        let mut regions = [vk::BufferImageCopy::default(); MAX_READS];
-        for (i, (region, &[x, y])) in regions.iter_mut().zip(&pixels[..count]).enumerate() {
-            *region = copy_region(read_offset(self.slot, read + i), [x, y], [1, 1], 0);
-        }
-        // From the pass that rendered them, unless an earlier read this frame took them from it.
-        let to_copy = (ids.layout() == vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).then(|| {
-            vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(image)
-                .subresource_range(COLOR_RANGE)
-        });
-        let to_host = vk::BufferMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)
-            .buffer(buffer)
-            .offset(read_offset(self.slot, read))
-            .size((count * ID_BYTES) as u64);
-        let device = &self.frames.device;
-        let commands = self.frames.slots[self.slot].commands;
-        let raw = device.raw();
-        // SAFETY: the commands are recording outside a pass; the regions lie within the image,
-        // which a pass of this frame rendered, and within the slot's part of the buffer, past
-        // what the frame read before; and both live until the frame has finished: the image
-        // retires until then, and the buffer lives as long as the frames, which wait for theirs
-        // before they go.
-        unsafe {
-            device.begin_label(commands, c"read ids");
-            if let Some(to_copy) = &to_copy {
+        // Whether it reads any, so that the passes after find the IDs where it leaves them.
+        self.open_pass(pass);
+        if count > 0 {
+            let buffer = (self.frames.reads.as_ref())
+                .map(Buffer::raw)
+                .expect("the buffer was just made");
+            let mut regions = [vk::BufferImageCopy::default(); MAX_READS];
+            for (i, (region, &[x, y])) in regions.iter_mut().zip(&pixels[..count]).enumerate() {
+                *region = copy_region(read_offset(self.slot, read + i), [x, y], [1, 1], 0);
+            }
+            let to_host = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                .buffer(buffer)
+                .offset(read_offset(self.slot, read))
+                .size((count * ID_BYTES) as u64);
+            let commands = self.commands();
+            let raw = self.frames.device.raw();
+            // SAFETY: the commands are recording outside a pass, with the IDs in the layout copies
+            // read them in; the regions lie within the image and within the slot's part of the
+            // buffer, past what the frame read before; and both live until the frame has
+            // finished: the image retires until then, and the buffer lives as long as the frames,
+            // which wait for theirs before they go.
+            unsafe {
+                raw.cmd_copy_image_to_buffer(
+                    commands,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    buffer,
+                    &regions[..count],
+                );
                 raw.cmd_pipeline_barrier2(
                     commands,
-                    &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(to_copy)),
+                    &vk::DependencyInfo::default()
+                        .buffer_memory_barriers(slice::from_ref(&to_host)),
                 );
             }
-            raw.cmd_copy_image_to_buffer(
-                commands,
-                image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                buffer,
-                &regions[..count],
-            );
-            raw.cmd_pipeline_barrier2(
-                commands,
-                &vk::DependencyInfo::default().buffer_memory_barriers(slice::from_ref(&to_host)),
-            );
-            device.end_label(commands);
+            self.frames.slots[self.slot].reads.1 += count;
         }
-        ids.set_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        self.frames.slots[self.slot].reads.1 += count;
+        self.close_pass();
         Ok(count)
     }
 
@@ -957,9 +1024,15 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open.
+    /// If a forgotten pass is still open, or a pass of the frame's graph wasn't recorded.
     pub fn submit(mut self) -> Result<()> {
         self.outside_pass();
+        assert!(
+            self.next == self.graph.passes.len(),
+            "a frame records every pass of its graph, but pass {} ({:?}) wasn't",
+            self.next,
+            self.graph.passes.get(self.next).map(|pass| pass.label)
+        );
         self.finish()
     }
 
@@ -1062,15 +1135,24 @@ impl<'a> Frame<'a> {
             );
         }
         for (i, (target, image)) in self.targets.iter().zip(images.iter_mut()).enumerate() {
-            let (Target::Swapchain(swapchain), Some((index, layout))) = (target, image) else {
+            let (
+                Target::Swapchain(swapchain),
+                Some(Tracked {
+                    index,
+                    layout,
+                    hazard,
+                }),
+            ) = (target, image)
+            else {
                 continue;
             };
             let (image, _, _) = swapchain.image(*index);
             // The present waits on a semaphore signaled after every command, the layout change
             // included, so the barrier needs no second scope.
+            let (src_stages, src_access) = hazard.last();
             let barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .src_stage_mask(src_stages)
+                .src_access_mask(src_access)
                 .old_layout(*layout)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .image(image)
@@ -1120,7 +1202,7 @@ impl<'a> Frame<'a> {
         sent?;
         *submitted = frame;
         for (target, image) in self.targets.iter_mut().zip(images.iter()) {
-            if let (Target::Image(target), Some((_, layout))) = (target, image) {
+            if let (Target::Image(target), Some(Tracked { layout, .. })) = (target, image) {
                 target.set_layout(*layout);
             }
         }

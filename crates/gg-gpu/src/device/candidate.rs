@@ -7,10 +7,10 @@ use gg_core::{Error, Result};
 
 use super::{UploadPath, has_bindless};
 use crate::capture;
+use crate::frame::graph::Kind;
 use crate::pipeline_cache::Identity;
 use crate::{
-    DepthImage, Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, TextureFormat,
-    Version,
+    Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, TextureFormat, Version,
 };
 
 /// A GPU the loader found, and what keeps the engine from using it, if anything.
@@ -33,6 +33,9 @@ pub(super) struct Candidate {
     /// image.
     pub(super) graphics_granularity: vk::Extent3D,
     pub(super) transfer_granularity: vk::Extent3D,
+    /// How many of the bits of the timestamps the graphics family's queues write count
+    /// (`timestampValidBits`); 0 for none.
+    pub(super) timestamp_bits: u32,
     pub(super) host_copy: HostCopy,
     pub(super) memory: vk::PhysicalDeviceMemoryProperties,
     /// Whether the driver reports each heap's budget (`VK_EXT_memory_budget`).
@@ -194,6 +197,9 @@ impl Candidate {
             transfer,
             graphics_granularity: granularity(graphics),
             transfer_granularity: granularity(transfer),
+            timestamp_bits: graphics
+                .and_then(|family| families.get(family as usize))
+                .map_or(0, |family| family.timestamp_valid_bits),
             host_copy,
             memory,
             memory_budget: has_extension(&extensions, vk::EXT_MEMORY_BUDGET_NAME),
@@ -259,7 +265,7 @@ fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
     let properties = unsafe {
         instance
             .raw()
-            .get_physical_device_format_properties(physical, DepthImage::FORMAT)
+            .get_physical_device_format_properties(physical, Kind::Depth.format())
     };
     let features = properties.optimal_tiling_features;
     features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
@@ -452,6 +458,7 @@ mod tests {
             transfer: None,
             graphics_granularity: vk::Extent3D::default(),
             transfer_granularity: vk::Extent3D::default(),
+            timestamp_bits: 64,
             host_copy: HostCopy::Unsupported,
             memory: vk::PhysicalDeviceMemoryProperties::default(),
             memory_budget: false,

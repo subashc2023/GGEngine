@@ -2,8 +2,9 @@
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' unlit materials among them, a game's
 //! UI over them in the view's own space, and the UI over the view; picks, which read back the ID of
-//! the draw the view shows at a pixel; an outline round what the view shows of an ID; and the
-//! render graph, lighting, PBR materials and post-processing to come.
+//! the draw the view shows at a pixel; an outline round what the view shows of an ID; each frame's
+//! passes in a render graph, which places the barriers between them and makes the view's images;
+//! and lighting, PBR materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -29,12 +30,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gg_core::math::{Mat4, Vec4};
-use gg_core::{Error, Result};
+use gg_core::{Error, Result, label};
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Frames, IdImage, Instance, InstanceDesc, Surface, Swapchain,
+    ColorImage, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId, Surface, Swapchain,
     Target, Texture as GpuTexture, TextureFormat,
 };
-use tracing::{info, trace};
+use tracing::info;
 
 pub use circle::Circle;
 pub use draws::Draws;
@@ -275,9 +276,11 @@ pub struct Renderer {
     meshes: MeshPass,
     view: ViewPass,
     outline: OutlinePass,
-    /// What the game's view renders into, the IDs its draws write beside it, and the depth image
-    /// they test, the size it last had, which has an area.
-    view_image: Option<(ColorImage, IdImage, DepthImage)>,
+    /// The passes of the frame being rendered, declared afresh each frame in the memory of the
+    /// last's.
+    graph: Graph,
+    /// The passes into the other windows that the frame draws UI in, in their order.
+    window_passes: Vec<PassId>,
     /// What the view's pixels go into while it shows pixels ([`RenderData::pixels`]), their size,
     /// and whether a frame has written them.
     pixels: Option<(GpuTexture, bool)>,
@@ -305,6 +308,26 @@ enum Output {
     Window(Swapchain),
     /// The image, and the size it's to have, which the next frame makes it again at, if it hasn't.
     Offscreen(ColorImage, [u32; 2]),
+}
+
+/// The game's view's images and passes in a frame's graph.
+struct ViewPasses {
+    color: ImageId,
+    ids: ImageId,
+    /// What draws the view.
+    pass: PassId,
+    /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
+    read_ids: Option<PassId>,
+    /// What outlines what the view shows of an ID, if anything.
+    outline: Option<(PassId, Outline)>,
+    /// What reads the view back, if the frame does.
+    read_view: Option<PassId>,
+}
+
+/// What the frame shows as the game's view: an image of its graph's, or a texture, by its index.
+enum Shown {
+    Image(ImageId),
+    Texture(u32),
 }
 
 // The engine renders on a thread of its own, which the renderer and its uploads move to.
@@ -385,7 +408,8 @@ impl Renderer {
             meshes: MeshPass::new(device, settings.upload_budget)?,
             view: ViewPass::new(device, format)?,
             outline: OutlinePass::new(device)?,
-            view_image: None,
+            graph: Graph::default(),
+            window_passes: Vec::new(),
             pixels: None,
             view_read: 0,
             picks: Picks::default(),
@@ -558,12 +582,8 @@ impl Renderer {
         // matter.
         let [width, height] = data.viewport.size;
         let view_projection = data.viewpoint.view_projection(data.viewport.aspect());
-        // The view renders into an image of its own size, with IDs and depth beside it, made again
-        // in the frame that changes its size, so that it never shows stretched; the old ones retire
-        // until the frames that use them have finished. A drag that resizes the view makes them
-        // every frame, which growing them in steps, and rendering into part of them, would not. A
-        // view without an area renders nothing, and keeps the images it had; so does one that shows
-        // pixels, which go into a texture of their own size, made again as that changes.
+        // A view without an area renders nothing; nor does one that shows pixels, which go into a
+        // texture of their own size, made again as that changes.
         let has_view = width > 0 && height > 0;
         let pixels = data.pixels.filter(|_| has_view);
         if let Some(Pixels {
@@ -585,39 +605,73 @@ impl Renderer {
             })
         });
         let renders_view = has_view && pixels.is_none();
-        if renders_view
-            && (self.view_image.as_ref())
-                .is_none_or(|(image, ..)| image.size() != data.viewport.size)
-        {
-            let image = ColorImage::new(&self.device, width, height, "view")?;
-            let ids = IdImage::new(&self.device, width, height, "view ids")?;
-            let depth = DepthImage::new(&self.device, width, height, "view depth")?;
-            self.view_image = Some((image, ids, depth));
-            trace!(width, height, "View image made");
-        }
         if let Output::Offscreen(image, size) = &mut self.output
             && image.size() != *size
         {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
+        // The frame's passes: the view, into images of its own, its size, so that it never shows
+        // stretched, made again in the frame that changes its size, which a drag that resizes the
+        // view does every frame, as growing them in steps and rendering into part of them wouldn't;
+        // what the view's IDs and image are read back by, and its outline; then the frame, which
+        // shows the view under the UI, and the other windows' UI, over black.
+        let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
+        let graph = &mut self.graph;
+        graph.clear();
+        let output = graph.target(0);
+        let size = data.viewport.size;
+        let view = renders_view.then(|| {
+            let color = graph.color("view", size);
+            let ids = graph.ids("view ids", size);
+            let depth = graph.depth("view depth", size);
+            let pass = (graph.render(label!("view")))
+                .clear(color, data.clear_color)
+                .ids(ids)
+                .depth(depth)
+                .add();
+            let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
+            // Into the view's image, from the IDs the picks read, so that wherever the view shows,
+            // and as it's read back, it shows outlined.
+            let outline = data.outline.filter(Outline::shows).map(|outline| {
+                let pass = graph
+                    .render(label!("outline"))
+                    .keep(color)
+                    .sample(ids)
+                    .add();
+                (pass, outline)
+            });
+            let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
+            ViewPasses {
+                color,
+                ids,
+                pass,
+                read_ids,
+                outline,
+                read_view,
+            }
+        });
+        let mut frame_pass = (graph.render(label!("frame"))).clear(output, data.clear_color);
+        if let Some(view) = &view {
+            frame_pass = frame_pass.sample(view.color);
+        }
+        let frame_pass = frame_pass.add();
+        self.window_passes.clear();
+        let black = [0.0, 0.0, 0.0, 1.0];
+        // After the output, the other windows that draw UI, in their order.
+        for target in 1..=self.window_keys.iter().filter(|key| has_ui(key)).count() {
+            let target = graph.target(target);
+            let pass = graph.render(label!("window")).clear(target, black).add();
+            self.window_passes.push(pass);
+        }
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image, _) => Target::Image(image),
         };
-        let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
         let others = (self.window_keys.iter().zip(&mut self.windows))
             .filter(|(key, _)| has_ui(key))
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
-        // After the output and the other windows, which keep their places.
-        let view_target = 1 + self.window_keys.iter().filter(|key| has_ui(key)).count();
-        let (view, ids, depth) = match &mut self.view_image {
-            Some((image, ids, depth)) if renders_view => {
-                (Some(Target::Image(image)), Some(ids), Some(&*depth))
-            }
-            _ => (None, None, None),
-        };
-        let targets = iter::once(target).chain(others).chain(view);
-        let Some(mut frame) = self.frames.begin(targets)? else {
+        let targets = iter::once(target).chain(others);
+        let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
             return Ok(false);
         };
         // The frame two before has finished, and what it read with it.
@@ -625,41 +679,33 @@ impl Renderer {
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
         // What the view shows, and how much of its area that covers.
-        let (counts, view) = match (ids, pixels_shown) {
-            (Some(ids), _) => {
-                let clear = data.clear_color;
-                let mut pass = frame
-                    .begin_pass(view_target, c"view", clear, depth, Some(&mut *ids))
-                    .expect("an offscreen image is always there");
-                let size = data.viewport.size;
+        let (counts, view) = match (view, pixels_shown) {
+            (Some(view), _) => {
+                let mut pass =
+                    (frame.render(view.pass)).expect("the graph's own images are always there");
                 let mut counts = self
                     .meshes
                     .draw(&mut pass, view_projection, size, data.draws)?;
+                pass.begin_label(c"canvas");
                 counts +=
                     (self.meshes).draw(&mut pass, canvas_projection(size), size, data.canvas)?;
+                pass.end_label();
                 drop(pass);
-                let picked = if data.read_picks {
-                    self.picks.take(frame.number(), Some(ids.size()))
-                } else {
-                    &[]
-                };
-                frame.read_ids(ids, picked)?;
-                // Into the view's image, from the IDs the picks read, so that wherever the view
-                // shows, and as it's read back, it shows outlined.
-                if let Some(outline) = data.outline.filter(Outline::shows) {
-                    let ids = frame.begin_sampling_ids(ids);
-                    let mut pass = frame
-                        .begin_pass_over(view_target, c"outline")
-                        .expect("an offscreen image is always there");
+                if let Some(read) = view.read_ids {
+                    let picked = self.picks.take(frame.number(), Some(size));
+                    frame.read_ids(read, picked)?;
+                }
+                if let Some((outlined, outline)) = view.outline {
+                    let mut pass =
+                        (frame.render(outlined)).expect("the graph's own images are always there");
+                    let ids = pass.sampled(view.ids);
                     self.outline.draw(&mut pass, ids, outline);
                 }
-                let image = if data.read_view {
+                if let Some(read) = view.read_view {
                     self.view_read = frame.number();
-                    frame.read_image(view_target)?
-                } else {
-                    frame.begin_sampling(view_target)
-                };
-                (counts, Some((image, size)))
+                    frame.read_image(read)?;
+                }
+                (counts, Some((Shown::Image(view.color), size)))
             }
             (None, Some(Pixels { size, bytes })) => {
                 if data.read_picks {
@@ -672,7 +718,10 @@ impl Renderer {
                     *written = true;
                 }
                 let shown = [size[0].min(width), size[1].min(height)];
-                (DrawCounts::default(), Some((texture.index(), shown)))
+                (
+                    DrawCounts::default(),
+                    Some((Shown::Texture(texture.index()), shown)),
+                )
             }
             (None, None) => {
                 if data.read_picks {
@@ -681,9 +730,14 @@ impl Renderer {
                 (DrawCounts::default(), None)
             }
         };
-        let mut pass = frame
-            .begin_pass(0, c"frame", data.clear_color, None, None)
-            .expect("a frame's first target has an image");
+        let mut pass = (frame.render(frame_pass)).expect("a frame's first target has an image");
+        let view = view.map(|(shown, size)| {
+            let image = match shown {
+                Shown::Image(image) => pass.sampled(image),
+                Shown::Texture(index) => index,
+            };
+            (image, size)
+        });
         // Under the whole UI, unless it paints the view among its own shapes.
         if let Some((image, size)) = view
             && !ui::draws_view(ui.primitives)
@@ -692,24 +746,27 @@ impl Renderer {
                 size,
                 ..data.viewport
             };
+            pass.begin_label(c"view");
             self.view.draw(&mut pass, viewport, image, None);
+            pass.end_label();
         }
         let view = view.map(|(image, size)| ui::View {
             pass: &self.view,
             image,
             size,
         });
+        pass.begin_label(c"ui");
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point, view)?;
+        pass.end_label();
         drop(pass);
         let drawn = self
             .window_keys
             .iter()
             .filter_map(|key| windows.iter().find(|(drawn, _)| drawn == key));
-        for (target, (_, ui)) in (1..).zip(drawn) {
-            let black = [0.0, 0.0, 0.0, 1.0];
+        for (&window, (_, ui)) in self.window_passes.iter().zip(drawn) {
             // The view shows in the main window alone.
-            if let Some(mut pass) = frame.begin_pass(target, c"window", black, None, None) {
+            if let Some(mut pass) = frame.render(window) {
                 self.ui
                     .draw(&mut pass, ui.primitives, ui.pixels_per_point, None)?;
             }
@@ -732,6 +789,20 @@ impl Renderer {
     /// meshes not yet drawable or removed, or with shaders removed.
     pub fn drawn(&self) -> DrawCounts {
         self.drawn
+    }
+
+    /// The time on the GPU of the frame whose timestamps the last [`Renderer::render`] that
+    /// rendered a frame read, two frames before it: from its first pass's beginning to its last's
+    /// end. `None` before then, and for a GPU whose graphics queue writes no timestamps. With
+    /// gg-core's `tracy` feature, Tracy's GPU timeline shows each pass.
+    pub fn gpu_time(&self) -> Option<Duration> {
+        self.frames.gpu_time()
+    }
+
+    /// The bytes of GPU memory the frames' own images are in, the view's among them, which those
+    /// whose uses in a frame don't overlap share.
+    pub fn transient_bytes(&self) -> u64 {
+        self.frames.transient_bytes()
     }
 
     /// What's being streamed to the GPU after the last [`Renderer::render`]: the meshes and

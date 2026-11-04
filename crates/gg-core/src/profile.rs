@@ -4,11 +4,15 @@
 //! never one for each draw, sprite or other item of a loop over a frame's content, which would
 //! cost more than it measures.
 //!
+//! The GPU's work shows on a timeline of its own: a pass, named by a [`Label`], is a zone there,
+//! timed by the GPU's own clock, which a [`GpuTimeline`] takes once the GPU has run it.
+//!
 //! The macros are defined here twice, under gg-core's feature, so that it decides for every crate
 //! that calls them. tracy-client's macros expand to `unsafe` blocks, sound for the literal names
 //! these take; rustc doesn't lint code expanded from another crate's macro, so callers that deny
 //! or forbid unsafe code still compile.
 
+use std::ffi::CStr;
 use std::fmt::Display;
 
 /// Whether zones reach Tracy: gg-core's `tracy` feature.
@@ -109,4 +113,126 @@ macro_rules! plot {
         let _: &'static str = $name;
         let _ = || -> f64 { $value };
     }};
+}
+
+/// The name of some of the GPU's work, such as a pass, which [`label!`](crate::label) makes from a
+/// literal: what captures show it as, its debug label, and, with the feature, where Tracy's GPU
+/// timeline shows it, a zone named so.
+#[derive(Clone, Copy)]
+pub struct Label {
+    name: &'static CStr,
+    #[cfg(feature = "tracy")]
+    location: &'static tracy_client::SpanLocation,
+}
+
+impl Label {
+    #[doc(hidden)]
+    #[cfg(feature = "tracy")]
+    pub fn __new(name: &'static CStr, location: &'static tracy_client::SpanLocation) -> Self {
+        Self { name, location }
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(feature = "tracy"))]
+    pub fn __new(name: &'static CStr) -> Self {
+        Self { name }
+    }
+
+    /// The name, as debug labels take it.
+    pub fn name(&self) -> &'static CStr {
+        self.name
+    }
+}
+
+impl std::fmt::Debug for Label {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(f)
+    }
+}
+
+impl PartialEq for Label {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+/// A [`Label`] named `name`, a literal: `label!("view")`.
+#[cfg(feature = "tracy")]
+#[macro_export]
+macro_rules! label {
+    ($name:literal) => {{
+        const NAME: &::core::ffi::CStr = $crate::profile::__c_name(concat!($name, "\0"));
+        $crate::profile::Label::__new(NAME, $crate::profile::__tracy::span_location!($name))
+    }};
+}
+
+/// A [`Label`] named `name`, a literal: `label!("view")`.
+#[cfg(not(feature = "tracy"))]
+#[macro_export]
+macro_rules! label {
+    ($name:literal) => {{
+        const NAME: &::core::ffi::CStr = $crate::profile::__c_name(concat!($name, "\0"));
+        $crate::profile::Label::__new(NAME)
+    }};
+}
+
+/// `name`, which ends in its only nul, as a C string.
+#[doc(hidden)]
+pub const fn __c_name(name: &'static str) -> &'static CStr {
+    match CStr::from_bytes_with_nul(name.as_bytes()) {
+        Ok(name) => name,
+        Err(_) => panic!("a label's name has no nul of its own"),
+    }
+}
+
+/// Tracy's timeline of one GPU queue's work, where each zone begins and ends at timestamps that
+/// the GPU writes, numbered by the query each goes in, which come back once it has run them.
+pub struct GpuTimeline {
+    #[cfg(feature = "tracy")]
+    context: tracy_client::GpuContext,
+}
+
+impl GpuTimeline {
+    /// The timeline named `name` of a GPU whose clock read `timestamp` just now and ticks every
+    /// `period` nanoseconds; `None` without the feature, or once Tracy has made all the 255 it
+    /// makes in a process.
+    pub fn new(name: &str, timestamp: i64, period: f32) -> Option<Self> {
+        #[cfg(feature = "tracy")]
+        {
+            let client = tracy_client::Client::start();
+            let kind = tracy_client::GpuContextType::Vulkan;
+            let context = client.new_gpu_context(Some(name), kind, timestamp, period);
+            context.ok().map(|context| Self { context })
+        }
+        #[cfg(not(feature = "tracy"))]
+        {
+            let _ = (name, timestamp, period);
+            None
+        }
+    }
+
+    /// A zone named `label` begins at the timestamp the GPU writes into `query`, which must be no
+    /// other zone's that hasn't had its times yet.
+    pub fn begin(&self, label: Label, query: u16) {
+        #[cfg(feature = "tracy")]
+        self.context.begin_span(label.location, query);
+        #[cfg(not(feature = "tracy"))]
+        let _ = (label, query);
+    }
+
+    /// The zone begun last ends at the timestamp the GPU writes into `query`.
+    pub fn end(&self, query: u16) {
+        #[cfg(feature = "tracy")]
+        self.context.end_span(query);
+        #[cfg(not(feature = "tracy"))]
+        let _ = query;
+    }
+
+    /// The GPU wrote `timestamp` into `query`: given in the order the GPU wrote them.
+    pub fn time(&self, query: u16, timestamp: i64) {
+        #[cfg(feature = "tracy")]
+        self.context.upload_gpu_timestamp(query, timestamp);
+        #[cfg(not(feature = "tracy"))]
+        let _ = (query, timestamp);
+    }
 }

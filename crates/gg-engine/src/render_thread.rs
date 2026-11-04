@@ -180,6 +180,8 @@ pub(crate) struct Rendered {
     /// Of the rest, copying the view it read back into the memory of the client it's published to.
     pub(crate) publish: Duration,
     pub(crate) drawn: DrawCounts,
+    /// The time on the GPU of the frame two before, as [`Renderer::gpu_time`] says.
+    pub(crate) gpu: Option<Duration>,
 }
 
 /// What renders frames on the render thread: the renderer, or a test's stand-in for it.
@@ -255,6 +257,7 @@ impl Render for Renderer {
             wait: self.waited() + waited,
             publish,
             drawn,
+            gpu: self.gpu_time(),
         }
     }
 
@@ -571,6 +574,7 @@ mod tests {
                     instances: self.setting,
                     triangles: 0,
                 },
+                gpu: None,
             }
         }
     }
