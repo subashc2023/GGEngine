@@ -71,6 +71,8 @@ run headless for as many frames; headless frames draw each tick as it ends, with
 A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
 <tick>`, run where it goes another way and where it doesn't, prints each world's content there a
 field a line, and the two diff to the field where they part, or match where the layout alone parts.
+Lockstep peers whose worlds part log `net.desync`, and the joiner `net.desync_field`, which names
+the entity and field where they part, at the tick they did, with both values.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,

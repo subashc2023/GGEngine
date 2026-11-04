@@ -2,7 +2,9 @@
 //! host, player 0, that listens, and a joiner, player 1, that connects and starts from the host's
 //! world, and runs its host's scripts, which come with it; each tick's inputs, every layer's
 //! commands and the edits that apply before it, a script's reload among them, sent [`DELAY`] ticks
-//! ahead and run once both peers' are in; the world's hash after each tick, compared; and, in
+//! ahead and run once both peers' are in; the world's hash after each tick, compared, each peer
+//! keeping a copy of its world after the tick until it is, so that where the hashes part, the host
+//! sends its joiner its world there, and the joiner names the field where its own differs; and, in
 //! development builds, the patches of the game's code, which the host has apply at a tick of its
 //! choosing.
 //!
@@ -10,7 +12,7 @@
 //! main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 3\tShards\t0.1.0 debug dev\tShards Inspector
+//! hello\tgg-lockstep 4\tShards\t0.1.0 debug dev\tShards Inspector
 //!                                                    the joiner, as it connects
 //! refused <why>                                      the host, refusing it, before it closes
 //! world 1234 2                                       the host's world, at tick 1234, its code
@@ -24,6 +26,10 @@
 //! s 1238 List([String("scenes/arena.ron"), ...])     a scene file's save before tick 1238
 //! t 1238                                             the inputs for tick 1238 are whole
 //! h 1234 58183b6352a09a44 fb695ce29daa8479           the world's hash after tick 1234
+//! parted 1234                                        the host's world after tick 1234, where
+//! stream 3f8a6c2e9b1d4057                              the peers' hashes parted, its lines as a
+//! ...                                                  snapshot file's world's, to its `end`
+//! end
 //! p 3 1240                                           the host's third patch, before tick 1240
 //! n List([String("5f3c9a1e07b2d846"), String(...)])  the name the host gave a texture it added,
 //!                                                      and the path it names
@@ -66,7 +72,7 @@ pub(crate) const DELAY: u64 = 4;
 
 /// The hello's first part: the protocol and its version, which a change to its lines takes to the
 /// next.
-const PROTOCOL: &str = "gg-lockstep 3";
+const PROTOCOL: &str = "gg-lockstep 4";
 
 /// The most bytes a line may have, its line break aside, past which the peer reading it drops the
 /// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
@@ -253,6 +259,14 @@ pub(crate) struct Lockstep {
     done: Vec<(Ticket, u64, Result<Done>)>,
     /// The world's hash after each tick, this peer's and the other's, until they're compared.
     hashes: [BTreeMap<u64, WorldHash>; 2],
+    /// A copy of this peer's world after each tick whose hashes haven't been compared, by tick,
+    /// so that a desync names where the worlds parted: the joiner's after the tick they parted at
+    /// kept until its host's comes. And copies kept from before, which they're taken into again.
+    worlds: BTreeMap<u64, World>,
+    spares: Vec<World>,
+    /// The joiner's: its host's world after the tick their hashes parted at, as it comes, the tick
+    /// and its lines so far.
+    parting: Option<(u64, String)>,
     #[cfg(feature = "dev")]
     patches: Patches,
     /// The host's: how many textures, models and fonts there were as it last told its joiner their
@@ -344,6 +358,9 @@ impl Lockstep {
             tickets: 0,
             done: Vec::new(),
             hashes: Default::default(),
+            worlds: BTreeMap::new(),
+            spares: Vec::new(),
+            parting: None,
             #[cfg(feature = "dev")]
             patches: Patches::default(),
             #[cfg(feature = "dev")]
@@ -465,7 +482,11 @@ impl Lockstep {
     /// Takes `line`, from the other peer; returns the host's world, the tick it's at and its text,
     /// once its last line has come, after which the joiner takes the host's inputs.
     fn read(&mut self, line: &str) -> Option<(u64, String)> {
-        if let Some((_, text)) = &mut self.coming {
+        let gathering = match (&mut self.coming, &mut self.parting) {
+            (Some((_, text)), _) | (None, Some((_, text))) => Some(text),
+            (None, None) => None,
+        };
+        if let Some(text) = gathering {
             if text.len() + line.len() >= MAX_WORLD {
                 self.lose(&format!("the host's world is more than {MAX_WORLD} bytes"));
                 return None;
@@ -475,9 +496,13 @@ impl Lockstep {
             if line != "end" {
                 return None;
             }
-            let (tick, text) = self.coming.take()?;
-            self.came(tick);
-            return Some((tick, text));
+            if let Some((tick, text)) = self.coming.take() {
+                self.came(tick);
+                return Some((tick, text));
+            }
+            let (tick, text) = self.parting.take()?;
+            self.name_parting(tick, &text);
+            return None;
         }
         // The hello's parts are split by tabs, the rest's by spaces.
         let (kind, rest) = line.split_once([' ', '\t']).unwrap_or((line, ""));
@@ -523,6 +548,11 @@ impl Lockstep {
                     info!(tick = rest, "The joiner joined the lockstep session");
                 }
             }
+            // Gathered whatever the joiner's world, so that its lines aren't read as others.
+            "parted" if !self.hosts() => match rest.parse::<u64>() {
+                Ok(tick) => self.parting = Some((tick, String::new())),
+                Err(_) => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+            },
             // Sent against a world the joiner no longer has, as the host's comes.
             _ if !joined => {}
             "c" | "e" | "s" => {
@@ -648,6 +678,7 @@ impl Lockstep {
         }
         self.theirs.clear();
         self.hashes = Default::default();
+        self.release();
         self.parted = false;
         self.from = Some(next + DELAY);
         if let Some(link) = &mut self.link {
@@ -680,6 +711,7 @@ impl Lockstep {
         }
         self.theirs.clear();
         self.hashes = Default::default();
+        self.release();
         self.parted = false;
         self.from = Some(tick);
         if let Some(link) = &mut self.link {
@@ -890,11 +922,17 @@ impl Lockstep {
         merged
     }
 
-    /// Once tick `tick` has run, leaving `world`: sends its hash, if there's another peer, and
-    /// compares it with theirs.
+    /// Once tick `tick` has run, leaving `world`: sends its hash, if there's another peer, keeping
+    /// a copy of the world until the hash is compared with theirs, unless the peers have parted,
+    /// and compares it.
     pub(crate) fn end_tick(&mut self, tick: u64, world: &World) {
         if self.from.is_none() {
             return;
+        }
+        if !self.parted {
+            let mut kept = self.spares.pop().unwrap_or_default();
+            kept.clone_from(world);
+            self.worlds.insert(tick, kept);
         }
         let hash = world.hash();
         self.send(&format!("h {tick} {hash}\n"));
@@ -902,14 +940,17 @@ impl Lockstep {
         self.compare();
     }
 
-    /// Compares the hashes both peers have after the same tick, dropping them, unless the peers
-    /// have parted; a pair that differs logs `net.desync`, and has the host send its world again.
+    /// Compares the hashes both peers have after the same tick, dropping them and the worlds kept
+    /// with this peer's, unless the peers have parted; a pair that differs logs `net.desync`, and
+    /// has the host send its joiner its world after that tick, which the joiner keeps its own after
+    /// until it comes, then its world again.
     fn compare(&mut self) {
         if self.parted {
             self.hashes = Default::default();
             return;
         }
         let hosts = self.hosts();
+        let mut parted = None;
         let [ours, theirs] = &mut self.hashes;
         while let (Some((&a, _)), Some((&b, _))) =
             (ours.first_key_value(), theirs.first_key_value())
@@ -936,9 +977,77 @@ impl Lockstep {
                 self.parted = true;
                 ours.clear();
                 theirs.clear();
+                parted = Some(a);
                 break;
             }
         }
+        // The worlds kept with the hashes dropped, but the one after the tick the peers parted at.
+        let first = self.hashes[0].first_key_value().map(|(&tick, _)| tick);
+        let mut kept = None;
+        while let Some(world) = self.worlds.first_entry()
+            && first.is_none_or(|first| *world.key() < first)
+        {
+            let (tick, world) = world.remove_entry();
+            if parted == Some(tick) {
+                kept = Some(world);
+            } else {
+                self.spares.push(world);
+            }
+        }
+        if let (Some(tick), Some(world)) = (parted, kept) {
+            if hosts {
+                // Dropped after, as sending it may lose the joiner, its spares with it.
+                self.send_parted(tick, &world);
+            } else {
+                self.worlds.insert(tick, world);
+            }
+        }
+    }
+
+    /// The host, as its hashes part from its joiner's after tick `tick`: sends the joiner `world`,
+    /// its own after that tick, which the joiner names where they part by.
+    fn send_parted(&mut self, tick: u64, world: &World) {
+        let mut text = format!("parted {tick}\n");
+        match world.save_whole(&mut text) {
+            Ok(()) => {
+                text.push_str("end\n");
+                self.send(&text);
+            }
+            Err(error) => warn!(
+                code = error.code(),
+                "Can't send the joiner the world where theirs parted from it: {error:#}"
+            ),
+        }
+    }
+
+    /// The joiner, as its host's world after tick `tick`, where their hashes parted, has come whole
+    /// as `text`: logs the first entity, component and field where its own world after that tick
+    /// differs, as [`World::difference`] finds it (`net.desync_field`).
+    fn name_parting(&mut self, tick: u64, text: &str) {
+        // None after a tick the joiner hasn't kept a world after, as one it didn't part at.
+        let Some(ours) = self.worlds.remove(&tick) else {
+            return;
+        };
+        // Into a copy of its own, of the same types and assets. What's opaque comes back as the
+        // host's world names it, which a world never drawn and compared as the same takes.
+        let mut theirs = ours.clone();
+        // Numbered as lines of the message, after its `parted`.
+        let lines = (2..).zip(text.lines().take_while(|line| *line != "end"));
+        match theirs.load_whole(lines, true) {
+            Ok(_) => log_parting(tick, &ours, &theirs),
+            Err(error) => warn!(
+                code = error.code(),
+                tick,
+                "Can't read the host's world after tick {tick}, where the peers parted: {error:#}"
+            ),
+        }
+        self.spares.push(ours);
+    }
+
+    /// Puts the worlds kept among the spares, as the hashes they were kept for are dropped.
+    fn release(&mut self) {
+        let kept = mem::take(&mut self.worlds).into_values();
+        self.spares.extend(kept);
     }
 
     /// Sends `text` to the other peer, losing it if that fails.
@@ -961,10 +1070,14 @@ impl Lockstep {
     fn drop_link(&mut self) {
         self.link = None;
         self.coming = None;
+        self.parting = None;
         self.owed = false;
         self.parted = false;
         self.theirs.clear();
         self.hashes = Default::default();
+        // Their memory too, as a host may play on alone.
+        self.worlds.clear();
+        self.spares.clear();
         if self.hosts() {
             self.from = None;
         }
@@ -1108,6 +1221,61 @@ fn write_inputs(out: &mut String, tick: u64, inputs: &Inputs) {
         writeln!(out, "s {tick} {scene}").expect(written);
     }
     writeln!(out, "t {tick}").expect(written);
+}
+
+/// Logs where `ours`, the joiner's world after tick `tick`, first differs from `theirs`, its host's
+/// (`net.desync_field`): the entity, and the component's field, with each world's value there,
+/// as recordings write values, or `none` where a world hasn't the component; `alive` or `none`
+/// for an entity one world alone has, its field empty.
+fn log_parting(tick: u64, ours: &World, theirs: &World) {
+    let Some(difference) = ours.difference(theirs) else {
+        error!(
+            code = "net.desync_field",
+            tick,
+            "After tick {tick} the peers' worlds hold the same content, so their layouts part, \
+             where they hold their entities or their streams of IDs"
+        );
+        return;
+    };
+    let entity = difference.entity;
+    let written = |value: &Option<Value>, world: &World| {
+        let mut text = String::new();
+        match value {
+            Some(value) => text::write_folded(&mut text, value, world),
+            None => text.push_str("none"),
+        }
+        text
+    };
+    let (field, at, joiner, host) = match &difference.component {
+        Some(component) => {
+            let field = crate::reflect::join(component, &difference.path);
+            let at = format!("{entity}'s `{field}`");
+            let joiner = written(&difference.ours, ours);
+            (field, at, joiner, written(&difference.theirs, theirs))
+        }
+        None => {
+            let alive = |world: &World| {
+                let alive = world.entity(entity).is_some();
+                if alive { "alive" } else { "none" }.to_owned()
+            };
+            (
+                String::new(),
+                entity.to_string(),
+                alive(ours),
+                alive(theirs),
+            )
+        }
+    };
+    error!(
+        code = "net.desync_field",
+        tick,
+        entity = %entity,
+        field = field.as_str(),
+        joiner = joiner.as_str(),
+        host = host.as_str(),
+        "After tick {tick} the peers' worlds first differ at {at}: the joiner's {joiner}, the \
+         host's {host}"
+    );
 }
 
 #[cfg(test)]
@@ -1330,14 +1498,52 @@ mod tests {
         }
     }
 
+    /// Sends the fields of each event logged with `net.desync_field`, by name, as text.
+    struct Partings(mpsc::Sender<BTreeMap<String, String>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Partings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.insert(field.name().to_owned(), value.to_owned());
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            if fields
+                .0
+                .get("code")
+                .is_some_and(|code| code == "net.desync_field")
+            {
+                let _ = self.0.send(fields.0);
+            }
+        }
+    }
+
     /// A joiner starts from the host's world, joining within [`DELAY`] ticks of the host's start,
     /// before which the host has sent no inputs; from then each tick runs on both players' commands
     /// on both peers, which hash alike. Worlds that go apart, as commands go both ways, are named
-    /// at their tick once by each peer, and made the same again once.
+    /// at their tick once by each peer, the joiner naming the field where they parted, there, with
+    /// both values, and made the same again once.
     #[test]
     fn two_peers_run_each_tick_on_both_players_inputs() {
         let (codes, logged) = mpsc::channel();
-        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let (partings, parted) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry()
+            .with(Codes(codes))
+            .with(Partings(partings));
         let _logging = tracing::subscriber::set_default(subscriber);
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
@@ -1350,10 +1556,28 @@ mod tests {
         let [ours, theirs] = host.score();
         assert!(ours > 0 && theirs > 0, "{ours} {theirs}");
 
-        // The host's world changed behind the session's back, the players playing on.
+        // The host's world changed behind the session's back, between ticks, the players playing
+        // on: the first tick after parts the worlds by the change to player 1's points.
         play(&mut host, &mut joiner, 10);
+        let (edited, points) = (host.next, host.score()[1]);
         let edit = host.set("cheat", 1, 5);
         host.cx.apply_edit(edit).expect("applied");
+        // The host runs ahead as far as its joiner's inputs reach, and the joiner then past it as
+        // far as the host's do, so that the joiner runs ticks after the one their worlds parted at
+        // before the host's world after it comes, as over a link slower than the loopback.
+        for _ in 0..DELAY * 2 {
+            host.stack_commands(Command::Add {
+                player: 0,
+                points: 1,
+            });
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..DELAY * 4 {
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(joiner.next > edited + 1, "{} {edited}", joiner.next);
         play(&mut host, &mut joiner, 100);
         let start = Instant::now();
         loop {
@@ -1370,6 +1594,25 @@ mod tests {
         assert_eq!(host.score(), joiner.score());
         let desyncs = logged.try_iter().filter(|code| code == "net.desync");
         assert_eq!(desyncs.count(), 2);
+        let partings: Vec<BTreeMap<String, String>> = parted.try_iter().collect();
+        let [parting] = &partings[..] else {
+            panic!("the joiner alone names it, once: {partings:?}");
+        };
+        let world = host.cx.world();
+        let score = world.query::<(crate::Entity, &Score)>().next();
+        let score = world.id(score.expect("a score").0).expect("an ID");
+        assert_eq!(parting["tick"], edited.to_string(), "{parting:?}");
+        assert_eq!(parting["entity"], score.to_string(), "{parting:?}");
+        assert_eq!(parting["field"], "Score.points[1]", "{parting:?}");
+        let value = |peer: &str| {
+            let value = parting[peer].strip_prefix("UInt(");
+            let value = value.and_then(|value| value.strip_suffix(')'));
+            value.and_then(|value| value.parse::<i64>().ok())
+        };
+        let (Some(joiner), Some(host)) = (value("joiner"), value("host")) else {
+            panic!("two points: {parting:?}");
+        };
+        assert_eq!(joiner - host, i64::from(points) - 5, "{parting:?}");
     }
 
     /// A joiner its host refuses, as of another app, closes its connection and tries again only

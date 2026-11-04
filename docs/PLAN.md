@@ -97,13 +97,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Cooked textures and meshes** (2026-11-03)
 - **Streaming** (2026-11-03)
 - **Shipping** (2026-11-03)
+- **Desyncs named to their field** (2026-11-03)
 
 ## Now
 
-**Closing Phase 10**: [ship.yml](../.github/workflows/ship.yml) run on Windows, Linux and macOS,
-which is billed and waits for the user to start it; and the demo's .app checked on an Apple Silicon
-Mac by hand, with the rest that Deferred lists for when one is at hand. Then Phase 11, whose
-milestones are planned as it starts.
+**Ticks run again, and a SyncTest**: Phase 11's second milestone, as Next has it. Phase 10 closes
+once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is checked on an
+Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
 
 ## Next
 
@@ -129,7 +129,19 @@ Each phase ends in something you can run and check.
     with a SyncTest; a server that owns the world, replicating it to clients that predict; and a
     desync debugger that names the entity and field where peers part. *Done when* the demo plays
     over a link with 100 ms of latency and loss, under rollback and under a server, without a
-    desync, and a desync forced in a test is named to its field.
+    desync, and a desync forced in a test is named to its field. Its milestones, in order: desyncs
+    named to their field, each peer keeping a copy of its world until the other's hash of that tick
+    has come, so that the joiner, given its host's world where their hashes part, names the entity
+    and field there; ticks run again, the world restored from a snapshot inside a tick and the
+    commands after it run again, layers told of the restore and the sounds those ticks queued not
+    played twice, with a SyncTest mode, which runs each tick again and compares its hash, that CI
+    runs on the demo and the sandbox; rollback, each peer predicting the other's inputs from its
+    last, rolling back to where a prediction missed and running the ticks after again, with an
+    input delay of a tick or two, inputs over UDP, each packet repeating those not yet acknowledged,
+    and a link conditioner that adds latency, jitter and loss; and a server that owns the world,
+    headless in real time and ending cleanly on Ctrl+C, sending its clients snapshots, then deltas,
+    each client predicting its own player and correcting toward the server, the others
+    interpolated.
 12. **Render graph and PBR.** Passes declare the resources they read and write; the graph
     places barriers and layout transitions, aliases transient memory and schedules async
     compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
@@ -461,7 +473,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them; and `gg new` for such a game, which makes games in the workspace's `games/` alone: its own workspace, the engine a pinned dependency, copies of clippy.toml and the toolchain's pin, and gg and dx installed | The first game outside the workspace |
 | The editor's hub making a project outside the engine's workspace, or from another template than `gg new`'s: its New Project runs `cargo gg new` in the workspace, and is off outside one; its Open opens a project anywhere | The first game outside the workspace, or a second kind of game to start from |
-| Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
+| Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, a replay names the part of the hash, and a lockstep joiner says the layouts alone part (`net.desync_field`) | A replay's or a desync's layout goes another way first |
 | Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
 | Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color and the tool API's look, which start as a fresh run's do, the editor in a project setting its parts of the look again as the restarted run serves; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and a run comes back stopped, or playing a copy with the world as edited held, as it was | Someone misses where they were looking after a restart |
 | What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |

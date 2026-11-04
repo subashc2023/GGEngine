@@ -931,9 +931,13 @@ them, since each peer runs both players' world.
   either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
   frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's
   player still.
-- **Desyncs name their tick.** Each peer sends the world's hash after each of its ticks; a hash
-  that isn't the other's logs `net.desync` with the tick, and the host sends its world again, as to
-  a joiner, so that the peers carry on in sync.
+- **Desyncs name their field.** Each peer sends the world's hash after each of its ticks, and keeps
+  a copy of its world after the tick until the other's hash of it has come; a hash that isn't the
+  other's logs `net.desync` with the tick, the host sends its joiner its world after that tick, and
+  the joiner logs the first entity, component and field where its own differs there, with both
+  values (`net.desync_field`), as `World::difference` finds it: at the tick the worlds went apart,
+  before what went apart has spread. Then the host sends its world again, as to a joiner, so that
+  the peers carry on in sync.
 
 Messages are lines of text over TCP, without Nagle's delay, which keeps them in order and whole;
 [net.rs](crates/gg-engine/src/net.rs) has their format and the rest. `gg run --peers 2` runs a host
