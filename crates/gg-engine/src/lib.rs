@@ -11,8 +11,9 @@
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
 //! frame, for the log and the Performance panel; the grid a tool's view shows in an axis plane;
-//! loading what layers add, images as textures, glTF models, whose nodes spawn as entities, and
-//! fonts, baked into fields that draw text crisp at any size, which it shapes and lays out; sounds,
+//! loading what layers add, images as textures, glTF models, whose nodes spawn as entities, their
+//! metallic-roughness materials lit by the world's lights, and fonts, baked into fields that draw
+//! text crisp at any size, which it shapes and lays out; sounds,
 //! which ticks queue and layers play, through kira, panned and faded by where they show in the view,
 //! and music, decoded as it plays, looping, which layers play one at a time, under volume buses;
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
@@ -81,6 +82,7 @@ mod inspector;
 mod interpolation;
 mod jobs;
 mod layer;
+mod light;
 mod loader;
 mod luau;
 mod main_loop;
@@ -197,6 +199,7 @@ pub use inspector::{Inspector, InspectorLink, Placed};
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Loading, Pick, Tick, Window};
+pub use light::{Light, LightKind};
 pub use luau::{Mods, Scripts};
 use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};

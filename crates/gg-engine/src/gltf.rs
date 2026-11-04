@@ -11,13 +11,14 @@ use std::mem;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+use bevy_mikktspace::{Geometry, Ops, TangentSpace};
+use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Lod, Wrap};
+use gg_renderer::{AlphaMode, Lod, Map, Wrap};
 
-use crate::Transform;
 use crate::image::{self, Image};
 use crate::package::Files;
+use crate::{Light, LightKind, Transform};
 
 /// What `read` gives: the default scene's parts, the primitives they draw and the images those
 /// sample. The cooker reads it through [`cook`](crate::cook), and cooks its primitives and images.
@@ -66,6 +67,8 @@ pub(crate) struct Part {
     pub(crate) parent: Option<usize>,
     /// The index in `primitives` of what it draws, if it draws anything.
     pub(crate) primitive: Option<usize>,
+    /// The light its node holds, as KHR_lights_punctual gives it, if it has one.
+    pub(crate) light: Option<Light>,
 }
 
 /// Triangles, with what their vertices and their material give them.
@@ -78,6 +81,14 @@ pub struct Primitive {
     pub uvs: Vec<[f32; 2]>,
     /// As many as the positions, linear RGBA: white without COLOR_0, alpha 1 for a VEC3.
     pub colors: Vec<[f32; 4]>,
+    /// As many as the positions, unit vectors: its NORMALs, or, without them, each triangle's own,
+    /// its corners apart from its neighbors', as glTF says to draw such a primitive flat; and +Z,
+    /// which nothing reads, for an unlit material's without them.
+    pub normals: Vec<[f32; 3]>,
+    /// As many as the positions: its TANGENTs, W the bitangent's sign, or, without them, those
+    /// MikkTSpace makes for a lit material with a normal map, as glTF says, its vertices apart where
+    /// their corners' tangents differ; and (1, 0, 0, 1), which nothing reads, for the rest.
+    pub tangents: Vec<[f32; 4]>,
     /// Three for each triangle; 0..count where the primitive has none.
     pub indices: Vec<u32>,
     /// Its levels of detail among its indices, finest first, as the cooker makes them, the first
@@ -92,38 +103,246 @@ impl Primitive {
     pub fn blends(&self) -> bool {
         matches!(self.material.alpha, AlphaMode::Blend)
     }
+
+    /// Gives each triangle corners of its own, facing as the triangle does, counterclockwise its
+    /// front: as glTF draws a primitive without normals, flat. A triangle of no area faces +Z,
+    /// covering nothing that shows. Its tangents go, which it has none of before its normals.
+    fn make_flat(&mut self) {
+        fn corners<T: Copy>(indices: &[u32], values: &[T]) -> Vec<T> {
+            indices.iter().map(|&i| values[i as usize]).collect()
+        }
+        let (positions, uvs, colors) = (
+            corners(&self.indices, &self.positions),
+            corners(&self.indices, &self.uvs),
+            corners(&self.indices, &self.colors),
+        );
+        self.normals = positions
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[a, b, c]| {
+                let [a, b, c] = [a, b, c].map(Vec3::from_array);
+                let normal = (b - a).cross(c - a).normalize_or(Vec3::Z);
+                [normal.to_array(); 3]
+            })
+            .collect();
+        self.indices = (0..positions.len() as u32).collect();
+        (self.positions, self.uvs, self.colors) = (positions, uvs, colors);
+        self.tangents.clear();
+    }
+
+    /// Gives it the tangents MikkTSpace makes from its positions, normals and texture coordinates,
+    /// as glTF says to for a normal map's primitive without them: a tangent for each triangle's
+    /// corner, which its vertices then take, each vertex apart for each tangent of its corners,
+    /// in the order its corners first reach them. A corner MikkTSpace gives none, of a triangle of
+    /// no area alone, takes +X.
+    fn make_tangents(&mut self) {
+        let mut corners = Corners {
+            primitive: self,
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; self.indices.len()],
+        };
+        // Its error has no values: it never fails.
+        let _ = bevy_mikktspace::generate_tangents::<_, Libm>(&mut corners);
+        let Corners { tangents, .. } = corners;
+        let mut placed: BTreeMap<(u32, [u32; 4]), u32> = BTreeMap::new();
+        let mut welded = self.clone_empty();
+        welded.indices.reserve(self.indices.len());
+        for (&vertex, tangent) in self.indices.iter().zip(tangents) {
+            let key = (vertex, tangent.map(f32::to_bits));
+            let next = welded.positions.len() as u32;
+            let at = *placed.entry(key).or_insert(next);
+            if at == next {
+                let v = vertex as usize;
+                welded.positions.push(self.positions[v]);
+                welded.uvs.push(self.uvs[v]);
+                welded.colors.push(self.colors[v]);
+                welded.normals.push(self.normals[v]);
+                welded.tangents.push(tangent);
+            }
+            welded.indices.push(at);
+        }
+        *self = welded;
+    }
+
+    /// Its name, levels and material, with no vertices or indices.
+    fn clone_empty(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            positions: Vec::new(),
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            normals: Vec::new(),
+            tangents: Vec::new(),
+            indices: Vec::new(),
+            lods: self.lods.clone(),
+            material: self.material,
+        }
+    }
 }
 
-/// How a primitive looks: its base color, which the material's factor and texture and the
-/// primitive's vertex colors multiply together, and how its alpha covers what's behind it.
+/// A primitive's triangles as MikkTSpace reads them, a face each, and the tangent it gives each
+/// corner.
+struct Corners<'a> {
+    primitive: &'a Primitive,
+    tangents: Vec<[f32; 4]>,
+}
+
+impl Corners<'_> {
+    fn vertex(&self, face: usize, corner: usize) -> usize {
+        self.primitive.indices[face * 3 + corner] as usize
+    }
+}
+
+impl Geometry<Libm> for Corners<'_> {
+    fn num_faces(&self) -> usize {
+        self.primitive.indices.len() / 3
+    }
+
+    fn num_vertices_of_face(&self, _face: usize) -> usize {
+        3
+    }
+
+    fn position(&self, face: usize, corner: usize) -> [f32; 3] {
+        self.primitive.positions[self.vertex(face, corner)]
+    }
+
+    fn normal(&self, face: usize, corner: usize) -> [f32; 3] {
+        self.primitive.normals[self.vertex(face, corner)]
+    }
+
+    fn tex_coord(&self, face: usize, corner: usize) -> [f32; 2] {
+        self.primitive.uvs[self.vertex(face, corner)]
+    }
+
+    fn set_tangent(&mut self, tangent: Option<TangentSpace>, face: usize, corner: usize) {
+        if let Some(tangent) = tangent {
+            self.tangents[face * 3 + corner] = tangent.tangent_encoded();
+        }
+    }
+}
+
+/// MikkTSpace's square roots and arccosines, libm's, as the engine's are, so that a model's
+/// tangents are the same on every platform, from its files or cooked.
+struct Libm;
+
+impl Ops for Libm {
+    fn sqrt(x: f32) -> f32 {
+        libm::sqrtf(x)
+    }
+
+    fn acos(x: f32) -> f32 {
+        libm::acosf(x)
+    }
+}
+
+/// How a primitive looks, as glTF's metallic-roughness materials say: its base color, which the
+/// material's factor and texture and the primitive's vertex colors multiply together; how
+/// metallic and rough it is, its normal map, occlusion and emission; whether it's unlit, as
+/// KHR_materials_unlit has it; and how its alpha covers what's behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Material {
     /// The base color factor, linear RGBA.
     pub(crate) color: [f32; 4],
-    /// The index in `images` of the base color texture's image, whose colors are sRGB-encoded.
-    pub(crate) image: Option<usize>,
-    /// Whether the texture magnifies to the nearest texel, rather than blending the nearest four.
-    pub(crate) nearest: bool,
-    /// How the texture wraps, the same across and down.
-    pub(crate) wrap: Wrap,
+    pub(crate) metallic: f32,
+    pub(crate) roughness: f32,
+    /// The normal map's scale of its X and Y.
+    pub(crate) normal_scale: f32,
+    /// How much the occlusion map darkens, from 0 to 1.
+    pub(crate) occlusion_strength: f32,
+    /// The emissive factor, linear RGB, times KHR_materials_emissive_strength's strength.
+    pub(crate) emissive: [f32; 3],
+    /// Its textures, each at its [`Slot`]'s place, which it samples, if it has one.
+    pub(crate) textures: [Option<Sampling>; 5],
     pub(crate) alpha: AlphaMode,
     /// Whether the back of each triangle shows, as well as its front, where its vertices go
     /// counterclockwise.
     pub(crate) double_sided: bool,
+    pub(crate) unlit: bool,
 }
 
 impl Default for Material {
-    /// glTF's default material, for a primitive without one: white, untextured, opaque and
-    /// single-sided.
+    /// glTF's default material, for a primitive without one: white, metallic and rough,
+    /// untextured, opaque and single-sided.
     fn default() -> Self {
         Self {
             color: [1.0; 4],
-            image: None,
-            nearest: false,
-            wrap: Wrap::Repeat,
+            metallic: 1.0,
+            roughness: 1.0,
+            normal_scale: 1.0,
+            occlusion_strength: 1.0,
+            emissive: [0.0; 3],
+            textures: [None; 5],
             alpha: AlphaMode::Opaque,
             double_sided: false,
+            unlit: false,
         }
+    }
+}
+
+impl Material {
+    /// Its texture of `slot`, if it has one.
+    pub(crate) fn texture(&self, slot: Slot) -> Option<Sampling> {
+        self.textures[slot as usize]
+    }
+}
+
+/// A material's texture: the index in `images` of its image, and how it samples it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Sampling {
+    pub(crate) image: usize,
+    /// Whether it magnifies to the nearest texel, rather than blending the nearest four.
+    pub(crate) nearest: bool,
+    /// How it wraps, the same across and down.
+    pub(crate) wrap: Wrap,
+}
+
+/// Each of a material's textures, in the order its `textures` hold them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    Color,
+    /// Metallic-roughness.
+    Surface,
+    Normal,
+    Occlusion,
+    Emissive,
+}
+
+impl Slot {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Color,
+        Self::Surface,
+        Self::Normal,
+        Self::Occlusion,
+        Self::Emissive,
+    ];
+
+    /// What its texture's image holds: colors, `None`, sRGB-encoded, or a map of data.
+    pub(crate) fn map(self) -> Option<Map> {
+        match self {
+            Self::Color | Self::Emissive => None,
+            Self::Surface | Self::Occlusion => Some(Map::Surface),
+            Self::Normal => Some(Map::Normal),
+        }
+    }
+
+    /// Its name in glTF's JSON.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Color => "baseColorTexture",
+            Self::Surface => "metallicRoughnessTexture",
+            Self::Normal => "normalTexture",
+            Self::Occlusion => "occlusionTexture",
+            Self::Emissive => "emissiveTexture",
+        }
+    }
+}
+
+/// What an image holds, as a texture samples it, in a phrase.
+pub(crate) fn holds(map: Option<Map>) -> &'static str {
+    match map {
+        None => "colors",
+        Some(Map::Surface) => "values",
+        Some(Map::Normal) => "a normal map",
     }
 }
 
@@ -182,8 +401,8 @@ pub(crate) fn read(
     check_version(model, &versioned.asset)?;
     let gltf: json::Gltf = serde_json::from_slice(json).map_err(not_gltf)?;
 
-    const UNLIT: &str = "KHR_materials_unlit";
-    if let Some(extension) = gltf.extensions_required.iter().find(|&e| e != UNLIT) {
+    let read = |extension: &&String| READ_EXTENSIONS.contains(&extension.as_str());
+    if let Some(extension) = gltf.extensions_required.iter().find(|e| !read(e)) {
         return Err(model.unsupported(format!(
             "requires extension {extension}, which the engine doesn't read"
         )));
@@ -201,7 +420,7 @@ pub(crate) fn read(
     }
     ignored.extend(
         (gltf.extensions_used.iter())
-            .filter(|&e| e != UNLIT)
+            .filter(|e| !read(e))
             .map(|extension| format!("extension {extension}")),
     );
     let mut reader = Reader {
@@ -214,6 +433,7 @@ pub(crate) fn read(
         indices: BTreeMap::new(),
         meshes: BTreeMap::new(),
         images: BTreeMap::new(),
+        holds: BTreeMap::new(),
         imported: Imported {
             ignored,
             ..Imported::default()
@@ -224,6 +444,14 @@ pub(crate) fn read(
     reader.scene()?;
     Ok(reader.imported)
 }
+
+/// The extensions the engine reads: materials drawn unlit, nodes' lights, and materials' emission
+/// stronger than 1.
+const READ_EXTENSIONS: [&str; 3] = [
+    "KHR_materials_unlit",
+    "KHR_lights_punctual",
+    "KHR_materials_emissive_strength",
+];
 
 const GLB_MAGIC: u32 = u32::from_le_bytes(*b"glTF");
 const JSON_CHUNK: u32 = u32::from_le_bytes(*b"JSON");
@@ -388,6 +616,9 @@ struct Reader<'a, F> {
     meshes: BTreeMap<u32, Range<usize>>,
     /// Each image read, by its index: where it is in `imported.images`.
     images: BTreeMap<u32, usize>,
+    /// What each image in `imported.images` holds, as the first texture that samples it says:
+    /// colors, `None`, or a map of data.
+    holds: BTreeMap<usize, Option<Map>>,
     imported: Imported,
     /// The bytes held of what [`MAX_MEMORY`] counts, and the most that may be.
     held: u64,
@@ -449,11 +680,16 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 Some(mesh) => self.mesh(mesh)?,
                 None => 0..0,
             };
+            let light = match &node.extensions.lights_punctual {
+                Some(light) => Some(self.light(light.light)?),
+                None => None,
+            };
             let part = self.imported.parts.len();
             self.imported.parts.push(Part {
                 transform,
                 parent,
                 primitive: (primitives.len() == 1).then_some(primitives.start),
+                light,
             });
             if primitives.len() > 1 {
                 // An entity draws one primitive, so each of the mesh's is a child of the node's.
@@ -461,12 +697,61 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     transform: Transform::IDENTITY,
                     parent: Some(part),
                     primitive: Some(primitive),
+                    light: None,
                 }));
             }
             self.hold((self.imported.parts.len() - part) * size_of::<Part>())?;
             stack.extend(node.children.iter().rev().map(|&child| (child, Some(part))));
         }
         Ok(())
+    }
+
+    /// Light `index` of KHR_lights_punctual's, which a node holds, checked as the extension says:
+    /// of a type it has, not negative in intensity, of a range more than 0 if it has one, and a
+    /// spot's cone's angles from 0 to the outer, which is more than the inner and at most a quarter
+    /// turn. Its intensity and range are in its units, candela or lux, and meters, the engine's.
+    fn light(&self, index: u32) -> Result<Light> {
+        let (model, gltf) = (self.model, self.gltf);
+        let lights = gltf.extensions.lights_punctual.as_ref();
+        let light = model.item(lights.map_or(&[][..], |l| &l.lights), "light", index)?;
+        let kind = match light.kind.as_str() {
+            "directional" => LightKind::Directional,
+            "point" => LightKind::Point,
+            "spot" => LightKind::Spot,
+            other => {
+                return Err(model.bad(format!(
+                    "has light {index} of type {other:?}, which KHR_lights_punctual doesn't have"
+                )));
+            }
+        };
+        let intensity = light.intensity.unwrap_or(1.0);
+        let spot = light.spot.as_ref();
+        let inner = spot.and_then(|spot| spot.inner_cone_angle).unwrap_or(0.0);
+        let outer = spot
+            .and_then(|spot| spot.outer_cone_angle)
+            .unwrap_or(std::f32::consts::FRAC_PI_4);
+        let valid = intensity >= 0.0
+            && light.range.is_none_or(|range| range > 0.0)
+            && (0.0..outer).contains(&inner)
+            && outer <= std::f32::consts::FRAC_PI_2;
+        if !valid
+            || light
+                .color
+                .is_some_and(|color| color.iter().any(|&c| c < 0.0))
+        {
+            return Err(model.bad(format!(
+                "has light {index} of a negative color or intensity, a range of 0 or less, or a \
+                 cone's angles out of order or past a quarter turn"
+            )));
+        }
+        Ok(Light {
+            kind,
+            color: light.color.map_or(Vec3::ONE, Vec3::from_array),
+            intensity,
+            range: light.range,
+            inner_cone: inner,
+            outer_cone: outer,
+        })
     }
 
     /// Node `index`'s transform: its matrix decomposed, or its translation, rotation and scale.
@@ -638,25 +923,73 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
             None => vec![[1.0; 4]; vertices],
         };
+        let normals = match primitive.attributes.get("NORMAL") {
+            Some(&accessor) => {
+                let (_, normals) = self.attribute(&what, "NORMAL", accessor, &[3], false)?;
+                let normals = normals.as_chunks::<3>().0.to_vec();
+                same_count("NORMAL", normals.len())?;
+                Some(normals)
+            }
+            None => None,
+        };
+        let tangents = match primitive.attributes.get("TANGENT") {
+            Some(&accessor) => {
+                let (_, tangents) = self.attribute(&what, "TANGENT", accessor, &[4], false)?;
+                let tangents = tangents.as_chunks::<4>().0.to_vec();
+                same_count("TANGENT", tangents.len())?;
+                Some(tangents)
+            }
+            None => None,
+        };
         let name = match &mesh.name {
             Some(name) => format!("{name}/{index}"),
             None => format!("{mesh_index}/{index}"),
         };
-        // Its own, as primitives that share accessors or a mesh's name each have a copy.
-        let vertex = size_of::<[f32; 3]>() + size_of::<[f32; 2]>() + size_of::<[f32; 4]>();
-        self.hold(vertices * vertex + size_of_val(indices.as_slice()) + name.len())?;
-        Ok(Some(Primitive {
+        let mut read = Primitive {
             name,
             positions,
             uvs,
             colors,
+            normals: Vec::new(),
+            tangents: Vec::new(),
             indices,
             lods: Vec::new(),
             material,
-        }))
+        };
+        // Tangents without normals are ignored, as glTF says, as the primitive is drawn flat; but
+        // an unlit material reads neither, so its vertices stay as they are, welded.
+        let tangents = match normals {
+            Some(normals) => {
+                read.normals = normals;
+                tangents
+            }
+            None if material.unlit => {
+                read.normals = vec![[0.0, 0.0, 1.0]; read.positions.len()];
+                None
+            }
+            None => {
+                read.make_flat();
+                None
+            }
+        };
+        match tangents {
+            Some(tangents) => read.tangents = tangents,
+            None if !material.unlit && material.texture(Slot::Normal).is_some() => {
+                read.make_tangents();
+            }
+            None => read.tangents = vec![[1.0, 0.0, 0.0, 1.0]; read.positions.len()],
+        }
+        // Its own, as primitives that share accessors or a mesh's name each have a copy.
+        let vertex = size_of::<gg_renderer::ModelVertex>();
+        let indices = size_of_val(read.indices.as_slice());
+        self.hold(read.positions.len() * vertex + indices + read.name.len())?;
+        Ok(Some(read))
     }
 
-    /// Material `index`, and the TEXCOORD set its base color texture reads, if it has one.
+    /// Material `index`, and the TEXCOORD set its textures read, if it has any: that of the first
+    /// in [`Slot`]'s order, as a primitive's vertices have one set. A texture that reads another,
+    /// or whose image another texture samples as what it doesn't, as colors where it samples a
+    /// map, is left out, which `imported.ignored` says.
     fn material(&mut self, index: u32) -> Result<(Material, Option<u32>)> {
         let (model, gltf) = (self.model, self.gltf);
         let material = model.item(&gltf.materials, "material", index)?;
@@ -679,19 +1012,71 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
         };
         let pbr = &material.pbr_metallic_roughness;
+        let extensions = &material.extensions;
+        let strength = (extensions.emissive_strength.as_ref())
+            .and_then(|strength| strength.emissive_strength)
+            .unwrap_or(1.0);
+        let emissive = material.emissive_factor.unwrap_or([0.0; 3]);
         let mut read = Material {
             color: pbr.base_color_factor.unwrap_or([1.0; 4]),
+            metallic: pbr.metallic_factor.unwrap_or(1.0),
+            roughness: pbr.roughness_factor.unwrap_or(1.0),
+            normal_scale: (material.normal_texture.as_ref())
+                .and_then(|normal| normal.scale)
+                .unwrap_or(1.0),
+            occlusion_strength: (material.occlusion_texture.as_ref())
+                .and_then(|occlusion| occlusion.strength)
+                .unwrap_or(1.0),
+            emissive: emissive.map(|channel| channel * strength),
             alpha,
             double_sided: material.double_sided,
+            unlit: extensions.unlit.is_some(),
             ..Material::default()
         };
-        let Some(info) = &pbr.base_color_texture else {
-            return Ok((read, None));
-        };
-        let texture = model.item(&gltf.textures, "texture", info.index)?;
+        let infos = [
+            (Slot::Color, pbr.base_color_texture.as_ref()),
+            (Slot::Surface, pbr.metallic_roughness_texture.as_ref()),
+            (
+                Slot::Normal,
+                (material.normal_texture.as_ref()).map(|n| &n.info),
+            ),
+            (
+                Slot::Occlusion,
+                (material.occlusion_texture.as_ref()).map(|o| &o.info),
+            ),
+            (Slot::Emissive, material.emissive_texture.as_ref()),
+        ];
+        let mut set = None;
+        for (slot, info) in infos {
+            let Some(info) = info else {
+                continue;
+            };
+            let read_set = *set.get_or_insert(info.tex_coord);
+            if read_set != info.tex_coord {
+                self.imported.ignored.push(format!(
+                    "material {index}'s {}, which reads TEXCOORD_{} where its others read \
+                     TEXCOORD_{read_set}",
+                    slot.name(),
+                    info.tex_coord
+                ));
+                continue;
+            }
+            read.textures[slot as usize] = self.sampling(index, slot, info.index)?;
+        }
+        Ok((read, set))
+    }
+
+    /// Texture `texture`, which material `material` samples at `slot`: its image and how it
+    /// samples it; or `None` where another texture samples its image as what it doesn't, which
+    /// `imported.ignored` says.
+    fn sampling(&mut self, material: u32, slot: Slot, texture: u32) -> Result<Option<Sampling>> {
+        let (model, gltf) = (self.model, self.gltf);
+        let index = texture;
+        let texture = model.item(&gltf.textures, "texture", index)?;
+        let (mut wrap, mut nearest) = (Wrap::Repeat, false);
         if let Some(sampler_index) = texture.sampler {
             let sampler = model.item(&gltf.samplers, "sampler", sampler_index)?;
-            let wrap = |mode: Option<u32>| match mode.unwrap_or(REPEAT) {
+            let wrapping = |mode: Option<u32>| match mode.unwrap_or(REPEAT) {
                 CLAMP_TO_EDGE => Ok(Wrap::Clamp),
                 MIRRORED_REPEAT => Ok(Wrap::Mirror),
                 REPEAT => Ok(Wrap::Repeat),
@@ -699,24 +1084,39 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     "sampler {sampler_index} has wrap mode {mode}, which glTF doesn't have"
                 ))),
             };
-            let (across, down) = (wrap(sampler.wrap_s)?, wrap(sampler.wrap_t)?);
+            let (across, down) = (wrapping(sampler.wrap_s)?, wrapping(sampler.wrap_t)?);
             if across != down {
                 return Err(model.unsupported(format!(
                     "sampler {sampler_index} wraps S and T differently, which the engine doesn't \
                      draw"
                 )));
             }
-            read.wrap = across;
-            read.nearest = sampler.mag_filter == Some(NEAREST);
+            wrap = across;
+            nearest = sampler.mag_filter == Some(NEAREST);
         }
         let source = texture.source.ok_or_else(|| {
             model.unsupported(format!(
-                "texture {} has no source, the image the engine samples",
-                info.index
+                "texture {index} has no source, the image the engine samples"
             ))
         })?;
-        read.image = Some(self.image(source)?);
-        Ok((read, Some(info.tex_coord)))
+        let image = self.image(source)?;
+        let wanted = slot.map();
+        let held = *self.holds.entry(image).or_insert(wanted);
+        if held != wanted {
+            self.imported.ignored.push(format!(
+                "material {material}'s {}, which samples image {source} as {} where another \
+                 texture samples it as {}",
+                slot.name(),
+                holds(wanted),
+                holds(held)
+            ));
+            return Ok(None);
+        }
+        Ok(Some(Sampling {
+            image,
+            nearest,
+            wrap,
+        }))
     }
 
     /// Image `index`, read once, as far as its header, as [`image::read`] reads it, for the loader
@@ -1128,6 +1528,38 @@ mod json {
         pub(super) images: Vec<Image>,
         pub(super) animations: Vec<IgnoredAny>,
         pub(super) cameras: Vec<IgnoredAny>,
+        pub(super) extensions: Extensions,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub(super) struct Extensions {
+        #[serde(rename = "KHR_lights_punctual")]
+        pub(super) lights_punctual: Option<LightsPunctual>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct LightsPunctual {
+        pub(super) lights: Vec<Light>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct Light {
+        #[serde(rename = "type")]
+        pub(super) kind: String,
+        pub(super) color: Option<[f32; 3]>,
+        pub(super) intensity: Option<f32>,
+        pub(super) range: Option<f32>,
+        pub(super) spot: Option<Spot>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct Spot {
+        pub(super) inner_cone_angle: Option<f32>,
+        pub(super) outer_cone_angle: Option<f32>,
     }
 
     #[derive(Deserialize, Default)]
@@ -1149,6 +1581,20 @@ mod json {
         pub(super) rotation: Option<[f32; 4]>,
         pub(super) scale: Option<[f32; 3]>,
         pub(super) weights: Vec<f32>,
+        pub(super) extensions: NodeExtensions,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub(super) struct NodeExtensions {
+        #[serde(rename = "KHR_lights_punctual")]
+        pub(super) lights_punctual: Option<NodeLight>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct NodeLight {
+        pub(super) light: u32,
     }
 
     #[derive(Deserialize, Default)]
@@ -1213,9 +1659,29 @@ mod json {
     #[serde(rename_all = "camelCase", default)]
     pub(super) struct Material {
         pub(super) pbr_metallic_roughness: Pbr,
+        pub(super) normal_texture: Option<NormalTextureInfo>,
+        pub(super) occlusion_texture: Option<OcclusionTextureInfo>,
+        pub(super) emissive_texture: Option<TextureInfo>,
+        pub(super) emissive_factor: Option<[f32; 3]>,
         pub(super) alpha_mode: Option<String>,
         pub(super) alpha_cutoff: Option<f32>,
         pub(super) double_sided: bool,
+        pub(super) extensions: MaterialExtensions,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub(super) struct MaterialExtensions {
+        #[serde(rename = "KHR_materials_unlit")]
+        pub(super) unlit: Option<IgnoredAny>,
+        #[serde(rename = "KHR_materials_emissive_strength")]
+        pub(super) emissive_strength: Option<EmissiveStrength>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct EmissiveStrength {
+        pub(super) emissive_strength: Option<f32>,
     }
 
     #[derive(Deserialize, Default)]
@@ -1223,6 +1689,9 @@ mod json {
     pub(super) struct Pbr {
         pub(super) base_color_factor: Option<[f32; 4]>,
         pub(super) base_color_texture: Option<TextureInfo>,
+        pub(super) metallic_factor: Option<f32>,
+        pub(super) roughness_factor: Option<f32>,
+        pub(super) metallic_roughness_texture: Option<TextureInfo>,
     }
 
     #[derive(Deserialize, Default)]
@@ -1230,6 +1699,22 @@ mod json {
     pub(super) struct TextureInfo {
         pub(super) index: u32,
         pub(super) tex_coord: u32,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct NormalTextureInfo {
+        #[serde(flatten)]
+        pub(super) info: TextureInfo,
+        pub(super) scale: Option<f32>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct OcclusionTextureInfo {
+        #[serde(flatten)]
+        pub(super) info: TextureInfo,
+        pub(super) strength: Option<f32>,
     }
 
     #[derive(Deserialize, Default)]
@@ -1396,10 +1881,19 @@ pub(crate) mod tests {
             None,
         );
         let image = bin.view(&png(), None);
+        let normals = bin.view(&floats(&[0., 0., 1., 0., 0., 1., 0., 0., 1.]), None);
         let gltf = json!({
             "asset": {"version": "2.0", "generator": "a test"},
-            "extensionsUsed": ["KHR_materials_unlit", "KHR_texture_transform"],
+            "extensionsUsed": [
+                "KHR_materials_unlit",
+                "KHR_texture_transform",
+                "KHR_lights_punctual",
+                "KHR_materials_emissive_strength",
+            ],
             "extensionsRequired": ["KHR_materials_unlit"],
+            "extensions": {"KHR_lights_punctual": {"lights": [
+                {"type": "point", "color": [1, 0.5, 0.25], "intensity": 40, "range": 6},
+            ]}},
             "scene": 0,
             "scenes": [{"nodes": [0]}],
             "nodes": [
@@ -1412,12 +1906,20 @@ pub(crate) mod tests {
                 // A rotation of length 2, which is the identity once it's unit, and morph weights
                 // of 0, which replace its mesh's.
                 {"translation": [0, 5, 0], "rotation": [0, 0, 0, 2], "mesh": 1, "weights": [0]},
-                // The first mesh again.
-                {"translation": [7, 0, 0], "mesh": 0},
+                // The first mesh again, and a light.
+                {
+                    "translation": [7, 0, 0],
+                    "mesh": 0,
+                    "extensions": {"KHR_lights_punctual": {"light": 0}},
+                },
             ],
             "meshes": [
                 {"name": "pair", "primitives": [
-                    {"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0},
+                    {
+                        "attributes": {"POSITION": 0, "TEXCOORD_0": 1, "NORMAL": 7},
+                        "indices": 2,
+                        "material": 0,
+                    },
                     {
                         "attributes": {"POSITION": 0, "TEXCOORD_0": 1, "COLOR_0": 4},
                         "indices": 3,
@@ -1458,27 +1960,40 @@ pub(crate) mod tests {
                     "count": 3,
                     "type": "VEC4",
                 },
+                {"bufferView": normals, "componentType": 5126, "count": 3, "type": "VEC3"},
             ],
             "materials": [
                 {
                     "pbrMetallicRoughness": {
                         "baseColorFactor": [1, 0.5, 0.25, 1],
                         "baseColorTexture": {"index": 0},
+                        "metallicFactor": 0.25,
+                        "roughnessFactor": 0.5,
+                    },
+                    // Of the image that its base color samples as colors, so left out.
+                    "occlusionTexture": {"index": 1, "strength": 0.5},
+                    "emissiveFactor": [1, 0.5, 0],
+                    "extensions": {
+                        "KHR_materials_emissive_strength": {"emissiveStrength": 2},
+                        "KHR_materials_unlit": {},
                     },
                     "alphaMode": "MASK",
                     "alphaCutoff": 0.25,
                 },
                 {
                     "pbrMetallicRoughness": {"baseColorTexture": {"index": 1, "texCoord": 0}},
+                    "normalTexture": {"index": 2, "scale": 0.5},
+                    // Of another set of texture coordinates, so left out.
+                    "emissiveTexture": {"index": 1, "texCoord": 1},
                     "alphaMode": "BLEND",
                     "doubleSided": true,
                 },
             ],
-            // Two textures of one image.
-            "textures": [{"source": 0, "sampler": 0}, {"source": 0}],
+            // Two textures of one image, and one of a second.
+            "textures": [{"source": 0, "sampler": 0}, {"source": 0}, {"source": 1}],
             "samplers": [{"magFilter": 9728, "minFilter": 9986, "wrapS": 33071, "wrapT": 33071}],
-            // Said to be a JPEG, but a PNG, as its bytes say.
-            "images": [{"bufferView": image, "mimeType": "image/jpeg"}],
+            // Said to be a JPEG, but a PNG, as its bytes say; and the same PNG again.
+            "images": [{"bufferView": image, "mimeType": "image/jpeg"}, {"bufferView": image}],
             "buffers": [{"byteLength": bin.bytes.len()}],
             "bufferViews": bin.views,
             "animations": [{"channels": [], "samplers": []}],
@@ -1487,6 +2002,10 @@ pub(crate) mod tests {
         glb(&gltf.to_string(), &bin.bytes)
     }
 
+    /// A model reads into its parts, each node's light among them; its primitives, with their
+    /// normals, or made flat without them, and their tangents, made by MikkTSpace for a normal
+    /// map's, and their materials, with each texture and factor and the extensions the engine
+    /// reads; and its images; leaving out what it says it leaves out.
     #[test]
     fn a_model_reads_into_parts_primitives_and_images() {
         let imported = read_glb(&model()).expect("a model");
@@ -1494,6 +2013,17 @@ pub(crate) mod tests {
             transform,
             parent,
             primitive,
+            light: None,
+        };
+        let lit = |transform, parent, primitive| Part {
+            light: Some(Light {
+                kind: LightKind::Point,
+                color: Vec3::new(1.0, 0.5, 0.25),
+                intensity: 40.0,
+                range: Some(6.0),
+                ..Light::default()
+            }),
+            ..part(transform, parent, primitive)
         };
         let moved = |x, y, z| Transform {
             translation: Vec3::new(x, y, z),
@@ -1514,7 +2044,7 @@ pub(crate) mod tests {
                 part(identity, Some(0), Some(1)),
                 part(moved(0.0, 5.0, 0.0), Some(0), Some(2)),
                 // The same primitives again, read once.
-                part(moved(7.0, 0.0, 0.0), Some(0), None),
+                lit(moved(7.0, 0.0, 0.0), Some(0), None),
                 part(identity, Some(4), Some(0)),
                 part(identity, Some(4), Some(1)),
             ]
@@ -1523,38 +2053,71 @@ pub(crate) mod tests {
         let uvs = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let white = vec![[1.0; 4]; 3];
         let half = 32768.0 / 65535.0;
+        let (front, back) = (vec![[0.0, 0.0, 1.0]; 3], vec![[0.0, 0.0, -1.0]; 3]);
+        let unused = vec![[1.0, 0.0, 0.0, 1.0]; 3];
+        let sampled = |image, nearest, wrap| {
+            Some(Sampling {
+                image,
+                nearest,
+                wrap,
+            })
+        };
+        let mut primitives = imported.primitives.clone();
+        // MikkTSpace's, along +X, the bitangent cross(normal, tangent) * W along +Y, as V runs up
+        // the triangle facing -Z: compared within rounding, then as exactly that.
+        let made = &mut primitives[1].tangents;
+        for tangent in made.iter() {
+            let near = Vec4::from(*tangent).abs_diff_eq(Vec4::new(1.0, 0.0, 0.0, -1.0), 1e-6);
+            assert!(near, "{tangent:?}");
+        }
+        *made = vec![[1.0, 0.0, 0.0, -1.0]; 3];
         assert_eq!(
-            imported.primitives,
+            primitives,
             [
                 Primitive {
                     name: "pair/0".to_owned(),
                     positions: triangle.clone(),
                     uvs: uvs.clone(),
                     colors: white,
+                    normals: front.clone(),
+                    tangents: unused.clone(),
                     indices: vec![0, 1, 2],
                     lods: Vec::new(),
                     material: Material {
                         color: [1.0, 0.5, 0.25, 1.0],
-                        image: Some(0),
-                        nearest: true,
-                        wrap: Wrap::Clamp,
+                        metallic: 0.25,
+                        roughness: 0.5,
+                        occlusion_strength: 0.5,
+                        emissive: [2.0, 1.0, 0.0],
+                        textures: [sampled(0, true, Wrap::Clamp), None, None, None, None],
                         alpha: AlphaMode::Mask { cutoff: 0.25 },
-                        double_sided: false,
+                        unlit: true,
+                        ..Material::default()
                     },
                 },
+                // Without normals, so flat: each triangle's corners its own, in its order.
                 Primitive {
                     name: "pair/1".to_owned(),
-                    positions: triangle,
-                    uvs,
+                    positions: triangle.into_iter().rev().collect(),
+                    uvs: uvs.into_iter().rev().collect(),
                     colors: vec![
-                        [1.0, 0.0, 0.0, 1.0],
+                        [0.0, 0.0, 1.0, 1.0],
                         [0.0, 1.0, 0.0, 1.0],
-                        [0.0, 0.0, 1.0, 1.0]
+                        [1.0, 0.0, 0.0, 1.0],
                     ],
-                    indices: vec![2, 1, 0],
+                    normals: back,
+                    tangents: vec![[1.0, 0.0, 0.0, -1.0]; 3],
+                    indices: vec![0, 1, 2],
                     lods: Vec::new(),
                     material: Material {
-                        image: Some(0),
+                        normal_scale: 0.5,
+                        textures: [
+                            sampled(0, false, Wrap::Repeat),
+                            None,
+                            sampled(1, false, Wrap::Repeat),
+                            None,
+                            None,
+                        ],
                         alpha: AlphaMode::Blend,
                         double_sided: true,
                         ..Material::default()
@@ -1569,17 +2132,21 @@ pub(crate) mod tests {
                         [0.0, 1.0, 0.0, 1.0],
                         [half, half, half, 0.0]
                     ],
+                    normals: front,
+                    tangents: unused,
                     indices: vec![0, 1, 2],
                     lods: Vec::new(),
                     material: Material::default(),
                 },
             ]
         );
-        // Read as far as its header, the PNG it is, which decodes as the loader decodes it.
-        let [read] = &imported.images[..] else {
-            panic!("one image: {:?}", imported.images);
+        // Read as far as their headers, the PNG they are, which decodes as the loader decodes it.
+        let [colors, normals] = &imported.images[..] else {
+            panic!("two images: {:?}", imported.images);
         };
-        assert_eq!((read.size, read.format), ([2, 1], image::Format::Png));
+        for read in [colors, normals] {
+            assert_eq!((read.size, read.format), ([2, 1], image::Format::Png));
+        }
         let image = Image {
             size: [2, 1],
             pixels: PIXELS.to_vec(),
@@ -1588,14 +2155,18 @@ pub(crate) mod tests {
         let mut decoded = imported.clone();
         decoded
             .decode_images("m", Path::new("m.glb"))
-            .expect("its image decodes");
-        assert_eq!(decoded.images, [image]);
+            .expect("its images decode");
+        assert_eq!(decoded.images, [image.clone(), image]);
         assert_eq!(
             imported.ignored,
             [
                 "1 animation",
                 "2 cameras",
-                "extension KHR_texture_transform"
+                "extension KHR_texture_transform",
+                "material 0's occlusionTexture, which samples image 0 as values where another \
+                 texture samples it as colors",
+                "material 1's emissiveTexture, which reads TEXCOORD_1 where its others read \
+                 TEXCOORD_0",
             ]
         );
     }
@@ -1674,17 +2245,31 @@ pub(crate) mod tests {
             transform: Transform::IDENTITY,
             parent: None,
             primitive: Some(0),
+            light: None,
         };
         assert_eq!(imported.parts, [part]);
+        // Without normals, so flat: each corner its own, in the triangle's order.
         let primitive = Primitive {
             name: "triangle/0".to_owned(),
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            positions: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            uvs: vec![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
             colors: vec![[1.0; 4]; 3],
-            indices: vec![0, 2, 1],
+            normals: vec![[0.0, 0.0, -1.0]; 3],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
             lods: Vec::new(),
             material: Material {
-                image: Some(0),
+                textures: [
+                    Some(Sampling {
+                        image: 0,
+                        nearest: false,
+                        wrap: Wrap::Repeat,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
                 ..Material::default()
             },
         };

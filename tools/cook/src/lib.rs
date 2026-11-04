@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 
 use gg_api::Project;
 use gg_api::asset::{self, Found};
-use gg_engine::cook::{self, Kind, Lod, Mipmaps, Writer};
+use gg_engine::cook::{self, Compressed, Kind, Lod, Writer};
 use gg_engine::{Error, Result};
 
 /// A file a package holds, as [`cook()`] cooked it.
@@ -123,7 +123,8 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
             Take::File => package.add(path, id, Kind::File, read(file)?)?,
             Take::Texture => {
                 let image = cook::read_image(path, file)?;
-                let ktx2 = texture::bc7(path, image.size, &image.pixels, false)?;
+                let colors = Compressed::Bc7Srgb;
+                let ktx2 = texture::compress(path, image.size, &image.pixels, false, colors)?;
                 package.add(path, id, Kind::Texture, ktx2)?;
             }
             Take::Model => package.add(path, id, Kind::Model, model(path, file)?)?,
@@ -166,8 +167,9 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
 
 /// Model `path`'s file at `file`, cooked as a run from the package reads it: read as a run reads
 /// it, each primitive's triangles optimized and given levels of detail, keeping their order where
-/// its material blends, and each image compressed to BC7 with the full chain of mip levels a run
-/// gives it, made as a run makes them.
+/// its material blends, and each image compressed as what it holds says, BC7 of colors or values
+/// or BC5 of a normal map, with the full chain of mip levels a run gives it, made as a run makes
+/// them.
 ///
 /// Fails as adding the model fails, and with `cook.uncompressed` for an image that doesn't
 /// compress.
@@ -175,18 +177,23 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
     let mut model = cook::read_model(path, file)?;
     let images = (model.images.iter().enumerate())
         .map(|(i, image)| {
-            let mipmaps = cook::mipmaps(&model, i);
-            let levels = cook::levels(image, mipmaps);
+            let texels = cook::texels(&model, i);
+            let levels = cook::levels(image, texels);
             let name = format!("{path}#{i}");
-            texture::bc7(&name, image.size, &levels, mipmaps != Mipmaps::None)
+            // A model's every image has its full chain of levels, which `levels` made.
+            texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
         })
         .collect::<Result<Vec<_>>>()?;
     for primitive in &mut model.primitives {
         let blends = primitive.blends();
         let lods = mesh::optimize(
-            &mut primitive.positions,
-            &mut primitive.uvs,
-            &mut primitive.colors,
+            mesh::Vertices {
+                positions: &mut primitive.positions,
+                uvs: &mut primitive.uvs,
+                colors: &mut primitive.colors,
+                normals: &mut primitive.normals,
+                tangents: &mut primitive.tangents,
+            },
             &mut primitive.indices,
             blends,
         );
@@ -440,10 +447,10 @@ Targets fragment_main(Varyings input) {
 
     /// A model cooks to what a run from the package reads: as many primitives and images as it
     /// read, each primitive with levels of detail among its indices, the first its own triangles,
-    /// and each image compressed to BC7 with its full chain of levels.
+    /// and each image compressed as what it holds, with its full chain of levels.
     #[test]
     fn a_model_cooks_to_what_a_run_reads() {
-        for name in ["crate.gltf", "torus.gltf"] {
+        for name in ["crate.gltf", "torus.gltf", "tiles.gltf"] {
             let file = showcase_model(name);
             let read = cook::read_model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
             let bytes = model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
@@ -457,9 +464,13 @@ Targets fragment_main(Varyings input) {
                 assert_eq!(finest.error, 0.0, "{name}");
             }
             assert_eq!(cooked.images.len(), read.images.len(), "{name}");
-            for (cooked, read) in cooked.images.iter().zip(&read.images) {
-                assert_eq!(cooked.size, read.size, "{name}");
-                assert_eq!(cooked.format, cook::Format::Bc7 { mipmapped: true });
+            for (i, (cooked, image)) in cooked.images.iter().zip(&read.images).enumerate() {
+                assert_eq!(cooked.size, image.size, "{name}");
+                let format = cook::Format::Bc {
+                    compressed: Compressed::of(cook::texels(&read, i)),
+                    mipmapped: true,
+                };
+                assert_eq!(cooked.format, format, "{name}'s image {i}");
             }
         }
         // The torus is enough triangles to simplify.

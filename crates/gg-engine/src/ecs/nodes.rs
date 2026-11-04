@@ -9,7 +9,7 @@ use gg_core::{Error, Result};
 use super::id::{self, EntityId};
 use super::{Entity, World};
 use crate::model::Nodes;
-use crate::{MeshDraw, Model, ModelNode, ModelRoot, Transform};
+use crate::{Light, MeshDraw, Model, ModelNode, ModelRoot, Transform};
 
 impl World {
     /// Spawns an entity at `at` with a [`ModelRoot`] of `model`, and its nodes, and returns it, as
@@ -42,8 +42,9 @@ impl World {
     /// Makes `root`'s nodes those of the model its [`ModelRoot`] names, as the assets it shares
     /// hold them, or takes them away if it has none: as it's loaded or made with one, gains or
     /// loses one, and as its model's nodes change, which were `was`. Its nodes stay while
-    /// they keep their places in the model's hierarchy, as code left them but for each one's draw,
-    /// and, given `was`, the transforms the model changed; otherwise they're spawned again.
+    /// they keep their places in the model's hierarchy, as code left them but for each one's draw
+    /// and light, and, given `was`, the transforms the model changed; otherwise they're spawned
+    /// again.
     pub(crate) fn fit_nodes(&mut self, root: Entity, was: Option<&Nodes>) {
         let model = self.get::<ModelRoot>(root).map(|&ModelRoot(model)| model);
         let assets = Arc::clone(&self.assets);
@@ -79,6 +80,13 @@ impl World {
                 let changed = match draw {
                     Some(draw) => self.put(node, draw),
                     None => self.take::<MeshDraw>(node).map(drop),
+                };
+                changed.expect("a node is alive");
+            }
+            if self.get::<Light>(node).copied() != part.light {
+                let changed = match part.light {
+                    Some(light) => self.put(node, light),
+                    None => self.take::<Light>(node).map(drop),
                 };
                 changed.expect("a node is alive");
             }
@@ -205,6 +213,9 @@ impl World {
             };
             let part_at = u32::try_from(i).expect("fewer than 2^32 parts");
             self.put(node, ModelNode(part_at)).expect("spawned");
+            if let Some(light) = part.light {
+                self.put(node, light).expect("spawned");
+            }
             let set = self.set_parent(node, Some(parent));
             set.expect("a new entity takes an earlier one as its parent");
             spawned.push(node);

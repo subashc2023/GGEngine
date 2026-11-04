@@ -25,9 +25,7 @@ use super::{Frame, TransferCommands, begin_recording, command_buffer};
 use crate::buffer::Buffer;
 use crate::texture::{MAX_LEVELS, Part, next_part};
 use crate::vma::Memory;
-use crate::{
-    COLOR_RANGE, Device, GpuBuffer, Texture, TextureFormat, UploadPath, color_layers, copy_region,
-};
+use crate::{COLOR_RANGE, Device, GpuBuffer, Texture, UploadPath, color_layers, copy_region};
 
 /// The stages that read textures: fragment shaders sample them, and vertex shaders may too, as
 /// the sprite shader queries their sizes.
@@ -73,15 +71,15 @@ impl<'a> Frame<'a> {
     /// see the new pixels from this frame's passes on. The pixels go through the frame's arena and
     /// the graphics queue, which suits small changes the frame uses at once, such as the UI's;
     /// [`Frame::stream_texture`] fills a whole image by the device's upload path, within a budget.
-    /// Only RGBA8 textures are written: a BC7 texture is streamed, as its blocks of 4 by 4 pixels
-    /// can't be written a pixel at a time.
+    /// Only RGBA8 textures are written: a compressed one is streamed, as its blocks of 4 by 4
+    /// pixels can't be written a pixel at a time.
     ///
     /// # Panics
     ///
     /// If a forgotten pass is still open, another device made the texture, its slot shows a
-    /// stand-in rather than an image of its own, it's a BC7 texture, it has mip levels, whose
-    /// others a write would leave undefined, the region doesn't fit in it, or `pixels` doesn't
-    /// fill the region exactly.
+    /// stand-in rather than an image of its own, it's compressed, it has mip levels, whose others a
+    /// write would leave undefined, the region doesn't fit in it, or `pixels` doesn't fill the
+    /// region exactly.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -95,9 +93,9 @@ impl<'a> Frame<'a> {
             .check_made("the texture written", texture.device());
         let image = texture.image_shown_mut("a texture written");
         assert!(
-            image.format != TextureFormat::Bc7Srgb,
-            "a BC7 texture is streamed, not written, as its blocks of 4x4 pixels can't be written \
-             a pixel at a time"
+            !image.format.compressed(),
+            "a compressed texture is streamed, not written, as its blocks of 4x4 pixels can't be \
+             written a pixel at a time"
         );
         assert_eq!(
             image.levels, 1,
@@ -156,13 +154,101 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
+    /// Writes `bytes` into `buffer` from byte `offset` on: through the frame's arena and the
+    /// graphics queue, after what earlier frames read of it, which suits small changes to data the
+    /// frame's draws read at once, such as a material's. The buffer's other bytes keep what they
+    /// had, except on its first write, which leaves them undefined and takes the buffer for drawing,
+    /// as [`Frame::finish_buffer`] takes one streamed. Shaders see the new bytes from this frame's
+    /// passes on.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, another device made the buffer, frames are streaming it,
+    /// or the bytes don't fit in it.
+    pub fn write_buffer(
+        &mut self,
+        buffer: &mut GpuBuffer,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.outside_pass();
+        self.frames
+            .device
+            .check_made("the buffer written", buffer.device());
+        let size = buffer.size();
+        assert!(
+            offset
+                .checked_add(bytes.len() as u64)
+                .is_some_and(|end| end <= size),
+            "{} bytes at {offset} overflow a buffer of {size}",
+            bytes.len()
+        );
+        let written = buffer.written();
+        let (copied, _) = buffer.progress();
+        assert!(
+            written || *copied == 0,
+            "a buffer that frames are streaming isn't written"
+        );
+        // A copy has at least a byte.
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let staged = self.upload(bytes)?;
+        let region = vk::BufferCopy {
+            src_offset: staged.offset,
+            dst_offset: offset,
+            size: bytes.len() as u64,
+        };
+        // Earlier frames on this queue may still read the buffer, and an earlier write may still be
+        // copying into it; the copy waits for both.
+        let (src_stage, src_access) = if written {
+            (
+                BUFFER_READERS | vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            )
+        } else {
+            (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
+        };
+        let to_copy = vk::MemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+        let to_read = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(BUFFER_READERS)
+            .dst_access_mask(BUFFER_READS);
+        let device = &self.frames.device;
+        let commands = self.frames.slots[self.slot].commands;
+        let raw = device.raw();
+        // SAFETY: the commands are recording outside a pass, the region fits the buffer, and the
+        // staged bytes and the buffer live until the frame has finished: the arena is reset only
+        // after that, and the buffer retires until then.
+        unsafe {
+            device.begin_label(commands, c"write buffer");
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_copy)),
+            );
+            raw.cmd_copy_buffer(commands, staged.buffer, buffer.raw(), &[region]);
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_read)),
+            );
+            device.end_label(commands);
+        }
+        buffer.set_written();
+        Ok(())
+    }
+
     /// Copies the next part of `pixels`, all of the image [`Texture::refill`] made for `texture`,
     /// each of its mip levels largest first, in its format, tightly packed, after the level before,
     /// into that image, by the device's upload path, and returns how many bytes it copied: as many
     /// as fit `budget`, but at least the smallest whole part, so that each frame makes progress.
-    /// A level of RGBA8 is its rows of pixels, top row first; a level of BC7 is its rows of blocks
-    /// of 4 by 4 pixels, 16 bytes each, top row first, a side that isn't a multiple of 4 ending in
-    /// a whole block ([`TextureFormat::bytes`] says how many bytes that makes). A part is whole
+    /// A level of RGBA8 is its rows of pixels, top row first; a level of BC7 or BC5 is its rows of
+    /// blocks of 4 by 4 pixels, 16 bytes each, top row first, a side that isn't a multiple of 4
+    /// ending in a whole block ([`crate::TextureFormat::bytes`] says how many bytes that makes). A part is whole
     /// rows of one level, or the small levels of a mip tail together. The frame keeps nothing of
     /// `pixels`: the caller gives them again, whole, until the last part is copied. What's staged
     /// for a copy is freed once the GPU is done with it. Through a transfer queue, the copies go

@@ -1,0 +1,128 @@
+(
+    entities: {
+        "167be52106681e98": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.93, 0.85),
+                intensity: 2500.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.3805622, 0.32714918, 0.14603542, 0.8525371),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1a31e7297f6642bc": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.4, 7.5),
+                rotation: (-0.15931821, 0.0, 0.0, 0.98722726),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "28def99d8ec81b0e": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3d8ddf7f4559ef9d": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.55, 0.2),
+                intensity: 2500.0,
+                range: Some(8.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+            ),
+            Name: ("Lamp"),
+            Transform: (
+                translation: (-2.2, 1.4, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5c83328f1b2ef716": (
+            Environment: (
+                exposure: 11.0,
+                tonemapper: PbrNeutral,
+            ),
+            Name: ("Environment"),
+        ),
+        "9ccc5ac3b65e8b4e": (
+            Name: ("Hint"),
+            Text: (
+                text: "glTF's metallic-roughness materials, lit by a sun, a point light and a spot",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a498ffa1732bcb29": (
+            Light: (
+                kind: Spot,
+                color: (0.45, 0.65, 1.0),
+                intensity: 20000.0,
+                range: None,
+                inner_cone: 0.2,
+                outer_cone: 0.42,
+            ),
+            Name: ("Spot"),
+            Transform: (
+                translation: (2.6, 3.4, 2.2),
+                rotation: (-0.40897596, 0.20848322, 0.09654612, 0.8831491),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a9ff88fae7088091": (
+            Name: ("Title"),
+            Text: (
+                text: "Lights",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b86542802e013640": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

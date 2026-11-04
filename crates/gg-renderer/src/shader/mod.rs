@@ -180,10 +180,14 @@ impl Shaders {
     ///   each the low and high halves of a 64-bit number; the fifth, of the instances' parameters,
     ///   one `P` each, back to back; the sixth, the view's size in pixels, across then down, for
     ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
-    ///   `struct Frame { float3 camera; float time; float exposure; }`, where the view sees from in
-    ///   the world, the time it shows and what lit shading multiplies light by, as
-    ///   [`RenderData`](crate::RenderData) gives them, or a struct of as many of its first fields:
-    ///   the engine adds fields at its end. A shader that takes no parameters leaves out the fifth,
+    ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
+    ///   lights; Material* materials; float4 eye; }`, where the view sees from in the world, the
+    ///   time it shows, what lit shading multiplies light by, and the frame's lights, as
+    ///   [`RenderData`](crate::RenderData) gives them, `Light` as `shaders/mesh.slang` declares it;
+    ///   the address of the table of models' materials; and where shading sees from, the camera's
+    ///   position and 1, or for an orthographic projection the way back toward it and 0, so that
+    ///   the way to the eye from `p` is `eye.xyz - p * eye.w`; or a struct of as many of its first
+    ///   fields: the engine adds fields at its end. A shader that takes no parameters leaves out the fifth,
     ///   and so those after it. A shader may end the struct after the last of them it reads, and
     ///   one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
@@ -910,7 +914,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 36 bytes, past the 20 the engine's take",
+                "its frame's data, Frame, take 68 bytes, past the 56 the engine's take",
                 "it reads brightness from its push constants, past the 112 bytes",
             ],
         );

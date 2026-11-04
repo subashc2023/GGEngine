@@ -8,11 +8,11 @@ use std::path::Path;
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Lods, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Shaders, Texture,
-    Textures,
+    AlphaMode, Lods, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex,
+    Sampled, Shaders, Texels, Texture, Textures,
 };
 
-use crate::gltf::{self, Imported, Part, Primitive};
+use crate::gltf::{self, Imported, Part, Primitive, Slot};
 use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
 
@@ -87,37 +87,43 @@ pub(crate) struct Nodes {
 }
 
 /// What a model is made of on the renderer, which a reload replaces under the same handles, and a
-/// removal removes: each primitive's mesh, each image's texture and how it got its mip levels, and,
-/// in development builds, each primitive's material as it was read, which a reload compares its
-/// own with, and how many primitives and images the model has now, as a reload that drops some
-/// keeps their meshes and textures for their places, which a later one gives back.
+/// removal removes: each primitive's mesh and material, each image's texture and the texels its
+/// levels are made from, which say what it holds; how many primitives and images the model has
+/// now, as a reload that drops some keeps their meshes, materials and textures for their places,
+/// which a later one gives back; and, in development builds, each primitive's material as it was
+/// read, which a reload compares its own with.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
     pub(crate) meshes: Vec<Mesh<ModelVertex>>,
-    pub(crate) images: Vec<(Texture, Mipmaps)>,
-    #[cfg(feature = "dev")]
-    materials: Vec<gltf::Material>,
-    #[cfg(feature = "dev")]
+    pub(crate) materials: Vec<MaterialId>,
+    pub(crate) images: Vec<(Texture, Texels)>,
     counts: (usize, usize),
+    #[cfg(feature = "dev")]
+    read: Vec<gltf::Material>,
 }
 
-/// Adds what model `name`, as `read` gave it from `path`, draws: its images to `textures`, through
-/// `loader`, which decodes them, each with mip levels, weighted by alpha where a masked or blended
-/// material samples it, then its primitives to `meshes`, each drawn with its material through
-/// `shaders`' model shader, which it adds for every alpha mode, so that a material changed later
-/// adds none. Gives what its root spawns, and what it's made of, its images' textures in the
-/// model's order.
+/// The renderer's stores that a model adds to, and replaces in as it's read again.
+pub(crate) struct Stores<'a> {
+    pub(crate) meshes: &'a mut Meshes,
+    pub(crate) shaders: &'a mut Shaders,
+    pub(crate) textures: &'a mut Textures,
+    pub(crate) materials: &'a mut Materials,
+}
+
+/// Adds what model `name`, as `read` gave it from `path`, draws, to `stores`: its images as
+/// textures, through `loader`, which decodes them, each with mip levels as [`texels`] says, then
+/// each primitive's mesh, and its material, which it's drawn with through the model shader, which
+/// it adds for every alpha mode, so that a material changed later adds none. Gives what its root
+/// spawns, and what it's made of, its images' textures in the model's order.
 ///
-/// Fails, adding nothing, with `renderer.too_many_textures` if `textures` hasn't room for its
+/// Fails, adding nothing, with `renderer.too_many_textures` if the textures haven't room for its
 /// images; an image whose pixels don't decode warns as the loader decodes it, and its texture keeps
 /// its stand-in.
 pub(crate) fn add(
     name: &str,
     path: &Path,
     imported: Imported,
-    meshes: &mut Meshes,
-    shaders: &mut Shaders,
-    textures: &mut Textures,
+    stores: Stores<'_>,
     loader: &mut Loader,
 ) -> Result<(Nodes, Made)> {
     let Imported {
@@ -126,17 +132,23 @@ pub(crate) fn add(
         images,
         ..
     } = imported;
+    let Stores {
+        meshes,
+        shaders,
+        textures,
+        materials,
+    } = stores;
     // Checked first, so that a model adds all of itself or nothing: what `read` gave can't fail to
     // add otherwise.
     room(name, images.len(), textures)?;
     shaders.add_model_shaders();
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
-            let mipmaps = mipmaps(&primitives, i);
+            let texels = texels(&primitives, i);
             let name = format!("{name} image {i}");
-            let added = loader.load(textures, &name, path, image, mipmaps);
+            let added = loader.load(textures, &name, path, image, texels);
             let texture = added.expect("an image read fits a texture, and there's room for it");
-            (texture, mipmaps)
+            (texture, texels)
         })
         .collect();
     let meshes: Vec<_> = (primitives.iter())
@@ -150,18 +162,21 @@ pub(crate) fn add(
             mesh.expect("a primitive is whole triangles of its own vertices, in its levels")
         })
         .collect();
+    let added = (primitives.iter())
+        .map(|primitive| materials.add(&material(&primitive.material, &images)))
+        .collect();
     let made = Made {
-        #[cfg(feature = "dev")]
         counts: (meshes.len(), images.len()),
         meshes,
+        materials: added,
         images,
         #[cfg(feature = "dev")]
-        materials: primitives
+        read: primitives
             .iter()
             .map(|primitive| primitive.material)
             .collect(),
     };
-    let draws = draws(&primitives, &made, shaders);
+    let draws = draws(&made, materials, shaders);
     Ok((Nodes { parts, draws }, made))
 }
 
@@ -174,31 +189,26 @@ pub(crate) type Reread = (Nodes, Vec<&'static str>, Vec<(usize, Texture)>);
 /// same handles, so that every entity drawing it draws it once frames have streamed it: each
 /// primitive's vertices and indices, and each image, with its mip levels made as its materials
 /// have them. If `whole`, the model takes all of it: primitives and images past those it had are
-/// added, or take back the meshes and textures of their places, which those it has no more keep,
-/// unused, for when they come back; and it gives what its root spawns now, its nodes and
-/// its draws, with their materials, which adds no shader, as [`add`] added them all. Otherwise it
-/// takes only those, and gives back `was`, what its root spawned, which its nodes keep. Gives too
-/// what changed of the model, as "nodes" and "materials", the materials compared as they were read,
-/// and the textures of the images added, with their places in the model, which no image of the
-/// model had before.
+/// added, or take back the meshes, materials and textures of their places, which those it has no
+/// more keep, unused, for when they come back; its materials take what they're read as; and it
+/// gives what its root spawns now, its nodes and its draws, with their materials, which adds no
+/// shader, as [`add`] added them all. Otherwise it takes only those, and gives back `was`, what its
+/// root spawned, which its nodes keep, their materials as they were. Gives too what changed of the
+/// model, as "nodes" and "materials", the materials compared as they were read, and the textures
+/// of the images added, with their places in the model, which no image of the model had before.
 ///
 /// Fails, replacing nothing, with `asset.model_changed` unless `whole` if it has other numbers of
-/// primitives or images, which a model's handles don't hold; and with `renderer.too_many_textures`
-/// if `textures` hasn't room for the images added.
+/// primitives or images, which a model's handles don't hold, and either way if an image holds
+/// other than it held, as colors where it held a normal map, which its texture keeps; and with
+/// `renderer.too_many_textures` if the textures haven't room for the images added.
 #[cfg(feature = "dev")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the renderer's three stores apart"
-)]
 pub(crate) fn reload(
     name: &str,
     imported: Imported,
     made: &mut Made,
     was: &Nodes,
     whole: bool,
-    meshes: &mut Meshes,
-    shaders: &mut Shaders,
-    textures: &mut Textures,
+    stores: Stores<'_>,
 ) -> Result<Reread> {
     let Imported {
         parts,
@@ -206,6 +216,12 @@ pub(crate) fn reload(
         images,
         ..
     } = imported;
+    let Stores {
+        meshes,
+        shaders,
+        textures,
+        materials,
+    } = stores;
     let counts = (primitives.len(), images.len());
     let had = made.counts;
     if counts != had && !whole {
@@ -223,29 +239,48 @@ pub(crate) fn reload(
         );
         return Err(Error::new("asset.model_changed", message));
     }
+    // A texture keeps what it holds, so an image that holds something else now, as colors where it
+    // held a normal map, takes one of its own, as the model's files are read afresh.
+    let held = |texels| match texels {
+        Texels::Map(map) => Some(map),
+        _ => None,
+    };
+    let unlike = (made.images.iter().enumerate())
+        .take(images.len())
+        .find(|&(i, &(_, was))| held(was) != held(texels(&primitives, i)));
+    if let Some((i, &(_, was))) = unlike {
+        let now = held(texels(&primitives, i));
+        let message = format!(
+            "model {name:?}'s image {i} holds {} where it held {}, which its texture keeps: the \
+             model takes it as the run starts again",
+            gltf::holds(now),
+            gltf::holds(held(was))
+        );
+        return Err(Error::new("asset.model_changed", message));
+    }
     room(name, counts.1.saturating_sub(made.images.len()), textures)?;
-    let materials = primitives.iter().map(|primitive| primitive.material);
+    let read = primitives.iter().map(|primitive| primitive.material);
     let changed = [
         (parts != was.parts, "nodes"),
-        (!materials.eq(made.materials.iter().copied()), "materials"),
+        (!read.eq(made.read.iter().copied()), "materials"),
     ];
     let changed = changed.into_iter().filter(|&(changed, _)| changed);
     let changed = changed.map(|(_, what)| what).collect();
     let mut added = Vec::new();
     for (i, image) in images.into_iter().enumerate() {
         let name = format!("{name} image {i}");
-        let mipmaps = mipmaps(&primitives, i);
-        let texels = image.texels(mipmaps);
+        let made_from = texels(&primitives, i);
+        let texels = image.texels(made_from);
         match made.images.get_mut(i) {
             Some((texture, was)) => {
                 let replaced = textures.replace(&name, *texture, image.size, image.pixels, texels);
-                replaced.expect("a decoded image fits a texture");
-                *was = mipmaps;
+                replaced.expect("a decoded image fits a texture of what it held");
+                *was = made_from;
             }
             None => {
                 let texture = textures.add(&name, image.size, image.pixels, texels);
                 let texture = texture.expect("a decoded image fits a texture, and there's room");
-                made.images.push((texture, mipmaps));
+                made.images.push((texture, made_from));
                 added.push((i, texture));
             }
         }
@@ -269,12 +304,19 @@ pub(crate) fn reload(
     if !whole {
         return Ok((was.clone(), changed, added));
     }
+    for (i, primitive) in primitives.iter().enumerate() {
+        let material = material(&primitive.material, &made.images);
+        match made.materials.get(i) {
+            Some(&id) => materials.replace(id, &material),
+            None => made.materials.push(materials.add(&material)),
+        }
+    }
     made.counts = counts;
-    made.materials = primitives
+    made.read = primitives
         .iter()
         .map(|primitive| primitive.material)
         .collect();
-    let draws = draws(&primitives, made, shaders);
+    let draws = draws(made, materials, shaders);
     Ok((Nodes { parts, draws }, changed, added))
 }
 
@@ -293,13 +335,12 @@ fn room(name: &str, images: usize, textures: &Textures) -> Result<()> {
     Ok(())
 }
 
-/// Each of `primitives`' draws, of its mesh among `made`'s, with its material.
-fn draws(primitives: &[Primitive], made: &Made, shaders: &mut Shaders) -> Vec<MeshDraw> {
-    (primitives.iter().zip(&made.meshes))
-        .map(|(primitive, &mesh)| {
-            let material = material(&primitive.material, &made.images);
-            MeshDraw::with_material(mesh, &material, shaders)
-        })
+/// Each primitive's draw, of its mesh with its material, as `made` holds them, as many as the
+/// model's primitives now are, as `made`'s counts say.
+fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshDraw> {
+    (made.meshes.iter().zip(&made.materials))
+        .take(made.counts.0)
+        .map(|(&mesh, &material)| MeshDraw::with_material(mesh, material, materials, shaders))
         .collect()
 }
 
@@ -343,39 +384,78 @@ fn vertices(primitive: &Primitive) -> Vec<ModelVertex> {
     (primitive.positions.iter())
         .zip(&primitive.uvs)
         .zip(&primitive.colors)
-        .map(|((&position, &uv), &color)| ModelVertex {
-            position: Vec3::from(position),
-            uv: Vec2::from(uv),
-            color: Vec4::from(color),
-        })
+        .zip(&primitive.normals)
+        .zip(&primitive.tangents)
+        .map(
+            |((((&position, &uv), &color), &normal), &tangent)| ModelVertex {
+                position: Vec3::from(position),
+                uv: Vec2::from(uv),
+                color: Vec4::from(color),
+                normal: Vec3::from(normal),
+                tangent: Vec4::from(tangent),
+            },
+        )
         .collect()
 }
 
-/// The material `read` gives, sampling its image among `images`, the model's textures.
-fn material(read: &gltf::Material, images: &[(Texture, Mipmaps)]) -> Material {
+/// The material `read` gives, sampling its images among `images`, the model's textures.
+fn material(read: &gltf::Material, images: &[(Texture, Texels)]) -> Material {
+    let sampled = |slot: Slot| {
+        read.texture(slot).map(|sampling| Sampled {
+            texture: images[sampling.image].0,
+            nearest: sampling.nearest,
+            wrap: sampling.wrap,
+        })
+    };
+    let white = |slot| sampled(slot).unwrap_or(Sampled::WHITE);
     Material {
         color: Vec4::from(read.color),
-        texture: (read.image).map_or(Material::default().texture, |i| images[i].0),
-        nearest: read.nearest,
-        wrap: read.wrap,
+        color_texture: white(Slot::Color),
+        metallic: read.metallic,
+        roughness: read.roughness,
+        surface_texture: white(Slot::Surface),
+        normal_texture: sampled(Slot::Normal),
+        normal_scale: read.normal_scale,
+        occlusion_texture: white(Slot::Occlusion),
+        occlusion_strength: read.occlusion_strength,
+        emissive: Vec3::from(read.emissive),
+        emissive_texture: white(Slot::Emissive),
         alpha: read.alpha,
         double_sided: read.double_sided,
+        unlit: read.unlit,
     }
 }
 
-/// How image `image` of `primitives`' model gets its mip levels: weighted by alpha where a masked
-/// or blended material samples it, since its alpha is then how much it covers, and plainly averaged
-/// where opaque ones alone do, as glTF has them ignore its alpha.
-pub(crate) fn mipmaps(primitives: &[Primitive], image: usize) -> Mipmaps {
-    let covers = primitives.iter().any(|primitive| {
+/// What image `image` of `primitives`' model holds, and so the texels its levels are made from: a
+/// map of data, as the first texture to sample it says, its levels averaging its values; or
+/// colors, weighted by alpha where a masked or blended material samples them as its base color,
+/// since their alpha is then how much it covers, and plainly averaged where opaque ones alone do,
+/// as glTF has them ignore its alpha, or where they're emitted. Reading the model left no image
+/// sampled as two of those.
+pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
+    let mut uses = (primitives.iter()).flat_map(|primitive| {
         let material = &primitive.material;
-        let blends = matches!(material.alpha, AlphaMode::Mask { .. } | AlphaMode::Blend);
-        material.image == Some(image) && blends
+        let sampled = Slot::ALL.into_iter().filter(move |&slot| {
+            material
+                .texture(slot)
+                .is_some_and(|texture| texture.image == image)
+        });
+        sampled.map(move |slot| (slot, material))
     });
-    if covers {
-        Mipmaps::AlphaWeighted
+    let covers = |(slot, material): (Slot, &gltf::Material)| {
+        let blends = matches!(material.alpha, AlphaMode::Mask { .. } | AlphaMode::Blend);
+        slot == Slot::Color && blends
+    };
+    let Some(first) = uses.next() else {
+        return Texels::Color(Mipmaps::Averaged);
+    };
+    if let Some(map) = first.0.map() {
+        return Texels::Map(map);
+    }
+    if covers(first) || uses.any(covers) {
+        Texels::Color(Mipmaps::AlphaWeighted)
     } else {
-        Mipmaps::Averaged
+        Texels::Color(Mipmaps::Averaged)
     }
 }
 
@@ -402,6 +482,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// A material that samples `image` as its base color.
+    fn colored(image: usize) -> gltf::Material {
+        let mut material = gltf::Material::default();
+        material.textures[Slot::Color as usize] = Some(gltf::Sampling {
+            image,
+            nearest: false,
+            wrap: gg_renderer::Wrap::Repeat,
+        });
+        material
+    }
+
     /// A model of a node turned, drawing a mesh of two primitives, the first masked; and a node
     /// moved and mirrored, drawing the second primitive again. Each primitive samples an image of
     /// its own.
@@ -411,23 +502,22 @@ pub(crate) mod tests {
             positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             uvs: vec![[0.0; 2]; 3],
             colors: vec![[1.0; 4]; 3],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
             lods: Vec::new(),
             material,
         };
         let masked = gltf::Material {
-            image: Some(0),
             alpha: AlphaMode::Mask { cutoff: 0.5 },
-            ..gltf::Material::default()
+            ..colored(0)
         };
-        let opaque = gltf::Material {
-            image: Some(1),
-            ..gltf::Material::default()
-        };
+        let opaque = colored(1);
         let part = |transform, parent, primitive| gltf::Part {
             transform,
             parent,
             primitive,
+            light: None,
         };
         let image = Image {
             size: [1, 1],
@@ -447,21 +537,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// The renderer's stores, which a model adds to.
+    #[derive(Default)]
+    struct Owned {
+        meshes: Meshes,
+        shaders: Shaders,
+        textures: Textures,
+        materials: Materials,
+    }
+
+    impl Owned {
+        fn stores(&mut self) -> Stores<'_> {
+            Stores {
+                meshes: &mut self.meshes,
+                shaders: &mut self.shaders,
+                textures: &mut self.textures,
+                materials: &mut self.materials,
+            }
+        }
+
+        /// How many meshes, textures, shaders and materials there are.
+        #[cfg(feature = "dev")]
+        fn counts(&self) -> (u32, u32, u32, u32) {
+            (
+                self.meshes.count(),
+                self.textures.count(),
+                self.shaders.count(),
+                self.materials.count(),
+            )
+        }
+    }
+
     /// `imported`, model `name`, added to `cx`'s world's assets, as a context adds one, and what
     /// it's made of.
     pub(crate) fn added(cx: &mut Context, name: &str, imported: Imported) -> (Model, Made) {
-        let (mut meshes, mut shaders, mut textures) =
-            (Meshes::default(), Shaders::default(), Textures::default());
+        let mut owned = Owned::default();
         let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
-        let added = add(
-            name,
-            path,
-            imported,
-            &mut meshes,
-            &mut shaders,
-            &mut textures,
-            loader,
-        );
+        let added = add(name, path, imported, owned.stores(), loader);
         let (nodes, made) = added.expect("a model");
         let assets = cx.world_mut().assets_mut();
         (assets.add_model(name.into(), name.into(), nodes), made)
@@ -524,30 +636,15 @@ pub(crate) mod tests {
     #[cfg(feature = "dev")]
     #[test]
     fn a_model_read_again_replaces_its_meshes_and_images_and_says_what_else_changed() {
-        let (mut meshes, mut shaders, mut textures) =
-            (Meshes::default(), Shaders::default(), Textures::default());
+        let mut owned = Owned::default();
         let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
-        let added = add(
-            "m",
-            path,
-            imported(),
-            &mut meshes,
-            &mut shaders,
-            &mut textures,
-            loader,
-        );
+        let added = add("m", path, imported(), owned.stores(), loader);
         let (was, mut made) = added.expect("a model");
-        let counts = (meshes.count(), textures.count(), shaders.count());
-        // Each read's, with how many meshes, textures and shaders there are after it.
+        let counts = owned.counts();
+        // Each read's, with how many meshes, textures, shaders and materials there are after it.
         let mut again = |imported, whole| {
-            let (shaders, meshes, textures) = (&mut shaders, &mut meshes, &mut textures);
-            let reloaded = reload(
-                "m", imported, &mut made, &was, whole, meshes, shaders, textures,
-            );
-            (
-                reloaded,
-                (meshes.count(), textures.count(), shaders.count()),
-            )
+            let reloaded = reload("m", imported, &mut made, &was, whole, owned.stores());
+            (reloaded, owned.counts())
         };
         let (nodes, changed, added) = again(imported(), false).0.expect("read again");
         assert_eq!(
@@ -573,7 +670,7 @@ pub(crate) mod tests {
 
         let mut fewer = imported();
         fewer.images.pop();
-        fewer.primitives[1].material.image = None;
+        fewer.primitives[1].material = gltf::Material::default();
         let error = again(fewer.clone(), false).0.expect_err("an image fewer");
         assert_eq!(error.code(), "asset.model_changed");
         assert!(
@@ -588,17 +685,76 @@ pub(crate) mod tests {
         assert_eq!(added, [], "its texture taken back, under the names it had");
         assert_eq!(
             nodes.draws, was.draws,
-            "drawing as it did, with the same textures"
+            "drawing as it did, with the same textures and materials"
         );
         assert_eq!(counted, counts, "nothing added");
+
+        // An image that's a normal map now, whose texture holds colors.
+        let mut remapped = imported();
+        let colors = remapped.primitives[1].material.textures[Slot::Color as usize].take();
+        remapped.primitives[1].material.textures[Slot::Normal as usize] = colors;
+        for whole in [false, true] {
+            let error = again(remapped.clone(), whole).0.expect_err("a map now");
+            assert_eq!(error.code(), "asset.model_changed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("holds a normal map where it held colors"),
+                "{error}"
+            );
+        }
     }
+
+    /// An image's texture holds what the first texture to sample it samples: colors, whose levels
+    /// are weighted by alpha where a masked or blended material samples them as its base color,
+    /// or a map, as its slot says.
     #[test]
-    fn images_that_masked_or_blended_materials_sample_have_levels_weighted_by_alpha() {
+    fn images_hold_what_their_materials_sample_them_as() {
         let Imported { mut primitives, .. } = imported();
-        assert_eq!(mipmaps(&primitives, 0), Mipmaps::AlphaWeighted);
-        assert_eq!(mipmaps(&primitives, 1), Mipmaps::Averaged);
+        let colors = |mipmaps| Texels::Color(mipmaps);
+        assert_eq!(texels(&primitives, 0), colors(Mipmaps::AlphaWeighted));
+        assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
         primitives[1].material.alpha = AlphaMode::Blend;
-        assert_eq!(mipmaps(&primitives, 1), Mipmaps::AlphaWeighted);
+        assert_eq!(texels(&primitives, 1), colors(Mipmaps::AlphaWeighted));
+        // Emitted, its alpha covers nothing.
+        let textures = &mut primitives[1].material.textures;
+        textures.swap(Slot::Color as usize, Slot::Emissive as usize);
+        assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
+        for (slot, map) in [
+            (Slot::Surface, gg_renderer::Map::Surface),
+            (Slot::Occlusion, gg_renderer::Map::Surface),
+            (Slot::Normal, gg_renderer::Map::Normal),
+        ] {
+            let textures = &mut primitives[1].material.textures;
+            let sampled = textures.iter_mut().find_map(Option::take);
+            textures[slot as usize] = sampled;
+            assert_eq!(texels(&primitives, 1), Texels::Map(map), "{slot:?}");
+        }
+    }
+
+    /// A primitive's material goes into the table as it's read: its factors, and each texture as
+    /// the model's image's, or white without one, but its normal map, which it hasn't.
+    #[test]
+    fn a_material_takes_its_images_textures() {
+        let read = gltf::Material {
+            metallic: 0.25,
+            roughness: 0.5,
+            emissive: [1.0, 2.0, 3.0],
+            unlit: true,
+            ..colored(1)
+        };
+        let images = [
+            (Texture::WHITE, Texels::Color(Mipmaps::Averaged)),
+            (Texture::WHITE, Texels::Color(Mipmaps::Averaged)),
+        ];
+        let made = material(&read, &images);
+        assert_eq!(made.color_texture, Sampled::of(images[1].0));
+        assert_eq!(made.surface_texture, Sampled::WHITE);
+        assert_eq!(made.normal_texture, None);
+        assert_eq!(
+            (made.metallic, made.roughness, made.emissive, made.unlit),
+            (0.25, 0.5, Vec3::new(1.0, 2.0, 3.0), true)
+        );
     }
 
     #[test]
@@ -610,16 +766,15 @@ pub(crate) mod tests {
         }
         let add = |textures: &mut Textures| {
             let (mut meshes, mut shaders) = (Meshes::default(), Shaders::default());
+            let mut materials = Materials::default();
             let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
-            add(
-                "m",
-                path,
-                imported(),
-                &mut meshes,
-                &mut shaders,
+            let stores = Stores {
+                meshes: &mut meshes,
+                shaders: &mut shaders,
                 textures,
-                loader,
-            )
+                materials: &mut materials,
+            };
+            add("m", path, imported(), stores, loader)
         };
         add(&mut textures).expect("room for both images");
         assert_eq!(textures.room(), 0);

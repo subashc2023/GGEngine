@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use gg_core::{Error, Result};
-use gg_renderer::{Mipmaps, Texels, Texture, Textures, add_mipmaps};
+use gg_renderer::{Texels, Texture, Textures, add_levels};
 use tracing::warn;
 
 use crate::image::{self, Format, Image};
@@ -48,13 +48,14 @@ struct Worker {
 }
 
 /// An image to decode: `texture`'s, `name`'s from `path`, read as far as its header, with the mip
-/// levels `mipmaps` says made from it, as its texture was reserved for.
+/// levels made from it that `levels` says, as [`add_levels`] makes them, if it's given, as its
+/// texture was reserved for.
 struct Job {
     texture: Texture,
     name: String,
     path: PathBuf,
     image: Image,
-    mipmaps: Mipmaps,
+    levels: Option<Texels>,
 }
 
 /// An image decoded, or why it didn't decode: `texture`'s pixels, its levels among them.
@@ -84,11 +85,12 @@ impl Loader {
 
     /// Hands out a texture of `textures` for `image`, texture `name`'s from `path`, read as far as
     /// its header as [`image::load_image`] reads it, whose pixels it decodes, as
-    /// [`image::decode_texture`] does, with the mip levels `mipmaps` says: on its thread, the
-    /// texture showing its stand-in until [`take`](Self::take) fills it, its levels made there
-    /// too; or, inline, at once, its levels left to the frames that stream it. Pixels that don't
-    /// decode warn `engine.bad_texture`, as they're taken or at once, and the texture keeps its
-    /// stand-in: the handle is the texture's whether they decode or not.
+    /// [`image::decode_texture`] does, as `texels`, a [`Texels::Color`] or a [`Texels::Map`], say,
+    /// with their mip levels, as [`Image::texels`] has them: on its thread, the texture showing its
+    /// stand-in until [`take`](Self::take) fills it, its levels made there too; or, inline, at once,
+    /// its levels left to the frames that stream it. Pixels that don't decode warn
+    /// `engine.bad_texture`, as they're taken or at once, and the texture keeps its stand-in: the
+    /// handle is the texture's whether they decode or not.
     ///
     /// Fails as [`Textures::reserve`] does.
     pub(crate) fn load(
@@ -97,7 +99,7 @@ impl Loader {
         name: &str,
         path: &Path,
         image: Image,
-        mipmaps: Mipmaps,
+        texels: impl Into<Texels>,
     ) -> Result<Texture> {
         if let Kind::Thread(None) = self.kind {
             self.kind = match Worker::start() {
@@ -111,22 +113,23 @@ impl Loader {
                 }
             };
         }
-        // On the thread, colors get their levels made with their pixels, as BC7 comes with its
-        // own; inline, the frames that stream them make them, as no frame waits for this thread.
+        // On the thread, colors and maps get their levels made with their pixels, as what's
+        // cooked comes with its own; inline, the frames that stream them make them, as no frame
+        // waits for this thread.
         let threaded = matches!(self.kind, Kind::Thread(_));
-        let (texels, made) = match image.texels(mipmaps) {
-            Texels::Color(mipmaps) if threaded && mipmaps != Mipmaps::None => {
-                (Texels::ColorLevels, mipmaps)
-            }
-            texels => (texels, Mipmaps::None),
+        let texels = image.texels(texels.into());
+        let (reserved, levels) = if threaded {
+            (texels.with_levels(), Some(texels))
+        } else {
+            (texels, None)
         };
-        let texture = textures.reserve(name, image.size, texels)?;
+        let texture = textures.reserve(name, image.size, reserved)?;
         let job = Job {
             texture,
             name: name.to_owned(),
             path: path.to_owned(),
             image,
-            mipmaps: made,
+            levels,
         };
         match &self.kind {
             Kind::Thread(Some(worker)) => {
@@ -212,7 +215,7 @@ impl Worker {
 }
 
 /// Decodes `job`'s image, and makes its mip levels, as its texture was reserved for: a PNG's or a
-/// JPEG's, but not BC7, which comes with its own.
+/// JPEG's, but not what's cooked, which comes with its own.
 fn decode(job: Job) -> Done {
     let _zone = gg_core::zone!("decode an image");
     let Job {
@@ -220,12 +223,14 @@ fn decode(job: Job) -> Done {
         name,
         path,
         image,
-        mipmaps,
+        levels,
     } = job;
     let pixels = image::decode_texture(&name, &path, image).map(|image| {
         let mut pixels = image.pixels;
-        if image.format == Format::Rgba8 {
-            add_mipmaps(&mut pixels, image.size, mipmaps);
+        if let Some(texels) = levels
+            && image.format == Format::Rgba8
+        {
+            add_levels(&mut pixels, image.size, texels);
         }
         pixels
     });
@@ -263,6 +268,8 @@ mod tests {
     use std::panic::AssertUnwindSafe;
     use std::time::{Duration, Instant};
 
+    use gg_renderer::Mipmaps;
+
     use super::*;
 
     /// A PNG of `width` pixels in a row, cut short of its last `cut` bytes, read as far as its
@@ -295,23 +302,24 @@ mod tests {
     }
 
     /// Textures' handles come at once, as their images' headers read, before they decode, on the
-    /// loader's thread, which fills each as it's taken, a model's image with its levels; and
-    /// inline, as a test's context decodes, each is filled as it's added.
+    /// loader's thread, which fills each as it's taken, a model's image with its levels, of colors
+    /// or a map; and inline, as a test's context decodes, each is filled as it's added.
     #[test]
     fn textures_decode_off_the_main_thread_and_fill_as_taken() {
         let mut textures = Textures::default();
         let mut loader = Loader::threaded();
         let path = Path::new("assets/a.png");
         let mut loaded = Vec::new();
-        for (width, mipmaps) in [
-            (1, Mipmaps::None),
-            (2, Mipmaps::None),
-            (3, Mipmaps::Averaged),
+        for (width, texels) in [
+            (1, Texels::Color(Mipmaps::None)),
+            (2, Texels::Color(Mipmaps::None)),
+            (3, Texels::Color(Mipmaps::Averaged)),
+            (3, Texels::Map(gg_renderer::Map::Normal)),
         ] {
-            let texture = loader.load(&mut textures, "a", path, read(width, 0), mipmaps);
+            let texture = loader.load(&mut textures, "a", path, read(width, 0), texels);
             loaded.push(texture.expect("a handle"));
         }
-        assert_eq!(loader.pending(), 3, "handed out before they decode");
+        assert_eq!(loader.pending(), 4, "handed out before they decode");
         settle(&mut loader, &mut textures);
         for texture in loaded {
             assert!(

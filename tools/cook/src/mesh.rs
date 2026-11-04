@@ -67,16 +67,36 @@ impl Lod {
     }
 }
 
+/// A primitive's vertices, an array for each of their attributes, as `optimize` takes them.
+pub(crate) struct Vertices<'a> {
+    pub(crate) positions: &'a mut Vec<[f32; 3]>,
+    pub(crate) uvs: &'a mut Vec<[f32; 2]>,
+    pub(crate) colors: &'a mut Vec<[f32; 4]>,
+    pub(crate) normals: &'a mut Vec<[f32; 3]>,
+    pub(crate) tangents: &'a mut Vec<[f32; 4]>,
+}
+
+impl Vertices<'_> {
+    /// Moves vertex `i` to `remap[i]`, of `count` after the move.
+    fn remap(&mut self, count: usize, remap: &[u32]) {
+        *self.positions = remap_vertex_buffer(self.positions, count, remap);
+        *self.uvs = remap_vertex_buffer(self.uvs, count, remap);
+        *self.colors = remap_vertex_buffer(self.colors, count, remap);
+        *self.normals = remap_vertex_buffer(self.normals, count, remap);
+        *self.tangents = remap_vertex_buffer(self.tangents, count, remap);
+    }
+}
+
 /// Optimizes a primitive's triangles in place, and returns its levels of detail, finest first.
 ///
-/// Vertices identical in position, UV and color merge into one, and those no triangle uses go. Level
-/// 0 has the input's triangles, with the winding they had, in the order and from the corners that
-/// the vertex cache and overdraw optimizers choose. Each coarser level is the one before it
-/// simplified toward half its triangles, by a simplifier that moves no vertex and keeps attribute
-/// seams, the edges where vertices of one position differ in UV or color, then ordered for the
-/// vertex cache. The chain ends at [`MAX_LEVELS`] levels, or before a level that would shed less
-/// than [`MIN_SHED`] of the one before it, and no level is simplified toward fewer than
-/// [`MIN_TRIANGLES`] triangles, though the simplifier may land a few short of its target.
+/// Vertices identical in every attribute merge into one, and those no triangle uses go. Level 0 has
+/// the input's triangles, with the winding they had, in the order and from the corners that the
+/// vertex cache and overdraw optimizers choose. Each coarser level is the one before it simplified
+/// toward half its triangles, by a simplifier that moves no vertex and keeps attribute seams, the
+/// edges where vertices of one position differ in another attribute, as hard edges' normals do,
+/// then ordered for the vertex cache. The chain ends at [`MAX_LEVELS`] levels, or before a level
+/// that would shed less than [`MIN_SHED`] of the one before it, and no level is simplified toward
+/// fewer than [`MIN_TRIANGLES`] triangles, though the simplifier may land a few short of its target.
 ///
 /// Afterwards `indices` holds level 0's triangles, then each coarser level's, over the same
 /// vertices, which are in the order that one pass through the levels, from the coarsest to the
@@ -91,42 +111,46 @@ impl Lod {
 /// past the vertices, as the glTF reader leaves none; and if the levels' indices together pass
 /// what 32 bits count.
 pub(crate) fn optimize(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    colors: &mut Vec<[f32; 4]>,
+    mut vertices: Vertices<'_>,
     indices: &mut Vec<u32>,
     keep_order: bool,
 ) -> Vec<Lod> {
+    let len = vertices.positions.len();
     // meshoptimizer builds with its assertions off in release, and reads past the vertices of an
     // index that is.
     assert!(
-        uvs.len() == positions.len()
-            && colors.len() == positions.len()
+        [
+            vertices.uvs.len(),
+            vertices.colors.len(),
+            vertices.normals.len(),
+            vertices.tangents.len()
+        ] == [len; 4]
             && indices.len().is_multiple_of(3)
-            && indices
-                .iter()
-                .all(|&index| (index as usize) < positions.len()),
+            && indices.iter().all(|&index| (index as usize) < len),
         "a primitive's vertex arrays are of one length, and its indices whole triangles within them"
     );
 
     // Its simplifier follows the mesh's topology, so identical vertices left apart would be seams
-    // it can't collapse across (the README's basic simplification). All three attributes are
-    // compared, bit for bit, as the shader reads them.
+    // it can't collapse across (the README's basic simplification). Every attribute is compared,
+    // bit for bit, as the shader reads them.
     let (count, remap) = generate_vertex_remap_multi(
-        positions.len(),
+        len,
         &[
-            VertexStream::new(positions.as_ptr()),
-            VertexStream::new(uvs.as_ptr()),
-            VertexStream::new(colors.as_ptr()),
+            VertexStream::new(vertices.positions.as_ptr()),
+            VertexStream::new(vertices.uvs.as_ptr()),
+            VertexStream::new(vertices.colors.as_ptr()),
+            VertexStream::new(vertices.normals.as_ptr()),
+            VertexStream::new(vertices.tangents.as_ptr()),
         ],
         Some(indices),
     );
-    apply_remap(positions, uvs, colors, indices, count, &remap);
+    *indices = remap_index_buffer(Some(indices.as_slice()), len, &remap);
+    vertices.remap(count, &remap);
 
     if !keep_order {
         optimize_vertex_cache_in_place(indices, count);
         // After the vertex cache, which it takes the output of.
-        optimize_overdraw_in_place_decoder(indices, positions, OVERDRAW_THRESHOLD);
+        optimize_overdraw_in_place_decoder(indices, vertices.positions, OVERDRAW_THRESHOLD);
     }
 
     let mut finer = Lod::new(0, indices.len(), 0.0);
@@ -147,7 +171,7 @@ pub(crate) fn optimize(
         let mut step = 0.0;
         let mut level = simplify_decoder(
             &indices[finer.range()],
-            positions,
+            vertices.positions,
             (triangles / 2).max(MIN_TRIANGLES) * 3,
             f32::MAX,
             SimplifyOptions::ErrorAbsolute | SimplifyOptions::Sparse,
@@ -179,25 +203,9 @@ pub(crate) fn optimize(
     let remap = optimize_vertex_fetch_remap(&by_use, count);
     // meshopt cuts the table to the vertices used, which are all of them, as level 0 uses each.
     assert_eq!(remap.len(), count, "level 0 uses every vertex");
-    apply_remap(positions, uvs, colors, indices, count, &remap);
+    *indices = remap_index_buffer(Some(indices.as_slice()), count, &remap);
+    vertices.remap(count, &remap);
     lods
-}
-
-/// Moves the vertex `i` of `positions`, `uvs` and `colors` to `remap[i]`, of `count` after the move,
-/// and rewrites `indices` to match.
-fn apply_remap(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    count: usize,
-    remap: &[u32],
-) {
-    let vertices = positions.len();
-    *indices = remap_index_buffer(Some(indices.as_slice()), vertices, remap);
-    *positions = remap_vertex_buffer(positions, count, remap);
-    *uvs = remap_vertex_buffer(uvs, count, remap);
-    *colors = remap_vertex_buffer(colors, count, remap);
 }
 
 #[cfg(test)]
@@ -210,35 +218,67 @@ mod tests {
         positions: Vec<[f32; 3]>,
         uvs: Vec<[f32; 2]>,
         colors: Vec<[f32; 4]>,
+        normals: Vec<[f32; 3]>,
+        tangents: Vec<[f32; 4]>,
         indices: Vec<u32>,
     }
 
     /// A vertex as the bits of its fields, so that vertices compare and sort whatever order a mesh
     /// holds them in.
-    type Key = [u32; 9];
+    type Key = [u32; 16];
+
+    /// A normal and a tangent facing +Z, as a vertex of a flat mesh has them.
+    const FACING: ([f32; 3], [f32; 4]) = ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
 
     impl Mesh {
+        /// A mesh of `positions`, `uvs` and `colors`, facing +Z, and `indices`.
+        fn facing(
+            positions: Vec<[f32; 3]>,
+            uvs: Vec<[f32; 2]>,
+            colors: Vec<[f32; 4]>,
+            indices: Vec<u32>,
+        ) -> Self {
+            let count = positions.len();
+            Self {
+                positions,
+                uvs,
+                colors,
+                normals: vec![FACING.0; count],
+                tangents: vec![FACING.1; count],
+                indices,
+            }
+        }
+
         fn optimize(&mut self) -> Vec<Lod> {
             self.optimize_keeping(false)
         }
 
         /// Optimizes it as `optimize` does, keeping its triangles' order if `keep_order`.
         fn optimize_keeping(&mut self, keep_order: bool) -> Vec<Lod> {
-            optimize(
-                &mut self.positions,
-                &mut self.uvs,
-                &mut self.colors,
-                &mut self.indices,
-                keep_order,
-            )
+            let vertices = Vertices {
+                positions: &mut self.positions,
+                uvs: &mut self.uvs,
+                colors: &mut self.colors,
+                normals: &mut self.normals,
+                tangents: &mut self.tangents,
+            };
+            optimize(vertices, &mut self.indices, keep_order)
         }
 
         fn key(&self, index: u32) -> Key {
             let i = index as usize;
-            let [x, y, z] = self.positions[i].map(f32::to_bits);
-            let [u, v] = self.uvs[i].map(f32::to_bits);
-            let [r, g, b, a] = self.colors[i].map(f32::to_bits);
-            [x, y, z, u, v, r, g, b, a]
+            let bits = [
+                &self.positions[i][..],
+                &self.uvs[i],
+                &self.colors[i],
+                &self.normals[i],
+                &self.tangents[i],
+            ];
+            let mut key = [0; 16];
+            for (key, value) in key.iter_mut().zip(bits.into_iter().flatten()) {
+                *key = value.to_bits();
+            }
+            key
         }
 
         /// The triangles of `indices`, each as its vertices' keys from its least on, in the order
@@ -278,12 +318,7 @@ mod tests {
                 indices.extend([a, b, c, c, b, d]);
             }
         }
-        Mesh {
-            positions,
-            uvs,
-            colors,
-            indices,
-        }
+        Mesh::facing(positions, uvs, colors, indices)
     }
 
     /// A cube whose six faces are each `n` by `n` quads with UVs of their own, `f` to `f + 0.5`
@@ -316,22 +351,15 @@ mod tests {
                 }
             }
         }
-        Mesh {
-            positions,
-            uvs,
-            colors,
-            indices,
-        }
+        Mesh::facing(positions, uvs, colors, indices)
     }
 
     /// `grid` but for its triangles whose first corner `weld` doesn't hold, which have vertices of
     /// their own and a UV of their own, so that each of their vertices is a seam.
     fn unwelded(grid: &Mesh, weld: impl Fn([f32; 3]) -> bool) -> Mesh {
         let mut mesh = Mesh {
-            positions: grid.positions.clone(),
-            uvs: grid.uvs.clone(),
-            colors: grid.colors.clone(),
             indices: vec![],
+            ..grid.clone()
         };
         for (triangle, corners) in grid.indices.as_chunks::<3>().0.iter().enumerate() {
             if weld(grid.positions[corners[0] as usize]) {
@@ -344,9 +372,57 @@ mod tests {
                 // Past the grid's own UVs, which are within 0 to 1.
                 mesh.uvs.push([2.0 + triangle as f32, 0.0]);
                 mesh.colors.push([1.0; 4]);
+                mesh.normals.push(FACING.0);
+                mesh.tangents.push(FACING.1);
             }
         }
         mesh
+    }
+
+    /// A grid whose quads each tilt their normals their own way, as a faceted mesh's hard edges
+    /// do: every vertex of one position stays apart from those of another normal, as a seam, which
+    /// no level collapses across.
+    #[test]
+    fn hard_edges_keep_their_normals_apart() {
+        let input = grid(16);
+        let mut faceted = Mesh {
+            indices: vec![],
+            positions: vec![],
+            uvs: vec![],
+            colors: vec![],
+            normals: vec![],
+            tangents: vec![],
+        };
+        for (triangle, corners) in input.indices.as_chunks::<3>().0.iter().enumerate() {
+            // Each quad's two triangles share a normal of their own.
+            let normal = [(triangle / 2 % 3) as f32, 0.0, 1.0];
+            for &corner in corners {
+                let i = corner as usize;
+                faceted.indices.push(faceted.positions.len() as u32);
+                faceted.positions.push(input.positions[i]);
+                faceted.uvs.push(input.uvs[i]);
+                faceted.colors.push(input.colors[i]);
+                faceted.normals.push(normal);
+                faceted.tangents.push(FACING.1);
+            }
+        }
+        let triangles = faceted.triangles(&faceted.indices);
+        let lods = faceted.optimize();
+        check("faceted by normals", &faceted, &lods);
+        assert_eq!(
+            faceted.triangles(&faceted.indices[lods[0].range()]),
+            triangles
+        );
+        for lod in &lods {
+            for triangle in faceted.indices[lod.range()].as_chunks::<3>().0 {
+                let normal = |i: u32| faceted.normals[i as usize];
+                assert!(
+                    normal(triangle[0]) == normal(triangle[1])
+                        && normal(triangle[1]) == normal(triangle[2]),
+                    "{lod:?} has a triangle across a hard edge"
+                );
+            }
+        }
     }
 
     /// Checks what holds of any output: the arrays of one length; the levels' indices one after
@@ -356,8 +432,13 @@ mod tests {
     /// errors finite, 0 for level 0 and not falling.
     fn check(name: &str, mesh: &Mesh, lods: &[Lod]) {
         let vertices = mesh.positions.len();
-        assert_eq!(mesh.uvs.len(), vertices, "{name}");
-        assert_eq!(mesh.colors.len(), vertices, "{name}");
+        let others = [
+            mesh.uvs.len(),
+            mesh.colors.len(),
+            mesh.normals.len(),
+            mesh.tangents.len(),
+        ];
+        assert_eq!(others, [vertices; 4], "{name}");
         assert!(
             mesh.indices
                 .iter()
@@ -448,10 +529,10 @@ mod tests {
     /// they were, as vertices' attributes.
     #[test]
     fn identical_vertices_merge_and_unused_ones_go() {
-        let mut mesh = Mesh {
-            // A square of two triangles, whose corners 0 and 2 are held twice, and a vertex that
-            // no triangle uses.
-            positions: vec![
+        // A square of two triangles, whose corners 0 and 2 are held twice, and a vertex that no
+        // triangle uses.
+        let mut mesh = Mesh::facing(
+            vec![
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
                 [1.0, 1.0, 0.0],
@@ -460,7 +541,7 @@ mod tests {
                 [1.0, 1.0, 0.0],
                 [5.0, 5.0, 5.0],
             ],
-            uvs: vec![
+            vec![
                 [0.0, 0.0],
                 [1.0, 0.0],
                 [1.0, 1.0],
@@ -469,9 +550,9 @@ mod tests {
                 [1.0, 1.0],
                 [9.0, 9.0],
             ],
-            colors: vec![[1.0; 4]; 7],
-            indices: vec![0, 1, 2, 4, 5, 3],
-        };
+            vec![[1.0; 4]; 7],
+            vec![0, 1, 2, 4, 5, 3],
+        );
         let input = mesh.triangles(&mesh.indices);
         let lods = mesh.optimize();
         check("square", &mesh, &lods);
@@ -505,12 +586,12 @@ mod tests {
 
     #[test]
     fn a_triangle_has_one_level() {
-        let mut mesh = Mesh {
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-            colors: vec![[1.0, 0.5, 0.25, 1.0]; 3],
-            indices: vec![2, 1, 0],
-        };
+        let mut mesh = Mesh::facing(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            vec![[1.0, 0.5, 0.25, 1.0]; 3],
+            vec![2, 1, 0],
+        );
         let input = mesh.triangles(&mesh.indices);
         let lods = mesh.optimize();
         check("triangle", &mesh, &lods);
@@ -591,6 +672,8 @@ mod tests {
                 bits(&mesh.positions.concat()),
                 bits(&mesh.uvs.concat()),
                 bits(&mesh.colors.concat()),
+                bits(&mesh.normals.concat()),
+                bits(&mesh.tangents.concat()),
             )
         };
         assert!(run() == run());

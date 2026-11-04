@@ -457,8 +457,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   the files it names, each primitive's triangles optimized by meshoptimizer for the GPU's vertex
   cache, overdraw and fetches, but those of a material that blends, which cover each other in
   their order and keep it, with levels of detail it simplified, each about half the triangles
-  of the one before, and each image compressed to BC7 with the full chain of mip levels a run makes
-  for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels; and the
+  of the one before, and each image compressed as what its materials sample it as, BC7 of colors
+  or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
+  makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels; and the
   rest as they are, sounds and music, scenes and other RON, and scripts. It leaves out the
   manifest, mods' folders, whose scripts a player installs, a module that shaders include rather
   than one that compiles alone, and what no run loads, as code and docs, by its extension, a
@@ -1229,8 +1230,43 @@ sunny day's light within 16-bit floats, and a world without an environment is ex
 default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and unlit materials,
 draws its colors as they are. Every draw's shader can read the frame's data through an address, the
 last of its push constants: where the view sees from, the time, the simulation's as the world
-draws, which stops with it and draws alike in a replay, and the exposure. Fields are added at its
-end, so that games' shaders that read the fields before them keep to the contract.
+draws, which stops with it and draws alike in a replay, and the exposure; the frame's lights, how
+many and where; the address of the table of models' materials; and where shading sees from, the
+camera's position, or for an orthographic projection, which sees along one way, the way back
+toward it. Fields are added at its end, so that games' shaders that read the fields before them
+keep to the contract.
+
+A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
+describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
+entity draws, falling off with the square of the distance, eased to nothing at its range if it has
+one, as the extension recommends; and spot, a point light within a cone round its -Z, wholly within
+its inner angle and fading to nothing at its outer. Each frame hands the renderer every light, from
+where its entity draws and facing as it does, ancestors carrying it, as a camera sees from where its
+entity draws; and each lit fragment shades with each of them in turn, forward, so that its cost
+grows with the lights, until clustered lighting culls them. A model's node that KHR_lights_punctual
+gives a light has it as a component, which fits as the model's nodes do. Scenes save lights, and the
+Inspector and tools edit them, as any component.
+
+Models shade as glTF's metallic-roughness materials say, by Appendix B's BRDF, as Khronos's sample
+viewer has it: Lambert's diffuse and GGX's specular, with Smith's height-correlated visibility,
+Schlick's Fresnel and 0.04 reflected head-on by every dielectric, from a material's base color,
+metallic and roughness, each a factor that its texture multiplies, and its normal map. Light times
+the exposure, then the material's emission, as the view shows it rather than exposed, make the
+color, so that an emissive white shows as white under any light. Occlusion darkens only light from
+all around, which no frame has until image-based lighting, so it changes nothing yet. A material
+that KHR_materials_unlit makes unlit, and every material in a frame without lights, draws its base
+color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
+corners apart, as glTF says, but one whose material is unlit, which reads none; a lit material's
+normal map without tangents gets MikkTSpace's, as glTF asks, through `bevy_mikktspace`, its square
+roots and arccosines libm's, so that every platform makes the same, its vertices apart where their
+corners' tangents differ. A material's maps of data, metallic-roughness, occlusion and normals, are
+textures of data, sampled as stored, their levels averaging their values; one image sampled as
+colors by one texture and as data by another is the first's, the other left out, and a material's
+textures read one set of texture coordinates, the first's, others left out alike, as the model's
+`engine.model_ignored` lists them. Materials live in a table on the GPU, which a model's draw's
+parameters index: each written into it as it's added and again as it's replaced, in the frame's own
+commands before its passes, the table made again twice the size as it fills; a handle is never
+given out again, as a texture's isn't.
 
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, sampling them or
@@ -1345,7 +1381,9 @@ their places, which those it has no more keep for them; but in a run
 that's recorded or in a lockstep session, whose world changes only as the run it goes with changed
 it, a model takes its vertices, indices and images alone: its nodes and materials stay as they were
 until the run starts again (`asset.model_changed`), and a model of other numbers of primitives or
-images takes nothing. The engine adds its model shader for every alpha mode with a run's first
+images takes nothing. In any run, a model whose image holds something else now, as colors where it
+held a normal map, takes nothing (`asset.model_changed`), as a texture keeps what it holds, until
+the run starts again. The engine adds its model shader for every alpha mode with a run's first
 model, so that a material read again adds none. A font takes what it baked, its field's texels at
 any size, which its text is laid out by from that frame. A texture's or a font's stand-in takes its
 file's once the file comes, or the file of the asset whose ID it stands for, once one has it, but
@@ -1366,7 +1404,9 @@ alpha not multiplied into them, as images store them, whatever color profile or 
 holds, as glTF requires; it streams into GPU memory, as below, where it stays until it's removed,
 and shaders sample its colors decoded to linear. A run from a game's package reads it as the cooker
 compressed it instead, BC7 of those colors, which stays compressed in GPU memory, a quarter of
-RGBA8's size, and which the GPU decodes as shaders sample it. What the simulation reads of a texture
+RGBA8's size, and which the GPU decodes as shaders sample it; a model's maps of data are BC7 of
+their values, and its normal maps BC5 of their X and Y, which shaders make Z from, as they do of
+an uncompressed normal map's. What the simulation reads of a texture
 is its handle and its size, as a sprite sheet's cells are cut by it, so a run reads its file and its
 header on the main thread as a layer adds it, or as text names it, as [Project
 state](#project-state) says, which hands out the handle at once, and a file that's missing or isn't
@@ -1403,7 +1443,9 @@ and a frame that begins with two frames' copies still running there copying noth
 in flight stays bounded however fast frames come;
 otherwise in the frame's own commands, or from the CPU, drawing in the frame that copies its last
 part. Until then a texture's slot in the bindless set shows a stand-in, a white texel for colors and
-a texel of zeros for data, so that text draws nothing, and a mesh draws nothing; one replaced, as a
+for a surface's map, which leaves a material's factors as they are, a texel of zeros for data, so
+that text draws nothing, and a normal pointing straight out for a normal map, and a mesh draws
+nothing; one replaced, as a
 reload replaces it, draws what it had until what's new can draw. There's a bindless set for each
 frame in flight, so that a slot that changes, as a texture shows its own image or another, changes
 at once in the set of the frame being recorded and in the other as its next frame begins, once the
@@ -1624,7 +1666,7 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as development builds add them and as their files change, and by the cooker into a game's package, their SPIR-V checked against the shader contract |
-| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them; textures cooked to BC7 in KTX2, its levels supercompressed by zstd, by bc7enc_rdo's perceptual encoder through `ctt`, and read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
+| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`, MikkTSpace's tangents made for it through `bevy_mikktspace`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them; textures cooked in KTX2, its levels supercompressed by zstd, through `ctt`: colors and maps' values to BC7 by bc7enc_rdo, perceptual for colors alone, and normal maps to BC5 by Intel's ISPC Texture Compressor; read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 | Networking | Our own, over std's TCP and UDP sockets; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |

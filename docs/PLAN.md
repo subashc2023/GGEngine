@@ -104,24 +104,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 11, networking beyond lockstep** (2026-11-04)
 - **The render graph** (2026-11-04)
 - **HDR and tonemapping** (2026-11-04)
+- **Lights and PBR materials** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it. Its milestones after HDR and tonemapping, in
-order:
+**Phase 12, render graph and PBR**, as Next has it. Its milestones after lights and PBR materials,
+in order:
 
-- **Lights and PBR materials.** `Light` components, directional, point and spot, in glTF's units,
-  lux and candela, which glTF's `KHR_lights_punctual` brings too, saved in scenes and set in the
-  Inspector; models drawn by glTF's metallic-roughness, its base color, metallic-roughness, normal,
-  occlusion and emissive maps and factors, shaded forward by every light, with tangents made by
-  MikkTSpace where a primitive has none, as some of Sponza's haven't; textures of data, sampled as
-  stored, which the cooker compresses as BC5 for normals; and materials kept on the GPU, written as
-  they change. A world without lights draws its models unlit, as now. Reference images on lavapipe
-  of spheres across metallic and roughness.
 - **Image-based lighting.** An environment's sky, from an HDR equirectangular image (`.hdr`),
   prefiltered on the GPU by compute passes as it loads, into diffuse irradiance, specular levels by
-  roughness and the split sum's table, lights its world and shows behind it, reloads as its file
-  changes, and is cooked as BC6H.
+  roughness and the split sum's table, lights its world, materials' occlusion maps darkening it,
+  and shows behind it, reloads as its file changes, and is cooked as BC6H.
 - **Cascaded shadow maps.** The directional light's shadows, in four cascades fitted to the view,
   steadied against shimmering, with depth bias and filtered edges, the cascades the graph's own.
 - **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky: Khronos
@@ -190,7 +183,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Symbols for a shipped game's crashes: the shipping profile keeps release's debug info, none, and no PDB or dSYM ships beside the game; a panic names its functions, by the symbols the executable keeps | A shipped game's crash needs symbolicating |
 | Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
 | ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
-| BC6H, for textures of high dynamic range: Phase 10 cooks BC7 alone | A game's textures hold HDR, as skies and lights' do in Phase 12 |
+| BC6H, for textures of high dynamic range: the cooker cooks BC7 and BC5 alone | A game's textures hold HDR, as skies and lights' do in Phase 12 |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`) | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
@@ -256,8 +249,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Post-processing past tonemapping, as bloom and color grading by a lookup table | A game's look needs it |
 | The view's size and the frame's data for a shader that takes no parameters, whose push constants end before them, as [`Shaders::add`](../crates/gg-renderer/src/shader/mod.rs) says: such a shader takes parameters it doesn't read | A game's shader needs them without parameters |
 | The frame's time as more than an `f32` of seconds, which steps by about 8 ms once a run has simulated a day | A game animates by the time through runs that long |
-| Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 12, with materials |
-| Games' textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB, as they read fonts' fields: `Context::add_texture` adds color alone | Phase 12, with PBR's maps |
+| Games' own shaders' parameters in a table on the GPU, as models' materials are, written when they change rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | A game draws many instances of its own shader whose parameters seldom change, or needs more than 64 bytes of them |
+| Games' own textures of data rather than color, such as their shaders' normal maps, which shaders read as stored: `Context::add_texture` adds color alone, and the cooker would need to know which hold data, as from their ID files; models' maps are data | A game's own shader samples data |
+| Removing a model's materials from the table: a removed model's stay, 92 bytes each, as their handles are never given out again | A game adds and removes many models as it plays, as levels streaming in and out do |
+| Specular antialiasing of normal maps' smaller levels, widening roughness by how much their averaged normals shortened (Toksvig): shading makes each normal whole again | Highlights shimmer on a normal-mapped surface seen from afar |
+| Emission in physical units, exposed as light is: an emissive color shows as it is under any exposure, KHR_materials_emissive_strength scaling it | A game's emissive surfaces must keep their brightness against its lights as its exposure changes |
+| A model's image that holds something else as its file is read again, as colors where it held a normal map, taking a texture of its own: the model takes nothing until the run starts again (`asset.model_changed`) | Someone retargets a model's images while its game runs |
+| The editor drawing lights in its view, as icons and spots' cones | Someone places lights by eye |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |
@@ -288,7 +286,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
-| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12 |
+| glTF that `Context::add_model` refuses or ignores, as it lists: skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, a material's textures that read a second set of texture coordinates, as occlusion baked for a lightmap does, an image sampled as both colors and data, material extensions past unlit and emission's strength (texture transforms, clearcoat, transmission, specular, sheen and the rest), quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |
@@ -396,7 +394,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pruning the small parts a mesh's coarser levels could drop: meshoptimizer's Prune, without an error limit, drops whole parts that should stay, so the cooker doesn't prune | A model of many small parts keeps too many triangles far away |
 | Locking the borders a node's primitives share as they simplify, so that their coarser levels meet: each simplifies apart, so their seams may open by as much as the pixel each level's error allows | A model shows gaps between its parts |
 | Compressing a package's meshes, by meshoptimizer's vertex and index codecs and zstd: a cooked model holds its vertices and indices as they are, its images alone supercompressed | A package's size matters, as for a download |
-| Choosing a texture's compression for each texture, as RGBA8 for pixel art BC7 changes, and BC4 or BC5 for data: every texture cooks to BC7, by bc7enc_rdo at its default effort | A game's art suffers, or Phase 12's maps |
+| Choosing a texture's compression for each texture, as RGBA8 for pixel art BC7 changes, and BC4 for data of one channel: games' textures cook to BC7, by bc7enc_rdo at its default effort, and models' maps to BC7 or BC5 by what they hold | A game's art suffers |
 | A texture that's both a layer's and a model's image held once: a cooked model holds its images, with their chains of levels, and the package the files layers load apart, of one level, so a PNG that's both is held twice | A package's size matters |
 | Compressing textures on several threads: the cooker compresses one image at a time, as ctt does without rayon, which deny.toml keeps to gg-engine | Cooking takes long enough to matter |
 | Cooking to the same bytes on every OS and architecture, as on one machine: bc7enc_rdo's ISPC picks its instruction set as it runs, and each platform's compiler builds meshoptimizer's C++ | Packages' bytes are compared across machines, as a build cache would |

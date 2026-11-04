@@ -1,14 +1,15 @@
 //! Images that layers load as textures, and models' images: PNGs and JPEGs, read as far as their
 //! headers as they're added, which give their sizes, and decoded to the RGBA8 that the renderer
 //! takes apart from that, as the loader decodes them off the main thread; and in a game's package,
-//! BC7 in KTX2, as the cooker compressed them, read and taken out of its supercompression alike.
+//! BC7 and BC5 in KTX2, as the cooker compressed them, read and taken out of its supercompression
+//! alike.
 
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use gg_core::{Error, Result};
-use gg_renderer::{MAX_TEXTURE_SIZE, Mipmaps, Texels, mip_sizes};
+use gg_renderer::{MAX_TEXTURE_SIZE, Map, Texels, mip_sizes};
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::errors::DecodeErrors;
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -36,31 +37,109 @@ pub struct Image {
 pub enum Format {
     /// Rows of RGBA8, tightly packed, top row first, of one level, as a PNG or a JPEG decodes.
     Rgba8,
-    /// BC7 blocks, as a game's package holds a texture, of its first level alone or, if
-    /// `mipmapped`, of each level of its full chain, which the cooker made, as [`Texels::Bc7`]
-    /// takes them.
-    Bc7 { mipmapped: bool },
+    /// Blocks of 4 by 4 pixels, 16 bytes each, compressed as `compressed` says, as a game's package
+    /// holds a texture, of its first level alone or, if `mipmapped`, of each level of its full
+    /// chain, which the cooker made, as [`Texels::Bc7`] takes them.
+    Bc {
+        compressed: Compressed,
+        mipmapped: bool,
+    },
     /// A PNG's file, whose header read, which decodes to RGBA8.
     Png,
     /// A JPEG's file, whose headers read and which reaches its end, which decodes to RGBA8.
     Jpeg,
-    /// A KTX2 file as the cooker writes one, whose header and levels' lengths read, of BC7 of its
-    /// first level alone or, if `mipmapped`, of its full chain, each level supercompressed by zstd
-    /// if `zstd`, which decodes to its levels' blocks.
-    Ktx2 { mipmapped: bool, zstd: bool },
+    /// A KTX2 file as the cooker writes one, whose header and levels' lengths read, of blocks
+    /// compressed as `compressed` says, of its first level alone or, if `mipmapped`, of its full
+    /// chain, each level supercompressed by zstd if `zstd`, which decodes to its levels' blocks.
+    Ktx2 {
+        compressed: Compressed,
+        mipmapped: bool,
+        zstd: bool,
+    },
 }
 
-impl Image {
-    /// What a texture of it holds: its colors, whose smaller levels a frame makes as `mipmaps`
-    /// says, or the levels it was cooked with.
-    pub(crate) fn texels(&self, mipmaps: Mipmaps) -> Texels {
-        match self.format {
-            Format::Rgba8 | Format::Png | Format::Jpeg => Texels::Color(mipmaps),
-            Format::Bc7 { mipmapped } | Format::Ktx2 { mipmapped, .. } => Texels::Bc7 { mipmapped },
+/// How the cooker compressed an image, by what it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compressed {
+    /// As BC7, of colors, sRGB-encoded, as textures and models' base colors and emission are.
+    Bc7Srgb,
+    /// As BC7, of values as they're stored, as a model's metallic-roughness and occlusion maps
+    /// are.
+    Bc7Unorm,
+    /// As BC5, of a normal map's X and Y.
+    Bc5,
+}
+
+impl Compressed {
+    /// How the cooker compresses what `texels` hold: colors as BC7 of sRGB, a surface's map as BC7
+    /// of values, a normal map as BC5.
+    pub fn of(texels: Texels) -> Self {
+        match texels {
+            Texels::Map(Map::Surface)
+            | Texels::MapLevels(Map::Surface)
+            | Texels::CompressedMap {
+                map: Map::Surface, ..
+            } => Self::Bc7Unorm,
+            Texels::Map(Map::Normal)
+            | Texels::MapLevels(Map::Normal)
+            | Texels::CompressedMap {
+                map: Map::Normal, ..
+            } => Self::Bc5,
+            Texels::Color(_) | Texels::ColorLevels | Texels::Data | Texels::Bc7 { .. } => {
+                Self::Bc7Srgb
+            }
         }
     }
 
-    /// How many bytes its pixels take once they're decoded: RGBA8 of its size, or each level's BC7
+    /// The KTX2 format of it.
+    pub(crate) fn ktx2(self) -> ktx2::Format {
+        match self {
+            Self::Bc7Srgb => ktx2::Format::BC7_SRGB_BLOCK,
+            Self::Bc7Unorm => ktx2::Format::BC7_UNORM_BLOCK,
+            Self::Bc5 => ktx2::Format::BC5_UNORM_BLOCK,
+        }
+    }
+}
+
+impl Image {
+    /// What a texture of it holds, as `texels`, a [`Texels::Color`] or a [`Texels::Map`], say it
+    /// does: those, whose smaller levels a frame makes, of an image that's RGBA8 or decodes to it;
+    /// or the levels it was cooked with, as it's compressed.
+    pub(crate) fn texels(&self, texels: Texels) -> Texels {
+        let (compressed, mipmapped) = match self.format {
+            Format::Rgba8 | Format::Png | Format::Jpeg => return texels,
+            Format::Bc {
+                compressed,
+                mipmapped,
+            }
+            | Format::Ktx2 {
+                compressed,
+                mipmapped,
+                ..
+            } => (compressed, mipmapped),
+        };
+        match compressed {
+            Compressed::Bc7Srgb => Texels::Bc7 { mipmapped },
+            Compressed::Bc7Unorm => Texels::CompressedMap {
+                map: Map::Surface,
+                mipmapped,
+            },
+            Compressed::Bc5 => Texels::CompressedMap {
+                map: Map::Normal,
+                mipmapped,
+            },
+        }
+    }
+
+    /// How it's compressed, if it is.
+    pub(crate) fn compressed(&self) -> Option<Compressed> {
+        match self.format {
+            Format::Rgba8 | Format::Png | Format::Jpeg => None,
+            Format::Bc { compressed, .. } | Format::Ktx2 { compressed, .. } => Some(compressed),
+        }
+    }
+
+    /// How many bytes its pixels take once they're decoded: RGBA8 of its size, or each level's
     /// blocks, as reading a model counts what it will hold.
     pub(crate) fn decoded_len(&self) -> usize {
         match self.format {
@@ -68,7 +147,7 @@ impl Image {
                 let [width, height] = self.size.map(|side| side as usize);
                 width * height * 4
             }
-            Format::Bc7 { mipmapped } | Format::Ktx2 { mipmapped, .. } => {
+            Format::Bc { mipmapped, .. } | Format::Ktx2 { mipmapped, .. } => {
                 let levels = if mipmapped { usize::MAX } else { 1 };
                 let [width, height] = self.size;
                 mip_sizes(width, height).take(levels).map(blocks).sum()
@@ -84,7 +163,7 @@ impl Image {
     /// corrupt past its header, and for one that decodes to another size than its header said.
     pub(crate) fn decoded(self) -> Result<Image, String> {
         let decode: fn(&[u8]) -> Result<Image, String> = match self.format {
-            Format::Rgba8 | Format::Bc7 { .. } => return Ok(self),
+            Format::Rgba8 | Format::Bc { .. } => return Ok(self),
             Format::Png => decode_png,
             Format::Jpeg => decode_jpeg,
             Format::Ktx2 { .. } => decode_ktx2_levels,
@@ -103,7 +182,8 @@ impl Image {
     }
 }
 
-/// A BC7 level's blocks of 4 by 4 texels, 16 bytes each, which cover its edges, in bytes.
+/// A level's blocks of 4 by 4 texels, 16 bytes each, as BC7's and BC5's are, which cover its edges,
+/// in bytes.
 fn blocks([width, height]: [u32; 2]) -> usize {
     (width.div_ceil(4) as usize) * (height.div_ceil(4) as usize) * 16
 }
@@ -114,7 +194,7 @@ fn blocks([width, height]: [u32; 2]) -> usize {
 ///
 /// Fails with `engine.bad_texture` if the file can't be read or isn't a regular file, or doesn't
 /// read as either; or if the package hasn't it as a texture, or holds one that doesn't read as
-/// the cooker writes them.
+/// the cooker writes them, of colors.
 pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image> {
     let zone = gg_core::zone!();
     zone.text(path.display());
@@ -128,7 +208,10 @@ pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image
     let bytes = (files.read_as(path, Kind::Texture, MAX_FILE + 1))
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if files.packaged().is_some() {
-        let read = read_ktx2(bytes);
+        let read = read_ktx2(bytes).and_then(|image| match image.compressed() {
+            Some(Compressed::Bc7Srgb) => Ok(image),
+            other => Err(format!("it holds {other:?}, where a texture holds colors")),
+        });
         return read.map_err(|problem| bad(format!("doesn't read as a cooked texture: {problem}")));
     }
     read(bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
@@ -140,7 +223,7 @@ pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image
 /// Fails with `engine.bad_texture`, naming the texture and its file, if it doesn't decode.
 pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Image> {
     let what = match image.format {
-        Format::Ktx2 { .. } | Format::Bc7 { .. } => "doesn't read as a cooked texture",
+        Format::Ktx2 { .. } | Format::Bc { .. } => "doesn't read as a cooked texture",
         Format::Png | Format::Jpeg | Format::Rgba8 => "doesn't decode as a PNG or a JPEG",
     };
     image.decoded().map_err(|problem| {
@@ -150,8 +233,8 @@ pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Im
 }
 
 /// Reads a texture as the cooker writes it, into a game's package or a model it cooked, its header
-/// and its levels' lengths, then takes its levels out, as a run's loader does: KTX2 holding BC7 of
-/// sRGB-encoded colors, of a 2D image of one level or of the full chain of levels [`mip_sizes`]
+/// and its levels' lengths, then takes its levels out, as a run's loader does: KTX2 holding what
+/// [`Compressed`] says, of a 2D image of one level or of the full chain of levels [`mip_sizes`]
 /// gives, each level as it is or supercompressed by zstd. The error says what's wrong with it.
 pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
     read_ktx2(bytes.to_vec())?.decoded()
@@ -159,7 +242,7 @@ pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
 
 /// Reads a texture as the cooker writes it, as [`decode_ktx2`] says, as far as its header and its
 /// levels' lengths, keeping `bytes` for [`Image::decoded`] to take its levels out of: KTX2 holding
-/// BC7 of sRGB-encoded colors, of a 2D image of one level or of the full chain of levels
+/// what [`Compressed`] says, of a 2D image of one level or of the full chain of levels
 /// [`mip_sizes`] gives, each level as it is or supercompressed by zstd. The error says what's
 /// wrong with it.
 ///
@@ -175,9 +258,15 @@ pub(crate) fn read_ktx2(bytes: Vec<u8>) -> Result<Image, String> {
         Err(_) => return Err("its reader panicked on it".to_owned()),
     };
     let header = reader.header();
-    if header.format != Some(ktx2::Format::BC7_SRGB_BLOCK) {
-        return Err(format!("it holds {:?}, not BC7 of sRGB", header.format));
-    }
+    let compressed = [Compressed::Bc7Srgb, Compressed::Bc7Unorm, Compressed::Bc5]
+        .into_iter()
+        .find(|compressed| header.format == Some(compressed.ktx2()));
+    let Some(compressed) = compressed else {
+        return Err(format!(
+            "it holds {:?}, not BC7 of sRGB or of values, or BC5",
+            header.format
+        ));
+    };
     if header.pixel_depth != 0 || header.layer_count != 0 || header.face_count != 1 {
         return Err("it isn't one 2D image".to_owned());
     }
@@ -217,7 +306,11 @@ pub(crate) fn read_ktx2(bytes: Vec<u8>) -> Result<Image, String> {
     Ok(Image {
         size,
         pixels: bytes,
-        format: Format::Ktx2 { mipmapped, zstd },
+        format: Format::Ktx2 {
+            compressed,
+            mipmapped,
+            zstd,
+        },
     })
 }
 
@@ -227,6 +320,11 @@ fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
     let reader = ktx2::Reader::new(bytes).map_err(|error| format!("it isn't KTX2: {error}"))?;
     let header = reader.header();
     let size = [header.pixel_width, header.pixel_height];
+    // Of what `read_ktx2` read it to hold.
+    let compressed = [Compressed::Bc7Unorm, Compressed::Bc5]
+        .into_iter()
+        .find(|compressed| header.format == Some(compressed.ktx2()))
+        .unwrap_or(Compressed::Bc7Srgb);
     // Of one level or the full chain, as read; and of zstd alone, if supercompressed at all.
     let (mipmapped, zstd) = (
         header.level_count > 1,
@@ -253,7 +351,10 @@ fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
     Ok(Image {
         size,
         pixels,
-        format: Format::Bc7 { mipmapped },
+        format: Format::Bc {
+            compressed,
+            mipmapped,
+        },
     })
 }
 
@@ -458,6 +559,8 @@ fn reaches_its_end(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use gg_renderer::Mipmaps;
+
     use super::*;
 
     /// A PNG or a JPEG read and decoded, as a texture's image is by the time it's drawn.
@@ -544,6 +647,9 @@ pub(crate) mod tests {
         file
     }
 
+    /// A cooked texture reads as its levels' blocks, of what it holds: colors, sRGB-encoded, as
+    /// BC7, which a texture of colors takes as it's cooked; and a model's maps, values as BC7 and
+    /// a normal map as BC5, which a texture of maps takes, as the kind it holds.
     #[test]
     fn a_cooked_texture_reads_as_its_levels_blocks() {
         const BC7_SRGB_BLOCK: ktx2::Format = ktx2::Format::BC7_SRGB_BLOCK;
@@ -551,26 +657,49 @@ pub(crate) mod tests {
         let blocks = |count: usize, byte: u8| vec![byte; count * 16];
         let one = ktx2(BC7_SRGB_BLOCK, [5, 5], &[blocks(4, 1)], true);
         let image = decode_ktx2(&one).expect("a level");
-        assert_eq!(
-            (image.size, image.format),
-            ([5, 5], Format::Bc7 { mipmapped: false })
-        );
+        let colors = |mipmapped| Format::Bc {
+            compressed: Compressed::Bc7Srgb,
+            mipmapped,
+        };
+        assert_eq!((image.size, image.format), ([5, 5], colors(false)));
         assert_eq!(image.pixels, blocks(4, 1));
-        assert_eq!(
-            image.texels(Mipmaps::AlphaWeighted),
-            Texels::Bc7 { mipmapped: false }
-        );
+        let weighted = Texels::Color(Mipmaps::AlphaWeighted);
+        assert_eq!(image.texels(weighted), Texels::Bc7 { mipmapped: false });
         let levels = [blocks(4, 1), blocks(1, 2), blocks(1, 3)];
         let chain = ktx2(BC7_SRGB_BLOCK, [5, 5], &levels, false);
         let image = decode_ktx2(&chain).expect("its chain");
-        assert_eq!(image.format, Format::Bc7 { mipmapped: true });
+        assert_eq!(image.format, colors(true));
         assert_eq!(image.pixels, levels.concat());
+        for (format, compressed, map) in [
+            (
+                ktx2::Format::BC7_UNORM_BLOCK,
+                Compressed::Bc7Unorm,
+                Map::Surface,
+            ),
+            (ktx2::Format::BC5_UNORM_BLOCK, Compressed::Bc5, Map::Normal),
+        ] {
+            let image = decode_ktx2(&ktx2(format, [5, 5], &levels, true)).expect("a map's chain");
+            let format = Format::Bc {
+                compressed,
+                mipmapped: true,
+            };
+            assert_eq!(
+                (image.format, image.compressed()),
+                (format, Some(compressed))
+            );
+            let cooked = Texels::CompressedMap {
+                map,
+                mipmapped: true,
+            };
+            assert_eq!(image.texels(Texels::Map(map)), cooked);
+            assert_eq!(Compressed::of(Texels::Map(map)), compressed);
+        }
     }
 
     #[test]
     fn a_cooked_texture_that_isnt_the_cookers_is_refused() {
         const BC7_SRGB_BLOCK: ktx2::Format = ktx2::Format::BC7_SRGB_BLOCK;
-        const BC7_UNORM_BLOCK: ktx2::Format = ktx2::Format::BC7_UNORM_BLOCK;
+        const BC4_UNORM_BLOCK: ktx2::Format = ktx2::Format::BC4_UNORM_BLOCK;
         const R8G8B8A8_SRGB: ktx2::Format = ktx2::Format::R8G8B8A8_SRGB;
         let blocks = |count: usize| vec![0; count * 16];
         let mut short = ktx2(BC7_SRGB_BLOCK, [5, 5], &[blocks(3)], true);
@@ -587,8 +716,8 @@ pub(crate) mod tests {
             ("not KTX2", b"\x89PNG\r\n\x1a\n".to_vec()),
             ("RGBA8", ktx2(R8G8B8A8_SRGB, [1, 1], &[vec![0; 4]], false)),
             (
-                "BC7 of linear colors",
-                ktx2(BC7_UNORM_BLOCK, [4, 4], &[blocks(1)], false),
+                "BC4, which the cooker doesn't write",
+                ktx2(BC4_UNORM_BLOCK, [4, 4], &[blocks(1)], false),
             ),
             (
                 "two of three levels",
@@ -626,7 +755,9 @@ pub(crate) mod tests {
         let from_png = read(png.clone()).expect("its header");
         let averaged = Texels::Color(Mipmaps::Averaged);
         assert_eq!((from_png.size, from_png.format), ([2, 1], Format::Png));
-        assert_eq!(from_png.texels(Mipmaps::Averaged), averaged);
+        assert_eq!(from_png.texels(averaged), averaged);
+        let normals = Texels::Map(Map::Normal);
+        assert_eq!(from_png.texels(normals), normals, "as the model samples it");
         assert_eq!((&from_png.pixels, from_png.decoded_len()), (&png, 8));
         let decoded = from_png.decoded().expect("its pixels");
         assert_eq!(decoded.format, Format::Rgba8);
@@ -647,15 +778,20 @@ pub(crate) mod tests {
         let file = ktx2(BC7_SRGB_BLOCK, [5, 5], &levels, true);
         let cooked = read_ktx2(file.clone()).expect("its header");
         let format = Format::Ktx2 {
+            compressed: Compressed::Bc7Srgb,
             mipmapped: true,
             zstd: true,
         };
         assert_eq!((cooked.size, cooked.format), ([5, 5], format));
         let chain = Texels::Bc7 { mipmapped: true };
-        assert_eq!(cooked.texels(Mipmaps::None), chain);
+        assert_eq!(cooked.texels(Texels::Color(Mipmaps::None)), chain);
         assert_eq!((&cooked.pixels, cooked.decoded_len()), (&file, 96));
         let decoded = cooked.decoded().expect("its levels");
-        assert_eq!(decoded.format, Format::Bc7 { mipmapped: true });
+        let blocks = Format::Bc {
+            compressed: Compressed::Bc7Srgb,
+            mipmapped: true,
+        };
+        assert_eq!(decoded.format, blocks);
         assert_eq!(decoded.pixels, levels.concat());
 
         let cut = read(png[..png.len() - 20].to_vec()).expect("its header, whole");

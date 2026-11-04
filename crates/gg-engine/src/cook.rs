@@ -7,10 +7,10 @@
 use std::path::Path;
 
 use gg_core::Result;
-pub use gg_renderer::{Lod, Mipmaps, mip_sizes};
+pub use gg_renderer::{Lod, Map, Mipmaps, Texels, mip_sizes};
 
 pub use crate::gltf::{Imported, Primitive};
-pub use crate::image::{Format, Image, decode_ktx2};
+pub use crate::image::{Compressed, Format, Image, decode_ktx2};
 use crate::package::Files;
 pub use crate::package::{Kind, Writer};
 
@@ -56,23 +56,25 @@ pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
     Ok(imported)
 }
 
-/// How image `image` of `model` gets its mip levels, as a run gives them: weighted by alpha where a
-/// masked or blended material samples it, and plainly averaged where opaque ones alone do.
-pub fn mipmaps(model: &Imported, image: usize) -> Mipmaps {
-    crate::model::mipmaps(&model.primitives, image)
+/// What image `image` of `model` holds, and so how it gets its mip levels and how it's compressed,
+/// as a run gives them: a map of data, its levels averaging its values; or colors, weighted by alpha
+/// where a masked or blended material samples them, and plainly averaged where opaque ones alone
+/// do.
+pub fn texels(model: &Imported, image: usize) -> Texels {
+    crate::model::texels(&model.primitives, image)
 }
 
-/// `image`'s RGBA8, then the rest of its full chain of mip levels, smallest last, made as
-/// `mipmaps` says, as a frame makes a texture's that the cooker hasn't made; its first level alone
-/// for [`Mipmaps::None`].
+/// `image`'s RGBA8, then the rest of its full chain of mip levels, smallest last, made as `texels`
+/// say, as a frame makes a texture's that the cooker hasn't made; its first level alone for
+/// [`Mipmaps::None`].
 ///
 /// # Panics
 ///
 /// If `image` isn't RGBA8.
-pub fn levels(image: &Image, mipmaps: Mipmaps) -> Vec<u8> {
+pub fn levels(image: &Image, texels: Texels) -> Vec<u8> {
     assert_eq!(image.format, Format::Rgba8, "levels are made from RGBA8");
     let mut pixels = image.pixels.clone();
-    gg_renderer::add_mipmaps(&mut pixels, image.size, mipmaps);
+    gg_renderer::add_levels(&mut pixels, image.size, texels);
     pixels
 }
 

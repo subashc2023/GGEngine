@@ -48,8 +48,9 @@ pub enum Mipmaps {
 /// What a texture's texels are: colors, sRGB-encoded as images store them, which shaders sample
 /// decoded to linear, with smaller mip levels as [`Mipmaps`] says, which a `Mipmaps` stands for, or
 /// with them made already; data, such as a font's distance field, which shaders read as stored,
-/// each channel a byte from 0 to 1, with one level; or colors compressed as BC7, as a game's
-/// package holds its textures.
+/// each channel a byte from 0 to 1, with one level; colors compressed as BC7, as a game's package
+/// holds its textures; or a material's map of data, as [`Map`] says, with its full chain of levels,
+/// as stored or compressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Texels {
     Color(Mipmaps),
@@ -67,6 +68,44 @@ pub enum Texels {
     Bc7 {
         mipmapped: bool,
     },
+    /// A material's map, which shaders read as stored, each channel a byte from 0 to 1: its first
+    /// level's rows of RGBA8, from which a frame makes the rest of the full chain, each level
+    /// averaging the one before's values by area, as [`add_map_mipmaps`] makes them.
+    Map(Map),
+    /// A material's map as [`Map`](Self::Map)'s is, its full chain made already, each level after
+    /// the one before, as the engine's loader makes them off the main thread: a frame makes none.
+    MapLevels(Map),
+    /// A material's map compressed as the cooker compresses each kind, its blocks laid out as
+    /// [`Bc7`](Self::Bc7)'s are: BC7 for a [`Map::Surface`], BC5 for a [`Map::Normal`]'s X and
+    /// Y. Its first level alone, or, if `mipmapped`, its full chain: a frame makes none.
+    CompressedMap {
+        map: Map,
+        mipmapped: bool,
+    },
+}
+
+/// What a material's map holds, which says what shows in its place until its image is there, and
+/// how the cooker compresses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Map {
+    /// Values a channel each, as glTF's metallic-roughness map holds roughness in green and metallic
+    /// in blue, and its occlusion map occlusion in red: white stands in, which leaves a material's
+    /// factors as they are. Compressed as BC7.
+    Surface,
+    /// A normal map: the X and Y of the surface's normal in its tangent space in red and green,
+    /// from 0 to 1 for -1 to 1, from which shaders make Z, ignoring blue; one that points straight
+    /// out stands in. Compressed as BC5, which holds the two alone.
+    Normal,
+}
+
+/// What a texture's texels stand for, which its replacements keep to, and the stand-in its slot
+/// shows until its image is there: white for colors and for a surface's map, zeros for data,
+/// and a normal pointing straight out for a normal map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Color,
+    Data,
+    Map(Map),
 }
 
 impl From<Mipmaps> for Texels {
@@ -76,12 +115,24 @@ impl From<Mipmaps> for Texels {
 }
 
 impl Texels {
-    /// The levels a frame makes from the first: none for data, nor for colors or BC7 that come with
-    /// them.
-    pub(crate) fn mipmaps(self) -> Mipmaps {
+    /// What its texels stand for.
+    pub(crate) fn kind(self) -> Kind {
         match self {
-            Self::Color(mipmaps) => mipmaps,
-            Self::ColorLevels | Self::Data | Self::Bc7 { .. } => Mipmaps::None,
+            Self::Color(_) | Self::ColorLevels | Self::Bc7 { .. } => Kind::Color,
+            Self::Data => Kind::Data,
+            Self::Map(map) | Self::MapLevels(map) | Self::CompressedMap { map, .. } => {
+                Kind::Map(map)
+            }
+        }
+    }
+
+    /// These texels once their levels are made from the first, as [`add_levels`] makes them:
+    /// colors' and maps' with their levels; others as they are, a frame making none.
+    pub fn with_levels(self) -> Self {
+        match self {
+            Self::Color(mipmaps) if mipmaps != Mipmaps::None => Self::ColorLevels,
+            Self::Map(map) => Self::MapLevels(map),
+            texels => texels,
         }
     }
 
@@ -90,9 +141,9 @@ impl Texels {
     pub(crate) fn mipmapped(self) -> bool {
         match self {
             Self::Color(mipmaps) => mipmaps != Mipmaps::None,
-            Self::ColorLevels => true,
+            Self::ColorLevels | Self::Map(_) | Self::MapLevels(_) => true,
             Self::Data => false,
-            Self::Bc7 { mipmapped } => mipmapped,
+            Self::Bc7 { mipmapped } | Self::CompressedMap { mipmapped, .. } => mipmapped,
         }
     }
 
@@ -100,19 +151,27 @@ impl Texels {
     pub(crate) fn format(self) -> TextureFormat {
         match self {
             Self::Color(_) | Self::ColorLevels => TextureFormat::Rgba8Srgb,
-            Self::Data => TextureFormat::Rgba8Unorm,
+            Self::Data | Self::Map(_) | Self::MapLevels(_) => TextureFormat::Rgba8Unorm,
             Self::Bc7 { .. } => TextureFormat::Bc7Srgb,
+            Self::CompressedMap {
+                map: Map::Surface, ..
+            } => TextureFormat::Bc7Unorm,
+            Self::CompressedMap {
+                map: Map::Normal, ..
+            } => TextureFormat::Bc5Unorm,
         }
     }
 
     /// How many bytes a texture `size` texels across and down takes of these: its first level's
-    /// RGBA8 for colors and data, from which a frame makes the rest, and every level's for colors
-    /// that come with them, and for BC7.
+    /// RGBA8 for colors, data and maps, from which a frame makes the rest, and every level's for
+    /// those that come with them, and for what's compressed.
     fn bytes(self, size: [u32; 2]) -> u64 {
         match self {
-            Self::Color(_) | Self::Data => TextureFormat::Rgba8Srgb.bytes(size, false),
-            Self::ColorLevels => TextureFormat::Rgba8Srgb.bytes(size, true),
-            Self::Bc7 { mipmapped } => TextureFormat::Bc7Srgb.bytes(size, mipmapped),
+            Self::Color(_) | Self::Data | Self::Map(_) => self.format().bytes(size, false),
+            Self::ColorLevels
+            | Self::MapLevels(_)
+            | Self::Bc7 { .. }
+            | Self::CompressedMap { .. } => self.format().bytes(size, self.mipmapped()),
         }
     }
 }
@@ -133,8 +192,8 @@ pub struct Textures {
 
 /// A texture handed out.
 struct Entry {
-    /// Whether its texels are data, which its replacements keep to.
-    data: bool,
+    /// What its texels stand for, which its replacements keep to.
+    kind: Kind,
     /// What it was reserved for, its name, size and texels, until its pixels come
     /// ([`Textures::fill`]).
     reserved: Option<(String, [u32; 2], Texels)>,
@@ -144,12 +203,11 @@ struct Entry {
 
 /// A change to a renderer's textures, which [`Uploads::take`](crate::Uploads::take) carries to it.
 pub(crate) enum Change {
-    /// A texture added: its slot, which shows a stand-in until an image is there, the one for
-    /// data if `data`.
+    /// A texture added: its slot, which shows the stand-in for its `kind` until an image is there.
     Reserved {
         index: u32,
         name: String,
-        data: bool,
+        kind: Kind,
     },
     /// An image for a texture's slot: its first, or one in place of the one it has.
     Image(Added),
@@ -171,7 +229,8 @@ impl Textures {
     /// colors, sRGB-encoded, and alpha not multiplied into them, which shaders sample decoded to
     /// linear, with smaller levels too if the [`Mipmaps`] it gives say so, made from it as frames
     /// stream it to the GPU, and how, or made already, after it, as [`Texels::ColorLevels`] says;
-    /// for data, read as stored; and for BC7, its levels' blocks instead, as [`Texels::Bc7`] says.
+    /// for data and maps, read as stored, a map's levels made likewise; and for what's compressed,
+    /// its levels' blocks instead, as [`Texels::Bc7`] says.
     /// It keeps a `Vec` of pixels as it is, and copies borrowed
     /// ones. Shaders sample it with texture coordinates from (0, 0) at its top left to (1, 1) at
     /// its bottom right; until frames have streamed it, they sample its stand-in. `name` names it
@@ -223,16 +282,16 @@ impl Textures {
                 ),
             ));
         }
-        let data = texels == Texels::Data;
+        let kind = texels.kind();
         self.entries.push(Entry {
-            data,
+            kind,
             reserved: Some((name.to_owned(), size, texels)),
             removed: false,
         });
         self.changes.push(Change::Reserved {
             index,
             name: name.to_owned(),
-            data,
+            kind,
         });
         Ok(Texture { index })
     }
@@ -291,8 +350,9 @@ impl Textures {
     /// # Panics
     ///
     /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them,
-    /// or `texels` are data where its texels are colors, or colors, compressed or not, where
-    /// they're data: a texture keeps the kind it was added as.
+    /// or `texels` stand for something else than its own, as data where its texels are colors,
+    /// compressed or not, or a normal map where they're a surface's: a texture keeps the kind it
+    /// was added as.
     pub fn replace<'a>(
         &mut self,
         name: &str,
@@ -306,9 +366,9 @@ impl Textures {
         };
         let texels = texels.into();
         assert_eq!(
-            texels == Texels::Data,
-            entry.data,
-            "texture {name:?} is replaced by texels of the other kind"
+            texels.kind(),
+            entry.kind,
+            "texture {name:?} is replaced by texels of another kind"
         );
         let pixels = pixels.into();
         check_pixels(name, size, &pixels, texels)?;
@@ -404,10 +464,26 @@ fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Re
     let bytes = texels.bytes(size);
     if pixels.len() as u64 != bytes {
         let of = match texels {
-            Texels::Color(_) | Texels::Data => "RGBA8",
-            Texels::ColorLevels => "RGBA8 in its levels",
-            Texels::Bc7 { mipmapped: false } => "BC7 blocks",
-            Texels::Bc7 { mipmapped: true } => "BC7 blocks in its levels",
+            Texels::Color(_) | Texels::Data | Texels::Map(_) => "RGBA8",
+            Texels::ColorLevels | Texels::MapLevels(_) => "RGBA8 in its levels",
+            Texels::Bc7 { mipmapped: false }
+            | Texels::CompressedMap {
+                map: Map::Surface,
+                mipmapped: false,
+            } => "BC7 blocks",
+            Texels::Bc7 { mipmapped: true }
+            | Texels::CompressedMap {
+                map: Map::Surface,
+                mipmapped: true,
+            } => "BC7 blocks in its levels",
+            Texels::CompressedMap {
+                map: Map::Normal,
+                mipmapped: false,
+            } => "BC5 blocks",
+            Texels::CompressedMap {
+                map: Map::Normal,
+                mipmapped: true,
+            } => "BC5 blocks in its levels",
         };
         return Err(bad_texture(
             name,
@@ -483,6 +559,54 @@ pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
         level = shrink(|i| level[i], from, to, weighted);
         append(pixels, &level);
         from = to;
+    }
+}
+
+/// Appends to `pixels`, the RGBA8 of a material's map `size` pixels across and down, the rest of
+/// its full chain of mip levels, smallest last: each level averages the one before by area, as
+/// [`add_mipmaps`] does, but each channel as it's stored, as shaders read a map, rather than
+/// decoded from sRGB, and its alpha with them alike. A normal map's levels average its X and Y,
+/// shortening the normal where those below differ, as it does a shader's that reads them across
+/// a level's texels; shaders make the normal whole again.
+#[doc(hidden)]
+pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
+    let _zone = gg_core::zone!();
+    let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
+        pixels.reserve(level.len() * 4);
+        for texel in level {
+            pixels.extend(texel.map(|value| (value * 255.0).round() as u8));
+        }
+    };
+    let mut sizes = mip_sizes(size[0], size[1]);
+    let first_size = sizes.next().expect("a chain has its first level");
+    let Some(mut from) = sizes.next() else {
+        return;
+    };
+    let first = pixels.as_chunks::<4>().0;
+    let texel = |i: usize| first[i].map(|byte| f32::from(byte) / 255.0);
+    let mut level = shrink(texel, first_size, from, false);
+    append(pixels, &level);
+    for to in sizes {
+        level = shrink(|i| level[i], from, to, false);
+        append(pixels, &level);
+        from = to;
+    }
+}
+
+/// Appends to `pixels`, the RGBA8 of a texture `size` pixels across and down, of `texels`, the rest
+/// of its levels that a frame would make: a color's as [`add_mipmaps`] makes them, a map's as
+/// [`add_map_mipmaps`] does, and none for what comes with its levels or has none, so that the
+/// pixels are then those of [`Texels::with_levels`].
+#[doc(hidden)]
+pub fn add_levels(pixels: &mut Vec<u8>, size: [u32; 2], texels: Texels) {
+    match texels {
+        Texels::Color(mipmaps) => add_mipmaps(pixels, size, mipmaps),
+        Texels::Map(_) => add_map_mipmaps(pixels, size),
+        Texels::ColorLevels
+        | Texels::Data
+        | Texels::Bc7 { .. }
+        | Texels::MapLevels(_)
+        | Texels::CompressedMap { .. } => {}
     }
 }
 
@@ -623,11 +747,11 @@ mod tests {
         assert_eq!(error.code(), "renderer.too_many_textures");
     }
 
-    /// The changes waiting to be taken: each texture's slot, by its index and whether its texels
-    /// are data; each image, by its texture's index, size and texels; and each removal.
+    /// The changes waiting to be taken: each texture's slot, by its index and what its texels
+    /// stand for; each image, by its texture's index, size and texels; and each removal.
     #[derive(Clone, Debug, PartialEq)]
     enum Waiting {
-        Slot(u32, bool),
+        Slot(u32, Kind),
         Image(u32, [u32; 2], Texels),
         Removed(u32),
     }
@@ -635,7 +759,7 @@ mod tests {
     fn waiting(textures: &Textures) -> Vec<Waiting> {
         (textures.changes.iter())
             .map(|change| match change {
-                Change::Reserved { index, data, .. } => Waiting::Slot(*index, *data),
+                Change::Reserved { index, kind, .. } => Waiting::Slot(*index, *kind),
                 Change::Image(added) => Waiting::Image(added.index, added.size, added.texels),
                 Change::Removed(index) => Waiting::Removed(*index),
             })
@@ -664,8 +788,8 @@ mod tests {
         replaced.expect("another image");
         let none = Texels::Color(Mipmaps::None);
         let averaged = Texels::Color(Mipmaps::Averaged);
-        let white = [Slot(0, false), Image(0, [1, 1], none)];
-        let added = [Slot(1, false), Image(1, [2, 1], averaged)];
+        let white = [Slot(0, Kind::Color), Image(0, [1, 1], none)];
+        let added = [Slot(1, Kind::Color), Image(1, [2, 1], averaged)];
         assert_eq!(waiting(&textures), [white, added].concat());
         // Once a frame has taken it, in place of the one the renderer has.
         textures.changes.clear();
@@ -684,7 +808,7 @@ mod tests {
         let field = field.expect("data");
         let replaced = textures.replace("field", field, [2, 1], &[1; 8], Texels::Data);
         replaced.expect("other data");
-        let data = [Slot(2, true), Image(2, [2, 1], Texels::Data)];
+        let data = [Slot(2, Kind::Data), Image(2, [2, 1], Texels::Data)];
         assert_eq!(
             waiting(&textures),
             [vec![Image(1, [1, 2], none)], data.into()].concat()
@@ -705,14 +829,14 @@ mod tests {
             .reserve("field", [2, 1], Texels::Data)
             .expect("a handle");
         assert_eq!(field.index, 1);
-        assert_eq!(waiting(&textures), [Slot(1, true)]);
+        assert_eq!(waiting(&textures), [Slot(1, Kind::Data)]);
         let error = textures.fill(field, &[0; 4]).expect_err("too few pixels");
         assert_eq!(error.code(), "renderer.bad_texture");
         assert!(error.to_string().contains("\"field\""), "{error}");
         textures.fill(field, &[0; 8]).expect("its pixels");
         assert_eq!(
             waiting(&textures),
-            [Slot(1, true), Image(1, [2, 1], Texels::Data)]
+            [Slot(1, Kind::Data), Image(1, [2, 1], Texels::Data)]
         );
         let error = textures.reserve("huge", [MAX_TEXTURE_SIZE + 1, 1], Mipmaps::None);
         assert_eq!(error.expect_err("too wide").code(), "renderer.bad_texture");
@@ -738,9 +862,9 @@ mod tests {
         assert_eq!((a.index, b.index), (2, 3));
         let none = Texels::Color(Mipmaps::None);
         let expected = [
-            Slot(2, false),
+            Slot(2, Kind::Color),
             Removed(2),
-            Slot(3, false),
+            Slot(3, Kind::Color),
             Image(3, [1, 1], none),
         ];
         assert_eq!(waiting(&textures), expected);
@@ -776,7 +900,10 @@ mod tests {
         let replaced = textures.replace("a", a, [1, 1], &[0; 4], Mipmaps::None);
         replaced.expect("another image");
         let none = Texels::Color(Mipmaps::None);
-        assert_eq!(waiting(&textures), [Slot(1, false), Image(1, [1, 1], none)]);
+        assert_eq!(
+            waiting(&textures),
+            [Slot(1, Kind::Color), Image(1, [1, 1], none)]
+        );
         let late = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = textures.fill(a, &[0; 20]);
         }));
@@ -818,12 +945,51 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "replaced by texels of the other kind")]
+    #[should_panic(expected = "replaced by texels of another kind")]
     fn a_texture_keeps_its_kind_of_texels() {
         let mut textures = Textures::default();
         let field = textures.add("field", [1, 1], &[0; 4], Texels::Data);
         let field = field.expect("data");
         let _ = textures.replace("field", field, [1, 1], &[0; 4], Mipmaps::None);
+    }
+
+    #[test]
+    #[should_panic(expected = "replaced by texels of another kind")]
+    fn a_normal_map_stays_a_normal_map() {
+        let mut textures = Textures::default();
+        let normals = textures.add("n", [1, 1], &[0; 4], Texels::Map(Map::Normal));
+        let normals = normals.expect("a normal map");
+        let surface = Texels::Map(Map::Surface);
+        let _ = textures.replace("n", normals, [1, 1], &[0; 4], surface);
+    }
+
+    /// A map's levels average its values as they're stored, where a color's average them decoded
+    /// from sRGB, so that a level halfway between 0 and 255 holds 128 rather than 188; and a map's
+    /// texels say, once made, that its levels are there.
+    #[test]
+    fn a_maps_levels_average_its_values_as_stored() {
+        let pixels = [0, 0, 0, 0, 255, 255, 255, 255];
+        let mut map = pixels.to_vec();
+        add_levels(&mut map, [2, 1], Texels::Map(Map::Normal));
+        assert_eq!(map.split_off(8), [128; 4]);
+        let color = levels(&pixels, [2, 1], Mipmaps::Averaged);
+        assert_eq!(color, [188, 188, 188, 128]);
+        assert_eq!(
+            Texels::Map(Map::Surface).with_levels(),
+            Texels::MapLevels(Map::Surface)
+        );
+        let surface = Texels::CompressedMap {
+            map: Map::Surface,
+            mipmapped: true,
+        };
+        assert_eq!(surface.with_levels(), surface);
+        assert_eq!(surface.format(), TextureFormat::Bc7Unorm);
+        let normals = Texels::CompressedMap {
+            map: Map::Normal,
+            mipmapped: false,
+        };
+        assert_eq!(normals.format(), TextureFormat::Bc5Unorm);
+        assert_eq!(normals.bytes([5, 5]), 4 * 16, "four blocks");
     }
 
     /// The levels after the first that `pixels`, `size` pixels across and down, gets.

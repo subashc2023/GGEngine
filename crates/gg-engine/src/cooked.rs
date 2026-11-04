@@ -1,24 +1,29 @@
 //! Cooked models: a model as the cooker writes it into a game's package, which a run from the
 //! package reads in place of its glTF file and the files that names. It holds what [`gltf::read`]
 //! makes of them, its primitives' triangles as the cooker optimized them, with their levels of
-//! detail, and its images compressed to BC7 in KTX2, with their mip
-//! levels, as [`read_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes
-//! levels for them, but takes the levels' blocks out of zstd, as the loader does.
+//! detail, and its images compressed in KTX2 as what each holds says, BC7 of colors or of values,
+//! or BC5 of a normal map, with their mip levels, as [`read_ktx2`] reads them, so that a run
+//! neither decodes PNGs and JPEGs nor makes levels for them, but takes the levels' blocks out of
+//! zstd, as the loader does.
 //!
 //! The format, every number little-endian, every count and length 32 bits, a string its length
 //! then its UTF-8:
 //!
 //! ```text
 //! ignored     a count, then each thing the model has that the engine ignores, as a string
-//! parts       a count, then each part's translation (3 f32s), rotation (4) and scale (3), then
-//!             its parent's index and its primitive's, each u32::MAX for none
+//! parts       a count, then each part's translation (3 f32s), rotation (4) and scale (3); its
+//!             parent's index and its primitive's, each u32::MAX for none; and its light's kind,
+//!             a byte (0 for none, then directional, point, spot), and, if it has one, its color
+//!             (3 f32s), intensity, range (0 for none), inner cone and outer cone (an f32 each)
 //! primitives  a count, then each one's name, as a string; its vertices' count, then their
-//!             positions (3 f32s each), their texture coordinates (2) and their colors (4); its
-//!             indices' count and its indices; its levels' count and each one's start, count and
-//!             error (an f32); its material's color (4 f32s), image (u32::MAX for none), whether
-//!             it's nearest (a byte), its wrap (a byte: clamp, repeat, mirror), its alpha mode (a
-//!             byte: opaque, mask, blend), the mask's cutoff (an f32), and whether it's
-//!             double-sided (a byte)
+//!             positions (3 f32s each), their texture coordinates (2), their colors (4), their
+//!             normals (3) and their tangents (4); its indices' count and its indices; its levels'
+//!             count and each one's start, count and error (an f32); its material's color (4
+//!             f32s), metallic, roughness, normal scale, occlusion strength (an f32 each) and
+//!             emission (3 f32s); each of its textures in `Slot`'s order, as its image (u32::MAX for
+//!             none), whether it's nearest (a byte) and its wrap (a byte: clamp, repeat, mirror);
+//!             its alpha mode (a byte: opaque, mask, blend), the mask's cutoff (an f32), and whether
+//!             it's double-sided and unlit (a byte each)
 //! images      a count, then each one's KTX2, as its length and its bytes
 //! ```
 //!
@@ -31,10 +36,11 @@ use gg_core::math::{Quat, Vec3};
 use gg_core::{Error, Result};
 use gg_renderer::{AlphaMode, Lod, Wrap};
 
-use crate::Transform;
-use crate::gltf::{self, Imported, Material, Part, Primitive};
-use crate::image::read_ktx2;
+use crate::gltf::{self, Imported, Material, Part, Primitive, Sampling};
+use crate::image::{Compressed, read_ktx2};
+use crate::model;
 use crate::package::{Files, Kind};
+use crate::{Light, LightKind, Transform};
 
 /// What stands for none, where the format holds an index.
 const NONE: u32 = u32::MAX;
@@ -87,6 +93,25 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         floats(&mut bytes, &scale.to_array());
         index(&mut bytes, part.parent);
         index(&mut bytes, part.primitive);
+        let Some(light) = &part.light else {
+            bytes.push(0);
+            continue;
+        };
+        bytes.push(match light.kind {
+            LightKind::Directional => 1,
+            LightKind::Point => 2,
+            LightKind::Spot => 3,
+        });
+        floats(&mut bytes, &light.color.to_array());
+        floats(
+            &mut bytes,
+            &[
+                light.intensity,
+                light.range.unwrap_or(0.0),
+                light.inner_cone,
+                light.outer_cone,
+            ],
+        );
     }
     count(&mut bytes, imported.primitives.len());
     for primitive in &imported.primitives {
@@ -95,6 +120,8 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         floats(&mut bytes, primitive.positions.as_flattened());
         floats(&mut bytes, primitive.uvs.as_flattened());
         floats(&mut bytes, primitive.colors.as_flattened());
+        floats(&mut bytes, primitive.normals.as_flattened());
+        floats(&mut bytes, primitive.tangents.as_flattened());
         count(&mut bytes, primitive.indices.len());
         for index in &primitive.indices {
             bytes.extend_from_slice(&index.to_le_bytes());
@@ -107,20 +134,36 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         }
         let material = &primitive.material;
         floats(&mut bytes, &material.color);
-        index(&mut bytes, material.image);
+        floats(
+            &mut bytes,
+            &[
+                material.metallic,
+                material.roughness,
+                material.normal_scale,
+                material.occlusion_strength,
+            ],
+        );
+        floats(&mut bytes, &material.emissive);
+        for texture in material.textures {
+            index(&mut bytes, texture.map(|texture| texture.image));
+            let (nearest, wrap) = texture.map_or((false, Wrap::Repeat), |texture| {
+                (texture.nearest, texture.wrap)
+            });
+            let wrap = match wrap {
+                Wrap::Clamp => 0,
+                Wrap::Repeat => 1,
+                Wrap::Mirror => 2,
+            };
+            bytes.extend_from_slice(&[u8::from(nearest), wrap]);
+        }
         let (alpha, cutoff) = match material.alpha {
             AlphaMode::Opaque => (0, 0.0),
             AlphaMode::Mask { cutoff } => (1, cutoff),
             AlphaMode::Blend => (2, 0.0),
         };
-        let wrap = match material.wrap {
-            Wrap::Clamp => 0,
-            Wrap::Repeat => 1,
-            Wrap::Mirror => 2,
-        };
-        bytes.extend_from_slice(&[u8::from(material.nearest), wrap, alpha]);
+        bytes.push(alpha);
         floats(&mut bytes, &[cutoff]);
-        bytes.push(u8::from(material.double_sided));
+        bytes.extend_from_slice(&[u8::from(material.double_sided), u8::from(material.unlit)]);
     }
     count(&mut bytes, images.len());
     for image in images {
@@ -178,7 +221,8 @@ impl<'a> Reader<'a> {
             .map(|_| self.string())
             .collect::<Result<_, _>>()?;
         let mut parts: Vec<Part> = Vec::new();
-        let part_count = self.count(48)?;
+        // A transform, two indices and a light's kind.
+        let part_count = self.count(49)?;
         let mut drawn = Vec::with_capacity(part_count);
         for i in 0..part_count {
             let [x, y, z, rx, ry, rz, rw, sx, sy, sz] = self.floats()?;
@@ -193,10 +237,14 @@ impl<'a> Reader<'a> {
             }
             let primitive = self.index()?;
             drawn.extend(primitive);
+            let light = self
+                .light()
+                .map_err(|problem| format!("its part {i} {problem}"))?;
             parts.push(Part {
                 transform,
                 parent,
                 primitive,
+                light,
             });
         }
         let mut held = 0;
@@ -205,7 +253,7 @@ impl<'a> Reader<'a> {
             let primitive = self
                 .primitive()
                 .map_err(|problem| format!("its primitive {i} {problem}"))?;
-            held += primitive.positions.len() * size_of::<[f32; 9]>()
+            held += primitive.positions.len() * size_of::<gg_renderer::ModelVertex>()
                 + primitive.indices.len() * size_of::<u32>();
             primitives.push(primitive);
         }
@@ -227,11 +275,22 @@ impl<'a> Reader<'a> {
             }
             images.push(image);
         }
-        let mut samples = primitives
-            .iter()
-            .filter_map(|primitive| primitive.material.image);
+        let mut samples = (primitives.iter())
+            .flat_map(|primitive| primitive.material.textures.into_iter().flatten())
+            .map(|texture| texture.image);
         if let Some(i) = samples.find(|&i| i >= images.len()) {
             return Err(format!("a material samples image {i}, which it hasn't"));
+        }
+        // Each image compressed as what its materials sample it as, which reading the model left
+        // one of: colors, values or a normal map.
+        for (i, image) in images.iter().enumerate() {
+            let wanted = Compressed::of(model::texels(&primitives, i));
+            if image.compressed() != Some(wanted) {
+                return Err(format!(
+                    "its image {i} holds {:?}, where its materials sample it as {wanted:?}",
+                    image.compressed()
+                ));
+            }
         }
         Ok(Imported {
             parts,
@@ -241,13 +300,36 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// A part's light, if it has one. The error says what's wrong with it.
+    fn light(&mut self) -> Result<Option<Light>, String> {
+        let [kind]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
+        let kind = match kind {
+            0 => return Ok(None),
+            1 => LightKind::Directional,
+            2 => LightKind::Point,
+            3 => LightKind::Spot,
+            _ => return Err(format!("has a light of kind {kind}")),
+        };
+        let [r, g, b, intensity, range, inner_cone, outer_cone] = self.floats()?;
+        Ok(Some(Light {
+            kind,
+            color: Vec3::new(r, g, b),
+            intensity,
+            range: (range > 0.0).then_some(range),
+            inner_cone,
+            outer_cone,
+        }))
+    }
+
     /// A primitive. The error says what's wrong with it.
     fn primitive(&mut self) -> Result<Primitive, String> {
         let name = self.string()?;
-        let vertices = self.count(36)?;
+        let vertices = self.count(size_of::<gg_renderer::ModelVertex>())?;
         let positions = self.vectors(vertices)?;
         let uvs = self.vectors(vertices)?;
         let colors = self.vectors(vertices)?;
+        let normals = self.vectors(vertices)?;
+        let tangents = self.vectors(vertices)?;
         let count = self.count(4)?;
         let indices: Vec<u32> = (0..count).map(|_| self.u32()).collect::<Result<_, _>>()?;
         if indices.is_empty() || !indices.len().is_multiple_of(3) {
@@ -284,41 +366,59 @@ impl<'a> Reader<'a> {
             });
         }
         let color = self.floats()?;
-        let image = self.index()?;
-        let [nearest, wrap, alpha]: [u8; 3] = self.take(3)?.try_into().expect("three bytes");
-        let [cutoff] = self.floats()?;
-        let [double_sided]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
-        let wrap = match wrap {
-            0 => Wrap::Clamp,
-            1 => Wrap::Repeat,
-            2 => Wrap::Mirror,
-            _ => return Err(format!("has a material that wraps by {wrap}")),
+        let [metallic, roughness, normal_scale, occlusion_strength] = self.floats()?;
+        let emissive = self.floats()?;
+        let flag = |byte: u8, what: &str| match byte {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(format!("has a material whose {what} is {byte}")),
         };
+        let mut textures = [None; 5];
+        for texture in &mut textures {
+            let image = self.index()?;
+            let [nearest, wrap]: [u8; 2] = self.take(2)?.try_into().expect("two bytes");
+            let wrap = match wrap {
+                0 => Wrap::Clamp,
+                1 => Wrap::Repeat,
+                2 => Wrap::Mirror,
+                _ => return Err(format!("has a material that wraps by {wrap}")),
+            };
+            let nearest = flag(nearest, "nearest")?;
+            *texture = image.map(|image| Sampling {
+                image,
+                nearest,
+                wrap,
+            });
+        }
+        let [alpha]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
+        let [cutoff] = self.floats()?;
+        let [double_sided, unlit]: [u8; 2] = self.take(2)?.try_into().expect("two bytes");
         let alpha = match alpha {
             0 => AlphaMode::Opaque,
             1 => AlphaMode::Mask { cutoff },
             2 => AlphaMode::Blend,
             _ => return Err(format!("has a material of alpha mode {alpha}")),
         };
-        let flag = |byte: u8, what: &str| match byte {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(format!("has a material whose {what} is {byte}")),
-        };
         Ok(Primitive {
             name,
             positions,
             uvs,
             colors,
+            normals,
+            tangents,
             indices,
             lods,
             material: Material {
                 color,
-                image,
-                nearest: flag(nearest, "nearest")?,
-                wrap,
+                metallic,
+                roughness,
+                normal_scale,
+                occlusion_strength,
+                emissive,
+                textures,
                 alpha,
                 double_sided: flag(double_sided, "double-sided")?,
+                unlit: flag(unlit, "unlitness")?,
             },
         })
     }
@@ -383,16 +483,26 @@ mod tests {
     use super::*;
     use crate::image::tests::ktx2;
 
-    /// A model of two parts, the second under the first and drawing a primitive of two levels with
-    /// a masked material that samples its image, and the KTX2 of that image, a block 4 texels
-    /// across and down.
+    /// A model of two parts, the first a spot light and the second under it drawing a primitive of
+    /// two levels with a masked material that samples its two images, colors and a normal map; and
+    /// the KTX2 of those images, each a block 4 texels across and down, BC7 of sRGB and BC5.
     fn model() -> (Imported, Vec<Vec<u8>>) {
-        let image = ktx2(ktx2::Format::BC7_SRGB_BLOCK, [4, 4], &[vec![7; 16]], true);
+        let colors = ktx2(ktx2::Format::BC7_SRGB_BLOCK, [4, 4], &[vec![7; 16]], true);
+        let normals = ktx2(ktx2::Format::BC5_UNORM_BLOCK, [4, 4], &[vec![9; 16]], true);
+        let sampled = |image, wrap| {
+            Some(Sampling {
+                image,
+                nearest: true,
+                wrap,
+            })
+        };
         let primitive = Primitive {
             name: "square/0".to_owned(),
             positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
             uvs: vec![[0.0; 2], [1.0, 0.0], [0.0, 1.0], [1.0; 2]],
             colors: vec![[1.0; 4], [0.5; 4], [0.25; 4], [0.0, 0.0, 0.0, 1.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            tangents: vec![[1.0, 0.0, 0.0, -1.0]; 4],
             indices: vec![0, 1, 2, 2, 1, 3, 0, 1, 2],
             lods: vec![
                 Lod {
@@ -408,11 +518,21 @@ mod tests {
             ],
             material: Material {
                 color: [1.0, 0.5, 0.25, 1.0],
-                image: Some(0),
-                nearest: true,
-                wrap: Wrap::Mirror,
+                metallic: 0.25,
+                roughness: 0.75,
+                normal_scale: 0.5,
+                occlusion_strength: 0.125,
+                emissive: [2.0, 0.0, 1.0],
+                textures: [
+                    sampled(0, Wrap::Mirror),
+                    None,
+                    sampled(1, Wrap::Clamp),
+                    None,
+                    sampled(0, Wrap::Repeat),
+                ],
                 alpha: AlphaMode::Mask { cutoff: 0.25 },
                 double_sided: true,
+                unlit: true,
             },
         };
         let turned = Transform {
@@ -420,26 +540,36 @@ mod tests {
             rotation: Quat::from_rotation_y(0.1),
             scale: Vec3::new(1.0, -2.0, 0.5),
         };
+        let spot = Light {
+            kind: LightKind::Spot,
+            color: Vec3::new(1.0, 0.5, 0.25),
+            intensity: 30.0,
+            range: Some(8.0),
+            inner_cone: 0.25,
+            outer_cone: 0.5,
+        };
         let parts = vec![
             Part {
                 transform: turned,
                 parent: None,
                 primitive: None,
+                light: Some(spot),
             },
             Part {
                 transform: Transform::IDENTITY,
                 parent: Some(0),
                 primitive: Some(0),
+                light: None,
             },
         ];
-        let read = crate::image::read_ktx2(image.clone()).expect("a texture");
+        let read = |image: &Vec<u8>| crate::image::read_ktx2(image.clone()).expect("a texture");
         let imported = Imported {
             parts,
             primitives: vec![primitive],
-            images: vec![read],
+            images: vec![read(&colors), read(&normals)],
             ignored: vec!["1 animation".to_owned()],
         };
-        (imported, vec![image])
+        (imported, vec![colors, normals])
     }
 
     #[test]
@@ -518,11 +648,41 @@ mod tests {
         ));
         cases.push((
             "a material sampling what it hasn't",
-            edited(&primitive(|primitive| primitive.material.image = Some(1))),
+            edited(&primitive(|primitive| {
+                primitive.material.textures[0] =
+                    primitive.material.textures[2].map(|texture| Sampling {
+                        image: 2,
+                        ..texture
+                    });
+            })),
         ));
         let mut image = images.clone();
         image[0][0] ^= 1;
         cases.push(("an image that isn't KTX2", encode(&imported, &image)));
+        // The normal map's BC5 where its colors' BC7 go.
+        let mut swapped = imported.clone();
+        swapped.images.swap(0, 1);
+        let swapped_images = [images[1].clone(), images[0].clone()];
+        cases.push((
+            "an image compressed as other than its materials sample it",
+            encode(&swapped, &swapped_images),
+        ));
+        cases.push((
+            "a light of a kind it hasn't",
+            edited(&|imported| {
+                let light = imported.parts[0].light.as_mut().expect("a light");
+                light.kind = LightKind::Point;
+            })
+            .into_iter()
+            .enumerate()
+            .map(|(i, byte)| {
+                // The light's kind is the byte after the first part's transform and indices, past
+                // the ignored's count and string and the parts' count.
+                let at = 4 + 4 + "1 animation".len() + 4 + 48;
+                if i == at { 9 } else { byte }
+            })
+            .collect(),
+        ));
         for (case, bytes) in cases {
             let error = decode("m", Path::new("m.glb"), &bytes).expect_err(case);
             assert_eq!(error.code(), "engine.bad_model", "{case}");

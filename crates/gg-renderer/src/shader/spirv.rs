@@ -480,12 +480,15 @@ impl Module {
     }
 
     /// The 32-bit scalars `ty` is made of, from byte `at`, where a matrix's columns are
-    /// `matrix_stride` bytes apart, as a struct says of its members; or what in it isn't one.
+    /// `matrix_stride` bytes apart, as a struct says of its members; or what in it isn't one. If
+    /// `addresses`, as the frame's data has them, an address of what's in a buffer is two of its
+    /// scalars, of 64 bits together.
     fn scalars(
         &self,
         ty: u32,
         at: u32,
         matrix_stride: Option<u32>,
+        addresses: bool,
         scalars: &mut Vec<Scalar>,
     ) -> Result<(), String> {
         match self.types.get(&ty) {
@@ -495,7 +498,7 @@ impl Module {
             Some(Type::Float { width }) => return Err(format!("a {width}-bit float")),
             Some(&Type::Vector { component, count }) => {
                 for i in 0..count {
-                    self.scalars(component, at + 4 * i, None, scalars)?;
+                    self.scalars(component, at + 4 * i, None, addresses, scalars)?;
                 }
             }
             Some(&Type::Matrix { column, count }) => {
@@ -505,7 +508,7 @@ impl Module {
                 };
                 for i in 0..count {
                     let stride = matrix_stride.unwrap_or(4 * rows);
-                    self.scalars(column, at + i * stride, None, scalars)?;
+                    self.scalars(column, at + i * stride, None, addresses, scalars)?;
                 }
             }
             Some(&Type::Array { element, length }) => {
@@ -513,10 +516,10 @@ impl Module {
                     return Err("an array of a length given as the pipeline's made".to_owned());
                 };
                 let mut one = Vec::new();
-                self.scalars(element, 0, None, &mut one)?;
+                self.scalars(element, 0, None, addresses, &mut one)?;
                 let stride = (self.decoration(ty, ARRAY_STRIDE)).unwrap_or(4 * one.len() as u32);
                 for i in 0..length {
-                    self.scalars(element, at + i * stride, None, scalars)?;
+                    self.scalars(element, at + i * stride, None, addresses, scalars)?;
                 }
             }
             Some(Type::Struct { members }) => {
@@ -526,11 +529,20 @@ impl Module {
                         return Err(format!("{name}, laid out nowhere"));
                     };
                     let stride = self.member_decoration(ty, member, MATRIX_STRIDE);
-                    self.scalars(member_type, at + offset, stride, scalars)?;
+                    self.scalars(member_type, at + offset, stride, addresses, scalars)?;
                 }
             }
             Some(Type::RuntimeArray { .. }) => {
                 return Err("an array without a length, which no Rust type is".to_owned());
+            }
+            Some(&Type::Pointer { storage, .. })
+                if addresses && storage == PHYSICAL_STORAGE_BUFFER =>
+            {
+                scalars.push(Scalar { at, float: false });
+                scalars.push(Scalar {
+                    at: at + 4,
+                    float: false,
+                });
             }
             Some(Type::Pointer { .. }) => return Err("an address".to_owned()),
             Some(Type::Bool) => return Err("a bool".to_owned()),
@@ -539,11 +551,12 @@ impl Module {
         Ok(())
     }
 
-    /// The size of what `ty` lays out from byte 0, if it's 32-bit scalars back to back; or why
-    /// it isn't, as what it holds.
-    fn packed_size(&self, ty: u32) -> Result<u32, String> {
+    /// The size of what `ty` lays out from byte 0, if it's 32-bit scalars back to back, addresses
+    /// among them if `addresses`, as [`scalars`](Self::scalars) says; or why it isn't, as what it
+    /// holds.
+    fn packed_size(&self, ty: u32, addresses: bool) -> Result<u32, String> {
         let mut scalars = Vec::new();
-        self.scalars(ty, 0, None, &mut scalars)
+        self.scalars(ty, 0, None, addresses, &mut scalars)
             .map_err(|what| format!("hold {what}"))?;
         packed(&scalars)
     }
@@ -552,7 +565,8 @@ impl Module {
     /// floats back to back: a float4x4, as slangc lays one out.
     fn is_float4x4(&self, ty: u32, matrix_stride: Option<u32>) -> bool {
         let mut scalars = Vec::new();
-        self.scalars(ty, 0, matrix_stride, &mut scalars).is_ok()
+        self.scalars(ty, 0, matrix_stride, false, &mut scalars)
+            .is_ok()
             && scalars.len() == 16
             && packed(&scalars) == Ok(64)
             && scalars.iter().all(|scalar| scalar.float)
@@ -682,9 +696,9 @@ impl Module {
     }
 
     /// Checks that `pointer`, the type of the push constant with the address of the frame's data,
-    /// points at the start of what [`FrameData`] lays out: no more bytes, of 32-bit fields without
-    /// padding, so that a shader that reads the fields before those the engine adds to its end
-    /// keeps to the contract.
+    /// points at the start of what [`FrameData`] lays out: no more bytes, of 32-bit fields and
+    /// addresses without padding, so that a shader that reads the fields before those the engine
+    /// adds to its end keeps to the contract.
     fn check_frame(&self, pointer: u32, breaches: &mut Vec<String>) {
         let size = size_of::<FrameData>();
         let Some(pointee) = self.pointee(pointer, PHYSICAL_STORAGE_BUFFER) else {
@@ -695,14 +709,14 @@ impl Module {
             return;
         };
         let name = self.name(pointee);
-        match self.packed_size(pointee) {
+        match self.packed_size(pointee, true) {
             Ok(found) if found as usize <= size => {}
             Ok(found) => breaches.push(format!(
                 "its frame's data, {name}, take {found} bytes, past the {size} the engine's take"
             )),
             Err(why) => breaches.push(format!(
-                "its frame's data, {name}, {why}, where the engine's have 32-bit fields alone, \
-                 without padding"
+                "its frame's data, {name}, {why}, where the engine's have 32-bit fields and \
+                 addresses alone, without padding"
             )),
         }
     }
@@ -725,7 +739,7 @@ impl Module {
             return;
         };
         let name = self.name(pointee);
-        let found = self.packed_size(pointee).and_then(|found| {
+        let found = self.packed_size(pointee, false).and_then(|found| {
             match self.decoration(pointer, ARRAY_STRIDE) {
                 Some(stride) if stride != found => Err(format!(
                     "take {stride} bytes each, {} of them padding",

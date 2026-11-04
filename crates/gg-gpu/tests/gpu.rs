@@ -1188,7 +1188,10 @@ fn bc7_textures_stream_and_decode_on_every_path() {
                 let message = panics(|| {
                     let _ = frame.write_texture(&mut textures[0], [0, 0], [1, 1], &[0; 4]);
                 });
-                assert!(message.contains("BC7 texture is streamed"), "{message}");
+                assert!(
+                    message.contains("compressed texture is streamed"),
+                    "{message}"
+                );
             }
             for (&pass, (texture, (_, probes))) in passes.iter().zip(textures.iter().zip(&fills)) {
                 draw_probes(&mut frame, pass, &pipeline, texture, probes, None);

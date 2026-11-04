@@ -22,10 +22,10 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
-    Line, Lod, Lods, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels,
-    Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels,
-    Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
-    Wrap,
+    Light, LightKind, Line, Lod, Lods, Map, Material, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
+    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler,
+    Settings, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui, UploadPath,
+    Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -79,6 +79,8 @@ fn main() -> ExitCode {
         outlines_match_their_reference,
         tonemappers_match_their_reference,
         shaders_read_the_frames_data,
+        lights_shade_as_gltf_defines,
+        lit_spheres_match_their_reference,
         lines_match_their_reference,
         grids_match_their_reference,
         views_match_their_reference,
@@ -249,21 +251,24 @@ fn shader(file: &str) -> PathBuf {
         .join(file)
 }
 
-/// What a test adds meshes, shaders and textures to, and the uploads that take them to its
-/// renderer; and no draws, for a frame's canvas.
+/// What a test adds meshes, shaders, textures and materials to, and the uploads that take them to
+/// its renderer; the lights its frames shade with; and no draws, for a frame's canvas.
 #[derive(Default)]
 struct Stores {
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
+    materials: Materials,
     uploads: Uploads,
+    lights: Vec<Light>,
     none: Draws,
 }
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
     /// draws nothing on its canvas, picks and outlines nothing and isn't tonemapped, at time 0
-    /// with an exposure of 1, with the uploads of what's been added since the last frame's.
+    /// with an exposure of 1 and the stores' lights, with the uploads of what's been added since
+    /// the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -274,15 +279,18 @@ impl Stores {
             meshes,
             shaders,
             textures,
+            materials,
             uploads,
+            lights,
             none,
         } = self;
-        uploads.take(meshes, shaders, textures);
+        uploads.take(meshes, shaders, textures, materials);
         RenderData {
             clear_color: CLEAR,
             tonemapper: Tonemapper::None,
             exposure: 1.0,
             time: 0.0,
+            lights,
             viewport,
             viewpoint,
             uploads,
@@ -362,6 +370,27 @@ fn square(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
     ];
     meshes
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh")
+}
+
+/// A unit square around the origin, a model's, counterclockwise seen from +Z, which it faces, its
+/// texture's top left at its top left, its tangent along +X.
+fn model_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
+    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+        position: Vec3::new(x, y, 0.0),
+        uv: Vec2::from(uv),
+        color: Vec4::ONE,
+        normal: Vec3::Z,
+        tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+    };
+    let corners = [
+        corner([-0.5, -0.5], [0.0, 1.0]),
+        corner([0.5, -0.5], [1.0, 1.0]),
+        corner([0.5, 0.5], [1.0, 0.0]),
+        corner([-0.5, 0.5], [0.0, 0.0]),
+    ];
+    meshes
+        .add("model square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh")
 }
 
@@ -2821,6 +2850,8 @@ fn models_match_their_reference() {
             position: Vec3::new(x, y, 0.0),
             uv: Vec2::from(uv),
             color,
+            normal: Vec3::Z,
+            tangent: Vec4::X,
         };
         let corners = [
             corner([-0.5, -0.5], [0.0, 1.0], colors[0]),
@@ -2870,15 +2901,20 @@ fn models_match_their_reference() {
     let white = opaque([0.9, 0.9, 0.9, 1.0], true);
     let cyan = opaque([0.1, 0.7, 0.8, 1.0], false);
     let masked = Material {
-        texture: cutout,
-        nearest: true,
-        wrap: Wrap::Clamp,
+        color_texture: Sampled {
+            texture: cutout,
+            nearest: true,
+            wrap: Wrap::Clamp,
+        },
         ..material([1.0; 4], AlphaMode::Mask { cutoff: 0.5 }, false)
     };
     let blended = material([0.9, 0.1, 0.8, 0.5], AlphaMode::Blend, false);
     let tinted = opaque([1.0, 0.5, 1.0, 1.0], false);
-    let mut draw =
-        |mesh, material: &Material| MeshDraw::with_material(mesh, material, &mut stores.shaders);
+    let (materials, shaders) = (&mut stores.materials, &mut stores.shaders);
+    let mut draw = |mesh, material: &Material| {
+        let material = materials.add(material);
+        MeshDraw::with_material(mesh, material, materials, shaders)
+    };
     let scene = [
         (draw(plain, &red), placed([-2.0, 0.9, 0.0], false, false)),
         (draw(plain, &green), placed([-1.0, 0.9, 0.0], true, false)),
@@ -2974,34 +3010,26 @@ fn mixed_textures_match_their_reference() {
             ..Sprite::default()
         },
     ];
-    // A unit square, counterclockwise seen from +Z, its texture's top left at its top left.
-    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
-        position: Vec3::new(x, y, 0.0),
-        uv: Vec2::from(uv),
-        color: Vec4::ONE,
-    };
-    let corners = [
-        corner([-0.5, -0.5], [0.0, 1.0]),
-        corner([0.5, -0.5], [1.0, 1.0]),
-        corner([0.5, 0.5], [1.0, 0.0]),
-        corner([-0.5, 0.5], [0.0, 0.0]),
-    ];
-    let square = (stores.meshes)
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = model_square(&mut stores.meshes);
     let nearest = Material {
-        texture: quadrants,
-        nearest: true,
-        wrap: Wrap::Clamp,
+        color_texture: Sampled {
+            texture: quadrants,
+            nearest: true,
+            wrap: Wrap::Clamp,
+        },
         ..Material::default()
     };
     let linear = Material {
-        texture: checker,
-        wrap: Wrap::Clamp,
+        color_texture: Sampled {
+            wrap: Wrap::Clamp,
+            ..Sampled::of(checker)
+        },
         ..Material::default()
     };
-    let squares = [nearest, linear]
-        .map(|material| MeshDraw::with_material(square, &material, &mut stores.shaders));
+    let squares = [nearest, linear].map(|material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+    });
     let (columns, rows) = (WIDTH / SIDE, HEIGHT / 2 / SIDE);
     // At `column` and `row` of the half whose top edge is at `top`, from the half's top left.
     let place = |column: u32, row: u32, top: f32| {
@@ -3093,22 +3121,14 @@ fn picks_answer_what_their_frame_drew() {
         flat,
         Vec4::new(0.2, 0.3, 0.8, 1.0),
     );
-    // Counterclockwise seen from +Z, its texture's top left at its top left.
-    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
-        position: Vec3::new(x, y, 0.0),
-        uv: Vec2::from(uv),
-        color: Vec4::ONE,
-    };
-    let model_corners = [
-        corner([-0.5, -0.5], [0.0, 1.0]),
-        corner([0.5, -0.5], [1.0, 1.0]),
-        corner([0.5, 0.5], [1.0, 0.0]),
-        corner([-0.5, 0.5], [0.0, 0.0]),
-    ];
-    let model_square = (stores.meshes)
-        .add("model square", &model_corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
-    let model = MeshDraw::with_material(model_square, &Material::default(), &mut stores.shaders);
+    let model_square = model_square(&mut stores.meshes);
+    let material = stores.materials.add(&Material::default());
+    let model = MeshDraw::with_material(
+        model_square,
+        material,
+        &stores.materials,
+        &mut stores.shaders,
+    );
     // Opaque on the left, wholly transparent on the right.
     let half = [[200, 40, 40, 255], [0, 0, 0, 0]];
     let half = (stores.textures)
@@ -3618,6 +3638,309 @@ fn shaders_read_the_frames_data() {
         );
     }
     shut_down(renderer);
+}
+
+/// A row of squares, each a model's, lit head-on, seen without perspective, so that the way to
+/// the eye is the light's way back at every pixel; each pixel at a square's middle checked against
+/// what glTF's BRDF gives, worked out by hand. Lit by `E` = π lux, a surface whose normal is `cos`
+/// from the light's way, rough 1, so that the GGX lobe is 1/π and the visibility 1/(4 cos), shows
+/// `(1 - f0) c cos + f0 / 4`, `f0` 0.04 for a dielectric: 0.49 for gray of 0.5 facing the light.
+/// The squares: a dielectric; one unlit, its color alone; one black and metallic, which reflects
+/// nothing, emitting 0.25; one normal-mapped toward +X, by RGBA8, by BC5, and by a map never
+/// filled, which stands in flat; and one whose factor is metallic, its surface map taking that to
+/// a dielectric's by its blue of 0, by RGBA8, by BC7, and by a map never filled, which stands in
+/// white, leaving a metal of 0.5, whose `f0` is 0.5, showing 0.125. Then a point light of 4π
+/// candela 2 units over the first square lights it as the directional light did; with a range of
+/// 2.5, by the window KHR_lights_punctual recommends, `(1 - (2 / 2.5)^4)^2`; and a spot over it
+/// lights it alike within its inner cone, and nothing outside its outer.
+fn lights_shade_as_gltf_defines() {
+    const SIDE: u32 = 16;
+    const SQUARES: u32 = 9;
+    const WIDTH: u32 = SIDE * SQUARES;
+    let mut renderer = renderer(WIDTH, SIDE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let square = model_square(&mut stores.meshes);
+    // A level of 4 by 4 texels, X tilted toward +X by 60°, as a normal map holds it.
+    let tilted: [u8; 4] = [238, 128, 255, 255];
+    let textures = &mut stores.textures;
+    let mut map = |name, texel: [u8; 4], map| {
+        let pixels = [texel; 16];
+        let added = textures.add(name, [4, 4], pixels.as_flattened(), Texels::Map(map));
+        Sampled::of(added.expect("a map"))
+    };
+    let normals = map("normals", tilted, Map::Normal);
+    let dielectric_surface = map("surface", [0, 255, 0, 255], Map::Surface);
+    // BC5's two channels, each a block of its endpoints and every index 0.
+    let mut bc5 = [0; 16];
+    bc5[..2].fill(tilted[0]);
+    bc5[8..10].fill(tilted[1]);
+    let normal_map = Texels::CompressedMap {
+        map: Map::Normal,
+        mipmapped: false,
+    };
+    let compressed_normals = textures.add("bc5 normals", [4, 4], &bc5[..], normal_map);
+    let compressed_normals = Sampled::of(compressed_normals.expect("a BC5 map"));
+    // BC7's mode 6 holds odd channels exactly: metallic 1/255.
+    let surface_map = Texels::CompressedMap {
+        map: Map::Surface,
+        mipmapped: false,
+    };
+    let block = bc7_block([1, 255, 1, 255]);
+    let compressed_surface = textures.add("bc7 surface", [4, 4], &block[..], surface_map);
+    let compressed_surface = Sampled::of(compressed_surface.expect("a BC7 map"));
+    let reserve = |textures: &mut Textures, name, map| {
+        let reserved = textures.reserve(name, [4, 4], Texels::Map(map));
+        Sampled::of(reserved.expect("a slot"))
+    };
+    let unfilled_normals = reserve(textures, "unfilled normals", Map::Normal);
+    let unfilled_surface = reserve(textures, "unfilled surface", Map::Surface);
+    let gray = Material {
+        color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+        metallic: 0.0,
+        roughness: 1.0,
+        ..Material::default()
+    };
+    let metal = Material {
+        metallic: 1.0,
+        ..gray
+    };
+    let materials = [
+        gray,
+        Material {
+            unlit: true,
+            ..gray
+        },
+        Material {
+            color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            emissive: Vec3::splat(0.25),
+            ..metal
+        },
+        Material {
+            normal_texture: Some(normals),
+            ..gray
+        },
+        Material {
+            normal_texture: Some(compressed_normals),
+            ..gray
+        },
+        Material {
+            normal_texture: Some(unfilled_normals),
+            ..gray
+        },
+        Material {
+            surface_texture: dielectric_surface,
+            ..metal
+        },
+        Material {
+            surface_texture: compressed_surface,
+            ..metal
+        },
+        Material {
+            surface_texture: unfilled_surface,
+            ..metal
+        },
+    ];
+    let at = |i: u32| Vec3::new(i as f32 - (SQUARES - 1) as f32 / 2.0, 0.0, 0.0);
+    let mut draws = Draws::default();
+    for (i, material) in (0..).zip(&materials) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(Mat4::from_translation(at(i)), &draw, 0);
+    }
+    let pi = Vec3::splat(PI);
+    let sun = Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::NEG_Z,
+        color: pi,
+        range: None,
+    };
+    stores.lights = vec![sun];
+    let viewport = filling([WIDTH, SIDE]);
+    // The unfilled maps' textures never stream, so frames are rendered until the rest have.
+    for _ in 0..4 {
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    }
+    // The shaded value of gray of 0.5, dielectric, whose normal is `cos` from the light's way.
+    let lit = |cos: f32| 0.96 * 0.5 * cos + 0.01;
+    // The tilted normal as the shader makes it from the map's X and Y.
+    let [x, y] = [tilted[0], tilted[1]].map(|byte| f32::from(byte) / 255.0 * 2.0 - 1.0);
+    let z = (1.0 - x * x - y * y).sqrt();
+    let tilted_cos = z / (x * x + y * y + z * z).sqrt();
+    let flat = {
+        let flat = 128.0_f32 / 255.0 * 2.0 - 1.0;
+        let z = (1.0 - 2.0 * flat * flat).sqrt();
+        z / (2.0 * flat * flat + z * z).sqrt()
+    };
+    // A metallic of 1/255: f0 a 255th of the way from 0.04 to 0.5, and as much less diffuse.
+    let barely = 1.0 / 255.0;
+    let f0 = 0.04 + (0.5 - 0.04) * barely;
+    let barely_metallic = 0.5 * (1.0 - barely) * (1.0 - f0) + f0 / 4.0;
+    let expected = [
+        lit(1.0),
+        0.5,
+        0.25,
+        lit(tilted_cos),
+        lit(tilted_cos),
+        lit(flat),
+        lit(1.0),
+        barely_metallic,
+        0.125,
+    ];
+    let shown = |renderer: &mut Renderer, i: u32| {
+        let frame = frame_pixels(renderer);
+        pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2])
+    };
+    let gray_of = |value: f32| {
+        let byte = encoded(value);
+        [byte, byte, byte, 255]
+    };
+    for (i, value) in (0..).zip(expected) {
+        let got = shown(&mut renderer, i);
+        assert!(
+            close(got, gray_of(value)),
+            "square {i} shows {got:?}, not {value} encoded, {:?}",
+            gray_of(value)
+        );
+    }
+    let over_first = at(0) + Vec3::new(0.0, 0.0, 2.0);
+    let point = Light {
+        kind: LightKind::Point,
+        position: over_first,
+        color: Vec3::splat(4.0 * PI),
+        ..sun
+    };
+    let reach2 = (2.0_f32 / 2.5) * (2.0 / 2.5);
+    let window = (1.0 - reach2 * reach2) * (1.0 - reach2 * reach2);
+    let spot = Light {
+        kind: LightKind::Spot {
+            inner: 0.1,
+            outer: 0.2,
+        },
+        ..point
+    };
+    let cases = [
+        (point, [(0, lit(1.0))]),
+        (
+            Light {
+                range: Some(2.5),
+                ..point
+            },
+            [(0, lit(1.0) * window)],
+        ),
+        (spot, [(0, lit(1.0))]),
+    ];
+    for (light, checks) in cases {
+        stores.lights = vec![light];
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        for (i, value) in checks {
+            let got = shown(&mut renderer, i);
+            assert!(
+                close(got, gray_of(value)),
+                "{light:?}: square {i} shows {got:?}, not {value} encoded"
+            );
+        }
+    }
+    // Outside the spot's outer cone, the dielectric of the surface map shows nothing.
+    assert!(close(shown(&mut renderer, 6), [0, 0, 0, 255]));
+    shut_down(renderer);
+}
+
+/// A sphere of `radius` about the origin, a model's, of `rings` rings from pole to pole and
+/// `segments` around, its normals out and its tangents along its lines of latitude, eastward.
+fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<ModelVertex> {
+    use math::libm::{cosf, sinf};
+    let mut vertices = Vec::new();
+    for ring in 0..=rings {
+        let polar = PI * ring as f32 / rings as f32;
+        for segment in 0..=segments {
+            let around = 2.0 * PI * segment as f32 / segments as f32;
+            let normal = Vec3::new(
+                sinf(polar) * cosf(around),
+                cosf(polar),
+                -sinf(polar) * sinf(around),
+            );
+            vertices.push(ModelVertex {
+                position: normal * radius,
+                uv: Vec2::new(segment as f32 / segments as f32, ring as f32 / rings as f32),
+                color: Vec4::ONE,
+                normal,
+                tangent: Vec4::new(-sinf(around), 0.0, -cosf(around), 1.0),
+            });
+        }
+    }
+    let mut indices = Vec::new();
+    let across = segments + 1;
+    for ring in 0..rings {
+        for segment in 0..segments {
+            let at = ring * across + segment;
+            let (below, next) = (at + across, at + 1);
+            indices.extend_from_slice(&[at, below, next, next, below, below + 1]);
+        }
+    }
+    meshes.add("sphere", &vertices, &indices).expect("a mesh")
+}
+
+/// Spheres of one color, opaque and rough 0 to 1 from left to right, metallic 0 to 1 from top to
+/// bottom, lit by a light from the upper left, in front, as a camera with perspective sees them,
+/// tonemapped by PBR Neutral, against their reference image.
+fn lit_spheres_match_their_reference() {
+    const SIZE: u32 = 200;
+    const STEPS: u32 = 5;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 9.0),
+        projection: Projection::Perspective {
+            fov: PI / 6.0,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    };
+    let sphere = sphere(&mut stores.meshes, 0.42, 24, 48);
+    let mut draws = Draws::default();
+    let step = |i: u32| i as f32 / (STEPS - 1) as f32;
+    for row in 0..STEPS {
+        for column in 0..STEPS {
+            let material = Material {
+                color: Vec4::new(0.9, 0.45, 0.2, 1.0),
+                metallic: step(row),
+                roughness: step(column),
+                ..Material::default()
+            };
+            let material = stores.materials.add(&material);
+            let draw =
+                MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
+            let middle = (STEPS - 1) as f32 / 2.0;
+            let at = Vec3::new(column as f32 - middle, middle - row as f32, 0.0);
+            draws.push_draw(Mat4::from_translation(at), &draw, 0);
+        }
+    }
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::new(1.0, -1.0, -1.0).normalize(),
+        color: Vec3::splat(4.0),
+        range: None,
+    }];
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let data = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    check(renderer, "lit_spheres", SIZE, SIZE);
 }
 
 /// Renders a frame of `data`, without UI.

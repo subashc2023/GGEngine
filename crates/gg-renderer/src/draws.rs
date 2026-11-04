@@ -312,7 +312,7 @@ mod tests {
     use gg_core::math::{Vec3, Vec4};
 
     use super::*;
-    use crate::{GridLines, Material, ModelVertex, Texture, circle, grid, line};
+    use crate::{GridLines, Material, Materials, ModelVertex, Texture, circle, grid, line};
 
     /// Each run's mesh, shader and draws.
     fn runs(draws: &Draws) -> Vec<(u32, u32, Range<usize>)> {
@@ -495,10 +495,13 @@ mod tests {
     fn draws_that_cull_run_apart_where_their_transforms_mirror_them() {
         let mut meshes = Meshes::default();
         let mut shaders = Shaders::default();
+        let mut materials = Materials::default();
         let corner = ModelVertex {
             position: Vec3::ZERO,
             uv: gg_core::math::Vec2::ZERO,
             color: Vec4::ONE,
+            normal: Vec3::Z,
+            tangent: Vec4::X,
         };
         let mesh = meshes.add("a", &[corner; 3], &[0, 1, 2]).unwrap();
         let mut draw = |double_sided| {
@@ -506,7 +509,8 @@ mod tests {
                 double_sided,
                 ..Material::default()
             };
-            MeshDraw::with_material(mesh, &material, &mut shaders)
+            let material = materials.add(&material);
+            MeshDraw::with_material(mesh, material, &materials, &mut shaders)
         };
         let (single, double) = (draw(false), draw(true));
         let at = Mat4::from_translation(Vec3::X);

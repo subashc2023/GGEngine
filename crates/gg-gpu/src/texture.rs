@@ -60,26 +60,48 @@ pub enum TextureFormat {
     /// isn't a multiple of 4, as a mip level's may not be, ends in a block that is whole all the
     /// same.
     Bc7Srgb,
+    /// Data compressed as BC7, as [`TextureFormat::Bc7Srgb`]'s blocks are, which shaders read as
+    /// [`TextureFormat::Rgba8Unorm`]'s: as cooked materials' maps of data store it.
+    Bc7Unorm,
+    /// Two channels of data compressed as BC5, in blocks of 4 by 4 pixels of 16 bytes each, 8 for
+    /// each channel, which shaders read as red and green from 0 to 1, blue as 0 and alpha as 1: as
+    /// cooked normal maps store their X and Y.
+    Bc5Unorm,
 }
 
 impl TextureFormat {
     /// Every format.
-    pub const ALL: [Self; 3] = [Self::Rgba8Unorm, Self::Rgba8Srgb, Self::Bc7Srgb];
+    pub const ALL: [Self; 5] = [
+        Self::Rgba8Unorm,
+        Self::Rgba8Srgb,
+        Self::Bc7Srgb,
+        Self::Bc7Unorm,
+        Self::Bc5Unorm,
+    ];
 
     pub(crate) fn raw(self) -> vk::Format {
         match self {
             Self::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             Self::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
             Self::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
+            Self::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
+            Self::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
         }
+    }
+
+    /// Whether it's compressed, in blocks of 4 by 4 pixels, which copies move whole: so streamed,
+    /// never written a pixel at a time.
+    pub fn compressed(self) -> bool {
+        self.block_size() != [1, 1]
     }
 
     /// How many bytes fill a texture of `size` pixels in this format, as [`Frame::stream_texture`]
     /// takes them: its levels packed largest first, the first level alone unless `mipmapped`, and
     /// otherwise every level that [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel. A level
-    /// of BC7 has 16 bytes for each block of 4 by 4 pixels, its sides rounded up to whole blocks, so
-    /// that a level of a pixel has a block. A level's bytes are a multiple of 4 for RGBA8 and of 16
-    /// for BC7, so that each level starts as aligned as the first, as copies need.
+    /// of BC7 or BC5 has 16 bytes for each block of 4 by 4 pixels, its sides rounded up to whole
+    /// blocks, so that a level of a pixel has a block. A level's bytes are a multiple of 4 for RGBA8
+    /// and of 16 for BC7 and BC5, so that each level starts as aligned as the first, as copies
+    /// need.
     ///
     /// [`Frame::stream_texture`]: crate::Frame::stream_texture
     pub fn bytes(self, size: [u32; 2], mipmapped: bool) -> u64 {
@@ -96,11 +118,11 @@ impl TextureFormat {
     }
 
     /// The pixels across and down of the texel block the format stores together, which copies
-    /// move whole: a pixel of RGBA8, and 4 by 4 of BC7.
+    /// move whole: a pixel of RGBA8, and 4 by 4 of BC7 and BC5.
     fn block_size(self) -> [u32; 2] {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb => [1, 1],
-            Self::Bc7Srgb => [4, 4],
+            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => [4, 4],
         }
     }
 
@@ -109,7 +131,7 @@ impl TextureFormat {
     fn block_bytes(self) -> u64 {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb => 4,
-            Self::Bc7Srgb => 16,
+            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => 16,
         }
     }
 }

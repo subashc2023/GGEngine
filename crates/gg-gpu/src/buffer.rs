@@ -151,11 +151,13 @@ impl Drop for Buffer {
 
 /// A buffer in the GPU's own memory, which frames fill a part at a time
 /// ([`Frame::stream_buffer`]) and then take for drawing ([`Frame::finish_buffer`]): vertices and
-/// other data that shaders read through its address, and the indices that draws take. Dropping
-/// it retires it until the GPU is done with it.
+/// other data that shaders read through its address, and the indices that draws take; or which
+/// frames write into as its data changes ([`Frame::write_buffer`]), as materials'. Dropping it
+/// retires it until the GPU is done with it.
 ///
 /// [`Frame::stream_buffer`]: crate::Frame::stream_buffer
 /// [`Frame::finish_buffer`]: crate::Frame::finish_buffer
+/// [`Frame::write_buffer`]: crate::Frame::write_buffer
 pub struct GpuBuffer {
     buffer: Buffer,
     /// How many of its bytes frames have copied, from the first.

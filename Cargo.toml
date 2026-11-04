@@ -18,16 +18,21 @@ cook = { path = "tools/cook" }
 
 ash = "0.38.0"
 ash-window = "0.13.0"
-# Decodes BC7 on the CPU, as GPUs do, for the cooker's tests of what it compressed: bcdec's port, in
-# safe Rust alone.
+# Decodes BC7 and BC5 on the CPU, as GPUs do, for the cooker's tests of what it compressed: bcdec's
+# port, in safe Rust alone.
 bcdec_rs = "0.2.1"
+# MikkTSpace's tangents, as glTF asks for a model's normal map that comes without them: the
+# reference's port, in safe Rust alone, without std, its square roots and arccosines the engine's.
+bevy_mikktspace = { version = "1.0.0", default-features = false }
 bytemuck = "1.25.2"
 cc = "1.9.0"
-# The cooker's BC7 encoding of games' textures, into KTX2 supercompressed with zstd: bc7enc_rdo's
-# perceptual encoder alone, as ISPC objects the crate ships built for each OS and architecture CI
-# builds on, so that no ISPC compiler is needed. Runs read what it writes with ktx2 and zstd.
+# The cooker's compression of games' textures, into KTX2 supercompressed with zstd: bc7enc_rdo's
+# encoder for BC7, perceptual for colors, and Intel's ISPC Texture Compressor for normal maps'
+# BC5, as ISPC objects the crates ship built for each OS and architecture CI builds on, so that no
+# ISPC compiler is needed. Runs read what it writes with ktx2 and zstd.
 ctt = { version = "0.6.1", default-features = false, features = [
     "encoder-bc7enc",
+    "encoder-intel",
     "ispc-prebuilt",
 ] }
 egui = { version = "0.37.0", features = ["default_fonts"] }

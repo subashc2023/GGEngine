@@ -139,7 +139,7 @@
         "63588cecf0028036": (
             Name: ("Hint"),
             Text: (
-                text: "Open a scene in the Scenes panel, below the Entities, then press Play to run it.\nsprites  ·  shapes  ·  text  ·  hierarchy  ·  physics  ·  models  ·  hdr",
+                text: "Open a scene in the Scenes panel, below the Entities, then press Play to run it.\nsprites  ·  shapes  ·  text  ·  hierarchy  ·  physics  ·  models  ·  hdr  ·  lights",
                 font: None,
                 size: 0.26,
                 color: (0.45, 0.5, 0.62, 1.0),

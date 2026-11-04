@@ -34,7 +34,9 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-const VERSION: u32 = 2;
+/// 3 since cooked models hold their vertices' normals and tangents, their materials' maps and their
+/// nodes' lights.
+const VERSION: u32 = 3;
 const HEADER: usize = 32;
 const ENTRY: usize = 32;
 /// What each entry's data starts at a multiple of, so that data mapped into memory is aligned for

@@ -4,7 +4,7 @@
 use std::f32::consts::PI;
 
 use gg_core::math::camera::rh::proj::vulkan;
-use gg_core::math::{Mat4, Quat, Vec3};
+use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 
 /// Where the game's view sees the world from, and how. World space is right-handed with +Y up, and
 /// a viewpoint without rotation looks down -Z, with +X to its right and +Y up, as glTF's cameras
@@ -106,6 +106,16 @@ impl Viewpoint {
         };
         let view = Mat4::from_rotation_translation(self.rotation, self.position).inverse();
         projection * view
+    }
+
+    /// Where lit shading sees from, as the frame's data holds it: its position and 1 with
+    /// perspective, or the way back toward it, its own +Z, and 0 without, as an orthographic
+    /// projection sees along one way wherever it looks.
+    pub(crate) fn eye(&self) -> Vec4 {
+        match self.projection {
+            Projection::Orthographic { .. } => (self.rotation * Vec3::Z).extend(0.0),
+            Projection::Perspective { .. } => self.position.extend(1.0),
+        }
     }
 }
 

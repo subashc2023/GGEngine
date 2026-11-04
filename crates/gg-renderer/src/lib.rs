@@ -1,11 +1,11 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
-//! games' shaders and textures and the engine's own, models' unlit materials among them, a game's
-//! UI over them in the view's own space, and the UI over the view; the view drawn in colors of high
-//! dynamic range, which a tonemapper maps into the range it shows; picks, which read back the ID of
-//! the draw the view shows at a pixel; an outline round what the view shows of an ID; each frame's
-//! passes in a render graph, which places the barriers between them and makes the view's images;
-//! and lighting and PBR materials to come.
+//! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
+//! metallic-roughness materials under the frame's lights, a game's UI over them in the view's own
+//! space, and the UI over the view; the view drawn in colors of high dynamic range, which a
+//! tonemapper maps into the range it shows; picks, which read back the ID of the draw the view
+//! shows at a pixel; an outline round what the view shows of an ID; and each frame's passes in a
+//! render graph, which places the barriers between them and makes the view's images.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -13,6 +13,7 @@
 mod circle;
 mod draws;
 mod grid;
+mod light;
 mod line;
 mod mesh;
 mod model;
@@ -46,23 +47,25 @@ pub use gg_gpu::{
     Window, Wrap, mip_sizes,
 };
 pub use grid::{Grid, GridLines};
+pub use light::{Light, LightKind};
 pub use line::Line;
 pub use mesh::{Lod, Lods, Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
-pub use model::{AlphaMode, Material, ModelVertex};
+pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sprite::{Sprite, SpriteSheet};
 pub use text::Glyph;
+pub use texture::{Map, Mipmaps, Texels, Texture, Textures};
 #[doc(hidden)]
-pub use texture::add_mipmaps;
-pub use texture::{Mipmaps, Texels, Texture, Textures};
+pub use texture::{add_levels, add_map_mipmaps, add_mipmaps};
 pub use tonemap::Tonemapper;
 pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
+use light::GpuLight;
 use mesh::{FrameData, MeshPass};
 use pick::Picks;
 use tonemap::TonemapPass;
@@ -139,26 +142,35 @@ impl std::ops::AddAssign for DrawCounts {
     }
 }
 
-/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`], replaced in them or removed
-/// from them, since it was last taken from them, in order: the shaders a frame makes pipelines
-/// for, the meshes and textures it queues to stream to the GPU, and the removals it applies,
-/// before it draws. Taking moves them out of the registries, which go on handing out handles where
-/// they are, so that a renderer on another thread renders what they handed out before. It keeps
-/// its memory, so that a frame that adds nothing allocates nothing.
+/// What's been added to a [`Meshes`], [`Shaders`], [`Textures`] and [`Materials`], replaced in
+/// them or removed from them, since it was last taken from them, in order: the shaders a frame
+/// makes pipelines for, the meshes and textures it queues to stream to the GPU, the materials it
+/// writes into their table, and the removals it applies, before it draws. Taking moves them out of
+/// the registries, which go on handing out handles where they are, so that a renderer on another
+/// thread renders what they handed out before. It keeps its memory, so that a frame that adds
+/// nothing allocates nothing.
 #[derive(Default)]
 pub struct Uploads {
     pub(crate) meshes: Vec<mesh::Change>,
     pub(crate) shaders: Vec<shader::Change>,
     pub(crate) textures: Vec<texture::Change>,
+    pub(crate) materials: Vec<(u32, model::Entry)>,
 }
 
 impl Uploads {
-    /// Takes what's changed in `meshes`, `shaders` and `textures` since they were last taken from,
-    /// after what it holds already.
-    pub fn take(&mut self, meshes: &mut Meshes, shaders: &mut Shaders, textures: &mut Textures) {
+    /// Takes what's changed in `meshes`, `shaders`, `textures` and `materials` since they were last
+    /// taken from, after what it holds already.
+    pub fn take(
+        &mut self,
+        meshes: &mut Meshes,
+        shaders: &mut Shaders,
+        textures: &mut Textures,
+        materials: &mut Materials,
+    ) {
         self.meshes.append(&mut meshes.changes);
         self.shaders.append(&mut shaders.changes);
         self.textures.append(&mut textures.changes);
+        self.materials.append(&mut materials.changes);
     }
 }
 
@@ -198,6 +210,10 @@ pub struct RenderData<'a> {
     /// The time the view shows, in seconds, which shaders read from the frame's data, as
     /// [`Shaders::add`] describes.
     pub time: f32,
+    /// What lights the view's lit shading, which shaders read through the frame's data, as
+    /// [`Shaders::add`] describes: without any, models' materials draw unlit, their base colors
+    /// alone.
+    pub lights: &'a [Light],
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -318,6 +334,9 @@ pub struct Renderer {
     waited: Duration,
     /// What the last frame drew, which [`Renderer::drawn`] describes.
     drawn: DrawCounts,
+    /// The frame's lights as shaders read them, kept between frames, so that one with no more than
+    /// the last allocates nothing.
+    lights: Vec<GpuLight>,
 }
 
 enum Output {
@@ -443,6 +462,7 @@ impl Renderer {
             failed: false,
             waited: Duration::ZERO,
             drawn: DrawCounts::default(),
+            lights: Vec::new(),
         })
     }
 
@@ -714,10 +734,21 @@ impl Renderer {
             (Some(view), _) => {
                 let mut pass =
                     (frame.render(view.pass)).expect("the graph's own images are always there");
+                self.lights.clear();
+                self.lights.extend(data.lights.iter().map(GpuLight::new));
+                let lights = if self.lights.is_empty() {
+                    0
+                } else {
+                    pass.upload(bytemuck::cast_slice(&self.lights))?.address()
+                };
                 let shared = FrameData {
                     camera: data.viewpoint.position,
                     time: data.time,
                     exposure: data.exposure,
+                    light_count: u32::try_from(self.lights.len()).expect("fewer than 2^32 lights"),
+                    lights,
+                    materials: self.meshes.materials_address(),
+                    eye: data.viewpoint.eye(),
                 };
                 let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
                 let mut counts =

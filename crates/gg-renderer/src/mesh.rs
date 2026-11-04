@@ -19,8 +19,8 @@ use gg_gpu::{
 use tracing::warn;
 
 use crate::shader::{self, Shader};
-use crate::texture::{self, Texels};
-use crate::{DrawCounts, Draws, Streaming, Uploads, grid, sprite};
+use crate::texture::{self, Map, Texels};
+use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -517,6 +517,8 @@ pub(crate) struct MeshPass {
     /// What's being streamed to the GPU, in the order it was added, each until it's drawable or
     /// removed; it keeps its memory, so that a frame with nothing to stream allocates nothing.
     streaming: VecDeque<Item>,
+    /// The materials models' draws index.
+    materials: MaterialTable,
     /// The most bytes a frame copies, as [`Settings::upload_budget`](crate::Settings::upload_budget)
     /// has it, but for the smallest whole part.
     budget: u64,
@@ -563,38 +565,46 @@ impl<T> Held<T> {
     }
 }
 
-/// A texture's slot: the texture in it, whether its texels are data, which says which stand-in
-/// the slot shows without an image of its own, and whether it was removed, which leaves it showing
+/// A texture's slot: the texture in it, what its texels stand for, which says which stand-in the
+/// slot shows without an image of its own, and whether it was removed, which leaves it showing
 /// the stand-in for good, as stale handles may still sample it.
 struct TextureSlot {
     texture: GpuTexture,
-    data: bool,
+    kind: texture::Kind,
     removed: bool,
 }
 
 /// The textures the renderer's slots show until their own images are there: a pixel of white for
-/// colors, so that a sprite shows its tint, and a pixel of zeros for data, so that text draws
-/// nothing rather than boxes. Written in the first frame that begins, before any slot shows them.
+/// colors, so that a sprite shows its tint, and for a surface's map, so that a material shows its
+/// factors; a pixel of zeros for data, so that text draws nothing rather than boxes; and a normal
+/// pointing straight out for a normal map, so that a surface shows as its vertices shape it.
+/// Written in the first frame that begins, before any slot shows them.
 struct StandIns {
     white: GpuTexture,
     zeros: GpuTexture,
+    flat: GpuTexture,
     written: bool,
 }
 
 impl StandIns {
     fn new(device: &Arc<Device>) -> Result<Self> {
         let white = TextureFormat::Rgba8Srgb;
-        let zeros = TextureFormat::Rgba8Unorm;
+        let data = TextureFormat::Rgba8Unorm;
         Ok(Self {
             white: GpuTexture::new(device, 1, 1, white, false, "white stand-in")?,
-            zeros: GpuTexture::new(device, 1, 1, zeros, false, "zero stand-in")?,
+            zeros: GpuTexture::new(device, 1, 1, data, false, "zero stand-in")?,
+            flat: GpuTexture::new(device, 1, 1, data, false, "flat normal stand-in")?,
             written: false,
         })
     }
 
-    /// The stand-in for a texture whose texels are data, if `data`, or colors.
-    fn of(&self, data: bool) -> &GpuTexture {
-        if data { &self.zeros } else { &self.white }
+    /// The stand-in for a texture whose texels stand for `kind`.
+    fn of(&self, kind: texture::Kind) -> &GpuTexture {
+        match kind {
+            texture::Kind::Color | texture::Kind::Map(Map::Surface) => &self.white,
+            texture::Kind::Data => &self.zeros,
+            texture::Kind::Map(Map::Normal) => &self.flat,
+        }
     }
 
     /// Writes them, in the first frame.
@@ -604,8 +614,76 @@ impl StandIns {
         }
         frame.write_texture(&mut self.white, [0, 0], [1, 1], &[255; 4])?;
         frame.write_texture(&mut self.zeros, [0, 0], [1, 1], &[0; 4])?;
+        // X and Y of 0, which a byte holds as nearly as 128 does.
+        frame.write_texture(&mut self.flat, [0, 0], [1, 1], &[128, 128, 255, 255])?;
         self.written = true;
         Ok(())
+    }
+}
+
+/// The table of materials, by their handles, in the GPU's own memory: written as materials are added
+/// and replaced, in the frame's own commands, before its passes, so that every draw from that
+/// frame on reads what was written; and made again, twice the size, as more are added than it
+/// holds, the old one retiring until the GPU is done with it. What it holds is kept on the CPU
+/// too, for a table made again to start from.
+struct MaterialTable {
+    /// The table, and how many materials it holds.
+    table: Option<(GpuBuffer, usize)>,
+    entries: Vec<model::Entry>,
+}
+
+impl MaterialTable {
+    /// The fewest materials a table holds.
+    const LEAST: usize = 64;
+
+    /// Writes `changes`, taking them, each a material's index and its entry, into the table, which
+    /// it makes, or makes again larger, as they need: one copy of every entry from the first that
+    /// changed to the last, or of them all into a table made again.
+    ///
+    /// # Panics
+    ///
+    /// If a material's index is past those before it, as they are where they came from another
+    /// `Materials` than those before them.
+    fn write(
+        &mut self,
+        device: &Arc<Device>,
+        frame: &mut Frame<'_>,
+        changes: &mut Vec<(u32, model::Entry)>,
+    ) -> Result<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        // The first entry that changed, and the one past the last.
+        let (mut first, mut end) = (usize::MAX, 0);
+        for (index, entry) in changes.drain(..) {
+            let index = index as usize;
+            match index.cmp(&self.entries.len()) {
+                std::cmp::Ordering::Less => self.entries[index] = entry,
+                std::cmp::Ordering::Equal => self.entries.push(entry),
+                std::cmp::Ordering::Greater => {
+                    panic!("a renderer draws with the materials of one `Materials`")
+                }
+            }
+            (first, end) = (first.min(index), end.max(index + 1));
+        }
+        let size = size_of::<model::Entry>();
+        let len = self.entries.len();
+        if self.table.as_ref().is_none_or(|&(_, room)| room < len) {
+            let room = len.next_power_of_two().max(Self::LEAST);
+            // The table that's there, if any, retires until the GPU is done with the frames that
+            // read it.
+            let table = GpuBuffer::new(device, (room * size) as u64, "materials")?;
+            self.table = Some((table, room));
+            (first, end) = (0, len);
+        }
+        let (table, _) = self.table.as_mut().expect("just made");
+        let bytes = bytemuck::cast_slice(&self.entries[first..end]);
+        frame.write_buffer(table, (first * size) as u64, bytes)
+    }
+
+    /// The address of the table, which shaders read the materials through: 0 before any is added.
+    fn address(&self) -> u64 {
+        self.table.as_ref().map_or(0, |(table, _)| table.address())
     }
 }
 
@@ -788,6 +866,10 @@ impl MeshPass {
             textures: Vec::new(),
             stand_ins: StandIns::new(device)?,
             streaming: VecDeque::new(),
+            materials: MaterialTable {
+                table: None,
+                entries: Vec::new(),
+            },
             budget,
             scratch: LodScratch::default(),
         })
@@ -878,8 +960,9 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Takes the changes to the meshes and textures in `uploads`, and streams what's queued to the
-    /// GPU, within the frame's budget, which must happen before the frame's passes. A texture
+    /// Takes the changes to the meshes, textures and materials in `uploads`, writes the materials
+    /// into their table, and streams what's queued to the GPU, within the frame's budget, which
+    /// must happen before the frame's passes. A texture
     /// added gets its slot, which shows a stand-in; its pixels, and a mesh's vertices and indices,
     /// queue up behind what was added before, and each frame copies parts of the queue in order,
     /// making an asset's buffers or image as its turn comes, if the GPU's memory has room for
@@ -903,7 +986,14 @@ impl MeshPass {
         for change in uploads.textures.drain(..) {
             self.texture_changed(frame, change)?;
         }
+        (self.materials).write(&self.device, frame, &mut uploads.materials)?;
         self.stream(frame)
+    }
+
+    /// The address of the table of materials, which the frame's data carries: 0 before any is
+    /// added.
+    pub(crate) fn materials_address(&self) -> u64 {
+        self.materials.address()
     }
 
     /// Takes a change to the meshes: queues what was added, or removes a mesh.
@@ -966,17 +1056,17 @@ impl MeshPass {
             ..
         } = self;
         match change {
-            texture::Change::Reserved { index, name, data } => {
+            texture::Change::Reserved { index, name, kind } => {
                 assert_eq!(
                     index as usize,
                     textures.len(),
                     "a renderer samples the textures of one `Textures`"
                 );
                 // In the slot of its handle's index, which shaders sample it by.
-                let texture = GpuTexture::placed(device, index, stand_ins.of(data), &name)?;
+                let texture = GpuTexture::placed(device, index, stand_ins.of(kind), &name)?;
                 textures.push(TextureSlot {
                     texture,
-                    data,
+                    kind,
                     removed: false,
                 });
             }
@@ -1010,7 +1100,7 @@ impl MeshPass {
                 let slot = slot.expect("a renderer samples the textures of one `Textures`");
                 debug_assert!(!slot.removed, "its `Textures` removes a texture once");
                 streaming.retain(|item| !item.is(Kind::Texture, index));
-                frame.hide_texture(&mut slot.texture, stand_ins.of(slot.data));
+                frame.hide_texture(&mut slot.texture, stand_ins.of(slot.kind));
                 slot.removed = true;
             }
         }
@@ -1163,7 +1253,7 @@ impl MeshPass {
                         return Ok(false);
                     }
                     // Once the image is there, so that a refill tried again doesn't make them again.
-                    texture::add_mipmaps(pixels, *size, texels.mipmaps());
+                    texture::add_levels(pixels, *size, *texels);
                     *made = true;
                     *copying = true;
                 }
@@ -1552,6 +1642,17 @@ pub(crate) struct FrameData {
     /// What lit shading multiplies light by, as
     /// [`RenderData::exposure`](crate::RenderData::exposure) gives it.
     pub(crate) exposure: f32,
+    /// How many lights the frame has, as [`RenderData::lights`](crate::RenderData::lights) gives
+    /// them.
+    pub(crate) light_count: u32,
+    /// The address of its lights, a [`GpuLight`](crate::light::GpuLight) each, or 0 for none.
+    pub(crate) lights: u64,
+    /// The address of the table of materials, each by its index, or 0 before any is added.
+    pub(crate) materials: u64,
+    /// Where lit shading sees from: the camera's position and 1 for a perspective, or the way back
+    /// toward it and 0 for an orthographic projection, which sees along one way, so that the way
+    /// to the eye from a point `p` is `eye.xyz - p * eye.w`.
+    pub(crate) eye: Vec4,
 }
 
 #[cfg(test)]
@@ -1724,12 +1825,13 @@ mod tests {
         let mut meshes = Meshes::default();
         let mut shaders = crate::Shaders::default();
         let mut textures = crate::Textures::default();
+        let mut materials = crate::Materials::default();
         let mut uploads = Uploads::default();
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        uploads.take(&mut meshes, &mut shaders, &mut textures, &mut materials);
         // As a frame that presented nothing leaves them, and more are added before the next.
         meshes.add("a", &TRIANGLE, &[0, 1, 2]).unwrap();
         textures.add("a", [1, 1], &[255; 4], Mipmaps::None).unwrap();
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        uploads.take(&mut meshes, &mut shaders, &mut textures, &mut materials);
         let meshes_held: Vec<u32> = (uploads.meshes.iter())
             .map(|change| match change {
                 Change::Added(added) => added.index,

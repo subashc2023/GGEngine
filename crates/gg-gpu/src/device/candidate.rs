@@ -171,10 +171,11 @@ impl Candidate {
         } else if !has_depth(instance, physical) {
             Some("can't render depth into D32_SFLOAT images".to_owned())
         } else if core.texture_compression_bc != vk::TRUE {
-            // Games' cooked textures are BC7, so every device must take them. Unlike depth, this
-            // needs no query of the format's features: Vulkan requires the feature to give BC7
-            // images sampling, linear filtering and copies into them (the Features chapter's
-            // textureCompressionBC, and the Formats chapter's required format support).
+            // Games' cooked textures are BC7 and BC5, so every device must take them. Unlike depth,
+            // this needs no query of the format's features: Vulkan requires the feature to give
+            // every BC format's images sampling, linear filtering and copies into them (the
+            // Features chapter's textureCompressionBC, and the Formats chapter's required format
+            // support).
             Some(
                 "doesn't support BC texture compression (textureCompressionBC), which games' \
                  cooked textures need"
@@ -318,7 +319,7 @@ fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
 }
 
 /// Whether the device can write the engine's textures from the CPU, and at what cost: host image
-/// copy for every texture format, BC7 among them, at every size a texture has, into the
+/// copy for every texture format, BC7 and BC5 among them, at every size a texture has, into the
 /// shader-read-only layout the bindless set declares textures in. Nothing past the extension's
 /// name is queried unless the device lists the extension.
 fn host_copy_support(

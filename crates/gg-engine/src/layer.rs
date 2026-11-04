@@ -17,9 +17,9 @@ use gg_api::asset::AssetId;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
-    Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture, Textures,
-    Tonemapper, Viewpoint, Viewport,
+    Blend, Circle, Draws, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps, ModelParams,
+    ModelVertex, Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture,
+    Textures, Tonemapper, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
@@ -45,6 +45,7 @@ use crate::grid::{self, Plane};
 use crate::hot_reload::{Asset as HotAsset, HotReload, Reloaded, Source};
 use crate::image::{self, Image};
 use crate::interpolation::Past;
+use crate::light::{self, Light};
 use crate::loader::Loader;
 use crate::model::{self, Made, Nodes};
 #[cfg(feature = "dev")]
@@ -293,11 +294,14 @@ pub struct Context {
     environment: Option<Environment>,
     /// The tie among the world's environments last warned of, while they've tied since.
     environment_tie: Option<environment::Tie>,
+    /// The world's lights as the world was last drawn, which keep their memory.
+    lights: Vec<gg_renderer::Light>,
     /// The simulation's time in seconds as the world was last drawn.
     time: f32,
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
+    materials: Materials,
     /// What decodes the textures' images, off the main thread in a run's context.
     loader: Loader,
     /// What the renderer was streaming once it had rendered the last frame it handed back.
@@ -556,6 +560,7 @@ impl Context {
             world.register::<MeshDraw>()?;
             world.register::<Camera>()?;
             world.register::<Environment>()?;
+            world.register::<Light>()?;
             world.register::<Name>()?;
             world.register::<RigidBody2D>()?;
             world.register::<BoxCollider2D>()?;
@@ -583,10 +588,12 @@ impl Context {
             tie: None,
             environment: None,
             environment_tie: None,
+            lights: Vec::new(),
             time: 0.0,
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             textures,
+            materials: Materials::default(),
             // A test's or a replay's, which draws nothing: on the calling thread, as each is added.
             loader: Loader::inline(),
             streamed: Streaming::default(),
@@ -1058,17 +1065,24 @@ impl Context {
     /// texture's does; each draws once frames have streamed it to the GPU. `name` names the model
     /// in errors and GPU captures. A run from a game's package
     /// reads the model as the cooker cooked it instead, its meshes optimized, with levels of detail
-    /// that each draw picks by its size on screen, and its images compressed to BC7 with their
-    /// levels, as ARCHITECTURE.md's Project state says. A file added again gives the model it gave
-    /// first, until it's removed, as [`remove_model`](Self::remove_model) says.
+    /// that each draw picks by its size on screen, and its images compressed with their levels, BC7
+    /// of colors or values and BC5 of normal maps, as ARCHITECTURE.md's Project state says. A file
+    /// added again gives the model it gave first, until it's removed, as
+    /// [`remove_model`](Self::remove_model) says.
     ///
-    /// Of each node it takes the transform, a matrix or a translation, rotation and scale; of each
-    /// primitive its mesh draws, the positions, the texture coordinates its base color texture
-    /// names and its vertex colors, COLOR_0, as floats or normalized integers, and its indices, of
-    /// 8, 16 or 32 bits; and of its material, the base color factor and texture, the texture's
-    /// wrapping and whether it magnifies to the nearest texel, the alpha mode and cutoff, and
-    /// whether it's double-sided. Models draw unlit, their base color alone, as KHR_materials_unlit
-    /// has it, and a material that isn't double-sided draws its triangles' fronts alone. Buffers
+    /// Of each node it takes the transform, a matrix or a translation, rotation and scale, and its
+    /// light, as KHR_lights_punctual gives it, which the node's entity has as a [`Light`]; of each
+    /// primitive its mesh draws, the positions, normals and tangents, the texture coordinates its
+    /// material's textures name, and its vertex colors, COLOR_0, as floats or normalized integers,
+    /// and its indices, of 8, 16 or 32 bits; and of its material, glTF's metallic-roughness, as
+    /// ARCHITECTURE.md's Rendering says: the base color factor and texture, the metallic and
+    /// roughness factors and their texture, the normal map and its scale, the occlusion map and its
+    /// strength, the emissive factor, times KHR_materials_emissive_strength's strength, and its
+    /// texture, each texture's wrapping and whether it magnifies to the nearest texel, the alpha
+    /// mode and cutoff, whether it's double-sided, and whether KHR_materials_unlit makes it unlit.
+    /// A primitive without normals draws flat, and a lit material's normal map without tangents
+    /// takes MikkTSpace's; a material that isn't double-sided draws its triangles' fronts alone.
+    /// Buffers
     /// are in files in the model's folder, named by URIs relative to the model's, read no further
     /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
     /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
@@ -1080,23 +1094,25 @@ impl Context {
     /// unless the run is recorded, in a lockstep session or follows another, its nodes and
     /// materials, which its roots' nodes take.
     ///
-    /// It ignores animations, cameras and the extensions the model uses without requiring them,
-    /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
-    /// rest. It ignores without a word normals, tangents, other texture coordinates, the material's
-    /// other parameters and textures, the textures' minification filters, since it samples them
-    /// trilinearly and anisotropically unless they magnify to the nearest texel, morph targets
-    /// while their weights are 0, the other scenes, and whatever the scene doesn't reach, which it
-    /// doesn't read.
+    /// It ignores animations, cameras and the extensions the model uses without requiring them but
+    /// those it reads, and a material's texture that reads other texture coordinates than its
+    /// others, or whose image another texture samples as what it doesn't, as data where it samples
+    /// colors, and logs which it has at info level, as `engine.model_ignored`: the model draws as
+    /// it is at rest. It ignores without a word the textures' minification filters, since it
+    /// samples them trilinearly and anisotropically unless they magnify to the nearest texel, morph
+    /// targets while their weights are 0, the other scenes, and whatever the scene doesn't reach,
+    /// which it doesn't read.
     ///
     /// Fails, adding nothing, with `engine.unsupported_model` for glTF the engine doesn't draw:
     /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
     /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
     /// wraps across and down differently, a texture without an image, any required extension but
-    /// KHR_materials_unlit, and a model that takes more than 4 GiB to read, of its buffers, images,
-    /// as read and as decoded, vertices and nodes; with `engine.bad_model` for a file that can't be
-    /// read, isn't a regular file or isn't glTF, as far as reading it checks, such as an accessor
-    /// past its buffer view, an index past its vertices, a node with two parents, a matrix that
-    /// isn't a translation, rotation and scale, a URI that's neither a data URI nor a relative
+    /// KHR_materials_unlit, KHR_lights_punctual and KHR_materials_emissive_strength, and a model that
+    /// takes more than 4 GiB to read, of its buffers, images, as read and as decoded, vertices and
+    /// nodes; with `engine.bad_model` for a file that can't be read, isn't a regular file or isn't
+    /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
+    /// its vertices, a node with two parents, a matrix that isn't a translation, rotation and
+    /// scale, a light the extension doesn't allow, a URI that's neither a data URI nor a relative
     /// path, or that has a `..`, or an image that isn't a PNG or a JPEG as far as its header, and,
     /// though glTF allows them, integers written as floats, such as `1.0`; and with
     /// `renderer.too_many_textures` if the renderer hasn't room for its images.
@@ -1131,13 +1147,13 @@ impl Context {
                         imported.ignored.join(", ")
                     );
                 }
-                let (meshes, shaders, textures, loader) = (
-                    &mut self.meshes,
-                    &mut self.shaders,
-                    &mut self.textures,
-                    &mut self.loader,
-                );
-                let added = model::add(name, path, imported, meshes, shaders, textures, loader);
+                let stores = model::Stores {
+                    meshes: &mut self.meshes,
+                    shaders: &mut self.shaders,
+                    textures: &mut self.textures,
+                    materials: &mut self.materials,
+                };
+                let added = model::add(name, path, imported, stores, &mut self.loader);
                 let (nodes, made) = added?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
                 // Each named by the model's ID, or path, and its order in the model.
@@ -2428,7 +2444,7 @@ impl Context {
             return;
         }
         let named = assets::name_of(self.root.as_deref(), path);
-        let texels = image.texels(Mipmaps::None);
+        let texels = image.texels(Texels::Color(Mipmaps::None));
         let Image { size, pixels, .. } = image;
         let loaded = self.loaded.textures.values();
         let was = loaded.copied().find(|&(loaded, _)| loaded == texture);
@@ -2496,11 +2512,14 @@ impl Context {
         let whole = !recorded && self.player.is_none() && !self.follows;
         let was = self.assets.nodes(model).expect("a model loaded").clone();
         let made = &mut self.loaded.made[model.index()];
-        let (meshes, shaders, textures) = (&mut self.meshes, &mut self.shaders, &mut self.textures);
+        let stores = model::Stores {
+            meshes: &mut self.meshes,
+            shaders: &mut self.shaders,
+            textures: &mut self.textures,
+            materials: &mut self.materials,
+        };
         let replaced = imported.images.len().min(made.images.len());
-        let reloaded = model::reload(
-            &named, imported, made, &was, whole, meshes, shaders, textures,
-        );
+        let reloaded = model::reload(&named, imported, made, &was, whole, stores);
         let (nodes, kept, added) = match reloaded {
             Ok(reloaded) => reloaded,
             Err(error) => {
@@ -3100,13 +3119,15 @@ impl Context {
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
     /// from where it was as the latest tick started to where the tick left it, at `time`, the
     /// simulation's in seconds, and their colliders' outlines, over the rest, while they're shown,
-    /// or the look shows them; and finds where the world's camera sees from, and the world's
-    /// environment. Before the entities, a development build draws the look's grid, unless the
-    /// frame is bare, as the viewpoint the frame sees from so far sees it.
+    /// or the look shows them; and finds where the world's camera sees from, the world's
+    /// environment, and its lights, where they draw. Before the entities, a development build
+    /// draws the look's grid, unless the frame is bare, as the viewpoint the frame sees from so far
+    /// sees it.
     pub(crate) fn draw_world(&mut self, alpha: f32, time: f32) {
         self.past.resolve(&self.world);
         self.seen = camera::seen(&self.world, &self.past, alpha, &mut self.tie);
         self.environment = environment::seen(&self.world, &mut self.environment_tie);
+        light::lights(&self.world, &self.past, alpha, &mut self.lights);
         self.time = time;
         #[cfg(feature = "dev")]
         if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
@@ -3138,7 +3159,8 @@ impl Context {
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: the world's environment's tonemapper and exposure,
-    /// or none and the default's, as the world was last drawn, and the time it was drawn at; its
+    /// or none and the default's, and its lights, as the world was last drawn, and the time it was
+    /// drawn at; its
     /// draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
@@ -3160,6 +3182,8 @@ impl Context {
         // default environment's is.
         frame.tonemapper = (self.environment).map_or(Tonemapper::None, |seen| seen.tonemapper);
         frame.exposure = self.environment.unwrap_or_default().light_scale();
+        frame.lights.clear();
+        frame.lights.extend_from_slice(&self.lights);
         frame.time = self.time;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
@@ -3194,7 +3218,12 @@ impl Context {
         self.loader.take(&mut self.textures);
         frame.loading = self.loader.pending();
         self.fonts.place(&mut self.textures);
-        (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
+        (frame.uploads).take(
+            &mut self.meshes,
+            &mut self.shaders,
+            &mut self.textures,
+            &mut self.materials,
+        );
         frame.picks.clear();
         #[cfg(feature = "dev")]
         if self.look.bare {
@@ -4787,8 +4816,14 @@ mod tests {
                 },
             ];
         }
-        let images: Vec<_> = (model.images.iter())
-            .map(|image| block(image.size.map(|side| side.min(4))))
+        // Each compressed as what it holds says, as the cooker compresses it.
+        let images: Vec<_> = (model.images.iter().enumerate())
+            .map(|(i, image)| {
+                let holds = crate::model::texels(&model.primitives, i);
+                let format = crate::image::Compressed::of(holds).ktx2();
+                let size = image.size.map(|side| side.min(4));
+                ktx2(format, size, &[vec![0; 16]], true)
+            })
             .collect();
         let still = "local Still = gg.declare(\"Still\", { rate = 1 })\nreturn Still\n";
         let mut writer = Writer::new(".", Some("scenes/main.ron"));
@@ -5324,8 +5359,8 @@ mod tests {
         cx.load_scene_file(&path).expect("loaded");
         assert_eq!(
             cx.textures.count(),
-            count + 3,
-            "each once, the model's one image among them"
+            count + 4,
+            "each once, the model's two images among them"
         );
         assert!(
             cx.assets.model(model).is_some(),
@@ -5479,7 +5514,8 @@ mod tests {
         std::fs::write(&path, gltf([0.0, 5.0, 0.0], 0.5)).expect("an edit");
         let moved = |cx: &Context| at(cx) == Vec3::new(0.0, 5.0, 0.0);
         until(&mut cx, false, &moved, "the node moves");
-        assert_ne!(draw(&cx), drew, "its material's color");
+        // Its material's color changed in the table of materials, where its draw reads it.
+        assert_eq!(draw(&cx), drew, "the same draw, of the same material");
 
         let _ = logged.codes.try_iter().count();
         std::fs::write(&path, gltf([0.0, 7.0, 0.0], 0.5)).expect("an edit");
