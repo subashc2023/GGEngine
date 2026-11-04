@@ -100,12 +100,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Desyncs named to their field** (2026-11-03)
 - **Ticks run again, and a SyncTest** (2026-11-03)
 - **Rollback** (2026-11-03)
+- **A server that owns the world** (2026-11-04)
+- **Phase 11, networking beyond lockstep** (2026-11-04)
 
 ## Now
 
-**A server that owns the world**: Phase 11's fourth milestone, as Next has it. Phase 10 closes once
-the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is checked on an Apple
-Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
+**Phase 12, render graph and PBR**, as Next has it, its milestones to be set out as it starts.
+Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
+checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
 
 ## Next
 
@@ -127,23 +129,9 @@ Each phase ends in something you can run and check.
     macOS, the reference player running a package's scenes and Luau scripts, as the showcase's,
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
-11. **Networking beyond lockstep.** Rollback, from the snapshots and replays the world already has,
-    with a SyncTest; a server that owns the world, replicating it to clients that predict; and a
-    desync debugger that names the entity and field where peers part. *Done when* the demo plays
-    over a link with 100 ms of latency and loss, under rollback and under a server, without a
-    desync, and a desync forced in a test is named to its field. Its milestones, in order: desyncs
-    named to their field, each peer keeping a copy of its world until the other's hash of that tick
-    has come, so that the joiner, given its host's world where their hashes part, names the entity
-    and field there; ticks run again, the world restored from a snapshot inside a tick and the
-    commands after it run again, layers told of the restore and the sounds those ticks queued not
-    played twice, with a SyncTest mode, which runs each tick again and compares its hash, that CI
-    runs on the demo and the sandbox; rollback, each peer predicting the other's inputs from its
-    last, rolling back to where a prediction missed and running the ticks after again, with an
-    input delay of a tick or two, inputs over UDP, each packet repeating those not yet acknowledged,
-    and a link conditioner that adds latency, jitter and loss; and a server that owns the world,
-    headless in real time and ending cleanly on Ctrl+C, sending its clients snapshots, then deltas,
-    each client predicting its own player and correcting toward the server, the others
-    interpolated.
+
+Phase 11 is done, as Done has it, but for what Deferred holds.
+
 12. **Render graph and PBR.** Passes declare the resources they read and write; the graph
     places barriers and layout transitions, aliases transient memory and schedules async
     compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
@@ -181,7 +169,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`) | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
-| A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
+| A clean shutdown on Ctrl+C in a windowed run started from a console, which ends the process at once, as headless runs and servers don't; the JSON log keeps every line written until then, and a recording every whole line but its `end` | Someone ends windowed runs from their console |
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | Checking windowed frames' allocations in CI, under Xvfb on Linux, with lavapipe presenting and input through XTest; they're checked by hand, as [gg-engine's AGENTS.md](../crates/gg-engine/AGENTS.md) says | A change to the windowed loop allocates where the check by hand didn't look |
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
@@ -464,7 +452,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in about 0.5 ms taken again or restored | A game's rollback frames need the time |
 | An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
 | Budgeting a frame's ticks against all of its time: a frame stops its ticks only once they take longer than the time they simulate, so ticks that take nearly their 15.625 ms keep real time at the frame rate's cost, as the debug sandbox's 100,000 drifters do, about 8 a frame at 8 fps; counting the rest of the frame too would slow down the simulation of any game drawn below 64 fps | A game's frame rate falls so |
-| Headless runs in real time, as a dedicated server's: a headless run takes a tick each frame, as fast as its frames go | The first dedicated server |
 | Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick; a recorded run hashes every tick, which takes the release swarm's headless frames from a p50 of 8.7 ms to 16.3 ms, its updates from 14.0 ms to 22.6 ms on average | Recorded runs of large worlds need the time |
 | The job system in gg-core, where the renderer can reach it; it's gg-engine's | gg-renderer needs jobs |
 | Naming the job system's threads and the render thread for Tracy on macOS, whose client reads no thread's name from the OS there, so they show as numbers: a call into gg-core, which keeps Tracy's client, from rayon-core's start handler and the render thread's start. On Windows and Linux they show as `gg-job-N` and `gg-render` | Someone profiles on macOS |
@@ -483,9 +470,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 | Patching an edit to a constant, which rebuilds the game: `gg run` patches edits inside function bodies alone, though one to a constant that no type, static or `const fn` reads would patch as well | Agents tune constants as the game runs, and the rebuilds' restarts slow them |
 | Removing the patches' libraries a `gg run` that's killed leaves; a run removes those its game loaded as it ends | They pile up enough to matter |
-| Sessions beyond two peers on a LAN: more players, spectators, a delay and a window of ticks predicted that follow the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, or rollback's 31.25 ms and 8 ticks, and play across the internet, through NATs | A game for more than two, or played across the internet |
+| Lockstep and rollback sessions beyond two peers on a LAN, as a server takes any number of clients: more players, spectators, a delay and a window of ticks predicted that follow the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, or rollback's 31.25 ms and 8 ticks; and play across the internet, through NATs, a server's too | A peer-to-peer game for more than two, or one played across the internet |
 | Rollback peers kept alike ahead of each other's inputs, the one ahead slowing a little, as GGPO's peers do: a peer ahead, as a host is of a joiner by the time its world took to come and the link's latency, predicts as far as `PREDICTED` and waits there, its corrections the other's moves late, while the other predicts little | A rollback session's corrections show on one peer |
-| Smoothing what a rollback corrects, which the frames draw where the ticks run again left it, at once | Players find corrections jarring |
+| Smoothing what a rollback, or a client's correction, corrects, which the frames draw where the ticks run again left it, at once: a client's own player seldom moves, as it predicts it exactly, and the other players draw between the server's states, but entities no player owns, as the demo's shards, jump where another's player moved them | Players find corrections jarring |
+| A server's session under `gg run`, and the tool API's edits, scene files' and scripts' saves and patches there: a server serves no tool API and watches no files, and a client refuses the API's edits (`net.no_edit`), as the server's next state would take them away, and applies a patch to itself alone | Agents build a game played through a server |
+| Recording a server, which `--serve` refuses with `--record`, though its ticks run once each, on its clients' inputs as they applied | A server session is worth replaying |
+| A server that checks that a client's commands name the client's own player: it applies whatever commands a client sends, and a game's commands name their player, so a client can steer another's | A game is played among people who'd cheat |
+| Naming the field where a client's world, read from a state's text, differs from the server's: `net.desync` names the tick and both hashes, as the client has the server's text alone; a server could read its own text back as it writes it, where a client says so | A client's world reads otherwise than the server's |
 | `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
 | Rebuilding or restarting a running game as its project's manifest changes, which `gg run` doesn't watch | Someone edits a manifest while its game runs |

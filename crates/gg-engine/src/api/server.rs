@@ -854,8 +854,8 @@ impl Api {
         let file = scene.path.as_deref().map(resolve).transpose()?;
         if scene.action == SceneAction::Save {
             if stack.is_peer() {
-                let message = "the game can't save the open scene: the run is a lockstep peer, \
-                               whose scene files would part from the other peer's";
+                let message = "the game can't save the open scene: the run is networked, and \
+                               its scene files would part from the session's others'";
                 return Err(Error::new("api.no_scene", message));
             }
             return scene_files::save(cx, file);

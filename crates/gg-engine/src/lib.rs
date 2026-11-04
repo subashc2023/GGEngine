@@ -66,6 +66,10 @@ pub mod grid;
 mod hot_reload;
 mod image;
 mod input;
+// Ctrl+C comes through the OS's handler for it, which only unsafe code installs: this module alone
+// may use it.
+#[allow(unsafe_code)]
+mod interrupt;
 // The Inspector in development builds, as `dev` has the UI; in a build without it, its items that
 // games name, which do nothing, as its `none.rs` says.
 #[cfg(feature = "dev")]
@@ -86,6 +90,7 @@ mod memory;
 mod model;
 mod name;
 mod net;
+mod owner;
 mod package;
 mod pads;
 // subsecond applies a patch of the game's code only through unsafe code: this module alone may use
@@ -194,6 +199,7 @@ pub use luau::{Mods, Scripts};
 use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};
 pub use name::Name;
+pub use owner::Owner;
 pub use perf::PerfPanel;
 pub use physics::{
     BodyType, BoxCollider2D, CircleCollider2D, Physics2D, RigidBody2D, step_physics,
@@ -625,19 +631,25 @@ fn run_args(
             app.stack.record(recorder);
         }
         if let Some(net) = &args.net {
-            let mut net = net::Lockstep::start(net, app.name, app.stack.names())?;
+            let mut session = net::Session::start(net, app.name, app.stack.names())?;
             if args.rollback {
-                net.predict();
+                session.predict();
             }
             if let Some(link) = args.link {
-                net.condition(link);
+                session.condition(link);
             }
-            app.stack.lockstep(net);
+            app.stack.session(session);
+        }
+        // A server renders nothing, and serves no tool API, whose tools look at a run's frames.
+        if matches!(args.net, Some(args::Net::Serve(_))) {
+            interrupt::watch();
+            return main_loop::run_server(&mut app, &args, snapshot);
         }
         // Before the renderer starts, so that tools find a run that hangs as it starts.
-        let player = args.net.as_ref().map(|net| match net {
-            args::Net::Host(_) => 0,
-            args::Net::Join(_) => 1,
+        let player = args.net.as_ref().and_then(|net| match net {
+            args::Net::Host(_) => Some(0),
+            args::Net::Join(_) => Some(1),
+            args::Net::Serve(_) | args::Net::Connect(_) => None,
         });
         let api = match api::start(
             app.name,
@@ -659,6 +671,10 @@ fn run_args(
             }
         };
         if args.headless || args.embedded {
+            // An embedded run's tool ends it.
+            if args.headless {
+                interrupt::watch();
+            }
             run_headless(&mut app, &args, api, snapshot)
         } else {
             window::run(&mut app, &args, api, snapshot)

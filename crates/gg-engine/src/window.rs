@@ -755,7 +755,7 @@ impl ApplicationHandler for Handler<'_> {
             }
             let perf = mem::take(&mut self.cx.perf);
             self.ran = Some(Ran::finish(
-                renderer,
+                Some(renderer),
                 self.frames,
                 &self.clock,
                 &self.stepper,

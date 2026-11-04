@@ -6,7 +6,7 @@ use std::iter;
 
 use gg_core::math::Vec3;
 
-use crate::{Entity, Parent, Transform, World};
+use crate::{Entity, EntityId, Parent, Transform, World};
 
 /// For a slot that no row copied.
 const NONE: u32 = u32::MAX;
@@ -52,6 +52,9 @@ pub(crate) struct Past {
     /// nothing to draw on from, as before the first tick and after a world restored or replaced in
     /// a tick.
     found: Option<(u64, u64)>,
+    /// The poses rows draw as in place of where they'd draw, by their tables and rows, sorted, as
+    /// [`instead`](Self::instead) has them.
+    instead: Vec<(u32, u32, Transform)>,
 }
 
 impl Past {
@@ -115,6 +118,7 @@ impl Past {
             starts,
             from,
             found,
+            instead: _,
         } = self;
         *resolved = true;
         *found = None;
@@ -185,6 +189,31 @@ impl Past {
             }
         }
         *found = Some(world.version());
+    }
+
+    /// Has the frames draw each entity of `poses`, by its ID, of `world` as it is, as its pose
+    /// says, in place of where it would draw, as a client draws the other players' entities where
+    /// the server's states had them: until they're given others, which a frame of `world` as it
+    /// is takes.
+    pub(crate) fn instead(&mut self, world: &World, poses: &[(EntityId, Transform)]) {
+        self.instead.clear();
+        for &(id, pose) in poses {
+            if let Some((table, row)) = world.entity(id).and_then(|entity| world.table_row(entity))
+            {
+                self.instead.push((table, row, pose));
+            }
+        }
+        self.instead
+            .sort_unstable_by_key(|&(table, row, _)| (table, row));
+    }
+
+    /// The poses table `table`'s rows draw as in place of where they'd draw, each with its table
+    /// and row, by row.
+    pub(crate) fn instead_of(&self, table: usize) -> &[(u32, u32, Transform)] {
+        let table = u32::try_from(table).expect("fewer than 2^32 tables");
+        let start = self.instead.partition_point(|&(of, ..)| of < table);
+        let end = self.instead.partition_point(|&(of, ..)| of <= table);
+        &self.instead[start..end]
     }
 
     /// What the rows of `world`'s table `table` draw from, from its first row on, if they draw
@@ -367,6 +396,34 @@ mod tests {
         assert_eq!(halfway(&world, &mut past), want);
     }
 
+    /// An entity given a pose to draw as instead, as a client draws another player's, draws as the
+    /// pose says, rather than on its way between ticks, carrying its child, beside an entity that
+    /// draws halfway on its way.
+    #[test]
+    fn an_entity_given_a_pose_draws_as_it_says_carrying_its_children() {
+        let mut world = World::default();
+        let theirs = world.spawn((at(0.0, 0.1), sprite(1.0)));
+        let child = world.spawn((at(1.0, 0.05), sprite(2.0)));
+        world.set_parent(child, Some(theirs)).expect("alive");
+        let ours = world.spawn((at(0.0, 0.3), sprite(3.0)));
+        let mut past = Past::default();
+        past.capture(&world);
+        moved(&mut world, theirs, at(2.0, 0.1));
+        moved(&mut world, ours, at(2.0, 0.3));
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        let pose = at(10.0, 0.1);
+        past.instead(&world, &[(id(theirs), pose)]);
+        let mut want = Draws::default();
+        for (matrix, n, entity) in [
+            (pose.matrix(), 1.0, theirs),
+            (pose.matrix() * at(1.0, 0.05).matrix(), 2.0, child),
+            (at(1.0, 0.3).matrix(), 3.0, ours),
+        ] {
+            want.extend_sprites(iter::once((matrix, sprite(n), id(entity).get())));
+        }
+        assert_eq!(halfway(&world, &mut past), want);
+    }
+
     /// A child moved from one parent to another, which moves no row, draws its own transform where
     /// the tick left it, beside a sibling whose rows stay its own, which still draws on its way.
     #[test]
@@ -437,6 +494,7 @@ mod tests {
             starts,
             from,
             found: _,
+            instead: _,
         } = past;
         [
             (tables.as_ptr().addr(), tables.capacity()),

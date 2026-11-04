@@ -24,7 +24,7 @@ apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
-games/shards/     the first demo, a project: two players, alone or networked (`--host`, `--join`)
+games/shards/     the first demo, a project: two players, alone, as peers or as a server's clients
 games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
 docs/PLAN.md      the roadmap (see Workflow)

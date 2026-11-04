@@ -44,7 +44,7 @@
 //! texture the host has just named, or are too many bytes for a packet; otherwise in the packets,
 //! UDP's, sent at each tick and again a tick's time after the last, which carry this peer's inputs
 //! for each tick from the first the other hasn't said it has, as many as fit [`MAX_PACKET`], so
-//! that a packet lost loses none:
+//! that a packet lost loses none, the ticks' lines as [`read_batches`] reads them:
 //!
 //! ```text
 //! a 1234 1236                                        the tick the peers' worlds were last made
@@ -63,6 +63,15 @@
 //! holds: as its host's world gives them, and as the host's `n` lines give the names of those it
 //! adds after, before the inputs that may name them. A peer's ticks allocate, for their inputs'
 //! text, the hash's lines and the packets, as recorded ticks do.
+//!
+//! A server that owns the world, and its clients, are [`server`]'s and [`client`]'s, over links as
+//! a session's peers have, a [`Session`] each as a peer's is.
+
+mod client;
+mod server;
+
+pub(crate) use client::Client;
+pub(crate) use server::Server;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -298,6 +307,41 @@ impl Link {
         self.udp.local_addr().map_or(0, |at| at.port())
     }
 
+    /// Takes the lines read and the packets come since the last take, once what `conditions` hold
+    /// is due from `now`, as [`receive`](Self::receive) holds them, and whether the connection has
+    /// closed, once what came before the close has been taken.
+    fn take(
+        &mut self,
+        buffer: &mut [u8],
+        conditions: Option<Conditions>,
+        random: &mut u64,
+        now: Instant,
+    ) -> (Vec<String>, Vec<Vec<u8>>, bool) {
+        let (mut lines, mut packets) = (Vec::new(), Vec::new());
+        let mut lost = false;
+        let latency = conditions.map_or(Duration::ZERO, |link| link.latency);
+        loop {
+            match self.from.try_recv() {
+                Ok(line) => self.lines.push_back((now + latency, line)),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    lost = true;
+                    break;
+                }
+            }
+        }
+        while self.lines.front().is_some_and(|(due, _)| *due <= now) {
+            lines.extend(self.lines.pop_front().map(|(_, line)| line));
+        }
+        // Closed once what came before the close has been read.
+        lost &= self.lines.is_empty();
+        self.receive(buffer, conditions, random, now);
+        self.packets.sort_by_key(|(due, _)| *due);
+        let due = self.packets.partition_point(|(due, _)| *due <= now);
+        packets.extend(self.packets.drain(..due).map(|(_, packet)| packet));
+        (lines, packets, lost)
+    }
+
     /// Takes the packets that came from the other peer's socket, read through `buffer`, each held
     /// from `now` as `conditions` say, or lost, drawing on `random`.
     fn receive(
@@ -336,9 +380,9 @@ impl Link {
 
     /// Sends `packet` to the other peer's socket, warning once a link of one that can't be sent,
     /// which is lost, as a packet may be.
-    fn send_packet(&mut self, packet: &str) {
+    fn send_packet(&mut self, packet: &[u8]) {
         let Some(other) = self.other else { return };
-        if let Err(error) = self.udp.send_to(packet.as_bytes(), other)
+        if let Err(error) = self.udp.send_to(packet, other)
             && !mem::replace(&mut self.unsent, true)
         {
             warn!(
@@ -473,30 +517,11 @@ impl Lockstep {
         let mut listening = None;
         let find = match net {
             Net::Host(address) => {
-                let listener = TcpListener::bind(address.as_str()).map_err(|error| {
-                    let message = format!("can't listen at {address} for a lockstep peer");
-                    Error::new("net.start", message).with_source(error)
-                })?;
+                let (find, at) = listen(address, "a lockstep peer")?;
                 #[cfg(test)]
                 {
-                    listening = listener.local_addr().ok();
+                    listening = Some(at);
                 }
-                let at = listener.local_addr();
-                let at = at.map_or_else(|_| address.clone(), |at| at.to_string());
-                let (accepted, find) = mpsc::channel();
-                thread::Builder::new()
-                    .name("gg-net-accept".to_owned())
-                    .spawn(move || {
-                        for stream in listener.incoming().flatten() {
-                            if accepted.send(stream).is_err() {
-                                break;
-                            }
-                        }
-                    })
-                    .map_err(|error| {
-                        let message = "can't start the thread that accepts peers".to_owned();
-                        Error::new("net.start", message).with_source(error)
-                    })?;
                 info!(address = %at, "Hosting a lockstep session");
                 Find::Host(find)
             }
@@ -504,6 +529,11 @@ impl Lockstep {
                 address: address.clone(),
                 connecting: None,
             },
+            Net::Serve(_) | Net::Connect(_) => {
+                unreachable!(
+                    "a server's session and a client's start as `Session::start` starts them"
+                )
+            }
         };
         let host = matches!(find, Find::Host(_));
         Ok(Self {
@@ -597,30 +627,10 @@ impl Lockstep {
     /// otherwise. Logs a connection lost, a peer refused and a desync.
     pub(crate) fn turn(&mut self) -> Turn {
         let now = Instant::now();
-        let (mut lines, mut packets) = (Vec::new(), Vec::new());
-        let mut lost = false;
-        if let Some(link) = &mut self.link {
-            let latency = self.conditions.map_or(Duration::ZERO, |link| link.latency);
-            loop {
-                match link.from.try_recv() {
-                    Ok(line) => link.lines.push_back((now + latency, line)),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        lost = true;
-                        break;
-                    }
-                }
-            }
-            while link.lines.front().is_some_and(|(due, _)| *due <= now) {
-                lines.extend(link.lines.pop_front().map(|(_, line)| line));
-            }
-            // Closed once what came before the close has been read.
-            lost &= link.lines.is_empty();
-            link.receive(&mut self.buffer, self.conditions, &mut self.random, now);
-            link.packets.sort_by_key(|(due, _)| *due);
-            let due = link.packets.partition_point(|(due, _)| *due <= now);
-            packets.extend(link.packets.drain(..due).map(|(_, packet)| packet));
-        }
+        let (lines, packets, lost) = match &mut self.link {
+            Some(link) => link.take(&mut self.buffer, self.conditions, &mut self.random, now),
+            None => Default::default(),
+        };
         let mut turn = Turn::None;
         for line in lines {
             if let Some(world) = self.read(&line) {
@@ -673,8 +683,9 @@ impl Lockstep {
                 address,
                 connecting,
             } => {
-                let made =
-                    connecting.get_or_insert_with(|| connect(address.clone(), Duration::ZERO));
+                let made = connecting.get_or_insert_with(|| {
+                    connect(address.clone(), "the lockstep host", Duration::ZERO)
+                });
                 let Ok(stream) = made.try_recv() else { return };
                 *connecting = None;
                 (stream, address.clone())
@@ -682,11 +693,7 @@ impl Lockstep {
         };
         let (stream, address) = made;
         let protocol = self.protocol();
-        let hello = |link: &Link| {
-            let (app, layers) = (self.app, &self.layers);
-            let port = link.port();
-            format!("hello\t{protocol}\t{app}\t{}\t{layers}\t{port}\n", engine())
-        };
+        let hello = |link: &Link| hello(protocol, self.app, &self.layers, link.port());
         let link = Link::new(stream).and_then(|mut link| link.send(&hello(&link)).map(|()| link));
         match link {
             Ok(link) => {
@@ -739,7 +746,7 @@ impl Lockstep {
                     connecting,
                 } = &mut self.find
                 {
-                    *connecting = Some(connect(address.clone(), REFUSED));
+                    *connecting = Some(connect(address.clone(), "the lockstep host", REFUSED));
                 }
             }
             "world" if !self.hosts() => {
@@ -860,29 +867,16 @@ impl Lockstep {
     /// Takes the joiner's hello, `line`, refusing it unless it's of this protocol, app, engine
     /// and layers, and says where its packets come from; once taken, the host owes it its world.
     fn hello(&mut self, line: &str) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        let ours = [self.protocol(), self.app, &engine(), self.layers.as_str()];
-        let port = parts.get(5).and_then(|port| port.parse::<u16>().ok());
-        let why = match (parts.get(1..5), port) {
-            (Some(theirs), Some(_)) if parts.len() == 6 && theirs == &ours[..] => None,
-            (Some([protocol, ..]), _) if *protocol != ours[0] => {
-                Some(format!("it speaks {protocol}, and the host {}", ours[0]))
-            }
-            (Some([_, app, engine, layers]), Some(_)) if parts.len() == 6 => Some(format!(
-                "it's app {app}, engine {engine}, layers `{layers}`, and the host app {}, engine \
-                 {}, layers `{}`",
-                ours[1], ours[2], ours[3]
-            )),
-            _ => Some("its hello isn't one".to_owned()),
-        };
-        match why {
-            None => {
+        let engine = engine();
+        let ours = [self.protocol(), self.app, &engine, self.layers.as_str()];
+        match port_of(line, ours, "the host") {
+            Ok(port) => {
                 self.owed = true;
-                if let (Some(link), Some(port)) = (&mut self.link, port) {
+                if let Some(link) = &mut self.link {
                     link.packets_from(port);
                 }
             }
-            Some(why) => {
+            Err(why) => {
                 warn!(code = "net.refused", "Refused a lockstep peer: {why}");
                 if let Some(link) = &mut self.link {
                     let _ = link.send(&format!("refused {why}\n"));
@@ -1483,37 +1477,20 @@ impl Lockstep {
             return Some(());
         }
         self.acked = self.acked.max(acked);
-        let mut commands = Vec::new();
-        for line in lines {
-            let (kind, rest) = line.split_once(' ')?;
-            let mut parts = rest.splitn(3, ' ');
-            let tick = parts.next()?.parse::<u64>().ok()?;
-            match kind {
-                "c" => {
-                    let layer = parts.next()?.parse::<usize>().ok()?;
-                    commands.push((tick, layer, parts.next()?.to_owned()));
+        let (whole, theirs) = (self.whole, &mut self.theirs);
+        read_batches(lines, |tick, commands| {
+            // Come before, or whole on the stream; what came of them there is the same.
+            if tick >= whole {
+                let inputs = theirs.entry(tick).or_default();
+                if !inputs.whole {
+                    *inputs = Inputs {
+                        commands,
+                        whole: true,
+                        ..Inputs::default()
+                    };
                 }
-                "t" if parts.next().is_none() => {
-                    if commands.iter().any(|&(of, ..)| of != tick) {
-                        return None;
-                    }
-                    let commands = commands.drain(..).map(|(_, layer, value)| (layer, value));
-                    // Come before, or whole on the stream; what came of them there is the same.
-                    if tick >= self.whole {
-                        let inputs = self.theirs.entry(tick).or_default();
-                        if !inputs.whole {
-                            *inputs = Inputs {
-                                commands: commands.collect(),
-                                whole: true,
-                                ..Inputs::default()
-                            };
-                        }
-                    }
-                }
-                _ => return None,
             }
-        }
-        Some(())
+        })
     }
 
     /// Sends the other peer this peer's packets, once there is one and it has said where its
@@ -1532,13 +1509,13 @@ impl Lockstep {
             lines.clear();
             write_inputs(&mut lines, tick, inputs);
             if packet.len() + lines.len() > MAX_PACKET && packet.len() > header.len() {
-                link.send_packet(&packet);
+                link.send_packet(packet.as_bytes());
                 packet.clone_from(&header);
             }
             packet.push_str(&lines);
         }
         // The last, or the header alone, which says how far this peer has the other's inputs.
-        link.send_packet(&packet);
+        link.send_packet(packet.as_bytes());
         link.sent = Some(Instant::now());
     }
 
@@ -1622,13 +1599,239 @@ impl Lockstep {
     }
 }
 
-/// What a peer must do between ticks, as [`Lockstep::turn`] says.
+/// What a peer, a server or a client must do between ticks, as [`Lockstep::turn`],
+/// [`Server::turn`] and [`Client::turn`] say.
 pub(crate) enum Turn {
     None,
-    /// The host owes its joiner its world.
+    /// The host owes its joiner its world, or the server a client its own.
     Send,
-    /// The joiner has its host's world: the tick it's at and its text.
+    /// The joiner has its host's world, or the client its server's: the tick it's at and its text.
     Restore((u64, String)),
+}
+
+/// The networked session a run takes part in, as `--host`, `--join`, `--serve` or `--connect` has
+/// it: a peer of a lockstep session, a server that owns the world, or a client of a server; each
+/// boxed, as their sizes are far apart, and a run has one.
+pub(crate) enum Session {
+    Peer(Box<Lockstep>),
+    Server(Box<Server>),
+    Client(Box<Client>),
+}
+
+impl Session {
+    /// Starts the session `net` says, for app `app`, whose layers are `layers`, from the bottom
+    /// up, as [`Lockstep::start`], [`Server::start`] and [`Client::start`] say.
+    ///
+    /// Fails with `net.start` if a host or a server can't listen at its address.
+    pub(crate) fn start(net: &Net, app: &'static str, layers: &[&str]) -> Result<Self> {
+        Ok(match net {
+            Net::Host(_) | Net::Join(_) => Self::Peer(Box::new(Lockstep::start(net, app, layers)?)),
+            Net::Serve(address) => Self::Server(Box::new(Server::start(address, app, layers)?)),
+            Net::Connect(address) => Self::Client(Box::new(Client::start(address, app, layers))),
+        })
+    }
+
+    /// Has a peer predict the other's inputs, as [`Lockstep::predict`] says: before its first turn.
+    pub(crate) fn predict(&mut self) {
+        if let Self::Peer(net) = self {
+            net.predict();
+        }
+    }
+
+    /// Has the session's links do to what comes as `conditions` say, as `--link` asks.
+    pub(crate) fn condition(&mut self, conditions: Conditions) {
+        let random = RandomState::new().hash_one(0);
+        match self {
+            Self::Peer(net) => net.condition(conditions),
+            Self::Server(server) => (server.conditions, server.random) = (Some(conditions), random),
+            Self::Client(client) => (client.conditions, client.random) = (Some(conditions), random),
+        }
+    }
+
+    /// The app the session is of.
+    pub(crate) fn app(&self) -> &'static str {
+        match self {
+            Self::Peer(net) => net.app(),
+            Self::Server(server) => server.app,
+            Self::Client(client) => client.app,
+        }
+    }
+
+    /// The player the run plays: a peer's, or a client's, once its server's world has come; none
+    /// for a server, which plays none.
+    pub(crate) fn player(&self) -> Option<u8> {
+        match self {
+            Self::Peer(net) => Some(net.player()),
+            Self::Server(_) => None,
+            Self::Client(client) => client.player,
+        }
+    }
+
+    /// Whether the run goes as another's world goes, as a joiner goes as its host's, and a client
+    /// as its server's, whose worlds take its own's place, whose assets name its own.
+    pub(crate) fn follows(&self) -> bool {
+        match self {
+            Self::Peer(net) => !net.hosts(),
+            Self::Server(_) => false,
+            Self::Client(_) => true,
+        }
+    }
+
+    /// Whether tick `tick` can run, as [`Lockstep::ready`] and [`Client::ready`] say: a server's
+    /// always can.
+    pub(crate) fn ready(&self, tick: u64) -> bool {
+        match self {
+            Self::Peer(net) => net.ready(tick),
+            Self::Server(_) => true,
+            Self::Client(client) => client.ready(tick),
+        }
+    }
+
+    /// As tick `tick` starts, once it's [`ready`](Self::ready): takes the queues' commands as this
+    /// run's inputs, as [`Lockstep::start_tick`], [`Server::start_tick`] and
+    /// [`Client::start_tick`] say.
+    pub(crate) fn start_tick<'q>(
+        &mut self,
+        tick: u64,
+        queues: impl Iterator<Item = (usize, &'q mut dyn Commands)>,
+        world: &World,
+    ) {
+        match self {
+            Self::Peer(net) => net.start_tick(tick, queues, world),
+            Self::Server(server) => server.start_tick(queues, world),
+            Self::Client(client) => client.start_tick(tick, queues, world),
+        }
+    }
+
+    /// What tick `tick` runs on, `world` as it starts: a peer's, as [`Lockstep::inputs`] says,
+    /// which keeps a copy of the world as a tick it runs on the other's inputs predicted starts, as
+    /// [`Lockstep::keep`] says; a server's, as [`Server::inputs`] says; and a client's, as
+    /// [`Client::inputs`] says.
+    pub(crate) fn inputs(&mut self, tick: u64, cx: &mut Context) -> Merged {
+        match self {
+            Self::Peer(net) => {
+                if !net.settled(tick) {
+                    net.keep(tick, cx.world());
+                }
+                net.inputs(tick, cx)
+            }
+            Self::Server(server) => server.inputs(tick),
+            Self::Client(client) => client.inputs(tick),
+        }
+    }
+
+    /// Keeps what the edit offered with `ticket` did, as it applied before tick `tick`: a peer's,
+    /// the only session whose edits a tick applies.
+    pub(crate) fn did(&mut self, ticket: Ticket, tick: u64, done: Result<Done>) {
+        if let Self::Peer(net) = self {
+            net.did(ticket, tick, done);
+        }
+    }
+
+    /// The sounds the runs of tick `tick` have played, if the tick may run again: a rollback peer's
+    /// tick run on the other's inputs predicted, and a client's, which a server's state may correct.
+    pub(crate) fn played(&mut self, tick: u64) -> Option<&mut Vec<Sound>> {
+        match self {
+            Self::Peer(net) => net.played(tick),
+            Self::Server(_) => None,
+            Self::Client(client) => Some(client.played.entry(tick).or_default()),
+        }
+    }
+
+    /// Once tick `tick` has run, leaving `world`: a peer ends it if it ran on both peers' inputs,
+    /// as [`Lockstep::end_tick`] says; a server sends its clients their states, as
+    /// [`Server::end_tick`] says; and a client keeps its world's hash, as [`Client::end_tick`] says.
+    pub(crate) fn ran(&mut self, tick: u64, world: &World) {
+        match self {
+            Self::Peer(net) if net.settled(tick) => net.end_tick(tick, world),
+            Self::Peer(_) => {}
+            Self::Server(server) => server.end_tick(tick, world),
+            Self::Client(client) => client.end_tick(tick, world),
+        }
+    }
+
+    /// Between ticks, as a frame starts, the next to run being `next`: what the session must do of
+    /// what came, as [`Lockstep::turn`], [`Server::turn`] and [`Client::turn`] say.
+    pub(crate) fn turn(&mut self, next: u64) -> Turn {
+        match self {
+            Self::Peer(net) => net.turn(),
+            Self::Server(server) => server.turn(next),
+            Self::Client(client) => client.turn(),
+        }
+    }
+
+    /// Sends the world, a snapshot file's text, which names `assets` of them as the run does, to
+    /// the joiner or the clients owed it, at tick `next`, as [`Lockstep::send_world`] and
+    /// [`Server::send_world`] say.
+    pub(crate) fn send_world(&mut self, world: &str, assets: Counts, next: u64) {
+        match self {
+            Self::Peer(net) => net.send_world(world, assets, next),
+            Self::Server(server) => server.send_world(world, next),
+            Self::Client(_) => {}
+        }
+    }
+
+    /// Once the world of a joiner's host, or a client's server, at tick `tick`, is `world`, in its
+    /// own's place: says so, as [`Lockstep::restored`] and [`Client::restored`] say, and returns
+    /// the tick the run goes on from.
+    pub(crate) fn restored(&mut self, tick: u64, world: &World) -> u64 {
+        match self {
+            Self::Peer(net) => {
+                net.restored(tick);
+                tick
+            }
+            Self::Server(_) => tick,
+            Self::Client(client) => client.restored(tick, world),
+        }
+    }
+
+    /// Lets go of the link a world that can't be restored came by, as `why` says.
+    pub(crate) fn lose(&mut self, why: &str) {
+        match self {
+            Self::Peer(net) => net.lose(why),
+            Self::Server(_) => {}
+            Self::Client(client) => client.lose(why),
+        }
+    }
+
+    /// Between ticks, the next to run being `next`, `world` as the last left it: the first tick to
+    /// run again from, if any, from where [`start_of`](Self::start_of) says, as
+    /// [`Lockstep::settle`] and [`Client::settle`] say.
+    pub(crate) fn settle(&mut self, next: u64, world: &World) -> Option<u64> {
+        match self {
+            Self::Peer(net) => net.settle(next, world),
+            Self::Server(_) => None,
+            Self::Client(client) => client.settle(next, world),
+        }
+    }
+
+    /// The world as tick `tick`, which [`settle`](Self::settle) gave, starts.
+    pub(crate) fn start_of(&self, tick: u64) -> &World {
+        match self {
+            Self::Peer(net) => net.start_of(tick),
+            Self::Server(_) => unreachable!("a server runs no tick again"),
+            Self::Client(client) => client.start_of(tick),
+        }
+    }
+
+    /// Counts the ticks from `from` to `next` run again, as [`settle`](Self::settle) had them.
+    pub(crate) fn rolled_back(&mut self, from: u64, next: u64) {
+        match self {
+            Self::Peer(net) => net.rolled_back(from, next),
+            Self::Server(_) => {}
+            Self::Client(client) => client.corrected(from, next),
+        }
+    }
+
+    /// Logs what the session did, as the run ends: how a rollback peer rolled back, what a server
+    /// sent, and how a client was corrected.
+    pub(crate) fn ended(&self) {
+        match self {
+            Self::Peer(net) => net.ended(),
+            Self::Server(server) => server.ended(),
+            Self::Client(client) => client.ended(),
+        }
+    }
 }
 
 /// What the hello says the engine is: its version and profile, and whether it's a development
@@ -1642,9 +1845,98 @@ fn engine() -> String {
     }
 }
 
-/// Connects to `address` on a thread of its own, after `after`, trying again every [`RETRY`] until
-/// it does, and returns where the connection comes.
-fn connect(address: String, after: Duration) -> Receiver<TcpStream> {
+/// The hello of a peer or a client that speaks `protocol`, of app `app` and layers `layers`, whose
+/// packets come from its socket's `port`: as the stream's lines name it.
+fn hello(protocol: &str, app: &str, layers: &str, port: u16) -> String {
+    format!("hello\t{protocol}\t{app}\t{}\t{layers}\t{port}\n", engine())
+}
+
+/// Takes a hello, `line`, which [`hello`] writes: the port its packets come from, if it's of the
+/// protocol, app, engine and layers `ours` are, which `who` speaks for; or else why it's refused.
+fn port_of(line: &str, ours: [&str; 4], who: &str) -> std::result::Result<u16, String> {
+    let parts: Vec<&str> = line.split('\t').collect();
+    let port = parts.get(5).and_then(|port| port.parse::<u16>().ok());
+    match (parts.get(1..5), port) {
+        (Some(theirs), Some(port)) if parts.len() == 6 && theirs == &ours[..] => Ok(port),
+        (Some([protocol, ..]), _) if *protocol != ours[0] => {
+            Err(format!("it speaks {protocol}, and {who} {}", ours[0]))
+        }
+        (Some([_, app, engine, layers]), Some(_)) if parts.len() == 6 => Err(format!(
+            "it's app {app}, engine {engine}, layers `{layers}`, and {who} app {}, engine {}, \
+             layers `{}`",
+            ours[1], ours[2], ours[3]
+        )),
+        _ => Err("its hello isn't one".to_owned()),
+    }
+}
+
+/// Listens at `address` for `what`, on a thread of its own that accepts each connection; returns
+/// where they come, and the address as the OS has it, which a test's port 0 picks.
+///
+/// Fails with `net.start` if it can't listen there.
+fn listen(address: &str, what: &str) -> Result<(Receiver<TcpStream>, SocketAddr)> {
+    let failed = |error: io::Error| {
+        let message = format!("can't listen at {address} for {what}");
+        Error::new("net.start", message).with_source(error)
+    };
+    let listener = TcpListener::bind(address).map_err(failed)?;
+    let at = listener.local_addr().map_err(failed)?;
+    let (accepted, find) = mpsc::channel();
+    thread::Builder::new()
+        .name("gg-net-accept".to_owned())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                if accepted.send(stream).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| {
+            let message = format!("can't start the thread that accepts {what}");
+            Error::new("net.start", message).with_source(error)
+        })?;
+    Ok((find, at))
+}
+
+/// Reads a packet's inputs, `lines`, as a peer's and a client's packets carry them: each tick's
+/// commands, `c` lines of its tick, then the `t` that says they're whole, which gives the tick and
+/// its commands, each with its layer's index, to `each`; `None` at a line that isn't one, those
+/// before given.
+fn read_batches(
+    lines: std::str::Lines<'_>,
+    mut each: impl FnMut(u64, Vec<(usize, String)>),
+) -> Option<()> {
+    let mut commands = Vec::new();
+    for line in lines {
+        let (kind, rest) = line.split_once(' ')?;
+        let mut parts = rest.splitn(3, ' ');
+        let tick = parts.next()?.parse::<u64>().ok()?;
+        match kind {
+            "c" => {
+                let layer = parts.next()?.parse::<usize>().ok()?;
+                commands.push((tick, layer, parts.next()?.to_owned()));
+            }
+            "t" if parts.next().is_none() => {
+                if commands.iter().any(|&(of, ..)| of != tick) {
+                    return None;
+                }
+                each(
+                    tick,
+                    commands
+                        .drain(..)
+                        .map(|(_, layer, value)| (layer, value))
+                        .collect(),
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// Connects to `address`, `what`'s, on a thread of its own, after `after`, trying again every
+/// [`RETRY`] until it does, and returns where the connection comes.
+fn connect(address: String, what: &'static str, after: Duration) -> Receiver<TcpStream> {
     let (made, connection) = mpsc::channel();
     let spawned = thread::Builder::new()
         .name("gg-net-connect".to_owned())
@@ -1661,7 +1953,7 @@ fn connect(address: String, after: Duration) -> Receiver<TcpStream> {
                     return;
                 }
                 if !warned {
-                    info!(address = %address, "Waiting for the lockstep host");
+                    info!(address = %address, "Waiting for {what}");
                     warned = true;
                 }
                 thread::sleep(RETRY);
@@ -1772,12 +2064,12 @@ mod tests {
     use crate::{Component, Context, Layer, Operation, Reflect, Tick};
 
     #[derive(Clone, Component)]
-    struct Score {
-        points: [u32; 2],
+    pub(super) struct Score {
+        pub(super) points: [u32; 2],
     }
 
     #[derive(Reflect)]
-    enum Command {
+    pub(super) enum Command {
         Add { player: u8, points: u32 },
     }
 
@@ -1785,7 +2077,7 @@ mod tests {
     /// `scene`, if it's given one, and the script at `script`, whose component its score's entity
     /// has.
     #[derive(Default)]
-    struct Game {
+    pub(super) struct Game {
         commands: Vec<Command>,
         scene: Option<PathBuf>,
         script: Option<(crate::Scripts, PathBuf)>,
@@ -2031,7 +2323,7 @@ mod tests {
 
     /// What a slow link does in the tests: holds each packet 20 ms, and up to 10 more, and loses a
     /// fifth of them.
-    const SLOW: Conditions = Conditions {
+    pub(super) const SLOW: Conditions = Conditions {
         latency: Duration::from_millis(20),
         jitter: Duration::from_millis(10),
         loss: 0.2,

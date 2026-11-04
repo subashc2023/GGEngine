@@ -913,13 +913,15 @@ between ticks, and the authors' logs the context's, rebuilt by a replay as the I
 
 ## Networking
 
-The engine supplies what each multiplayer model needs: two peers, on one machine or a LAN, in
-deterministic lockstep, or predicting each other's inputs and rolling back where a prediction
-missed (`--rollback`, of both peers); a server that owns the world comes later, from the same
-snapshots, commands and hashes. A run given `--host <address>` listens there, and one given
-`--join <address>` connects to it; the host is player 0 and the joiner player 1, as
-`Context::player` tells a layer, which queues commands for its own player alone, naming it in
-them, since each peer runs both players' world.
+The engine supplies what each multiplayer model needs, from the same snapshots, commands and
+hashes: two peers, on one machine or a LAN, in deterministic lockstep, or predicting each other's
+inputs and rolling back where a prediction missed (`--rollback`, of both peers); and a server that
+owns the world (`--serve <address>`), which any number of clients (`--connect <address>`) play,
+each predicting its own player. A run given `--host <address>` listens there, and one given
+`--join <address>` connects to it; the host is player 0 and the joiner player 1, and a server
+gives each client the least player no other client has, as `Context::player` tells a layer, which
+queues commands for its own player alone, naming it in them, since each run runs every player's
+world.
 
 - **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
   the joiner's, and the edits from outside the layers that apply before it, as a recording keeps
@@ -975,6 +977,35 @@ them, since each peer runs both players' world.
   worlds went apart, before what went apart has spread. Then the host sends its world again, as to
   a joiner, so that the peers carry on in sync, from a world that in a rollback session went by the
   joiner's inputs predicted, whatever they were.
+- **A server owns the world.** It runs without a window or a GPU, its layers' ticks alone, as
+  their updates draw, in real time, until Ctrl+C, which ends it cleanly, as it does a headless run.
+  A client starts from its world, as a joiner from its host's, and sends its inputs, its layers'
+  commands, each tick's tagged with the tick; the server applies them in their order, each tick's
+  at the first tick it runs that's theirs or past it, its own layers' first and then each client's
+  by its player. After each tick it sends each client its state: the world's text, as a snapshot
+  writes it, compressed by zstd against the text of the latest state the client has said it has,
+  which is its dictionary, about 600 bytes in the demo against 34 KB whole, with the world's hash.
+  The server's own world is the only one edited: a client refuses the tool API's edits
+  (`net.no_edit`), as the server's next state would take them away.
+- **Clients predict their own player, and correct.** A client runs as far ahead of the server as
+  the way there and back and two ticks more, on its own inputs alone, which predicts its own player
+  exactly and the others as going on as their last commands had them, as rollback predicts; its
+  ticks run up to a tenth faster or slower than real time, so that its inputs come two ticks before
+  the server runs their ticks, and it waits at half a second past the latest state. It reads each
+  state into a world of its own, of its types and assets, logging `net.desync` where that doesn't
+  hash as the server's world did, as when a state's text leaves out what the hash reads; and where
+  the world it predicted after that tick hashes otherwise, takes its world back to the server's,
+  the very world (`World::rewind`), and runs the ticks after again, as rollback does, its inputs
+  the server hadn't applied applying in them, those whose ticks have gone at the first, as the
+  server would, the sounds played before not played again. A queue that edits, as the Inspector's,
+  goes to the server alone. As the run ends a client logs how often it corrected
+  (`net.corrected`), and the server what it sent (`net.served`).
+- **The other players draw between the server's states.** An entity whose `Owner` component names
+  another player, and its descendants, draw on a client between the two states about three ticks
+  behind the latest, where the time since the latest came puts it, eased so that the states'
+  jitter doesn't show, rather than where the client's ticks left them; the rest draw as every
+  run's do. So a collision with another player happens where the client predicted it, ahead of
+  where it's drawn: over a 100 ms link, about 1.5 units at the demo's speed.
 
 The session's stream is lines of text over TCP, without Nagle's delay, which keeps them in order
 and whole: the hello, the host's world, the hashes, and a tick's inputs that hold an edit or a
@@ -982,10 +1013,15 @@ patch, name a texture the host has just named, or are too long for a packet. A t
 inputs go over UDP, in packets sent at each tick and again a tick's time after the last, each
 repeating this peer's inputs for every tick the other hasn't said it has, so that a packet lost
 loses none, and naming the tick the peers' worlds were last made the same at, so that one sent
-before a resync is dropped. `--link` has a peer's link hold each packet that comes, and up to more,
-losing some, and the stream's lines, as a slow link would. [net.rs](crates/gg-engine/src/net.rs)
-has their format and the rest. `gg run --peers 2` runs a host and a joiner from one build, patching
-both and restarting both after a rebuild, its arguments after `--`, as `--rollback`, given both.
+before a resync is dropped. A server's link to each client is the same: a client's inputs go over
+UDP, each packet repeating those the server hasn't said it applied, or on the stream if a tick's
+are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
+state lost being lost, as the next is sent against the latest the client has. `--link` has a
+run's links hold each packet that comes, and up to more, losing some, and the stream's lines, as a
+slow link would. [net.rs](crates/gg-engine/src/net.rs) and
+[server.rs](crates/gg-engine/src/net/server.rs) have their formats and the rest. `gg run --peers 2`
+runs a host and a joiner from one build, patching both and restarting both after a rebuild, its
+arguments after `--`, as `--rollback`, given both.
 
 ## Diagnostics
 
@@ -1555,5 +1591,6 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them; textures cooked to BC7 in KTX2, its levels supercompressed by zstd, by bc7enc_rdo's perceptual encoder through `ctt`, and read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
+| Networking | Our own, over std's TCP and UDP sockets; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |
 
 Areas not listed here are undecided.

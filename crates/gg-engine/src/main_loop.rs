@@ -12,11 +12,12 @@ use gg_renderer::{Arenas, MemoryBudget, Renderer, Settings, Validation, Viewport
 use tracing::{debug, error, info, warn};
 
 use crate::api::{self, Api};
-use crate::args::Args;
+use crate::args::{Args, Net};
 #[cfg(feature = "dev")]
 use crate::chrome::Chrome;
 #[cfg(feature = "dev")]
 use crate::dock::{Dock, Ui};
+use crate::interrupt;
 use crate::layer::{Context, Stack, Tick};
 use crate::memory;
 use crate::perf::{self, Perf, Summary};
@@ -29,7 +30,8 @@ use crate::{App, BUILD};
 /// render on the render thread, as a windowed run's do, the last as the run ends. `api` serves
 /// tools as each frame starts; while it has paused or stopped the simulation with nothing asked of
 /// the frames, each waits up to a tick's time for a request, rather than spinning. The run starts
-/// as [`start`] says.
+/// as [`start`] says, and ends at `--frames`, or at Ctrl+C. A server's client (`--connect`) steps
+/// its simulation in real time, its frames a tick apart, as its server's go.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
 /// with no UI, playing sound as one does, and its view fills its image, at the size the client
@@ -43,6 +45,8 @@ pub(crate) fn run_headless(
     snapshot: Option<Snapshot>,
 ) -> Result<Ran> {
     let embedded = args.embedded;
+    // A client's ticks keep pace with its server's, in real time.
+    let real_time = embedded || matches!(args.net, Some(Net::Connect(_)));
     let (mut width, mut height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
@@ -52,7 +56,7 @@ pub(crate) fn run_headless(
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),
-        None if embedded => Stepper::default(),
+        None if real_time => Stepper::default(),
         None => Stepper::lockstep(),
     };
     #[cfg(feature = "dev")]
@@ -88,6 +92,10 @@ pub(crate) fn run_headless(
             }
             if cx.exiting() {
                 debug!("A layer asked the run to end");
+                break;
+            }
+            if interrupt::interrupted() {
+                info!("Ending the run, as Ctrl+C asks");
                 break;
             }
             // One point is one pixel, as on a display without scaling.
@@ -152,7 +160,7 @@ pub(crate) fn run_headless(
             handed += 1;
             match handing {
                 Some(frame) => api::pace(&api, frame),
-                None if embedded => {
+                None if real_time => {
                     let tick = frame_started + crate::Tick::DT;
                     std::thread::sleep(tick.saturating_duration_since(Instant::now()));
                 }
@@ -184,8 +192,63 @@ pub(crate) fn run_headless(
     app.stack.recorded()?;
     let perf = mem::take(&mut cx.perf);
     Ok(Ran::finish(
-        renderer, frames, &clock, &stepper, perf, stopping,
+        Some(renderer),
+        frames,
+        &clock,
+        &stepper,
+        perf,
+        stopping,
     ))
+}
+
+/// Runs a server (`--serve`): without a window, a GPU or the tool API, which looks at a run's
+/// frames, its frames a tick apart, each taking what its clients sent and running the ticks owed in
+/// real time, as [`Stack::net_turn`] and [`Stepper::step`] say, until `--frames` frames, Ctrl+C or
+/// a layer's [`Context::exit`]. The layers load their assets, which nothing draws, and their ticks
+/// run, but not their updates, whose drawing nothing would take. The run starts as [`start`] says.
+pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>) -> Result<Ran> {
+    let mut cx = Context::of_run(None, app, false);
+    let mut clock = Clock::default();
+    let mut stepper = Stepper::default();
+    start(
+        &mut app.stack,
+        &mut cx,
+        &mut stepper,
+        snapshot,
+        false,
+        false,
+    )?;
+    let mut frames = 0;
+    while args.frames.is_none_or(|limit| frames < limit) {
+        if cx.exiting() {
+            debug!("A layer asked the run to end");
+            break;
+        }
+        if interrupt::interrupted() {
+            info!("Ending the run, as Ctrl+C asks");
+            break;
+        }
+        let dt = clock.start_frame();
+        let start = Instant::now();
+        gg_core::profile::frame_mark();
+        cx.perf.start_frame(dt);
+        if let Some(ticks) = app.stack.net_turn(&mut cx, stepper.ticks) {
+            stepper.jump_to(ticks);
+        }
+        let stack = &mut app.stack;
+        let tick = |tick: Tick| stack.tick(&mut cx, tick);
+        stepper.step(dt, tick, || start.elapsed());
+        let ticked = start.elapsed();
+        cx.perf.ran(ticked, Duration::ZERO, Duration::ZERO);
+        frames += 1;
+        std::thread::sleep((start + crate::Tick::DT).saturating_duration_since(Instant::now()));
+    }
+    cx.perf.finish(clock.since_last(Instant::now()));
+    let stopping = Instant::now();
+    let _zone = gg_core::zone!("shutdown");
+    app.stack.detach(&mut cx);
+    let perf = mem::take(&mut cx.perf);
+    Ok(Ran::finish(None, frames, &clock, &stepper, perf, stopping))
 }
 
 /// Starts the run in `cx`, windowed or not: from `snapshot`'s world, at its ticks, if it's given
@@ -267,11 +330,13 @@ pub(crate) type EguiPass<'a> = (std::convert::Infallible, std::marker::PhantomDa
 pub(crate) type Passed = std::convert::Infallible;
 
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
-/// the frame's measure, takes what a lockstep peer sent, as [`Stack::net_turn`] says, runs the
-/// ticks of the simulation that the time owes, as `stepper` steps it, those a lockstep peer's
-/// inputs have come for, copying where the world's entities are as each starts, updates the layers, draws the world
-/// after what they drew, as far on from where the last tick found it to where it left it as the
-/// frame is past the tick, and, given egui, the dock and egui's input in `ui`, has the layers draw
+/// the frame's measure, takes what the session sent, as [`Stack::net_turn`] says, runs the ticks of
+/// the simulation that the time owes, as `stepper` steps it, a client's a little more or less, as
+/// [`Stack::paced`] says, those a lockstep peer's inputs have come for, copying where the world's
+/// entities are as each starts, updates the layers, draws the world after what they drew, as far
+/// on from where the last tick found it to where it left it as the frame is past the tick, a
+/// client's other players as [`Stack::interpolate`] says, and, given egui, the dock and egui's
+/// input in `ui`, has the layers draw
 /// their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
 /// UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands what egui made
 /// of it to the render thread.
@@ -297,6 +362,7 @@ pub(crate) fn run_frame(
     if let Some(ticks) = stack.net_turn(cx, stepper.ticks) {
         stepper.jump_to(ticks);
     }
+    let owed = stack.paced(dt);
     let tick = |tick: Tick| {
         if stack.net_waits(tick.number) {
             return false;
@@ -304,7 +370,7 @@ pub(crate) fn run_frame(
         cx.capture();
         stack.tick(cx, tick)
     };
-    stepper.step(dt, tick, || start.elapsed());
+    stepper.step(owed, tick, || start.elapsed());
     // A script that stopped in a tick paused the frames while it waited.
     #[cfg(feature = "dev")]
     if cx.hosts.took_stop() {
@@ -312,6 +378,7 @@ pub(crate) fn run_frame(
     }
     let ticked = Instant::now();
     stack.update(cx, dt);
+    stack.interpolate(cx, dt);
     let alpha = stepper.alpha();
     gg_core::plot!("alpha", f64::from(alpha));
     cx.draw_world(alpha);
@@ -703,11 +770,11 @@ pub(crate) struct Ran {
     /// The whole ticks the frames' time held that they didn't run, which the simulation fell
     /// behind by.
     ticks_dropped: u64,
-    validation: Validation,
-    /// The GPU it rendered on.
-    gpu: String,
-    /// The GPU's own memory in use as the run ended, before the renderer let go of its own.
-    gpu_memory: u64,
+    /// How the run was validated, the GPU it rendered on, and the GPU's own memory in use as the
+    /// run ended, before the renderer let go of its own: none for a server, which renders nothing.
+    validation: Option<Validation>,
+    gpu: Option<String>,
+    gpu_memory: Option<u64>,
     /// What the frames' arenas held as the run ended, and the most a frame took of its own.
     arenas: Arenas,
     /// The most of the process's memory that was resident, if the OS says.
@@ -721,21 +788,25 @@ pub(crate) struct Ran {
 impl Ran {
     /// Shuts the renderer down first, so that what validation reports on the way, such as
     /// objects left undestroyed, counts too, once it has told what of the GPU's memory is in use
-    /// and what the frames' arenas hold. `stopping` is when the run began to end, after its last
-    /// frame rendered, `stepper` what stepped its simulation, and `perf` what it measured of its
-    /// frames, the last of them finished.
+    /// and what the frames' arenas hold, given one: a server's run has none. `stopping` is when the
+    /// run began to end, after its last frame rendered, `stepper` what stepped its simulation, and
+    /// `perf` what it measured of its frames, the last of them finished.
     pub(crate) fn finish(
-        renderer: Renderer,
+        renderer: Option<Renderer>,
         frames: u64,
         clock: &Clock,
         stepper: &Stepper,
         perf: Perf,
         stopping: Instant,
     ) -> Self {
-        let validation = renderer.validation();
-        let gpu = renderer.gpu_name().to_owned();
-        let gpu_memory = renderer.memory_budget().usage;
-        let arenas = renderer.arenas();
+        let validation = renderer.as_ref().map(Renderer::validation);
+        let gpu = renderer
+            .as_ref()
+            .map(|renderer| renderer.gpu_name().to_owned());
+        let gpu_memory = renderer
+            .as_ref()
+            .map(|renderer| renderer.memory_budget().usage);
+        let arenas = renderer.as_ref().map(Renderer::arenas).unwrap_or_default();
         drop(renderer);
         Self {
             frames,
@@ -797,12 +868,12 @@ impl Ran {
             gpu_memory_bytes = self.gpu_memory,
             arena_bytes = self.arenas.held,
             arena_peak_bytes = self.arenas.peak,
-            gpu = self.gpu.as_str(),
+            gpu = self.gpu.as_deref(),
             build = BUILD,
             headless = args.headless,
             embedded = args.embedded,
             vsync = args.vsync,
-            validated = self.validation.enabled(),
+            validated = self.validated(),
             "Frame times"
         );
         // A frame past `--frames` is refused, but a window closed early ends a run before it.
@@ -817,7 +888,7 @@ impl Ran {
                 self.frames
             );
         }
-        let messages = self.validation.messages();
+        let messages = self.validation.as_ref().map_or(0, Validation::messages);
         if messages > 0 {
             error!(
                 code = "engine.validation",
@@ -831,10 +902,16 @@ impl Ran {
         }
         info!(
             frames = self.frames,
-            validated = self.validation.enabled(),
+            validated = self.validated(),
             "Exited cleanly"
         );
         ExitCode::SUCCESS
+    }
+
+    /// Whether the run ran under Vulkan's validation layer: a server's, which renders nothing,
+    /// didn't.
+    fn validated(&self) -> bool {
+        self.validation.as_ref().is_some_and(Validation::enabled)
     }
 }
 

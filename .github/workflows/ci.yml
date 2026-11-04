@@ -135,6 +135,25 @@ jobs:
           test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
           grep -q '"code":"net.rollback","rollbacks":[1-9]' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
+      # The demo's server, without a GPU, and two clients, over links that hold each packet 100 ms,
+      # and up to 20 more, and lose 5% of them: each client exits 0, having joined as a player of its
+      # own and corrected its world toward the server's states, whose text reads as the server's
+      # hash says; and the server, sent Ctrl+C once they've gone, ends cleanly, exiting 0.
+      - name: Run the demo as a server and two clients over a slow link
+        if: matrix.container
+        run: |
+          target/debug/gg-shards --serve 127.0.0.1:7702 --link 100,20,5 &
+          server=$!
+          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --link 100,20,5 &
+          client=$!
+          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --link 100,20,5
+          wait $client
+          kill -INT $server
+          wait $server
+          test "$(grep -h '"message":"Joined the server"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
+          test "$(grep -h '"code":"net.corrected","corrections":[1-9]' target/debug/logs/shards-*.jsonl | wc -l)" = 2
+          grep -q '"message":"Ending the run, as Ctrl+C asks"' target/debug/logs/shards-*.jsonl
+          ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
       # Each tick, run again on a copy of the world taken as it started, with the commands it
       # applied, leaves the copy as it left the world, as rollback needs: the sandbox's and the
       # demo's headless, and the demo's live recording replayed, which steers, dashes, collects and

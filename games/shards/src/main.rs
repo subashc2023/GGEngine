@@ -2,7 +2,9 @@
 //! into each other, and collecting the shards that turn up where the match's own random numbers put
 //! them, first to ten. Run alone, the keys steer player 0; or networked, in lockstep, a run given
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
-//! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
+//! keys; or as clients of a run given `--serve <address>`, each given `--connect <address>` steering
+//! the player the server gives it, each disc its player's [`Owner`]. The arena's walls are its
+//! scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its shards spin by a Luau script, `scripts/spin.luau`, which it reloads as
 //! it's saved, and the mods installed run, which may read the world and write sprites, as its
 //! sample, `mods/rainbow`, given `--mods mods`, cycles the shards' colors; its floor is its shader,
@@ -29,8 +31,8 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
     Commands, Component, Context, Entity, Error, Event, Font, Grant, Key, Layer, Mesh, Mods,
-    MouseButton, Name, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts,
-    Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
+    MouseButton, Name, Owner, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D,
+    Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -217,7 +219,8 @@ struct Sounds {
 /// draws the floor, the scores and the menu between ticks. An asset or script of its own, or its
 /// start scene, that doesn't load ends the run with its error, through [`Context::fail`].
 struct Shards {
-    /// The player this run's keys steer: 0, unless it joined a lockstep session.
+    /// The player this run's keys steer: 0, unless it joined a lockstep session or a server gave
+    /// it another.
     player: u8,
     actions: Actions<Act>,
     commands: Vec<Command>,
@@ -341,8 +344,8 @@ impl Layer for Shards {
         build(cx.world_mut());
     }
 
-    /// Takes back which player this run steers, which a joiner's world, the host's, doesn't say,
-    /// and lets go of what may have been held as the world was taken.
+    /// Takes back which player this run steers, which a joiner's world, the host's, and a client's,
+    /// the server's, don't say, and lets go of what may have been held as the world was taken.
     fn restored(&mut self, cx: &mut Context) {
         self.player = cx.player().unwrap_or(0);
         let player = self.player;
@@ -419,7 +422,11 @@ impl Layer for Shards {
         if let Some(font) = self.font {
             draw_scores(cx, &found, font, &mut self.text);
             match self.menu {
-                Some(focus) => draw_menu(cx, font, focus, COLORS[usize::from(self.player)]),
+                Some(focus) => {
+                    // A server's client past the two players has no disc, nor color, of its own.
+                    let lit = COLORS.get(usize::from(self.player)).copied();
+                    draw_menu(cx, font, focus, lit.unwrap_or([1.0; 3]));
+                }
                 None => draw_hint(cx, font),
             }
         }
@@ -566,7 +573,10 @@ fn build(world: &mut World) {
             cooldown: 0,
         };
         let name = Name(format!("Player {}", index + 1));
-        world.spawn((at, body, collider, disc, player, name));
+        let owner = Owner {
+            player: index as u8,
+        };
+        world.spawn((at, body, collider, disc, player, owner, name));
     }
     for _ in 0..SHARDS {
         let at = Transform {

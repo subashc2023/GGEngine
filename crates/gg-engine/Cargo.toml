@@ -56,6 +56,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
@@ -64,8 +65,9 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# The process's memory, which the memory module reads through the OS's C functions.
-[target.'cfg(target_os = "macos")'.dependencies]
+# The process's memory, which the memory module reads through macOS's C functions, and Ctrl+C,
+# whose signal the interrupt module takes on every Unix.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 # The Windows modules' tests make windows of their own, which need the process's module handle.

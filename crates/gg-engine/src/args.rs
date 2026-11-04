@@ -36,12 +36,12 @@ pub(crate) struct Args {
     /// Whether a run that doesn't start from a snapshot starts stopped, its world the world as
     /// edited, until the tool API's `play`.
     pub(crate) stopped: bool,
-    /// The lockstep session the run hosts or joins, if it's networked.
+    /// The session the run hosts, joins, serves or connects to, if it's networked.
     pub(crate) net: Option<Net>,
     /// Whether the session's peers predict each other's inputs, rolling back where a prediction
     /// missed, rather than waiting for them.
     pub(crate) rollback: bool,
-    /// What the link does to the packets the run's peer receives, as a slow link would.
+    /// What the links do to the packets the run receives, as a slow link would.
     pub(crate) link: Option<Conditions>,
     /// The folder of the mods the run runs, in place of those installed.
     pub(crate) mods: Option<PathBuf>,
@@ -49,11 +49,14 @@ pub(crate) struct Args {
     pub(crate) package: Option<PathBuf>,
 }
 
-/// A lockstep session's end a run takes, and the address it listens at or connects to, as given.
+/// A networked session's end a run takes, and the address it listens at or connects to, as given:
+/// a lockstep session's host or joiner, or a server or its client.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Net {
     Host(String),
     Join(String),
+    Serve(String),
+    Connect(String),
 }
 
 /// What `--link` has a peer's link do to what it receives, as a slow link would: hold each packet
@@ -75,7 +78,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 17] = [
+const NOT_REPLAYED: [&str; 19] = [
     "--record",
     "--restore",
     "--headless",
@@ -90,6 +93,8 @@ const NOT_REPLAYED: [&str; 17] = [
     "--stopped",
     "--host",
     "--join",
+    "--serve",
+    "--connect",
     "--rollback",
     "--link",
     "--mods",
@@ -131,9 +136,16 @@ Options:
   --rollback        With --host or --join, of both peers: predict the other peer's inputs, up to
                     8 ticks on, and roll back where a prediction missed, its ticks run again, with
                     an input delay of 2 ticks rather than lockstep's 4
-  --link <MS,MS,%>  With --host or --join, have the link hold each packet this peer receives the
-                    first MS, and up to the second more, losing the percent of them, such as
-                    `--link 100,20,5`, and hold what comes on the session's stream the first MS
+  --serve <ADDRESS> Serve the world at ADDRESS, such as `0.0.0.0:7700`, to the clients that connect,
+                    as the server that owns it: without a window or a GPU, in real time, until
+                    Ctrl+C, or --frames frames of a tick's time
+  --connect <ADDRESS>
+                    Play as a client of the server at ADDRESS, from its world, as the player it
+                    gives this run, predicting the world, the other players drawn as it last had
+                    them
+  --link <MS,MS,%>  With --host, --join, --serve or --connect, have each link hold each packet this
+                    run receives the first MS, and up to the second more, losing the percent of
+                    them, such as `--link 100,20,5`, and hold what comes on its stream the first MS
   --mods <DIR>     Run the mods in the folder DIR, in place of those installed in the game's
                     per-user folder, which a windowed run runs
   --package <PATH>  Read the files under the asset root from the game's package at PATH, which
@@ -250,15 +262,17 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--replay" => parsed.replay = Some(value_of(flag)?.into()),
             // The last given, which `gg run` gives after the game's own.
             "--restore" => parsed.restore = Some(value_of(flag)?.into()),
-            "--host" | "--join" if parsed.net.is_some() => {
+            "--host" | "--join" | "--serve" | "--connect" if parsed.net.is_some() => {
                 return Err(bad(
-                    "a run hosts one lockstep session or joins one, so it takes one `--host` or \
-                     `--join`"
+                    "a run takes part in one networked session, so it takes one `--host`, \
+                     `--join`, `--serve` or `--connect`"
                         .to_owned(),
                 ));
             }
             "--host" => parsed.net = Some(Net::Host(value_of(flag)?)),
             "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
+            "--serve" => parsed.net = Some(Net::Serve(value_of(flag)?)),
+            "--connect" => parsed.net = Some(Net::Connect(value_of(flag)?)),
             "--mods" => parsed.mods = Some(value_of(flag)?.into()),
             "--package" => parsed.package = Some(value_of(flag)?.into()),
             "--dump" => {
@@ -301,6 +315,31 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
+    if matches!(parsed.net, Some(Net::Connect(_))) && parsed.record.is_some() {
+        return Err(bad(
+            "`--connect` starts the run from the server's world, and corrects it to the server's \
+             after, which a recording, whose replay goes from a seed by its commands alone, can't \
+             follow, so it takes no `--record`"
+                .to_owned(),
+        ));
+    }
+    if matches!(parsed.net, Some(Net::Serve(_))) {
+        let renders = [
+            (parsed.record.is_some(), "--record"),
+            (parsed.embedded, "--embedded"),
+            (parsed.capture.is_some(), "--capture"),
+            (parsed.gpu.is_some(), "--gpu"),
+            (parsed.vsync, "--vsync"),
+        ];
+        if let Some((_, flag)) = renders.iter().find(|(given, _)| *given) {
+            let why = if *flag == "--record" {
+                "applies its clients' inputs as they come, which a recording can't keep yet"
+            } else {
+                "renders nothing, without a GPU"
+            };
+            return Err(bad(format!("`--serve` {why}, so it takes no `{flag}`")));
+        }
+    }
     if parsed.embedded && parsed.headless {
         return Err(bad(
             "`--headless` and `--embedded` each run without a window, a tick a frame or in real \
@@ -332,20 +371,25 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     }
     if parsed.stopped && parsed.net.is_some() {
         return Err(bad(
-            "`--stopped` starts the run stopped, but a lockstep session's peers play from start to \
-             end, so that their worlds don't part, so it takes no `--host` or `--join`"
+            "`--stopped` starts the run stopped, but a networked session's runs play from start to \
+             end, so that their worlds don't part, so it takes no `--host`, `--join`, `--serve` or \
+             `--connect`"
                 .to_owned(),
         ));
     }
-    if (parsed.rollback || parsed.link.is_some()) && parsed.net.is_none() {
-        let flag = if parsed.rollback {
-            "--rollback"
-        } else {
-            "--link"
-        };
-        return Err(bad(format!(
-            "`{flag}` is of a lockstep session's peers, so it needs `--host` or `--join`"
-        )));
+    let peer = matches!(parsed.net, Some(Net::Host(_) | Net::Join(_)));
+    if parsed.rollback && !peer {
+        return Err(bad(
+            "`--rollback` is of a lockstep session's peers, so it needs `--host` or `--join`"
+                .to_owned(),
+        ));
+    }
+    if parsed.link.is_some() && parsed.net.is_none() {
+        return Err(bad(
+            "`--link` is of a networked run's links, so it needs `--host`, `--join`, `--serve` or \
+             `--connect`"
+                .to_owned(),
+        ));
     }
     if parsed.rollback && parsed.record.is_some() {
         return Err(bad(
@@ -485,6 +529,15 @@ mod tests {
         assert_eq!(join.link, Some(link));
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
         assert_eq!((host.rollback, host.link), (false, None));
+        // A server and its client, each over a link of its own.
+        let serve = parse_strs(&["--serve", "0.0.0.0:7700", "--link", "100,20,5"]);
+        let serve = serve.unwrap().unwrap();
+        assert_eq!(serve.net, Some(Net::Serve("0.0.0.0:7700".to_owned())));
+        assert!(serve.link.is_some());
+        let connect = parse_strs(&["--connect=127.0.0.1:7700", "--headless", "--link=100,20,5"]);
+        let connect = connect.unwrap().unwrap();
+        assert_eq!(connect.net, Some(Net::Connect("127.0.0.1:7700".to_owned())));
+        assert!(connect.headless && connect.link.is_some());
         // A run's ticks run again, and a replay's.
         assert!(!parse_strs(&[]).unwrap().unwrap().sync_test);
         for args in [
@@ -513,6 +566,8 @@ mod tests {
                 "--restore",
                 "--host",
                 "--join",
+                "--serve",
+                "--connect",
                 "--mods",
             ]
             .contains(&flag);
@@ -569,6 +624,20 @@ mod tests {
             &["--host", "0.0.0.0:7700", "--link", "100,20,100"],
             &["--host", "0.0.0.0:7700", "--link", "100,20,-1"],
             &["--host", "0.0.0.0:7700", "--link", "100,-20,5"],
+            &["--host", "0.0.0.0:7700", "--serve", "0.0.0.0:7701"],
+            &["--serve", "0.0.0.0:7700", "--connect", "127.0.0.1:7700"],
+            &["--serve"],
+            &["--connect"],
+            &["--serve", "0.0.0.0:7700", "--rollback"],
+            &["--connect", "127.0.0.1:7700", "--rollback"],
+            &["--serve", "0.0.0.0:7700", "--record", "run.recording"],
+            &["--connect", "127.0.0.1:7700", "--record", "run.recording"],
+            &["--serve", "0.0.0.0:7700", "--embedded"],
+            &["--serve", "0.0.0.0:7700", "--capture", "3"],
+            &["--serve", "0.0.0.0:7700", "--gpu", "amd"],
+            &["--serve", "0.0.0.0:7700", "--vsync"],
+            &["--stopped", "--serve", "0.0.0.0:7700"],
+            &["--stopped", "--connect", "127.0.0.1:7700"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

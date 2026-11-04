@@ -195,22 +195,33 @@ pub(crate) fn draw_world(
                     let batch = |row| batch(kind, row);
                     cut(segments, len, z, batch, kind, table, ROOTS);
                 }
-                if let Some(from) = poses.from(index) {
+                let (from, instead) = (poses.from(index), poses.past.instead_of(index));
+                if from.is_some() || !instead.is_empty() {
                     let end = blending + len;
                     if blended.len() < end {
                         blended.resize(end, Mat4::IDENTITY);
                     }
-                    blend(&mut blended[blending..end], &from[..len], transforms, alpha);
+                    let out = &mut blended[blending..end];
+                    match from {
+                        Some(from) => blend(out, &from[..len], transforms, alpha),
+                        None => {
+                            for (out, local) in out.iter_mut().zip(transforms) {
+                                *out = local.matrix();
+                            }
+                        }
+                    }
+                    for &(_, row, pose) in instead {
+                        out[row as usize] = pose.matrix();
+                    }
                     blends[index] = Some(blending);
                     blending = end;
                 }
             }
             Some(parents) => {
                 let start = matrices.len();
-                let from = poses.from(index);
                 depths.clear();
                 for (row, (local, parent)) in transforms.iter().zip(parents).enumerate() {
-                    let drawn = from.map(|from| interpolation::between(&from[row], local, alpha));
+                    let drawn = poses.drawn(index, row, local);
                     let (at, drawn) = poses.carry(local, drawn, parent);
                     depths.push(at.w_axis.z);
                     matrices.push(drawn.unwrap_or(at));
@@ -327,8 +338,8 @@ pub(crate) fn draw_world(
 }
 
 /// Where the world's entities draw this frame: each `alpha` of the way from what `past` has it draw
-/// from to where the latest tick left it, while it draws between ticks, and children where their
-/// ancestors carry them as they draw.
+/// from to where the latest tick left it, while it draws between ticks, or as `past` has it draw
+/// instead, as [`Past::instead`] says; and children where their ancestors carry them as they draw.
 pub(crate) struct Poses<'a> {
     world: &'a World,
     past: &'a Past,
@@ -355,6 +366,20 @@ impl<'a> Poses<'a> {
             .flatten()
     }
 
+    /// The pose row `row` of table `table` draws as, its transform `local` as the latest tick left
+    /// it: as the past has it draw instead, if it does, or else on its way from what it draws from,
+    /// while it draws between ticks; `None` where it draws as the tick left it.
+    fn drawn(&self, table: usize, row: usize, local: &Transform) -> Option<Transform> {
+        let instead = self.past.instead_of(table);
+        if !instead.is_empty()
+            && let Ok(at) = instead.binary_search_by_key(&(row as u32), |&(_, of, _)| of)
+        {
+            return Some(instead[at].2);
+        }
+        let from = self.from(table)?;
+        Some(interpolation::between(&from[row], local, self.alpha))
+    }
+
     /// A child's matrices from its own space to the world's, as the latest tick left it and as it
     /// draws, from its transform, `drawn` as it draws: its transform's, then each ancestor's in
     /// turn up to its root, an ancestor without a transform carrying its children as though it
@@ -377,11 +402,8 @@ impl<'a> Poses<'a> {
                     return (at, drawn);
                 };
                 let ancestor = transforms[row].matrix();
-                let drawn = match self.from(index) {
-                    Some(from) => {
-                        let pose = interpolation::between(&from[row], &transforms[row], self.alpha);
-                        Some(pose.matrix() * drawn.unwrap_or(at))
-                    }
+                let drawn = match self.drawn(index, row, &transforms[row]) {
+                    Some(pose) => Some(pose.matrix() * drawn.unwrap_or(at)),
                     None => drawn.map(|drawn| ancestor * drawn),
                 };
                 (ancestor * at, drawn)
@@ -398,8 +420,7 @@ impl<'a> Poses<'a> {
         let rows = &self.world.tables()[table];
         let transforms = rows.column::<Transform>(self.transform);
         let local = &transforms.expect("it has transforms")[row];
-        let from = self.from(table);
-        let drawn = from.map(|from| interpolation::between(&from[row], local, self.alpha));
+        let drawn = self.drawn(table, row, local);
         let parent = self.world.component::<Parent>();
         let parents = parent.and_then(|id| rows.column::<Parent>(id));
         (local, drawn, parents.map(|parents| &parents[row]))
@@ -436,11 +457,8 @@ impl<'a> Poses<'a> {
             let Some(transforms) = table.column::<Transform>(self.transform) else {
                 return rotation;
             };
-            let ancestor = match self.from(index) {
-                Some(from) => interpolation::between(&from[row], &transforms[row], self.alpha),
-                None => transforms[row],
-            };
-            ancestor.rotation * rotation
+            let ancestor = self.drawn(index, row, &transforms[row]);
+            ancestor.unwrap_or(transforms[row]).rotation * rotation
         });
         // Normalized, since each product of unit quaternions rounds a little off a unit.
         let position = carried.unwrap_or(at).w_axis.truncate();

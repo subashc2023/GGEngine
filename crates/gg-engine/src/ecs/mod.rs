@@ -363,7 +363,6 @@ impl World {
     }
 
     /// What names the textures its components show, as it shares them, to share them again.
-    #[cfg(feature = "dev")]
     pub(crate) fn shared_assets(&self) -> &Arc<Assets> {
         &self.assets
     }
@@ -739,6 +738,11 @@ impl World {
     /// `count` resets.
     pub(crate) fn reset_since(&self, entity: Entity, count: u64) -> bool {
         self.resets[entity.slot()] > count
+    }
+
+    /// The table and the row `entity` is in, by their indices, if it's alive, for drawing.
+    pub(crate) fn table_row(&self, entity: Entity) -> Option<(u32, u32)> {
+        self.location(entity).map(|at| (at.table, at.row))
     }
 
     /// Where `entity` is, if it's alive.
