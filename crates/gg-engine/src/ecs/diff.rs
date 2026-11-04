@@ -33,6 +33,56 @@ pub struct Difference {
     pub theirs: Option<Value>,
 }
 
+/// A [`Difference`] as a diagnostic writes it, by [`Difference::written`].
+pub(crate) struct Written {
+    /// The component's field, as [`reflect::join`] writes it: empty where one world alone has the
+    /// entity.
+    pub(crate) field: String,
+    /// Where it is, as a message says it: the entity's ID, and its field, if it has one.
+    pub(crate) at: String,
+    /// The world `difference` was called on, there: the field's value, as recordings write values,
+    /// or `none` where it hasn't the component; or, for an entity one world alone has, `alive` or
+    /// `none`.
+    pub(crate) ours: String,
+    /// The other world, there, as `ours` is.
+    pub(crate) theirs: String,
+}
+
+impl Difference {
+    /// Itself, as a diagnostic writes it, `ours` being the world [`World::difference`] was called
+    /// on and `theirs` the other.
+    pub(crate) fn written(&self, ours: &World, theirs: &World) -> Written {
+        let entity = self.entity;
+        let Some(component) = &self.component else {
+            let alive = |world: &World| {
+                let alive = world.entity(entity).is_some();
+                if alive { "alive" } else { "none" }.to_owned()
+            };
+            return Written {
+                field: String::new(),
+                at: entity.to_string(),
+                ours: alive(ours),
+                theirs: alive(theirs),
+            };
+        };
+        let value = |value: &Option<Value>, world: &World| {
+            let mut written = String::new();
+            match value {
+                Some(value) => text::write_folded(&mut written, value, world),
+                None => written.push_str("none"),
+            }
+            written
+        };
+        let field = reflect::join(component, &self.path);
+        Written {
+            at: format!("{entity}'s `{field}`"),
+            field,
+            ours: value(&self.ours, ours),
+            theirs: value(&self.theirs, theirs),
+        }
+    }
+}
+
 impl World {
     /// The first place where this world's content and `other`'s differ, as their hashes'
     /// [`content`](crate::WorldHash::content) tells them apart: the entities in the order of their

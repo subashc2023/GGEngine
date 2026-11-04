@@ -186,6 +186,7 @@ enum Undo {
 
 /// An entity's exclusive field, `field` of `component`, which an operation made false as it made
 /// another entity's true.
+#[derive(Clone)]
 struct Excluded {
     entity: EntityId,
     component: Ident,
@@ -1024,6 +1025,61 @@ impl Inverse {
             }
         }
         settle(&mut self.undo);
+    }
+
+    /// A copy of it, its world's still, as a copy of its log takes: it keeps what this keeps, as
+    /// its own, so that once [rebound](Self::rebind) to a copy of the world taken while this kept
+    /// it, it undoes there as this does in the world.
+    #[cfg(any(feature = "dev", test))]
+    pub(super) fn copied(&self) -> Inverse {
+        fn copied(undo: &Undo) -> Undo {
+            match undo {
+                Undo::Apply(operation) => Undo::Apply(operation.clone()),
+                Undo::Set { set, kept } => Undo::Set {
+                    set: set.clone(),
+                    kept: kept.as_ref().map(|kept| kept.cloned()),
+                },
+                Undo::Put {
+                    entity,
+                    component,
+                    column,
+                } => Undo::Put {
+                    entity: *entity,
+                    component: *component,
+                    column: column.cloned(),
+                },
+                Undo::Uncreate(made) => Undo::Uncreate(made.clone()),
+                Undo::Restore { taken, created } => Undo::Restore {
+                    taken: (taken.iter())
+                        .map(|taken| Taken {
+                            row: (taken.row.iter())
+                                .map(|(id, column)| (*id, column.cloned()))
+                                .collect(),
+                            ..*taken
+                        })
+                        .collect(),
+                    created: *created,
+                },
+                Undo::Exclusive { undo, excluded, to } => Undo::Exclusive {
+                    undo: Box::new(copied(undo)),
+                    excluded: excluded.clone(),
+                    to: *to,
+                },
+            }
+        }
+        Inverse {
+            world: self.world,
+            undo: copied(&self.undo),
+        }
+    }
+
+    /// Has it be the world's whose serial is `to`, if it's `from`'s, as [`copied`](Self::copied)
+    /// says.
+    #[cfg(any(feature = "dev", test))]
+    pub(super) fn rebind(&mut self, from: u64, to: u64) {
+        if self.world == from {
+            self.world = to;
+        }
     }
 }
 

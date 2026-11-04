@@ -66,13 +66,11 @@ as it starts; filter it on `level`, `code` or `vuid`. `RUST_LOG` sets what's log
 `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the default; a level for every target, as
 `RUST_LOG=info` has, replaces it. A run that doesn't end in an error logs `engine.perf` as it ends:
 its frame times and where they went, and its memory. Compare builds by theirs, from release builds
-run headless for as many frames; headless frames draw each tick as it ends, without blending.
-
-A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
-<tick>`, run where it goes another way and where it doesn't, prints each world's content there a
-field a line, and the two diff to the field where they part, or match where the layout alone parts.
-Lockstep peers whose worlds part log `net.desync`, and the joiner `net.desync_field`, which names
-the entity and field where they part, at the tick they did, with both values.
+run headless for as many frames; headless frames draw each tick as it ends, without blending. A
+replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
+<tick>`, run where it does and where it doesn't, prints each world a field a line, to diff. Lockstep
+peers whose worlds part log `net.desync`, the joiner `net.desync_field`; `--sync-test` runs each
+tick again on a copy, ending where they part (`sync_test.diverged`): both name the field and values.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,

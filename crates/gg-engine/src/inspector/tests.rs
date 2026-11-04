@@ -1782,6 +1782,54 @@ fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
     }
 }
 
+/// In a run whose ticks run again on a copy of the world (`--sync-test`), the Inspector's sets,
+/// undos and redos run again on the copy as they ran in the world, through a copy of its log as
+/// each tick started, so that the copy parts from the world at no tick; and the world keeps its
+/// serial, and its log, whose undos and redos go on in it.
+#[test]
+fn a_sync_tests_copy_takes_the_inspectors_edits_undos_and_redos_as_the_world_did() {
+    let mut cx = Context::seeded(1);
+    let entity = cx.world_mut().spawn(everything());
+    let picked = id(cx.world(), entity);
+    let mut stack = crate::layer::Stack::default();
+    stack.push_overlay(Inspector::default());
+    stack.sync_test();
+    stack.attach(&mut cx);
+    let serial = cx.world().serial();
+    let set = |count| {
+        let edit = Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(count),
+        };
+        vec![Command::Set(picked, edit), Command::Seal]
+    };
+    let ticks = [
+        (set(7), 7),
+        (set(8), 8),
+        (vec![Command::Step(Step::Undo)], 7),
+        (vec![Command::Step(Step::Undo)], 42),
+        (vec![Command::Step(Step::Redo)], 7),
+    ];
+    for (number, (commands, count)) in (0..).zip(ticks) {
+        let queue = stack.commands_of(0).expect("its queue");
+        for command in commands {
+            let value = Queue(vec![command]).value(0);
+            queue.push(&value).expect("queued");
+        }
+        assert!(stack.tick(&mut cx, Tick { number }));
+        assert!(
+            !cx.exiting(),
+            "tick {number}: the copy parted from the world"
+        );
+        let counted = cx.world().get::<Everything>(entity).expect("alive").count;
+        assert_eq!(counted, count, "tick {number}");
+    }
+    assert_eq!(cx.world().serial(), serial);
+    stack.detach(&mut cx);
+    assert!(!stack.failed());
+}
+
 /// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
 /// by the rows of each of its children in turn.
 fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(EntityId, usize)> {

@@ -1237,40 +1237,13 @@ fn log_parting(tick: u64, ours: &World, theirs: &World) {
         );
         return;
     };
-    let entity = difference.entity;
-    let written = |value: &Option<Value>, world: &World| {
-        let mut text = String::new();
-        match value {
-            Some(value) => text::write_folded(&mut text, value, world),
-            None => text.push_str("none"),
-        }
-        text
-    };
-    let (field, at, joiner, host) = match &difference.component {
-        Some(component) => {
-            let field = crate::reflect::join(component, &difference.path);
-            let at = format!("{entity}'s `{field}`");
-            let joiner = written(&difference.ours, ours);
-            (field, at, joiner, written(&difference.theirs, theirs))
-        }
-        None => {
-            let alive = |world: &World| {
-                let alive = world.entity(entity).is_some();
-                if alive { "alive" } else { "none" }.to_owned()
-            };
-            (
-                String::new(),
-                entity.to_string(),
-                alive(ours),
-                alive(theirs),
-            )
-        }
-    };
+    let written = difference.written(ours, theirs);
+    let (at, joiner, host) = (&written.at, &written.ours, &written.theirs);
     error!(
         code = "net.desync_field",
         tick,
-        entity = %entity,
-        field = field.as_str(),
+        entity = %difference.entity,
+        field = written.field.as_str(),
         joiner = joiner.as_str(),
         host = host.as_str(),
         "After tick {tick} the peers' worlds first differ at {at}: the joiner's {joiner}, the \

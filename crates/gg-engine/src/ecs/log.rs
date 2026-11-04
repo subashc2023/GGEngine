@@ -236,6 +236,39 @@ impl Log {
         self.undone.iter().map(|entry| entry.operations.as_slice())
     }
 
+    /// A copy of the log, for a copy of the world it's applied to, as a SyncTest runs a tick again
+    /// on one: its entries keep what the log's keep, as their own, and are the world's still, so
+    /// that it's kept aside, as the log was as the tick started, and [rebound](Self::rebind) to the
+    /// copy of the world taken then, where it undoes and redoes as the log does in the world. It's
+    /// never used in the world itself, where it and the log would each give back what they keep.
+    #[cfg(any(feature = "dev", test))]
+    pub(crate) fn copied(&self) -> Log {
+        let copied = |entries: &[Entry]| -> Vec<Entry> {
+            let entry = |entry: &Entry| Entry {
+                operations: entry.operations.clone(),
+                inverses: entry.inverses.iter().map(Inverse::copied).collect(),
+            };
+            entries.iter().map(entry).collect()
+        };
+        Log {
+            done: copied(&self.done),
+            undone: copied(&self.undone),
+            open: self.open,
+        }
+    }
+
+    /// Has its entries of the world whose serial is `from` be those of the world whose serial is
+    /// `to`, a copy of that world, as [`copied`](Self::copied) says; another world's stay its own,
+    /// refused in both.
+    #[cfg(any(feature = "dev", test))]
+    pub(crate) fn rebind(&mut self, from: u64, to: u64) {
+        for entry in self.done.iter_mut().chain(&mut self.undone) {
+            for inverse in &mut entry.inverses {
+                inverse.rebind(from, to);
+            }
+        }
+    }
+
     /// Drops every entry, and what they kept, from `world`, which they were applied to.
     pub fn clear(&mut self, world: &mut World) {
         for dropped in self.done.drain(..).chain(self.undone.drain(..)) {
@@ -1157,5 +1190,62 @@ pub(super) mod tests {
         assert_eq!(vacated(world), 0);
         check_ids(world);
         check_links(world);
+    }
+
+    /// A copy of a log of random operations, some undone, rebound to a copy of its world taken as
+    /// the log held what it holds, undoes, redoes and applies there as the log does in the world:
+    /// after each step the two worlds hash alike, and each keeps the slots its log keeps, which
+    /// clearing each frees in its own; while a copy not rebound is refused there, as another
+    /// world's, and changes nothing.
+    #[test]
+    fn a_log_copied_for_a_copy_of_its_world_steps_there_as_the_log_does_in_the_world() {
+        let mut x = fixture();
+        let world = &mut x.world;
+        let mut log = Log::default();
+        let mut rng = Rng(13);
+        for step in 0..400 {
+            let operation = random(world, &mut rng, step);
+            let _ = log.apply(world, operation);
+            if rng.below(4) == 0 {
+                let _ = log.undo(world);
+            }
+        }
+        let mut copy = world.clone();
+        let mut unbound = log.copied();
+        let mut copied = log.copied();
+        copied.rebind(world.serial(), copy.serial());
+        let mut stepped = 0;
+        for step in 0..300 {
+            let (ours, theirs) = match rng.below(3) {
+                0 => (log.undo(world), copied.undo(&mut copy)),
+                1 => (log.redo(world), copied.redo(&mut copy)),
+                _ => {
+                    let operation = random(world, &mut rng, 1000 + step);
+                    let theirs = copied.apply(&mut copy, operation.clone());
+                    (
+                        log.apply(world, operation).map(|()| true),
+                        theirs.map(|()| true),
+                    )
+                }
+            };
+            let code = |done: Result<bool>| done.map_err(|error| error.code().to_owned());
+            let (ours, theirs) = (code(ours), code(theirs));
+            assert_eq!(ours, theirs, "step {step}");
+            stepped += usize::from(ours == Ok(true));
+            assert_eq!(world.hash(), copy.hash(), "step {step}");
+            assert_eq!(vacated(world), log.kept(), "step {step}");
+            assert_eq!(vacated(&copy), copied.kept(), "step {step}");
+        }
+        assert!(stepped > 100, "{stepped} steps taken");
+        assert!(log.kept() > 0, "slots kept, which the copy keeps too");
+        let hash = copy.hash();
+        let refused = unbound.undo(&mut copy).map_err(|error| error.code());
+        assert_eq!(refused, Err("ops.other_world"));
+        assert_eq!(copy.hash(), hash);
+        log.clear(world);
+        copied.clear(&mut copy);
+        assert_eq!((vacated(world), vacated(&copy)), (0, 0));
+        check_ids(&copy);
+        check_links(&copy);
     }
 }

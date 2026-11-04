@@ -26,6 +26,8 @@ pub(crate) struct Args {
     pub(crate) replay: Option<PathBuf>,
     /// Where the replay stops, to write the world as it is there.
     pub(crate) dump: Option<Dump>,
+    /// Whether each tick runs again, on a copy of the world taken as it started, a replay's too.
+    pub(crate) sync_test: bool,
     /// Whether a development build serves the tool API.
     pub(crate) api: bool,
     /// The snapshot the run starts from, in place of the world its layers would attach.
@@ -96,6 +98,9 @@ Options:
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
   --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
   --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
+  --sync-test       Run each tick again, a replay's too, on a copy of the world taken as it
+                    started, with the commands it applied, as rollback runs ticks again, and end
+                    the run where the copy and the world part, naming the field
   --restore <PATH>  Start from the snapshot at PATH, which the tool API's `snapshot` writes, where
                     its world was, rather than building the world afresh
   --no-api          Serve no tool API, which development builds serve for tools such as `gg`
@@ -116,8 +121,8 @@ Environment:
   RUST_LOG          The log filter, such as `debug` or `info,gg_gpu=trace`
   NO_COLOR          Turns the console's colors off
 
-Exits 0 on success, 1 on an error, a validation message or a replay that goes another way, and 2
-on bad arguments.
+Exits 0 on success, 1 on an error, a validation message, a replay that goes another way or a tick
+that goes another way run again, and 2 on bad arguments.
 "
     )
 }
@@ -139,6 +144,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         record: None,
         replay: None,
         dump: None,
+        sync_test: false,
         api: true,
         restore: None,
         stopped: false,
@@ -176,6 +182,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--vsync" => parsed.vsync = true,
             "--no-api" => parsed.api = false,
             "--stopped" => parsed.stopped = true,
+            "--sync-test" => parsed.sync_test = true,
             "--frames" => {
                 let frames = value_of(flag)?;
                 let frames = frames.parse().map_err(|_| {
@@ -390,6 +397,14 @@ mod tests {
         let join = parse_strs(&["--join=127.0.0.1:7700", "--restore", "a.snapshot"]);
         let join = join.unwrap().unwrap().net;
         assert_eq!(join, Some(Net::Join("127.0.0.1:7700".to_owned())));
+        // A run's ticks run again, and a replay's.
+        assert!(!parse_strs(&[]).unwrap().unwrap().sync_test);
+        for args in [
+            &["--sync-test"][..],
+            &["--replay", "run.recording", "--sync-test"],
+        ] {
+            assert!(parse_strs(args).unwrap().unwrap().sync_test, "{args:?}");
+        }
         for (dump, at) in [("attach", Dump::Attach), ("300", Dump::Tick(300))] {
             let args = parse_strs(&["--replay", "run.recording", "--dump", dump]);
             let args = args.unwrap().unwrap();

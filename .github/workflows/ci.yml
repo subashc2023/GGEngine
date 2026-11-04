@@ -122,6 +122,18 @@ jobs:
           wait $host
           grep -q '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
+      # Each tick, run again on a copy of the world taken as it started, with the commands it
+      # applied, leaves the copy as it left the world, as rollback needs: the sandbox's and the
+      # demo's headless, and the demo's live recording replayed, which steers, dashes, collects and
+      # edits, each exiting 0 and saying so as it ends.
+      - name: Run each tick again, as a SyncTest
+        if: matrix.container
+        run: |
+          cargo run -p sandbox --locked -- --headless --frames 120 --sync-test
+          target/debug/gg-shards --headless --frames 300 --sync-test
+          target/debug/gg-shards --replay games/shards/tests/references/live.recording --sync-test
+          grep -q '"code":"sync_test.matched","ticks":120,' target/debug/logs/sandbox-*.jsonl
+          test "$(grep -h '"code":"sync_test.matched"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
       # Whether the editor runs, its view a panel that the UI draws among its own, exiting 0.
       - name: Run the editor headless
         if: matrix.container

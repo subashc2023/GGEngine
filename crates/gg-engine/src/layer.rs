@@ -58,6 +58,7 @@ use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
 use crate::scene_files::{self, SceneFile, SceneFiles};
 use crate::snapshot::{self, Again, Run, Snapshot};
+use crate::sync_test::SyncTest;
 use crate::{
     App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, ModelNode, ModelRoot,
     Name, RigidBody2D, Transform, Ui, World,
@@ -103,6 +104,17 @@ pub trait Layer {
     /// values its panels show, and queues what its ticks need, such as letting go of what was held
     /// as the world it picks up from was left. The world changes only at ticks from here.
     fn restored(&mut self, _cx: &mut Context) {}
+
+    /// Called as a SyncTest (`--sync-test`) runs a tick again, as it does each once it has run: as
+    /// a copy of the world taken as the tick started is put in the world's place, before the
+    /// layers' ticks run again on it, each given back the commands it applied; and as the world
+    /// comes back, once they have. The layer moves what it keeps of a world by its
+    /// [serial](World::serial) to the world in place, as the Inspector moves its log, so that its
+    /// tick goes on the copy as it went on the world, and on the world after as before; what it
+    /// keeps by entities' IDs holds in both, which name the same entities there. It queues nothing,
+    /// as the engine fills its queue. The default does nothing, for a layer that keeps nothing of
+    /// a world by its serial.
+    fn swapped(&mut self, _cx: &mut Context) {}
 
     /// Called once as the app ends, after the last tick.
     fn detach(&mut self, _cx: &mut Context) {}
@@ -402,6 +414,10 @@ pub struct Context {
     pub(crate) edited: Option<Edited>,
     /// The local player, in a lockstep session.
     player: Option<u8>,
+    /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
+    /// from a restore.
+    #[cfg(feature = "dev")]
+    sync_tested: bool,
 }
 
 /// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its
@@ -607,7 +623,17 @@ impl Context {
             #[cfg(feature = "dev")]
             edited: None,
             player: None,
+            #[cfg(feature = "dev")]
+            sync_tested: false,
         }
+    }
+
+    /// Whether a SyncTest runs each tick again on a copy of the world (`--sync-test`), as
+    /// [`Layer::swapped`] says: for the Inspector, whose tick then keeps its log as the tick
+    /// started, for the tick's run again.
+    #[cfg(feature = "dev")]
+    pub(crate) fn sync_tested(&self) -> bool {
+        self.sync_tested
     }
 
     /// The player this run plays, in a lockstep session, which the run hosts (`--host`), as player
@@ -3262,6 +3288,8 @@ pub(crate) struct Stack {
     recorder: Option<Recorder>,
     /// The lockstep session the run is a peer of, if it's networked.
     net: Option<Lockstep>,
+    /// What runs each tick again, if the run's ticks are sync-tested, until one goes another way.
+    sync_test: Option<SyncTest>,
     /// Whether a layer ended the run with an error, as [`Context::fail`] says, which the context
     /// tells as the layers detach.
     failed: bool,
@@ -3326,9 +3354,21 @@ impl Stack {
         self.layers.get_mut(index)?.commands()
     }
 
+    /// What runs each tick again, if the run's ticks are sync-tested: for tests.
+    #[cfg(test)]
+    pub(crate) fn sync_test_mut(&mut self) -> Option<&mut SyncTest> {
+        self.sync_test.as_mut()
+    }
+
     /// Has the run be a peer of `net`'s lockstep session.
     pub(crate) fn lockstep(&mut self, net: Lockstep) {
         self.net = Some(net);
+    }
+
+    /// Has each tick run again once it has run, a replay's too, as a SyncTest (`--sync-test`) runs
+    /// it, as [`tick`](Self::tick) says: before the layers attach.
+    pub(crate) fn sync_test(&mut self) {
+        self.sync_test = Some(SyncTest::default());
     }
 
     /// Whether the run waits on its lockstep peer: a joiner without the host's world, or a tick
@@ -3528,6 +3568,10 @@ impl Stack {
         }
         cx.player = self.net.as_ref().map(Lockstep::player);
         cx.follows |= self.joins();
+        #[cfg(feature = "dev")]
+        {
+            cx.sync_tested = self.sync_test.is_some();
+        }
         self.load(cx);
         for layer in &mut self.layers {
             layer.attach(cx);
@@ -3559,6 +3603,10 @@ impl Stack {
         let _zone = gg_core::zone!();
         cx.player = self.net.as_ref().map(Lockstep::player);
         cx.follows |= self.joins();
+        #[cfg(feature = "dev")]
+        {
+            cx.sync_tested = self.sync_test.is_some();
+        }
         self.load(cx);
         cx.attached = true;
         cx.load_restored(snapshot.added());
@@ -3748,13 +3796,22 @@ impl Stack {
         }
     }
 
-    /// Detaches from the top down, the reverse of attaching, once a recording has its end; and
-    /// takes from `cx` whether a layer ended the run with an error, as [`failed`](Self::failed)
-    /// tells, as it detached too.
+    /// Detaches from the top down, the reverse of attaching, once a recording has its end, and a
+    /// SyncTest that found no tick going another way has logged how many it ran again
+    /// (`sync_test.matched`); and takes from `cx` whether a layer ended the run with an error, as
+    /// [`failed`](Self::failed) tells, as it detached too.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
             recorder.end();
+        }
+        if let Some(sync_test) = &self.sync_test {
+            info!(
+                code = "sync_test.matched",
+                ticks = sync_test.matched(),
+                "Each tick ran again on a copy of the world taken as it started, and left it as it \
+                 left the world"
+            );
         }
         cx.attached = false;
         cx.authors.clear(&mut cx.world);
@@ -3791,7 +3848,10 @@ impl Stack {
     /// peer's inputs, returning `false` without running until they've come; once they have, this
     /// peer's queued commands go out as its inputs for a tick to come, and the tick runs on both
     /// peers' for it, as [`Lockstep::start_tick`] says, the edits among them applying first, as a
-    /// recording keeps them.
+    /// recording keeps them. A SyncTest takes a copy of the world once those have applied, keeps
+    /// each layer's commands as its tick is about to apply them, and runs the tick again once it
+    /// has run, as [`run_again`](Self::run_again) says: one that fails ends the run with its error,
+    /// as [`Context::fail`] does, and the SyncTest with it.
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) -> bool {
         let _zone = gg_core::zone!();
         let Self {
@@ -3799,6 +3859,7 @@ impl Stack {
             names,
             recorder,
             net,
+            sync_test,
             ..
         } = self;
         let merged = match net {
@@ -3857,6 +3918,9 @@ impl Stack {
             }
             None => None,
         };
+        if let Some(sync_test) = sync_test.as_mut() {
+            sync_test.take(&cx.world);
+        }
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(merged) = &merged
                 && let Some(queue) = layer.commands()
@@ -3869,10 +3933,24 @@ impl Stack {
             {
                 recorder.queued(index, names[index], commands, &cx.world);
             }
+            if let Some(sync_test) = sync_test.as_mut()
+                && let Some(commands) = layer.commands()
+            {
+                sync_test.queued(index, names[index], commands, &cx.world);
+            }
             layer.tick(&mut cx.world, tick);
             cx.share_assets();
         }
         cx.play_queued();
+        if let Some(again) = sync_test.as_mut()
+            && let Err(error) = Self::run_again(layers, again, cx, tick)
+        {
+            error!(code = error.code(), tick = tick.number, "{error:#}");
+            // As `Context::fail` ends it, with the error logged.
+            cx.exiting = true;
+            cx.failed = true;
+            *sync_test = None;
+        }
         if let Some(recorder) = recorder {
             recorder.ticked(tick, &cx.world);
         }
@@ -3884,7 +3962,9 @@ impl Stack {
 
     /// Runs a tick as a replay does: as [`tick`](Self::tick) does, with each layer's queue emptied
     /// and filled again by `fill`, which gets the layer's index, its queue, if it has one, and the
-    /// world as its tick finds it.
+    /// world as its tick finds it; and a SyncTest runs it again.
+    ///
+    /// Fails as `fill` does, and as [`run_again`](Self::run_again) does, which ends the SyncTest.
     pub(crate) fn replay_tick(
         &mut self,
         cx: &mut Context,
@@ -3892,13 +3972,68 @@ impl Stack {
         mut fill: impl FnMut(usize, Option<&mut dyn Commands>, &World) -> Result<()>,
     ) -> Result<()> {
         let _zone = gg_core::zone!();
-        for (index, layer) in self.layers.iter_mut().enumerate() {
+        let Self {
+            layers,
+            names,
+            sync_test,
+            ..
+        } = self;
+        if let Some(sync_test) = sync_test.as_mut() {
+            sync_test.take(&cx.world);
+        }
+        for (index, layer) in layers.iter_mut().enumerate() {
             fill(index, layer.commands(), &cx.world)?;
+            if let Some(sync_test) = sync_test.as_mut()
+                && let Some(commands) = layer.commands()
+            {
+                sync_test.queued(index, names[index], commands, &cx.world);
+            }
             layer.tick(&mut cx.world, tick);
             cx.share_assets();
         }
         cx.play_queued();
+        if let Some(again) = sync_test.as_mut()
+            && let Err(error) = Self::run_again(layers, again, cx, tick)
+        {
+            *sync_test = None;
+            return Err(error);
+        }
         Ok(())
+    }
+
+    /// Runs `tick` again, as a SyncTest does once it has run, `sync_test` having kept a copy of the
+    /// world as it started and each layer's commands as its tick applied them: on the copy, put in
+    /// the world's place, each layer told as it's put there and as the world comes back, as
+    /// [`Layer::swapped`] says, and given back the commands its tick applied; the sounds the tick
+    /// queues there stay in the copy, which nothing plays, as they played as it ran on the world.
+    /// Then checks that it left the copy as it left the world.
+    ///
+    /// Fails, without running it again, as [`SyncTest::refused`] does, and as
+    /// [`SyncTest::compare`] does.
+    fn run_again(
+        layers: &mut [Box<dyn Layer>],
+        sync_test: &mut SyncTest,
+        cx: &mut Context,
+        tick: Tick,
+    ) -> Result<()> {
+        let _zone = gg_core::zone!();
+        sync_test.refused()?;
+        mem::swap(&mut cx.world, sync_test.world_mut());
+        for layer in layers.iter_mut() {
+            layer.swapped(cx);
+        }
+        for (index, layer) in layers.iter_mut().enumerate() {
+            if let Some(queue) = layer.commands() {
+                sync_test.give_back(index, queue);
+            }
+            layer.tick(&mut cx.world, tick);
+            cx.share_assets();
+        }
+        mem::swap(&mut cx.world, sync_test.world_mut());
+        for layer in layers.iter_mut() {
+            layer.swapped(cx);
+        }
+        sync_test.compare(tick, &cx.world)
     }
 
     pub(crate) fn update(&mut self, cx: &mut Context, dt: Duration) {
@@ -3977,6 +4112,10 @@ impl<L: Layer> Layer for Hot<L> {
 
     fn restored(&mut self, cx: &mut Context) {
         HotFn::current(L::restored).call((&mut self.0, cx));
+    }
+
+    fn swapped(&mut self, cx: &mut Context) {
+        HotFn::current(L::swapped).call((&mut self.0, cx));
     }
 
     fn detach(&mut self, cx: &mut Context) {
@@ -5874,6 +6013,9 @@ mod tests {
         fn restored(&mut self, _: &mut Context) {
             self.calls.push("restored");
         }
+        fn swapped(&mut self, _: &mut Context) {
+            self.calls.push("swapped");
+        }
         fn detach(&mut self, _: &mut Context) {
             self.calls.push("detach");
         }
@@ -5907,6 +6049,7 @@ mod tests {
         hot.load(&mut cx);
         hot.attach(&mut cx);
         hot.restored(&mut cx);
+        hot.swapped(&mut cx);
         hot.tick(&mut world, Tick { number: 0 });
         let queued = hot.commands().map(|commands| commands.len());
         hot.update(&mut cx, Duration::ZERO);
@@ -5914,7 +6057,8 @@ mod tests {
         hot.detach(&mut cx);
         assert_eq!((queued, handled), (Some(1), ControlFlow::Break(())));
         let calls = [
-            "load", "attach", "restored", "tick", "commands", "update", "event", "detach",
+            "load", "attach", "restored", "swapped", "tick", "commands", "update", "event",
+            "detach",
         ];
         assert_eq!(hot.0.calls, calls);
     }

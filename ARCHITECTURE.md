@@ -731,6 +731,20 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   finds the first tick where it goes another way. `World::difference` names the entity and field
   where two worlds part in one process; across two machines, `--dump` writes the world there a
   field a line, and the two dumps diff to them.
+- **Ticks run again:** a SyncTest (`--sync-test`) runs each tick again once it has run, a replay's
+  too, on a copy of the world taken as it started, each layer given back the commands its tick
+  applied, and ends the run where the copy and the world then part (`sync_test.diverged`), naming
+  the first entity and field there with both values, as `World::difference` finds them: so that
+  what rollback needs of every tick, that it go by the world, its commands and what its layer set up
+  alone, and that a copy of the world hold all it reads, is checked as a game runs. The world the
+  tick ran on goes on, its serial its own, so that what's kept of it by its serial holds, as the
+  authors' logs and interpolation keep it; the copy is put in its place while the tick runs again,
+  each layer told as it's put there and as the world comes back (`Layer::swapped`), so that what a
+  layer keeps of a world by its serial goes with it, as the Inspector's log does, a copy of it as
+  the tick started running the tick's undos and redos again on the copy. The sounds the tick
+  queues there stay in the copy, which nothing plays, and what the tick logs, it logs twice. A
+  command its queue wouldn't queue again, as one holding something opaque, keeps the tick from
+  running again, and ends the run (`sync_test.bad_command`).
 
 The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
 its slot and which use of the slot it is, so that a despawned entity's handle never names

@@ -68,8 +68,10 @@ use crate::{
 /// joiner's and the tool API's `stop` do, or renewed it, as its `scene new` and `scene open` do.
 /// But the very world it left coming back, as an app that swaps one world for another and back has
 /// it, or as `stop` brings back the world as edited, finds its edits, pick and open rows as they
-/// were. Another layer picks and edits as the panels do through the [`InspectorLink`] that
-/// [`link`](Self::link) gives it.
+/// were. A SyncTest's copy of the world (`--sync-test`), which each tick runs again on, takes none
+/// of that: the tick's edits run again there through a copy of the log as the tick started, and
+/// the pick and the open rows stay. Another layer picks and edits as the panels do through the
+/// [`InspectorLink`] that [`link`](Self::link) gives it.
 ///
 /// A remote Inspector, which [`remote`](Self::remote) makes, shows the world of the game its link
 /// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
@@ -101,6 +103,17 @@ pub struct Inspector {
     /// The log, the pick and the open rows of the world the Inspector left last, which they come
     /// back from if that world comes back.
     left: Option<Left>,
+    /// Whether a SyncTest runs each tick again on a copy of the world (`--sync-test`), as the run
+    /// said as the Inspector attached or picked up from a restore.
+    sync_tested: bool,
+    /// In a run whose ticks run again, a copy of the log as the last tick that had commands
+    /// started, which the tick runs again with on the copy of the world, as
+    /// [`swapped`](Layer::swapped) says.
+    before: Option<Log>,
+    /// The log of the world the Inspector left as a SyncTest swapped another in its place, by the
+    /// world's serial: the world's while its tick runs again on a copy, and then the copy's, until
+    /// the next.
+    aside: Option<(u64, Log)>,
     /// Why the last operation, undo or redo was refused, until the next edit, operation, undo or
     /// redo.
     not_done: Option<String>,
@@ -221,6 +234,7 @@ impl Layer for Inspector {
     /// Knows the world it shows from the start, which a stopped run's may be for its first edits,
     /// with no tick yet.
     fn attach(&mut self, cx: &mut Context) {
+        self.sync_tested = cx.sync_tested();
         if self.remote.is_none() {
             self.world = Some(cx.world().serial());
         }
@@ -232,10 +246,34 @@ impl Layer for Inspector {
     /// left before; as the API's `scene new` and `scene open` renew the world; as a run restored
     /// from a snapshot starts; and as a lockstep joiner's world gives way to its host's.
     fn restored(&mut self, cx: &mut Context) {
+        self.sync_tested = cx.sync_tested();
         let serial = cx.world().serial();
         if self.remote.is_none() && self.world != Some(serial) {
             self.swap_to(serial);
         }
+    }
+
+    /// Moves its log to the world in place, as a SyncTest swaps a copy of the world in while the
+    /// tick runs again there: the copy takes a copy of the log as the tick started, through which
+    /// its undos and redos go there as they went in the world, and the world takes its own log
+    /// back after, the copy's going aside until the next. The pick, the open rows and the edit
+    /// going on stay, as the entities they name by their IDs are the same in both.
+    fn swapped(&mut self, cx: &mut Context) {
+        let serial = cx.world().serial();
+        let left = self.world.filter(|&world| world != serial);
+        let Some(left) = left.filter(|_| self.remote.is_none()) else {
+            return;
+        };
+        let log = match self.aside.take() {
+            Some((world, log)) if world == serial => log,
+            _ => {
+                let mut before = self.before.take().unwrap_or_default();
+                before.rebind(left, serial);
+                before
+            }
+        };
+        self.aside = Some((left, mem::replace(&mut self.log, log)));
+        self.world = Some(serial);
     }
 
     fn detach(&mut self, cx: &mut Context) {
@@ -252,6 +290,9 @@ impl Layer for Inspector {
             self.swap_to(world.serial());
         }
         self.world = Some(world.serial());
+        // The log as the tick starts, which it runs again with on a copy of the world.
+        let again = self.sync_tested && !self.queued.0.is_empty();
+        self.before = again.then(|| self.log.copied());
         let mut queued = mem::take(&mut self.queued.0);
         for command in queued.drain(..) {
             self.run(world, command);

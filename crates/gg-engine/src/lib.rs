@@ -103,6 +103,7 @@ mod renderer_components;
 mod scene_files;
 mod script;
 mod snapshot;
+mod sync_test;
 // What tests share, in tests alone.
 #[cfg(test)]
 mod testing;
@@ -579,6 +580,7 @@ fn run_args(
         validation = args.validation,
         record = args.record.as_ref().map(|path| path.display().to_string()),
         replay = args.replay.as_ref().map(|path| path.display().to_string()),
+        sync_test = args.sync_test,
         "Options"
     );
 
@@ -597,6 +599,10 @@ fn run_args(
     if let Err(error) = jobs::start(args.threads) {
         error!(code = error.code(), "{error:#}");
         return ExitCode::FAILURE;
+    }
+    // Before the replay too, whose ticks run again as a run's do.
+    if args.sync_test {
+        app.stack.sync_test();
     }
     // Before any renderer, which a replay doesn't need, and which a recording that can't be
     // written would keep from starting.
