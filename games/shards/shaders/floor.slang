@@ -1,7 +1,7 @@
 // The arena's floor: a unit square, its corners' positions in its own space and where each is
 // across it, from 0 to 1, as `Corner` in main.rs, which the struct here matches field for field;
 // in one color, crossed by lines of another, `cells` across and down, as `Floor` gives them. The
-// colors are linear, and the sRGB target encodes them.
+// colors are linear, as the view's are.
 
 struct Vertex {
     float3 position;

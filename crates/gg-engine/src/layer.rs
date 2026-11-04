@@ -18,8 +18,8 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
-    Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture, Textures, Viewpoint,
-    Viewport,
+    Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture, Textures,
+    Tonemapper, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
@@ -37,6 +37,7 @@ use crate::cooked;
 use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
+use crate::environment::{self, Environment};
 use crate::font::{self, Align, Font, Fonts, TextStyle};
 use crate::gltf;
 use crate::grid::{self, Plane};
@@ -288,6 +289,12 @@ pub struct Context {
     seen: Option<Viewpoint>,
     /// The tie among the world's cameras last warned of, while they've tied since.
     tie: Option<Tie>,
+    /// The world's environment as the world was last drawn, if it has one.
+    environment: Option<Environment>,
+    /// The tie among the world's environments last warned of, while they've tied since.
+    environment_tie: Option<environment::Tie>,
+    /// The simulation's time in seconds as the world was last drawn.
+    time: f32,
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
@@ -548,6 +555,7 @@ impl Context {
             world.register::<Sprite>()?;
             world.register::<MeshDraw>()?;
             world.register::<Camera>()?;
+            world.register::<Environment>()?;
             world.register::<Name>()?;
             world.register::<RigidBody2D>()?;
             world.register::<BoxCollider2D>()?;
@@ -573,6 +581,9 @@ impl Context {
             viewpoint: None,
             seen: None,
             tie: None,
+            environment: None,
+            environment_tie: None,
+            time: 0.0,
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             textures,
@@ -3087,13 +3098,16 @@ impl Context {
     }
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
-    /// from where it was as the latest tick started to where the tick left it, and their colliders'
-    /// outlines, over the rest, while they're shown, or the look shows them; and finds where the
-    /// world's camera sees from. Before the entities, a development build draws the look's grid,
-    /// unless the frame is bare, as the viewpoint the frame sees from so far sees it.
-    pub(crate) fn draw_world(&mut self, alpha: f32) {
+    /// from where it was as the latest tick started to where the tick left it, at `time`, the
+    /// simulation's in seconds, and their colliders' outlines, over the rest, while they're shown,
+    /// or the look shows them; and finds where the world's camera sees from, and the world's
+    /// environment. Before the entities, a development build draws the look's grid, unless the
+    /// frame is bare, as the viewpoint the frame sees from so far sees it.
+    pub(crate) fn draw_world(&mut self, alpha: f32, time: f32) {
         self.past.resolve(&self.world);
         self.seen = camera::seen(&self.world, &self.past, alpha, &mut self.tie);
+        self.environment = environment::seen(&self.world, &mut self.environment_tie);
+        self.time = time;
         #[cfg(feature = "dev")]
         if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
             let viewpoint = self.look.viewpoint.or(self.viewpoint).or(self.seen);
@@ -3123,9 +3137,11 @@ impl Context {
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
-    /// [`view`](Self::view) gives from then on: its draws, those over the rest last, and its
-    /// canvas's, placed from their anchors in the view's pixels, for the last frame's, which it
-    /// forgets, keeping their memory for the next; the viewpoint a layer set this
+    /// [`view`](Self::view) gives from then on: the world's environment's tonemapper and exposure,
+    /// or none and the default's, as the world was last drawn, and the time it was drawn at; its
+    /// draws, those over the rest last, and its canvas's, placed from their anchors in the view's
+    /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
+    /// viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
     /// default, which hears the sounds playing from a place, as [`Place`] says; what a layer
     /// outlined this frame, which it forgets too; the pixels the view shows,
@@ -3140,6 +3156,11 @@ impl Context {
     /// reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
+        // A world without an environment isn't tonemapped, and its light is exposed as the
+        // default environment's is.
+        frame.tonemapper = (self.environment).map_or(Tonemapper::None, |seen| seen.tonemapper);
+        frame.exposure = self.environment.unwrap_or_default().light_scale();
+        frame.time = self.time;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         let (viewpoint, outline) = (self.viewpoint.take(), self.outline.take());

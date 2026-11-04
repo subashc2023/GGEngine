@@ -163,24 +163,29 @@ impl Shaders {
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
     ///   shader that returns a struct of two outputs, and nothing else: the color, a
-    ///   `float4 : SV_Target0`, in linear RGBA; and the draw's ID, a `uint2 : SV_Target1`, which
-    ///   the view keeps where the draw shows, for [picks](crate::Pick) to read back: its
-    ///   instance's, which the vertex shader reads from `ids[instance]` and hands on
-    ///   `nointerpolation`, or 0 where it draws no entity. A shader that blends should discard
+    ///   `float4 : SV_Target0`, in linear RGBA, which may be brighter than 1, as the view's colors
+    ///   are of high dynamic range; and the draw's ID, a `uint2 : SV_Target1`, which the view
+    ///   keeps where the draw shows, for [picks](crate::Pick) to read back: its instance's, which
+    ///   the vertex shader reads from `ids[instance]` and hands on `nointerpolation`, or 0 where
+    ///   it draws no entity. A shader that blends should discard
     ///   what's fully transparent, after it samples, as the engine's do: blending it changes no
     ///   pixel, but its ID would hide what's behind it from picks.
     /// - Each run of consecutive draws of one mesh with it is one instanced draw, whose instances
     ///   are the draws. Its push constants are `struct { float4x4 clip_from_world; V* vertices;
-    ///   float4x4* transforms; uint2* ids; P* params; float2 view; }`, the only 104 bytes set. The
-    ///   first is the camera's view and projection, from the world to Vulkan's clip space; the
-    ///   second, the address of the mesh's vertices; the third, of the instances' transforms, each
-    ///   from the mesh's own space to the world's, for `mul(clip_from_world,
+    ///   float4x4* transforms; uint2* ids; P* params; float2 view; Frame* frame; }`, the only 112
+    ///   bytes set. The first is the camera's view and projection, from the world to Vulkan's clip
+    ///   space; the second, the address of the mesh's vertices; the third, of the instances'
+    ///   transforms, each from the mesh's own space to the world's, for `mul(clip_from_world,
     ///   mul(transforms[instance], float4(position, 1.0)))`; the fourth, of the instances' IDs,
     ///   each the low and high halves of a 64-bit number; the fifth, of the instances' parameters,
     ///   one `P` each, back to back; the sixth, the view's size in pixels, across then down, for
-    ///   what's sized on screen, as the engine's lines are. A shader that takes no parameters leaves
-    ///   out the fifth, and so the sixth. A shader may end the struct after the last of them it
-    ///   reads, and one that reads none has none.
+    ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
+    ///   `struct Frame { float3 camera; float time; float exposure; }`, where the view sees from in
+    ///   the world, the time it shows and what lit shading multiplies light by, as
+    ///   [`RenderData`](crate::RenderData) gives them, or a struct of as many of its first fields:
+    ///   the engine adds fields at its end. A shader that takes no parameters leaves out the fifth,
+    ///   and so those after it. A shader may end the struct after the last of them it reads, and
+    ///   one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -905,7 +910,8 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "it reads brightness from its push constants, past the 104 bytes",
+                "its frame's data, Frame, take 36 bytes, past the 20 the engine's take",
+                "it reads brightness from its push constants, past the 112 bytes",
             ],
         );
         says(

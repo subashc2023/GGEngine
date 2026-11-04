@@ -50,7 +50,7 @@ struct Targets {
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
     // Each instance's texture and sampler, which can differ across a draw.
-    // Decoded from sRGB to linear as it's sampled, and the sRGB target encodes it again.
+    // Decoded from sRGB to linear as it's sampled, as the view's colors are.
     Params params = push.params[input.instance];
     Texture2D texture = textures[NonUniformResourceIndex(params.texture)];
     float4 color = texture.Sample(samplers[NonUniformResourceIndex(params.sampler)], input.uv);

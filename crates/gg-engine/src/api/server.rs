@@ -4081,7 +4081,7 @@ mod tests {
             cx.outline(hero, Vec4::ONE, 1.0);
         };
         let drawn = |cx: &mut Context| {
-            cx.draw_world(1.0);
+            cx.draw_world(1.0, 0.0);
             let mut frame = Extracted::default();
             cx.extract(&mut frame, view);
             frame

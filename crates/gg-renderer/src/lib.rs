@@ -1,10 +1,11 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' unlit materials among them, a game's
-//! UI over them in the view's own space, and the UI over the view; picks, which read back the ID of
+//! UI over them in the view's own space, and the UI over the view; the view drawn in colors of high
+//! dynamic range, which a tonemapper maps into the range it shows; picks, which read back the ID of
 //! the draw the view shows at a pixel; an outline round what the view shows of an ID; each frame's
 //! passes in a render graph, which places the barriers between them and makes the view's images;
-//! and lighting, PBR materials and post-processing to come.
+//! and lighting and PBR materials to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -20,6 +21,7 @@ mod shader;
 mod sprite;
 mod text;
 mod texture;
+mod tonemap;
 mod ui;
 mod view;
 mod viewpoint;
@@ -56,12 +58,14 @@ pub use text::Glyph;
 #[doc(hidden)]
 pub use texture::add_mipmaps;
 pub use texture::{Mipmaps, Texels, Texture, Textures};
+pub use tonemap::Tonemapper;
 pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
-use mesh::MeshPass;
+use mesh::{FrameData, MeshPass};
 use pick::Picks;
+use tonemap::TonemapPass;
 use ui::UiPass;
 use view::{OutlinePass, ViewPass};
 
@@ -180,9 +184,20 @@ impl Streaming {
 
 /// What a frame draws besides UI: plain data, which the engine extracts every frame.
 pub struct RenderData<'a> {
-    /// The color the game's view clears to before the meshes are drawn, and the frame around it,
-    /// in linear RGBA.
+    /// The color the game's view clears to before the meshes are drawn, which its tonemapper maps
+    /// with them, and the frame around it, as it is, in linear RGBA.
     pub clear_color: [f32; 4],
+    /// How the view's colors, drawn in high dynamic range, map into the range it shows, 0 to 1:
+    /// [`Tonemapper::None`] clamps them, so that what's in that range shows as it was drawn.
+    pub tonemapper: Tonemapper,
+    /// What lit shading multiplies light by, which shaders read from the frame's data, as
+    /// [`Shaders::add`] describes: light in physical units, as lux and candela, times this, is what
+    /// the tonemapper maps. What isn't lit, as sprites, text and unlit materials, draws its colors
+    /// as they are.
+    pub exposure: f32,
+    /// The time the view shows, in seconds, which shaders read from the frame's data, as
+    /// [`Shaders::add`] describes.
+    pub time: f32,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -275,6 +290,7 @@ pub struct Renderer {
     windows: Vec<Swapchain>,
     meshes: MeshPass,
     view: ViewPass,
+    tonemap: TonemapPass,
     outline: OutlinePass,
     /// The passes of the frame being rendered, declared afresh each frame in the memory of the
     /// last's.
@@ -312,10 +328,15 @@ enum Output {
 
 /// The game's view's images and passes in a frame's graph.
 struct ViewPasses {
+    /// What the view draws into, of high dynamic range.
+    hdr: ImageId,
+    /// What it shows, tonemapped.
     color: ImageId,
     ids: ImageId,
     /// What draws the view.
     pass: PassId,
+    /// What tonemaps it.
+    tonemap: PassId,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
     read_ids: Option<PassId>,
     /// What outlines what the view shows of an ID, if anything.
@@ -407,6 +428,7 @@ impl Renderer {
             windows: Vec::new(),
             meshes: MeshPass::new(device, settings.upload_budget)?,
             view: ViewPass::new(device, format)?,
+            tonemap: TonemapPass::new(device)?,
             outline: OutlinePass::new(device)?,
             graph: Graph::default(),
             window_passes: Vec::new(),
@@ -613,23 +635,30 @@ impl Renderer {
         // The frame's passes: the view, into images of its own, its size, so that it never shows
         // stretched, made again in the frame that changes its size, which a drag that resizes the
         // view does every frame, as growing them in steps and rendering into part of them wouldn't;
-        // what the view's IDs and image are read back by, and its outline; then the frame, which
-        // shows the view under the UI, and the other windows' UI, over black.
+        // what the view's IDs are read back by; its tonemapping, into the image it shows; its
+        // outline, and what reads it back; then the frame, which shows the view under the UI, and
+        // the other windows' UI, over black.
         let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
         let graph = &mut self.graph;
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
         let view = renders_view.then(|| {
-            let color = graph.color("view", size);
+            let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
             let pass = (graph.render(label!("view")))
-                .clear(color, data.clear_color)
+                .clear(hdr, data.clear_color)
                 .ids(ids)
                 .depth(depth)
                 .add();
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
+            // Cleared as a graph's own image is first written, though the pass writes every pixel.
+            let color = graph.color("view", size);
+            let tonemap = (graph.render(label!("tonemap")))
+                .clear(color, data.clear_color)
+                .sample(hdr)
+                .add();
             // Into the view's image, from the IDs the picks read, so that wherever the view shows,
             // and as it's read back, it shows outlined.
             let outline = data.outline.filter(Outline::shows).map(|outline| {
@@ -642,9 +671,11 @@ impl Renderer {
             });
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
+                hdr,
                 color,
                 ids,
                 pass,
+                tonemap,
                 read_ids,
                 outline,
                 read_view,
@@ -683,18 +714,28 @@ impl Renderer {
             (Some(view), _) => {
                 let mut pass =
                     (frame.render(view.pass)).expect("the graph's own images are always there");
-                let mut counts = self
-                    .meshes
-                    .draw(&mut pass, view_projection, size, data.draws)?;
+                let shared = FrameData {
+                    camera: data.viewpoint.position,
+                    time: data.time,
+                    exposure: data.exposure,
+                };
+                let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
+                let mut counts =
+                    (self.meshes).draw(&mut pass, view_projection, shared, size, data.draws)?;
                 pass.begin_label(c"canvas");
-                counts +=
-                    (self.meshes).draw(&mut pass, canvas_projection(size), size, data.canvas)?;
+                let canvas = canvas_projection(size);
+                counts += (self.meshes).draw(&mut pass, canvas, shared, size, data.canvas)?;
                 pass.end_label();
                 drop(pass);
                 if let Some(read) = view.read_ids {
                     let picked = self.picks.take(frame.number(), Some(size));
                     frame.read_ids(read, picked)?;
                 }
+                let mut pass =
+                    (frame.render(view.tonemap)).expect("the graph's own images are always there");
+                let hdr = pass.sampled(view.hdr);
+                self.tonemap.draw(&mut pass, hdr, data.tonemapper);
+                drop(pass);
                 if let Some((outlined, outline)) = view.outline {
                     let mut pass =
                         (frame.render(outlined)).expect("the graph's own images are always there");

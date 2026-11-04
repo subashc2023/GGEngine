@@ -24,7 +24,8 @@ use gg_renderer::{
     AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
     Line, Lod, Lods, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels,
     Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels,
-    Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
+    Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
+    Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -76,6 +77,8 @@ fn main() -> ExitCode {
         text_matches_its_reference,
         the_canvas_matches_its_reference,
         outlines_match_their_reference,
+        tonemappers_match_their_reference,
+        shaders_read_the_frames_data,
         lines_match_their_reference,
         grids_match_their_reference,
         views_match_their_reference,
@@ -259,8 +262,8 @@ struct Stores {
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
-    /// draws nothing on its canvas and picks and outlines nothing, with the uploads of what's been
-    /// added since the last frame's.
+    /// draws nothing on its canvas, picks and outlines nothing and isn't tonemapped, at time 0
+    /// with an exposure of 1, with the uploads of what's been added since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -277,6 +280,9 @@ impl Stores {
         uploads.take(meshes, shaders, textures);
         RenderData {
             clear_color: CLEAR,
+            tonemapper: Tonemapper::None,
+            exposure: 1.0,
+            time: 0.0,
             viewport,
             viewpoint,
             uploads,
@@ -3500,6 +3506,116 @@ fn a_view_in_the_ui_matches_its_reference() {
         } else {
             compare("view_in_ui", WIDTH, HEIGHT, &pixels);
         }
+    }
+    shut_down(renderer);
+}
+
+/// Squares of gray, above, and of orange, below, each brighter than the one to its left, from
+/// 0.05 to 16 times as bright as white, mapped by each tonemapper in turn, from the top, compared
+/// with their reference image: a row of the view for each. Gray at 0.5 and 2, past the 1 that an
+/// 8-bit image clamps to, comes out as each formula gives it, but AgX's, which the reference keeps.
+fn tonemappers_match_their_reference() {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 64;
+    const BRIGHTNESS: [f32; 8] = [0.05, 0.18, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // 2 units from the view's bottom to its top, and 8 across: a unit is 32 pixels both ways.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let mut draws = Draws::default();
+    for (column, brightness) in (0..).zip(BRIGHTNESS) {
+        let x = column as f32 - 3.5;
+        for (y, color) in [(0.5, Vec3::ONE), (-0.5, Vec3::new(1.0, 0.35, 0.05))] {
+            let at = Mat4::from_translation(Vec3::new(x, y, 0.0));
+            draws.push(square, flat, at, (color * brightness).extend(1.0));
+        }
+    }
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // Gray at 0.5 and at 2, the middle of the third and fifth squares above.
+    let grays = [[80, 16], [144, 16]];
+    // Stephen Hill's fit of ACES's transforms, whose matrices keep gray gray.
+    let aces = |v: f32| {
+        (v * (v + 0.024_578_6) - 0.000_090_537) / (v * (0.983_729 * v + 0.432_951) + 0.238_081)
+    };
+    let mut rows = Vec::new();
+    for tonemapper in [
+        Tonemapper::None,
+        Tonemapper::PbrNeutral,
+        Tonemapper::Aces,
+        Tonemapper::Agx,
+    ] {
+        let data = RenderData {
+            tonemapper,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        // PBR Neutral takes 0.04 off, and rolls 1.96 off to 1 - 0.24² / (1.96 + 0.24 - 0.76).
+        let expected = match tonemapper {
+            Tonemapper::None => Some([0.5, 1.0]),
+            Tonemapper::PbrNeutral => Some([0.46, 0.96]),
+            Tonemapper::Aces => Some([aces(0.5), aces(2.0)]),
+            Tonemapper::Agx => None,
+        };
+        for (pixel, gray) in grays.into_iter().zip(expected.into_iter().flatten()) {
+            let gray = encoded(gray);
+            let got = pixel_at(&frame, WIDTH, pixel);
+            assert!(
+                close(got, [gray, gray, gray, 255]),
+                "{tonemapper:?} maps gray to {got:?} at {pixel:?}, not {gray}"
+            );
+        }
+        rows.extend(frame);
+    }
+    shut_down(renderer);
+    compare("tonemappers", WIDTH, HEIGHT * 4, &rows);
+}
+
+/// A square that covers a view, with a shader that shows the frame's data as colors: where the
+/// camera is, left of it, and the time and the exposure, right of it.
+fn shaders_read_the_frames_data() {
+    const SIZE: u32 = 16;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let shader = (stores.shaders)
+        .add::<[f32; 3], Vec4>("frame data", &shader("frame_data.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    let huge = Mat4::from_scale(Vec3::splat(100.0));
+    draws.push(square, shader, huge, Vec4::ZERO);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.1, 0.2, 0.3),
+        ..Viewpoint::default()
+    };
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let data = RenderData {
+        time: 0.4,
+        exposure: 0.6,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let frame = frame_pixels(&mut renderer);
+    for (pixel, [r, g, b]) in [([4, 8], [0.1, 0.2, 0.3]), ([12, 8], [0.4, 0.6, 0.0])] {
+        let expected = [encoded(r), encoded(g), encoded(b), 255];
+        let got = pixel_at(&frame, SIZE, pixel);
+        assert!(
+            close(got, expected),
+            "{got:?} at {pixel:?}, not {expected:?}"
+        );
     }
     shut_down(renderer);
 }

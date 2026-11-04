@@ -2,7 +2,8 @@
 //! each at the start of a block of memory that images whose uses in a frame don't overlap share,
 //! and kept for the frames after, which declare them alike, while their uses still don't overlap
 //! within a block. Each block remembers what the last use of any image in it left, so that the
-//! first use of another, in the frame or the next, waits for it.
+//! first use of another, in the frame or the next, waits for it; and each image what its own last
+//! use left, which its next waits for too.
 
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use ash::vk;
 use gg_core::Result;
 use tracing::trace;
 
-use super::graph::{Graph, Hazard, ImageDecl, ImageId, Kind};
+use super::graph::{Access, Barrier, Graph, Hazard, ImageDecl, ImageId, Kind};
 use crate::Device;
 use crate::device::Retired;
 use crate::image::{image_info, image_view};
@@ -44,6 +45,11 @@ pub(crate) struct Made {
     block: usize,
     /// The layout the frame's commands so far leave it in: undefined as each frame begins.
     pub(crate) layout: vk::ImageLayout,
+    /// What its own last use left, which its next waits for as well as for its block's: a barrier
+    /// on another image that used the block since is that image's, and leaves this one's own
+    /// writes, as a depth image's at the fragment tests, unwaited for, as synchronization
+    /// validation finds.
+    hazard: Hazard,
 }
 
 /// Memory that images are made in.
@@ -188,6 +194,7 @@ impl Transients {
                 index,
                 block,
                 layout: vk::ImageLayout::UNDEFINED,
+                hazard: Hazard::default(),
             });
             self.of[i] = Some(self.made.len() - 1);
         }
@@ -218,15 +225,22 @@ impl Transients {
         &self.made[self.made_for(image)]
     }
 
-    /// The layout the frame leaves the graph's `image` in, and what the uses of its block so far
-    /// left.
+    /// The barrier that lets `access`, a use of the graph's `image`, follow what the uses so far of
+    /// the image and of its block left, if it needs one, which the use then leaves for both, with
+    /// the layout it leaves the image in.
     ///
     /// # Panics
     ///
     /// If `image` isn't one of the graph's own.
-    pub(crate) fn state(&mut self, image: ImageId) -> (&mut vk::ImageLayout, &mut Hazard) {
+    pub(crate) fn follow(&mut self, image: ImageId, access: Access) -> Option<Barrier> {
         let made = &mut self.made[self.of[image.0 as usize].expect("one of the graph's own")];
-        (&mut made.layout, &mut self.blocks[made.block].hazard)
+        let block = &mut self.blocks[made.block].hazard;
+        // Within a frame they're the same once the image's first use has left them: no other image
+        // uses the block between its uses.
+        let mut hazard = made.hazard.and(*block);
+        let barrier = hazard.follow(&mut made.layout, access);
+        (made.hazard, *block) = (hazard, hazard);
+        barrier
     }
 
     /// The bytes of the blocks of memory the images are in.

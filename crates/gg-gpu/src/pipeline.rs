@@ -27,6 +27,13 @@ pub struct Format {
 }
 
 impl Format {
+    /// The format of the colors of high dynamic range that a [`Graph`]'s own images of them hold
+    /// ([`Graph::hdr`]), 16-bit floats, without IDs or depth.
+    ///
+    /// [`Graph`]: crate::Graph
+    /// [`Graph::hdr`]: crate::Graph::hdr
+    pub const HDR: Self = Self::new(Kind::Hdr.format());
+
     /// A target's format, `color`, without IDs or depth.
     pub(crate) const fn new(color: vk::Format) -> Self {
         Self {

@@ -1,6 +1,6 @@
 // flat_color.slang reading the view's size as two integers, where the engine pushes two floats,
-// and a push constant past the 104 bytes the engine pushes, which the contract refuses: nothing sets
-// it.
+// the frame's data as more than the engine's, and a push constant past the 112 bytes the engine
+// pushes, which the contract refuses: nothing sets them.
 
 struct Vertex {
     float3 position;
@@ -10,6 +10,13 @@ struct Params {
     float4 color;
 };
 
+struct Frame {
+    float3 camera;
+    float time;
+    float exposure;
+    float4 tint;
+};
+
 struct Push {
     float4x4 clip_from_world;
     Vertex* vertices;
@@ -17,6 +24,7 @@ struct Push {
     uint2* ids;
     Params* params;
     uint2 view;
+    Frame* frame;
     float brightness;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -46,7 +54,7 @@ struct Targets {
 Targets fragment_main(Varyings input) {
     Targets out;
     float wide = float(push.view.x);
-    out.color = push.params[input.instance].color * push.brightness * wide;
+    out.color = push.params[input.instance].color * push.brightness * wide * push.frame->tint;
     out.id = input.id;
     return out;
 }

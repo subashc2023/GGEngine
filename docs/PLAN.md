@@ -103,19 +103,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A server that owns the world** (2026-11-04)
 - **Phase 11, networking beyond lockstep** (2026-11-04)
 - **The render graph** (2026-11-04)
+- **HDR and tonemapping** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it. Its milestones after the render graph, in
+**Phase 12, render graph and PBR**, as Next has it. Its milestones after HDR and tonemapping, in
 order:
 
-- **HDR and tonemapping.** The view renders into colors of 16-bit floats, which a pass tonemaps
-  into the 8-bit sRGB image the frame shows, captures read and outlines draw over. A world's
-  exposure and tonemapper are an `Environment` component's, on an entity, which the view renders
-  with whatever viewpoint it sees from, so that the editor's view and agents' looks show what the
-  game does: Khronos PBR Neutral by default; a world without one isn't tonemapped, so that 2D games
-  and today's references draw as they do. Shaders read the frame's data from a buffer: the camera's
-  position, the time and the exposure.
 - **Lights and PBR materials.** `Light` components, directional, point and spot, in glTF's units,
   lux and candela, which glTF's `KHR_lights_punctual` brings too, saved in scenes and set in the
   Inspector; models drawn by glTF's metallic-roughness, its base color, metallic-roughness, normal,
@@ -256,7 +250,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A model standing in for a following run with its nodes, so that the hash still matches: a replay or a joiner that can't load a model stands in with one of no nodes, and its hash parts from its run's where the nodes were | A replay or a joiner runs without a game's model files, as a bug report's might |
 | A sprite sheet's texture reloaded at another size, which keeps drawing as it did (`asset.sheet_resized`): its sprites hold its cells as fractions of its size, which a layer cut it by as it added it | A game's sheets grow as they're drawn, as frames added to an animation's |
 | Following a texture's, a model's or a font's file outside the asset root, or a sound's or music's anywhere, none of which has an asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
-| Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 12, with lighting |
+| Exposure that adapts to what the view sees, from its luminance, as eyes adapt: an environment's exposure is set by hand | A game's light changes more than one exposure suits, as from sunlight indoors |
+| Dithering the tonemapped view against banding in its 8 bits | Banding shows in dark gradients, as skies' |
+| Showing the frame on HDR displays, through HDR10 or scRGB swapchains: frames are 8-bit sRGB | A game targets HDR displays |
+| Post-processing past tonemapping, as bloom and color grading by a lookup table | A game's look needs it |
+| The view's size and the frame's data for a shader that takes no parameters, whose push constants end before them, as [`Shaders::add`](../crates/gg-renderer/src/shader/mod.rs) says: such a shader takes parameters it doesn't read | A game's shader needs them without parameters |
+| The frame's time as more than an `f32` of seconds, which steps by about 8 ms once a run has simulated a day | A game animates by the time through runs that long |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 12, with materials |
 | Games' textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB, as they read fonts' fields: `Context::add_texture` adds color alone | Phase 12, with PBR's maps |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |

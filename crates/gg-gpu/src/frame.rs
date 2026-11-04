@@ -821,8 +821,7 @@ impl<'a> Frame<'a> {
                     (self.frames.transients.image(image).raw, kind.range())
                 }
             };
-            let (layout, hazard) = self.frames.transients.state(image);
-            if let Some(barrier) = hazard.follow(layout, access) {
+            if let Some(barrier) = self.frames.transients.follow(image, access) {
                 barriers.push(barrier.on(raw, range));
             }
         }

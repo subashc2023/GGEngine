@@ -381,7 +381,7 @@ pub(crate) fn run_frame(
     stack.interpolate(cx, dt);
     let alpha = stepper.alpha();
     gg_core::plot!("alpha", f64::from(alpha));
-    cx.draw_world(alpha);
+    cx.draw_world(alpha, stepper.time(alpha));
     let updated = Instant::now();
     #[cfg(feature = "dev")]
     let pass = ui.map(|(egui, dock, input)| {
@@ -683,6 +683,15 @@ impl Stepper {
         }
         // Past a tick while waiting for a lockstep peer, which draws the last tick as it left it.
         (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64).min(1.0) as f32
+    }
+
+    /// The simulation's time, in seconds, as a frame draws the world `alpha` of the way on from
+    /// where the latest tick found it to where it left it: 0 before any tick. It goes by the
+    /// world's ticks, so it stops while the simulation does, and a replay's frames draw at the
+    /// times its run's did.
+    fn time(&self, alpha: f32) -> f32 {
+        let ticks = (self.ticks as f64 - 1.0 + f64::from(alpha)).max(0.0);
+        (ticks * Tick::DT.as_secs_f64()) as f32
     }
 
     /// Pauses the simulation, as the tool API's `pause` asks: frames run no ticks but those
@@ -1172,6 +1181,22 @@ pub(crate) mod tests {
         let mut tick = |tick: Tick| tick.number < until;
         assert_eq!(stepper.step(Duration::ZERO, &mut tick, fast), MOST_TICKS);
         assert_eq!((stepper.ticks, stepper.dropped), (2 + MOST_TICKS, 0));
+    }
+
+    /// A frame draws the world at the simulation's time, part of the way through the latest tick
+    /// as the world draws, from 0 before any; in lockstep, at the latest tick's end.
+    #[test]
+    fn frames_draw_the_world_at_the_simulations_time() {
+        let fast = || Duration::ZERO;
+        let mut stepper = Stepper::default();
+        assert_eq!(stepper.time(stepper.alpha()), 0.0);
+        assert_eq!(stepper.step(Tick::DT * 5 / 2, |_| true, fast), 2);
+        assert_eq!(stepper.time(stepper.alpha()), 1.5 / 64.0);
+        let mut lockstep = Stepper::lockstep();
+        for _ in 0..3 {
+            assert_eq!(lockstep.step(Duration::ZERO, |_| true, fast), 1);
+        }
+        assert_eq!(lockstep.time(lockstep.alpha()), 3.0 / 64.0);
     }
 
     /// Paused, frames run only the ticks asked for, at most 8 a frame, whatever their time, and

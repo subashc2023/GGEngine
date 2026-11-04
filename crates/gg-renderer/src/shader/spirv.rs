@@ -9,7 +9,7 @@ use std::mem::offset_of;
 use gg_gpu::SHADER_CAPABILITIES;
 
 use super::Types;
-use crate::mesh::Push;
+use crate::mesh::{FrameData, Push};
 
 /// SPIR-V's magic number, which opens a module.
 const MAGIC: u32 = 0x0723_0203;
@@ -96,7 +96,7 @@ const DRAW_INDEX: u32 = 4426;
 const DIM_2D: u32 = 1;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
-const PUSHED: [(u32, &str, Pushed); 6] = [
+const PUSHED: [(u32, &str, Pushed); 7] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -127,6 +127,11 @@ const PUSHED: [(u32, &str, Pushed); 6] = [
         "the view's size in pixels",
         Pushed::View,
     ),
+    (
+        offset_of!(Push, frame) as u32,
+        "the frame's data's address",
+        Pushed::Frame,
+    ),
 ];
 
 /// What a member of a [`Push`] is.
@@ -144,6 +149,8 @@ enum Pushed {
     Params,
     /// A float2.
     View,
+    /// The address of the frame's data, a [`FrameData`].
+    Frame,
 }
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
@@ -669,7 +676,34 @@ impl Module {
                         ));
                     }
                 }
+                Pushed::Frame => self.check_frame(ty, breaches),
             }
+        }
+    }
+
+    /// Checks that `pointer`, the type of the push constant with the address of the frame's data,
+    /// points at the start of what [`FrameData`] lays out: no more bytes, of 32-bit fields without
+    /// padding, so that a shader that reads the fields before those the engine adds to its end
+    /// keeps to the contract.
+    fn check_frame(&self, pointer: u32, breaches: &mut Vec<String>) {
+        let size = size_of::<FrameData>();
+        let Some(pointee) = self.pointee(pointer, PHYSICAL_STORAGE_BUFFER) else {
+            breaches.push(
+                "its push constants hold the frame's data's address as what isn't an address"
+                    .to_owned(),
+            );
+            return;
+        };
+        let name = self.name(pointee);
+        match self.packed_size(pointee) {
+            Ok(found) if found as usize <= size => {}
+            Ok(found) => breaches.push(format!(
+                "its frame's data, {name}, take {found} bytes, past the {size} the engine's take"
+            )),
+            Err(why) => breaches.push(format!(
+                "its frame's data, {name}, {why}, where the engine's have 32-bit fields alone, \
+                 without padding"
+            )),
         }
     }
 

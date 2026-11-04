@@ -67,7 +67,7 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
 Targets fragment_main(Varyings input) {
     Sprite sprite = push.params[input.instance];
     // The sprites of one draw sample textures of their own, so the index can differ across it.
-    // Decoded from sRGB to linear as it's sampled, and the sRGB target encodes it again.
+    // Decoded from sRGB to linear as it's sampled, as the view's colors are.
     Texture2D texture = textures[NonUniformResourceIndex(sprite.texture)];
     SamplerState sampler = samplers[NonUniformResourceIndex(sprite.sampler)];
     float2 uv = clamp(input.uv, input.inside.xy, input.inside.zw);

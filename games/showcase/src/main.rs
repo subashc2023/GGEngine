@@ -4,12 +4,13 @@
 //! flipped and blended (`sprites.ron`); circles, discs and rings, crisp and faded (`shapes.ron`);
 //! text in the engine's font and the project's, aligned, sized, colored and turned (`text.ron`); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
-//! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); and glTF
+//! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
-//! (`models.ron`). Its Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`, turn and bob what
-//! they're on at each tick, and 2D physics steps, so that each scene moves as it plays, in the
-//! editor from its Play, and in the reference player, which runs the game's package without its
-//! code.
+//! (`models.ron`); and colors from a quarter as bright as white to 16 times, which the world's
+//! environment tonemaps (`hdr.ron`). Its Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`,
+//! turn and bob what they're on at each tick, and 2D physics steps, so that each scene moves as it
+//! plays, in the editor from its Play, and in the reference player, which runs the game's package
+//! without its code.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.

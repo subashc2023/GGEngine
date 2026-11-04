@@ -5,7 +5,7 @@ struct Vertex {
 };
 
 struct Params {
-    // Linear, and the sRGB target encodes it.
+    // Linear, as the view's colors are.
     float4 color;
 };
 

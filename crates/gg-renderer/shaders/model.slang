@@ -56,7 +56,7 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
 Targets fragment_main(Varyings input) {
     Material material = push.params[input.instance];
     // The instances of one draw can carry different textures and samplers. Decoded from sRGB to
-    // linear as it's sampled, and the sRGB target encodes it again.
+    // linear as it's sampled, as the view's colors are.
     Texture2D texture = textures[NonUniformResourceIndex(material.texture)];
     SamplerState sampler = samplers[NonUniformResourceIndex(material.sampler)];
     // Sampled before any discard, which would leave the derivatives that pick its level undefined.

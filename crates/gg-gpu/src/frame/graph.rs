@@ -56,6 +56,12 @@ pub(crate) enum Kind {
     /// Colors, in [`ColorImage::FORMAT`], which passes render into and blend over, later ones
     /// sample and frames read back.
     Color,
+    /// Colors of high dynamic range, as 16-bit floats in linear RGBA, [`Format::HDR`], which passes
+    /// render into and blend over, past 1 too, and later ones sample. Vulkan requires every device
+    /// to render into the format, blend in it and sample it.
+    ///
+    /// [`Format::HDR`]: crate::Format::HDR
+    Hdr,
     /// IDs beside a pass's colors, as two 32-bit unsigned integers, the low and high halves of a
     /// 64-bit one, which passes render, frames read pixels of back and later passes sample, as
     /// unsigned integers. Vulkan requires every device to render into the format, copy from it and
@@ -70,6 +76,7 @@ impl Kind {
     pub(crate) const fn format(self) -> vk::Format {
         match self {
             Self::Color => ColorImage::FORMAT.color,
+            Self::Hdr => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids => vk::Format::R32G32_UINT,
             Self::Depth => vk::Format::D32_SFLOAT,
         }
@@ -83,13 +90,15 @@ impl Kind {
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_SRC
             }
+            // Never read back: what a frame reads back is what it shows.
+            Self::Hdr => vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             Self::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
         }
     }
 
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
-            Self::Color | Self::Ids => COLOR_RANGE,
+            Self::Color | Self::Hdr | Self::Ids => COLOR_RANGE,
             Self::Depth => DEPTH_RANGE,
         }
     }
@@ -218,6 +227,18 @@ impl Graph {
     /// If a side is 0.
     pub fn color(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
         self.transient(name, Kind::Color, size)
+    }
+
+    /// An image of the graph's own of colors of high dynamic range, `size` pixels, named `name`:
+    /// [`Format::HDR`](crate::Format::HDR)'s 16-bit floats, which keep what's brighter than 1 for
+    /// a later pass to sample and map into a target's range, as tonemapping does. Frames don't
+    /// read it back.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn hdr(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Hdr, size)
     }
 
     /// An image of the graph's own of IDs, `size` pixels, named `name`, which a pass renders
@@ -366,15 +387,16 @@ pub struct RenderPass<'g> {
 }
 
 impl RenderPass<'_> {
-    /// Draws into `image`, a target or a color image of the graph's own, cleared first to
-    /// `color`, in linear RGBA.
+    /// Draws into `image`, a target or a color image of the graph's own, of either range, cleared
+    /// first to `color`, in linear RGBA.
     pub fn clear(self, image: ImageId, color: [f32; 4]) -> Self {
         self.with(image, Use::Color(Some(color)))
     }
 
-    /// Draws into `image`, a target or a color image of the graph's own, over what its last use
-    /// left there, which its draws blend over: a target that no pass has drawn into since it was
-    /// made, or since its swapchain's image was acquired, holds nothing to draw over.
+    /// Draws into `image`, a target or a color image of the graph's own, of either range, over
+    /// what its last use left there, which its draws blend over: a target that no pass has drawn
+    /// into since it was made, or since its swapchain's image was acquired, holds nothing to draw
+    /// over.
     pub fn keep(self, image: ImageId) -> Self {
         self.with(image, Use::Color(None))
     }
@@ -434,7 +456,7 @@ impl RenderPass<'_> {
             );
             let kind = graph.kind(image);
             let fits = match use_ {
-                Use::Color(_) => matches!(kind, None | Some(Kind::Color)),
+                Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
                 Use::Ids => kind == Some(Kind::Ids),
                 Use::Depth => kind == Some(Kind::Depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
@@ -569,6 +591,16 @@ impl Hazard {
             self.reads |= access.stages;
         }
         Some(barrier)
+    }
+
+    /// What this and `other` left together, for a use that follows both: their writes and their
+    /// reads.
+    pub(crate) fn and(self, other: Self) -> Self {
+        Self {
+            write_stages: self.write_stages | other.write_stages,
+            write_access: self.write_access | other.write_access,
+            reads: self.reads | other.reads,
+        }
     }
 
     /// What a barrier after every use so far waits for, as one before a present does: the last
@@ -765,5 +797,34 @@ mod tests {
             graph.render(label()).clear(target, [0.0; 4]).add();
             graph.render(label()).keep(target).add();
         }));
+    }
+
+    /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,
+    /// and are sampled, but not read back.
+    #[test]
+    fn colors_of_high_dynamic_range_draw_and_sample_but_arent_read_back() {
+        let mut graph = Graph::default();
+        let (hdr, ids, depth) = (
+            graph.hdr("hdr", [4, 4]),
+            graph.ids("ids", [4, 4]),
+            graph.depth("depth", [4, 4]),
+        );
+        (graph.render(label()).clear(hdr, [2.0, 0.5, 0.0, 1.0]))
+            .ids(ids)
+            .depth(depth)
+            .add();
+        graph.render(label()).keep(hdr).add();
+        let view = graph.color("view", [4, 4]);
+        let mapped = graph
+            .render(label())
+            .clear(view, [0.0; 4])
+            .sample(hdr)
+            .add();
+        assert_eq!(graph.uses(mapped)[1], (hdr, Use::Sampled));
+        assert_eq!(graph.lifetime(hdr), Some((0, 2)));
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph.read_image(label(), hdr)
+        }));
+        assert!(read.is_err(), "read back");
     }
 }

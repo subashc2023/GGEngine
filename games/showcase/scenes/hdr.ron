@@ -1,0 +1,409 @@
+(
+    entities: {
+        "180776407825f8b1": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+            ),
+            Name: ("Environment"),
+        ),
+        "2506f8a962c9a7f6": (
+            Name: ("Hint"),
+            Text: (
+                text: "HDR: from a quarter of white to 16 times as bright, tonemapped by the Environment",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2f84b7e6ee78405d": (
+            Name: ("Gray 0.25×"),
+            Sprite: (
+                color: (0.25, 0.25, 0.25, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-6.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "373333727042570a": (
+            Name: ("Orange 4×"),
+            Sprite: (
+                color: (4.0, 1.4, 0.2, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "470d55cb39348497": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "58a53125d9740a2a": (
+            Name: ("Gray 1×"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "5b3106196d703579": (
+            Name: ("Orange 1×"),
+            Sprite: (
+                color: (1.0, 0.35, 0.05, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "617e1758a3970198": (
+            Name: ("Orange 0.5×"),
+            Sprite: (
+                color: (0.5, 0.175, 0.025, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "68576025f16176a8": (
+            Name: ("Label: 1×"),
+            Text: (
+                text: "1×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-2.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "762f2a30810a5c69": (
+            Name: ("Gray 16×"),
+            Sprite: (
+                color: (16.0, 16.0, 16.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (6.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "8063a90aca89a7b6": (
+            Name: ("Gray 0.5×"),
+            Sprite: (
+                color: (0.5, 0.5, 0.5, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "8c5f20a8e5aa5055": (
+            Name: ("Orange 2×"),
+            Sprite: (
+                color: (2.0, 0.7, 0.1, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "99c9e601ebe2eb6f": (
+            Name: ("Label: 0.5×"),
+            Text: (
+                text: "0.5×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-4.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ab12eb12ef550a37": (
+            Name: ("Label: 16×"),
+            Text: (
+                text: "16×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (6.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bd4869888709850d": (
+            Name: ("Label: 8×"),
+            Text: (
+                text: "8×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (4.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c3a750317e304470": (
+            Name: ("Orange 8×"),
+            Sprite: (
+                color: (8.0, 2.8, 0.4, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "c934b5ffae2a11d3": (
+            Name: ("Gray 2×"),
+            Sprite: (
+                color: (2.0, 2.0, 2.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "d2c112b4211826a5": (
+            Name: ("Gray 4×"),
+            Sprite: (
+                color: (4.0, 4.0, 4.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "dd5fc77628774dc7": (
+            Name: ("Orange 16×"),
+            Sprite: (
+                color: (16.0, 5.6, 0.8, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (6.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "de078abf7a44fefe": (
+            Name: ("Gray 8×"),
+            Sprite: (
+                color: (8.0, 8.0, 8.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.0, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "ec32e480b1e8d855": (
+            Name: ("Label: 2×"),
+            Text: (
+                text: "2×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ecce012b8670339e": (
+            Name: ("Label: 4×"),
+            Text: (
+                text: "4×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (2.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "eefcde2b3b512e98": (
+            Name: ("Label: 0.25×"),
+            Text: (
+                text: "0.25×",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-6.0, -2.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f165cd66aa413d44": (
+            Name: ("Orange 0.25×"),
+            Sprite: (
+                color: (0.25, 0.0875, 0.0125, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-6.0, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+    },
+)

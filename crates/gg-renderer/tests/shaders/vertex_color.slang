@@ -1,5 +1,5 @@
 // Meshes in the colors of their vertices, whose positions are in the mesh's own space. The colors
-// are linear, and the sRGB target encodes them.
+// are linear, as the view's are.
 
 struct Vertex {
     float3 position;

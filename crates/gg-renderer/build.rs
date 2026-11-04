@@ -7,7 +7,7 @@ use std::env;
 use std::path::{self, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 11] = [
+const SHADERS: [&str; 12] = [
     "circle",
     "egui",
     "grid",
@@ -18,6 +18,7 @@ const SHADERS: [&str; 11] = [
     "outline",
     "sprite",
     "text",
+    "tonemap",
     "view",
 ];
 

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use gg_core::{Error, Result};
 use gg_renderer::{
     DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer, Streaming,
-    Uploads, Viewpoint, Viewport,
+    Tonemapper, Uploads, Viewpoint, Viewport,
 };
 
 #[cfg(feature = "dev")]
@@ -42,6 +42,11 @@ impl Drawn {
 /// `dev`, which has none.
 pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
+    pub(crate) tonemapper: Tonemapper,
+    /// What lit shading multiplies light by, as [`RenderData::exposure`] has it.
+    pub(crate) exposure: f32,
+    /// The simulation's time in seconds as the world was drawn.
+    pub(crate) time: f32,
     pub(crate) viewport: Viewport,
     pub(crate) viewpoint: Viewpoint,
     pub(crate) draws: Draws,
@@ -120,6 +125,9 @@ impl Default for Extracted {
     fn default() -> Self {
         Self {
             clear_color: [0.0; 4],
+            tonemapper: Tonemapper::None,
+            exposure: 1.0,
+            time: 0.0,
             viewport: Viewport {
                 origin: [0, 0],
                 size: [0, 0],
@@ -214,6 +222,9 @@ impl Render for Renderer {
         });
         let data = RenderData {
             clear_color: frame.clear_color,
+            tonemapper: frame.tonemapper,
+            exposure: frame.exposure,
+            time: frame.time,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,

@@ -71,6 +71,7 @@ fn main() -> ExitCode {
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
         the_graphs_own_images_share_memory_where_their_uses_dont_overlap,
+        depth_and_colors_take_turns_in_memory,
         frames_time_their_passes_on_the_gpu,
         streamed_textures_can_be_written_over_on_every_path,
         bc7_textures_stream_and_decode_on_every_path,
@@ -945,6 +946,63 @@ fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
         0 < apart && apart < together,
         "images used apart hold {apart} bytes, and used together {together}"
     );
+
+    drop((frames, image, pipeline, device, instance));
+    check(&validation);
+}
+
+/// Depth that a pass tests and writes, then colors that a later pass clears blue and the last
+/// samples into the target, in the memory the depth took, over more frames than are in flight.
+/// Synchronization validation sees each first use wait for what the other image left in the memory
+/// and for what its own uses left a frame before, of other stages and accesses than the other's.
+fn depth_and_colors_take_turns_in_memory() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = sampling_spirv();
+    let pipeline = sampling_pipeline(&device, &spirv);
+    let mut image = ColorImage::new(&device, 2, 1, "turns test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let target = graph.target(0);
+    let depth = graph.depth("depth", [2, 1]);
+    let colors = graph.color("colors", [2, 1]);
+    let tested = (graph.render(label!("depth")))
+        .clear(target, [0.0; 4])
+        .depth(depth)
+        .add();
+    let blue = (graph.render(label!("blue")))
+        .clear(colors, [0.0, 0.0, 1.0, 1.0])
+        .add();
+    let sample = graph
+        .render(label!("sample"))
+        .keep(target)
+        .sample(colors)
+        .add();
+    for _ in 0..4 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        drop(frame.render(tested));
+        drop(frame.render(blue));
+        let mut pass = (frame.render(sample)).expect("an offscreen image is always there");
+        pass.set_pipeline(&pipeline);
+        // As `sample.slang` takes them: the image, a sampler, its level and a point of it.
+        let words = [
+            pass.sampled(colors),
+            Sampler::NearestClamp.index(),
+            0.0f32.to_bits(),
+            0.5f32.to_bits(),
+            0.5f32.to_bits(),
+        ];
+        pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+        pass.draw(3, 1);
+        drop(pass);
+        frame.submit().expect("the frame's submission");
+    }
+    let pixels = image.read_back().expect("the image's pixels");
+    assert_eq!(pixels, [0, 0, 255, 255].repeat(2), "the blue image sampled");
 
     drop((frames, image, pipeline, device, instance));
     check(&validation);

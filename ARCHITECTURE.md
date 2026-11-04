@@ -1203,26 +1203,46 @@ hands `gg-renderer`: the color the view clears to, the game's view, the viewpoin
 from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
 parameters that shader takes, and a transform that places it in the world. The view is the main
 window's central area, which the dock leaves the game, or a dockspace's view panel. It renders into
-an image of its own, that area's size in pixels, made again as that size changes, which the frame
-then shows there, a pixel to a pixel, so that HDR and tonemapping, post-processing and the tool
-API's captures read the view whole: under the whole UI, or, from a panel, where the UI paints a
-callback that stands for it, in the UI's order and clipped as the UI clips it, so that the panels
-floating over it and the menus show over it; and games' pipelines are made for that image's format,
-8-bit sRGB, whatever the window presents, for the image of IDs beside it, below, and for the depth
-image beside them, of 32-bit floats, which every draw into the view tests. Depth runs reversed, from
-1 at the near plane to 0 far away, which keeps a float's precision where it's needed and lets
-perspective see infinitely far; each frame clears it to 0, and a draw shows where it's as near as
-what's drawn there or nearer, so that at one depth the later goes over, as 2D draws at one z stack.
+images of its own, that area's size in pixels, made again as that size changes, which the frame
+then shows there, a pixel to a pixel, so that tonemapping, post-processing and the tool API's
+captures read the view whole: under the whole UI, or, from a panel, where the UI paints a callback
+that stands for it, in the UI's order and clipped as the UI clips it, so that the panels floating
+over it and the menus show over it. The view draws in colors of high dynamic range, 16-bit floats
+in linear RGBA, which games' pipelines are made for, with the image of IDs beside them, below, and
+the depth image, of 32-bit floats, which every draw into the view tests; a tonemap pass then maps
+the colors into the view's 8-bit sRGB image, which the frame shows, captures read and the outline
+draws over, whatever the window presents. Depth runs reversed, from 1 at the near plane to 0 far
+away, which keeps a float's precision where it's needed and lets perspective see infinitely far;
+each frame clears it to 0, and a draw shows where it's as near as what's drawn there or nearer, so
+that at one depth the later goes over, as 2D draws at one z stack.
+
+A world's `Environment`, a component on an entity of its own, says how the view shows the world's
+light, whatever viewpoint it sees from, the editor's and agents' looks too, so that they show what
+the game does; of several, the lowest ID's, with a warning. Its tonemapper maps the view's colors
+into the range it shows: Khronos PBR Neutral by default, which shows base colors up to about 0.76 as
+they are, less the 0.04 a dielectric reflects whatever its color, and rolls brighter light off
+toward white; ACES, as Stephen Hill fitted it; AgX; or none, each channel clamped, which a world
+without an environment gets, so that a 2D game's sprites show as they're colored. The clear color
+is tonemapped with what's drawn, as a sky would be. Its exposure, in EV100, scales light: lit
+shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades, which keeps a
+sunny day's light within 16-bit floats, and a world without an environment is exposed as the
+default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and unlit materials,
+draws its colors as they are. Every draw's shader can read the frame's data through an address, the
+last of its push constants: where the view sees from, the time, the simulation's as the world
+draws, which stops with it and draws alike in a replay, and the exposure. Fields are added at its
+end, so that games' shaders that read the fields before them keep to the contract.
 
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, sampling them or
 copying from them, from which the frame places every barrier and layout transition as each pass
 begins, each use waiting for the uses before it that it must and no more, so that no pass records
-one itself. The passes run in that order, on the graphics queue. The view's images, its colors,
-IDs and depth, are the graph's own: each lasts for a frame, undefined until a pass there writes it,
-and is made from what the passes say of it, in a block of memory that the graph's own images whose
-uses in a frame don't overlap share, kept for the frames after that declare it alike, by its name,
-kind and size; a pass that's an image's last use doesn't store it. Each pass is a debug label, and
+one itself. The passes run in that order, on the graphics queue. The view's images, its colors of
+high dynamic range, IDs, depth and tonemapped colors, are the graph's own: each lasts for a frame,
+undefined until a pass there writes it, and is made from what the passes say of it, in a block of
+memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
+after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
+store it, and an image's next use waits for what its own last use left as well as for what the
+block's did, as the view's tonemapped colors follow its depth there. Each pass is a debug label, and
 the draws inside it have labels of their own, each run of draws its shader's name, and the
 canvas's, and the frame pass's view and UI, apart. Each pass writes a timestamp as it begins and as
 it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy's GPU

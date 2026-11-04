@@ -13,7 +13,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
+    Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
     Texture as GpuTexture, TextureFormat,
 };
 use tracing::warn;
@@ -499,8 +499,8 @@ impl Default for Meshes {
     }
 }
 
-/// Draws meshes with their shaders into the game's view, an image whose format is
-/// [`ColorImage::FORMAT`], writing their IDs beside it and testing its depth image, streams the
+/// Draws meshes with their shaders into the game's view, colors of high dynamic range of
+/// [`Format::HDR`], writing their IDs beside them and testing its depth image, streams the
 /// meshes' vertices and indices and the textures the shaders sample to the GPU within a budget of
 /// bytes each frame, and keeps them there.
 pub(crate) struct MeshPass {
@@ -846,7 +846,7 @@ impl MeshPass {
                     spirv: &added.spirv,
                     vertex: c"vertex_main",
                     fragment: c"fragment_main",
-                    format: ColorImage::FORMAT.with_ids().with_depth(),
+                    format: Format::HDR.with_ids().with_depth(),
                     blend: added.blend,
                     depth_write: writes_depth,
                 },
@@ -1204,20 +1204,22 @@ impl MeshPass {
     /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
     /// `view_projection` takes the world to clip space, each run of them as one instanced draw, or,
     /// of a mesh with levels of detail, as one for each level its instances draw at, and copies
-    /// each draw's transforms, IDs and parameters into the frame for its shader. A run of a mesh
-    /// that isn't drawable yet, or was removed, or with a shader that was, draws nothing and isn't
-    /// counted. Returns what it drew.
+    /// each draw's transforms, IDs and parameters into the frame for its shader, which reads the
+    /// frame's data, a [`FrameData`], at the address `frame`. A run of a mesh that isn't drawable
+    /// yet, or was removed, or with a shader that was, draws nothing and isn't counted. Returns
+    /// what it drew.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one of the pass's `Meshes`, a shader isn't one of its `Shaders`, a
     /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
-    /// instances than Vulkan's 32-bit count, or the pass isn't into an image of
-    /// [`ColorImage::FORMAT`] with IDs and a depth image.
+    /// instances than Vulkan's 32-bit count, or the pass isn't into an image of [`Format::HDR`]
+    /// with IDs and a depth image.
     pub(crate) fn draw(
         &mut self,
         pass: &mut Pass<'_, '_>,
         view_projection: Mat4,
+        frame: u64,
         view: [u32; 2],
         draws: &Draws,
     ) -> Result<DrawCounts> {
@@ -1270,6 +1272,7 @@ impl MeshPass {
                     ids: 0,
                     params: 0,
                     view: view.map(|side| side as f32),
+                    frame,
                 },
                 opaque: shader.writes_depth,
             };
@@ -1513,8 +1516,9 @@ impl Batch<'_> {
 /// shaders declare as `Push` in `shaders/mesh.slang`. The matrix goes first, so that every offset
 /// is the same under every layout Slang gives push constants; the IDs before the parameters, so
 /// that a shader that takes none still ends its struct after the last member it reads; and the
-/// view's size last, so that it moves none of the offsets games' shaders declare before it,
-/// though a shader that takes no parameters can't read it.
+/// view's size and the frame's data after them, each added at the end, so that it moved none of
+/// the offsets games' shaders declare before it, though a shader that takes no parameters can't
+/// read them.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {
@@ -1530,6 +1534,24 @@ pub(crate) struct Push {
     pub(crate) params: u64,
     /// The size of the view the pass draws into, in pixels, across then down.
     pub(crate) view: [f32; 2],
+    /// The address of the frame's data, a [`FrameData`].
+    pub(crate) frame: u64,
+}
+
+/// What every draw's shader may read of the frame, through [`Push::frame`]: `Frame` in
+/// `shaders/mesh.slang`, field for field. Fields are added at its end, so that a shader that reads
+/// those before them keeps to the contract.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+pub(crate) struct FrameData {
+    /// Where the view sees from, in the world.
+    pub(crate) camera: Vec3,
+    /// The time the view shows, in seconds, as [`RenderData::time`](crate::RenderData::time)
+    /// gives it.
+    pub(crate) time: f32,
+    /// What lit shading multiplies light by, as
+    /// [`RenderData::exposure`](crate::RenderData::exposure) gives it.
+    pub(crate) exposure: f32,
 }
 
 #[cfg(test)]

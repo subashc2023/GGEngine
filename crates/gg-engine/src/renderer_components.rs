@@ -1,11 +1,12 @@
-//! The engine's components that `gg-renderer` defines, and the sampler a sprite holds, which
-//! `gg-gpu` does, described to reflection here, since neither crate can derive it.
+//! The engine's components that `gg-renderer` defines, the tonemapper an environment holds, which
+//! it does too, and the sampler a sprite holds, which `gg-gpu` does, described to reflection here,
+//! since neither crate can derive it.
 
 use std::fmt::Write as _;
 
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
-use gg_renderer::{Circle, MeshDraw, Sampler, Sprite, Texture};
+use gg_renderer::{Circle, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
 
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
@@ -352,6 +353,75 @@ impl Reflect for Sampler {
         };
         reflect::pick(given, [])?;
         Ok(sampler)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, _: u32) -> Option<&dyn Reflect> {
+        None
+    }
+
+    fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
+        None
+    }
+
+    /// By its index, which is its variant's in its description.
+    fn digest(&self, to: &mut Digest<'_>) {
+        self.index().digest(to);
+    }
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// A tonemapper's variant name, by a match that names each, so that one `gg-renderer` adds fails to
+/// compile here until it's named.
+fn tonemapper_name(tonemapper: Tonemapper) -> &'static str {
+    match tonemapper {
+        Tonemapper::PbrNeutral => "PbrNeutral",
+        Tonemapper::Aces => "Aces",
+        Tonemapper::Agx => "Agx",
+        Tonemapper::None => "None",
+    }
+}
+
+/// An enum of unit variants, one for each tonemapper.
+impl Reflect for Tonemapper {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let variants = Tonemapper::ALL.map(|tonemapper| reflect::Variant {
+            name: tonemapper_name(tonemapper).into(),
+            fields: Vec::new(),
+            tuple: false,
+        });
+        let doc = "How the view's colors, drawn in high dynamic range, map into the range it shows: \
+                   Khronos PBR Neutral, which keeps materials' colors; ACES, the film look; AgX, \
+                   Blender's; or none, each channel clamped.";
+        types.add::<Self>("Tonemapper".into(), doc.into(), |_| {
+            Ok(Shape::Enum(variants.into()))
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Variant(tonemapper_name(*self).into(), Vec::new())
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        let (name, given) = reflect::variant(value)?;
+        let Some(tonemapper) = (Tonemapper::ALL.into_iter()).find(|&t| tonemapper_name(t) == name)
+        else {
+            return Err(reflect::no_variant(
+                name,
+                &Tonemapper::ALL.map(tonemapper_name),
+            ));
+        };
+        reflect::pick(given, [])?;
+        Ok(tonemapper)
     }
 
     fn with_value(&self, value: &Value) -> Result<Self> {

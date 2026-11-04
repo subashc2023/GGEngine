@@ -56,6 +56,7 @@ mod dock;
 mod draw;
 mod ecs;
 mod edits;
+mod environment;
 mod event;
 mod font;
 mod gltf;
@@ -165,6 +166,7 @@ pub use ecs::{
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version. A build without `dev`, which has no UI, keeps it for its types.
 pub use egui;
+pub use environment::Environment;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 pub use font::{Align, Font, Text, TextStyle};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
@@ -182,11 +184,11 @@ pub use gg_renderer::MeshDraw;
 /// sheets whose cells they show; circles; meshes; shaders for their vertex types, each added with
 /// how it blends; the textures those shaders and sprites sample, and the samplers they sample them
 /// with; the viewpoint the game's view sees them from, and its projection, which a [`Camera`] has
-/// too; where that view is in the window; and what's still streaming to the GPU, as
-/// [`Context::streaming`] tells.
+/// too; the tonemapper an [`Environment`] maps the view's colors by; where that view is in the
+/// window; and what's still streaming to the GPU, as [`Context::streaming`] tells.
 pub use gg_renderer::{
     Blend, Circle, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Streaming, Texture,
-    Viewpoint, Viewport,
+    Tonemapper, Viewpoint, Viewport,
 };
 pub use grant::{Capability, Grant};
 pub use input::Input;
