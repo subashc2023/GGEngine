@@ -2624,6 +2624,12 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         let frame = frame_pixels(renderer);
         pixels.map(|at| pixel_at(&frame, SIDE, at))
     };
+    // The gray, linear 0.5, encodes to 187.5, which drivers round either way.
+    let shows = |renderer: &mut Renderer, colors: [[u8; 4]; 4], what: &str| {
+        let shown = shown(renderer);
+        let matched = (shown.iter().zip(colors)).all(|(&pixel, color)| close(pixel, color));
+        assert!(matched, "{what}: {shown:?}, not {colors:?}");
+    };
     let (white, gray) = ([255; 4], [188, 188, 188, 255]);
     let draws = scene(None);
     settle(
@@ -2633,7 +2639,7 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         viewpoint,
         &draws,
     );
-    assert_eq!(shown(&mut renderer), [red, gray, gray, CLEARED]);
+    shows(&mut renderer, [red, gray, gray, CLEARED], "drawn");
     assert_eq!(renderer.drawn().instances, 3);
 
     stores.textures.remove(texture);
@@ -2642,11 +2648,8 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         &mut renderer,
         stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
     );
-    assert_eq!(
-        shown(&mut renderer),
-        [white, gray, gray, CLEARED],
-        "the texture removed"
-    );
+    let removed = [white, gray, gray, CLEARED];
+    shows(&mut renderer, removed, "the texture removed");
     assert_eq!(renderer.drawn().instances, 3);
     stores.meshes.remove(plain_a);
     stores.meshes.remove(plain_a);
@@ -2654,11 +2657,8 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         &mut renderer,
         stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
     );
-    assert_eq!(
-        shown(&mut renderer),
-        [white, CLEARED, gray, CLEARED],
-        "the mesh removed"
-    );
+    let removed = [white, CLEARED, gray, CLEARED];
+    shows(&mut renderer, removed, "the mesh removed");
     assert_eq!(renderer.drawn().instances, 2);
     stores.shaders.remove(flat_b);
     stores.shaders.remove(flat_b);
@@ -2666,11 +2666,8 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         &mut renderer,
         stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
     );
-    assert_eq!(
-        shown(&mut renderer),
-        [white, CLEARED, CLEARED, CLEARED],
-        "the shader removed"
-    );
+    let removed = [white, CLEARED, CLEARED, CLEARED];
+    shows(&mut renderer, removed, "the shader removed");
     assert_eq!(renderer.drawn().instances, 1);
     // An image and vertices for what's removed change nothing.
     (stores.textures)
@@ -2687,11 +2684,7 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         viewpoint,
         &draws,
     );
-    assert_eq!(
-        shown(&mut renderer),
-        [white, CLEARED, CLEARED, CLEARED],
-        "dropped"
-    );
+    shows(&mut renderer, removed, "dropped");
 
     // A texture of 256 KiB, removed after the first frame streams a part of it: its stand-in
     // shows at once, and nothing of it streams on.

@@ -644,7 +644,7 @@ mod tests {
         // Every regular file, through the folders the scan goes through, in the order of its path.
         let (every, unread) = files(&root);
         let paths: Vec<&str> = every.iter().map(|found| &*found.path).collect();
-        let expected = [
+        let walked = [
             "assets/Case.png",
             "assets/bad.png",
             "assets/bad.png.meta",
@@ -661,7 +661,7 @@ mod tests {
             "sub/tests/y.png",
             "ui/title.otf",
         ];
-        assert_eq!(paths, expected);
+        assert_eq!(paths, walked);
         assert_eq!(every[7].file, file);
         assert_eq!(unread, []);
         let Some(Err(misnamed)) = &found.assets[0].meta else {

@@ -19,7 +19,7 @@ use super::hooks::{self, Frame, Seen};
 use crate::{Entity, World};
 
 /// How long a stop waits at a time for what to do: between waits, on Windows, it answers what other
-/// threads send the game's windows and dispatches at most [`PUMPED`] messages posted to them, as
+/// threads send the game's windows and dispatches at most `PUMPED` messages posted to them, as
 /// `windows_wait::pump` says, so that Windows takes the window for one that waits rather than one
 /// that hangs.
 const LOOK: Duration = Duration::from_millis(15);
