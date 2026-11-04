@@ -36,7 +36,7 @@ use crate::{Entity, EntityId, Owner, Sound, Tick, Transform, World, WorldHash, i
 /// How many ticks before the server runs their tick the client's inputs aim to come: 31.25 ms, so
 /// that one lost, which the next packet carries again, or held by a link's jitter, still comes in
 /// time.
-const LEAD: u64 = 2;
+pub(super) const LEAD: u64 = 2;
 
 /// How much faster or slower than real time the client's ticks run for each tick its inputs come
 /// later or earlier than [`LEAD`], on average, and the most, which takes it back within seconds

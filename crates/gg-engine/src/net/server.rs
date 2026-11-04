@@ -488,6 +488,7 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::super::Session;
+    use super::super::client::LEAD;
     use super::super::tests::{Command, Game, SLOW, Score};
     use super::*;
     use crate::Context;
@@ -569,7 +570,7 @@ mod tests {
     fn until(
         server: &mut Node,
         clients: &mut [Node],
-        mut done: impl FnMut(&Node, &[Node]) -> bool,
+        mut done: impl FnMut(&mut Node, &mut [Node]) -> bool,
     ) {
         let start = Instant::now();
         while !done(server, clients) {
@@ -692,14 +693,14 @@ mod tests {
             assert_eq!(client.score(), queued);
             let [corrections, ..] = client.client().corrected;
             assert!(corrections > 1, "corrected {corrections} times");
-            // Its ticks gone ahead again, as the link slowed, so that its inputs come in time, as
-            // a client whose ticks went at real time's pace wouldn't, theirs some 3 ticks late.
-            let lead = client.client().lead;
-            assert!(
-                lead > -1.0,
-                "its inputs came {lead} ticks before their ticks ran"
-            );
         }
+        // Each client's ticks gone ahead again, as the link slowed, until its inputs come `LEAD`
+        // ticks before their ticks run, as a client whose ticks went at real time's pace wouldn't,
+        // theirs 2 or 3 ticks late; which takes longer where turns come late, as on a loaded runner.
+        until(&mut server, &mut clients, |_, clients| {
+            let near = |client: &mut Node| (client.client().lead - LEAD as f64).abs() < 1.0;
+            clients.iter_mut().all(near)
+        });
         let codes: Vec<String> = logged.try_iter().collect();
         let parted = ["net.desync", "net.bad_command", "net.bad_state", "net.lost"];
         assert!(
