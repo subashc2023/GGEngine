@@ -4768,14 +4768,20 @@ mod tests {
             cx.start_assets(serves, writes);
             cx
         };
-        let mut cx = started(true, true);
+        let cx = started(true, true);
         let a = cx.catalog().id("a.png").expect("an ID written");
-        let look = cx.ask_assets().expect("a thread watches");
+        cx.ask_assets().expect("a thread watches");
+        // The thread keeps the prints after it answers a look, and a run's end waits for it no
+        // longer than `asset_watch::STOP`: until the cache holds a.png's.
+        let kept =
+            || std::fs::read_to_string(&cache).is_ok_and(|kept| kept.contains(&a.to_string()));
         let until = std::time::Instant::now() + Duration::from_secs(30);
-        while cx.assets_answered() < look {
-            assert!(std::time::Instant::now() < until, "the thread looked");
+        while !kept() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the thread kept the prints"
+            );
             std::thread::sleep(Duration::from_millis(5));
-            cx.take_assets();
         }
         drop(cx);
         std::fs::rename(root.join("a.png"), root.join("b.png")).expect("renamed");
