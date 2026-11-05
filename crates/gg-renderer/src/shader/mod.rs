@@ -181,15 +181,18 @@ impl Shaders {
     ///   one `P` each, back to back; the sixth, the view's size in pixels, across then down, for
     ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
-    ///   lights; Material* materials; float4 eye; }`, where the view sees from in the world, the
-    ///   time it shows, what lit shading multiplies light by, and the frame's lights, as
-    ///   [`RenderData`](crate::RenderData) gives them, `Light` as `shaders/mesh.slang` declares it;
-    ///   the address of the table of models' materials; and where shading sees from, the camera's
+    ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
+    ///   specular_levels; uint brdf; float sky_luminance; }`, where the view sees from in the
+    ///   world, the time it shows, what lit shading multiplies light by, and the frame's lights,
+    ///   as [`RenderData`](crate::RenderData) gives them, `Light` as `shaders/mesh.slang` declares
+    ///   it; the address of the table of models' materials; where shading sees from, the camera's
     ///   position and 1, or for an orthographic projection the way back toward it and 0, so that
-    ///   the way to the eye from `p` is `eye.xyz - p * eye.w`; or a struct of as many of its first
-    ///   fields: the engine adds fields at its end. A shader that takes no parameters leaves out the fifth,
-    ///   and so those after it. A shader may end the struct after the last of them it reads, and
-    ///   one that reads none has none.
+    ///   the way to the eye from `p` is `eye.xyz - p * eye.w`; and the sky, as
+    ///   `shaders/mesh.slang` says, its texture, its prefiltered light, cubes, the split sum's
+    ///   table and its luminance, `specular_levels` 0 in a frame without one; or a struct of as
+    ///   many of its first fields: the engine adds fields at its end. A shader that takes no
+    ///   parameters leaves out the fifth, and so those after it. A shader may end the struct after
+    ///   the last of them it reads, and one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -199,8 +202,10 @@ impl Shaders {
     ///   [`Texture`](crate::Texture) in its parameters, a `uint`, with its
     ///   `[[vk::binding(1, 0)]] SamplerState samplers[]`, by a [`Sampler`](crate::Sampler)'s
     ///   index, a `uint` too, each through `NonUniformResourceIndex`, since the instances of one
-    ///   draw can carry different ones; not with a depth comparison, as `SampleCmp` makes, since
-    ///   the textures hold colors and the samplers compare nothing. It uses no other resources,
+    ///   draw can carry different ones; and the cubes the frame's data names, through
+    ///   `[[vk::binding(0, 0)]] TextureCube cubes[]`, the same binding; not with a depth
+    ///   comparison, as `SampleCmp` makes, since the textures hold colors and the samplers compare
+    ///   nothing. It uses no other resources,
     ///   and nothing else that needs a feature the engine doesn't enable, such as `double`,
     ///   `half`, 64-bit integers or wave operations.
     /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
@@ -589,6 +594,9 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
         .arg("-matrix-layout-column-major")
         // A function marked for one stage but compiled as the other.
         .args(["-warnings-as-errors", "38006"])
+        // Parameters at one binding, as the bindless set's textures are, 2D and cubes, which
+        // Vulkan lets a shader declare as both, each slot read as what it holds.
+        .args(["-warnings-disable", "39001"])
         .args(["-entry", "vertex_main", "-stage", "vertex"])
         .args(["-entry", "fragment_main", "-stage", "fragment"])
         .arg("-o")
@@ -914,7 +922,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 68 bytes, past the 56 the engine's take",
+                "its frame's data, Frame, take 84 bytes, past the 80 the engine's take",
                 "it reads brightness from its push constants, past the 112 bytes",
             ],
         );
@@ -993,12 +1001,15 @@ mod tests {
         (shaders.add::<[f32; 5], [u32; 2]>("textured", &textured, Blend::Alpha)).expect("a shader");
         let level = fixture("level.slang");
         (shaders.add::<[f32; 5], [u32; 3]>("level", &level, Blend::Alpha)).expect("a shader");
-        // The sprite shader, the three model shaders and the two games'.
+        // The sprite shader, the three model shaders and the two games'. Each samples a texture
+        // by an index an instance carries; the model shaders sample the sky's light too, by the
+        // frame's indices, the same across a draw.
         assert_eq!(shaders.changes.len(), 6);
         for added in adds(&shaders) {
             let sampled = spirv::sampled_images(&added.spirv);
             assert!(
-                !sampled.is_empty() && sampled.iter().all(|&(_, decorated)| decorated),
+                sampled.iter().any(|&(_, decorated, _)| decorated)
+                    && (sampled.iter()).all(|&(_, decorated, of)| decorated || !of),
                 "{}: {sampled:?}",
                 added.name
             );

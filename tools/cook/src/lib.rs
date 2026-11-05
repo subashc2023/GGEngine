@@ -1,9 +1,9 @@
 //! The offline asset cooker, as ARCHITECTURE.md's Project state says: a game's project into the
 //! package its builds without `dev` run from, of the files under its asset root that its runs load,
 //! each as the engine makes it as it loads it where that takes more than reading it, a font baked
-//! into its field and a shader compiled to SPIR-V; a texture compressed to BC7, and a model's
-//! meshes optimized, with levels of detail, and its images compressed with their mip levels, so
-//! that they load and draw faster; and the rest as they are.
+//! into its field and a shader compiled to SPIR-V; a texture compressed to BC7, or a sky's to
+//! BC6H, and a model's meshes optimized, with levels of detail, and its images compressed with
+//! their mip levels, so that they load and draw faster; and the rest as they are.
 
 mod mesh;
 mod texture;
@@ -49,7 +49,7 @@ impl Take {
         let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
         Some(match extension.as_str() {
             "wav" | "ogg" | "flac" | "mp3" | "ron" | "luau" => Self::File,
-            "png" | "jpg" | "jpeg" => Self::Texture,
+            "png" | "jpg" | "jpeg" | "hdr" => Self::Texture,
             "gltf" | "glb" => Self::Model,
             "ttf" | "otf" => Self::Font,
             "slang" => Self::Shader,
@@ -64,7 +64,8 @@ impl Take {
 /// The package holds the files under the asset root, through the folders gg-api's scan goes
 /// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, and the
 /// manifest: sounds and music, scenes and other RON, and scripts, as they are; textures compressed
-/// to BC7, of one level, as a layer's texture has; models read as a run reads them, with the
+/// to BC7, or a Radiance HDR's colors of high dynamic range to BC6H, of one level, as a layer's
+/// texture has; models read as a run reads them, with the
 /// buffers and images they name, their primitives' triangles optimized and given levels of detail,
 /// and their images compressed to BC7 with their full chains of mip levels, made as a run makes
 /// them; fonts baked into their fields; and shaders compiled, but for a file that doesn't compile
@@ -123,7 +124,11 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
             Take::File => package.add(path, id, Kind::File, read(file)?)?,
             Take::Texture => {
                 let image = cook::read_image(path, file)?;
-                let colors = Compressed::Bc7Srgb;
+                // A Radiance HDR's colors, of high dynamic range, as BC6H; others' as BC7.
+                let colors = match image.format {
+                    cook::Format::Rgba16f => Compressed::Bc6h,
+                    _ => Compressed::Bc7Srgb,
+                };
                 let ktx2 = texture::compress(path, image.size, &image.pixels, false, colors)?;
                 package.add(path, id, Kind::Texture, ktx2)?;
             }

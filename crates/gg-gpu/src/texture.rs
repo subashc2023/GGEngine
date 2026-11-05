@@ -67,16 +67,25 @@ pub enum TextureFormat {
     /// each channel, which shaders read as red and green from 0 to 1, blue as 0 and alpha as 1: as
     /// cooked normal maps store their X and Y.
     Bc5Unorm,
+    /// 16-bit floats in linear RGBA, 8 bytes a pixel, which shaders read as they are: for colors of
+    /// high dynamic range, as a sky's.
+    Rgba16Float,
+    /// Colors of high dynamic range compressed as BC6H, unsigned, in blocks of 4 by 4 pixels of 16
+    /// bytes each, which shaders read as [`TextureFormat::Rgba16Float`]'s, alpha as 1: as cooked
+    /// skies store them.
+    Bc6hUfloat,
 }
 
 impl TextureFormat {
     /// Every format.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Rgba8Unorm,
         Self::Rgba8Srgb,
         Self::Bc7Srgb,
         Self::Bc7Unorm,
         Self::Bc5Unorm,
+        Self::Rgba16Float,
+        Self::Bc6hUfloat,
     ];
 
     pub(crate) fn raw(self) -> vk::Format {
@@ -86,6 +95,8 @@ impl TextureFormat {
             Self::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
             Self::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
             Self::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
+            Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Bc6hUfloat => vk::Format::BC6H_UFLOAT_BLOCK,
         }
     }
 
@@ -97,11 +108,11 @@ impl TextureFormat {
 
     /// How many bytes fill a texture of `size` pixels in this format, as [`Frame::stream_texture`]
     /// takes them: its levels packed largest first, the first level alone unless `mipmapped`, and
-    /// otherwise every level that [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel. A level
-    /// of BC7 or BC5 has 16 bytes for each block of 4 by 4 pixels, its sides rounded up to whole
-    /// blocks, so that a level of a pixel has a block. A level's bytes are a multiple of 4 for RGBA8
-    /// and of 16 for BC7 and BC5, so that each level starts as aligned as the first, as copies
-    /// need.
+    /// otherwise every level that [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel, and of
+    /// 16-bit floats 8. A level of BC7, BC5 or BC6H has 16 bytes for each block of 4 by 4 pixels,
+    /// its sides rounded up to whole blocks, so that a level of a pixel has a block. A level's bytes
+    /// are a multiple of a pixel's or a block's, so that each level starts as aligned as the first,
+    /// as copies need.
     ///
     /// [`Frame::stream_texture`]: crate::Frame::stream_texture
     pub fn bytes(self, size: [u32; 2], mipmapped: bool) -> u64 {
@@ -118,11 +129,11 @@ impl TextureFormat {
     }
 
     /// The pixels across and down of the texel block the format stores together, which copies
-    /// move whole: a pixel of RGBA8, and 4 by 4 of BC7 and BC5.
+    /// move whole: a pixel of RGBA8 or of 16-bit floats, and 4 by 4 of BC7, BC5 and BC6H.
     fn block_size(self) -> [u32; 2] {
         match self {
-            Self::Rgba8Unorm | Self::Rgba8Srgb => [1, 1],
-            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => [4, 4],
+            Self::Rgba8Unorm | Self::Rgba8Srgb | Self::Rgba16Float => [1, 1],
+            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm | Self::Bc6hUfloat => [4, 4],
         }
     }
 
@@ -131,7 +142,8 @@ impl TextureFormat {
     fn block_bytes(self) -> u64 {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb => 4,
-            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => 16,
+            Self::Rgba16Float => 8,
+            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm | Self::Bc6hUfloat => 16,
         }
     }
 }
@@ -444,8 +456,8 @@ impl Image {
     }
 
     /// Its mip levels' sizes, largest first, and where each one's pixels start among all of
-    /// theirs, packed a level after the one before. Each level has a multiple of 16 bytes if it's
-    /// BC7 and of 4 if it's RGBA8, so each starts as aligned as the first.
+    /// theirs, packed a level after the one before. Each level has a multiple of its format's
+    /// pixel's or block's bytes, so each starts as aligned as the first.
     pub(crate) fn levels(&self) -> impl Iterator<Item = ([u32; 2], u64)> {
         levels(
             self.format,
@@ -654,6 +666,10 @@ mod tests {
         assert_eq!(bc7.bytes([5, 4], false), 32);
         assert_eq!(bc7.bytes([5, 5], false), 64);
         assert_eq!(bc7.bytes([8192, 8192], false), 8192 * 8192);
+        // BC6H's blocks are BC7's size; a pixel of 16-bit floats is twice RGBA8's.
+        let bc6h = TextureFormat::Bc6hUfloat;
+        assert_eq!(bc6h.bytes([13, 5], true), bc7.bytes([13, 5], true));
+        assert_eq!(TextureFormat::Rgba16Float.bytes([3, 2], true), (6 + 1) * 8);
     }
 
     #[test]

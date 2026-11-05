@@ -32,7 +32,10 @@ fn the_project_is_canonical_and_starts_in_its_welcome() {
 fn every_asset_has_its_id_file_beside_it() {
     let project = Project::read(dir()).expect("the project reads");
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
-    assert!(found.assets.len() >= 11, "4 textures, 6 models and a font");
+    assert!(
+        found.assets.len() >= 12,
+        "5 textures, a sky's among them, 6 models and a font"
+    );
     let mut ids = HashSet::new();
     for asset in &found.assets {
         let path = &asset.path;
@@ -77,7 +80,7 @@ fn loaded() -> (Context, Showcase) {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 9, "{scenes:?}");
+    assert_eq!(scenes.len(), 10, "{scenes:?}");
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
         let (mut cx, _showcase) = loaded();

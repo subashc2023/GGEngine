@@ -1,11 +1,12 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
-//! metallic-roughness materials under the frame's lights, a game's UI over them in the view's own
-//! space, and the UI over the view; the view drawn in colors of high dynamic range, which a
-//! tonemapper maps into the range it shows; picks, which read back the ID of the draw the view
-//! shows at a pixel; an outline round what the view shows of an ID; and each frame's passes in a
-//! render graph, which places the barriers between them and makes the view's images.
+//! metallic-roughness materials under the frame's lights and its sky, which shows behind them,
+//! prefiltered on the GPU, a game's UI over them in the view's own space, and the UI over the
+//! view; the view drawn in colors of high dynamic range, which a tonemapper maps into the range it
+//! shows; picks, which read back the ID of the draw the view shows at a pixel; an outline round
+//! what the view shows of an ID; and each frame's passes in a render graph, which places the
+//! barriers between them and makes the view's images.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -19,6 +20,7 @@ mod mesh;
 mod model;
 mod pick;
 mod shader;
+mod sky;
 mod sprite;
 mod text;
 mod texture;
@@ -55,6 +57,7 @@ pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
+pub use sky::Sky;
 pub use sprite::{Sprite, SpriteSheet};
 pub use text::Glyph;
 pub use texture::{Map, Mipmaps, Texels, Texture, Textures};
@@ -68,6 +71,7 @@ pub use viewpoint::{Projection, Viewpoint};
 use light::GpuLight;
 use mesh::{FrameData, MeshPass};
 use pick::Picks;
+use sky::{SkyData, SkyLight, SkyPass};
 use tonemap::TonemapPass;
 use ui::UiPass;
 use view::{OutlinePass, ViewPass};
@@ -211,9 +215,15 @@ pub struct RenderData<'a> {
     /// [`Shaders::add`] describes.
     pub time: f32,
     /// What lights the view's lit shading, which shaders read through the frame's data, as
-    /// [`Shaders::add`] describes: without any, models' materials draw unlit, their base colors
-    /// alone.
+    /// [`Shaders::add`] describes: without any, or a sky, models' materials draw unlit, their base
+    /// colors alone.
     pub lights: &'a [Light],
+    /// What the view shows behind the world, in place of the clear color, and lights it by from
+    /// all around, which shaders read through the frame's data too: from the first frame that
+    /// renders the view once its texture's slot shows an image of its own, which that frame
+    /// prefilters, and again each time it shows another. While it shows a stand-in, the view shows
+    /// no sky and is lit by none.
+    pub sky: Option<Sky>,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -308,6 +318,11 @@ pub struct Renderer {
     view: ViewPass,
     tonemap: TonemapPass,
     outline: OutlinePass,
+    /// Made by the first frame with a sky to show.
+    sky: Option<SkyPass>,
+    /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
+    /// targets while they record its passes.
+    sky_light: SkyLight,
     /// The passes of the frame being rendered, declared afresh each frame in the memory of the
     /// last's.
     graph: Graph,
@@ -449,6 +464,8 @@ impl Renderer {
             view: ViewPass::new(device, format)?,
             tonemap: TonemapPass::new(device)?,
             outline: OutlinePass::new(device)?,
+            sky: None,
+            sky_light: SkyLight::default(),
             graph: Graph::default(),
             window_passes: Vec::new(),
             pixels: None,
@@ -652,6 +669,15 @@ impl Renderer {
         {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
+        // The sky the view shows, while its texture's slot shows an image of its own, with that
+        // image's size and how many times the slot has come to show another.
+        let sky = data.sky.filter(|_| renders_view).and_then(|sky| {
+            let (size, shown) = self.meshes.texture_shown(sky.texture)?;
+            Some((sky, size, shown))
+        });
+        if sky.is_some() && self.sky.is_none() {
+            self.sky = Some(SkyPass::new(&self.device)?);
+        }
         // The frame's passes: the view, into images of its own, its size, so that it never shows
         // stretched, made again in the frame that changes its size, which a drag that resizes the
         // view does every frame, as growing them in steps and rendering into part of them wouldn't;
@@ -659,19 +685,38 @@ impl Renderer {
         // outline, and what reads it back; then the frame, which shows the view under the UI, and
         // the other windows' UI, over black.
         let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
+        let windows_drawn = self.window_keys.iter().filter(|key| has_ui(key)).count();
         let graph = &mut self.graph;
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
+        // First, the sky's prefiltering, if this frame prefilters it: the first to render the view
+        // since its texture came to show the image it shows. Its images are the targets after the
+        // windows'. A frame that doesn't takes the light from those before.
+        let plan = match sky {
+            Some((sky, sky_size, shown)) if !self.sky_light.holds(sky, shown) => {
+                let first = 1 + windows_drawn;
+                Some((self.sky_light).plan(&self.device, graph, first, sky, sky_size)?)
+            }
+            _ => None,
+        };
+        let held = match (sky, &plan) {
+            (Some((sky, _, shown)), None) => self.sky_light.data(sky, shown),
+            _ => None,
+        };
         let view = renders_view.then(|| {
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
-            let pass = (graph.render(label!("view")))
+            let mut pass = (graph.render(label!("view")))
                 .clear(hdr, data.clear_color)
                 .ids(ids)
-                .depth(depth)
-                .add();
+                .depth(depth);
+            // What the draws light by, as the frame that prefilters it leaves it.
+            for light in plan.iter().flat_map(sky::Plan::sampled) {
+                pass = pass.sample(light);
+            }
+            let pass = pass.add();
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
@@ -709,7 +754,7 @@ impl Renderer {
         self.window_passes.clear();
         let black = [0.0, 0.0, 0.0, 1.0];
         // After the output, the other windows that draw UI, in their order.
-        for target in 1..=self.window_keys.iter().filter(|key| has_ui(key)).count() {
+        for target in 1..=windows_drawn {
             let target = graph.target(target);
             let pass = graph.render(label!("window")).clear(target, black).add();
             self.window_passes.push(pass);
@@ -721,7 +766,10 @@ impl Renderer {
         let others = (self.window_keys.iter().zip(&mut self.windows))
             .filter(|(key, _)| has_ui(key))
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
-        let targets = iter::once(target).chain(others);
+        let lit = (plan.is_some()).then(|| self.sky_light.targets());
+        let targets = iter::once(target)
+            .chain(others)
+            .chain(lit.into_iter().flatten());
         let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
             return Ok(false);
         };
@@ -729,6 +777,10 @@ impl Renderer {
         self.picks.answer(frame.ids_read());
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
+        if let Some(plan) = &plan {
+            let pass = self.sky.as_ref().expect("made for a sky to show");
+            pass.prefilter(&mut frame, plan);
+        }
         // What the view shows, and how much of its area that covers.
         let (counts, view) = match (view, pixels_shown) {
             (Some(view), _) => {
@@ -741,6 +793,10 @@ impl Renderer {
                 } else {
                     pass.upload(bytemuck::cast_slice(&self.lights))?.address()
                 };
+                let lit = match (&plan, sky) {
+                    (Some(plan), Some((sky, ..))) => Some(plan.data(&pass, sky)),
+                    _ => held,
+                };
                 let shared = FrameData {
                     camera: data.viewpoint.position,
                     time: data.time,
@@ -749,8 +805,16 @@ impl Renderer {
                     lights,
                     materials: self.meshes.materials_address(),
                     eye: data.viewpoint.eye(),
+                    sky: lit.unwrap_or_default(),
                 };
                 let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
+                // Behind everything, in place of the clear color.
+                if let Some(SkyData { sky, luminance, .. }) = lit {
+                    let drawn = self.sky.as_ref().expect("made for a sky to show");
+                    let aspect = data.viewport.aspect();
+                    let scale = luminance * data.exposure;
+                    drawn.draw(&mut pass, &data.viewpoint, aspect, sky, scale);
+                }
                 let mut counts =
                     (self.meshes).draw(&mut pass, view_projection, shared, size, data.draws)?;
                 pass.begin_label(c"canvas");
@@ -845,6 +909,9 @@ impl Renderer {
         }
         self.ui.free_textures();
         frame.submit()?;
+        if let (Some(plan), Some((sky, _, shown))) = (&plan, sky) {
+            self.sky_light.prefiltered(sky, shown, plan);
+        }
         self.waited = self.frames.waited();
         self.drawn = counts;
         Ok(true)

@@ -85,7 +85,8 @@ impl FromStr for AssetId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetKind {
-    /// A PNG or a JPEG, `.png`, `.jpg` or `.jpeg`, as `Context::add_texture` loads.
+    /// A PNG, a JPEG or a Radiance HDR, `.png`, `.jpg`, `.jpeg` or `.hdr`, as
+    /// `Context::add_texture` loads.
     Texture,
     /// A glTF, `.gltf` or `.glb`, as `Context::add_model` loads.
     Model,
@@ -102,7 +103,7 @@ impl AssetKind {
     pub fn of(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
         match extension.as_str() {
-            "png" | "jpg" | "jpeg" => Some(Self::Texture),
+            "png" | "jpg" | "jpeg" | "hdr" => Some(Self::Texture),
             "gltf" | "glb" => Some(Self::Model),
             "ttf" | "otf" => Some(Self::Font),
             _ => None,
@@ -546,6 +547,7 @@ mod tests {
             ("a.PNG", AssetKind::Texture),
             ("assets/b.jpg", AssetKind::Texture),
             ("b.JPEG", AssetKind::Texture),
+            ("skies/sky.hdr", AssetKind::Texture),
             ("c.gltf", AssetKind::Model),
             ("c.GLB", AssetKind::Model),
             ("fonts/d.ttf", AssetKind::Font),

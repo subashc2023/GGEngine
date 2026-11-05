@@ -8,6 +8,7 @@
 //! through a transfer queue, a frame's copies go in a submission of their own, which another
 //! timeline paces, and no frame waits for.
 
+mod compute;
 pub(crate) mod graph;
 mod pass;
 mod timer;
@@ -25,13 +26,14 @@ use tracing::error;
 
 use crate::buffer::Buffer;
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, ColorImage, Device, Swapchain, copy_region, vk_error};
+use crate::{COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error};
 use graph::{Hazard, ImageDecl, PassKind, Use};
 use timer::Timer;
 use transients::Transients;
 use upload::Arena;
 
-pub use graph::{Graph, ImageId, PassId, RenderPass};
+pub use compute::Compute;
+pub use graph::{ComputePass, Graph, ImageId, PassId, RenderPass};
 pub use pass::{Indices, Pass};
 pub use upload::Upload;
 
@@ -55,12 +57,14 @@ pub struct Arenas {
     pub peak: u64,
 }
 
-/// What a frame renders into.
+/// What a frame renders or computes into.
 pub enum Target<'a> {
     /// The next image of a window's swapchain, presented when the frame is submitted.
     Swapchain(&'a mut Swapchain),
     /// An offscreen image.
     Image(&'a mut ColorImage),
+    /// A storage image, which compute passes write and passes sample, but none draws into.
+    Storage(&'a mut StorageImage),
 }
 
 /// The resources of the frames in flight, and the timeline semaphore that paces them. A device
@@ -382,6 +386,9 @@ impl Frames {
                 Target::Image(image) => self
                     .device
                     .check_made("an offscreen image among the targets", image.device()),
+                Target::Storage(image) => self
+                    .device
+                    .check_made("a storage image among the targets", image.device()),
             }
         }
         check_targets(graph, &list);
@@ -456,6 +463,11 @@ impl Frames {
                     layout: image.layout(),
                     hazard: Hazard::ANYTHING,
                 }),
+                Target::Storage(image) => Some(Tracked {
+                    index: 0,
+                    layout: image.layout(),
+                    hazard: Hazard::ANYTHING,
+                }),
             };
             if i == 0 && image.is_none() {
                 return Ok(());
@@ -476,14 +488,19 @@ impl Frames {
         // and recorded again; the sets and layout live as long as the device.
         unsafe {
             begin_recording(&self.device, pool, commands, commands_name)?;
-            raw.cmd_bind_descriptor_sets(
-                commands,
+            for bind_point in [
                 vk::PipelineBindPoint::GRAPHICS,
-                bindless.pipeline_layout(),
-                0,
-                &[bindless.set(slot)],
-                &[],
-            );
+                vk::PipelineBindPoint::COMPUTE,
+            ] {
+                raw.cmd_bind_descriptor_sets(
+                    commands,
+                    bind_point,
+                    bindless.pipeline_layout(),
+                    0,
+                    &[bindless.set(slot)],
+                    &[],
+                );
+            }
         }
         self.timer.begin_frame(&self.device, commands, slot, passes)
     }
@@ -591,7 +608,8 @@ fn read_offset(slot: usize, read: usize) -> u64 {
     ((slot * MAX_READS + read) * ID_BYTES) as u64
 }
 
-/// Checks that `graph` uses only targets of `targets`, and swapchains' only to draw into.
+/// Checks that `graph` uses only targets of `targets`, swapchains' only to draw into, storage
+/// images only to write and sample, and only storage images to write.
 ///
 /// # Panics
 ///
@@ -607,16 +625,23 @@ fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
                 targets.len()
             );
         };
-        if matches!(found, Target::Swapchain(_)) {
-            let image = ImageId(i as u32);
-            let misused = (graph.uses.iter())
-                .find(|&&(used, use_)| used == image && !matches!(use_, Use::Color(_)));
-            if let Some((_, use_)) = misused {
-                panic!(
-                    "target {target} is a swapchain's, which passes only draw into, but one uses \
-                     it as {use_:?}"
-                );
-            }
+        let (what, fits): (_, fn(&Use) -> bool) = match found {
+            Target::Swapchain(_) => ("a swapchain's, which passes only draw into", |use_| {
+                matches!(use_, Use::Color(_))
+            }),
+            Target::Storage(_) => (
+                "a storage image, which passes only write and sample",
+                |use_| matches!(use_, Use::Storage | Use::Sampled | Use::ComputeSampled),
+            ),
+            Target::Image(_) => (
+                "an offscreen image, which no pass writes as storage",
+                |use_| *use_ != Use::Storage,
+            ),
+        };
+        let image = ImageId(i as u32);
+        let misused = (graph.uses.iter()).find(|&&(used, use_)| used == image && !fits(&use_));
+        if let Some((_, use_)) = misused {
+            panic!("target {target} is {what}, but one uses it as {use_:?}");
         }
     }
 }
@@ -626,6 +651,15 @@ fn target_parts(target: &Target<'_>, index: u32) -> (vk::Image, vk::ImageView, v
     match target {
         Target::Swapchain(swapchain) => swapchain.image(index),
         Target::Image(image) => image.parts(),
+        Target::Storage(image) => image.parts(),
+    }
+}
+
+/// What a target's barriers cover: the whole of its image, every level and layer.
+fn target_range(target: &Target<'_>) -> vk::ImageSubresourceRange {
+    match target {
+        Target::Swapchain(_) | Target::Image(_) => COLOR_RANGE,
+        Target::Storage(image) => image.range(),
     }
 }
 
@@ -776,21 +810,24 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If it draws over, samples or copies from a target that no pass has drawn into since it was
-    /// made, or since its swapchain's image was acquired.
+    /// If it draws over, samples or copies from a target that no pass has drawn into or written
+    /// since it was made, or since its swapchain's image was acquired.
     fn open_pass(&mut self, pass: PassId) {
         let graph = self.graph;
         let decl = &graph.passes[pass.0 as usize];
-        // Before anything is recorded, as a refusal records nothing.
+        // Before anything is recorded, as a refusal records nothing. A storage image's first
+        // write finds it undefined, as it says.
         for &(image, use_) in graph.uses(pass) {
             if let ImageDecl::Target(target) = graph.images[image.0 as usize] {
                 let tracked = self.frames.images[target]
                     .as_ref()
                     .expect("a pass that records has its targets' images");
                 assert!(
-                    use_.access().discards || tracked.layout != vk::ImageLayout::UNDEFINED,
+                    use_.access().discards
+                        || use_ == Use::Storage
+                        || tracked.layout != vk::ImageLayout::UNDEFINED,
                     "pass {:?} uses target {target} as {use_:?}, but no pass has drawn into it \
-                     since it was made, or since its swapchain's image was acquired",
+                     or written it since it was made, or since its swapchain's image was acquired",
                     decl.label
                 );
             }
@@ -812,8 +849,9 @@ impl<'a> Frame<'a> {
                         .as_mut()
                         .expect("a pass that records has its targets' images");
                     if let Some(barrier) = tracked.hazard.follow(&mut tracked.layout, access) {
-                        let (raw, ..) = target_parts(&self.targets[target], tracked.index);
-                        barriers.push(barrier.on(raw, COLOR_RANGE));
+                        let found = &self.targets[target];
+                        let (raw, ..) = target_parts(found, tracked.index);
+                        barriers.push(barrier.on(raw, target_range(found)));
                     }
                     continue;
                 }
@@ -869,6 +907,19 @@ impl<'a> Frame<'a> {
 
     fn commands(&self) -> vk::CommandBuffer {
         self.frames.slots[self.slot].commands
+    }
+
+    /// The index in the bindless set that shaders sample `image` through, which a pass samples.
+    fn sampled_index(&self, image: ImageId) -> u32 {
+        match self.graph.images[image.0 as usize] {
+            ImageDecl::Target(target) => match &self.targets[target] {
+                Target::Image(image) => image.index(),
+                Target::Storage(image) => image.index(),
+                Target::Swapchain(_) => unreachable!("only offscreen targets are sampled"),
+            },
+            ImageDecl::Transient { .. } => (self.frames.transients.image(image).index)
+                .expect("only kinds that shaders sample are sampled"),
+        }
     }
 
     /// Records `pass`, a pass of the frame's graph that reads an image back, which must be the
@@ -1201,8 +1252,12 @@ impl<'a> Frame<'a> {
         sent?;
         *submitted = frame;
         for (target, image) in self.targets.iter_mut().zip(images.iter()) {
-            if let (Target::Image(target), Some(Tracked { layout, .. })) = (target, image) {
-                target.set_layout(*layout);
+            match (target, image) {
+                (Target::Image(target), Some(Tracked { layout, .. })) => target.set_layout(*layout),
+                (Target::Storage(target), Some(Tracked { layout, .. })) => {
+                    target.set_layout(*layout);
+                }
+                _ => {}
             }
         }
         if scratch.swapchains.is_empty() {

@@ -27,11 +27,12 @@ use crate::texture::{MAX_LEVELS, Part, next_part};
 use crate::vma::Memory;
 use crate::{COLOR_RANGE, Device, GpuBuffer, Texture, UploadPath, color_layers, copy_region};
 
-/// The stages that read textures: fragment shaders sample them, and vertex shaders may too, as
-/// the sprite shader queries their sizes.
+/// The stages that read textures: fragment shaders sample them, vertex shaders may too, as the
+/// sprite shader queries their sizes, and compute shaders, as a sky's are prefiltered.
 const TEXTURE_READERS: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
     vk::PipelineStageFlags2::VERTEX_SHADER.as_raw()
-        | vk::PipelineStageFlags2::FRAGMENT_SHADER.as_raw(),
+        | vk::PipelineStageFlags2::FRAGMENT_SHADER.as_raw()
+        | vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw(),
 );
 
 /// The stages that read buffers during a frame: shaders, through their addresses, and draws'

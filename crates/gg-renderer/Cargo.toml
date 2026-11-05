@@ -15,6 +15,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 egui.workspace = true
+# The tests' skies, of 16-bit floats.
+half.workspace = true
 png.workspace = true
 
 # The GPU tests have a main of their own, like gg-gpu's: it sets the Vulkan loader's

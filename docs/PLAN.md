@@ -105,16 +105,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The render graph** (2026-11-04)
 - **HDR and tonemapping** (2026-11-04)
 - **Lights and PBR materials** (2026-11-04)
+- **Image-based lighting** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it. Its milestones after lights and PBR materials,
-in order:
+**Phase 12, render graph and PBR**, as Next has it. Its milestones after image-based lighting, in
+order:
 
-- **Image-based lighting.** An environment's sky, from an HDR equirectangular image (`.hdr`),
-  prefiltered on the GPU by compute passes as it loads, into diffuse irradiance, specular levels by
-  roughness and the split sum's table, lights its world, materials' occlusion maps darkening it,
-  and shows behind it, reloads as its file changes, and is cooked as BC6H.
 - **Cascaded shadow maps.** The directional light's shadows, in four cascades fitted to the view,
   steadied against shimmering, with depth bias and filtered edges, the cascades the graph's own.
 - **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky: Khronos
@@ -183,7 +180,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Symbols for a shipped game's crashes: the shipping profile keeps release's debug info, none, and no PDB or dSYM ships beside the game; a panic names its functions, by the symbols the executable keeps | A shipped game's crash needs symbolicating |
 | Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
 | ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
-| BC6H, for textures of high dynamic range: the cooker cooks BC7 and BC5 alone | A game's textures hold HDR, as skies and lights' do in Phase 12 |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`) | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
@@ -256,6 +252,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Emission in physical units, exposed as light is: an emissive color shows as it is under any exposure, KHR_materials_emissive_strength scaling it | A game's emissive surfaces must keep their brightness against its lights as its exposure changes |
 | A model's image that holds something else as its file is read again, as colors where it held a normal map, taking a texture of its own: the model takes nothing until the run starts again (`asset.model_changed`) | Someone retargets a model's images while its game runs |
 | The editor drawing lights in its view, as icons and spots' cones | Someone places lights by eye |
+| A sky made procedurally, as Hillaire's atmosphere ("A Scalable and Production Ready Sky and Atmosphere Rendering Technique", 2020), from the world's directional light in its units, which a time of day moves, with haze over distance: a sky is an image | A game's sky follows its sun, or the user asks for one |
+| Turning a sky, as EXT_lights_image_based turns one: its image's middle column faces +X | A sky's sun must line up with the directional light that stands for it |
+| A sun in the sky lighting once: its disk lights through the sky's light as well as through a directional light a game adds for it, and its texels past 65,504, the most a half float holds, are clamped to it | Shadows, which a directional light casts and the sky's light doesn't |
+| Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
+| Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes often, as a time of day's, or a hitch that shows |
+| Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
+| Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |

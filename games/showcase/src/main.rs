@@ -7,8 +7,10 @@
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
 //! (`models.ron`); colors from a quarter as bright as white to 16 times, which the world's
-//! environment tonemaps (`hdr.ron`); and glTF's metallic-roughness materials, plastic, metal,
-//! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`). Its
+//! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
+//! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); and
+//! the same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0,
+//! which shows behind them (`sky.ron`). Its
 //! Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`,
 //! turn and bob what they're on at each tick, and 2D physics steps, so that each scene moves as it
 //! plays, in the editor from its Play, and in the reference player, which runs the game's package

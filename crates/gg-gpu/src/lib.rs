@@ -1,7 +1,7 @@
 //! The Vulkan layer, built on `ash`: instance and device setup, memory, buffers and images,
-//! bindless descriptors, pipelines, swapchain, synchronization and queue submission, the render
-//! graph, which places a frame's barriers and makes its own images, and frame captures through
-//! RenderDoc.
+//! bindless descriptors, graphics and compute pipelines, swapchain, synchronization and queue
+//! submission, the render graph, which places a frame's barriers and makes its own images, and
+//! frame captures through RenderDoc.
 //!
 //! `gg-renderer` is its only client; the engine reaches the GPU through the renderer.
 
@@ -17,6 +17,7 @@ mod image;
 mod instance;
 mod pipeline;
 mod pipeline_cache;
+mod storage;
 mod surface;
 mod swapchain;
 mod texture;
@@ -32,12 +33,13 @@ pub use buffer::GpuBuffer;
 pub use capture::Capture;
 pub use device::{Device, MemoryBudget, SHADER_CAPABILITIES, UploadPath};
 pub use frame::{
-    Arenas, Frame, Frames, Graph, ImageId, ImageRead, Indices, MAX_READS, Pass, PassId, RenderPass,
-    Target, Upload,
+    Arenas, Compute, ComputePass, Frame, Frames, Graph, ImageId, ImageRead, Indices, MAX_READS,
+    Pass, PassId, RenderPass, Target, Upload,
 };
 pub use image::ColorImage;
 pub use instance::{Instance, InstanceDesc, Validation};
-pub use pipeline::{Blend, Faces, Format, GraphicsDesc, Pipeline};
+pub use pipeline::{Blend, ComputePipeline, Faces, Format, GraphicsDesc, Pipeline};
+pub use storage::StorageImage;
 pub use surface::{Surface, Window};
 pub use swapchain::Swapchain;
 pub use texture::{MAX_TEXTURE_SIZE, Texture, TextureFormat, mip_sizes};

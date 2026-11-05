@@ -1,8 +1,9 @@
 //! Images that layers load as textures, and models' images: PNGs and JPEGs, read as far as their
 //! headers as they're added, which give their sizes, and decoded to the RGBA8 that the renderer
-//! takes apart from that, as the loader decodes them off the main thread; and in a game's package,
-//! BC7 and BC5 in KTX2, as the cooker compressed them, read and taken out of its supercompression
-//! alike.
+//! takes apart from that, as the loader decodes them off the main thread; textures of high dynamic
+//! range, as skies are, from Radiance's `.hdr`, alike, to RGBA of 16-bit floats; and in a game's
+//! package, BC7, BC5 and BC6H in KTX2, as the cooker compressed them, read and taken out of its
+//! supercompression alike.
 
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
@@ -10,6 +11,9 @@ use std::path::Path;
 
 use gg_core::{Error, Result};
 use gg_renderer::{MAX_TEXTURE_SIZE, Map, Texels, mip_sizes};
+use half::f16;
+use image::ImageDecoder;
+use image::codecs::hdr::HdrDecoder;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::errors::DecodeErrors;
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -37,6 +41,9 @@ pub struct Image {
 pub enum Format {
     /// Rows of RGBA8, tightly packed, top row first, of one level, as a PNG or a JPEG decodes.
     Rgba8,
+    /// Rows of RGBA of 16-bit floats, linear, 8 bytes a pixel, tightly packed, top row first, of
+    /// one level, alpha 1, as a Radiance HDR decodes, as [`Texels::Hdr`] takes them.
+    Rgba16f,
     /// Blocks of 4 by 4 pixels, 16 bytes each, compressed as `compressed` says, as a game's package
     /// holds a texture, of its first level alone or, if `mipmapped`, of each level of its full
     /// chain, which the cooker made, as [`Texels::Bc7`] takes them.
@@ -48,6 +55,8 @@ pub enum Format {
     Png,
     /// A JPEG's file, whose headers read and which reaches its end, which decodes to RGBA8.
     Jpeg,
+    /// A Radiance HDR's file, `.hdr`, whose header read, which decodes to RGBA of 16-bit floats.
+    Hdr,
     /// A KTX2 file as the cooker writes one, whose header and levels' lengths read, of blocks
     /// compressed as `compressed` says, of its first level alone or, if `mipmapped`, of its full
     /// chain, each level supercompressed by zstd if `zstd`, which decodes to its levels' blocks.
@@ -68,11 +77,16 @@ pub enum Compressed {
     Bc7Unorm,
     /// As BC5, of a normal map's X and Y.
     Bc5,
+    /// As BC6H, unsigned, of colors of high dynamic range, as skies are, of one level.
+    Bc6h,
 }
 
 impl Compressed {
+    /// Every way the cooker compresses an image.
+    const ALL: [Self; 4] = [Self::Bc7Srgb, Self::Bc7Unorm, Self::Bc5, Self::Bc6h];
+
     /// How the cooker compresses what `texels` hold: colors as BC7 of sRGB, a surface's map as BC7
-    /// of values, a normal map as BC5.
+    /// of values, a normal map as BC5, and colors of high dynamic range as BC6H.
     pub fn of(texels: Texels) -> Self {
         match texels {
             Texels::Map(Map::Surface)
@@ -88,6 +102,7 @@ impl Compressed {
             Texels::Color(_) | Texels::ColorLevels | Texels::Data | Texels::Bc7 { .. } => {
                 Self::Bc7Srgb
             }
+            Texels::Hdr | Texels::Bc6h => Self::Bc6h,
         }
     }
 
@@ -97,6 +112,7 @@ impl Compressed {
             Self::Bc7Srgb => ktx2::Format::BC7_SRGB_BLOCK,
             Self::Bc7Unorm => ktx2::Format::BC7_UNORM_BLOCK,
             Self::Bc5 => ktx2::Format::BC5_UNORM_BLOCK,
+            Self::Bc6h => ktx2::Format::BC6H_UFLOAT_BLOCK,
         }
     }
 }
@@ -104,10 +120,12 @@ impl Compressed {
 impl Image {
     /// What a texture of it holds, as `texels`, a [`Texels::Color`] or a [`Texels::Map`], say it
     /// does: those, whose smaller levels a frame makes, of an image that's RGBA8 or decodes to it;
-    /// or the levels it was cooked with, as it's compressed.
+    /// colors of high dynamic range, of one level, of a Radiance HDR; or the levels it was cooked
+    /// with, as it's compressed.
     pub(crate) fn texels(&self, texels: Texels) -> Texels {
         let (compressed, mipmapped) = match self.format {
             Format::Rgba8 | Format::Png | Format::Jpeg => return texels,
+            Format::Rgba16f | Format::Hdr => return Texels::Hdr,
             Format::Bc {
                 compressed,
                 mipmapped,
@@ -128,25 +146,25 @@ impl Image {
                 map: Map::Normal,
                 mipmapped,
             },
+            Compressed::Bc6h => Texels::Bc6h,
         }
     }
 
     /// How it's compressed, if it is.
     pub(crate) fn compressed(&self) -> Option<Compressed> {
         match self.format {
-            Format::Rgba8 | Format::Png | Format::Jpeg => None,
+            Format::Rgba8 | Format::Rgba16f | Format::Png | Format::Jpeg | Format::Hdr => None,
             Format::Bc { compressed, .. } | Format::Ktx2 { compressed, .. } => Some(compressed),
         }
     }
 
-    /// How many bytes its pixels take once they're decoded: RGBA8 of its size, or each level's
-    /// blocks, as reading a model counts what it will hold.
+    /// How many bytes its pixels take once they're decoded: RGBA8 or RGBA of 16-bit floats of its
+    /// size, or each level's blocks, as reading a model counts what it will hold.
     pub(crate) fn decoded_len(&self) -> usize {
+        let [width, height] = self.size.map(|side| side as usize);
         match self.format {
-            Format::Rgba8 | Format::Png | Format::Jpeg => {
-                let [width, height] = self.size.map(|side| side as usize);
-                width * height * 4
-            }
+            Format::Rgba8 | Format::Png | Format::Jpeg => width * height * 4,
+            Format::Rgba16f | Format::Hdr => width * height * 8,
             Format::Bc { mipmapped, .. } | Format::Ktx2 { mipmapped, .. } => {
                 let levels = if mipmapped { usize::MAX } else { 1 };
                 let [width, height] = self.size;
@@ -163,9 +181,10 @@ impl Image {
     /// corrupt past its header, and for one that decodes to another size than its header said.
     pub(crate) fn decoded(self) -> Result<Image, String> {
         let decode: fn(&[u8]) -> Result<Image, String> = match self.format {
-            Format::Rgba8 | Format::Bc { .. } => return Ok(self),
+            Format::Rgba8 | Format::Rgba16f | Format::Bc { .. } => return Ok(self),
             Format::Png => decode_png,
             Format::Jpeg => decode_jpeg,
+            Format::Hdr => decode_hdr,
             Format::Ktx2 { .. } => decode_ktx2_levels,
         };
         // As its header's read is, in `read` and `read_ktx2`.
@@ -189,12 +208,13 @@ fn blocks([width, height]: [u32; 2]) -> usize {
 }
 
 /// Reads the image file at `path` from `files`, which is texture `name`'s, as far as its header,
-/// which gives its size, as [`read`] and [`read_ktx2`] say: a PNG or a JPEG on the disk, or, from
-/// the game's package, the texture the cooker made of one. [`decode_texture`] decodes it.
+/// which gives its size, as [`read`], [`read_hdr`] and [`read_ktx2`] say: a PNG, a JPEG or a
+/// Radiance HDR on the disk, or, from the game's package, the texture the cooker made of one.
+/// [`decode_texture`] decodes it.
 ///
 /// Fails with `engine.bad_texture` if the file can't be read or isn't a regular file, or doesn't
-/// read as either; or if the package hasn't it as a texture, or holds one that doesn't read as
-/// the cooker writes them, of colors.
+/// read as any; or if the package hasn't it as a texture, or holds one that doesn't read as the
+/// cooker writes them, of colors.
 pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image> {
     let zone = gg_core::zone!();
     zone.text(path.display());
@@ -209,10 +229,14 @@ pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if files.packaged().is_some() {
         let read = read_ktx2(bytes).and_then(|image| match image.compressed() {
-            Some(Compressed::Bc7Srgb) => Ok(image),
+            Some(Compressed::Bc7Srgb | Compressed::Bc6h) => Ok(image),
             other => Err(format!("it holds {other:?}, where a texture holds colors")),
         });
         return read.map_err(|problem| bad(format!("doesn't read as a cooked texture: {problem}")));
+    }
+    if is_hdr(&bytes) {
+        return read_hdr(bytes)
+            .map_err(|problem| bad(format!("doesn't decode as a Radiance HDR: {problem}")));
     }
     read(bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
 }
@@ -225,6 +249,7 @@ pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Im
     let what = match image.format {
         Format::Ktx2 { .. } | Format::Bc { .. } => "doesn't read as a cooked texture",
         Format::Png | Format::Jpeg | Format::Rgba8 => "doesn't decode as a PNG or a JPEG",
+        Format::Hdr | Format::Rgba16f => "doesn't decode as a Radiance HDR",
     };
     image.decoded().map_err(|problem| {
         let message = format!("texture {name:?} at {} {what}: {problem}", path.display());
@@ -258,12 +283,11 @@ pub(crate) fn read_ktx2(bytes: Vec<u8>) -> Result<Image, String> {
         Err(_) => return Err("its reader panicked on it".to_owned()),
     };
     let header = reader.header();
-    let compressed = [Compressed::Bc7Srgb, Compressed::Bc7Unorm, Compressed::Bc5]
-        .into_iter()
-        .find(|compressed| header.format == Some(compressed.ktx2()));
+    let compressed =
+        (Compressed::ALL.into_iter()).find(|compressed| header.format == Some(compressed.ktx2()));
     let Some(compressed) = compressed else {
         return Err(format!(
-            "it holds {:?}, not BC7 of sRGB or of values, or BC5",
+            "it holds {:?}, not BC7 of sRGB or of values, BC5 or BC6H",
             header.format
         ));
     };
@@ -321,8 +345,7 @@ fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
     let header = reader.header();
     let size = [header.pixel_width, header.pixel_height];
     // Of what `read_ktx2` read it to hold.
-    let compressed = [Compressed::Bc7Unorm, Compressed::Bc5]
-        .into_iter()
+    let compressed = (Compressed::ALL.into_iter())
         .find(|compressed| header.format == Some(compressed.ktx2()))
         .unwrap_or(Compressed::Bc7Srgb);
     // Of one level or the full chain, as read; and of zstd alone, if supercompressed at all.
@@ -389,6 +412,74 @@ pub(crate) fn read(bytes: Vec<u8>) -> Result<Image, String> {
         size,
         pixels: bytes,
         format,
+    })
+}
+
+/// Whether `bytes` start as a Radiance HDR does, by the signature its writers start it with:
+/// `#?RADIANCE`, or `#?RGBE`, as some older ones write.
+fn is_hdr(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"#?RADIANCE") || bytes.starts_with(b"#?RGBE")
+}
+
+/// A Radiance HDR's decoder of `bytes`, reading as far as its header: strictly, but for a file of
+/// the older signature, which only a decoder that takes the signature as a comment reads.
+fn hdr_decoder(bytes: &[u8]) -> Result<HdrDecoder<Cursor<&[u8]>>, String> {
+    let strict = bytes.starts_with(b"#?RADIANCE");
+    HdrDecoder::with_strictness(Cursor::new(bytes), strict).map_err(|error| error.to_string())
+}
+
+/// Reads a Radiance HDR as far as its header, which gives its size, keeping `bytes` for
+/// [`Image::decoded`] to decode to RGBA of 16-bit floats. The error says what's wrong with it.
+///
+/// Fails before anything is decoded if a side is 0 or more than [`MAX_TEXTURE_SIZE`], or if there
+/// are more than [`MAX_FILE`] bytes; what's past the header fails only as it decodes.
+pub(crate) fn read_hdr(bytes: Vec<u8>) -> Result<Image, String> {
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(format!("it's more than {} MiB", MAX_FILE >> 20));
+    }
+    // The decoder panics only by a bug; that's the file's doing all the same, as for a PNG.
+    let size = panic::catch_unwind(|| {
+        let (width, height) = hdr_decoder(&bytes)?.dimensions();
+        check_size(width, height).map(|()| [width, height])
+    })
+    .unwrap_or_else(|_| Err("its decoder panicked on it".to_owned()))?;
+    Ok(Image {
+        size,
+        pixels: bytes,
+        format: Format::Hdr,
+    })
+}
+
+/// Decodes a Radiance HDR, which [`read_hdr`] read, to RGBA of 16-bit floats, linear, alpha 1:
+/// each of its RGBE texels, run-length encoded or flat, to its color, which past 65,504, the most a
+/// 16-bit float holds short of infinity, as the sun's disk in a sky can be, is that.
+fn decode_hdr(bytes: &[u8]) -> Result<Image, String> {
+    let decoder = hdr_decoder(bytes)?;
+    let (width, height) = decoder.dimensions();
+    check_size(width, height)?;
+    // Three floats of 4 bytes a texel, which become four of 2 in place, front to back: each
+    // texel's are read before its own are written, and it's written over only what's read.
+    let count = width as usize * height as usize;
+    let mut pixels = vec![0; count * 12];
+    (decoder.read_image(&mut pixels)).map_err(|error| error.to_string())?;
+    for texel in 0..count {
+        let from = texel * 12;
+        let channel = |i: usize| {
+            let bytes = [0, 1, 2, 3].map(|byte| pixels[from + 4 * i + byte]);
+            f32::from_ne_bytes(bytes)
+        };
+        let rgba = [channel(0), channel(1), channel(2), 1.0];
+        for (i, value) in rgba.into_iter().enumerate() {
+            let half = f16::from_f32(value.min(f16::MAX.to_f32()));
+            let to = texel * 8 + 2 * i;
+            pixels[to..to + 2].copy_from_slice(&half.to_ne_bytes());
+        }
+    }
+    pixels.truncate(count * 8);
+    Ok(Image {
+        size: [width, height],
+        pixels,
+        format: Format::Rgba16f,
     })
 }
 
@@ -802,6 +893,41 @@ pub(crate) mod tests {
         short[level + 16..level + 24].copy_from_slice(&64u64.to_le_bytes());
         let short = read_ktx2(short).expect("its header, whose level says it's whole");
         assert!(short.decoded().is_err(), "its level decompressed short");
+    }
+
+    /// A Radiance HDR reads as far as its header, of either signature, and decodes to RGBA of
+    /// 16-bit floats, alpha 1, each texel its RGBE's color, what's past the most a 16-bit float
+    /// holds clamped to it; a texture of it holds colors of high dynamic range, whatever it's added
+    /// as. One cut short fails as it decodes, and one too large as it's read.
+    #[test]
+    fn a_radiance_hdr_decodes_to_16_bit_floats() {
+        // 1, 0.5 and 0.25; 200, 100 and 50; and 255 times 2^14, then none.
+        let texels: [[u8; 4]; 3] = [[128, 64, 32, 129], [200, 100, 50, 136], [255, 0, 0, 150]];
+        let hdr = |signature: &str, width: u32| {
+            let header = format!("{signature}\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X {width}\n");
+            [header.as_bytes(), texels.as_flattened()].concat()
+        };
+        for signature in ["#?RADIANCE", "#?RGBE"] {
+            let read = read_hdr(hdr(signature, 3)).expect(signature);
+            assert_eq!((read.size, read.format), ([3, 1], Format::Hdr));
+            assert_eq!(read.texels(Texels::Color(Mipmaps::Averaged)), Texels::Hdr);
+            assert_eq!(read.decoded_len(), 3 * 8);
+            let decoded = read.decoded().expect(signature);
+            assert_eq!((decoded.size, decoded.format), ([3, 1], Format::Rgba16f));
+            let values: Vec<f32> = (decoded.pixels.as_chunks::<2>().0.iter())
+                .map(|&bytes| f16::from_ne_bytes(bytes).to_f32())
+                .collect();
+            let expected = [
+                1.0, 0.5, 0.25, 1.0, 200.0, 100.0, 50.0, 1.0, 65504.0, 0.0, 0.0, 1.0,
+            ];
+            assert_eq!(values, expected, "{signature}");
+        }
+        let mut cut = hdr("#?RADIANCE", 3);
+        cut.truncate(cut.len() - 2);
+        let cut = read_hdr(cut).expect("its header, whole");
+        assert!(cut.decoded().is_err(), "its texels cut short");
+        let wide = read_hdr(hdr("#?RADIANCE", 9000)).expect_err("too wide");
+        assert!(wide.contains("9000") && wide.contains("8192"), "{wide}");
     }
 
     #[test]

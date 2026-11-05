@@ -111,7 +111,7 @@ impl<'a> Frame<'a> {
                             },
                         ));
                 }
-                Use::Sampled | Use::CopySource => {}
+                Use::Sampled | Use::ComputeSampled | Use::Storage | Use::CopySource => {}
             }
         }
         let attachments = &attachments[..1 + usize::from(format.ids != vk::Format::UNDEFINED)];
@@ -155,6 +155,7 @@ impl<'a> Frame<'a> {
             ImageDecl::Target(target) => match &self.targets[target] {
                 Target::Swapchain(swapchain) => swapchain.format().color,
                 Target::Image(_) => ColorImage::FORMAT.color,
+                Target::Storage(_) => unreachable!("no pass draws into a storage image"),
             },
             ImageDecl::Transient { kind, .. } => kind.format(),
         }
@@ -202,14 +203,7 @@ impl<'a> Pass<'_, 'a> {
             "a pass samples only the images it was added sampling, and not image {}",
             image.0
         );
-        match graph.images[image.0 as usize] {
-            ImageDecl::Target(target) => match &self.frame.targets[target] {
-                Target::Image(image) => image.index(),
-                Target::Swapchain(_) => unreachable!("only offscreen targets are sampled"),
-            },
-            ImageDecl::Transient { .. } => (self.frame.frames.transients.image(image).index)
-                .expect("only kinds that shaders sample are sampled"),
-        }
+        self.frame.sampled_index(image)
     }
 
     /// As [`Frame::upload`].

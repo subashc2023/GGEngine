@@ -49,8 +49,9 @@ pub enum Mipmaps {
 /// decoded to linear, with smaller mip levels as [`Mipmaps`] says, which a `Mipmaps` stands for, or
 /// with them made already; data, such as a font's distance field, which shaders read as stored,
 /// each channel a byte from 0 to 1, with one level; colors compressed as BC7, as a game's package
-/// holds its textures; or a material's map of data, as [`Map`] says, with its full chain of levels,
-/// as stored or compressed.
+/// holds its textures; a material's map of data, as [`Map`] says, with its full chain of levels,
+/// as stored or compressed; or colors of high dynamic range, as a sky's, of one level, as stored or
+/// compressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Texels {
     Color(Mipmaps),
@@ -82,6 +83,14 @@ pub enum Texels {
         map: Map,
         mipmapped: bool,
     },
+    /// Colors of high dynamic range, linear, as a `.hdr` image holds them: rows of RGBA of 16-bit
+    /// floats, 8 bytes a texel, tightly packed, top row first, of one level, which shaders read as
+    /// they are.
+    Hdr,
+    /// Colors of high dynamic range compressed as BC6H, unsigned, as a game's package holds a sky:
+    /// its one level's blocks of 4 by 4 texels, 16 bytes each, laid out as [`Bc7`](Self::Bc7)'s
+    /// are, which shaders read as [`Hdr`](Self::Hdr)'s, alpha 1.
+    Bc6h,
 }
 
 /// What a material's map holds, which says what shows in its place until its image is there, and
@@ -118,7 +127,9 @@ impl Texels {
     /// What its texels stand for.
     pub(crate) fn kind(self) -> Kind {
         match self {
-            Self::Color(_) | Self::ColorLevels | Self::Bc7 { .. } => Kind::Color,
+            Self::Color(_) | Self::ColorLevels | Self::Bc7 { .. } | Self::Hdr | Self::Bc6h => {
+                Kind::Color
+            }
             Self::Data => Kind::Data,
             Self::Map(map) | Self::MapLevels(map) | Self::CompressedMap { map, .. } => {
                 Kind::Map(map)
@@ -142,7 +153,7 @@ impl Texels {
         match self {
             Self::Color(mipmaps) => mipmaps != Mipmaps::None,
             Self::ColorLevels | Self::Map(_) | Self::MapLevels(_) => true,
-            Self::Data => false,
+            Self::Data | Self::Hdr | Self::Bc6h => false,
             Self::Bc7 { mipmapped } | Self::CompressedMap { mipmapped, .. } => mipmapped,
         }
     }
@@ -159,19 +170,23 @@ impl Texels {
             Self::CompressedMap {
                 map: Map::Normal, ..
             } => TextureFormat::Bc5Unorm,
+            Self::Hdr => TextureFormat::Rgba16Float,
+            Self::Bc6h => TextureFormat::Bc6hUfloat,
         }
     }
 
     /// How many bytes a texture `size` texels across and down takes of these: its first level's
     /// RGBA8 for colors, data and maps, from which a frame makes the rest, and every level's for
-    /// those that come with them, and for what's compressed.
+    /// those that come with them, and for what's compressed or of high dynamic range.
     fn bytes(self, size: [u32; 2]) -> u64 {
         match self {
             Self::Color(_) | Self::Data | Self::Map(_) => self.format().bytes(size, false),
             Self::ColorLevels
             | Self::MapLevels(_)
             | Self::Bc7 { .. }
-            | Self::CompressedMap { .. } => self.format().bytes(size, self.mipmapped()),
+            | Self::CompressedMap { .. }
+            | Self::Hdr
+            | Self::Bc6h => self.format().bytes(size, self.mipmapped()),
         }
     }
 }
@@ -484,6 +499,8 @@ fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Re
                 map: Map::Normal,
                 mipmapped: true,
             } => "BC5 blocks in its levels",
+            Texels::Hdr => "RGBA of 16-bit floats",
+            Texels::Bc6h => "BC6H blocks",
         };
         return Err(bad_texture(
             name,
@@ -606,7 +623,9 @@ pub fn add_levels(pixels: &mut Vec<u8>, size: [u32; 2], texels: Texels) {
         | Texels::Data
         | Texels::Bc7 { .. }
         | Texels::MapLevels(_)
-        | Texels::CompressedMap { .. } => {}
+        | Texels::CompressedMap { .. }
+        | Texels::Hdr
+        | Texels::Bc6h => {}
     }
 }
 
@@ -942,6 +961,14 @@ mod tests {
         replaced.expect("RGBA8 in place of BC7");
         let replaced = textures.replace("one", texture, [1, 1], blocks(1), chain);
         replaced.expect("BC7 in place of RGBA8");
+        // And colors of high dynamic range, as they are or compressed, a level each.
+        let replaced = textures.replace("one", texture, [2, 1], &[0; 16], Texels::Hdr);
+        replaced.expect("16-bit floats in place of BC7");
+        let replaced = textures.replace("one", texture, [5, 5], blocks(4), Texels::Bc6h);
+        replaced.expect("BC6H in place of 16-bit floats");
+        let error = (textures.add("short", [2, 1], &[0; 8], Texels::Hdr))
+            .expect_err("RGBA8's bytes where 16-bit floats are twice them");
+        assert!(error.to_string().contains("16-bit floats"), "{error}");
     }
 
     #[test]

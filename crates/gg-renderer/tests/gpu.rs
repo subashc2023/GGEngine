@@ -24,8 +24,8 @@ use gg_renderer::{
     AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
     Light, LightKind, Line, Lod, Lods, Map, Material, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
     ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler,
-    Settings, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui, UploadPath,
-    Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
+    Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
+    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -81,6 +81,9 @@ fn main() -> ExitCode {
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         lit_spheres_match_their_reference,
+        a_uniform_sky_lights_white_as_itself,
+        the_sky_shows_each_way_behind_the_world,
+        sky_lit_spheres_match_their_reference,
         lines_match_their_reference,
         grids_match_their_reference,
         views_match_their_reference,
@@ -252,7 +255,7 @@ fn shader(file: &str) -> PathBuf {
 }
 
 /// What a test adds meshes, shaders, textures and materials to, and the uploads that take them to
-/// its renderer; the lights its frames shade with; and no draws, for a frame's canvas.
+/// its renderer; the lights and the sky its frames shade with; and no draws, for a frame's canvas.
 #[derive(Default)]
 struct Stores {
     meshes: Meshes,
@@ -261,14 +264,15 @@ struct Stores {
     materials: Materials,
     uploads: Uploads,
     lights: Vec<Light>,
+    sky: Option<Sky>,
     none: Draws,
 }
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
     /// draws nothing on its canvas, picks and outlines nothing and isn't tonemapped, at time 0
-    /// with an exposure of 1 and the stores' lights, with the uploads of what's been added since
-    /// the last frame's.
+    /// with an exposure of 1 and the stores' lights and sky, with the uploads of what's been added
+    /// since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -282,6 +286,7 @@ impl Stores {
             materials,
             uploads,
             lights,
+            sky,
             none,
         } = self;
         uploads.take(meshes, shaders, textures, materials);
@@ -291,6 +296,7 @@ impl Stores {
             exposure: 1.0,
             time: 0.0,
             lights,
+            sky: *sky,
             viewport,
             viewpoint,
             uploads,
@@ -3941,6 +3947,320 @@ fn lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "lit_spheres", SIZE, SIZE);
+}
+
+/// A sky's texture of `size` texels, each `texel(x, y)`'s linear RGB, as [`Texels::Hdr`] takes
+/// them, alpha 1.
+fn sky_texture(
+    textures: &mut Textures,
+    size: [u32; 2],
+    texel: impl Fn(u32, u32) -> [f32; 3],
+) -> Texture {
+    let mut pixels = Vec::new();
+    for y in 0..size[1] {
+        for x in 0..size[0] {
+            let [r, g, b] = texel(x, y);
+            for channel in [r, g, b, 1.0] {
+                pixels.extend(half::f16::from_f32(channel).to_ne_bytes());
+            }
+        }
+    }
+    textures
+        .add("sky", size, pixels, Texels::Hdr)
+        .expect("a sky")
+}
+
+/// Squares, each a model's, seen head-on without perspective under a sky of 0.5 every way, with
+/// no lights, prefiltered from the frame after its texture shows: as Fdez-Agüera's scattering many
+/// times over keeps what a white surface reflects whole, every white one shows the sky's 0.5,
+/// dielectric or metal, smooth or rough; a smooth metal of another color its color of it, as the
+/// split sum's scale and bias give; one whose occlusion map holds a half, a half of it; and an
+/// unlit one its color alone. The sky shows behind them, at its luminance times the exposure. Its
+/// texture given another image, of half the light, the frame after that shows prefilters it again.
+fn a_uniform_sky_lights_white_as_itself() {
+    const SIDE: u32 = 16;
+    const SQUARES: u32 = 7;
+    const WIDTH: u32 = SIDE * (SQUARES + 1);
+    let mut renderer = renderer(WIDTH, SIDE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    // 2 times its luminance, 0.25: 0.5, which shows as it is, unlike 1, which a brighter value
+    // would clamp to.
+    let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [2.0; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 0.25,
+    });
+    let half_occluded = stores.textures.add(
+        "occlusion",
+        [4, 4],
+        [[128, 255, 255, 255]; 16].as_flattened(),
+        Texels::Map(Map::Surface),
+    );
+    let half_occluded = Sampled::of(half_occluded.expect("an occlusion map"));
+    let square = model_square(&mut stores.meshes);
+    let white = Material {
+        color: Vec4::ONE,
+        metallic: 0.0,
+        roughness: 1.0,
+        ..Material::default()
+    };
+    let tint = Vec4::new(1.0, 0.5, 0.25, 1.0);
+    let materials = [
+        white,
+        Material {
+            roughness: 0.0,
+            ..white
+        },
+        Material {
+            metallic: 1.0,
+            roughness: 0.5,
+            ..white
+        },
+        Material {
+            metallic: 1.0,
+            ..white
+        },
+        Material {
+            color: tint,
+            metallic: 1.0,
+            roughness: 0.0,
+            ..white
+        },
+        Material {
+            occlusion_texture: half_occluded,
+            ..white
+        },
+        Material {
+            color: Vec4::new(0.3, 0.3, 0.3, 1.0),
+            unlit: true,
+            ..white
+        },
+    ];
+    let at = |i: u32| Vec3::new(i as f32 - SQUARES as f32 / 2.0, 0.0, 0.0);
+    let mut draws = Draws::default();
+    for (i, material) in (0..).zip(&materials) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(Mat4::from_translation(at(i)), &draw, 0);
+    }
+    let viewport = filling([WIDTH, SIDE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let frame = frame_pixels(&mut renderer);
+    let occluded = 0.5 * 128.0 / 255.0;
+    let expected = [
+        [0.5; 3],
+        [0.5; 3],
+        [0.5; 3],
+        [0.5; 3],
+        [0.5 * tint.x, 0.5 * tint.y, 0.5 * tint.z],
+        [occluded; 3],
+        [0.3; 3],
+        // The sky, past the squares.
+        [0.5; 3],
+    ];
+    for (i, rgb) in (0..).zip(expected) {
+        let [r, g, b] = rgb.map(encoded);
+        let got = pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
+        // A level's rounding and the table's sampling may take a smooth metal's reflection a
+        // little off its color.
+        let near = got
+            .iter()
+            .zip([r, g, b, 255])
+            .all(|(&a, b)| a.abs_diff(b) <= 2);
+        assert!(near, "square {i} shows {got:?}, not {rgb:?} encoded");
+    }
+    // Its texture given another image, of half the light, it's prefiltered again once that shows.
+    let dimmer = [[1.0_f32, 1.0, 1.0, 1.0].map(|value| half::f16::from_f32(value).to_ne_bytes())];
+    let dimmer = dimmer.as_flattened().as_flattened().repeat(128 * 64);
+    let replaced = stores
+        .textures
+        .replace("sky", sky, [128, 64], dimmer, Texels::Hdr);
+    replaced.expect("another image");
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let frame = frame_pixels(&mut renderer);
+    let quarter = encoded(0.25);
+    for i in [0, 3, SQUARES] {
+        let got = pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
+        assert!(
+            close(got, [quarter, quarter, quarter, 255]),
+            "square {i} shows {got:?} under the dimmer sky"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// A sky of a color a way, seen through a narrow perspective each way in turn: each of the four
+/// ways between the axes round the horizon, each its column's color in the image's middle row, as
+/// the image's center column faces +X, a quarter of the way across -Z; straight up its top row's,
+/// and straight down its bottom row's; at its luminance times the exposure. Its texture given a
+/// BC6H block of one color instead, the sky shows that color as the GPU decodes it.
+fn the_sky_shows_each_way_behind_the_world() {
+    const SIZE: u32 = 3;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let colors = [
+        [0.25, 0.0, 0.0],
+        [0.0, 0.25, 0.0],
+        [0.0, 0.0, 0.25],
+        [0.25, 0.25, 0.0],
+    ];
+    let (top, bottom) = ([0.0, 0.25, 0.25], [0.125, 0.125, 0.125]);
+    let sky = sky_texture(&mut stores.textures, [4, 3], |x, y| match y {
+        0 => top,
+        1 => colors[x as usize],
+        _ => bottom,
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 8.0,
+    });
+    let draws = Draws::default();
+    let viewport = filling([SIZE, SIZE]);
+    // Facing `way`, from anywhere: the sky is as far as can be.
+    let looking = |way: Vec3| Viewpoint {
+        position: Vec3::new(5.0, -3.0, 2.0),
+        rotation: Quat::from_rotation_arc(Vec3::NEG_Z, way),
+        projection: Projection::Perspective {
+            fov: 0.1,
+            near: 0.5,
+        },
+    };
+    settle(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        looking(Vec3::X),
+        &draws,
+    );
+    let ways = [
+        (Vec3::new(-1.0, 0.0, -1.0), colors[0]),
+        (Vec3::new(1.0, 0.0, -1.0), colors[1]),
+        (Vec3::new(1.0, 0.0, 1.0), colors[2]),
+        (Vec3::new(-1.0, 0.0, 1.0), colors[3]),
+        (Vec3::Y, top),
+        (Vec3::NEG_Y, bottom),
+    ];
+    for (way, color) in ways {
+        let data = RenderData {
+            exposure: 0.5,
+            ..stores.data(viewport, looking(way.normalize()), &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        // Of 8 times the exposure's 0.5.
+        let [r, g, b] = color.map(|channel: f32| encoded(channel * 4.0));
+        let got = pixel_at(&frame, SIZE, [1, 1]);
+        assert!(
+            close(got, [r, g, b, 255]),
+            "looking {way}, {got:?}, not {color:?} times 4 encoded"
+        );
+    }
+    // A block of BC6H's mode 11, its bits from the lowest: the mode, 3, in 5 bits; both endpoints,
+    // the same, each red, green and blue in 10 bits; and every texel's index, 0, picking the first.
+    // Unsigned, an endpoint of 10 bits that's neither 0 nor 1023 decodes to the 16-bit float of
+    // bits 31 times it plus 15: about 0.125, 0.0625 and 0.03125.
+    let [r, g, b] = [396_u128, 363, 330];
+    let block = (3 | r << 5 | g << 15 | b << 25 | r << 35 | g << 45 | b << 55).to_le_bytes();
+    let replaced = (stores.textures).replace("sky", sky, [4, 4], &block[..], Texels::Bc6h);
+    replaced.expect("a compressed sky");
+    settle(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        looking(Vec3::X),
+        &draws,
+    );
+    let data = RenderData {
+        exposure: 0.5,
+        ..stores.data(viewport, looking(Vec3::X), &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let frame = frame_pixels(&mut renderer);
+    let color = [r, g, b].map(|endpoint| half::f16::from_bits(31 * endpoint as u16 + 15).to_f32());
+    let [r, g, b] = color.map(|channel| encoded(channel * 4.0));
+    let got = pixel_at(&frame, SIZE, [1, 1]);
+    assert!(
+        close(got, [r, g, b, 255]),
+        "a BC6H sky shows {got:?}, not {color:?} times 4 encoded"
+    );
+    shut_down(renderer);
+}
+
+/// Spheres of one color, opaque and rough 0 to 1 from left to right, metallic 0 to 1 from top to
+/// bottom, lit by a sky alone, a gradient from a blue zenith to a pale horizon over dark ground,
+/// with a bright patch where a sun would be, high to the upper left, which shows behind them, as a
+/// camera with perspective sees them, tonemapped by PBR Neutral, against their reference image.
+fn sky_lit_spheres_match_their_reference() {
+    const SIZE: u32 = 200;
+    const STEPS: u32 = 5;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 9.0),
+        projection: Projection::Perspective {
+            fov: PI / 6.0,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    };
+    let [width, height] = [128, 64];
+    let sky = sky_texture(&mut stores.textures, [width, height], |x, y| {
+        // How far up, from -1 straight down to 1 straight up, and round, from 0 at +X.
+        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
+        let round = (x as f32 + 0.5) / width as f32;
+        let sun = (round - 0.15).abs() < 0.04 && (up - 0.6).abs() < 0.08;
+        if sun {
+            [40.0, 36.0, 30.0]
+        } else if up > 0.0 {
+            let pale = 1.0 - up;
+            [0.3 + 0.6 * pale, 0.5 + 0.4 * pale, 1.0]
+        } else {
+            [0.12, 0.09, 0.06]
+        }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let sphere = sphere(&mut stores.meshes, 0.42, 24, 48);
+    let mut draws = Draws::default();
+    let step = |i: u32| i as f32 / (STEPS - 1) as f32;
+    for row in 0..STEPS {
+        for column in 0..STEPS {
+            let material = Material {
+                color: Vec4::new(0.9, 0.45, 0.2, 1.0),
+                metallic: step(row),
+                roughness: step(column),
+                ..Material::default()
+            };
+            let material = stores.materials.add(&material);
+            let draw =
+                MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
+            let middle = (STEPS - 1) as f32 / 2.0;
+            let at = Vec3::new(column as f32 - middle, middle - row as f32, 0.0);
+            draws.push_draw(Mat4::from_translation(at), &draw, 0);
+        }
+    }
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let data = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    check(renderer, "sky_lit_spheres", SIZE, SIZE);
 }
 
 /// Renders a frame of `data`, without UI.

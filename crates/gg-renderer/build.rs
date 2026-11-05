@@ -4,10 +4,11 @@
 //! one, which `GG_SLANGC` names to it.
 
 use std::env;
-use std::path::{self, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 12] = [
+/// Those that draw, of a vertex and a fragment shader each.
+const SHADERS: [&str; 13] = [
     "circle",
     "egui",
     "grid",
@@ -16,11 +17,24 @@ const SHADERS: [&str; 12] = [
     "model_masked",
     "model_opaque",
     "outline",
+    "sky",
     "sprite",
     "text",
     "tonemap",
     "view",
 ];
+
+/// Those that compute, with their entry points.
+const COMPUTE: [(&str, &[&str]); 1] = [(
+    "prefilter",
+    &[
+        "cube_main",
+        "downsample_main",
+        "irradiance_main",
+        "specular_main",
+        "brdf_main",
+    ],
+)];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=SLANGC");
@@ -36,32 +50,47 @@ fn main() {
     println!("cargo::rustc-env=GG_SLANGC={name}");
     // The whole directory, so that a change to a file the shaders include compiles them again too.
     println!("cargo::rerun-if-changed=shaders");
+    let drawing: &[(&str, &str)] = &[("vertex_main", "vertex"), ("fragment_main", "fragment")];
     for shader in SHADERS {
-        let source = format!("shaders/{shader}.slang");
-        let output = Command::new(&slangc)
-            .arg(&source)
-            // As `compile` in src/shader/mod.rs compiles games' shaders, which says why.
-            .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
-            .arg("-matrix-layout-column-major")
-            .args(["-warnings-as-errors", "38006"])
-            .args(["-entry", "vertex_main", "-stage", "vertex"])
-            .args(["-entry", "fragment_main", "-stage", "fragment"])
-            .arg("-o")
-            .arg(out.join(format!("{shader}.spv")))
-            .output()
-            .unwrap_or_else(|error| {
-                panic!(
-                    "can't run {}: {error}; install the Vulkan SDK, or set SLANGC to slangc's path",
-                    slangc.display()
-                )
-            });
-        if !output.status.success() {
+        compile(&slangc, &out, shader, drawing);
+    }
+    for (shader, entries) in COMPUTE {
+        let entries: Vec<_> = (entries.iter()).map(|&entry| (entry, "compute")).collect();
+        compile(&slangc, &out, shader, &entries);
+    }
+}
+
+/// Compiles `shaders/<shader>.slang` with `slangc` into `<shader>.spv` in `out`, of `entries`, each
+/// an entry point and its stage.
+fn compile(slangc: &Path, out: &Path, shader: &str, entries: &[(&str, &str)]) {
+    let source = format!("shaders/{shader}.slang");
+    let mut command = Command::new(slangc);
+    command
+        .arg(&source)
+        // As `compile` in src/shader/mod.rs compiles games' shaders, which says why.
+        .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
+        .arg("-matrix-layout-column-major")
+        .args(["-warnings-as-errors", "38006"])
+        .args(["-warnings-disable", "39001"]);
+    for (entry, stage) in entries {
+        command.args(["-entry", entry, "-stage", stage]);
+    }
+    let output = command
+        .arg("-o")
+        .arg(out.join(format!("{shader}.spv")))
+        .output()
+        .unwrap_or_else(|error| {
             panic!(
-                "slangc failed on {source}:\n{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+                "can't run {}: {error}; install the Vulkan SDK, or set SLANGC to slangc's path",
+                slangc.display()
+            )
+        });
+    if !output.status.success() {
+        panic!(
+            "slangc failed on {source}:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 

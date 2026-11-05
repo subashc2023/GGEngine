@@ -1,9 +1,10 @@
-//! The bindless descriptor sets: every texture shaders can sample, and a fixed set of samplers,
-//! in one descriptor set for each frame in flight, of one layout, that every pipeline shares.
-//! Shaders pick a texture and a sampler by index, and read buffers through their device
-//! addresses, so nothing else is ever bound. A frame binds the set of its slot; a slot's view
-//! changes in the set of the frame being recorded at once, and in each other set as that set's
-//! next frame begins, once the frame that last used it has finished.
+//! The bindless descriptor sets: every texture shaders can sample, a fixed set of samplers, and
+//! the levels of the storage images compute shaders write, in one descriptor set for each frame in
+//! flight, of one layout, that every pipeline shares. Shaders pick a texture, a sampler and a
+//! storage image by index, and read buffers through their device addresses, so nothing else is
+//! ever bound. A frame binds the set of its slot; a slot's view changes in the set of the frame
+//! being recorded at once, and in each other set as that set's next frame begins, once the frame
+//! that last used it has finished.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, PoisonError};
@@ -24,6 +25,11 @@ pub(crate) const TEXTURES: u32 = 65_536;
 /// [`Texture::placed`](crate::Texture::placed) does, so that its index is known before it's made.
 /// The other 4,096 are given out wherever one is free.
 pub const PLACED_TEXTURES: u32 = TEXTURES - 4_096;
+
+/// How many storage images the set holds, a mip level of an image each, which compute shaders
+/// write and read by index, in the general layout. A device with descriptor indexing holds at least
+/// 500,000.
+pub(crate) const STORAGE_IMAGES: u32 = 4_096;
 
 /// The bytes of push constants every pipeline gets: 128, the most every device allows. Shaders
 /// see them from offset 0, in every stage.
@@ -156,7 +162,38 @@ pub(crate) struct Bindless {
 /// What the lock guards.
 struct State {
     slots: Slots,
+    storage: StorageSlots,
     rewrites: Rewrites,
+}
+
+/// Which storage image slots are in use: by a storage image's level, or by one retired until the
+/// GPU is done with the frames that may write it. Each takes its view in every set at once, and
+/// keeps it until it's freed.
+struct StorageSlots {
+    /// Slots whose views were destroyed, to reuse first.
+    free: Vec<u32>,
+    /// The first slot never used.
+    next: u32,
+}
+
+impl StorageSlots {
+    /// Takes a free slot for a level of the image named `name`.
+    fn take(&mut self, name: &str) -> Result<u32> {
+        match self.free.pop() {
+            Some(index) => Ok(index),
+            None if self.next < STORAGE_IMAGES => {
+                self.next += 1;
+                Ok(self.next - 1)
+            }
+            None => Err(Error::new(
+                "gpu.too_many_storage_images",
+                format!(
+                    "a level of storage image {name:?} has no slot: the bindless set holds \
+                     {STORAGE_IMAGES} storage images, and all are in use"
+                ),
+            )),
+        }
+    }
 }
 
 /// The views queued for texture slots in the sets of frames that may still be running, each
@@ -286,6 +323,10 @@ impl Bindless {
             pipeline_layout: vk::PipelineLayout::null(),
             state: Mutex::new(State {
                 slots: Slots::new(),
+                storage: StorageSlots {
+                    free: Vec::new(),
+                    next: 0,
+                },
                 rewrites: Rewrites::new(),
             }),
         };
@@ -316,11 +357,15 @@ impl Bindless {
             }
             // Textures change while frames that use other textures are in flight, and a slot of
             // the set of the frame being recorded changes while the frame before samples it
-            // through the other set.
+            // through the other set; storage images come and go while frames that use others are.
             let texture_flags = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
                 | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING
                 | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
-            let binding_flags = [texture_flags, vk::DescriptorBindingFlags::empty()];
+            let binding_flags = [
+                texture_flags,
+                vk::DescriptorBindingFlags::empty(),
+                texture_flags,
+            ];
             let bindings = [
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(0)
@@ -332,6 +377,11 @@ impl Bindless {
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .descriptor_count(SAMPLERS as u32)
                     .stage_flags(vk::ShaderStageFlags::ALL),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(STORAGE_IMAGES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
             ];
             let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
                 .binding_flags(&binding_flags);
@@ -339,7 +389,9 @@ impl Bindless {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
                 .bindings(&bindings)
                 .push_next(&mut flags_info);
-            let contents = format_args!("{TEXTURES} textures and {SAMPLERS} samplers");
+            let contents = format_args!(
+                "{TEXTURES} textures, {SAMPLERS} samplers and {STORAGE_IMAGES} storage images"
+            );
             self.layout = device
                 .create_descriptor_set_layout(&layout_info, None)
                 .map_err(|e| {
@@ -355,6 +407,10 @@ impl Bindless {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLER,
                     descriptor_count: (SAMPLERS * SETS) as u32,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_IMAGE,
+                    descriptor_count: STORAGE_IMAGES * SETS as u32,
                 },
             ];
             let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -547,6 +603,44 @@ impl Bindless {
         self.lock().slots.release(index);
     }
 
+    /// Puts `view`, of a level of the storage image named `name`, in a free storage slot, in every
+    /// set at once, and returns the slot's index.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the sets', and `view` a live view of one level of a storage image of it, in
+    /// the general layout whenever a shader reads or writes it; no frame uses the slot, which is
+    /// free as it's taken.
+    pub(crate) unsafe fn add_storage(
+        &self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        name: &str,
+    ) -> Result<u32> {
+        let mut state = self.lock();
+        let index = state.storage.take(name)?;
+        let image_info = [vk::DescriptorImageInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+        for &set in &self.sets {
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .dst_array_element(index)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&image_info);
+            // SAFETY: the caller guarantees the device and view, and that no frame uses the slot;
+            // the lock is held.
+            unsafe { device.update_descriptor_sets(&[write], &[]) };
+        }
+        Ok(index)
+    }
+
+    /// Frees a storage slot, once the GPU is done with the frames that may use it.
+    pub(crate) fn remove_storage(&self, index: u32) {
+        self.lock().storage.free.push(index);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         // Neither the slot list nor the queues are ever left half-changed.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -667,5 +761,20 @@ mod tests {
         let error = slots.take(None, "one too many").expect_err("no slot left");
         assert_eq!(error.code(), "gpu.too_many_textures");
         assert!(error.to_string().contains("\"one too many\""), "{error}");
+    }
+
+    #[test]
+    fn storage_slots_run_out_at_the_end_and_come_back_once_freed() {
+        let mut slots = StorageSlots {
+            free: Vec::new(),
+            next: 0,
+        };
+        for expected in 0..STORAGE_IMAGES {
+            assert_eq!(slots.take("given out").ok(), Some(expected));
+        }
+        let error = slots.take("one too many").expect_err("no slot left");
+        assert_eq!(error.code(), "gpu.too_many_storage_images");
+        slots.free.push(7);
+        assert_eq!(slots.take("again").ok(), Some(7));
     }
 }

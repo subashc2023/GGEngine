@@ -1,8 +1,8 @@
 //! A frame's render graph: the passes a frame runs, in the order they're added, and how each uses
-//! the images it renders into, samples and copies from, which the frame places every barrier and
-//! layout transition from as each pass begins; and the images that are the graph's own, which last
-//! for a frame, made from what the passes say of them, in memory that those whose uses in a frame
-//! don't overlap share, as `transients` says.
+//! the images it renders into, computes into, samples and copies from, which the frame places
+//! every barrier and layout transition from as each pass begins; and the images that are the
+//! graph's own, which last for a frame, made from what the passes say of them, in memory that
+//! those whose uses in a frame don't overlap share, as `transients` says.
 
 use std::ops::Range;
 
@@ -121,6 +121,11 @@ pub(crate) enum Use {
     Depth,
     /// Sampled by its fragment shaders, through the image's slot in the bindless set.
     Sampled,
+    /// Sampled by its compute shaders, through the image's slot in the bindless set.
+    ComputeSampled,
+    /// Written and read by its compute shaders, a level at a time, through the storage slots of a
+    /// storage image's levels, in the general layout, as its last use left it.
+    Storage,
     /// Copied from, as a read back is.
     CopySource,
 }
@@ -153,6 +158,17 @@ impl Use {
                 reads: vk::AccessFlags2::SHADER_SAMPLED_READ,
                 writes: vk::AccessFlags2::NONE,
                 layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                discards: false,
+            },
+            Self::ComputeSampled => Access {
+                stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+                ..Self::Sampled.access()
+            },
+            Self::Storage => Access {
+                stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+                reads: vk::AccessFlags2::SHADER_STORAGE_READ,
+                writes: vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                layout: vk::ImageLayout::GENERAL,
                 discards: false,
             },
             Self::CopySource => Access {
@@ -199,6 +215,8 @@ pub(crate) enum PassKind {
     ReadIds,
     /// Reads a color image back, as [`Frame::read_image`](crate::Frame::read_image) does.
     ReadImage,
+    /// Dispatches compute shaders, as [`Frame::compute`](crate::Frame::compute) records them.
+    Compute,
 }
 
 impl Graph {
@@ -281,6 +299,17 @@ impl Graph {
     pub fn render(&mut self, label: Label) -> RenderPass<'_> {
         let start = self.uses.len();
         RenderPass {
+            graph: self,
+            label,
+            start,
+        }
+    }
+
+    /// A pass that dispatches compute shaders, named `label`, whose images the builder it returns
+    /// takes, before [`ComputePass::add`] adds it.
+    pub fn compute(&mut self, label: Label) -> ComputePass<'_> {
+        let start = self.uses.len();
+        ComputePass {
             graph: self,
             label,
             start,
@@ -414,8 +443,8 @@ impl RenderPass<'_> {
     }
 
     /// Samples `image` from the draws' fragment shaders, as an earlier pass left it, through the
-    /// index [`Pass::sampled`](crate::Pass::sampled) gives: a target that's an offscreen image, or
-    /// a color image or an image of IDs of the graph's own.
+    /// index [`Pass::sampled`](crate::Pass::sampled) gives: a target that's an offscreen image or a
+    /// storage image, or a color image or an image of IDs of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::Sampled)
     }
@@ -460,7 +489,9 @@ impl RenderPass<'_> {
                 Use::Ids => kind == Some(Kind::Ids),
                 Use::Depth => kind == Some(Kind::Depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
-                Use::CopySource => unreachable!("a render pass copies nothing"),
+                Use::ComputeSampled | Use::Storage | Use::CopySource => {
+                    unreachable!("a render pass neither computes nor copies")
+                }
             };
             assert!(
                 fits,
@@ -481,6 +512,73 @@ impl RenderPass<'_> {
             }
         }
         graph.add_pass(label, PassKind::Render, start)
+    }
+}
+
+/// A pass that dispatches compute shaders, being built: the images it samples and those it writes.
+/// [`ComputePass::add`] adds it to its graph.
+#[must_use = "a pass is in its graph once it's added"]
+pub struct ComputePass<'g> {
+    graph: &'g mut Graph,
+    label: Label,
+    /// Where its uses start in the graph's.
+    start: usize,
+}
+
+impl ComputePass<'_> {
+    /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
+    /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
+    /// a storage image, or a color image or an image of IDs of the graph's own.
+    pub fn sample(self, image: ImageId) -> Self {
+        self.with(image, Use::ComputeSampled)
+    }
+
+    /// Writes and reads `image`, a storage image among the frame's targets, through its levels'
+    /// storage slots, which [`Compute::storage`](crate::Compute::storage) gives, as its last use
+    /// left it: what no pass has written since it was made is undefined.
+    pub fn write(self, image: ImageId) -> Self {
+        self.with(image, Use::Storage)
+    }
+
+    fn with(self, image: ImageId, use_: Use) -> Self {
+        self.graph.uses.push((image, use_));
+        self
+    }
+
+    /// Adds the pass to its graph.
+    ///
+    /// # Panics
+    ///
+    /// If it uses an image twice, writes one of the graph's own, which are no storage images,
+    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote.
+    pub fn add(self) -> PassId {
+        let Self {
+            graph,
+            label,
+            start,
+        } = self;
+        let uses = &graph.uses[start..];
+        for (i, &(image, use_)) in uses.iter().enumerate() {
+            assert!(
+                uses[..i].iter().all(|&(used, _)| used != image),
+                "pass {label:?} uses image {} twice; an image is in one layout at a time",
+                image.0
+            );
+            let kind = graph.kind(image);
+            let fits = match use_ {
+                Use::ComputeSampled => kind.is_none_or(Kind::sampled),
+                // Only a target can be a storage image, as the frame checks.
+                Use::Storage => kind.is_none(),
+                _ => unreachable!("a compute pass samples and writes alone"),
+            };
+            assert!(
+                fits,
+                "pass {label:?} uses image {} as {use_:?}, but it's {}",
+                image.0,
+                kind.map_or_else(|| "a target".to_owned(), |kind| format!("{kind:?}"))
+            );
+        }
+        graph.add_pass(label, PassKind::Compute, start)
     }
 }
 

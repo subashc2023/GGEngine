@@ -1,5 +1,5 @@
-// Models' meshes, shaded as glTF's metallic-roughness materials are, by every light of the frame;
-// or, in a frame without lights and for a material that's unlit, drawn unlit, as
+// Models' meshes, shaded as glTF's metallic-roughness materials are, by every light of the frame
+// and its sky; or, in a frame without either and for a material that's unlit, drawn unlit, as
 // KHR_materials_unlit defines it: each fragment its material's base color times its texture's,
 // sampled at the vertices' texture coordinates, times the vertices' color. Each instance is a mesh
 // with its own transform, ID and material, writing its ID where it shows. `ModelVertex` in
@@ -9,9 +9,12 @@
 // Shading follows glTF 2.0's Appendix B, as Khronos's sample viewer implements it: a Lambertian
 // diffuse lobe and a GGX specular lobe, with Smith's height-correlated visibility, Schlick's
 // Fresnel, and 0.04 reflected head-on by every dielectric. Lights fall off as
-// KHR_lights_punctual's reference does. Their light, times the frame's exposure, then the
-// material's emission, as the view shows it, make the color. The occlusion map darkens only light
-// from all around, of which there's none until image-based lighting.
+// KHR_lights_punctual's reference does. The sky lights it from all around by its prefiltered
+// light, through the split sum, with Fdez-Agüera's roughness-dependent Fresnel and his scattering
+// many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
+// 2019), as the sample viewer's ibl.glsl and pbr.frag have it (glTF-Sample-Renderer at df3e51cb),
+// which the occlusion map darkens, as it darkens nothing else. Their light, times the frame's
+// exposure, then the material's emission, as the view shows it, make the color.
 //
 // As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
 // which blending would leave as it was, so that a pick there finds what's behind it; it writes no
@@ -48,6 +51,8 @@ static const float LEAST_ROUGHNESS = 0.045;
 static const float BRIGHTEST = 65504.0;
 static const uint UNLIT = 1;
 static const uint NORMAL_MAPPED = 2;
+// `Sampler::LinearClamp`'s index in the bindless set.
+static const uint LINEAR_CLAMP = 0;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -104,6 +109,34 @@ float pow5(float x) {
     return x2 * x2 * x;
 }
 
+// How much of the sky's light GGX reflects, of a material of `f0` and `roughness` seen at a cosine
+// of `n_dot_v`, by the split sum's `table`, there: once, with Fresnel's dependence on roughness,
+// and many times over.
+float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) {
+    float3 rough = max(float3(1.0 - roughness), f0) - f0;
+    float3 once = (f0 + rough * pow5(1.0 - n_dot_v)) * table.x + table.y;
+    float missed = 1.0 - (table.x + table.y);
+    float3 average = f0 + (1.0 - f0) / 21.0;
+    return once + missed * once * average / (1.0 - average * missed);
+}
+
+// The sky's light from all around reflected by a surface of `base` color, `metallic` and
+// `roughness`, facing `normal` and seen along `view` at a cosine of `n_dot_v`, as luminance before
+// the exposure.
+float3 sky_light(Frame frame, float3 base, float metallic, float roughness, float3 normal,
+                 float3 view, float n_dot_v) {
+    SamplerState clamp_ = samplers[LINEAR_CLAMP];
+    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * base;
+    float level = roughness * float(frame.specular_levels - 1);
+    float3 reflected = reflect(-view, normal);
+    float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb;
+    float2 table = textures[frame.brdf].SampleLevel(clamp_, float2(n_dot_v, roughness), 0.0).rg;
+    float3 dielectric = lerp(diffuse, specular, sky_reflectance(float3(0.04), roughness, n_dot_v,
+                                                                 table));
+    float3 metal = sky_reflectance(base, roughness, n_dot_v, table) * specular;
+    return lerp(dielectric, metal, metallic) * frame.sky_luminance;
+}
+
 [shader("fragment")]
 Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
@@ -114,6 +147,7 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     float4 color = sampled(material, 0, input.uv) * material.color * input.color;
     float4 surface = sampled(material, 1, input.uv);
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
+    float occlusion = 1.0 + material.occlusion_strength * (sampled(material, 3, input.uv).r - 1.0);
     float3 emission = sampled(material, 4, input.uv).rgb * material.emissive;
 #if defined(MASKED)
     if (color.a < material.cutoff) {
@@ -129,7 +163,7 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
 #endif
     Targets out;
     out.id = input.id;
-    if (frame.light_count == 0 || (material.flags & UNLIT) != 0) {
+    if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
         out.color = color;
         return out;
     }
@@ -191,6 +225,10 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
         float3 specular = fresnel * distribution * visibility;
         float3 diffuse = (1.0 - fresnel) * diffuse_color / PI;
         light_sum += (diffuse + specular) * radiance * n_dot_l;
+    }
+    if (frame.specular_levels > 0) {
+        light_sum += sky_light(frame, color.rgb, metallic, roughness, normal, view, n_dot_v)
+            * occlusion;
     }
     float3 shaded = light_sum * frame.exposure + emission;
     out.color = float4(min(shaded, BRIGHTEST), color.a);

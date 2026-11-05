@@ -29,6 +29,9 @@ pub(crate) enum Retired {
     /// An image made in memory that others share, with its slot in the bindless sets, if it has
     /// one.
     Alias(vk::Image, vk::ImageView, Option<u32>),
+    /// A view of a level of a storage image, with its storage slot in the bindless sets: retired
+    /// before its image, so that it goes first.
+    StorageView(vk::ImageView, u32),
     /// Memory that images were made in, which goes once they're done with.
     Memory(Allocation),
     /// A slot in the bindless sets that shows another texture's image.
@@ -278,12 +281,14 @@ impl Device {
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
         // For models' textures, which recede from the camera; for passes that render IDs beside
-        // colors, whose targets blend apart, since integers don't blend; and for games' cooked
-        // textures, which are compressed as BC7.
+        // colors, whose targets blend apart, since integers don't blend; for games' cooked
+        // textures, which are compressed as BC7; and for compute shaders, which pick their storage
+        // images from the bindless set by an index they're pushed.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .independent_blend(true)
-            .texture_compression_bc(true);
+            .texture_compression_bc(true)
+            .shader_storage_image_array_dynamic_indexing(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -295,9 +300,9 @@ impl Device {
         }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
         // features but the bindless ones, BC texture compression and host image copy, which
-        // `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy and independent
-        // blending, in vk.xml's feature requirements), and the create info's pointers outlive the
-        // call.
+        // `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy, independent blending
+        // and indexing storage images dynamically, in vk.xml's feature requirements), and the
+        // create info's pointers outlive the call.
         let raw =
             unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
                 let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);
@@ -720,6 +725,10 @@ impl Device {
                         self.bindless.remove(slot);
                     }
                 }
+                Retired::StorageView(view, slot) => {
+                    self.raw.destroy_image_view(view, None);
+                    self.bindless.remove_storage(slot);
+                }
                 Retired::Memory(allocation) => self.allocator.free_memory(allocation),
                 Retired::Slot(slot) => self.bindless.remove(slot),
                 Retired::Pipeline(pipeline) => self.raw.destroy_pipeline(pipeline, None),
@@ -1004,12 +1013,13 @@ pub const SHADER_CAPABILITIES: [u32; 17] = [
 
 /// The descriptor indexing features that the bindless set needs, which Vulkan 1.4 doesn't
 /// require but every desktop driver has. A device that has `descriptorIndexing` can hold at
-/// least 500,000 update-after-bind sampled images.
+/// least 500,000 update-after-bind sampled images, and as many storage images.
 fn bindless_features() -> vk::PhysicalDeviceVulkan12Features<'static> {
     vk::PhysicalDeviceVulkan12Features::default()
         .runtime_descriptor_array(true)
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
+        .descriptor_binding_storage_image_update_after_bind(true)
         .descriptor_binding_update_unused_while_pending(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
 }
@@ -1021,6 +1031,7 @@ fn has_bindless(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> bool {
         features.runtime_descriptor_array,
         features.descriptor_binding_partially_bound,
         features.descriptor_binding_sampled_image_update_after_bind,
+        features.descriptor_binding_storage_image_update_after_bind,
         features.descriptor_binding_update_unused_while_pending,
         features.shader_sampled_image_array_non_uniform_indexing,
     ]

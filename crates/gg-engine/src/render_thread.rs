@@ -47,6 +47,8 @@ pub(crate) struct Extracted {
     pub(crate) exposure: f32,
     /// The world's lights as it was drawn, which keep their memory.
     pub(crate) lights: Vec<gg_renderer::Light>,
+    /// The world's sky, as its environment has it.
+    pub(crate) sky: Option<gg_renderer::Sky>,
     /// The simulation's time in seconds as the world was drawn.
     pub(crate) time: f32,
     pub(crate) viewport: Viewport,
@@ -130,6 +132,7 @@ impl Default for Extracted {
             tonemapper: Tonemapper::None,
             exposure: 1.0,
             lights: Vec::new(),
+            sky: None,
             time: 0.0,
             viewport: Viewport {
                 origin: [0, 0],
@@ -229,6 +232,7 @@ impl Render for Renderer {
             exposure: frame.exposure,
             time: frame.time,
             lights: &frame.lights,
+            sky: frame.sky,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,

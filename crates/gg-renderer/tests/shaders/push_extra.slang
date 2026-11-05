@@ -17,6 +17,7 @@ struct Frame {
     float4 tint;
     float4 shade;
     float4 glow;
+    float4 haze;
 };
 
 struct Push {
@@ -57,7 +58,7 @@ Targets fragment_main(Varyings input) {
     Targets out;
     float wide = float(push.view.x);
     out.color = push.params[input.instance].color * push.brightness * wide * push.frame->tint
-        * push.frame->shade * push.frame->glow;
+        * push.frame->shade * push.frame->glow * push.frame->haze;
     out.id = input.id;
     return out;
 }

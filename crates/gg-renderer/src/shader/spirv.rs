@@ -94,6 +94,7 @@ const DRAW_INDEX: u32 = 4426;
 
 /// An image's dimensionality, for 2D images.
 const DIM_2D: u32 = 1;
+const DIM_CUBE: u32 = 3;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
 const PUSHED: [(u32, &str, Pushed); 7] = [
@@ -254,9 +255,10 @@ struct Image {
 }
 
 impl Image {
-    /// Whether it's a 2D image that's sampled, as the bindless set's textures are.
-    fn is_texture_2d(&self) -> bool {
-        (self.dim, self.arrayed, self.multisampled, self.usage) == (DIM_2D, false, false, 1)
+    /// Whether it's a 2D image or a cube that's sampled, as the bindless set's textures are.
+    fn is_texture(&self) -> bool {
+        matches!(self.dim, DIM_2D | DIM_CUBE)
+            && (self.arrayed, self.multisampled, self.usage) == (false, false, 1)
     }
 }
 
@@ -775,7 +777,7 @@ impl Module {
             });
             let bindless = match (set, binding, element) {
                 (Some(0), Some(0), Some(Type::Image(image))) => {
-                    image.is_texture_2d() && self.is_float(image.sampled)
+                    image.is_texture() && self.is_float(image.sampled)
                 }
                 (Some(0), Some(1), Some(Type::Sampler)) => true,
                 _ => false,
@@ -789,7 +791,8 @@ impl Module {
             };
             breaches.push(format!(
                 "it binds {}, {}, {at}, where a shader binds only the bindless set's \
-                 `Texture2D textures[]` at set 0, binding 0, and `SamplerState samplers[]` at \
+                 `Texture2D textures[]` or `TextureCube cubes[]` at set 0, binding 0, and \
+                 `SamplerState samplers[]` at \
                  binding 1",
                 self.resource(variable),
                 self.name(variable.id)
@@ -1080,9 +1083,10 @@ pub(super) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
-/// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform.
+/// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform, and
+/// whether the image or the sampler it's made of is.
 #[cfg(test)]
-pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool)> {
+pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool, bool)> {
     let words = words(spirv).expect("SPIR-V");
     let (mut non_uniform, mut sampled) = (HashSet::new(), Vec::new());
     for instruction in instructions(&words) {
@@ -1090,11 +1094,14 @@ pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool)> {
             (_, OP_DECORATE, &[id, NON_UNIFORM]) => {
                 non_uniform.insert(id);
             }
-            (_, OP_SAMPLED_IMAGE, &[_, id, ..]) => sampled.push(id),
+            (_, OP_SAMPLED_IMAGE, &[_, id, image, sampler]) => sampled.push([id, image, sampler]),
             _ => {}
         }
     }
-    let decorated = |id| (id, non_uniform.contains(&id));
+    let decorated = |[id, image, sampler]: [u32; 3]| {
+        let of = non_uniform.contains(&image) || non_uniform.contains(&sampler);
+        (id, non_uniform.contains(&id), of)
+    };
     sampled.into_iter().map(decorated).collect()
 }
 
@@ -1127,7 +1134,12 @@ mod tests {
         ];
         let spirv = module(&[decorate(10), decorate(21), decorate(33)], &samples);
         let decorated = decorate_non_uniform(spirv.clone());
-        let sampled = [(30, true), (31, true), (32, false), (33, true)];
+        let sampled = [
+            (30, true, true),
+            (31, true, true),
+            (32, false, false),
+            (33, true, true),
+        ];
         assert_eq!(sampled_images(&decorated), sampled);
         // After the first NonUniform decoration, among the others.
         let expected = [

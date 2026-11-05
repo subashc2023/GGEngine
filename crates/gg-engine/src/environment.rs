@@ -1,19 +1,21 @@
-//! Environments: the component that says how the game's view shows its world's light, whatever
-//! viewpoint it sees from, and which of a world's environments the view renders with.
+//! Environments: the component that says how the game's view shows its world's light, and the sky
+//! around it, whatever viewpoint it sees from, and which of a world's environments the view renders
+//! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::Tonemapper;
+use gg_renderer::{Sky, Texture, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, Entity, EntityId, World};
 
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
-/// the tool API's looks' too, so that they show what the game does: its exposure, and the
-/// tonemapper that maps the view's colors, drawn in high dynamic range, into the range it shows. A
-/// world has one, on an entity of its own; of several, the view renders with the one of the lowest
-/// ID, warning (`engine.environment_tie`). A world without one isn't tonemapped, so that what's
-/// in the range a view shows, as a 2D game's sprites, shows as it's drawn, and lit shading exposes
-/// its light as the default environment's exposure does.
+/// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
+/// that maps the view's colors, drawn in high dynamic range, into the range it shows, and the sky
+/// it shows behind the world and lights it by. A world has one, on an entity of its own; of
+/// several, the view renders with the one of the lowest ID, warning (`engine.environment_tie`). A
+/// world without one isn't tonemapped, so that what's in the range a view shows, as a 2D game's
+/// sprites, shows as it's drawn, and lit shading exposes its light as the default environment's
+/// exposure does.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Environment {
     /// How much light the view takes in, as a camera's exposure value at ISO 100, EV100: lit
@@ -25,6 +27,17 @@ pub struct Environment {
     /// How the view's colors, drawn in high dynamic range, map into the range it shows: Khronos PBR
     /// Neutral by default.
     pub tonemapper: Tonemapper,
+    /// The sky: an image of the world around, equirectangular, its middle column the way toward
+    /// +X and a quarter of the way across the way toward -Z, its top row straight up, as Khronos's
+    /// glTF Sample Viewer and three.js take one, which the view shows behind the world, in place of
+    /// the clear color, and lights its models by from all around: a texture of colors, as a
+    /// Radiance HDR's, `.hdr`, of high dynamic range, is. `None`, the default, for none.
+    pub sky: Option<Texture>,
+    /// The luminance, in candela per square meter, that a texel of the sky's of 1 stands for,
+    /// which its colors are multiplied by, before the exposure, as light is: 30,000 by default,
+    /// Filament's default for an environment's intensity, which suits a sunny day's exposure.
+    #[reflect(default = 30_000.0)]
+    pub sky_luminance: f32,
 }
 
 impl Default for Environment {
@@ -32,6 +45,8 @@ impl Default for Environment {
         Self {
             exposure: 15.0,
             tonemapper: Tonemapper::default(),
+            sky: None,
+            sky_luminance: 30_000.0,
         }
     }
 }
@@ -43,6 +58,14 @@ impl Environment {
     /// 2014).
     pub fn light_scale(&self) -> f32 {
         1.0 / (1.2 * exp2f(self.exposure))
+    }
+
+    /// The sky the view shows, as the renderer takes it, if it has one.
+    pub(crate) fn sky(&self) -> Option<Sky> {
+        self.sky.map(|texture| Sky {
+            texture,
+            luminance: self.sky_luminance,
+        })
     }
 }
 
@@ -108,6 +131,7 @@ mod tests {
         let dim = Environment {
             exposure: 7.0,
             tonemapper: Tonemapper::Agx,
+            ..Environment::default()
         };
         let first = world.spawn(dim);
         assert_eq!(seen(&world, &mut warned), Some(dim));

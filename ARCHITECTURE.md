@@ -536,10 +536,11 @@ A project's state is text that people and agents edit, diff and merge with ordin
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
-- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`), model (`.gltf`, `.glb`) and font (`.ttf`,
-  `.otf`) under the asset root, whatever its extension's case, has an ID that outlives its file's
-  name: 64 random bits, never 0, written as 16 lowercase hex digits, as an entity's are, in an ID
-  file beside it, its file's name and `.meta`, such as `stone.png.meta`, matched by that exact
+- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`, `.hdr`), model (`.gltf`, `.glb`) and font
+  (`.ttf`, `.otf`) under the asset root, whatever its extension's case, has an ID that outlives
+  its file's name: 64 random bits, never 0, written as 16 lowercase hex digits, as an entity's
+  are, in an ID file beside it, its file's name and `.meta`, such as `stone.png.meta`, matched by
+  that exact
   name, a name that matches only when case is ignored being a problem (`asset.meta_case`), so that
   a file system that ignores case gives an asset the ID one that doesn't gives it. An ID file is
   canonical RON, a part to a line, `(`, `    id: "5f3c9a1e07b2d846",`, `)`; a part it hasn't is
@@ -1218,23 +1219,25 @@ each frame clears it to 0, and a draw shows where it's as near as what's drawn t
 that at one depth the later goes over, as 2D draws at one z stack.
 
 A world's `Environment`, a component on an entity of its own, says how the view shows the world's
-light, whatever viewpoint it sees from, the editor's and agents' looks too, so that they show what
-the game does; of several, the lowest ID's, with a warning. Its tonemapper maps the view's colors
-into the range it shows: Khronos PBR Neutral by default, which shows base colors up to about 0.76 as
-they are, less the 0.04 a dielectric reflects whatever its color, and rolls brighter light off
-toward white; ACES, as Stephen Hill fitted it; AgX; or none, each channel clamped, which a world
-without an environment gets, so that a 2D game's sprites show as they're colored. The clear color
-is tonemapped with what's drawn, as a sky would be. Its exposure, in EV100, scales light: lit
+light, and the sky around it, as below, whatever viewpoint it sees from, the editor's and agents'
+looks too, so that they show what the game does; of several, the lowest ID's, with a warning. Its
+tonemapper maps the view's colors into the range it shows: Khronos PBR Neutral by default, which
+shows base colors up to about 0.76 as they are, less the 0.04 a dielectric reflects whatever its
+color, and rolls brighter light off toward white; ACES, as Stephen Hill fitted it; AgX; or none,
+each channel clamped, which a world without an environment gets, so that a 2D game's sprites show
+as they're colored. The clear color, which a sky takes the place of, is tonemapped with what's
+drawn, as the sky is. Its exposure, in EV100, scales light: lit
 shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades, which keeps a
 sunny day's light within 16-bit floats, and a world without an environment is exposed as the
 default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and unlit materials,
 draws its colors as they are. Every draw's shader can read the frame's data through an address, the
 last of its push constants: where the view sees from, the time, the simulation's as the world
 draws, which stops with it and draws alike in a replay, and the exposure; the frame's lights, how
-many and where; the address of the table of models' materials; and where shading sees from, the
+many and where; the address of the table of models' materials; where shading sees from, the
 camera's position, or for an orthographic projection, which sees along one way, the way back
-toward it. Fields are added at its end, so that games' shaders that read the fields before them
-keep to the contract.
+toward it; and the sky's texture, its prefiltered light, the split sum's table and its luminance.
+Fields are added at its end, so that games' shaders that read the fields before them keep to the
+contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1253,9 +1256,8 @@ Schlick's Fresnel and 0.04 reflected head-on by every dielectric, from a materia
 metallic and roughness, each a factor that its texture multiplies, and its normal map. Light times
 the exposure, then the material's emission, as the view shows it rather than exposed, make the
 color, so that an emissive white shows as white under any light. Occlusion darkens only light from
-all around, which no frame has until image-based lighting, so it changes nothing yet. A material
-that KHR_materials_unlit makes unlit, and every material in a frame without lights, draws its base
-color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
+all around, the sky's. A material that KHR_materials_unlit makes unlit, and every material in a
+frame without lights or a sky, draws its base color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
 corners apart, as glTF says, but one whose material is unlit, which reads none; a lit material's
 normal map without tangents gets MikkTSpace's, as glTF asks, through `bevy_mikktspace`, its square
 roots and arccosines libm's, so that every platform makes the same, its vertices apart where their
@@ -1268,11 +1270,39 @@ parameters index: each written into it as it's added and again as it's replaced,
 commands before its passes, the table made again twice the size as it fills; a handle is never
 given out again, as a texture's isn't.
 
+An environment's sky is a texture of the world around, equirectangular, its middle column the way
+toward +X, a quarter of the way across the way toward -Z, and its top row straight up, as Khronos's
+glTF Sample Viewer and three.js take one, which a Radiance HDR's colors of high dynamic range suit;
+its colors times its luminance, in candela per square meter, 30,000 by default, as Filament's
+environments' intensity is, are light, which the exposure scales as it does lux and candela. The
+view draws it before anything else, at depth 0, writing no ID, in place of the clear color, each
+pixel the way it sees, from the image's first level; an orthographic view sees one way, so one
+color. It lights models from all around through the split sum, with Fdez-Agüera's
+roughness-dependent Fresnel and his scattering many times over, as Khronos's sample viewer has it,
+so that a white surface under a sky of one color shows that color, whatever its roughness and
+metal. The first frame to render the view once the sky's texture shows an image of its own, or
+another, prefilters it on the GPU in compute passes before the view's: into a cube of a side a
+quarter of the image's width, to the next power of two, at most 512, made for that frame alone,
+whose levels each average the one before's; from it, importance sampling its levels by the solid
+angle a sample covers (Křivánek and Colbert), a cube of 32 texels a side of the light Lambert's
+diffuse takes, cosine-weighted, and a cube of the cube's side, at most 256, of the light GGX's
+specular takes, a level for each step of roughness, from none at its first to 1 at its last, of 8
+texels; and, once, the split sum's table, of 128 by 128, of GGX's reflectance as F0's scale and bias
+by the cosine of the view's angle and the roughness. Those images keep that light until the sky
+shows another image, as a reload does. A view whose sky's texture shows its stand-in shows no sky,
+and is lit by none; a frame that renders no view prefilters nothing.
+
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
-adds them, each saying how it uses the images it touches, drawing into them, sampling them or
-copying from them, from which the frame places every barrier and layout transition as each pass
-begins, each use waiting for the uses before it that it must and no more, so that no pass records
-one itself. The passes run in that order, on the graphics queue. The view's images, its colors of
+adds them, each saying how it uses the images it touches, drawing into them, writing them from
+compute shaders, sampling them or copying from them, from which the frame places every barrier and
+layout transition as each pass begins, each use waiting for the uses before it that it must and no
+more, so that no pass records one itself. The passes run in that order, on the graphics queue. A
+pass that computes dispatches compute shaders, which write storage images, 16-bit floats in linear
+RGBA, of a 2D image's one layer or a cube's six faces, a mip level at a time through slots of the
+bindless set's own for storage images, in the general layout, as their last use left them. A
+storage image is among a frame's targets, as an offscreen image is, and keeps the layout its last
+frame left it in, so that once a frame whose last use of it sampled it is submitted, frames after
+sample it through its texture slot without declaring it. The view's images, its colors of
 high dynamic range, IDs, depth and tonemapped colors, are the graph's own: each lasts for a frame,
 undefined until a pass there writes it, and is made from what the passes say of it, in a block of
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
@@ -1401,17 +1431,21 @@ their startup times compare.
 
 A game's texture is a PNG or a JPEG that the engine decodes to RGBA8 with colors sRGB-encoded and
 alpha not multiplied into them, as images store them, whatever color profile or gamma the file
-holds, as glTF requires; it streams into GPU memory, as below, where it stays until it's removed,
-and shaders sample its colors decoded to linear. A run from a game's package reads it as the cooker
-compressed it instead, BC7 of those colors, which stays compressed in GPU memory, a quarter of
-RGBA8's size, and which the GPU decodes as shaders sample it; a model's maps of data are BC7 of
-their values, and its normal maps BC5 of their X and Y, which shaders make Z from, as they do of
-an uncompressed normal map's. What the simulation reads of a texture
+holds, as glTF requires; or a Radiance HDR, `.hdr`, of colors of high dynamic range, as a sky's,
+which it decodes to RGBA of 16-bit floats, linear, alpha 1, a color past the most a half float
+holds clamped to it, of one level; a model's images are PNGs and JPEGs alone. It streams into GPU
+memory, as below, where it stays until it's removed, and shaders sample its colors decoded to
+linear, or a Radiance HDR's as they are. A run from a game's package reads it as the cooker
+compressed it instead, BC7 of those colors, or BC6H of a Radiance HDR's, which stays compressed in
+GPU memory, a quarter of RGBA8's size, and which the GPU decodes as shaders sample it; a model's
+maps of data are BC7 of their values, and its normal maps BC5 of their X and Y, which shaders make
+Z from, as they do of an uncompressed normal map's. What the simulation reads of a texture
 is its handle and its size, as a sprite sheet's cells are cut by it, so a run reads its file and its
 header on the main thread as a layer adds it, or as text names it, as [Project
 state](#project-state) says, which hands out the handle at once, and a file that's missing or isn't
-an image of a size the engine takes fails there; its pixels, PNG's and JPEG's or the package's
-levels supercompressed by zstd, decode on a thread of their own, `gg-load`, one at a time in the
+an image of a size the engine takes fails there; its pixels, PNG's, JPEG's and Radiance HDR's or
+the package's levels supercompressed by zstd, decode on a thread of their own, `gg-load`, one at a
+time in the
 order they came, and fill the texture as a frame starts, which shows its stand-in until then. Pixels
 that don't decode warn (`engine.bad_texture`), and the texture keeps its stand-in until its file,
 still watched, reads again; the cooker refuses them, so a package holds none. A test's context and a
@@ -1666,7 +1700,7 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as development builds add them and as their files change, and by the cooker into a game's package, their SPIR-V checked against the shader contract |
-| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`, MikkTSpace's tangents made for it through `bevy_mikktspace`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them; textures cooked in KTX2, its levels supercompressed by zstd, through `ctt`: colors and maps' values to BC7 by bc7enc_rdo, perceptual for colors alone, and normal maps to BC5 by Intel's ISPC Texture Compressor; read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
+| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`, MikkTSpace's tangents made for it through `bevy_mikktspace`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them, and Radiance HDRs that `image`'s decoder of them decodes, to 16-bit floats through `half`; textures cooked in KTX2, its levels supercompressed by zstd, through `ctt`: colors and maps' values to BC7 by bc7enc_rdo, perceptual for colors alone, and normal maps to BC5 and colors of high dynamic range to BC6H by Intel's ISPC Texture Compressor; read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 | Networking | Our own, over std's TCP and UDP sockets; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |

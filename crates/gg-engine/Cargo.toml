@@ -15,6 +15,7 @@ gg-api = { workspace = true, optional = true }
 gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true
+half.workspace = true
 harfrust.workspace = true
 image.workspace = true
 kira.workspace = true

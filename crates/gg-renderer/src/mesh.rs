@@ -566,12 +566,14 @@ impl<T> Held<T> {
 }
 
 /// A texture's slot: the texture in it, what its texels stand for, which says which stand-in the
-/// slot shows without an image of its own, and whether it was removed, which leaves it showing
-/// the stand-in for good, as stale handles may still sample it.
+/// slot shows without an image of its own, whether it was removed, which leaves it showing the
+/// stand-in for good, as stale handles may still sample it, and how many times it has come to show
+/// another image, its own or the stand-in, which tells what it shows apart from what it showed.
 struct TextureSlot {
     texture: GpuTexture,
     kind: texture::Kind,
     removed: bool,
+    shown: u64,
 }
 
 /// The textures the renderer's slots show until their own images are there: a pixel of white for
@@ -1068,6 +1070,7 @@ impl MeshPass {
                     texture,
                     kind,
                     removed: false,
+                    shown: 0,
                 });
             }
             texture::Change::Image(added) => {
@@ -1102,6 +1105,7 @@ impl MeshPass {
                 streaming.retain(|item| !item.is(Kind::Texture, index));
                 frame.hide_texture(&mut slot.texture, stand_ins.of(slot.kind));
                 slot.removed = true;
+                slot.shown += 1;
             }
         }
         Ok(())
@@ -1231,7 +1235,8 @@ impl MeshPass {
                 pixels,
                 made,
             } => {
-                let texture = &mut textures[item.index as usize].texture;
+                let slot = &mut textures[item.index as usize];
+                let texture = &mut slot.texture;
                 if !*made {
                     if *spent >= budget
                         || waits_for_room(
@@ -1266,9 +1271,20 @@ impl MeshPass {
                 }
                 // The last part is copied: the pixels go, whatever else waits.
                 *pixels = Vec::new();
-                frame.finish_texture(texture)
+                let finished = frame.finish_texture(texture)?;
+                slot.shown += u64::from(finished);
+                Ok(finished)
             }
         }
+    }
+
+    /// What `texture`'s slot shows, if it's an image of its own rather than a stand-in: its size,
+    /// and how many times the slot has come to show another image, which tells this one apart
+    /// from those it showed before. `None` for a texture that isn't the pass's.
+    pub(crate) fn texture_shown(&self, texture: crate::Texture) -> Option<([u32; 2], u64)> {
+        let slot = self.textures.get(texture.index as usize)?;
+        let size = slot.texture.size();
+        (size != [0, 0]).then_some((size, slot.shown))
     }
 
     /// How many bytes of the `item`th queued asset are copied.
@@ -1653,6 +1669,8 @@ pub(crate) struct FrameData {
     /// toward it and 0 for an orthographic projection, which sees along one way, so that the way
     /// to the eye from a point `p` is `eye.xyz - p * eye.w`.
     pub(crate) eye: Vec4,
+    /// The frame's sky and its prefiltered light, as [`SkyData`](crate::sky::SkyData) has them.
+    pub(crate) sky: crate::sky::SkyData,
 }
 
 #[cfg(test)]

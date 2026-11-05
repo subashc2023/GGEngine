@@ -1,0 +1,82 @@
+(
+    entities: {
+        "1a2d8462946cfda4": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.4, 7.5),
+                rotation: (-0.15931821, 0.0, 0.0, 0.98722726),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "34e8eecd978de7a6": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3862305cc1f240f5": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 30000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "91d0bec2dbb82cd5": (
+            Name: ("Hint"),
+            Text: (
+                text: "glTF's metallic-roughness materials, lit by a sky alone",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "97900072cdbac1b4": (
+            Name: ("Title"),
+            Text: (
+                text: "Sky",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d20da34712153bdc": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

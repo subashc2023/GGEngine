@@ -60,6 +60,8 @@
             Environment: (
                 exposure: 11.0,
                 tonemapper: PbrNeutral,
+                sky: None,
+                sky_luminance: 30000.0,
             ),
             Name: ("Environment"),
         ),

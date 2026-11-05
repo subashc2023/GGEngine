@@ -20,9 +20,11 @@ gg-engine.workspace = true
 meshopt.workspace = true
 serde_json.workspace = true
 
-# The tests' textures, and the BC7 they compress to, decoded on the CPU.
+# The tests' textures, and the BC7, BC5 and BC6H they compress to, decoded on the CPU, the last of
+# 16-bit floats.
 [dev-dependencies]
 bcdec_rs.workspace = true
+half.workspace = true
 png.workspace = true
 
 [lints]

@@ -1,7 +1,8 @@
 //! Textures compressed in KTX2, as a game's package holds them, by what they hold: colors as BC7,
 //! a layer's texture of one level and a model's base colors and emission with their full chain of
-//! mip levels; and a model's maps, values as BC7 and normal maps' X and Y as BC5, with theirs,
-//! which the engine makes for the cooker as a frame makes a texture's.
+//! mip levels; a model's maps, values as BC7 and normal maps' X and Y as BC5, with theirs, which
+//! the engine makes for the cooker as a frame makes a texture's; and colors of high dynamic range,
+//! as a sky's, as BC6H, of one level.
 
 use ctt::encoders::Encoder;
 use ctt::encoders::bc7enc::Bc7encSettings;
@@ -18,14 +19,14 @@ use gg_engine::{Error, Result};
 /// but reading them back takes no longer for a higher one.
 const ZSTD_LEVEL: i32 = 19;
 
-/// Texture `name`'s `pixels`, rows of RGBA8, alpha not multiplied in, `size` texels across and
-/// down, followed, if `mipmapped`, by the rest of their full chain of levels, smallest last:
-/// compressed as `compressed` says, each level supercompressed by zstd, in KTX2, as
-/// [`decode_ktx2`](gg_engine::cook::decode_ktx2) reads it. Colors, sRGB-encoded, go to BC7 by
-/// bc7enc_rdo's perceptual encoder, and values, as stored, to BC7 by the same encoder weighing each
-/// channel alike; a normal map's X and Y, in red and green, go to BC5 by Intel's ISPC Texture
-/// Compressor, which drops blue and alpha. The same pixels compress to the same bytes every time on
-/// one machine.
+/// Texture `name`'s `pixels`, rows of RGBA8, alpha not multiplied in, or for BC6H of RGBA of 16-bit
+/// floats, `size` texels across and down, followed, if `mipmapped`, by the rest of their full chain
+/// of levels, smallest last: compressed as `compressed` says, each level supercompressed by zstd,
+/// in KTX2, as [`decode_ktx2`](gg_engine::cook::decode_ktx2) reads it. Colors, sRGB-encoded, go to
+/// BC7 by bc7enc_rdo's perceptual encoder, and values, as stored, to BC7 by the same encoder
+/// weighing each channel alike; a normal map's X and Y, in red and green, go to BC5 by Intel's ISPC
+/// Texture Compressor, which drops blue and alpha; and colors of high dynamic range to BC6H by the
+/// same, which drops alpha. The same pixels compress to the same bytes every time on one machine.
 ///
 /// Fails with `cook.uncompressed` if ctt can't compress them.
 ///
@@ -40,16 +41,17 @@ pub(crate) fn compress(
     compressed: Compressed,
 ) -> Result<Vec<u8>> {
     let levels = mip_sizes(size[0], size[1]).take(if mipmapped { usize::MAX } else { 1 });
+    let texel = if compressed == Compressed::Bc6h { 8 } else { 4 };
     let mut surfaces = Vec::new();
     let mut at = 0;
     for [width, height] in levels {
-        let len = width as usize * height as usize * 4;
+        let len = width as usize * height as usize * texel as usize;
         surfaces.push(SurfaceRef {
             data: &pixels[at..at + len],
             width,
             height,
             depth: 1,
-            stride: width * 4,
+            stride: width * texel,
             slice_stride: 0,
         });
         at += len;
@@ -83,6 +85,12 @@ pub(crate) fn compress(
             Format::R8G8B8A8_UNORM,
             ColorSpace::Linear,
             Format::BC5_UNORM_BLOCK,
+            Encoder::Intel(IspcSettings::default()),
+        ),
+        Compressed::Bc6h => (
+            Format::R16G16B16A16_SFLOAT,
+            ColorSpace::Linear,
+            Format::BC6H_UFLOAT_BLOCK,
             Encoder::Intel(IspcSettings::default()),
         ),
     };
@@ -189,11 +197,47 @@ mod tests {
                 let expected = match compressed {
                     Compressed::Bc5 => [r, g, 0, 255],
                     Compressed::Bc7Srgb | Compressed::Bc7Unorm => [r, g, b, a],
+                    Compressed::Bc6h => unreachable!("RGBA8 isn't compressed as BC6H"),
                 };
                 assert!(
                     close(got, expected),
                     "{compressed:?}'s texel {i}: {got:?}, not {expected:?}"
                 );
+            }
+        }
+    }
+
+    /// Colors of high dynamic range compress to the BC6H a run reads back, a block of each color
+    /// decoding to it within compression's loss, past 1 and far past it, and below.
+    #[test]
+    fn colors_of_high_dynamic_range_compress_to_bc6h() {
+        // 8x4 texels, a block of each color.
+        let (bright, dim) = ([40.0, 2.0, 0.5], [0.25, 0.75, 0.0]);
+        let texel = |i: usize| if i % 8 < 4 { bright } else { dim };
+        let pixels: Vec<u8> = (0..32)
+            .flat_map(|i| {
+                let [r, g, b] = texel(i);
+                [r, g, b, 1.0].map(|value: f32| half::f16::from_f32(value).to_ne_bytes())
+            })
+            .flatten()
+            .collect();
+        let bc6h = Compressed::Bc6h;
+        let ktx2 = compress("sky", [8, 4], &pixels, false, bc6h).expect("compressed");
+        let image = decode_ktx2(&ktx2).expect("KTX2 a run reads");
+        let format = ImageFormat::Bc {
+            compressed: bc6h,
+            mipmapped: false,
+        };
+        assert_eq!((image.size, image.format), ([8, 4], format));
+        let blocks = image.pixels.as_chunks::<16>().0;
+        assert_eq!(blocks.len(), 2);
+        for (block, expected) in blocks.iter().zip([bright, dim]) {
+            let mut decoded = [0.0; 48];
+            bcdec_rs::bc6h_float(block, &mut decoded, 12, false);
+            for got in decoded.as_chunks::<3>().0 {
+                let near = (got.iter().zip(expected))
+                    .all(|(&got, want)| (got - want).abs() <= 0.02 * want + 0.005);
+                assert!(near, "{got:?}, not {expected:?}");
             }
         }
     }

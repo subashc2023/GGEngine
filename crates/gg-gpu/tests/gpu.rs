@@ -17,9 +17,9 @@ use std::sync::Arc;
 use ash::vk;
 use gg_core::label;
 use gg_gpu::{
-    Arenas, Blend, ColorImage, Device, Frame, Frames, GpuBuffer, Graph, GraphicsDesc, Instance,
-    InstanceDesc, MAX_READS, PLACED_TEXTURES, PassId, Pipeline, Sampler, Target, Texture,
-    TextureFormat, UploadPath, Validation, mip_sizes,
+    Arenas, Blend, ColorImage, ComputePipeline, Device, Frame, Frames, GpuBuffer, Graph,
+    GraphicsDesc, Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pass, PassId, Pipeline,
+    Sampler, StorageImage, Target, Texture, TextureFormat, UploadPath, Validation, mip_sizes,
 };
 
 /// Runs each test through `tests`, by the name it's written with, given the arguments written
@@ -65,6 +65,7 @@ fn main() -> ExitCode {
         clear_reads_back,
         arenas_hold_more_than_a_frame_took,
         sampled_images_keep_their_layout,
+        compute_passes_write_cubes_that_passes_sample,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
@@ -306,6 +307,15 @@ fn rgba8_levels(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
 /// shaders, with the slangc that `SLANGC` names, else the Vulkan SDK's, under `VULKAN_SDK`, else
 /// the first on the path.
 fn sampling_spirv() -> Vec<u8> {
+    spirv(
+        "sample",
+        &[("vertex_main", "vertex"), ("fragment_main", "fragment")],
+    )
+}
+
+/// The SPIR-V of `tests/shaders/<shader>.slang`, of its `entries`, each an entry point and its
+/// stage, compiled as [`sampling_spirv`] says.
+fn spirv(shader: &str, entries: &[(&str, &str)]) -> Vec<u8> {
     let exe = if cfg!(windows) {
         "slangc.exe"
     } else {
@@ -321,14 +331,18 @@ fn sampling_spirv() -> Vec<u8> {
         .or_else(|| in_sdk("Bin"))
         .or_else(|| in_sdk("bin"))
         .unwrap_or_else(|| exe.into());
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/sample.slang");
-    let spirv = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample.spv");
-    let output = Command::new(&slangc)
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shaders/{shader}.slang"));
+    let spirv = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{shader}.spv"));
+    let mut command = Command::new(&slangc);
+    command
         .arg(&source)
         .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
-        .args(["-warnings-as-errors", "38006"])
-        .args(["-entry", "vertex_main", "-stage", "vertex"])
-        .args(["-entry", "fragment_main", "-stage", "fragment"])
+        .args(["-warnings-as-errors", "38006"]);
+    for (entry, stage) in entries {
+        command.args(["-entry", entry, "-stage", stage]);
+    }
+    let output = command
         .arg("-o")
         .arg(&spirv)
         .output()
@@ -580,6 +594,158 @@ fn sampled_images_keep_their_layout() {
     }
 
     drop((frames, image, drawn, device, instance));
+    check(&validation);
+}
+
+/// A compute pass writes each face of a cube's first level, another halves it into its second,
+/// reading what the first wrote, and a render pass samples both levels of each face by direction,
+/// then the next frame samples them again without declaring the cube, as a frame whose last use
+/// sampled it leaves it to: synchronization validation sees each use wait for the write before it.
+/// A storage image's slot to sample through comes only once a frame has left it so, and an
+/// offscreen image written as storage is refused.
+fn compute_passes_write_cubes_that_passes_sample() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = spirv(
+        "cube",
+        &[
+            ("fill_main", "compute"),
+            ("halve_main", "compute"),
+            ("vertex_main", "vertex"),
+            ("fragment_main", "fragment"),
+        ],
+    );
+    let fill = ComputePipeline::new(&device, "fill cube", &spirv, c"fill_main").expect("fill");
+    let halve = ComputePipeline::new(&device, "halve cube", &spirv, c"halve_main").expect("halve");
+    let draw = Pipeline::graphics(
+        &device,
+        &GraphicsDesc {
+            name: "sample cube",
+            spirv: &spirv,
+            vertex: c"vertex_main",
+            fragment: c"fragment_main",
+            format: ColorImage::FORMAT,
+            blend: Blend::Opaque,
+            depth_write: false,
+        },
+    )
+    .expect("a pipeline");
+    let mut cube = StorageImage::new(&device, [4, 4], 2, true, "test cube").expect("a cube");
+    assert_eq!(cube.sampled(), None, "nothing has written it");
+    // A pixel for each level of each face, in Vulkan's order of faces.
+    let mut image = ColorImage::new(&device, 12, 1, "cube samples").expect("an image");
+    let directions: [[f32; 3]; 6] = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    // As `cube.slang` takes them: the cube's slot, the sampler's, the level and the direction.
+    let sample = |pass: &mut Pass<'_, '_>, index: u32| {
+        pass.set_pipeline(&draw);
+        let probes = (0..2u32)
+            .flat_map(|level| (directions.iter()).map(move |&direction| (level, direction)));
+        for (x, (level, [dx, dy, dz])) in (0..).zip(probes) {
+            pass.set_viewport([x, 0], [1, 1]);
+            let level = (level as f32).to_bits();
+            let words = [
+                index,
+                Sampler::NearestClamp.index(),
+                0,
+                level,
+                dx.to_bits(),
+                dy.to_bits(),
+                dz.to_bits(),
+                0,
+            ];
+            pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+            pass.draw(3, 1);
+        }
+    };
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let (color, written) = (graph.target(0), graph.target(1));
+    let filled = graph.compute(label!("fill")).write(written).add();
+    let halved = graph.compute(label!("halve")).write(written).add();
+    let drawn = (graph.render(label!("draw")))
+        .clear(color, [0.0; 4])
+        .sample(written)
+        .add();
+    let targets = [Target::Image(&mut image), Target::Storage(&mut cube)];
+    let mut frame = frames
+        .begin(targets, &graph)
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    // As `cube.slang` takes them: the level's slot, the next's when halving, and its side.
+    let mut pass = frame.compute(filled);
+    pass.set_pipeline(&fill);
+    let words = [pass.storage(written, 0), 0, 4, 0, 0, 0, 0, 0];
+    pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+    pass.dispatch([1, 1, 6]);
+    drop(pass);
+    let mut pass = frame.compute(halved);
+    pass.set_pipeline(&halve);
+    let (above, below) = (pass.storage(written, 0), pass.storage(written, 1));
+    let words = [above, below, 2, 0, 0, 0, 0, 0];
+    pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+    pass.dispatch([1, 1, 6]);
+    drop(pass);
+    let mut pass = frame
+        .render(drawn)
+        .expect("an offscreen image is always there");
+    let index = pass.sampled(written);
+    sample(&mut pass, index);
+    drop(pass);
+    frame.submit().expect("the frame's submission");
+    assert_eq!(cube.sampled(), Some(index), "sampled last");
+    // Each face's color in its first level, then halved in its second, sRGB-encoded.
+    let expected: Vec<[u8; 4]> = (0..2)
+        .flat_map(|level| {
+            (0..6u32).map(move |face| {
+                let on = if level == 0 { 255 } else { 188 };
+                let bit = |shift: u32| if face >> shift & 1 == 1 { on } else { 0 };
+                [bit(0), bit(1), bit(2), 255]
+            })
+        })
+        .collect();
+    let close = |pixels: &[u8]| {
+        (pixels.as_chunks::<4>().0.iter().zip(&expected)).all(|(got, want)| {
+            got.iter()
+                .zip(want)
+                .all(|(&got, &want)| got.abs_diff(want) <= 1)
+        })
+    };
+    let pixels = image.read_back().expect("the image's pixels");
+    assert!(close(&pixels), "{pixels:?}, not {expected:?}");
+
+    let mut graph = Graph::default();
+    let color = graph.target(0);
+    let drawn = graph.render(label!("draw")).clear(color, [0.0; 4]).add();
+    let mut frame = frames
+        .begin([Target::Image(&mut image)], &graph)
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let mut pass = frame
+        .render(drawn)
+        .expect("an offscreen image is always there");
+    sample(&mut pass, index);
+    drop(pass);
+    frame.submit().expect("the frame's submission");
+    let pixels = image.read_back().expect("the image's pixels");
+    assert!(close(&pixels), "{pixels:?}, not {expected:?}");
+
+    let mut graph = Graph::default();
+    let color = graph.target(0);
+    let _ = graph.compute(label!("misused")).write(color).add();
+    let refused = panics(|| {
+        let _ = frames.begin([Target::Image(&mut image)], &graph);
+    });
+    assert!(refused.contains("no pass writes as storage"), "{refused}");
+
+    drop((frames, image, cube, fill, halve, draw, device, instance));
     check(&validation);
 }
 

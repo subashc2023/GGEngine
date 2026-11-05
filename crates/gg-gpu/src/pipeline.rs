@@ -1,4 +1,5 @@
-//! Graphics pipelines, made from SPIR-V with the bindless set's layout, for dynamic rendering.
+//! Pipelines, made from SPIR-V with the bindless set's layout: graphics pipelines, for dynamic
+//! rendering, and compute pipelines.
 
 use std::ffi::CStr;
 use std::io::Cursor;
@@ -180,25 +181,8 @@ impl Pipeline {
             depth || !desc.depth_write,
             "a pipeline writes depth only into targets that have it"
         );
-        let code = ash::util::read_spv(&mut Cursor::new(desc.spirv)).map_err(|error| {
-            Error::new(
-                "gpu.bad_shader",
-                format!("the shaders of pipeline {:?} aren't SPIR-V", desc.name),
-            )
-            .with_source(error)
-        })?;
         let raw_device = device.raw();
-        let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
-        // SAFETY: the device is live, and the code is a whole number of words that starts with
-        // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be
-        // valid SPIR-V, as `GraphicsDesc::spirv` says.
-        let module =
-            unsafe { raw_device.create_shader_module(&module_info, None) }.map_err(|e| {
-                let shaders = format_args!("the shaders of pipeline {:?}", desc.name);
-                vk_error("vkCreateShaderModule", shaders, e)
-            })?;
-        // SAFETY: the module is live.
-        unsafe { device.set_name(module, desc.name) };
+        let module = shader_module(device, desc.name, desc.spirv)?;
 
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -284,16 +268,7 @@ impl Pipeline {
         })?[0];
         // SAFETY: the pipeline is live.
         unsafe { device.set_name(raw, desc.name) };
-        let flags = feedback.flags;
-        debug!(
-            pipeline = desc.name,
-            us = flags
-                .contains(vk::PipelineCreationFeedbackFlags::VALID)
-                .then_some(feedback.duration / 1000),
-            cache_hit =
-                flags.contains(vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT),
-            "Pipeline made"
-        );
+        made_log(desc.name, feedback);
         Ok(Self {
             device: device.clone(),
             raw,
@@ -320,4 +295,110 @@ impl Drop for Pipeline {
     fn drop(&mut self) {
         self.device.retire(Retired::Pipeline(self.raw));
     }
+}
+
+/// A compute pipeline, which a [`Graph`]'s compute passes dispatch. Dropping it retires it until
+/// the GPU is done with it.
+///
+/// [`Graph`]: crate::Graph
+pub struct ComputePipeline {
+    device: Arc<Device>,
+    raw: vk::Pipeline,
+}
+
+impl ComputePipeline {
+    /// Makes a pipeline, named `name`, of the entry point `entry` of `spirv`, a SPIR-V module
+    /// that slangc compiled, through the device's pipeline cache if it has one. The module is
+    /// trusted as [`GraphicsDesc::spirv`] says, and to write only the bindless set's storage images.
+    /// Fails as [`Pipeline::graphics`] does.
+    pub fn new(device: &Arc<Device>, name: &str, spirv: &[u8], entry: &CStr) -> Result<Self> {
+        let module = shader_module(device, name, spirv)?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module)
+            .name(entry);
+        let mut feedback = vk::PipelineCreationFeedback::default();
+        let mut feedback_info = vk::PipelineCreationFeedbackCreateInfo::default()
+            .pipeline_creation_feedback(&mut feedback);
+        let info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(device.bindless().pipeline_layout())
+            .push_next(&mut feedback_info);
+        let raw_device = device.raw();
+        // SAFETY: as for a graphics pipeline's, but for the one entry point.
+        let made = unsafe {
+            let cache = device.raw_pipeline_cache();
+            let made = raw_device.create_compute_pipelines(cache, &[info], None);
+            raw_device.destroy_shader_module(module, None);
+            made
+        };
+        let raw = made.map_err(|(_, e)| {
+            vk_error(
+                "vkCreateComputePipelines",
+                format_args!("compute pipeline {name:?} of {entry:?}"),
+                e,
+            )
+        })?[0];
+        // SAFETY: the pipeline is live.
+        unsafe { device.set_name(raw, name) };
+        made_log(name, feedback);
+        Ok(Self {
+            device: device.clone(),
+            raw,
+        })
+    }
+
+    pub(crate) fn raw(&self) -> vk::Pipeline {
+        self.raw
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
+    }
+}
+
+impl Drop for ComputePipeline {
+    fn drop(&mut self) {
+        self.device.retire(Retired::Pipeline(self.raw));
+    }
+}
+
+/// A shader module of `spirv`, for pipeline `name`, which it names after it.
+///
+/// Fails with `gpu.bad_shader` if `spirv` isn't SPIR-V.
+fn shader_module(device: &Device, name: &str, spirv: &[u8]) -> Result<vk::ShaderModule> {
+    let code = ash::util::read_spv(&mut Cursor::new(spirv)).map_err(|error| {
+        Error::new(
+            "gpu.bad_shader",
+            format!("the shaders of pipeline {name:?} aren't SPIR-V"),
+        )
+        .with_source(error)
+    })?;
+    let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+    // SAFETY: the device is live, and the code is a whole number of words that starts with
+    // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be valid
+    // SPIR-V, as `GraphicsDesc::spirv` says.
+    let module = unsafe { device.raw().create_shader_module(&module_info, None) }.map_err(|e| {
+        let shaders = format_args!("the shaders of pipeline {name:?}");
+        vk_error("vkCreateShaderModule", shaders, e)
+    })?;
+    // SAFETY: the module is live.
+    unsafe { device.set_name(module, name) };
+    Ok(module)
+}
+
+/// Logs that pipeline `name` was made: how long the driver took, and whether the device's
+/// pipeline cache held it.
+fn made_log(name: &str, feedback: vk::PipelineCreationFeedback) {
+    let flags = feedback.flags;
+    debug!(
+        pipeline = name,
+        us = flags
+            .contains(vk::PipelineCreationFeedbackFlags::VALID)
+            .then_some(feedback.duration / 1000),
+        cache_hit =
+            flags.contains(vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT),
+        "Pipeline made"
+    );
 }

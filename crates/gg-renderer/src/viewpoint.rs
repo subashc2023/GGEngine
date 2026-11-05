@@ -83,6 +83,37 @@ impl Viewpoint {
     ///
     /// If its projection can't project, as [`Projection`] says.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        let view = Mat4::from_rotation_translation(self.rotation, self.position).inverse();
+        self.projection_matrix(aspect) * view
+    }
+
+    /// The matrix from Vulkan's clip space to the ways the view sees, for a view `aspect` times as
+    /// wide as it's tall, as a sky is drawn: with perspective, from a point at the near plane,
+    /// where reversed depth is 1, to one whose way from the origin is the way its pixel sees,
+    /// whatever the viewpoint's position; without, from every point to the one way it sees.
+    ///
+    /// # Panics
+    ///
+    /// If its projection can't project, as [`Projection`] says.
+    pub(crate) fn ways_from_clip(&self, aspect: f32) -> Mat4 {
+        let projection = self.projection_matrix(aspect);
+        match self.projection {
+            Projection::Orthographic { .. } => {
+                let along = self.rotation * Vec3::NEG_Z;
+                Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, along.extend(1.0))
+            }
+            Projection::Perspective { .. } => {
+                (projection * Mat4::from_quat(self.rotation.inverse())).inverse()
+            }
+        }
+    }
+
+    /// The matrix of its projection alone, from its own space to Vulkan's clip space.
+    ///
+    /// # Panics
+    ///
+    /// If its projection can't project, as [`Projection`] says.
+    fn projection_matrix(&self, aspect: f32) -> Mat4 {
         // glam checks none of it, without its `glam-assert` feature.
         assert!(
             self.projection.projects(),
@@ -91,7 +122,7 @@ impl Viewpoint {
              to top, from a near plane in front of it; got {:?}",
             self.projection
         );
-        let projection = match self.projection {
+        match self.projection {
             Projection::Orthographic { height, near, far } => {
                 let top = height / 2.0;
                 let right = top * aspect;
@@ -103,9 +134,7 @@ impl Viewpoint {
             Projection::Perspective { fov, near } => {
                 vulkan::perspective_infinite_reverse(fov, aspect, near)
             }
-        };
-        let view = Mat4::from_rotation_translation(self.rotation, self.position).inverse();
-        projection * view
+        }
     }
 
     /// Where lit shading sees from, as the frame's data holds it: its position and 1 with
@@ -205,6 +234,46 @@ mod tests {
         // Behind it, where Vulkan clips what's at a negative w.
         let behind = clip * Vec4::new(3.0, -2.0, 6.0, 1.0);
         assert!(behind.w < 0.0, "{behind}");
+    }
+
+    /// A pixel sees the way its point in the world is from the viewpoint, wherever that is: the
+    /// center ahead, the top edge 45° up, and the right edge, 1.5 times as far across, toward its
+    /// right; and without perspective, every pixel the one way ahead.
+    #[test]
+    fn each_pixel_sees_the_way_it_shows() {
+        let viewpoint = Viewpoint {
+            position: Vec3::new(3.0, -2.0, 5.0),
+            rotation: Quat::from_rotation_z(FRAC_PI_2),
+            projection: Projection::Perspective {
+                fov: FRAC_PI_2,
+                near: 0.5,
+            },
+        };
+        let way = |viewpoint: &Viewpoint, x: f32, y: f32| {
+            let point = viewpoint.ways_from_clip(1.5) * Vec4::new(x, y, 1.0, 1.0);
+            (point.truncate() / point.w).normalize()
+        };
+        for ([x, y], expected) in [
+            ([0.0, 0.0], Vec3::NEG_Z),
+            ([0.0, -1.0], Vec3::new(-1.0, 0.0, -1.0).normalize()),
+            ([1.0, 0.0], Vec3::new(0.0, 1.5, -1.0).normalize()),
+        ] {
+            let got = way(&viewpoint, x, y);
+            assert!(got.abs_diff_eq(expected, 1e-5), "{got}, not {expected}");
+        }
+        let flat = Viewpoint {
+            projection: Projection::Orthographic {
+                height: 4.0,
+                near: 1.0,
+                far: 11.0,
+            },
+            rotation: Quat::from_rotation_y(FRAC_PI_2),
+            ..viewpoint
+        };
+        for [x, y] in [[0.0, 0.0], [1.0, -1.0]] {
+            let got = way(&flat, x, y);
+            assert!(got.abs_diff_eq(Vec3::NEG_X, 1e-5), "{got}");
+        }
     }
 
     #[test]

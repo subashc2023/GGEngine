@@ -1,11 +1,15 @@
 // What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang and
 // model.slang include: the bindless set's arrays, the quad's corners, the frame's data, with its
-// lights and the table of models' materials, and the push constants, for a shader's types of
-// vertices and parameters, and what the fragment stage returns. `Corner` in src/sprite.rs,
-// `GpuLight` in src/light.rs, `Entry` in src/model.rs and `Push` in src/mesh.rs, which `Corner`,
-// `Light`, `Material` and `Push` here match field for field.
+// lights, the table of models' materials and the sky's prefiltered light, and the push constants,
+// for a shader's types of vertices and parameters, and what the fragment stage returns. `Corner`
+// in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs and `Push` and `FrameData`
+// in src/mesh.rs, which `Corner`, `Light`, `Material`, `Push` and `Frame` here match field for
+// field.
 
+// The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
+// second.
 [[vk::binding(0, 0)]] Texture2D textures[];
+[[vk::binding(0, 0)]] TextureCube cubes[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
 
 struct Corner {
@@ -67,6 +71,22 @@ struct Frame {
     // toward it and 0 for an orthographic projection, so that the way to the eye from `p` is
     // `eye.xyz - p * eye.w`.
     float4 eye;
+    // The sky's image, equirectangular, a texture of the bindless set's, which the view shows
+    // behind the world.
+    uint sky;
+    // The sky's light from all around, prefiltered, cubes of the bindless set's: what Lambert's
+    // diffuse takes the way of a normal, the irradiance over π; and what GGX's specular takes the
+    // way of a reflection, a level for each step of roughness, from none at the first to 1 at the
+    // last, of `specular_levels`, which is 0 in a frame without a sky.
+    uint irradiance;
+    uint specular;
+    uint specular_levels;
+    // The split sum's table, a texture of the bindless set's: by the cosine of the view's angle
+    // across and the roughness down, GGX's reflectance as F0's scale in red and its bias in green.
+    uint brdf;
+    // The luminance, in candela per square meter, that a texel of the sky's of 1 stands for: what
+    // its light is multiplied by, before the exposure.
+    float sky_luminance;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take
