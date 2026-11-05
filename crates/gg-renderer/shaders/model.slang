@@ -8,7 +8,10 @@
 //
 // Shading follows glTF 2.0's Appendix B, as Khronos's sample viewer implements it: a Lambertian
 // diffuse lobe and a GGX specular lobe, with Smith's height-correlated visibility, Schlick's
-// Fresnel, and 0.04 reflected head-on by every dielectric. Lights fall off as
+// Fresnel, and 0.04 reflected head-on by every dielectric. A material of
+// KHR_materials_pbrSpecularGlossiness's is shaded by the same lobes, as the extension's reference
+// has it: it reflects its specular color head-on, diffuses its diffuse color less that color's
+// strongest channel, and is as rough as 1 less its glossiness. Lights fall off as
 // KHR_lights_punctual's reference does. The sky lights it from all around by its prefiltered
 // light, through the split sum, with Fdez-Agüera's roughness-dependent Fresnel and his scattering
 // many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
@@ -53,6 +56,7 @@ static const float LEAST_ROUGHNESS = 0.045;
 static const float BRIGHTEST = 65504.0;
 static const uint UNLIT = 1;
 static const uint NORMAL_MAPPED = 2;
+static const uint SPECULAR_GLOSSINESS = 4;
 // `Sampler::LinearClamp`'s index in the bindless set.
 static const uint LINEAR_CLAMP = 0;
 // The texels inside its map's edges that each cascade keeps the points it shadows to, as `MARGIN`
@@ -138,21 +142,20 @@ float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) 
     return once + missed * once * average / (1.0 - average * missed);
 }
 
-// The sky's light from all around reflected by a surface of `base` color, `metallic` and
-// `roughness`, facing `normal` and seen along `view` at a cosine of `n_dot_v`, as luminance before
-// the exposure.
-float3 sky_light(Frame frame, float3 base, float metallic, float roughness, float3 normal,
-                 float3 view, float n_dot_v) {
+// The sky's light from all around reflected by a surface of `roughness`, facing `normal` and seen
+// along `view` at a cosine of `n_dot_v`, as luminance before the exposure: a surface that diffuses
+// `diffuse_color` and reflects `f0` head-on, mixed by `metallic` with a metal of `metal` color.
+float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
+                 float roughness, float3 normal, float3 view, float n_dot_v) {
     SamplerState clamp_ = samplers[LINEAR_CLAMP];
-    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * base;
+    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * diffuse_color;
     float level = roughness * float(frame.specular_levels - 1);
     float3 reflected = reflect(-view, normal);
     float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb;
     float2 table = textures[frame.brdf].SampleLevel(clamp_, float2(n_dot_v, roughness), 0.0).rg;
-    float3 dielectric = lerp(diffuse, specular, sky_reflectance(float3(0.04), roughness, n_dot_v,
-                                                                 table));
-    float3 metal = sky_reflectance(base, roughness, n_dot_v, table) * specular;
-    return lerp(dielectric, metal, metallic) * frame.sky_luminance;
+    float3 dielectric = lerp(diffuse, specular, sky_reflectance(f0, roughness, n_dot_v, table));
+    float3 metal_light = sky_reflectance(metal, roughness, n_dot_v, table) * specular;
+    return lerp(dielectric, metal_light, metallic) * frame.sky_luminance;
 }
 
 // What the shadow map `map`, `size` texels across, holds of light at `uv`, compared with `depth`:
@@ -226,7 +229,8 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Material material = frame.materials[push.params[input.instance].material];
     // Every texture sampled before any branch or discard, which would leave the derivatives that
     // pick their levels undefined. Base colors decode from sRGB as they're sampled, as the
-    // emission's do; the maps are read as stored.
+    // emission's and a specular-glossiness map's specular colors do; the other maps, and that
+    // map's glossiness in alpha, are read as stored.
     float4 color = sampled(material, 0, input.uv) * material.color * input.color;
     float4 surface = sampled(material, 1, input.uv);
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
@@ -266,12 +270,30 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
         float3 local = float3(mapped * material.normal_scale, z);
         normal = normalize(tangent * local.x + bitangent * local.y + normal * local.z);
     }
-    float metallic = saturate(material.metallic * surface.b);
-    float roughness = clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
+    // What it diffuses and reflects head-on, which the frame's lights shade; and for the sky's
+    // light, a dielectric's, which it mixes with a metal's by how metallic it is.
+    float metallic = 0.0;
+    float roughness;
+    float3 diffuse_color;
+    float3 f0;
+    float3 sky_diffuse;
+    float3 sky_f0;
+    if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
+        f0 = material.specular * surface.rgb;
+        roughness = clamp(1.0 - material.glossiness * surface.a, LEAST_ROUGHNESS, 1.0);
+        diffuse_color = color.rgb * (1.0 - max(max(f0.r, f0.g), f0.b));
+        sky_diffuse = diffuse_color;
+        sky_f0 = f0;
+    } else {
+        metallic = saturate(material.metallic * surface.b);
+        roughness = clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
+        diffuse_color = color.rgb * (1.0 - metallic);
+        f0 = lerp(float3(0.04), color.rgb, metallic);
+        sky_diffuse = color.rgb;
+        sky_f0 = float3(0.04);
+    }
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
-    float3 diffuse_color = color.rgb * (1.0 - metallic);
-    float3 f0 = lerp(float3(0.04), color.rgb, metallic);
     float3 view = normalize(frame.eye.xyz - input.world * frame.eye.w);
     float n_dot_v = max(dot(normal, view), 1e-4);
     float3 light_sum = float3(0.0);
@@ -315,7 +337,8 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
         light_sum += (diffuse + specular) * radiance * n_dot_l;
     }
     if (frame.specular_levels > 0) {
-        light_sum += sky_light(frame, color.rgb, metallic, roughness, normal, view, n_dot_v)
+        light_sum += sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
+                               view, n_dot_v)
             * occlusion;
     }
     float3 shaded = light_sum * frame.exposure + emission;

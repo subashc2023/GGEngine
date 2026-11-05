@@ -76,11 +76,13 @@ pub enum Texels {
     /// A material's map as [`Map`](Self::Map)'s is, its full chain made already, each level after
     /// the one before, as the engine's loader makes them off the main thread: a frame makes none.
     MapLevels(Map),
-    /// A material's map compressed as the cooker compresses each kind, its blocks laid out as
-    /// [`Bc7`](Self::Bc7)'s are: BC7 for a [`Map::Surface`], BC5 for a [`Map::Normal`]'s X and
-    /// Y. Its first level alone, or, if `mipmapped`, its full chain: a frame makes none.
+    /// A material's map compressed, its blocks laid out as [`Bc7`](Self::Bc7)'s are: as BC5 if
+    /// `bc5`, of a [`Map::Normal`]'s X and Y, as the cooker compresses one, and otherwise as BC7, as
+    /// the cooker compresses a [`Map::Surface`] and as a model's DDS images hold any map. Its first
+    /// level alone, or, if `mipmapped`, its full chain: a frame makes none.
     CompressedMap {
         map: Map,
+        bc5: bool,
         mipmapped: bool,
     },
     /// Colors of high dynamic range, linear, as a `.hdr` image holds them: rows of RGBA of 16-bit
@@ -103,7 +105,8 @@ pub enum Map {
     Surface,
     /// A normal map: the X and Y of the surface's normal in its tangent space in red and green,
     /// from 0 to 1 for -1 to 1, from which shaders make Z, ignoring blue; one that points straight
-    /// out stands in. Compressed as BC5, which holds the two alone.
+    /// out stands in. The cooker compresses one as BC5, which holds the two alone; a model's DDS
+    /// image may hold one as BC7.
     Normal,
 }
 
@@ -164,12 +167,8 @@ impl Texels {
             Self::Color(_) | Self::ColorLevels => TextureFormat::Rgba8Srgb,
             Self::Data | Self::Map(_) | Self::MapLevels(_) => TextureFormat::Rgba8Unorm,
             Self::Bc7 { .. } => TextureFormat::Bc7Srgb,
-            Self::CompressedMap {
-                map: Map::Surface, ..
-            } => TextureFormat::Bc7Unorm,
-            Self::CompressedMap {
-                map: Map::Normal, ..
-            } => TextureFormat::Bc5Unorm,
+            Self::CompressedMap { bc5: false, .. } => TextureFormat::Bc7Unorm,
+            Self::CompressedMap { bc5: true, .. } => TextureFormat::Bc5Unorm,
             Self::Hdr => TextureFormat::Rgba16Float,
             Self::Bc6h => TextureFormat::Bc6hUfloat,
         }
@@ -483,21 +482,25 @@ fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Re
             Texels::ColorLevels | Texels::MapLevels(_) => "RGBA8 in its levels",
             Texels::Bc7 { mipmapped: false }
             | Texels::CompressedMap {
-                map: Map::Surface,
+                bc5: false,
                 mipmapped: false,
+                ..
             } => "BC7 blocks",
             Texels::Bc7 { mipmapped: true }
             | Texels::CompressedMap {
-                map: Map::Surface,
+                bc5: false,
                 mipmapped: true,
+                ..
             } => "BC7 blocks in its levels",
             Texels::CompressedMap {
-                map: Map::Normal,
+                bc5: true,
                 mipmapped: false,
+                ..
             } => "BC5 blocks",
             Texels::CompressedMap {
-                map: Map::Normal,
+                bc5: true,
                 mipmapped: true,
+                ..
             } => "BC5 blocks in its levels",
             Texels::Hdr => "RGBA of 16-bit floats",
             Texels::Bc6h => "BC6H blocks",
@@ -1007,16 +1010,26 @@ mod tests {
         );
         let surface = Texels::CompressedMap {
             map: Map::Surface,
+            bc5: false,
             mipmapped: true,
         };
         assert_eq!(surface.with_levels(), surface);
         assert_eq!(surface.format(), TextureFormat::Bc7Unorm);
         let normals = Texels::CompressedMap {
             map: Map::Normal,
+            bc5: true,
             mipmapped: false,
         };
         assert_eq!(normals.format(), TextureFormat::Bc5Unorm);
         assert_eq!(normals.bytes([5, 5]), 4 * 16, "four blocks");
+        // A normal map as a DDS image holds one, its X, Y and Z, as BC7.
+        let bc7_normals = Texels::CompressedMap {
+            map: Map::Normal,
+            bc5: false,
+            mipmapped: false,
+        };
+        assert_eq!(bc7_normals.format(), TextureFormat::Bc7Unorm);
+        assert_eq!(bc7_normals.kind(), Kind::Map(Map::Normal));
     }
 
     /// The levels after the first that `pixels`, `size` pixels across and down, gets.

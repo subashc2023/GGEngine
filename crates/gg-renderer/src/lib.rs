@@ -1,7 +1,8 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
-//! metallic-roughness materials under the frame's lights, a directional light's shadows, in
+//! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
+//! lights, a directional light's shadows, in
 //! cascades fitted to the view, and its sky, which shows behind them, prefiltered on the GPU, a
 //! game's UI over them in the view's own space, and the UI over the view; the view drawn in colors
 //! of high dynamic range, which a tonemapper maps into the range it shows; picks, which read back
@@ -56,7 +57,7 @@ pub use line::Line;
 pub use mesh::{Lod, Lods, Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
-pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled};
+pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sky::Sky;

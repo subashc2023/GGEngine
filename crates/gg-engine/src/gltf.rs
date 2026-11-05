@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use bevy_mikktspace::{Geometry, Ops, TangentSpace};
 use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Lod, Map, Wrap};
+use gg_renderer::{AlphaMode, Lod, Map, Workflow, Wrap};
 
 use crate::image::{self, Image};
 use crate::package::Files;
@@ -235,16 +235,17 @@ impl Ops for Libm {
     }
 }
 
-/// How a primitive looks, as glTF's metallic-roughness materials say: its base color, which the
-/// material's factor and texture and the primitive's vertex colors multiply together; how
-/// metallic and rough it is, its normal map, occlusion and emission; whether it's unlit, as
-/// KHR_materials_unlit has it; and how its alpha covers what's behind it.
+/// How a primitive looks, as glTF's metallic-roughness materials say, or
+/// KHR_materials_pbrSpecularGlossiness's: its base color, or its diffuse color, which the
+/// material's factor and texture and the primitive's vertex colors multiply together; how it
+/// reflects, its normal map, occlusion and emission; whether it's unlit, as KHR_materials_unlit has
+/// it; and how its alpha covers what's behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Material {
-    /// The base color factor, linear RGBA.
+    /// The base color factor, or the diffuse factor, linear RGBA.
     pub(crate) color: [f32; 4],
-    pub(crate) metallic: f32,
-    pub(crate) roughness: f32,
+    /// How metallic and rough it is, or its specular color and how glossy.
+    pub(crate) workflow: Workflow,
     /// The normal map's scale of its X and Y.
     pub(crate) normal_scale: f32,
     /// How much the occlusion map darkens, from 0 to 1.
@@ -266,8 +267,7 @@ impl Default for Material {
     fn default() -> Self {
         Self {
             color: [1.0; 4],
-            metallic: 1.0,
-            roughness: 1.0,
+            workflow: Workflow::default(),
             normal_scale: 1.0,
             occlusion_strength: 1.0,
             emissive: [0.0; 3],
@@ -284,6 +284,16 @@ impl Material {
     pub(crate) fn texture(&self, slot: Slot) -> Option<Sampling> {
         self.textures[slot as usize]
     }
+
+    /// What its texture of `slot` holds, as [`Slot::map`] says, but that a specular-glossiness
+    /// map holds colors, its specular color sRGB-encoded, as KHR_materials_pbrSpecularGlossiness
+    /// has it.
+    pub(crate) fn map(&self, slot: Slot) -> Option<Map> {
+        match (slot, self.workflow) {
+            (Slot::Surface, Workflow::SpecularGlossiness { .. }) => None,
+            _ => slot.map(),
+        }
+    }
 }
 
 /// A material's texture: the index in `images` of its image, and how it samples it.
@@ -299,8 +309,9 @@ pub(crate) struct Sampling {
 /// Each of a material's textures, in the order its `textures` hold them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
+    /// Base color, or diffuse.
     Color,
-    /// Metallic-roughness.
+    /// Metallic-roughness, or specular-glossiness.
     Surface,
     Normal,
     Occlusion,
@@ -316,23 +327,13 @@ impl Slot {
         Self::Emissive,
     ];
 
-    /// What its texture's image holds: colors, `None`, sRGB-encoded, or a map of data.
+    /// What its texture's image holds in a metallic-roughness material: colors, `None`,
+    /// sRGB-encoded, or a map of data.
     pub(crate) fn map(self) -> Option<Map> {
         match self {
             Self::Color | Self::Emissive => None,
             Self::Surface | Self::Occlusion => Some(Map::Surface),
             Self::Normal => Some(Map::Normal),
-        }
-    }
-
-    /// Its name in glTF's JSON.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Color => "baseColorTexture",
-            Self::Surface => "metallicRoughnessTexture",
-            Self::Normal => "normalTexture",
-            Self::Occlusion => "occlusionTexture",
-            Self::Emissive => "emissiveTexture",
         }
     }
 }
@@ -349,10 +350,11 @@ pub(crate) fn holds(map: Option<Map>) -> &'static str {
 /// The most memory reading a model may take, in bytes, for what it makes of its files: buffers read
 /// from files and data URIs, images' files and what they decode to, which both are held until the
 /// loader has decoded them, primitives' vertices, indices and names, and parts.
-/// Past what a model that fits a GPU needs, as four textures 8,192 pixels square and ten million
-/// vertices take about 1.5 GiB, so that a small file can't fill memory by naming its data many
-/// times, such as one PNG's bytes as many images.
-pub(crate) const MAX_MEMORY: u64 = 4 << 30;
+/// Past what a model that fits a GPU needs, as the Amazon Lumberyard Bistro's 2 GB of images, BC7
+/// with their levels, held as their files and as their blocks, and its 4 million triangles take
+/// about 4.5 GiB, so that a small file can't fill memory by naming its data many times, such as one
+/// PNG's bytes as many images.
+pub(crate) const MAX_MEMORY: u64 = 8 << 30;
 
 /// Reads model `name`'s file at `path`, and the files it names, from `from`, the disk or the game's
 /// package, as [`read`] does through [`Files::read`], and lists the files it read, its own first,
@@ -445,12 +447,15 @@ pub(crate) fn read(
     Ok(reader.imported)
 }
 
-/// The extensions the engine reads: materials drawn unlit, nodes' lights, and materials' emission
-/// stronger than 1.
-const READ_EXTENSIONS: [&str; 3] = [
+/// The extensions the engine reads: materials drawn unlit, nodes' lights, materials' emission
+/// stronger than 1, materials of specular and glossiness, and textures' DDS images, which it
+/// samples in place of their sources.
+const READ_EXTENSIONS: [&str; 5] = [
     "KHR_materials_unlit",
     "KHR_lights_punctual",
     "KHR_materials_emissive_strength",
+    "KHR_materials_pbrSpecularGlossiness",
+    "MSFT_texture_dds",
 ];
 
 const GLB_MAGIC: u32 = u32::from_le_bytes(*b"glTF");
@@ -608,8 +613,9 @@ struct Reader<'a, F> {
     bin: Option<&'a [u8]>,
     /// Each buffer read, by its index: exactly its byteLength.
     buffers: BTreeMap<u32, Cow<'a, [u8]>>,
-    /// Each accessor read as an attribute, by its index: its elements' components, in order.
-    floats: BTreeMap<u32, Vec<f32>>,
+    /// Each accessor read as an attribute, by its index: its elements' components, in order, and
+    /// whether they're all finite.
+    floats: BTreeMap<u32, (Vec<f32>, bool)>,
     /// Each accessor read as indices, by its index.
     indices: BTreeMap<u32, Vec<u32>>,
     /// Each mesh read, by its index: where the primitives it draws are in `imported.primitives`.
@@ -934,12 +940,23 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
             None => None,
         };
+        // Tangents that aren't all finite, as a tool can leave where a triangle's texture
+        // coordinates have no area, are ignored, the primitive drawn as one without them, which
+        // glTF says to make them for.
         let tangents = match primitive.attributes.get("TANGENT") {
             Some(&accessor) => {
-                let (_, tangents) = self.attribute(&what, "TANGENT", accessor, &[4], false)?;
-                let tangents = tangents.as_chunks::<4>().0.to_vec();
-                same_count("TANGENT", tangents.len())?;
-                Some(tangents)
+                let (_, tangents, finite) = self.floats(&what, "TANGENT", accessor, &[4], false)?;
+                let tangents = finite.then(|| tangents.as_chunks::<4>().0.to_vec());
+                if tangents.is_none() {
+                    self.imported.ignored.push(format!(
+                        "{what}'s TANGENT, which holds numbers that aren't finite: it's drawn as \
+                         without one"
+                    ));
+                }
+                if let Some(tangents) = &tangents {
+                    same_count("TANGENT", tangents.len())?;
+                }
+                tangents
             }
             None => None,
         };
@@ -989,9 +1006,11 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     }
 
     /// Material `index`, and the TEXCOORD set its textures read, if it has any: that of the first
-    /// in [`Slot`]'s order, as a primitive's vertices have one set. A texture that reads another,
-    /// or whose image another texture samples as what it doesn't, as colors where it samples a
-    /// map, is left out, which `imported.ignored` says.
+    /// in [`Slot`]'s order, as a primitive's vertices have one set. A material of
+    /// KHR_materials_pbrSpecularGlossiness's is that, in place of its metallic-roughness, which is
+    /// the extension's fallback. A texture that reads another set, or whose image another texture
+    /// samples as what it doesn't, as colors where it samples a map, is left out, which
+    /// `imported.ignored` says.
     fn material(&mut self, index: u32) -> Result<(Material, Option<u32>)> {
         let (model, gltf) = (self.model, self.gltf);
         let material = model.item(&gltf.materials, "material", index)?;
@@ -1019,10 +1038,36 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             .and_then(|strength| strength.emissive_strength)
             .unwrap_or(1.0);
         let emissive = material.emissive_factor.unwrap_or([0.0; 3]);
+        let (color, workflow, color_texture, surface_texture) =
+            match &extensions.specular_glossiness {
+                Some(glossy) => (
+                    glossy.diffuse_factor.unwrap_or([1.0; 4]),
+                    Workflow::SpecularGlossiness {
+                        specular: Vec3::from_array(glossy.specular_factor.unwrap_or([1.0; 3])),
+                        glossiness: glossy.glossiness_factor.unwrap_or(1.0),
+                    },
+                    (glossy.diffuse_texture.as_ref(), "diffuseTexture"),
+                    (
+                        glossy.specular_glossiness_texture.as_ref(),
+                        "specularGlossinessTexture",
+                    ),
+                ),
+                None => (
+                    pbr.base_color_factor.unwrap_or([1.0; 4]),
+                    Workflow::MetallicRoughness {
+                        metallic: pbr.metallic_factor.unwrap_or(1.0),
+                        roughness: pbr.roughness_factor.unwrap_or(1.0),
+                    },
+                    (pbr.base_color_texture.as_ref(), "baseColorTexture"),
+                    (
+                        pbr.metallic_roughness_texture.as_ref(),
+                        "metallicRoughnessTexture",
+                    ),
+                ),
+            };
         let mut read = Material {
-            color: pbr.base_color_factor.unwrap_or([1.0; 4]),
-            metallic: pbr.metallic_factor.unwrap_or(1.0),
-            roughness: pbr.roughness_factor.unwrap_or(1.0),
+            color,
+            workflow,
             normal_scale: (material.normal_texture.as_ref())
                 .and_then(|normal| normal.scale)
                 .unwrap_or(1.0),
@@ -1036,42 +1081,58 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             ..Material::default()
         };
         let infos = [
-            (Slot::Color, pbr.base_color_texture.as_ref()),
-            (Slot::Surface, pbr.metallic_roughness_texture.as_ref()),
+            (Slot::Color, color_texture),
+            (Slot::Surface, surface_texture),
             (
                 Slot::Normal,
-                (material.normal_texture.as_ref()).map(|n| &n.info),
+                (
+                    (material.normal_texture.as_ref()).map(|n| &n.info),
+                    "normalTexture",
+                ),
             ),
             (
                 Slot::Occlusion,
-                (material.occlusion_texture.as_ref()).map(|o| &o.info),
+                (
+                    (material.occlusion_texture.as_ref()).map(|o| &o.info),
+                    "occlusionTexture",
+                ),
             ),
-            (Slot::Emissive, material.emissive_texture.as_ref()),
+            (
+                Slot::Emissive,
+                (material.emissive_texture.as_ref(), "emissiveTexture"),
+            ),
         ];
         let mut set = None;
-        for (slot, info) in infos {
+        for (slot, (info, name)) in infos {
             let Some(info) = info else {
                 continue;
             };
             let read_set = *set.get_or_insert(info.tex_coord);
             if read_set != info.tex_coord {
                 self.imported.ignored.push(format!(
-                    "material {index}'s {}, which reads TEXCOORD_{} where its others read \
+                    "material {index}'s {name}, which reads TEXCOORD_{} where its others read \
                      TEXCOORD_{read_set}",
-                    slot.name(),
                     info.tex_coord
                 ));
                 continue;
             }
-            read.textures[slot as usize] = self.sampling(index, slot, info.index)?;
+            let held = read.map(slot);
+            read.textures[slot as usize] = self.sampling(index, name, held, info.index)?;
         }
         Ok((read, set))
     }
 
-    /// Texture `texture`, which material `material` samples at `slot`: its image and how it
-    /// samples it; or `None` where another texture samples its image as what it doesn't, which
-    /// `imported.ignored` says.
-    fn sampling(&mut self, material: u32, slot: Slot, texture: u32) -> Result<Option<Sampling>> {
+    /// Texture `texture`, which material `material` samples as its `name`, as what `wanted` says
+    /// its image holds, colors or a map: its image, its DDS image if it has one, which
+    /// MSFT_texture_dds names in place of its source, and how it samples it; or `None` where
+    /// another texture samples its image as what it doesn't, which `imported.ignored` says.
+    fn sampling(
+        &mut self,
+        material: u32,
+        name: &str,
+        wanted: Option<Map>,
+        texture: u32,
+    ) -> Result<Option<Sampling>> {
         let (model, gltf) = (self.model, self.gltf);
         let index = texture;
         let texture = model.item(&gltf.textures, "texture", index)?;
@@ -1096,19 +1157,18 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             wrap = across;
             nearest = sampler.mag_filter == Some(NEAREST);
         }
-        let source = texture.source.ok_or_else(|| {
+        let dds = (texture.extensions.dds.as_ref()).and_then(|dds| dds.source);
+        let source = dds.or(texture.source).ok_or_else(|| {
             model.unsupported(format!(
                 "texture {index} has no source, the image the engine samples"
             ))
         })?;
         let image = self.image(source)?;
-        let wanted = slot.map();
         let held = *self.holds.entry(image).or_insert(wanted);
         if held != wanted {
             self.imported.ignored.push(format!(
-                "material {material}'s {}, which samples image {source} as {} where another \
+                "material {material}'s {name}, which samples image {source} as {} where another \
                  texture samples it as {}",
-                slot.name(),
                 holds(wanted),
                 holds(held)
             ));
@@ -1121,7 +1181,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         }))
     }
 
-    /// Image `index`, read once, as far as its header, as [`image::read`] reads it, for the loader
+    /// Image `index`, read once, as far as its header, as [`image::read`] reads it, or as
+    /// [`image::read_dds`] reads a DDS file, which it tells apart by its first bytes, for the loader
     /// to decode: where it is in `imported.images`.
     fn image(&mut self, index: u32) -> Result<usize> {
         if let Some(&at) = self.images.get(&index) {
@@ -1142,11 +1203,20 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 )));
             }
         };
-        let read = image::read(bytes.into_owned()).map_err(|problem| {
-            model.bad(format!(
-                "image {index} doesn't decode as a PNG or a JPEG: {problem}"
-            ))
-        })?;
+        let bytes = bytes.into_owned();
+        let read = if image::is_dds(&bytes) {
+            image::read_dds(bytes).map_err(|problem| {
+                model.bad(format!(
+                    "image {index} doesn't read as a DDS of BC7: {problem}"
+                ))
+            })?
+        } else {
+            image::read(bytes).map_err(|problem| {
+                model.bad(format!(
+                    "image {index} doesn't decode as a PNG or a JPEG: {problem}"
+                ))
+            })?
+        };
         // Read and decoded for each image, as images that share a source each decode it, its file
         // held until it's decoded.
         self.hold(read.pixels.len() + read.decoded_len())?;
@@ -1156,10 +1226,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(at)
     }
 
-    /// Accessor `index`, which `what` reads as attribute `semantic`, once: how many components
-    /// each element has, and all of them in order. glTF allows it if each element has a number of
-    /// components in `components`, and they're floats, or, if `normalized`, normalized unsigned
-    /// bytes or shorts.
+    /// Accessor `index`, which `what` reads as attribute `semantic`, as [`floats`](Self::floats)
+    /// reads it, failing if it holds a number that isn't finite, which glTF doesn't allow.
     fn attribute(
         &mut self,
         what: &str,
@@ -1168,6 +1236,26 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         components: &[usize],
         normalized: bool,
     ) -> Result<(usize, &[f32])> {
+        let model = self.model;
+        let (count, floats, finite) = self.floats(what, semantic, index, components, normalized)?;
+        if !finite {
+            return Err(model.bad(format!("accessor {index} holds a number that isn't finite")));
+        }
+        Ok((count, floats))
+    }
+
+    /// Accessor `index`, which `what` reads as attribute `semantic`, once: how many components
+    /// each element has, all of them in order, and whether they're all finite. glTF allows it if
+    /// each element has a number of components in `components`, and they're floats, or, if
+    /// `normalized`, normalized unsigned bytes or shorts.
+    fn floats(
+        &mut self,
+        what: &str,
+        semantic: &str,
+        index: u32,
+        components: &[usize],
+        normalized: bool,
+    ) -> Result<(usize, &[f32], bool)> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
         let component = match (accessor.component_type, accessor.normalized) {
@@ -1205,12 +1293,11 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     .map(|&short| f32::from(u16::from_le_bytes(short)) / 65535.0)
                     .collect(),
             };
-            if !floats.iter().all(|float| float.is_finite()) {
-                return Err(model.bad(format!("accessor {index} holds a number that isn't finite")));
-            }
-            self.floats.insert(index, floats);
+            let finite = floats.iter().all(|float| float.is_finite());
+            self.floats.insert(index, (floats, finite));
         }
-        Ok((count, &self.floats[&index]))
+        let (floats, finite) = &self.floats[&index];
+        Ok((count, floats, *finite))
     }
 
     /// Accessor `index`, which `what` reads as its indices, once, checked to be whole triangles,
@@ -1678,6 +1765,18 @@ mod json {
         pub(super) unlit: Option<IgnoredAny>,
         #[serde(rename = "KHR_materials_emissive_strength")]
         pub(super) emissive_strength: Option<EmissiveStrength>,
+        #[serde(rename = "KHR_materials_pbrSpecularGlossiness")]
+        pub(super) specular_glossiness: Option<SpecularGlossiness>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct SpecularGlossiness {
+        pub(super) diffuse_factor: Option<[f32; 4]>,
+        pub(super) diffuse_texture: Option<TextureInfo>,
+        pub(super) specular_factor: Option<[f32; 3]>,
+        pub(super) glossiness_factor: Option<f32>,
+        pub(super) specular_glossiness_texture: Option<TextureInfo>,
     }
 
     #[derive(Deserialize, Default)]
@@ -1723,6 +1822,20 @@ mod json {
     #[serde(rename_all = "camelCase", default)]
     pub(super) struct Texture {
         pub(super) sampler: Option<u32>,
+        pub(super) source: Option<u32>,
+        pub(super) extensions: TextureExtensions,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub(super) struct TextureExtensions {
+        #[serde(rename = "MSFT_texture_dds")]
+        pub(super) dds: Option<TextureDds>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct TextureDds {
         pub(super) source: Option<u32>,
     }
 
@@ -2087,8 +2200,10 @@ pub(crate) mod tests {
                     lods: Vec::new(),
                     material: Material {
                         color: [1.0, 0.5, 0.25, 1.0],
-                        metallic: 0.25,
-                        roughness: 0.5,
+                        workflow: Workflow::MetallicRoughness {
+                            metallic: 0.25,
+                            roughness: 0.5,
+                        },
                         occlusion_strength: 0.5,
                         emissive: [2.0, 1.0, 0.0],
                         textures: [sampled(0, true, Wrap::Clamp), None, None, None, None],
@@ -2442,6 +2557,126 @@ pub(crate) mod tests {
     /// Removes `key` from the object `value`.
     fn remove(value: &mut Value, key: &str) {
         value.as_object_mut().expect("an object").remove(key);
+    }
+
+    /// A material of KHR_materials_pbrSpecularGlossiness's is that, its diffuse color and texture
+    /// in place of a base color's and its specular-glossiness map, which holds colors, in place of
+    /// its metallic-roughness, the extension's fallback, which is ignored. A texture whose
+    /// MSFT_texture_dds names a DDS image samples that, not its source, which isn't there: a DDS of
+    /// BC7, read as far as its headers. Neither extension is ignored; a DDS that isn't of BC7 is
+    /// refused, naming its image.
+    #[test]
+    fn specular_glossiness_and_dds_images_read_as_their_extensions_say() {
+        let (mut gltf, bin) = triangle();
+        gltf["extensionsUsed"] = json!(["KHR_materials_pbrSpecularGlossiness", "MSFT_texture_dds"]);
+        gltf["materials"] = json!([{
+            "pbrMetallicRoughness": {"baseColorFactor": [0.0, 0.0, 0.0, 1.0], "metallicFactor": 0.5},
+            "extensions": {"KHR_materials_pbrSpecularGlossiness": {
+                "diffuseFactor": [1.0, 0.5, 0.25, 1.0],
+                "diffuseTexture": {"index": 0},
+                "specularFactor": [0.5, 0.25, 0.125],
+                "glossinessFactor": 0.75,
+                "specularGlossinessTexture": {"index": 1},
+            }},
+        }]);
+        let dds_of = |source: u32| json!({"source": 1, "extensions": {"MSFT_texture_dds": {"source": source}}});
+        gltf["textures"] = json!([dds_of(2), dds_of(3)]);
+        let png = gltf["images"][0].clone();
+        gltf["images"] = json!([png, {"uri": "missing.png"}, {"uri": "a.dds"}, {"uri": "b.dds"}]);
+        gltf["buffers"][0]["uri"] = json!("m.bin");
+        let read = |gltf: &Value, b: &[u8]| {
+            let a = crate::image::tests::dds(99, [4, 4], &[vec![1; 16]]);
+            let files = [("m.bin", &bin[..]), ("a.dds", &a[..]), ("b.dds", b)];
+            read_files("m.gltf", gltf.to_string().as_bytes(), &files)
+        };
+        let b = crate::image::tests::dds(98, [4, 4], &[vec![2; 16]]);
+        let imported = read(&gltf, &b).expect("a model");
+        let material = imported.primitives[0].material;
+        assert_eq!(material.color, [1.0, 0.5, 0.25, 1.0]);
+        let workflow = Workflow::SpecularGlossiness {
+            specular: Vec3::new(0.5, 0.25, 0.125),
+            glossiness: 0.75,
+        };
+        assert_eq!(material.workflow, workflow);
+        let sampled = material
+            .textures
+            .map(|texture| texture.map(|texture| texture.image));
+        assert_eq!(sampled, [Some(0), Some(1), None, None, None]);
+        assert_eq!(material.map(Slot::Surface), None, "colors");
+        let dds = |compressed| crate::image::Format::Dds {
+            compressed,
+            mipmapped: false,
+        };
+        let formats: Vec<_> = (imported.images.iter())
+            .map(|image| (image.size, image.format))
+            .collect();
+        use crate::image::Compressed::{Bc7Srgb, Bc7Unorm};
+        assert_eq!(formats, [([4, 4], dds(Bc7Srgb)), ([4, 4], dds(Bc7Unorm))]);
+        assert!(imported.ignored.is_empty(), "{:?}", imported.ignored);
+        let bc1 = crate::image::tests::dds(71, [4, 4], &[vec![2; 8]]);
+        let error = read(&gltf, &bc1).expect_err("BC1");
+        assert_eq!(error.code(), "engine.bad_model");
+        let message = error.to_string();
+        assert!(
+            message.contains("image 3") && message.contains("DXGI format 71"),
+            "{message}"
+        );
+    }
+
+    /// A primitive whose TANGENT holds numbers that aren't finite, as a tool can leave them where a
+    /// triangle's texture coordinates have no area, is drawn as one without tangents, its normal
+    /// map's from MikkTSpace, which `ignored` says; its other attributes still may hold none.
+    #[test]
+    fn tangents_that_arent_finite_are_ignored() {
+        let (mut gltf, mut bin) = triangle();
+        let mut view = |bytes: &[u8]| {
+            while !bin.len().is_multiple_of(4) {
+                bin.push(0);
+            }
+            let at = bin.len();
+            bin.extend_from_slice(bytes);
+            let views = gltf["bufferViews"].as_array_mut().expect("views");
+            views.push(json!({"buffer": 0, "byteOffset": at, "byteLength": bytes.len()}));
+            views.len() - 1
+        };
+        let nan = f32::NAN;
+        let normals = view(&floats(&[0., 0., 1., 0., 0., 1., 0., 0., 1.]));
+        let tangents = view(&floats(&[
+            1., 0., 0., 1., nan, nan, nan, 0., 1., 0., 0., 1.,
+        ]));
+        let nans = view(&floats(&[nan; 9]));
+        gltf["buffers"][0]["byteLength"] = json!(bin.len());
+        let accessors = gltf["accessors"].as_array_mut().expect("accessors");
+        for (view, kind) in [(normals, "VEC3"), (tangents, "VEC4"), (nans, "VEC3")] {
+            accessors
+                .push(json!({"bufferView": view, "componentType": 5126, "count": 3, "type": kind}));
+        }
+        let attributes = &mut gltf["meshes"][0]["primitives"][0]["attributes"];
+        attributes["NORMAL"] = json!(3);
+        attributes["TANGENT"] = json!(4);
+        // Its own image, of the same PNG, which the base color samples as colors.
+        let png = gltf["images"][0].clone();
+        gltf["images"].as_array_mut().expect("images").push(png);
+        let texture = json!({"source": 1});
+        gltf["textures"]
+            .as_array_mut()
+            .expect("textures")
+            .push(texture);
+        gltf["materials"][0]["normalTexture"] = json!({"index": 1});
+        let read = |gltf: &Value| read_glb(&glb(&gltf.to_string(), &bin));
+        let imported = read(&gltf).expect("a model");
+        let ignored = "primitive 0 of mesh 0's TANGENT, which holds numbers that aren't finite: \
+                       it's drawn as without one";
+        assert_eq!(imported.ignored, [ignored]);
+        // MikkTSpace's, along U, which runs along X.
+        let made = &imported.primitives[0].tangents;
+        assert!(
+            made.iter().all(|tangent| tangent == &[1.0, 0.0, 0.0, 1.0]),
+            "{made:?}"
+        );
+        gltf["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = json!(5);
+        let error = read(&gltf).expect_err("normals that aren't finite");
+        assert!(error.to_string().contains("isn't finite"), "{error}");
     }
 
     #[test]

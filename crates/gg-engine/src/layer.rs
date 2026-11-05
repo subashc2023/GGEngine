@@ -1066,7 +1066,8 @@ impl Context {
     /// in errors and GPU captures. A run from a game's package
     /// reads the model as the cooker cooked it instead, its meshes optimized, with levels of detail
     /// that each draw picks by its size on screen, and its images compressed with their levels, BC7
-    /// of colors or values and BC5 of normal maps, as ARCHITECTURE.md's Project state says. A file
+    /// of colors or values and BC5 of normal maps, but DDS images' blocks as they are, as
+    /// ARCHITECTURE.md's Project state says. A file
     /// added again gives the model it gave first, until it's removed, as
     /// [`remove_model`](Self::remove_model) says.
     ///
@@ -1076,17 +1077,21 @@ impl Context {
     /// material's textures name, and its vertex colors, COLOR_0, as floats or normalized integers,
     /// and its indices, of 8, 16 or 32 bits; and of its material, glTF's metallic-roughness, as
     /// ARCHITECTURE.md's Rendering says: the base color factor and texture, the metallic and
-    /// roughness factors and their texture, the normal map and its scale, the occlusion map and its
-    /// strength, the emissive factor, times KHR_materials_emissive_strength's strength, and its
-    /// texture, each texture's wrapping and whether it magnifies to the nearest texel, the alpha
-    /// mode and cutoff, whether it's double-sided, and whether KHR_materials_unlit makes it unlit.
+    /// roughness factors and their texture, or, in their place, KHR_materials_pbrSpecularGlossiness's
+    /// diffuse factor and texture, specular and glossiness factors and their texture, the normal map
+    /// and its scale, the occlusion map and its strength, the emissive factor, times
+    /// KHR_materials_emissive_strength's strength, and its texture, each texture's wrapping and
+    /// whether it magnifies to the nearest texel, the alpha mode and cutoff, whether it's
+    /// double-sided, and whether KHR_materials_unlit makes it unlit.
     /// A primitive without normals draws flat, and a lit material's normal map without tangents
     /// takes MikkTSpace's; a material that isn't double-sided draws its triangles' fronts alone.
     /// Buffers
     /// are in files in the model's folder, named by URIs relative to the model's, read no further
     /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
-    /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
-    /// than by the types the model declares. A file added again gives the model it gave first. It's
+    /// buffer views: PNGs or JPEGs, as `add_texture` takes them, or DDS files of BC7, with one level
+    /// or their full chain, which a texture's MSFT_texture_dds names in place of its source, told
+    /// apart by their bytes rather than by the types the model declares. A file added again gives
+    /// the model it gave first. It's
     /// named by its asset ID, where its file has one, or else by its path, as a texture is, and its
     /// images by its name and their places in it, such as `5f3c9a1e07b2d846#0` or
     /// `assets/truck.glb#0`. In a development run that serves the tool API, it takes what its files
@@ -1095,9 +1100,11 @@ impl Context {
     /// materials, which its roots' nodes take.
     ///
     /// It ignores animations, cameras and the extensions the model uses without requiring them but
-    /// those it reads, and a material's texture that reads other texture coordinates than its
-    /// others, or whose image another texture samples as what it doesn't, as data where it samples
-    /// colors, and logs which it has at info level, as `engine.model_ignored`: the model draws as
+    /// those it reads, a material's texture that reads other texture coordinates than its others,
+    /// or whose image another texture samples as what it doesn't, as data where it samples colors,
+    /// and a primitive's TANGENT that holds numbers that aren't finite, which glTF doesn't allow,
+    /// drawing the primitive as one without them, and logs which it has at info level, as
+    /// `engine.model_ignored`: the model draws as
     /// it is at rest. It ignores without a word the textures' minification filters, since it
     /// samples them trilinearly and anisotropically unless they magnify to the nearest texel, morph
     /// targets while their weights are 0, the other scenes, and whatever the scene doesn't reach,
@@ -1107,13 +1114,15 @@ impl Context {
     /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
     /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
     /// wraps across and down differently, a texture without an image, any required extension but
-    /// KHR_materials_unlit, KHR_lights_punctual and KHR_materials_emissive_strength, and a model that
-    /// takes more than 4 GiB to read, of its buffers, images, as read and as decoded, vertices and
-    /// nodes; with `engine.bad_model` for a file that can't be read, isn't a regular file or isn't
+    /// KHR_materials_unlit, KHR_lights_punctual, KHR_materials_emissive_strength,
+    /// KHR_materials_pbrSpecularGlossiness and MSFT_texture_dds, and a model that takes more than 8
+    /// GiB to read, of its buffers, images, as read and as decoded, vertices and nodes; with
+    /// `engine.bad_model` for a file that can't be read, isn't a regular file or isn't
     /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
     /// its vertices, a node with two parents, a matrix that isn't a translation, rotation and
     /// scale, a light the extension doesn't allow, a URI that's neither a data URI nor a relative
-    /// path, or that has a `..`, or an image that isn't a PNG or a JPEG as far as its header, and,
+    /// path, or that has a `..`, or an image that isn't a PNG, a JPEG or a DDS of BC7 as far as its
+    /// header, and,
     /// though glTF allows them, integers written as floats, such as `1.0`; and with
     /// `renderer.too_many_textures` if the renderer hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {

@@ -1,7 +1,8 @@
 //! Models' meshes: the engine's vertex type and shader for meshes with materials, as glTF files
-//! describe them, shaded by glTF's metallic-roughness model under the frame's lights, or drawn
-//! unlit in a frame without any; and the materials themselves, in a table the GPU keeps, which
-//! each draw's parameters index.
+//! describe them, shaded by glTF's metallic-roughness model, or
+//! KHR_materials_pbrSpecularGlossiness's, under the frame's lights, or drawn unlit in a frame
+//! without any; and the materials themselves, in a table the GPU keeps, which each draw's
+//! parameters index.
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec3, Vec4};
@@ -83,22 +84,21 @@ impl Sampled {
 }
 
 /// How a model's mesh looks, as glTF's metallic-roughness materials say: lit by the frame's
-/// lights, its base color, how metallic and how rough it is, its normal map, its occlusion and
-/// what it emits; or unlit, as KHR_materials_unlit has it, its base color alone, as every material
-/// draws in a frame without lights. Each of its textures multiplies its factor, and samples where
-/// the vertices say; covering what's behind it as `alpha` says.
+/// lights, its base color, how it reflects, its normal map, its occlusion and what it emits; or
+/// unlit, as KHR_materials_unlit has it, its base color alone, as every material draws in a frame
+/// without lights. Each of its textures multiplies its factor, and samples where the vertices say;
+/// covering what's behind it as `alpha` says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
     /// The base color, in linear RGBA, alpha not multiplied in, which its texture's colors and the
-    /// vertices' multiply.
+    /// vertices' multiply: for a [`Workflow::SpecularGlossiness`], its diffuse color.
     pub color: Vec4,
     pub color_texture: Sampled,
-    /// How metallic it is, from 0, a dielectric, to 1, a metal, which its surface texture's blue
-    /// multiplies.
-    pub metallic: f32,
-    /// How rough it is, from 0, a mirror, to 1, which its surface texture's green multiplies.
-    pub roughness: f32,
-    /// Its metallic-roughness map, sampled as stored, a [`Map::Surface`](crate::Map::Surface).
+    /// How it reflects, which its surface texture's texels multiply.
+    pub workflow: Workflow,
+    /// Its surface's map: a [`Map::Surface`](crate::Map::Surface), sampled as stored, of a
+    /// [`Workflow::MetallicRoughness`], or colors, sRGB-encoded, of a
+    /// [`Workflow::SpecularGlossiness`].
     pub surface_texture: Sampled,
     /// Its normal map, a [`Map::Normal`](crate::Map::Normal), if it has one, its X and Y scaled
     /// by `normal_scale`; without one, it faces as its vertices' normals say.
@@ -128,8 +128,7 @@ impl Default for Material {
         Self {
             color: Vec4::ONE,
             color_texture: Sampled::WHITE,
-            metallic: 1.0,
-            roughness: 1.0,
+            workflow: Workflow::default(),
             surface_texture: Sampled::WHITE,
             normal_texture: None,
             normal_scale: 1.0,
@@ -140,6 +139,32 @@ impl Default for Material {
             alpha: AlphaMode::Opaque,
             double_sided: false,
             unlit: false,
+        }
+    }
+}
+
+/// How a material's surface reflects light, its workflow, as PBR calls it, with the factors its
+/// surface texture's texels multiply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Workflow {
+    /// As glTF's metallic-roughness materials do: how metallic it is, from 0, a dielectric, to 1,
+    /// a metal, which its surface texture's blue multiplies, and how rough, from 0, a mirror, to
+    /// 1, which its green multiplies.
+    MetallicRoughness { metallic: f32, roughness: f32 },
+    /// As KHR_materials_pbrSpecularGlossiness's materials do: the color it reflects head-on, in
+    /// linear RGB, which its surface texture's colors multiply, and how glossy it is, from 0, rough,
+    /// to 1, a mirror, which its alpha multiplies. It diffuses its base color times 1 less its
+    /// specular color's strongest channel, and is shaded by the same BRDF, as rough as 1 less its
+    /// glossiness.
+    SpecularGlossiness { specular: Vec3, glossiness: f32 },
+}
+
+impl Default for Workflow {
+    /// glTF's default material's: fully metallic and rough.
+    fn default() -> Self {
+        Self::MetallicRoughness {
+            metallic: 1.0,
+            roughness: 1.0,
         }
     }
 }
@@ -220,23 +245,29 @@ impl Materials {
 pub(crate) struct Entry {
     color: Vec4,
     emissive: Vec3,
+    /// A [`Workflow::MetallicRoughness`]'s, 0 for the other.
     metallic: f32,
     roughness: f32,
     normal_scale: f32,
     occlusion_strength: f32,
     /// The alpha below which the masked shader discards; the others read none.
     cutoff: f32,
-    /// [`UNLIT`] and [`NORMAL_MAPPED`], as they hold.
+    /// [`UNLIT`], [`NORMAL_MAPPED`] and [`SPECULAR_GLOSSINESS`], as they hold.
     flags: u32,
     /// Each texture's index and its sampler's: the base color's, the surface's, the normal map's,
     /// the occlusion's and the emissive's.
     textures: [[u32; 2]; 5],
+    /// A [`Workflow::SpecularGlossiness`]'s, 0 for the other.
+    specular: Vec3,
+    glossiness: f32,
 }
 
 /// The flag of a material drawn unlit.
 const UNLIT: u32 = 1;
 /// The flag of a material with a normal map.
 const NORMAL_MAPPED: u32 = 2;
+/// The flag of a material whose surface is a [`Workflow::SpecularGlossiness`].
+const SPECULAR_GLOSSINESS: u32 = 4;
 
 impl Entry {
     fn new(material: &Material) -> Self {
@@ -244,14 +275,28 @@ impl Entry {
             AlphaMode::Mask { cutoff } => cutoff,
             AlphaMode::Opaque | AlphaMode::Blend => 0.0,
         };
+        let (metallic, roughness, specular, glossiness) = match material.workflow {
+            Workflow::MetallicRoughness {
+                metallic,
+                roughness,
+            } => (metallic, roughness, Vec3::ZERO, 0.0),
+            Workflow::SpecularGlossiness {
+                specular,
+                glossiness,
+            } => (0.0, 0.0, specular, glossiness),
+        };
+        let specular_glossiness = matches!(material.workflow, Workflow::SpecularGlossiness { .. });
         let flags = (u32::from(material.unlit) * UNLIT)
-            | (u32::from(material.normal_texture.is_some()) * NORMAL_MAPPED);
+            | (u32::from(material.normal_texture.is_some()) * NORMAL_MAPPED)
+            | (u32::from(specular_glossiness) * SPECULAR_GLOSSINESS);
         let sampled = |sampled: Sampled| [sampled.texture.index, sampled.sampler()];
         Self {
             color: material.color,
             emissive: material.emissive,
-            metallic: material.metallic,
-            roughness: material.roughness,
+            metallic,
+            roughness,
+            specular,
+            glossiness,
             normal_scale: material.normal_scale,
             occlusion_strength: material.occlusion_strength,
             cutoff,
@@ -388,6 +433,28 @@ mod tests {
         assert_eq!(entry.textures[1], [white.index, anisotropic]);
         let plain = Entry::new(&Material::default());
         assert_eq!(plain.flags, 0, "lit, without a normal map");
+        let surface = (
+            plain.metallic,
+            plain.roughness,
+            plain.specular,
+            plain.glossiness,
+        );
+        assert_eq!(surface, (1.0, 1.0, Vec3::ZERO, 0.0));
+        let glossy = Entry::new(&Material {
+            workflow: Workflow::SpecularGlossiness {
+                specular: Vec3::splat(0.5),
+                glossiness: 0.25,
+            },
+            ..Material::default()
+        });
+        assert_eq!(glossy.flags, SPECULAR_GLOSSINESS);
+        let surface = (
+            glossy.metallic,
+            glossy.roughness,
+            glossy.specular,
+            glossy.glossiness,
+        );
+        assert_eq!(surface, (0.0, 0.0, Vec3::splat(0.5), 0.25));
         materials.changes.clear();
         materials.replace(second, &Material::default());
         assert_eq!(materials.changes, [(1, plain)]);

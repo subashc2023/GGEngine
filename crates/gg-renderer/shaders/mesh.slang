@@ -39,23 +39,29 @@ struct Light {
     float angle_offset;
 };
 
-// A model's material, as glTF's metallic-roughness materials describe them.
+// A model's material, as glTF's metallic-roughness materials describe them, or
+// KHR_materials_pbrSpecularGlossiness's.
 struct Material {
-    // Linear RGBA, alpha not multiplied in.
+    // Linear RGBA, alpha not multiplied in: a specular-glossiness material's diffuse color.
     float4 color;
     // Linear RGB, as the view shows it.
     float3 emissive;
+    // A metallic-roughness material's, 0 for the other.
     float metallic;
     float roughness;
     float normal_scale;
     float occlusion_strength;
     // The alpha below which the masked shader discards.
     float cutoff;
-    // 1 if it's unlit, and 2 if it has a normal map.
+    // 1 if it's unlit, 2 if it has a normal map, and 4 if it's a specular-glossiness material.
     uint flags;
-    // Each texture's index and its sampler's: the base color's, the metallic-roughness map's, the
-    // normal map's, the occlusion map's and the emissive's.
+    // Each texture's index and its sampler's: the base color's, the surface's (the
+    // metallic-roughness map, or the specular-glossiness map), the normal map's, the occlusion
+    // map's and the emissive's.
     uint2 textures[5];
+    // A specular-glossiness material's specular color, linear RGB, and glossiness, 0 for the other.
+    float3 specular;
+    float glossiness;
 };
 
 // How many cascades a light's shadows are in.

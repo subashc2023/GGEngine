@@ -1,2 +1,3 @@
 # What `cargo gg fetch` fetches, as fetch.ron lists it: files the repository doesn't hold.
 /models/sponza/
+/models/bistro/

@@ -25,7 +25,7 @@ use gg_renderer::{
     Light, LightKind, Line, Lod, Lods, Map, Material, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
     ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler,
     Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
-    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
+    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -84,6 +84,7 @@ fn main() -> ExitCode {
         a_uniform_sky_lights_white_as_itself,
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
+        specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         shadows_fall_where_their_casters_put_them,
         shadows_hold_still_as_the_view_moves,
@@ -382,6 +383,14 @@ fn square(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
     meshes
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh")
+}
+
+/// A metallic-roughness material's workflow.
+fn metallic(metallic: f32, roughness: f32) -> Workflow {
+    Workflow::MetallicRoughness {
+        metallic,
+        roughness,
+    }
 }
 
 /// A unit square around the origin, a model's, counterclockwise seen from +Z, which it faces, its
@@ -3660,13 +3669,14 @@ fn shaders_read_the_frames_data() {
 /// nothing, emitting 0.25; one normal-mapped toward +X, by RGBA8, by BC5, and by a map never
 /// filled, which stands in flat; and one whose factor is metallic, its surface map taking that to
 /// a dielectric's by its blue of 0, by RGBA8, by BC7, and by a map never filled, which stands in
-/// white, leaving a metal of 0.5, whose `f0` is 0.5, showing 0.125. Then a point light of 4π
+/// white, leaving a metal of 0.5, whose `f0` is 0.5, showing 0.125; and one normal-mapped toward
+/// +X by BC7, of X, Y and Z, as a model's DDS image holds a normal map. Then a point light of 4π
 /// candela 2 units over the first square lights it as the directional light did; with a range of
 /// 2.5, by the window KHR_lights_punctual recommends, `(1 - (2 / 2.5)^4)^2`; and a spot over it
 /// lights it alike within its inner cone, and nothing outside its outer.
 fn lights_shade_as_gltf_defines() {
     const SIDE: u32 = 16;
-    const SQUARES: u32 = 9;
+    const SQUARES: u32 = 10;
     const WIDTH: u32 = SIDE * SQUARES;
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
@@ -3696,13 +3706,26 @@ fn lights_shade_as_gltf_defines() {
     bc5[8..10].fill(tilted[1]);
     let normal_map = Texels::CompressedMap {
         map: Map::Normal,
+        bc5: true,
         mipmapped: false,
     };
     let compressed_normals = textures.add("bc5 normals", [4, 4], &bc5[..], normal_map);
     let compressed_normals = Sampled::of(compressed_normals.expect("a BC5 map"));
-    // BC7's mode 6 holds odd channels exactly: metallic 1/255.
+    // BC7's mode 6 holds odd channels exactly: X and Y tilted toward +X, nearly as `tilted`, and
+    // Z, which the shader ignores.
+    let bc7_tilted: [u8; 4] = [239, 129, 255, 255];
+    let bc7_normal_map = Texels::CompressedMap {
+        map: Map::Normal,
+        bc5: false,
+        mipmapped: false,
+    };
+    let block = bc7_block(bc7_tilted);
+    let bc7_normals = textures.add("bc7 normals", [4, 4], &block[..], bc7_normal_map);
+    let bc7_normals = Sampled::of(bc7_normals.expect("a BC7 normal map"));
+    // And metallic 1/255.
     let surface_map = Texels::CompressedMap {
         map: Map::Surface,
+        bc5: false,
         mipmapped: false,
     };
     let block = bc7_block([1, 255, 1, 255]);
@@ -3716,12 +3739,11 @@ fn lights_shade_as_gltf_defines() {
     let unfilled_surface = reserve(textures, "unfilled surface", Map::Surface);
     let gray = Material {
         color: Vec4::new(0.5, 0.5, 0.5, 1.0),
-        metallic: 0.0,
-        roughness: 1.0,
+        workflow: metallic(0.0, 1.0),
         ..Material::default()
     };
     let metal = Material {
-        metallic: 1.0,
+        workflow: metallic(1.0, 1.0),
         ..gray
     };
     let materials = [
@@ -3759,6 +3781,10 @@ fn lights_shade_as_gltf_defines() {
             surface_texture: unfilled_surface,
             ..metal
         },
+        Material {
+            normal_texture: Some(bc7_normals),
+            ..gray
+        },
     ];
     let at = |i: u32| Vec3::new(i as f32 - (SQUARES - 1) as f32 / 2.0, 0.0, 0.0);
     let mut draws = Draws::default();
@@ -3785,10 +3811,13 @@ fn lights_shade_as_gltf_defines() {
     }
     // The shaded value of gray of 0.5, dielectric, whose normal is `cos` from the light's way.
     let lit = |cos: f32| 0.96 * 0.5 * cos + 0.01;
-    // The tilted normal as the shader makes it from the map's X and Y.
-    let [x, y] = [tilted[0], tilted[1]].map(|byte| f32::from(byte) / 255.0 * 2.0 - 1.0);
-    let z = (1.0 - x * x - y * y).sqrt();
-    let tilted_cos = z / (x * x + y * y + z * z).sqrt();
+    // A tilted normal as the shader makes it from the map's X and Y.
+    let cos_of = |tilted: [u8; 4]| {
+        let [x, y] = [tilted[0], tilted[1]].map(|byte| f32::from(byte) / 255.0 * 2.0 - 1.0);
+        let z = (1.0 - x * x - y * y).sqrt();
+        z / (x * x + y * y + z * z).sqrt()
+    };
+    let tilted_cos = cos_of(tilted);
     let flat = {
         let flat = 128.0_f32 / 255.0 * 2.0 - 1.0;
         let z = (1.0 - 2.0 * flat * flat).sqrt();
@@ -3808,6 +3837,7 @@ fn lights_shade_as_gltf_defines() {
         lit(1.0),
         barely_metallic,
         0.125,
+        lit(cos_of(bc7_tilted)),
     ];
     let shown = |renderer: &mut Renderer, i: u32| {
         let frame = frame_pixels(renderer);
@@ -3926,8 +3956,7 @@ fn lit_spheres_match_their_reference() {
         for column in 0..STEPS {
             let material = Material {
                 color: Vec4::new(0.9, 0.45, 0.2, 1.0),
-                metallic: step(row),
-                roughness: step(column),
+                workflow: metallic(step(row), step(column)),
                 ..Material::default()
             };
             let material = stores.materials.add(&material);
@@ -4021,30 +4050,27 @@ fn a_uniform_sky_lights_white_as_itself() {
     let square = model_square(&mut stores.meshes);
     let white = Material {
         color: Vec4::ONE,
-        metallic: 0.0,
-        roughness: 1.0,
+        workflow: metallic(0.0, 1.0),
         ..Material::default()
     };
     let tint = Vec4::new(1.0, 0.5, 0.25, 1.0);
     let materials = [
         white,
         Material {
-            roughness: 0.0,
+            workflow: metallic(0.0, 0.0),
             ..white
         },
         Material {
-            metallic: 1.0,
-            roughness: 0.5,
+            workflow: metallic(1.0, 0.5),
             ..white
         },
         Material {
-            metallic: 1.0,
+            workflow: metallic(1.0, 1.0),
             ..white
         },
         Material {
             color: tint,
-            metallic: 1.0,
-            roughness: 0.0,
+            workflow: metallic(1.0, 0.0),
             ..white
         },
         Material {
@@ -4253,8 +4279,7 @@ fn sky_lit_spheres_match_their_reference() {
         for column in 0..STEPS {
             let material = Material {
                 color: Vec4::new(0.9, 0.45, 0.2, 1.0),
-                metallic: step(row),
-                roughness: step(column),
+                workflow: metallic(step(row), step(column)),
                 ..Material::default()
             };
             let material = stores.materials.add(&material);
@@ -4273,6 +4298,136 @@ fn sky_lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
+}
+
+/// Spheres of KHR_materials_pbrSpecularGlossiness's materials, lit by a sky, a directional light and
+/// a point light, each showing as its metallic-roughness equal does: a dielectric, which reflects
+/// 0.04 head-on and diffuses its base color, as one that diffuses that over 0.96, as much as its
+/// specular color's strongest channel takes off; a metal as one that diffuses nothing and reflects
+/// its color; each as rough as 1 less its glossiness. Then one whose specular color and glossiness
+/// come from its map, of colors, its specular color sRGB-encoded and its glossiness in alpha as
+/// stored, as one whose factors are those.
+fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
+    const SIDE: u32 = 40;
+    const SPHERES: u32 = 5;
+    const WIDTH: u32 = SIDE * SPHERES;
+    let mut renderer = renderer(WIDTH, SIDE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let [width, height] = [64, 32];
+    let sky = sky_texture(&mut stores.textures, [width, height], |_, y| {
+        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
+        if up > 0.0 {
+            [0.4, 0.6, 1.0]
+        } else {
+            [0.15, 0.1, 0.05]
+        }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let sun = Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::new(1.0, -1.0, -1.0).normalize(),
+        color: Vec3::splat(2.0),
+        range: None,
+        shadow_distance: None,
+    };
+    let point = Light {
+        kind: LightKind::Point,
+        position: Vec3::new(-1.0, 1.0, 2.0),
+        color: Vec3::splat(3.0),
+        ..sun
+    };
+    stores.lights = vec![sun, point];
+    // A specular color of about 0.5, sRGB-encoded, and a glossiness of 0.6, as a map holds them.
+    let [specular_byte, glossiness_byte] = [188, 153];
+    let specular = math::libm::powf((f32::from(specular_byte) / 255.0 + 0.055) / 1.055, 2.4);
+    let glossiness = f32::from(glossiness_byte) / 255.0;
+    let texel = [specular_byte, specular_byte, specular_byte, glossiness_byte];
+    let map = stores.textures.add(
+        "specular-glossiness",
+        [4, 4],
+        [texel; 16].as_flattened(),
+        Texels::Color(Mipmaps::None),
+    );
+    let map = Sampled::of(map.expect("a map"));
+    let color = Vec4::new(0.9, 0.45, 0.2, 1.0);
+    let glossy = |color: Vec4, specular: Vec3, glossiness: f32| Material {
+        color,
+        workflow: Workflow::SpecularGlossiness {
+            specular,
+            glossiness,
+        },
+        ..Material::default()
+    };
+    let rough = |metallic_: f32, roughness: f32| Material {
+        color,
+        workflow: metallic(metallic_, roughness),
+        ..Material::default()
+    };
+    let diffused = (color / 0.96).with_w(1.0);
+    let black = Vec4::new(0.0, 0.0, 0.0, 1.0);
+    let pairs = [
+        (rough(0.0, 0.3), glossy(diffused, Vec3::splat(0.04), 0.7)),
+        (rough(0.0, 1.0), glossy(diffused, Vec3::splat(0.04), 0.0)),
+        (rough(1.0, 0.3), glossy(black, color.truncate(), 0.7)),
+        (rough(1.0, 0.8), glossy(black, color.truncate(), 0.2)),
+        (
+            glossy(color, Vec3::splat(specular), glossiness),
+            Material {
+                surface_texture: map,
+                ..glossy(color, Vec3::ONE, 1.0)
+            },
+        ),
+    ];
+    let sphere = sphere(&mut stores.meshes, 0.42, 24, 48);
+    let at = |i: u32| Vec3::new(i as f32 - (SPHERES - 1) as f32 / 2.0, 0.0, 0.0);
+    let viewport = filling([WIDTH, SIDE]);
+    let mut frames = Vec::new();
+    for second in [false, true] {
+        let mut draws = Draws::default();
+        for (i, &(equal, material)) in (0..).zip(&pairs) {
+            let material = stores
+                .materials
+                .add(if second { &material } else { &equal });
+            let draw =
+                MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
+            draws.push_draw(Mat4::from_translation(at(i)), &draw, 0);
+        }
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        frames.push(frame_pixels(&mut renderer));
+    }
+    let middle = |frame: &[u8], i: u32| pixel_at(frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
+    assert_ne!(
+        middle(&frames[0], 0),
+        middle(&frames[0], 2),
+        "a dielectric and a metal show alike: the spheres didn't draw"
+    );
+    let pixels = |frame: &[u8]| frame.as_chunks::<4>().0.to_vec();
+    let differ = (pixels(&frames[0]).into_iter().zip(pixels(&frames[1])))
+        .enumerate()
+        .find(|&(_, (equal, glossy))| !close(glossy, equal));
+    if let Some((i, (equal, glossy))) = differ {
+        let [x, y] = [i as u32 % WIDTH, i as u32 / WIDTH];
+        panic!(
+            "sphere {}'s pixel ({x}, {y}) shows {glossy:?} of specular-glossiness, where its \
+             equal shows {equal:?}",
+            x / SIDE
+        );
+    }
+    shut_down(renderer);
 }
 
 /// A white floor seen from above under a sky of 10⁵ candela per square meter with a sun in it, a
@@ -4328,8 +4483,7 @@ fn a_skys_sun_lights_once() {
     let square = model_square(&mut stores.meshes);
     let white = Material {
         color: Vec4::ONE,
-        metallic: 0.0,
-        roughness: 1.0,
+        workflow: metallic(0.0, 1.0),
         ..Material::default()
     };
     let white = stores.materials.add(&white);
@@ -4418,7 +4572,7 @@ fn looking_down(at: Vec3, across: f32, far: f32) -> Viewpoint {
 fn floor_and_plates(stores: &mut Stores, plates: usize) -> Draws {
     let square = model_square(&mut stores.meshes);
     let white = Material {
-        metallic: 0.0,
+        workflow: metallic(0.0, 1.0),
         ..Material::default()
     };
     let masked = AlphaMode::Mask { cutoff: 0.5 };
@@ -4560,7 +4714,7 @@ fn surfaces_cast_no_shadows_on_themselves() {
     let mut stores = Stores::default();
     let square = model_square(&mut stores.meshes);
     let white = Material {
-        metallic: 0.0,
+        workflow: metallic(0.0, 1.0),
         ..Material::default()
     };
     let material = stores.materials.add(&white);
@@ -4640,18 +4794,17 @@ fn shadowed_models_match_their_reference() {
     };
     let gray = Material {
         color: Vec4::new(0.7, 0.7, 0.7, 1.0),
-        metallic: 0.0,
-        roughness: 0.8,
+        workflow: metallic(0.0, 0.8),
         ..Material::default()
     };
     let orange = Material {
         color: Vec4::new(0.9, 0.4, 0.1, 1.0),
-        roughness: 0.5,
+        workflow: metallic(0.0, 0.5),
         ..gray
     };
     let blue = Material {
         color: Vec4::new(0.2, 0.4, 0.9, 1.0),
-        roughness: 0.3,
+        workflow: metallic(0.0, 0.3),
         ..gray
     };
     let cut = Material {

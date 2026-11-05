@@ -1,0 +1,37 @@
+(
+    entities: {
+        "4381eed8d6a7ce5d": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7e4ec6345a1db5dc": (
+            Environment: (
+                exposure: 10.5,
+                tonemapper: PbrNeutral,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 1000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "a93e2ab3ca4f8763": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.62802875,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (13.787391, 3.156161, 25.16486),
+                rotation: (-0.0142109, -0.0944423, -0.0193406, 0.995241),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

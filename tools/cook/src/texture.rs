@@ -2,7 +2,7 @@
 //! a layer's texture of one level and a model's base colors and emission with their full chain of
 //! mip levels; a model's maps, values as BC7 and normal maps' X and Y as BC5, with theirs, which
 //! the engine makes for the cooker as a frame makes a texture's; and colors of high dynamic range,
-//! as a sky's, as BC6H, of one level.
+//! as a sky's, as BC6H, of one level. A model's DDS images of BC7 keep their blocks and levels.
 
 use ctt::encoders::Encoder;
 use ctt::encoders::bc7enc::Bc7encSettings;
@@ -127,6 +127,76 @@ pub(crate) fn compress(
         Ok(PipelineOutput::Encoded(bytes)) => Ok(bytes),
         Ok(PipelineOutput::Raw(_)) => Err(uncompressed("ctt gave no KTX2".to_owned())),
         Err(error) => Err(uncompressed(error.to_string())),
+    }
+}
+
+/// Texture `name`'s BC7 `blocks`, `size` texels across and down, of its first level alone or, if
+/// `mipmapped`, of its full chain, as a model's DDS image holds them: kept as they are, in KTX2 as
+/// [`compress`] writes it, of sRGB or of values as `compressed` says, each level supercompressed by
+/// zstd.
+///
+/// Fails with `cook.uncompressed` if ctt can't write them.
+///
+/// # Panics
+///
+/// If `compressed` isn't BC7, or `blocks` don't fill the levels exactly.
+pub(crate) fn keep(
+    name: &str,
+    size: [u32; 2],
+    blocks: &[u8],
+    mipmapped: bool,
+    compressed: Compressed,
+) -> Result<Vec<u8>> {
+    let (format, color_space) = match compressed {
+        Compressed::Bc7Srgb => (Format::BC7_SRGB_BLOCK, ColorSpace::Srgb),
+        Compressed::Bc7Unorm => (Format::BC7_UNORM_BLOCK, ColorSpace::Linear),
+        other => panic!("texture {name:?}'s blocks are kept as BC7, not as {other:?}"),
+    };
+    let levels = mip_sizes(size[0], size[1]).take(if mipmapped { usize::MAX } else { 1 });
+    let mut surfaces = Vec::new();
+    let mut at = 0;
+    for [width, height] in levels {
+        // A row of blocks of 4 by 4 texels, 16 bytes each, which cover the level's edges.
+        let stride = width.div_ceil(4) * 16;
+        let len = (stride * height.div_ceil(4)) as usize;
+        surfaces.push(SurfaceRef {
+            data: &blocks[at..at + len],
+            width,
+            height,
+            depth: 1,
+            stride,
+            slice_stride: 0,
+        });
+        at += len;
+    }
+    assert_eq!(
+        at,
+        blocks.len(),
+        "the blocks fill texture {name:?}'s levels"
+    );
+    let image = ImageRef {
+        surfaces: vec![surfaces],
+        kind: TextureKind::Texture2D,
+        desc: FormatDesc {
+            format,
+            color_space,
+            alpha: AlphaMode::Opaque,
+        },
+    };
+    // No format to convert to: ctt passes blocks of the format they're in through as they are.
+    let settings = ConvertSettings {
+        container: Container::ktx2_zstd(ZSTD_LEVEL),
+        mipmap: false,
+        ..ConvertSettings::default()
+    };
+    let unwritten = |problem: String| {
+        let message = format!("texture {name:?}'s blocks don't go into KTX2: {problem}");
+        Error::new("cook.uncompressed", message)
+    };
+    match ctt::convert(image, settings) {
+        Ok(PipelineOutput::Encoded(bytes)) => Ok(bytes),
+        Ok(PipelineOutput::Raw(_)) => Err(unwritten("ctt gave no KTX2".to_owned())),
+        Err(error) => Err(unwritten(error.to_string())),
     }
 }
 

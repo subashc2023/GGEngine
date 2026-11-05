@@ -411,8 +411,7 @@ fn material(read: &gltf::Material, images: &[(Texture, Texels)]) -> Material {
     Material {
         color: Vec4::from(read.color),
         color_texture: white(Slot::Color),
-        metallic: read.metallic,
-        roughness: read.roughness,
+        workflow: read.workflow,
         surface_texture: white(Slot::Surface),
         normal_texture: sampled(Slot::Normal),
         normal_scale: read.normal_scale,
@@ -449,7 +448,7 @@ pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
     let Some(first) = uses.next() else {
         return Texels::Color(Mipmaps::Averaged);
     };
-    if let Some(map) = first.0.map() {
+    if let Some(map) = first.1.map(first.0) {
         return Texels::Map(map);
     }
     if covers(first) || uses.any(covers) {
@@ -462,6 +461,7 @@ pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
 #[cfg(test)]
 pub(crate) mod tests {
     use gg_core::math::Quat;
+    use gg_renderer::Workflow;
 
     use super::*;
     use crate::image::{Format, Image};
@@ -730,15 +730,27 @@ pub(crate) mod tests {
             textures[slot as usize] = sampled;
             assert_eq!(texels(&primitives, 1), Texels::Map(map), "{slot:?}");
         }
+        // A specular-glossiness material's surface map holds colors.
+        let material = &mut primitives[1].material;
+        material.workflow = Workflow::SpecularGlossiness {
+            specular: Vec3::ONE,
+            glossiness: 1.0,
+        };
+        let sampled = material.textures.iter_mut().find_map(Option::take);
+        material.textures[Slot::Surface as usize] = sampled;
+        assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
     }
 
     /// A primitive's material goes into the table as it's read: its factors, and each texture as
     /// the model's image's, or white without one, but its normal map, which it hasn't.
     #[test]
     fn a_material_takes_its_images_textures() {
+        let workflow = Workflow::SpecularGlossiness {
+            specular: Vec3::splat(0.25),
+            glossiness: 0.5,
+        };
         let read = gltf::Material {
-            metallic: 0.25,
-            roughness: 0.5,
+            workflow,
             emissive: [1.0, 2.0, 3.0],
             unlit: true,
             ..colored(1)
@@ -752,8 +764,8 @@ pub(crate) mod tests {
         assert_eq!(made.surface_texture, Sampled::WHITE);
         assert_eq!(made.normal_texture, None);
         assert_eq!(
-            (made.metallic, made.roughness, made.emissive, made.unlit),
-            (0.25, 0.5, Vec3::new(1.0, 2.0, 3.0), true)
+            (made.workflow, made.emissive, made.unlit),
+            (workflow, Vec3::new(1.0, 2.0, 3.0), true)
         );
     }
 

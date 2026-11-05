@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 
 use gg_api::asset::{self, Found};
 use gg_api::{Fetch, Project};
-use gg_engine::cook::{self, Compressed, Kind, Lod, Writer};
+use gg_engine::cook::{self, Compressed, Kind, Lod, Texels, Writer};
 use gg_engine::{Error, Result};
 
 /// A file a package holds, as [`cook()`] cooked it.
@@ -175,7 +175,8 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
 /// it, each primitive's triangles optimized and given levels of detail, keeping their order where
 /// its material blends, and each image compressed as what it holds says, BC7 of colors or values
 /// or BC5 of a normal map, with the full chain of mip levels a run gives it, made as a run makes
-/// them.
+/// them; but a DDS image, as MSFT_texture_dds names one, keeps its BC7 blocks and its levels, as
+/// colors or values as what it holds says.
 ///
 /// Fails as adding the model fails, and with `cook.uncompressed` for an image that doesn't
 /// compress.
@@ -184,9 +185,18 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
     let images = (model.images.iter().enumerate())
         .map(|(i, image)| {
             let texels = cook::texels(&model, i);
-            let levels = cook::levels(image, texels);
             let name = format!("{path}#{i}");
-            // A model's every image has its full chain of levels, which `levels` made.
+            // A DDS image's, which reading the model alone gives as blocks: BC7 is the same blocks
+            // of colors or of values, which the texture's format says.
+            if let cook::Format::Bc { mipmapped, .. } = image.format {
+                let compressed = match texels {
+                    Texels::Map(_) => Compressed::Bc7Unorm,
+                    _ => Compressed::Bc7Srgb,
+                };
+                return texture::keep(&name, image.size, &image.pixels, mipmapped, compressed);
+            }
+            let levels = cook::levels(image, texels);
+            // Every other image of a model has its full chain of levels, which `levels` made.
             texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -486,6 +496,110 @@ Targets fragment_main(Varyings input) {
         let cooked = cook::read_cooked_model("torus.gltf", &bytes).unwrap();
         let lods = &cooked.primitives[0].lods;
         assert!(lods.len() > 1, "{lods:?}");
+    }
+
+    /// A DDS file of BC7 of `size` texels and the DXGI format `format`, 98 of values or 99 of sRGB,
+    /// holding `levels`, each one's blocks, as Microsoft's guide lays one out.
+    fn dds(format: u32, size: [u32; 2], levels: &[Vec<u8>]) -> Vec<u8> {
+        let mut words = [0u32; 31];
+        // Its header's size; DDSD_CAPS, HEIGHT, WIDTH, PIXELFORMAT and MIPMAPCOUNT; its size and
+        // levels; its pixel format's size, DDPF_FOURCC, and the four characters of a DX10 header.
+        words[0] = 124;
+        words[1] = 0x2_1007;
+        [words[2], words[3]] = [size[1], size[0]];
+        words[6] = levels.len() as u32;
+        words[18] = 32;
+        words[19] = 0x4;
+        words[20] = u32::from_le_bytes(*b"DX10");
+        // The DX10 header: its DXGI format, a 2D texture, not a cube, one of them.
+        let dx10 = [format, 3, 0, 1, 0];
+        let words = words
+            .iter()
+            .chain(&dx10)
+            .flat_map(|word| word.to_le_bytes());
+        [b"DDS ".to_vec(), words.collect(), levels.concat()].concat()
+    }
+
+    /// A model of a material of KHR_materials_pbrSpecularGlossiness's, whose textures are DDS
+    /// images, as MSFT_texture_dds names them, cooks to its images' blocks and levels as they are,
+    /// its diffuse texture's and its specular-glossiness map's as BC7 of colors, sRGB-encoded, and
+    /// its normal map's as BC7 of values, whatever each file's own format says.
+    #[test]
+    fn a_models_dds_images_keep_their_blocks() {
+        let floats = |floats: &[f32]| floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let positions: Vec<u8> = floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]);
+        let uvs: Vec<u8> = floats(&[0., 0., 1., 0., 0., 1.]);
+        let bin = [positions, uvs, vec![0, 0, 1, 0, 2, 0, 0, 0]].concat();
+        // 8 texels a side: levels of 4 blocks, then 1 each for 4, 2 and 1 texels.
+        let levels = |byte: u8| [vec![byte; 64], vec![byte + 1; 16], vec![2; 16], vec![3; 16]];
+        let gltf = format!(
+            r#"{{
+    "asset": {{"version": "2.0"}},
+    "extensionsUsed": ["KHR_materials_pbrSpecularGlossiness", "MSFT_texture_dds"],
+    "scenes": [{{"nodes": [0]}}],
+    "nodes": [{{"mesh": 0}}],
+    "meshes": [{{"primitives": [{{
+        "attributes": {{"POSITION": 0, "TEXCOORD_0": 1}}, "indices": 2, "material": 0
+    }}]}}],
+    "accessors": [
+        {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"}},
+        {{"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"}},
+        {{"bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR"}}
+    ],
+    "materials": [{{
+        "normalTexture": {{"index": 2}},
+        "extensions": {{"KHR_materials_pbrSpecularGlossiness": {{
+            "diffuseTexture": {{"index": 0}},
+            "specularGlossinessTexture": {{"index": 1}},
+            "glossinessFactor": 0.5
+        }}}}
+    }}],
+    "textures": [
+        {{"extensions": {{"MSFT_texture_dds": {{"source": 0}}}}}},
+        {{"extensions": {{"MSFT_texture_dds": {{"source": 1}}}}}},
+        {{"extensions": {{"MSFT_texture_dds": {{"source": 2}}}}}}
+    ],
+    "images": [{{"uri": "diffuse.dds"}}, {{"uri": "glossy.dds"}}, {{"uri": "normals.dds"}}],
+    "buffers": [{{"uri": "square.bin", "byteLength": {}}}],
+    "bufferViews": [
+        {{"buffer": 0, "byteOffset": 0, "byteLength": 36}},
+        {{"buffer": 0, "byteOffset": 36, "byteLength": 24}},
+        {{"buffer": 0, "byteOffset": 60, "byteLength": 6}}
+    ]
+}}"#,
+            bin.len()
+        );
+        let fixture = Fixture::new("dds", &[("square.gltf", &gltf)]);
+        fixture.write("square.bin", &bin);
+        // Of values, sRGB, and sRGB: the formats sampling them say.
+        let files = [
+            ("diffuse.dds", 98, 10),
+            ("glossy.dds", 99, 20),
+            ("normals.dds", 99, 30),
+        ];
+        for (name, format, byte) in files {
+            fixture.write(name, &dds(format, [8, 8], &levels(byte)));
+        }
+        let file = fixture.0.join("square.gltf");
+        let bytes = model("square.gltf", &file).unwrap_or_else(|error| panic!("{error:#}"));
+        let cooked = cook::read_cooked_model("square.gltf", &bytes)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        let held: Vec<_> = (cooked.images.iter())
+            .map(|image| (image.size, image.format, image.pixels.clone()))
+            .collect();
+        let blocks = |compressed, byte| {
+            let format = cook::Format::Bc {
+                compressed,
+                mipmapped: true,
+            };
+            ([8, 8], format, levels(byte).concat())
+        };
+        let expected = [
+            blocks(Compressed::Bc7Srgb, 10),
+            blocks(Compressed::Bc7Srgb, 20),
+            blocks(Compressed::Bc7Unorm, 30),
+        ];
+        assert_eq!(held, expected);
     }
 
     /// A project whose package couldn't name its assets alike, or whose shader doesn't compile, is

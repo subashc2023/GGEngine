@@ -53,7 +53,7 @@ cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names cont
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
 cargo gg run --peers 2 [-- --rollback]   # in games/shards: a host and joiner, lockstep or predicting
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
-cargo gg fetch                    # in games/showcase: Sponza, which git doesn't hold, for its scene
+cargo gg fetch                    # in games/showcase: Sponza and Bistro, which git doesn't hold
 ```
 
 Building needs a C and C++ compiler, for VMA, Luau, zstd and meshoptimizer, and `slangc` for the

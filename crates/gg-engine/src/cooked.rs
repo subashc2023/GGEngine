@@ -2,9 +2,9 @@
 //! package reads in place of its glTF file and the files that names. It holds what [`gltf::read`]
 //! makes of them, its primitives' triangles as the cooker optimized them, with their levels of
 //! detail, and its images compressed in KTX2 as what each holds says, BC7 of colors or of values,
-//! or BC5 of a normal map, with their mip levels, as [`read_ktx2`] reads them, so that a run
-//! neither decodes PNGs and JPEGs nor makes levels for them, but takes the levels' blocks out of
-//! zstd, as the loader does.
+//! or BC5 of a normal map, or BC7 of one, as a DDS image holds it, with their mip levels, as
+//! [`read_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes levels for
+//! them, but takes the levels' blocks out of zstd, as the loader does.
 //!
 //! The format, every number little-endian, every count and length 32 bits, a string its length
 //! then its UTF-8:
@@ -19,11 +19,13 @@
 //!             positions (3 f32s each), their texture coordinates (2), their colors (4), their
 //!             normals (3) and their tangents (4); its indices' count and its indices; its levels'
 //!             count and each one's start, count and error (an f32); its material's color (4
-//!             f32s), metallic, roughness, normal scale, occlusion strength (an f32 each) and
-//!             emission (3 f32s); each of its textures in `Slot`'s order, as its image (u32::MAX for
-//!             none), whether it's nearest (a byte) and its wrap (a byte: clamp, repeat, mirror);
-//!             its alpha mode (a byte: opaque, mask, blend), the mask's cutoff (an f32), and whether
-//!             it's double-sided and unlit (a byte each)
+//!             f32s), its workflow, a byte (0 for metallic-roughness, 1 for specular-glossiness),
+//!             then its metallic and roughness (an f32 each) or its specular color (3 f32s) and
+//!             glossiness (an f32), its normal scale and occlusion strength (an f32 each) and
+//!             emission (3 f32s); each of its textures in `Slot`'s order, as its image (u32::MAX
+//!             for none), whether it's nearest (a byte) and its wrap (a byte: clamp, repeat,
+//!             mirror); its alpha mode (a byte: opaque, mask, blend), the mask's cutoff (an f32),
+//!             and whether it's double-sided and unlit (a byte each)
 //! images      a count, then each one's KTX2, as its length and its bytes
 //! ```
 //!
@@ -34,10 +36,10 @@ use std::path::Path;
 
 use gg_core::math::{Quat, Vec3};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Lod, Wrap};
+use gg_renderer::{AlphaMode, Lod, Workflow, Wrap};
 
 use crate::gltf::{self, Imported, Material, Part, Primitive, Sampling};
-use crate::image::{Compressed, read_ktx2};
+use crate::image::read_ktx2;
 use crate::model;
 use crate::package::{Files, Kind};
 use crate::{Light, LightKind, Transform};
@@ -134,14 +136,26 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         }
         let material = &primitive.material;
         floats(&mut bytes, &material.color);
+        match material.workflow {
+            Workflow::MetallicRoughness {
+                metallic,
+                roughness,
+            } => {
+                bytes.push(0);
+                floats(&mut bytes, &[metallic, roughness]);
+            }
+            Workflow::SpecularGlossiness {
+                specular,
+                glossiness,
+            } => {
+                bytes.push(1);
+                floats(&mut bytes, &specular.to_array());
+                floats(&mut bytes, &[glossiness]);
+            }
+        }
         floats(
             &mut bytes,
-            &[
-                material.metallic,
-                material.roughness,
-                material.normal_scale,
-                material.occlusion_strength,
-            ],
+            &[material.normal_scale, material.occlusion_strength],
         );
         floats(&mut bytes, &material.emissive);
         for texture in material.textures {
@@ -284,10 +298,10 @@ impl<'a> Reader<'a> {
         // Each image compressed as what its materials sample it as, which reading the model left
         // one of: colors, values or a normal map.
         for (i, image) in images.iter().enumerate() {
-            let wanted = Compressed::of(model::texels(&primitives, i));
-            if image.compressed() != Some(wanted) {
+            let texels = model::texels(&primitives, i);
+            if !image.compressed().is_some_and(|held| held.holds(texels)) {
                 return Err(format!(
-                    "its image {i} holds {:?}, where its materials sample it as {wanted:?}",
+                    "its image {i} holds {:?}, where its materials sample it as {texels:?}",
                     image.compressed()
                 ));
             }
@@ -368,7 +382,25 @@ impl<'a> Reader<'a> {
             });
         }
         let color = self.floats()?;
-        let [metallic, roughness, normal_scale, occlusion_strength] = self.floats()?;
+        let [workflow]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
+        let workflow = match workflow {
+            0 => {
+                let [metallic, roughness] = self.floats()?;
+                Workflow::MetallicRoughness {
+                    metallic,
+                    roughness,
+                }
+            }
+            1 => {
+                let [r, g, b, glossiness] = self.floats()?;
+                Workflow::SpecularGlossiness {
+                    specular: Vec3::new(r, g, b),
+                    glossiness,
+                }
+            }
+            _ => return Err(format!("has a material of workflow {workflow}")),
+        };
+        let [normal_scale, occlusion_strength] = self.floats()?;
         let emissive = self.floats()?;
         let flag = |byte: u8, what: &str| match byte {
             0 => Ok(false),
@@ -412,8 +444,7 @@ impl<'a> Reader<'a> {
             lods,
             material: Material {
                 color,
-                metallic,
-                roughness,
+                workflow,
                 normal_scale,
                 occlusion_strength,
                 emissive,
@@ -520,8 +551,10 @@ mod tests {
             ],
             material: Material {
                 color: [1.0, 0.5, 0.25, 1.0],
-                metallic: 0.25,
-                roughness: 0.75,
+                workflow: Workflow::MetallicRoughness {
+                    metallic: 0.25,
+                    roughness: 0.75,
+                },
                 normal_scale: 0.5,
                 occlusion_strength: 0.125,
                 emissive: [2.0, 0.0, 1.0],
@@ -565,10 +598,17 @@ mod tests {
                 light: None,
             },
         ];
+        // And the same again, of specular and glossiness, which no part draws.
+        let mut glossy = primitive.clone();
+        glossy.name = "square/1".to_owned();
+        glossy.material.workflow = Workflow::SpecularGlossiness {
+            specular: Vec3::new(0.5, 0.25, 0.125),
+            glossiness: 0.625,
+        };
         let read = |image: &Vec<u8>| crate::image::read_ktx2(image.clone()).expect("a texture");
         let imported = Imported {
             parts,
-            primitives: vec![primitive],
+            primitives: vec![primitive, glossy],
             images: vec![read(&colors), read(&normals)],
             ignored: vec!["1 animation".to_owned()],
         };
@@ -581,6 +621,13 @@ mod tests {
         let bytes = encode(&imported, &images);
         let read = decode("m", Path::new("m.glb"), &bytes).expect("a cooked model");
         assert_eq!(read, imported);
+        // Its normal map as BC7 of values, as the cooker keeps a DDS image's blocks.
+        let bc7 = ktx2(ktx2::Format::BC7_UNORM_BLOCK, [4, 4], &[vec![9; 16]], true);
+        let mut kept = imported.clone();
+        kept.images[1] = crate::image::read_ktx2(bc7.clone()).expect("a texture");
+        let bytes = encode(&kept, &[images[0].clone(), bc7]);
+        let read = decode("m", Path::new("m.glb"), &bytes).expect("a BC7 normal map");
+        assert_eq!(read, kept);
         // Its floats' bits, which the world hash reads through its nodes.
         let rotation = read.parts[0]
             .transform
@@ -617,7 +664,7 @@ mod tests {
         ));
         cases.push((
             "a part drawing what it hasn't",
-            edited(&|imported| imported.parts[1].primitive = Some(1)),
+            edited(&|imported| imported.parts[1].primitive = Some(2)),
         ));
         let primitive = |edit: fn(&mut Primitive)| {
             move |imported: &mut Imported| edit(&mut imported.primitives[0])

@@ -1,0 +1,172 @@
+(
+    entities: {
+        "0635b7c74f48072b": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 8"),
+            Transform: (
+                translation: (-81.1513, 0.0, -180.21368),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "0aa7ca06af899406": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 12"),
+            Transform: (
+                translation: (43.207172, 0.0, -192.86172),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "16b65eb58237c796": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 5"),
+            Transform: (
+                translation: (-43.207172, 0.0, 192.86172),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1fac26f92083820d": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.62802875,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (-42.067825, 3.156161, 93.66811),
+                rotation: (-0.0142109, -0.0944423, -0.0193406, 0.995241),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4f83cbeb76ed2516": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 16"),
+            Transform: (
+                translation: (167.56564, 0.0, -205.50977),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "60296272cc29b458": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 7"),
+            Transform: (
+                translation: (-68.50326, 0.0, -55.855213),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "770528d3f2e96af4": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 4"),
+            Transform: (
+                translation: (-205.50977, 0.0, -167.56564),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7914d6a4daa293e9": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 10"),
+            Transform: (
+                translation: (68.50326, 0.0, 55.855213),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "873752785259c1c2": (
+            Environment: (
+                exposure: 14.5,
+                tonemapper: PbrNeutral,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 16000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "8a2fbfa58f83f50d": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 11"),
+            Transform: (
+                translation: (55.855213, 0.0, -68.50326),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "924110e4fea9e9de": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 13"),
+            Transform: (
+                translation: (205.50977, 0.0, 167.56564),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b380d0a59d378668": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 3"),
+            Transform: (
+                translation: (-192.86172, 0.0, -43.207172),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b4886cba49183287": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 1"),
+            Transform: (
+                translation: (-167.56564, 0.0, 205.50977),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b6c10eeb26c176fc": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 14"),
+            Transform: (
+                translation: (192.86172, 0.0, 43.207172),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ba52e7b63fa6ca4c": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 15"),
+            Transform: (
+                translation: (180.21368, 0.0, -81.1513),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bb924b8f7f8edcb6": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 6"),
+            Transform: (
+                translation: (-55.855213, 0.0, 68.50326),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "be760d76325ae7ca": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 9"),
+            Transform: (
+                translation: (81.1513, 0.0, 180.21368),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c78cac1c5861c4d5": (
+            ModelRoot: ("310f8adb3a4235a7"),
+            Name: ("Bistro 2"),
+            Transform: (
+                translation: (-180.21368, 0.0, 81.1513),
+                rotation: (0.0, 0.742019, 0.0, 0.6703789),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

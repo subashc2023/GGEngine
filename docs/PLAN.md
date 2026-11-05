@@ -109,10 +109,66 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Cascaded shadow maps** (2026-11-04)
 - **Sponza** (2026-11-04)
 - **Phase 12, render graph and PBR** (2026-11-04)
+- **Bistro** (2026-11-05)
 
 ## Now
 
-**Phase 13, GPU-driven rendering**, as Next has it, its milestones to be set out as it starts.
+**Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
+
+- **Culling on the GPU.** Buffers in the graph, which a pass writes and later passes read, as images
+  are. A compute pass culls each opaque run's instances against the view, its far plane at infinity
+  as now, and against each shadow cascade's box, so that a cascade draws its casters alone; picks
+  each one's level of detail, as the render thread picks them now; and writes those left, each
+  level's in their order, for indirect draws whose instance counts it writes, so that the CPU
+  records a draw for each run and level whatever its instances. Games' shaders read their instances
+  as they do now; what blends, and the canvas, draw as now. Every reference image unchanged; the 16
+  Bistros' triangles drawn, and their shadows' time on the GPU, fall.
+- **The scene on the GPU.** The world's opaque meshes kept on the GPU from frame to frame, each
+  instance written as it changes rather than every frame: the world keeps the tick at which each
+  component's rows last changed, marked wherever a system, a set or a load reaches them mutably, and
+  keeps world transforms, propagated after the ticks as they change, where drawing computes each
+  child's from its ancestors every frame now; frames between ticks blend what the last tick moved
+  alone. A frame's CPU time then follows what changes rather than what's drawn: `update_ms` and
+  `render_ms` the same for 16 Bistros as for one, as the phase's *Done when* asks. Sprites, text and
+  what blends are drawn from the world every frame, as now.
+- **Occlusion culling.** Two passes against a depth pyramid: the first draws what the last frame
+  showed, and the pyramid is built from its depth; the second tests the rest against it and draws
+  what shows, so that what comes into view draws in the frame it does. Shadows' cascades cull against
+  their boxes alone. In the Bistro's streets, the triangles drawn fall to about what shows.
+- **Clustered lighting.** A compute pass bins the frame's lights into the view's clusters, tiles
+  across it by slices along its depth, and each lit fragment shades by its cluster's lights rather
+  than by every light, games' shaders reading them through the frame's data; the Bistro's 96 point
+  lights shade where they reach. References on lavapipe of many lights, against every light's.
+- **Async compute.** The graph runs compute passes on a queue of their own where the device has a
+  compute family apart from graphics, as the RTX 4090 and the AMD iGPU here do, waiting through
+  semaphores where the two queues' uses meet, and on the graphics queue elsewhere, as on lavapipe:
+  culling and light culling beside the shadows' passes. Each queue is a timeline in Tracy, its clock
+  read through `VK_KHR_calibrated_timestamps`, which both GPUs here have, as the run starts and again
+  as it goes on, which fixes the offset [DEFECTS.md](DEFECTS.md) has.
+- **Meshlets and packed vertices.** The cooker cuts each level of a model's meshes into meshlets,
+  meshoptimizer's, each with its bounds and the cone its triangles face within, and packs models'
+  vertices into 8- and 16-bit fields. Meshlets draw through mesh shaders where the device has
+  `VK_EXT_mesh_shader`, as the RTX 4090 and lavapipe (Mesa 23.2.1 or later) do, and elsewhere, as on
+  the AMD iGPU here and KosmicKrisp, through a compute pass that writes the triangles of the meshlets
+  left for an indirect draw; meshlets are culled against the view, their cones and the depth
+  pyramid. Development runs draw a model's primitives whole, as they draw its one level. Both paths'
+  references on lavapipe, the compute path forced there.
+- **A visibility buffer.** Models' opaque and masked materials draw into a visibility buffer, each
+  pixel the instance and triangle it shows, beside the view's depth and IDs; a compute pass then
+  shades each pixel by its material from the table, its texture coordinates' derivatives from its
+  triangle's corners. Games' opaque shaders and what blends draw forward after it, against its depth.
+  References within tolerance of the forward path's.
+- **TAA.** The view drawn jittered by a subpixel offset each frame, each pixel's motion from its
+  instance's transform the frame before, and resolved against the frames before, reprojected and
+  clamped to its neighborhood, before tonemapping, as an environment's antialiasing says: TAA by
+  default, and none in a world without an environment, so that 2D games and today's references draw
+  as they do. Its own references on lavapipe, of frames in a row.
+
+Phase 13 closes once the showcase's 16 Bistros, `bistro_grid.ron`, from its package, run headless
+at 1,280 by 720 on the RTX 4090 in 4.17 ms a frame or less at the 95th percentile, 240 frames a
+second, the refresh of the display here, with `update_ms` and `render_ms` as one Bistro's,
+`bistro.ron`'s; an Apple Silicon Mac's waits for one, with the rest that Deferred lists for when
+one is at hand.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -147,7 +203,7 @@ Phases 11 and 12 are done, as Done has it, but for what Deferred holds.
     vertices the cooker packs into 8- and 16-bit fields; a visibility buffer; clustered lighting;
     TAA. *Done when* CPU frame time stays flat as the instance count grows, and a cooked Amazon
     Lumberyard Bistro with many instances meets a frame-time target set in this phase on the
-    RTX 4090 and an Apple Silicon Mac.
+    RTX 4090; on an Apple Silicon Mac once one is at hand.
 
 Later: 3D physics, animation (sprite flipbooks and tweens, then skeletal), particles, linked
 prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
@@ -170,7 +226,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
 | ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`) | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`); and Phase 13's 16 Bistros on a Mac, their frame time against a target set there, their meshlets drawn through the compute path, as KosmicKrisp has no mesh shaders | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C in a windowed run started from a console, which ends the process at once, as headless runs and servers don't; the JSON log keeps every line written until then, and a recording every whole line but its `end` | Someone ends windowed runs from their console |
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -178,7 +234,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
 | RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
-| `gg fetch` taking archives, as a model shipped zipped: it fetches files one at a time, each named in the fetch list with its SHA-256 | A project fetches what comes only as an archive, as Phase 13's Bistro may |
+| `gg fetch` taking archives, as a model shipped zipped: it fetches files one at a time, each named in the fetch list with its SHA-256 | A project fetches what comes only as an archive |
 | A scene that names a fetched file not fetched yet saying that `gg fetch` fetches it: its load fails naming the file's ID, as for any asset not there (`asset.no_model`) | Someone opens such a scene and is lost |
 | Tokens of fewer capabilities, minted for clients that can't read the session file, and grants kept to one scene: a connection's `hello` narrows its own grant, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes, but any process that reads the session file reaches everything | A client the user doesn't run as their own, such as one on another machine, an agent that can read the file but mustn't reach everything, or one kept to one scene |
 | `gg mcp --grant` listing only the tools its grant covers: it lists them all, and the game refuses the rest with `api.ungranted` | An agent's tools list misleads it |
@@ -189,7 +245,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `hello`, `ping`, `view`, `patch`, `note` and `quit`, and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
 | Ordering a graph's passes by what they use, rather than as they're added, and leaving out those whose results nothing uses | Passes come from more than one place, as games' own would |
-| Buffers in the graph: a pass that writes a buffer for a later one to read, as the graph tracks images alone | The first such pass, as Phase 13's culling |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
@@ -251,8 +306,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
 | Point and spot lights' shadows, as cubes and maps in an atlas: a directional light alone casts them | A game lit by them needs their shadows |
 | More than one directional light's shadows: of those that cast them, the brightest does | A scene with two suns, or a sun and a moon at once |
+| Leaving a model's lights out where a scene places it: each root spawns all of the model's nodes, lights among them, so the showcase's 16 Bistros shine 16 suns, exposed 4 stops down, the one that casts shadows among 15 that fill them in, and their point lights a 16th as bright | A scene places a model that holds a sun more than once for its look, not its cost |
 | Blending between cascades over a band at each split, where shadows' sharpness now steps from one cascade to the next | The step shows, as it doesn't in the showcase's Sponza at 1,280 by 720 |
-| Casters culled for each cascade against its box: each cascade draws every opaque draw, four times over the view's | Phase 13's culling, or shadows' passes that cost enough to matter |
 | Shadow maps' size, the cascades' count and splits, and the shadows' offsets and bias, set by a game or by quality settings: 2,048 texels, four cascades, three quarters logarithmic, and the constants `shaders/model.slang` and `src/shadow.rs` hold | A game needs others, or a device is too slow for them |
 | Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |
 | Shadows that soften with the distance from their casters, as PCSS's, and contact shadows: every shadow's edge is six texels of its cascade | A game's look needs them |
@@ -273,7 +328,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
 | Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |
-| A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 13's culling |
+| A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one |
 | Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
 | Rendering the view's IDs only in frames that pick or outline: every frame renders them, for the reason [Rendering](../ARCHITECTURE.md#rendering) gives | A profile shows them |
 | Answering picks sooner than [Rendering](../ARCHITECTURE.md#rendering) says they come: reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
@@ -286,7 +341,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
-| glTF that `Context::add_model` refuses or ignores, as it lists: skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, a material's textures that read a second set of texture coordinates, as occlusion baked for a lightmap does, an image sampled as both colors and data, material extensions past unlit and emission's strength (texture transforms, clearcoat, transmission, specular, sheen and the rest), quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it |
+| glTF that `Context::add_model` refuses or ignores, as it lists: skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, a material's textures that read a second set of texture coordinates, as occlusion baked for a lightmap does, an image sampled as both colors and data, material extensions past unlit, emission's strength and specular-glossiness (texture transforms, clearcoat, transmission, as the Bistro's 18 glass materials have it, which draw opaque, specular, sheen and the rest), quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |
@@ -386,10 +441,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Following a rename in case alone, as Windows' and macOS's file systems allow, of an asset whose ID file keeps the old case: the ID file matches only when case is ignored (`asset.meta_case`), so the asset keeps its ID for the run, then goes without until its ID file is renamed too | Someone renames assets in case alone |
 | Warning, in a development run, of a path whose case differs from its file's, or on macOS its Unicode form, which Windows' and macOS's file systems find but a package doesn't | A game's path runs in development and fails from its package |
 | Checking that a package holds every file a game's code loads, as by listing those a development run read: the cooker holds what the scan of ID files finds, and checks the start scene alone | A file a game loads is left out of its package unseen |
-| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | Phase 13, whose cooker packs vertices |
 | Levels of detail in development runs: a model read from its glTF draws one level, the cooker's levels showing from a package alone, as `--package` gives a development build | Someone tunes a model's levels without cooking it |
-| Picking levels of detail on the GPU, with culling: the render thread picks each draw's level as it records the frame, at a pixel of error in every view, without hysteresis or a blend between levels, so a draw at a threshold can flip between two from frame to frame | Phase 13's GPU culling, or a level's pop shows |
-| Gathering an opaque run's draws by level in one pass, by a counting sort, rather than a pass over the run for each level between the finest and coarsest its draws picked | A profile shows it |
+| Hysteresis or a blend between levels of detail: a draw's level is the coarsest whose error spans a pixel of the view, so a draw at a threshold can flip between two from frame to frame | A level's pop shows |
 | Simplifying meshes by their colors and texture coordinates too, through meshoptimizer's attribute-aware simplification: levels are simplified by their positions alone, keeping seams, so a coarse level of a model colored by its vertices may shift its colors | A model's coarser levels look off where their error doesn't say so |
 | Pruning the small parts a mesh's coarser levels could drop: meshoptimizer's Prune, without an error limit, drops whole parts that should stay, so the cooker doesn't prune | A model of many small parts keeps too many triangles far away |
 | Locking the borders a node's primitives share as they simplify, so that their coarser levels meet: each simplifies apart, so their seams may open by as much as the pixel each level's error allows | A model shows gaps between its parts |
@@ -432,7 +485,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots | Someone sets an entity's field in the Inspector, or loses an entity in a long Entities panel |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | An icon on each of the Entities panel's rows saying what its entity is, from its components, such as a camera's, a sprite's or a mesh's: a row says its name alone | Names alone stop telling entities apart at a glance |
-| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Bodies under a parent, or a profile showing the walks up the hierarchy |
 | Where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, and for the editor's handles, which show what's picked, as it moves, up to a tick ahead of where it draws: layers read the world up to a tick ahead of where it draws, `World::pose` giving where the latest tick left an entity, and the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity, or someone editing something as it moves |
 | Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
 | Rotations of more than half a turn a tick, which draw the shorter way round, the other way; Hermite easing from velocities would draw them, and curves between ticks | Something spins that fast, or a curve between ticks shows |

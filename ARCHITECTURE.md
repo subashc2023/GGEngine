@@ -469,7 +469,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   their order and keep it, with levels of detail it simplified, each about half the triangles
   of the one before, and each image compressed as what its materials sample it as, BC7 of colors
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
-  makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels; and the
+  makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels, but
+  a DDS image's BC7 blocks and levels kept as they are; and the
   rest as they are, sounds and music, scenes and other RON, and scripts. It leaves out the
   manifest and the fetch list, mods' folders, whose scripts a player installs, a module that
   shaders include rather than one that compiles alone, and what no run loads, as code and docs, by
@@ -1265,16 +1266,25 @@ Inspector and tools edit them, as any component.
 Models shade as glTF's metallic-roughness materials say, by Appendix B's BRDF, as Khronos's sample
 viewer has it: Lambert's diffuse and GGX's specular, with Smith's height-correlated visibility,
 Schlick's Fresnel and 0.04 reflected head-on by every dielectric, from a material's base color,
-metallic and roughness, each a factor that its texture multiplies, and its normal map. Light times
+metallic and roughness, each a factor that its texture multiplies, and its normal map. A material
+of KHR_materials_pbrSpecularGlossiness's, which takes its metallic-roughness's place, shades by the
+same lobes, as the extension's reference has it: it reflects its specular color head-on, diffuses
+its diffuse color times 1 less that color's strongest channel, and is as rough as 1 less its
+glossiness, its map's specular color sRGB-encoded and its glossiness, in alpha, as stored. Light times
 the exposure, then the material's emission, as the view shows it rather than exposed, make the
 color, so that an emissive white shows as white under any light. Occlusion darkens only light from
 all around, the sky's. A material that KHR_materials_unlit makes unlit, and every material in a
 frame without lights or a sky, draws its base color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
 corners apart, as glTF says, but one whose material is unlit, which reads none; a lit material's
-normal map without tangents gets MikkTSpace's, as glTF asks, through `bevy_mikktspace`, its square
+normal map without tangents, or whose tangents aren't all finite, as a tool can leave them where
+texture coordinates have no area, gets MikkTSpace's, as glTF asks, through `bevy_mikktspace`, its square
 roots and arccosines libm's, so that every platform makes the same, its vertices apart where their
 corners' tangents differ. A material's maps of data, metallic-roughness, occlusion and normals, are
-textures of data, sampled as stored, their levels averaging their values; one image sampled as
+textures of data, sampled as stored, their levels averaging their values. A texture whose
+MSFT_texture_dds names a DDS image samples that in place of its source: BC7 with its levels, of
+colors or of a map's values as what samples it says, whatever the file's own format says, as glTF
+takes a PNG's colors as sRGB whatever its profile, its blocks kept as they are, by development runs
+and by the cooker alike. One image sampled as
 colors by one texture and as data by another is the first's, the other left out, and a material's
 textures read one set of texture coordinates, the first's, others left out alike, as the model's
 `engine.model_ignored` lists them. Materials live in a table on the GPU, which a model's draw's
@@ -1477,7 +1487,8 @@ A game's texture is a PNG or a JPEG that the engine decodes to RGBA8 with colors
 alpha not multiplied into them, as images store them, whatever color profile or gamma the file
 holds, as glTF requires; or a Radiance HDR, `.hdr`, of colors of high dynamic range, as a sky's,
 which it decodes to RGBA of 16-bit floats, linear, alpha 1, a color past the most a half float
-holds clamped to it, of one level; a model's images are PNGs and JPEGs alone. It streams into GPU
+holds clamped to it, of one level; a model's images are PNGs and JPEGs, and DDS files of BC7 as
+MSFT_texture_dds names them, which stay compressed. It streams into GPU
 memory, as below, where it stays until it's removed, and shaders sample its colors decoded to
 linear, or a Radiance HDR's as they are. A run from a game's package reads it as the cooker
 compressed it instead, BC7 of those colors, or BC6H of a Radiance HDR's, which stays compressed in

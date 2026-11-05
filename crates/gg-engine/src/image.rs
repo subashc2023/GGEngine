@@ -1,9 +1,10 @@
 //! Images that layers load as textures, and models' images: PNGs and JPEGs, read as far as their
 //! headers as they're added, which give their sizes, and decoded to the RGBA8 that the renderer
 //! takes apart from that, as the loader decodes them off the main thread; textures of high dynamic
-//! range, as skies are, from Radiance's `.hdr`, alike, to RGBA of 16-bit floats; and in a game's
-//! package, BC7, BC5 and BC6H in KTX2, as the cooker compressed them, read and taken out of its
-//! supercompression alike.
+//! range, as skies are, from Radiance's `.hdr`, alike, to RGBA of 16-bit floats; models' DDS
+//! images of BC7, as `MSFT_texture_dds` names them, whose blocks are taken out alike; and in a
+//! game's package, BC7, BC5 and BC6H in KTX2, as the cooker compressed them, read and taken out of
+//! its supercompression alike.
 
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
@@ -65,9 +66,17 @@ pub enum Format {
         mipmapped: bool,
         zstd: bool,
     },
+    /// A DDS file, as a model's `MSFT_texture_dds` image is, whose headers read, of BC7 blocks,
+    /// of sRGB or of values as `compressed` says, of its first level alone or, if `mipmapped`, of
+    /// its full chain, which decodes to its levels' blocks as they are.
+    Dds {
+        compressed: Compressed,
+        mipmapped: bool,
+    },
 }
 
-/// How the cooker compressed an image, by what it holds.
+/// How an image's blocks are compressed: as the cooker compressed them, by what the image holds,
+/// or as a model's DDS image holds them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compressed {
     /// As BC7, of colors, sRGB-encoded, as textures and models' base colors and emission are.
@@ -106,6 +115,14 @@ impl Compressed {
         }
     }
 
+    /// Whether a model's image that holds what `texels` say may be compressed so in a game's
+    /// package: as [`of`](Self::of) says, or for a normal map, as BC7 of values too, as the cooker
+    /// keeps a DDS image's blocks.
+    pub(crate) fn holds(self, texels: Texels) -> bool {
+        let normals = matches!(Compressed::of(texels), Self::Bc5);
+        self == Self::of(texels) || (normals && self == Self::Bc7Unorm)
+    }
+
     /// The KTX2 format of it.
     pub(crate) fn ktx2(self) -> ktx2::Format {
         match self {
@@ -120,8 +137,9 @@ impl Compressed {
 impl Image {
     /// What a texture of it holds, as `texels`, a [`Texels::Color`] or a [`Texels::Map`], say it
     /// does: those, whose smaller levels a frame makes, of an image that's RGBA8 or decodes to it;
-    /// colors of high dynamic range, of one level, of a Radiance HDR; or the levels it was cooked
-    /// with, as it's compressed.
+    /// colors of high dynamic range, of one level, of a Radiance HDR; or, as it's compressed, the
+    /// levels it was cooked or stored with, BC7's colors or maps as `texels` say, whether its blocks
+    /// were compressed of sRGB or of values, as BC7's are the same blocks either way.
     pub(crate) fn texels(&self, texels: Texels) -> Texels {
         let (compressed, mipmapped) = match self.format {
             Format::Rgba8 | Format::Png | Format::Jpeg => return texels,
@@ -134,19 +152,32 @@ impl Image {
                 compressed,
                 mipmapped,
                 ..
+            }
+            | Format::Dds {
+                compressed,
+                mipmapped,
             } => (compressed, mipmapped),
         };
-        match compressed {
-            Compressed::Bc7Srgb => Texels::Bc7 { mipmapped },
-            Compressed::Bc7Unorm => Texels::CompressedMap {
-                map: Map::Surface,
+        let map = match texels {
+            Texels::Map(map) | Texels::MapLevels(map) | Texels::CompressedMap { map, .. } => {
+                Some(map)
+            }
+            _ => None,
+        };
+        match (compressed, map) {
+            (Compressed::Bc6h, _) => Texels::Bc6h,
+            // BC5 holds a normal map's X and Y alone.
+            (Compressed::Bc5, map) => Texels::CompressedMap {
+                map: map.unwrap_or(Map::Normal),
+                bc5: true,
                 mipmapped,
             },
-            Compressed::Bc5 => Texels::CompressedMap {
-                map: Map::Normal,
+            (Compressed::Bc7Srgb | Compressed::Bc7Unorm, Some(map)) => Texels::CompressedMap {
+                map,
+                bc5: false,
                 mipmapped,
             },
-            Compressed::Bc6h => Texels::Bc6h,
+            (Compressed::Bc7Srgb | Compressed::Bc7Unorm, None) => Texels::Bc7 { mipmapped },
         }
     }
 
@@ -154,7 +185,9 @@ impl Image {
     pub(crate) fn compressed(&self) -> Option<Compressed> {
         match self.format {
             Format::Rgba8 | Format::Rgba16f | Format::Png | Format::Jpeg | Format::Hdr => None,
-            Format::Bc { compressed, .. } | Format::Ktx2 { compressed, .. } => Some(compressed),
+            Format::Bc { compressed, .. }
+            | Format::Ktx2 { compressed, .. }
+            | Format::Dds { compressed, .. } => Some(compressed),
         }
     }
 
@@ -165,7 +198,9 @@ impl Image {
         match self.format {
             Format::Rgba8 | Format::Png | Format::Jpeg => width * height * 4,
             Format::Rgba16f | Format::Hdr => width * height * 8,
-            Format::Bc { mipmapped, .. } | Format::Ktx2 { mipmapped, .. } => {
+            Format::Bc { mipmapped, .. }
+            | Format::Ktx2 { mipmapped, .. }
+            | Format::Dds { mipmapped, .. } => {
                 let levels = if mipmapped { usize::MAX } else { 1 };
                 let [width, height] = self.size;
                 mip_sizes(width, height).take(levels).map(blocks).sum()
@@ -174,8 +209,9 @@ impl Image {
     }
 
     /// It decoded, from the file it was read from as far as its header: a PNG or a JPEG to RGBA8,
-    /// as [`read`] says, and a KTX2 file to its levels' blocks, taken out of zstd where they're
-    /// supercompressed; itself if it's decoded already. The error says what's wrong with it.
+    /// as [`read`] says, a KTX2 file to its levels' blocks, taken out of zstd where they're
+    /// supercompressed, and a DDS file to its levels' blocks; itself if it's decoded already. The
+    /// error says what's wrong with it.
     ///
     /// Fails for a file whose header read but whose pixels don't decode, as one cut short or
     /// corrupt past its header, and for one that decodes to another size than its header said.
@@ -186,6 +222,7 @@ impl Image {
             Format::Jpeg => decode_jpeg,
             Format::Hdr => decode_hdr,
             Format::Ktx2 { .. } => decode_ktx2_levels,
+            Format::Dds { .. } => decode_dds,
         };
         // As its header's read is, in `read` and `read_ktx2`.
         let decoded = panic::catch_unwind(|| decode(&self.pixels))
@@ -248,6 +285,7 @@ pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image
 pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Image> {
     let what = match image.format {
         Format::Ktx2 { .. } | Format::Bc { .. } => "doesn't read as a cooked texture",
+        Format::Dds { .. } => "doesn't read as a DDS of BC7",
         Format::Png | Format::Jpeg | Format::Rgba8 => "doesn't decode as a PNG or a JPEG",
         Format::Hdr | Format::Rgba16f => "doesn't decode as a Radiance HDR",
     };
@@ -374,6 +412,110 @@ fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
     Ok(Image {
         size,
         pixels,
+        format: Format::Bc {
+            compressed,
+            mipmapped,
+        },
+    })
+}
+
+/// Where a DDS file of BC7's blocks start: past its magic number, `DDS `, its header, of 124 bytes,
+/// and the DX10 header that names its DXGI format, of 20, which BC7 needs.
+const DDS_BLOCKS: usize = 148;
+
+/// Whether `bytes` start as a DDS file does.
+pub(crate) fn is_dds(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"DDS ")
+}
+
+/// Reads a DDS file, as a model's `MSFT_texture_dds` image is, as far as its headers, keeping
+/// `bytes` for [`Image::decoded`] to take its blocks out of: a 2D image of BC7, of sRGB or of
+/// values as its DXGI format says, of its first level alone or of the full chain of levels
+/// [`mip_sizes`] gives, whose blocks fill the file to its end, as Microsoft's "Programming Guide for
+/// DDS" lays them out. The error says what's wrong with it.
+///
+/// Fails before anything is allocated for the pixels if a side is 0 or more than
+/// [`MAX_TEXTURE_SIZE`], or if there are more than [`MAX_FILE`] bytes.
+pub(crate) fn read_dds(bytes: Vec<u8>) -> Result<Image, String> {
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(format!("it's more than {} MiB", MAX_FILE >> 20));
+    }
+    let (size, compressed, mipmapped) = dds_header(&bytes)?;
+    Ok(Image {
+        size,
+        pixels: bytes,
+        format: Format::Dds {
+            compressed,
+            mipmapped,
+        },
+    })
+}
+
+/// A DDS file's size, how its blocks are compressed and whether it has its full chain of levels, as
+/// [`read_dds`] reads them from its headers, checking that its blocks fill it to its end.
+fn dds_header(bytes: &[u8]) -> Result<([u32; 2], Compressed, bool), String> {
+    if !is_dds(bytes) || bytes.len() < DDS_BLOCKS {
+        return Err(format!(
+            "it doesn't start with `DDS `, or ends within the {DDS_BLOCKS} bytes of its headers"
+        ));
+    }
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+    // The header's size and its pixel format's, each as the format fixes it.
+    if word(4) != 124 || word(76) != 32 {
+        return Err("its header isn't a DDS header".to_owned());
+    }
+    // DDPF_FOURCC, and the four characters that say a DX10 header follows.
+    if word(80) & 0x4 == 0 || &bytes[84..88] != b"DX10" {
+        return Err("it has no DX10 header, which names BC7".to_owned());
+    }
+    let compressed = match word(128) {
+        98 => Compressed::Bc7Unorm,
+        99 => Compressed::Bc7Srgb,
+        format => {
+            return Err(format!(
+                "it holds DXGI format {format}, where the engine reads BC7 alone, 98 and 99"
+            ));
+        }
+    };
+    // A 2D texture, not a cube, and one of them.
+    if word(132) != 3 || word(136) & 0x4 != 0 || word(140) != 1 {
+        return Err("it isn't one 2D image".to_owned());
+    }
+    let size = [word(16), word(12)];
+    check_size(size[0], size[1])?;
+    // DDSD_MIPMAPCOUNT: without it, or with a count of 0, it has one level.
+    let levels = if word(8) & 0x2_0000 != 0 {
+        word(28).max(1)
+    } else {
+        1
+    };
+    let chain = mip_sizes(size[0], size[1]).count() as u32;
+    let mipmapped = match levels {
+        1 => false,
+        count if count == chain => true,
+        count => {
+            return Err(format!(
+                "it has {count} levels, neither 1 nor the {chain} of its full chain"
+            ));
+        }
+    };
+    let sizes = mip_sizes(size[0], size[1]).take(levels as usize);
+    let len: usize = sizes.map(blocks).sum();
+    let held = bytes.len() - DDS_BLOCKS;
+    if held != len {
+        return Err(format!(
+            "it holds {held} bytes past its headers, not the {len} of its levels' blocks"
+        ));
+    }
+    Ok((size, compressed, mipmapped))
+}
+
+/// Takes the levels' blocks of `bytes`, a DDS file that [`read_dds`] read, out of it.
+fn decode_dds(bytes: &[u8]) -> Result<Image, String> {
+    let (size, compressed, mipmapped) = dds_header(bytes)?;
+    Ok(Image {
+        size,
+        pixels: bytes[DDS_BLOCKS..].to_vec(),
         format: Format::Bc {
             compressed,
             mipmapped,
@@ -768,6 +910,12 @@ pub(crate) mod tests {
                 Map::Surface,
             ),
             (ktx2::Format::BC5_UNORM_BLOCK, Compressed::Bc5, Map::Normal),
+            // A normal map as the cooker keeps a DDS image's.
+            (
+                ktx2::Format::BC7_UNORM_BLOCK,
+                Compressed::Bc7Unorm,
+                Map::Normal,
+            ),
         ] {
             let image = decode_ktx2(&ktx2(format, [5, 5], &levels, true)).expect("a map's chain");
             let format = Format::Bc {
@@ -780,10 +928,117 @@ pub(crate) mod tests {
             );
             let cooked = Texels::CompressedMap {
                 map,
+                bc5: compressed == Compressed::Bc5,
                 mipmapped: true,
             };
             assert_eq!(image.texels(Texels::Map(map)), cooked);
-            assert_eq!(Compressed::of(Texels::Map(map)), compressed);
+            assert!(compressed.holds(Texels::Map(map)), "{compressed:?}");
+        }
+        assert_eq!(Compressed::of(Texels::Map(Map::Normal)), Compressed::Bc5);
+        let colors = Texels::Color(Mipmaps::Averaged);
+        assert!(!Compressed::Bc7Unorm.holds(colors) && !Compressed::Bc5.holds(colors));
+        assert!(!Compressed::Bc5.holds(Texels::Map(Map::Surface)));
+    }
+
+    /// A DDS file of BC7 of `size` texels and the DXGI format `format`, 98 of values or 99 of
+    /// sRGB, holding `levels`, each one's blocks, as Microsoft's guide lays one out and as
+    /// etcpak, which made the Bistro's, writes it.
+    pub(crate) fn dds(format: u32, size: [u32; 2], levels: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = b"DDS ".to_vec();
+        let mut words = [0u32; 31];
+        // Its header's size; DDSD_CAPS, HEIGHT, WIDTH, PIXELFORMAT, MIPMAPCOUNT and LINEARSIZE.
+        words[0] = 124;
+        words[1] = 0xa_1007;
+        [words[2], words[3]] = [size[1], size[0]];
+        words[4] = levels[0].len() as u32;
+        words[6] = levels.len() as u32;
+        // The pixel format's size, DDPF_FOURCC, then its four characters; DDSCAPS_TEXTURE,
+        // MIPMAP and COMPLEX.
+        words[18] = 32;
+        words[19] = 0x4;
+        words[20] = u32::from_le_bytes(*b"DX10");
+        words[26] = 0x40_1008;
+        bytes.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+        // The DX10 header: its DXGI format, a 2D texture, not a cube, one of them.
+        for word in [format, 3, 0, 1, 0] {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend(levels.concat());
+        bytes
+    }
+
+    /// A DDS file of BC7 reads as far as its headers, and decodes to its levels' blocks, as
+    /// colors or as a map as what samples it says, whether its format is of sRGB or of values.
+    #[test]
+    fn a_dds_of_bc7_decodes_to_its_levels_blocks() {
+        let blocks = |count: usize, byte: u8| vec![byte; count * 16];
+        let levels = [blocks(4, 1), blocks(1, 2), blocks(1, 3)];
+        for (format, compressed) in [(99, Compressed::Bc7Srgb), (98, Compressed::Bc7Unorm)] {
+            let file = dds(format, [5, 5], &levels);
+            let read = read_dds(file).expect("a DDS");
+            let dds = Format::Dds {
+                compressed,
+                mipmapped: true,
+            };
+            assert_eq!((read.size, read.format), ([5, 5], dds));
+            assert_eq!(read.decoded_len(), 6 * 16);
+            let colors = Texels::Color(Mipmaps::Averaged);
+            assert_eq!(read.texels(colors), Texels::Bc7 { mipmapped: true });
+            let normals = Texels::CompressedMap {
+                map: Map::Normal,
+                bc5: false,
+                mipmapped: true,
+            };
+            assert_eq!(read.texels(Texels::Map(Map::Normal)), normals);
+            let decoded = read.decoded().expect("its blocks");
+            let bc = Format::Bc {
+                compressed,
+                mipmapped: true,
+            };
+            assert_eq!((decoded.format, decoded.pixels), (bc, levels.concat()));
+        }
+        let one = read_dds(dds(99, [5, 5], &[blocks(4, 1)])).expect("a level");
+        let one = one.decoded().expect("its blocks");
+        assert_eq!(
+            (one.format, one.pixels.len()),
+            (
+                Format::Bc {
+                    compressed: Compressed::Bc7Srgb,
+                    mipmapped: false,
+                },
+                4 * 16
+            )
+        );
+    }
+
+    /// A DDS file that isn't one 2D image of BC7, of one level or its full chain, whose blocks fill
+    /// it, is refused, saying why.
+    #[test]
+    fn a_dds_that_isnt_one_of_bc7_is_refused() {
+        let blocks = |count: usize| vec![0; count * 16];
+        let levels = [blocks(4), blocks(1), blocks(1)];
+        let good = dds(98, [5, 5], &levels);
+        let with = |at: usize, word: u32| {
+            let mut file = good.clone();
+            file[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            file
+        };
+        let cases = [
+            (good[..100].to_vec(), "within"),
+            (with(0, u32::from_le_bytes(*b"DDT ")), "DDS"),
+            (with(84, u32::from_le_bytes(*b"DXT5")), "DX10"),
+            (with(128, 83), "DXGI format 83"),
+            (with(132, 4), "2D"),
+            (with(136, 0x4), "2D"),
+            (with(140, 6), "2D"),
+            (with(16, 0), "0x5"),
+            (with(28, 2), "2 levels"),
+            (good[..good.len() - 1].to_vec(), "past its headers"),
+            ([good.clone(), vec![0]].concat(), "past its headers"),
+        ];
+        for (file, named) in cases {
+            let problem = read_dds(file).expect_err(named);
+            assert!(problem.contains(named), "{problem}");
         }
     }
 
