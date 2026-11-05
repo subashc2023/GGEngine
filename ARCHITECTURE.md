@@ -1235,9 +1235,10 @@ last of its push constants: where the view sees from, the time, the simulation's
 draws, which stops with it and draws alike in a replay, and the exposure; the frame's lights, how
 many and where; the address of the table of models' materials; where shading sees from, the
 camera's position, or for an orthographic projection, which sees along one way, the way back
-toward it; and the sky's texture, its prefiltered light, the split sum's table and its luminance.
-Fields are added at its end, so that games' shaders that read the fields before them keep to the
-contract.
+toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance; and
+the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
+through the bindless set's sampler that compares. Fields are added at its end, so that games'
+shaders that read the fields before them keep to the contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1292,6 +1293,28 @@ by the cosine of the view's angle and the roughness. Those images keep that ligh
 shows another image, as a reload does. A view whose sky's texture shows its stand-in shows no sky,
 and is lit by none; a frame that renders no view prefilters nothing.
 
+A directional light casts shadows, unless its `Light` says it doesn't, as far ahead of the camera as
+its shadow distance, 100 units by default, fading out over the last tenth: of a world's lights that
+cast them, the brightest, the first of those as bright, as one light's shadows are drawn. Point and
+spot lights cast none yet. The shadows are in four cascades, each a shadow map of 2,048 texels a
+side, of 32-bit depth, the graph's own images, drawn before the view, which samples them. The
+view's depth, from its near plane to the shadows' reach, splits into four slices, the nearest the
+shortest, by the practical split scheme, three quarters logarithmic; each cascade is the box, seen
+from the light, round the smallest sphere that holds its slice, so that its size changes only with
+the view's projection, and its center moves only by whole texels of its map in the light's space,
+so that its texels stay put in the world as the view turns and moves, and shadows' edges don't
+shimmer. What a shader that's opaque draws casts shadows, through a pipeline of the shader's vertex
+shader alone, drawing depth alone, into each cascade; the masked model shader's, through a fragment
+shader of its own too, which cuts them out as it cuts out what it draws; what blends casts none, nor
+what a layer draws on its canvas. Casters between the light and a cascade's near side cast from it,
+their depth clamped there, and a cascade's depths sit back from its casters by a texel's worth of
+their slope. A lit fragment takes the nearest cascade whose map holds it and the texels the filter
+reads round it, moves a texel toward the light, and off its surface along its normal by three
+texels times the sine of the light's angle to it, so that a surface doesn't shadow itself, and
+filters six by six of the map's texels' comparisons, in nine samples of four, by a kernel that falls
+from the point outward, so that a shadow's edge moves smoothly. A frame whose lights cast no shadows
+makes no shadow maps and draws no shadows.
+
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, writing them from
 compute shaders, sampling them or copying from them, from which the frame places every barrier and
@@ -1302,8 +1325,9 @@ RGBA, of a 2D image's one layer or a cube's six faces, a mip level at a time thr
 bindless set's own for storage images, in the general layout, as their last use left them. A
 storage image is among a frame's targets, as an offscreen image is, and keeps the layout its last
 frame left it in, so that once a frame whose last use of it sampled it is submitted, frames after
-sample it through its texture slot without declaring it. The view's images, its colors of
-high dynamic range, IDs, depth and tonemapped colors, are the graph's own: each lasts for a frame,
+sample it through its texture slot without declaring it. A pass may draw depth alone, as a shadow
+map's does. The view's images, its colors of high dynamic range, IDs, depth and tonemapped colors,
+and the shadows' maps, are the graph's own: each lasts for a frame,
 undefined until a pass there writes it, and is made from what the passes say of it, in a block of
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
 after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
@@ -1665,8 +1689,9 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 ## Platforms
 
 - **Vulkan 1.4, bleeding edge.** The engine requires a Vulkan 1.4 device, with the descriptor
-  indexing bindless textures need, depth in 32-bit floats, and BC texture compression, which
-  games' cooked textures are in, none of which Vulkan requires but every target has, and takes up
+  indexing bindless textures need, depth in 32-bit floats, sampled by comparison too, depth clamp,
+  which shadow maps need, and BC texture compression, which games' cooked textures are in, none of
+  which Vulkan requires but every target has, and takes up
   newer features as drivers ship them, with a fallback wherever a target lacks one. Phones, which
   have ASTC rather than BC, would take a cook of their own.
 - **Windows and Linux:** native Vulkan drivers.

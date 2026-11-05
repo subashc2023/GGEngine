@@ -8,6 +8,8 @@
                 range: None,
                 inner_cone: 0.0,
                 outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
             ),
             Name: ("Sun"),
             Transform: (
@@ -48,6 +50,8 @@
                 range: Some(8.0),
                 inner_cone: 0.0,
                 outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
             ),
             Name: ("Lamp"),
             Transform: (
@@ -91,6 +95,8 @@
                 range: None,
                 inner_cone: 0.2,
                 outer_cone: 0.42,
+                shadows: true,
+                shadow_distance: 100.0,
             ),
             Name: ("Spot"),
             Transform: (

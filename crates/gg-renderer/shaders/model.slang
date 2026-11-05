@@ -13,8 +13,9 @@
 // light, through the split sum, with Fdez-Agüera's roughness-dependent Fresnel and his scattering
 // many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
 // 2019), as the sample viewer's ibl.glsl and pbr.frag have it (glTF-Sample-Renderer at df3e51cb),
-// which the occlusion map darkens, as it darkens nothing else. Their light, times the frame's
-// exposure, then the material's emission, as the view shows it, make the color.
+// which the occlusion map darkens, as it darkens nothing else. The light that casts the frame's
+// shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
+// then the material's emission, as the view shows it, make the color.
 //
 // As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
 // which blending would leave as it was, so that a pick there finds what's behind it; it writes no
@@ -22,7 +23,8 @@
 // with OPAQUE or MASKED defined, for materials whose alpha glTF ignores, or uses only to cut out
 // what's less opaque than their cutoff: both are drawn fully opaque, so they return an alpha of 1.
 // Of those, only the masked one discards, since a shader that can discard while it writes depth
-// loses early depth testing on some GPUs.
+// loses early depth testing on some GPUs; its shadows are cut out as it is, by `shadow_main`,
+// where those of an opaque material, drawn without a fragment shader, are whole.
 
 #include "mesh.slang"
 
@@ -53,6 +55,22 @@ static const uint UNLIT = 1;
 static const uint NORMAL_MAPPED = 2;
 // `Sampler::LinearClamp`'s index in the bindless set.
 static const uint LINEAR_CLAMP = 0;
+// The texels inside its map's edges that each cascade keeps the points it shadows to, as `MARGIN`
+// in src/shadow.rs says.
+static const float MARGIN = 8.0;
+// How far a point moves along its surface's normal, in texels of its cascade, times the sine of
+// the light's angle to the normal, before its shadow map is sampled, so that a surface doesn't
+// shadow itself: the filter's reach. Where a plane slopes from the light at an angle, its depth
+// changes by the angle's tangent a texel, so the texels the filter reads, up to 3 away, are as
+// much as 3 tangents of a texel nearer the light than the point; moved off it by `d`, the point
+// is `d` over the cosine nearer, which is enough where `d` is 3 sines of a texel (Holbert's normal
+// offset, "Saying Goodbye to Shadow Acne", GDC 2011).
+static const float NORMAL_OFFSET = 3.0;
+// How far a point moves toward the light, in texels of its cascade, before its shadow map is
+// sampled, besides: where a surface faces the light, the normal offset is 0, and its depths and
+// the point's, found by the rasterizer and the shader, are the same but for their rounding, which
+// would leave some of it in its own shadow.
+static const float LIGHT_OFFSET = 1.0;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -137,6 +155,71 @@ float3 sky_light(Frame frame, float3 base, float metallic, float roughness, floa
     return lerp(dielectric, metal, metallic) * frame.sky_luminance;
 }
 
+// What the shadow map `map`, `size` texels across, holds of light at `uv`, compared with `depth`:
+// each texel near it 1 where `depth` is as near the light as the texel's or nearer, and 0 where
+// it's farther, weighted by a kernel that falls from 4 at the point to 0 three texels away, in
+// three straight pieces, read in nine samples of four texels each, which the comparison sampler
+// filters, at points the point's place in its texel picks so that their weights add up to the
+// kernel's. The kernel is Castaño's of 5 ("Shadow Mapping Summary", 2013, as The Witness filters
+// its shadows), which is continuous, so that the shadow's edge moves smoothly with the point.
+float filtered(uint map, float2 uv, float depth, float size) {
+    Texture2D texture = textures[NonUniformResourceIndex(map)];
+    SamplerComparisonState compare = comparisons[COMPARISON_SAMPLER];
+    float2 texels = uv * size;
+    // The corner between texels nearest the point, and how far the point is past the texel center
+    // before it, from 0 to 1.
+    float2 corner = floor(texels + 0.5);
+    float2 s = texels + 0.5 - corner;
+    float2 base = corner - 0.5;
+    // Each sample's weight and its place, from the texel center before the corner, across then
+    // down.
+    float3 wu = float3(4.0 - 3.0 * s.x, 7.0, 1.0 + 3.0 * s.x);
+    float3 u = float3((3.0 - 2.0 * s.x) / wu.x - 2.0, (3.0 + s.x) / 7.0, s.x / wu.z + 2.0);
+    float3 wv = float3(4.0 - 3.0 * s.y, 7.0, 1.0 + 3.0 * s.y);
+    float3 v = float3((3.0 - 2.0 * s.y) / wv.x - 2.0, (3.0 + s.y) / 7.0, s.y / wv.z + 2.0);
+    float sum = 0.0;
+    for (uint j = 0; j < 3; j++) {
+        for (uint i = 0; i < 3; i++) {
+            float2 at = (base + float2(u[i], v[j])) / size;
+            sum += wu[i] * wv[j] * texture.SampleCmpLevelZero(compare, at, depth);
+        }
+    }
+    return sum / 144.0;
+}
+
+// How much of the light that casts `shadows` reaches `world`, on a surface whose normal before its
+// normal map is `normal`, the light coming from `to_light`: from 0 in its shadow to 1 out of it.
+// The nearest cascade whose map holds the point, and the texels the filter reads round it, shadows
+// it, from the point moved off its surface by the normal offset and toward the light; past them
+// all, or past the shadows' reach, it's lit, and toward their reach, more and more so.
+float shadowed(Shadows shadows, float3 world, float3 normal, float3 to_light) {
+    float depth = dot(shadows.view_depth.xyz, world) + shadows.view_depth.w;
+    if (depth >= shadows.reach) {
+        return 1.0;
+    }
+    float3 light = mul(shadows.light_from_world, float4(world, 1.0)).xyz;
+    float3 off = mul((float3x3)shadows.light_from_world, normal);
+    float n_dot_l = dot(normal, to_light);
+    float sine = sqrt(saturate(1.0 - n_dot_l * n_dot_l));
+    float inside = 1.0 - 2.0 * MARGIN / shadows.map_size;
+    for (uint i = 0; i < CASCADES; i++) {
+        float4 cascade = shadows.cascades[i];
+        float3 n = (light - cascade.xyz) * cascade.w;
+        if (max(max(abs(n.x), abs(n.y)), abs(n.z)) >= inside) {
+            continue;
+        }
+        float texel = 2.0 / (cascade.w * shadows.map_size);
+        // The light's space's +Z is toward the light.
+        float3 moved = off * (NORMAL_OFFSET * sine) + float3(0.0, 0.0, LIGHT_OFFSET);
+        n = (light + moved * texel - cascade.xyz) * cascade.w;
+        float lit = filtered(shadows.maps[i], n.xy * float2(0.5, -0.5) + 0.5, n.z * 0.5 + 0.5,
+                             shadows.map_size);
+        float fade = saturate((depth - shadows.fade_from) / (shadows.reach - shadows.fade_from));
+        return lerp(lit, 1.0, fade);
+    }
+    return 1.0;
+}
+
 [shader("fragment")]
 Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
@@ -170,6 +253,8 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     // A back face seen of a double-sided material faces the other way, its tangent space too.
     float facing = front ? 1.0 : -1.0;
     float3 normal = normalize(input.normal) * facing;
+    // Which way the surface faces where its shadows are sampled: the normal map's bumps cast none.
+    float3 surface_normal = normal;
     if ((material.flags & NORMAL_MAPPED) != 0) {
         // Kept square to the normal, which interpolation doesn't keep them.
         float3 tangent = input.tangent.xyz * facing;
@@ -213,6 +298,9 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
         if (n_dot_l <= 0.0) {
             continue;
         }
+        if (i == frame.shadows.light) {
+            radiance *= shadowed(frame.shadows, input.world, surface_normal, to_light);
+        }
         float3 halfway = normalize(to_light + view);
         float n_dot_h = saturate(dot(normal, halfway));
         float v_dot_h = saturate(dot(view, halfway));
@@ -234,3 +322,17 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     out.color = float4(min(shaded, BRIGHTEST), color.a);
     return out;
 }
+
+#if defined(MASKED)
+// A masked material's shadow, drawn into a shadow map: none where it's less opaque than its
+// cutoff, as it draws nothing there.
+[shader("fragment")]
+void shadow_main(Varyings input) {
+    Frame frame = *push.frame;
+    Material material = frame.materials[push.params[input.instance].material];
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a;
+    if (alpha < material.cutoff) {
+        discard;
+    }
+}
+#endif

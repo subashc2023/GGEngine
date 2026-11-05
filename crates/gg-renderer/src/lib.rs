@@ -1,12 +1,13 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
-//! metallic-roughness materials under the frame's lights and its sky, which shows behind them,
-//! prefiltered on the GPU, a game's UI over them in the view's own space, and the UI over the
-//! view; the view drawn in colors of high dynamic range, which a tonemapper maps into the range it
-//! shows; picks, which read back the ID of the draw the view shows at a pixel; an outline round
-//! what the view shows of an ID; and each frame's passes in a render graph, which places the
-//! barriers between them and makes the view's images.
+//! metallic-roughness materials under the frame's lights, a directional light's shadows, in
+//! cascades fitted to the view, and its sky, which shows behind them, prefiltered on the GPU, a
+//! game's UI over them in the view's own space, and the UI over the view; the view drawn in colors
+//! of high dynamic range, which a tonemapper maps into the range it shows; picks, which read back
+//! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
+//! and each frame's passes in a render graph, which places the barriers between them and makes the
+//! view's images and the shadows' maps.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -20,6 +21,7 @@ mod mesh;
 mod model;
 mod pick;
 mod shader;
+mod shadow;
 mod sky;
 mod sprite;
 mod text;
@@ -71,6 +73,7 @@ pub use viewpoint::{Projection, Viewpoint};
 use light::GpuLight;
 use mesh::{FrameData, MeshPass};
 use pick::Picks;
+use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use sky::{SkyData, SkyLight, SkyPass};
 use tonemap::TonemapPass;
 use ui::UiPass;
@@ -216,7 +219,8 @@ pub struct RenderData<'a> {
     pub time: f32,
     /// What lights the view's lit shading, which shaders read through the frame's data, as
     /// [`Shaders::add`] describes: without any, or a sky, models' materials draw unlit, their base
-    /// colors alone.
+    /// colors alone. Of the directional lights with a shadow distance, the brightest casts
+    /// shadows, as [`Light::shadow_distance`] says.
     pub lights: &'a [Light],
     /// What the view shows behind the world, in place of the clear color, and lights it by from
     /// all around, which shaders read through the frame's data too: from the first frame that
@@ -362,6 +366,8 @@ enum Output {
 
 /// The game's view's images and passes in a frame's graph.
 struct ViewPasses {
+    /// What draws the shadows the view shows, if a light casts them.
+    shadows: Option<ShadowPasses>,
     /// What the view draws into, of high dynamic range.
     hdr: ImageId,
     /// What it shows, tonemapped.
@@ -377,6 +383,14 @@ struct ViewPasses {
     outline: Option<(PassId, Outline)>,
     /// What reads the view back, if the frame does.
     read_view: Option<PassId>,
+}
+
+/// The shadows' cascades, fitted to the view, and their shadow maps and the passes that draw them,
+/// in a frame's graph, before the view's pass, which samples them.
+struct ShadowPasses {
+    cascades: Cascades,
+    maps: [ImageId; CASCADES],
+    passes: [PassId; CASCADES],
 }
 
 /// What the frame shows as the game's view: an image of its graph's, or a texture, by its index.
@@ -705,6 +719,30 @@ impl Renderer {
             _ => None,
         };
         let view = renders_view.then(|| {
+            // The cascades of the shadows of the light that casts them, if one does, each drawn
+            // before the view samples it.
+            let aspect = data.viewport.aspect();
+            let shadows = Cascades::fit(data.lights, &data.viewpoint, aspect).map(|cascades| {
+                let names = [
+                    "shadow cascade 0",
+                    "shadow cascade 1",
+                    "shadow cascade 2",
+                    "shadow cascade 3",
+                ];
+                let labels = [
+                    label!("shadow cascade 0"),
+                    label!("shadow cascade 1"),
+                    label!("shadow cascade 2"),
+                    label!("shadow cascade 3"),
+                ];
+                let maps = names.map(|name| graph.shadow(name, [MAP_SIZE; 2]));
+                let passes = std::array::from_fn(|i| graph.render(labels[i]).depth(maps[i]).add());
+                ShadowPasses {
+                    cascades,
+                    maps,
+                    passes,
+                }
+            });
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
@@ -712,9 +750,13 @@ impl Renderer {
                 .clear(hdr, data.clear_color)
                 .ids(ids)
                 .depth(depth);
-            // What the draws light by, as the frame that prefilters it leaves it.
+            // What the draws light by, as the frame that prefilters it leaves it, and the shadows
+            // they're in.
             for light in plan.iter().flat_map(sky::Plan::sampled) {
                 pass = pass.sample(light);
+            }
+            for &map in shadows.iter().flat_map(|shadows| &shadows.maps) {
+                pass = pass.sample(map);
             }
             let pass = pass.add();
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
@@ -736,6 +778,7 @@ impl Renderer {
             });
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
+                shadows,
                 hdr,
                 color,
                 ids,
@@ -784,18 +827,12 @@ impl Renderer {
         // What the view shows, and how much of its area that covers.
         let (counts, view) = match (view, pixels_shown) {
             (Some(view), _) => {
-                let mut pass =
-                    (frame.render(view.pass)).expect("the graph's own images are always there");
                 self.lights.clear();
                 self.lights.extend(data.lights.iter().map(GpuLight::new));
                 let lights = if self.lights.is_empty() {
                     0
                 } else {
-                    pass.upload(bytemuck::cast_slice(&self.lights))?.address()
-                };
-                let lit = match (&plan, sky) {
-                    (Some(plan), Some((sky, ..))) => Some(plan.data(&pass, sky)),
-                    _ => held,
+                    frame.upload(bytemuck::cast_slice(&self.lights))?.address()
                 };
                 let shared = FrameData {
                     camera: data.viewpoint.position,
@@ -805,7 +842,35 @@ impl Renderer {
                     lights,
                     materials: self.meshes.materials_address(),
                     eye: data.viewpoint.eye(),
+                    sky: SkyData::default(),
+                    shadows: ShadowData::default(),
+                };
+                // The casters, each cascade's from the light, which read the frame's data but for
+                // what the view alone samples.
+                if let Some(shadows) = &view.shadows {
+                    let address = frame.upload(bytemuck::bytes_of(&shared))?.address();
+                    for (i, &cascade) in shadows.passes.iter().enumerate() {
+                        let mut pass = (frame.render(cascade))
+                            .expect("the graph's own images are always there");
+                        let clip = shadows.cascades.clip_from_world(i);
+                        let map = [MAP_SIZE; 2];
+                        (self.meshes).draw(&mut pass, clip, address, map, data.draws, true)?;
+                    }
+                }
+                let mut pass =
+                    (frame.render(view.pass)).expect("the graph's own images are always there");
+                let lit = match (&plan, sky) {
+                    (Some(plan), Some((sky, ..))) => Some(plan.data(&pass, sky)),
+                    _ => held,
+                };
+                let shadows = (view.shadows.as_ref()).map(|shadows| {
+                    let maps = shadows.maps.map(|map| pass.sampled(map));
+                    shadows.cascades.data(maps)
+                });
+                let shared = FrameData {
                     sky: lit.unwrap_or_default(),
+                    shadows: shadows.unwrap_or_default(),
+                    ..shared
                 };
                 let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
                 // Behind everything, in place of the clear color.
@@ -815,11 +880,18 @@ impl Renderer {
                     let scale = luminance * data.exposure;
                     drawn.draw(&mut pass, &data.viewpoint, aspect, sky, scale);
                 }
-                let mut counts =
-                    (self.meshes).draw(&mut pass, view_projection, shared, size, data.draws)?;
+                let mut counts = (self.meshes).draw(
+                    &mut pass,
+                    view_projection,
+                    shared,
+                    size,
+                    data.draws,
+                    false,
+                )?;
                 pass.begin_label(c"canvas");
                 let canvas = canvas_projection(size);
-                counts += (self.meshes).draw(&mut pass, canvas, shared, size, data.canvas)?;
+                counts +=
+                    (self.meshes).draw(&mut pass, canvas, shared, size, data.canvas, false)?;
                 pass.end_label();
                 drop(pass);
                 if let Some(read) = view.read_ids {

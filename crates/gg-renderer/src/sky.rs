@@ -122,11 +122,13 @@ impl SkyPass {
                     name: "sky",
                     spirv: SPIRV,
                     vertex: c"vertex_main",
-                    fragment: c"fragment_main",
+                    fragment: Some(c"fragment_main"),
                     format: Format::HDR.with_ids().with_depth(),
                     // Drawn first, at depth 0, which the cleared depth passes, writing none.
                     blend: Blend::Opaque,
                     depth_write: false,
+                    depth_bias: 0.0,
+                    depth_clamp: false,
                 },
             )?,
         })

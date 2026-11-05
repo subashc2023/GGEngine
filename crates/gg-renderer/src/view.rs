@@ -63,10 +63,12 @@ impl ViewPass {
                 name: "view",
                 spirv: SPIRV,
                 vertex: c"vertex_main",
-                fragment: c"fragment_main",
+                fragment: Some(c"fragment_main"),
                 format,
                 blend: Blend::Opaque,
                 depth_write: false,
+                depth_bias: 0.0,
+                depth_clamp: false,
             },
         )?;
         Ok(Self { pipeline })
@@ -115,10 +117,12 @@ impl OutlinePass {
                 name: "outline",
                 spirv: OUTLINE_SPIRV,
                 vertex: c"vertex_main",
-                fragment: c"fragment_main",
+                fragment: Some(c"fragment_main"),
                 format: ColorImage::FORMAT,
                 blend: Blend::Alpha,
                 depth_write: false,
+                depth_bias: 0.0,
+                depth_clamp: false,
             },
         )?;
         Ok(Self { pipeline })

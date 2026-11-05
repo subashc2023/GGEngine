@@ -25,7 +25,8 @@ pub struct PassId(pub(crate) u32);
 /// passes again every frame; it keeps its memory, so that a frame that adds no more than the last
 /// allocates nothing.
 ///
-/// Its own images, [`Graph::color`], [`Graph::ids`] and [`Graph::depth`], last for a frame: each
+/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::depth`] and
+/// [`Graph::shadow`], last for a frame: each
 /// is undefined until a pass of the frame writes it, so its first use writes it whole, and passes
 /// whose uses of two of them don't overlap may find them in the same memory. The frames keep them
 /// for the frames after, which add them alike, by their names, kinds and sizes.
@@ -70,6 +71,10 @@ pub(crate) enum Kind {
     /// Depth, as 32-bit floats, which draws test and write: from 1 at the near plane to 0 far
     /// away, as the renderer's cameras project it. Every device the engine opens renders it.
     Depth,
+    /// Depth, as [`Kind::Depth`] holds it, which later passes sample, as a shadow map's is: by
+    /// comparison, through the bindless set's comparison sampler, which every device the engine
+    /// opens samples it with.
+    Shadow,
 }
 
 impl Kind {
@@ -78,7 +83,7 @@ impl Kind {
             Self::Color => ColorImage::FORMAT.color,
             Self::Hdr => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids => vk::Format::R32G32_UINT,
-            Self::Depth => vk::Format::D32_SFLOAT,
+            Self::Depth | Self::Shadow => vk::Format::D32_SFLOAT,
         }
     }
 
@@ -93,14 +98,22 @@ impl Kind {
             // Never read back: what a frame reads back is what it shows.
             Self::Hdr => vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             Self::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            Self::Shadow => {
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+            }
         }
     }
 
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
             Self::Color | Self::Hdr | Self::Ids => COLOR_RANGE,
-            Self::Depth => DEPTH_RANGE,
+            Self::Depth | Self::Shadow => DEPTH_RANGE,
         }
+    }
+
+    /// Whether passes draw their depth into it.
+    fn is_depth(self) -> bool {
+        matches!(self, Self::Depth | Self::Shadow)
     }
 
     /// Whether shaders may sample it, through a slot in the bindless set.
@@ -280,6 +293,19 @@ impl Graph {
         self.transient(name, Kind::Depth, size)
     }
 
+    /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws test
+    /// and write, as [`Graph::depth`]'s, and later passes sample, as a shadow map is: by comparison,
+    /// through the bindless set's comparison sampler, [`COMPARISON_SAMPLER`].
+    ///
+    /// [`COMPARISON_SAMPLER`]: crate::COMPARISON_SAMPLER
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn shadow(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Shadow, size)
+    }
+
     fn transient(&mut self, name: &'static str, kind: Kind, size: [u32; 2]) -> ImageId {
         let [width, height] = size;
         assert!(
@@ -405,8 +431,9 @@ impl Graph {
     }
 }
 
-/// A pass that draws, being built: its color target, the IDs and depth beside it, if any, and the
-/// images it samples. [`RenderPass::add`] adds it to its graph.
+/// A pass that draws, being built: its color target, the IDs and depth beside it, if any, or its
+/// depth alone, as a shadow map's pass draws, and the images it samples. [`RenderPass::add`] adds
+/// it to its graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct RenderPass<'g> {
     graph: &'g mut Graph,
@@ -436,15 +463,15 @@ impl RenderPass<'_> {
         self.with(ids, Use::Ids)
     }
 
-    /// Tests the draws against `depth`, an image of depth of the graph's own, and writes theirs
-    /// into it as their pipelines say, cleared first to 0, as far away as depth goes.
+    /// Tests the draws against `depth`, an image of depth of the graph's own, of either kind, and
+    /// writes theirs into it as their pipelines say, cleared first to 0, as far away as depth goes.
     pub fn depth(self, depth: ImageId) -> Self {
         self.with(depth, Use::Depth)
     }
 
     /// Samples `image` from the draws' fragment shaders, as an earlier pass left it, through the
     /// index [`Pass::sampled`](crate::Pass::sampled) gives: a target that's an offscreen image or a
-    /// storage image, or a color image or an image of IDs of the graph's own.
+    /// storage image, or a color image, an image of IDs or a shadow map of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::Sampled)
     }
@@ -458,9 +485,10 @@ impl RenderPass<'_> {
     ///
     /// # Panics
     ///
-    /// If it hasn't one color target, has more than one image of IDs or of depth, or uses an image
-    /// twice, as one another kind of image, or as images of the graph's own of other sizes; or if
-    /// it samples or draws over one of the graph's own images that no earlier pass wrote.
+    /// If it hasn't one color target, beside at most one image of IDs and one of depth, or one
+    /// image of depth alone; if it uses an image twice, as one another kind of image, or as images
+    /// of the graph's own of other sizes; or if it samples or draws over one of the graph's own
+    /// images that no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -469,12 +497,15 @@ impl RenderPass<'_> {
         } = self;
         let uses = &graph.uses[start..];
         let count = |is: fn(&Use) -> bool| uses.iter().filter(|(_, use_)| is(use_)).count();
+        let (colors, ids, depths) = (
+            count(|use_| matches!(use_, Use::Color(_))),
+            count(|use_| *use_ == Use::Ids),
+            count(|use_| *use_ == Use::Depth),
+        );
         assert!(
-            count(|use_| matches!(use_, Use::Color(_))) == 1
-                && count(|use_| *use_ == Use::Ids) <= 1
-                && count(|use_| *use_ == Use::Depth) <= 1,
+            (colors == 1 && ids <= 1 && depths <= 1) || (colors, ids, depths) == (0, 0, 1),
             "pass {label:?} draws into one color target, beside at most one image of IDs and one of \
-             depth; it has {uses:?}"
+             depth, or into one image of depth alone; it has {uses:?}"
         );
         let mut size = None;
         for (i, &(image, use_)) in uses.iter().enumerate() {
@@ -487,7 +518,7 @@ impl RenderPass<'_> {
             let fits = match use_ {
                 Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
                 Use::Ids => kind == Some(Kind::Ids),
-                Use::Depth => kind == Some(Kind::Depth),
+                Use::Depth => kind.is_some_and(Kind::is_depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
                 Use::ComputeSampled | Use::Storage | Use::CopySource => {
                     unreachable!("a render pass neither computes nor copies")
@@ -528,7 +559,7 @@ pub struct ComputePass<'g> {
 impl ComputePass<'_> {
     /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
     /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
-    /// a storage image, or a color image or an image of IDs of the graph's own.
+    /// a storage image, or a color image, an image of IDs or a shadow map of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::ComputeSampled)
     }
@@ -895,6 +926,41 @@ mod tests {
             graph.render(label()).clear(target, [0.0; 4]).add();
             graph.render(label()).keep(target).add();
         }));
+        // Depth alone draws without IDs, into one image of it.
+        assert!(refused(|graph| {
+            let (ids, depth) = (graph.ids("ids", [4, 4]), graph.depth("depth", [4, 4]));
+            graph.render(label()).ids(ids).depth(depth).add();
+        }));
+        assert!(refused(|graph| {
+            let (a, b) = (graph.shadow("a", [4, 4]), graph.shadow("b", [4, 4]));
+            graph.render(label()).depth(a).depth(b).add();
+        }));
+        assert!(refused(|graph| {
+            graph.render(label()).add();
+        }));
+    }
+
+    /// A shadow map is drawn into as depth alone, and sampled by a later pass, as the view's depth
+    /// can't be; and it's depth beside a color target too.
+    #[test]
+    fn shadow_maps_draw_depth_alone_and_later_passes_sample_them() {
+        let mut graph = Graph::default();
+        let shadow = graph.shadow("shadow", [8, 8]);
+        let drawn = graph.render(label()).depth(shadow).add();
+        let target = graph.target(0);
+        let shaded = (graph.render(label()).clear(target, [0.0; 4]))
+            .sample(shadow)
+            .add();
+        assert_eq!(graph.uses(drawn), [(shadow, Use::Depth)]);
+        assert_eq!(graph.uses(shaded)[1], (shadow, Use::Sampled));
+        assert_eq!(graph.lifetime(shadow), Some((0, 1)));
+        let view = graph.color("view", [8, 8]);
+        let beside = graph.shadow("beside", [8, 8]);
+        graph
+            .render(label())
+            .clear(view, [0.0; 4])
+            .depth(beside)
+            .add();
     }
 
     /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,

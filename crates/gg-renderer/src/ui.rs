@@ -82,10 +82,12 @@ impl UiPass {
                     name: "egui",
                     spirv: SPIRV,
                     vertex: c"vertex_main",
-                    fragment: c"fragment_main",
+                    fragment: Some(c"fragment_main"),
                     format,
                     blend: Blend::PremultipliedAlpha,
                     depth_write: false,
+                    depth_bias: 0.0,
+                    depth_clamp: false,
                 },
             )?;
             self.pipelines.push((format, pipeline));

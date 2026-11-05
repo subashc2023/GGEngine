@@ -3,6 +3,7 @@
 
 use std::ffi::CStr;
 use std::io::Cursor;
+use std::iter;
 use std::sync::Arc;
 
 use ash::vk;
@@ -15,11 +16,12 @@ use crate::{Device, vk_error};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for: its color
 /// target's, its IDs', if it has them, and its depth's, if it has it, as a [`Graph`]'s passes
-/// declare them.
+/// declare them; or its depth's alone.
 ///
 /// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
+    /// `UNDEFINED` for a pass of depth alone.
     pub(crate) color: vk::Format,
     /// `UNDEFINED` for a pass without IDs.
     pub(crate) ids: vk::Format,
@@ -34,6 +36,12 @@ impl Format {
     /// [`Graph`]: crate::Graph
     /// [`Graph::hdr`]: crate::Graph::hdr
     pub const HDR: Self = Self::new(Kind::Hdr.format());
+
+    /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::shadow`])
+    /// does.
+    ///
+    /// [`Graph::shadow`]: crate::Graph::shadow
+    pub const DEPTH: Self = Self::new(vk::Format::UNDEFINED).with_depth();
 
     /// A target's format, `color`, without IDs or depth.
     pub(crate) const fn new(color: vk::Format) -> Self {
@@ -60,6 +68,10 @@ impl Format {
             depth: Kind::Depth.format(),
             ..self
         }
+    }
+
+    fn has_color(self) -> bool {
+        self.color != vk::Format::UNDEFINED
     }
 
     fn has_ids(self) -> bool {
@@ -143,13 +155,15 @@ impl Faces {
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
-    /// A SPIR-V module holding both entry points, which slangc compiled. It's trusted to be valid
+    /// A SPIR-V module holding its entry points, which slangc compiled. It's trusted to be valid
     /// and to keep to the pipeline layout: to read only the push constants set before a draw,
     /// to use only the device's enabled features, and to bind nothing but the bindless set's
     /// textures and samplers. Vulkan checks none of it; validation does in debug builds.
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
-    pub fragment: &'a CStr,
+    /// `None` for a pipeline that draws depth alone, all of each triangle, as a shadow map's
+    /// opaque casters are drawn.
+    pub fragment: Option<&'a CStr>,
     /// The formats of the targets it draws into. Where they have IDs, its fragment shader writes
     /// them at location 1, as two 32-bit unsigned integers, which replace what's there wherever it
     /// draws, however its color blends.
@@ -158,6 +172,16 @@ pub struct GraphicsDesc<'a> {
     /// Whether it writes its depth where it draws, for later draws to test against. Only a
     /// pipeline whose targets have depth can.
     pub depth_write: bool,
+    /// How far each fragment's depth goes back, away from the near plane, in multiples of the most
+    /// its triangle's depth changes across a pixel: slope-scaled depth bias, which keeps the depths
+    /// of a shadow map behind the surfaces they're of where those slope away from the light, so
+    /// that a surface doesn't shadow itself. 0 for none. Depth runs from 1 at the near plane, so
+    /// going back takes depth down: Vulkan's slope factor is this negated.
+    pub depth_bias: f32,
+    /// Whether depth nearer than the near plane, or farther than the far, is clamped to it, where
+    /// otherwise what's past them would be clipped: as a shadow map's casters between the light
+    /// and its near plane still cast shadows, from it.
+    pub depth_clamp: bool,
 }
 
 /// A graphics pipeline. Dropping it retires it until the GPU is done with it.
@@ -174,26 +198,32 @@ impl Pipeline {
     ///
     /// # Panics
     ///
-    /// If it writes depth into targets without it.
+    /// If it writes, biases or clamps depth for targets without it, or it has no fragment shader
+    /// but its targets have colors.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
         assert!(
-            depth || !desc.depth_write,
-            "a pipeline writes depth only into targets that have it"
+            depth || !(desc.depth_write || desc.depth_bias != 0.0 || desc.depth_clamp),
+            "a pipeline writes, biases and clamps depth only for targets that have it"
+        );
+        assert!(
+            desc.fragment.is_some() || !desc.format.has_color(),
+            "a pipeline without a fragment shader draws depth alone"
         );
         let raw_device = device.raw();
         let module = shader_module(device, desc.name, desc.spirv)?;
 
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(module)
-                .name(desc.vertex),
+        let vertex = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(desc.vertex);
+        let fragment = desc.fragment.map(|entry| {
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(module)
-                .name(desc.fragment),
-        ];
+                .name(entry)
+        });
+        let stages: Vec<_> = iter::once(vertex).chain(fragment).collect();
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -203,7 +233,10 @@ impl Pipeline {
         let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::NONE)
-            .line_width(1.0);
+            .line_width(1.0)
+            .depth_clamp_enable(desc.depth_clamp)
+            .depth_bias_enable(desc.depth_bias != 0.0)
+            .depth_bias_slope_factor(-desc.depth_bias);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let attachment = desc.blend.attachment();
@@ -211,10 +244,12 @@ impl Pipeline {
         // state differs from a blended color's, which takes independent blending.
         let ids = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
-        let targets = 1 + usize::from(desc.format.has_ids());
         let attachments = [attachment, ids];
-        let color_blend =
-            vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments[..targets]);
+        // The color target's, then the IDs', of those it has.
+        let first = usize::from(!desc.format.has_color());
+        let targets = 1 + usize::from(desc.format.has_ids());
+        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(&attachments[first..targets]);
         // Or equal, so that what draws later at one depth goes over what drew there before, as 2D
         // games stack what they draw at one z.
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -230,7 +265,7 @@ impl Pipeline {
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let formats = [desc.format.color, desc.format.ids];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&formats[..targets])
+            .color_attachment_formats(&formats[first..targets])
             .depth_attachment_format(desc.format.depth);
         // How long the driver took, and whether the device's pipeline cache held the pipeline.
         let mut feedback = vk::PipelineCreationFeedback::default();
@@ -251,8 +286,8 @@ impl Pipeline {
             .push_next(&mut feedback_info);
         // SAFETY: the module, the layout and the pipeline cache, if the device has one, are live,
         // and the infos outlive the call; the module can go once the pipeline is made. The module
-        // is trusted to have both entry points and to keep to the layout, as `GraphicsDesc::spirv`
-        // says.
+        // is trusted to have its entry points and to keep to the layout, as `GraphicsDesc::spirv`
+        // says. The device has depth clamp, which `Candidate::new` checked.
         let made = unsafe {
             let cache = device.raw_pipeline_cache();
             let made = raw_device.create_graphics_pipelines(cache, &[info], None);

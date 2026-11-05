@@ -56,10 +56,20 @@ pub struct Light {
     /// past it is taken as a quarter turn.
     #[reflect(degrees, min = 0.0, default = FRAC_PI_4)]
     pub outer_cone: f32,
+    /// Whether it casts shadows, which a directional light does, the brightest of a world's that
+    /// does: what's opaque between it and a model shades the model from its light, as far ahead of
+    /// the camera as its shadow distance. Point and spot lights cast none yet.
+    #[reflect(default = true)]
+    pub shadows: bool,
+    /// How far ahead of the camera its shadows reach, in world units, fading out over the last
+    /// tenth: the farther, the less sharp they are, as their shadow maps spread over more.
+    #[reflect(min = 0.0, default = 100.0)]
+    pub shadow_distance: f32,
 }
 
 impl Default for Light {
-    /// A directional light of white, as bright as a sunny day's sun.
+    /// A directional light of white, as bright as a sunny day's sun, casting shadows 100 units
+    /// ahead of the camera.
     fn default() -> Self {
         Self {
             kind: LightKind::Directional,
@@ -68,6 +78,8 @@ impl Default for Light {
             range: None,
             inner_cone: 0.0,
             outer_cone: FRAC_PI_4,
+            shadows: true,
+            shadow_distance: 100.0,
         }
     }
 }
@@ -92,6 +104,7 @@ impl Light {
             direction,
             color: self.color.max(Vec3::ZERO) * self.intensity.max(0.0),
             range: self.range,
+            shadow_distance: self.shadows.then_some(self.shadow_distance),
         }
     }
 }
@@ -171,5 +184,21 @@ mod tests {
             panic!("a spot: {light:?}");
         };
         assert_eq!((inner, outer), (FRAC_PI_2, FRAC_PI_2));
+    }
+
+    /// A light that casts shadows hands the renderer its shadow distance; one that doesn't, none.
+    #[test]
+    fn a_light_casts_shadows_as_far_as_its_distance_unless_it_casts_none() {
+        let sun = Light {
+            shadow_distance: 30.0,
+            ..Light::default()
+        };
+        let lit = |light: Light| light.lit(Vec3::ZERO, Vec3::NEG_Z).shadow_distance;
+        assert_eq!(lit(sun), Some(30.0));
+        let shadowless = Light {
+            shadows: false,
+            ..sun
+        };
+        assert_eq!(lit(shadowless), None);
     }
 }

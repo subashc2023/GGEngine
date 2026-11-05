@@ -111,6 +111,11 @@ pub(crate) struct Added {
     /// The size of the parameters it takes.
     pub(crate) params_size: usize,
     pub(crate) blend: Blend,
+    /// What draws the shadows of what it draws, if it writes depth and they're cut out as it is:
+    /// a module of its vertex shader and `shadow_main`, a fragment shader that discards where it
+    /// does, as the engine's masked model shader has. Those of the others that write depth are of
+    /// whole triangles, drawn by their vertex shaders alone.
+    pub(crate) shadow: Option<Vec<u8>>,
 }
 
 /// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
@@ -156,7 +161,11 @@ impl Shaders {
     /// multiplied into the color already. Every shader tests the view's depth, drawing only where
     /// it's as near as what's drawn there or nearer; one that's [`Blend::Opaque`] writes its depth
     /// too, so that what's behind it doesn't show over it, while one that blends doesn't, so that
-    /// what's behind it still shows through it. `name` names it in errors and GPU captures.
+    /// what's behind it still shows through it. What one that's opaque draws casts shadows, from
+    /// the light that casts them, of whole triangles, as its vertex shader places them, pushed a
+    /// shadow map's matrix from the world to its clip space and the map's size in place of the
+    /// view's, and the frame's data without the sky or the shadows. `name` names it in errors and
+    /// GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine checks, in the SPIR-V slangc writes,
     /// that it keeps to this contract:
@@ -182,17 +191,19 @@ impl Shaders {
     ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
-    ///   specular_levels; uint brdf; float sky_luminance; }`, where the view sees from in the
-    ///   world, the time it shows, what lit shading multiplies light by, and the frame's lights,
-    ///   as [`RenderData`](crate::RenderData) gives them, `Light` as `shaders/mesh.slang` declares
-    ///   it; the address of the table of models' materials; where shading sees from, the camera's
-    ///   position and 1, or for an orthographic projection the way back toward it and 0, so that
-    ///   the way to the eye from `p` is `eye.xyz - p * eye.w`; and the sky, as
-    ///   `shaders/mesh.slang` says, its texture, its prefiltered light, cubes, the split sum's
-    ///   table and its luminance, `specular_levels` 0 in a frame without one; or a struct of as
-    ///   many of its first fields: the engine adds fields at its end. A shader that takes no
-    ///   parameters leaves out the fifth, and so those after it. A shader may end the struct after
-    ///   the last of them it reads, and one that reads none has none.
+    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; }`, where the view sees
+    ///   from in the world, the time it shows, what lit shading multiplies light by, and the
+    ///   frame's lights, as [`RenderData`](crate::RenderData) gives them, `Light` as
+    ///   `shaders/mesh.slang` declares it; the address of the table of models' materials; where
+    ///   shading sees from, the camera's position and 1, or for an orthographic projection the way
+    ///   back toward it and 0, so that the way to the eye from `p` is `eye.xyz - p * eye.w`; the
+    ///   sky, as `shaders/mesh.slang` says, its texture, its prefiltered light, cubes, the split
+    ///   sum's table and its luminance, `specular_levels` 0 in a frame without one; and the
+    ///   shadows of the light that casts them, their cascades' shadow maps among them, `Shadows`
+    ///   as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in a frame without them; or a
+    ///   struct of as many of its first fields: the engine adds fields at its end. A shader that
+    ///   takes no parameters leaves out the fifth, and so those after it. A shader may end the
+    ///   struct after the last of them it reads, and one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -202,12 +213,14 @@ impl Shaders {
     ///   [`Texture`](crate::Texture) in its parameters, a `uint`, with its
     ///   `[[vk::binding(1, 0)]] SamplerState samplers[]`, by a [`Sampler`](crate::Sampler)'s
     ///   index, a `uint` too, each through `NonUniformResourceIndex`, since the instances of one
-    ///   draw can carry different ones; and the cubes the frame's data names, through
-    ///   `[[vk::binding(0, 0)]] TextureCube cubes[]`, the same binding; not with a depth
-    ///   comparison, as `SampleCmp` makes, since the textures hold colors and the samplers compare
-    ///   nothing. It uses no other resources,
-    ///   and nothing else that needs a feature the engine doesn't enable, such as `double`,
-    ///   `half`, 64-bit integers or wave operations.
+    ///   draw can carry different ones; the cubes the frame's data names, through
+    ///   `[[vk::binding(0, 0)]] TextureCube cubes[]`, the same binding; and the shadow maps the
+    ///   frame's data names, by comparison alone, as `SampleCmp` samples, through
+    ///   `[[vk::binding(1, 0)]] SamplerComparisonState comparisons[]`, the samplers' binding, at
+    ///   [`COMPARISON_SAMPLER`](gg_gpu::COMPARISON_SAMPLER), which samples nothing else, as the
+    ///   other textures hold no depth. It uses no other resources, and nothing else that needs a
+    ///   feature the engine doesn't enable, such as `double`, `half`, 64-bit integers or wave
+    ///   operations.
     /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
     ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
     ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
@@ -242,7 +255,7 @@ impl Shaders {
         let compiled_at = SystemTime::now();
         let (spirv, files) = compile(Path::new(SLANGC), name, path)?;
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, blend, types);
+        let index = self.push(name, spirv, None, blend, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -271,7 +284,7 @@ impl Shaders {
     ) -> Result<Shader<V, P>> {
         let types = Types::of::<V, P>();
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, blend, types);
+        let index = self.push(name, spirv, None, blend, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -341,6 +354,7 @@ impl Shaders {
             vertex_size: source.types.vertex_size,
             params_size: source.types.params_size,
             blend: source.blend,
+            shadow: None,
         }));
     }
 
@@ -365,10 +379,17 @@ impl Shaders {
         }
     }
 
-    /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, with its sampled
-    /// images decorated as [`spirv::decorate_non_uniform`] says, and gives the index of its
-    /// handle.
-    fn push(&mut self, name: &str, spirv: Vec<u8>, blend: Blend, types: Types) -> u32 {
+    /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, and `shadow`, what
+    /// draws its shadows if they're cut out, as [`Added::shadow`] says, each with its sampled
+    /// images decorated as [`spirv::decorate_non_uniform`] says, and gives the index of its handle.
+    fn push(
+        &mut self,
+        name: &str,
+        spirv: Vec<u8>,
+        shadow: Option<Vec<u8>>,
+        blend: Blend,
+        types: Types,
+    ) -> u32 {
         let index = self.count;
         self.count += 1;
         self.changes.push(Change::Added(Added {
@@ -379,6 +400,7 @@ impl Shaders {
             vertex_size: types.vertex_size,
             params_size: types.params_size,
             blend,
+            shadow: shadow.map(spirv::decorate_non_uniform),
         }));
         index
     }
@@ -393,7 +415,8 @@ impl Shaders {
             AlphaMode::Mask { .. } => (1, "model masked", model::MASKED_SPIRV, Blend::Opaque),
             AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
         };
-        self.lazy(slot, name, spirv, blend)
+        let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
+        self.lazy(slot, name, spirv, shadow, blend)
     }
 
     /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
@@ -414,35 +437,43 @@ impl Shaders {
     /// The engine's circle shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
-        self.lazy(3, "circle", circle::SPIRV, Blend::Alpha)
+        self.lazy(3, "circle", circle::SPIRV, None, Blend::Alpha)
     }
 
     /// The engine's line shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
-        self.lazy(4, "line", line::SPIRV, Blend::Alpha)
+        self.lazy(4, "line", line::SPIRV, None, Blend::Alpha)
     }
 
     /// The engine's grid shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn grid(&mut self) -> Shader<Vec2, grid::Params> {
-        self.lazy(5, "grid", grid::SPIRV, Blend::Alpha)
+        self.lazy(5, "grid", grid::SPIRV, None, Blend::Alpha)
     }
 
     /// The engine's text shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
-        self.lazy(6, "text", text::SPIRV, Blend::Alpha)
+        self.lazy(6, "text", text::SPIRV, None, Blend::Alpha)
     }
 
-    /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, which draws
-    /// meshes of `V` with parameters `P` and blends as `blend` says: added the first time it's
-    /// asked for, and then the same.
-    fn lazy<V, P>(&mut self, slot: usize, name: &str, spirv: &[u8], blend: Blend) -> Shader<V, P> {
+    /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, with `shadow`
+    /// to draw its shadows cut out, if they are, which draws meshes of `V` with parameters `P` and
+    /// blends as `blend` says: added the first time it's asked for, and then the same.
+    fn lazy<V, P>(
+        &mut self,
+        slot: usize,
+        name: &str,
+        spirv: &[u8],
+        shadow: Option<&[u8]>,
+        blend: Blend,
+    ) -> Shader<V, P> {
         let index = match self.lazy[slot] {
             Some(index) => index,
             None => {
-                let index = self.push(name, spirv.to_vec(), blend, Types::of::<V, P>());
+                let (spirv, shadow) = (spirv.to_vec(), shadow.map(<[u8]>::to_vec));
+                let index = self.push(name, spirv, shadow, blend, Types::of::<V, P>());
                 *self.lazy[slot].insert(index)
             }
         };
@@ -460,7 +491,7 @@ impl Default for Shaders {
             sources: Vec::new(),
         };
         let types = Types::of::<Corner, Params>();
-        let index = shaders.push("sprite", sprite::SPIRV.to_vec(), Blend::Alpha, types);
+        let index = shaders.push("sprite", sprite::SPIRV.to_vec(), None, Blend::Alpha, types);
         assert_eq!(index, sprite::SHADER.index, "the sprite shader comes first");
         shaders
     }
@@ -922,7 +953,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 84 bytes, past the 80 the engine's take",
+                "its frame's data, Frame, take 260 bytes, past the 256 the engine's take",
                 "it reads brightness from its push constants, past the 112 bytes",
             ],
         );
@@ -980,10 +1011,6 @@ mod tests {
         says(
             refusal::<Vertex, Color>("doubles.slang"),
             &["Float64, for `double`"],
-        );
-        says(
-            refusal::<[f32; 5], [u32; 2]>("compares_depth.slang"),
-            &["it samples with a depth comparison"],
         );
     }
 

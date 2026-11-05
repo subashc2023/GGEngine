@@ -16,6 +16,10 @@ pub(crate) static OPAQUE_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque.spv"));
 pub(crate) static MASKED_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked.spv"));
+/// The masked one's vertex shader again, with `shadow_main`, which draws its shadows cut out as it
+/// is.
+pub(crate) static MASKED_SHADOW_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_shadow.spv"));
 
 /// A vertex of a model's mesh: where it is in the mesh's space, where it samples its material's
 /// textures, a color the material's is multiplied by, in linear RGBA, the way its surface faces,

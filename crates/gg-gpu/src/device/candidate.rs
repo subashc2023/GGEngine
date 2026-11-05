@@ -169,7 +169,13 @@ impl Candidate {
         } else if !bindless {
             Some("doesn't support the descriptor indexing that bindless textures need".to_owned())
         } else if !has_depth(instance, physical) {
-            Some("can't render depth into D32_SFLOAT images".to_owned())
+            Some(
+                "can't render depth into D32_SFLOAT images and sample them by comparison, as \
+                 shadow maps are"
+                    .to_owned(),
+            )
+        } else if core.depth_clamp != vk::TRUE {
+            Some("doesn't support depth clamp (depthClamp), which shadow maps need".to_owned())
         } else if core.texture_compression_bc != vk::TRUE {
             // Games' cooked textures are BC7 and BC5, so every device must take them. Unlike depth,
             // this needs no query of the format's features: Vulkan requires the feature to give
@@ -258,18 +264,27 @@ impl Candidate {
     }
 }
 
-/// Whether a device renders depth into depth images' format, D32_SFLOAT. Vulkan requires that of
-/// it or of X8_D24_UNORM_PACK32, but nearly every device has it, AMD's among them, which have no
-/// 24-bit depth, and Apple's GPUs, whose Metal has 32-bit float depth everywhere.
+/// Whether a device renders depth into depth images' format, D32_SFLOAT, and samples it by
+/// comparison, as shadow maps are. Vulkan requires the first of it or of X8_D24_UNORM_PACK32, and
+/// the second of no format, but nearly every device has both, AMD's among them, which have no
+/// 24-bit depth, and Apple's GPUs, whose Metal has 32-bit float depth everywhere. Called for a
+/// device of Vulkan 1.3 or later, whose format properties tell the comparison.
 fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
-    // SAFETY: the physical device came from this instance.
-    let properties = unsafe {
-        instance
-            .raw()
-            .get_physical_device_format_properties(physical, Kind::Depth.format())
-    };
-    let features = properties.optimal_tiling_features;
-    features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+    let mut features3 = vk::FormatProperties3::default();
+    let mut properties = vk::FormatProperties2::default().push_next(&mut features3);
+    // SAFETY: the physical device came from this instance, whose Vulkan 1.3 has format properties
+    // 3, and the properties outlive the call.
+    unsafe {
+        instance.raw().get_physical_device_format_properties2(
+            physical,
+            Kind::Depth.format(),
+            &mut properties,
+        );
+    }
+    let needed = vk::FormatFeatureFlags2::DEPTH_STENCIL_ATTACHMENT
+        | vk::FormatFeatureFlags2::SAMPLED_IMAGE
+        | vk::FormatFeatureFlags2::SAMPLED_IMAGE_DEPTH_COMPARISON;
+    features3.optimal_tiling_features.contains(needed)
 }
 
 /// The device's extensions; none, if they can't be listed.

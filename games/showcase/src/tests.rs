@@ -80,7 +80,7 @@ fn loaded() -> (Context, Showcase) {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 10, "{scenes:?}");
+    assert_eq!(scenes.len(), 11, "{scenes:?}");
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
         let (mut cx, _showcase) = loaded();

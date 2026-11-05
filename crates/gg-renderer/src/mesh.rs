@@ -13,14 +13,14 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
+    Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
     Texture as GpuTexture, TextureFormat,
 };
 use tracing::warn;
 
 use crate::shader::{self, Shader};
 use crate::texture::{self, Map, Texels};
-use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, sprite};
+use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -528,6 +528,9 @@ pub(crate) struct MeshPass {
 
 struct GpuShader {
     pipeline: Pipeline,
+    /// What draws its shadows into a shadow map, if it writes depth: its vertex shader, and
+    /// `shadow_main` if its shadows are cut out ([`shader::Added::shadow`]).
+    shadow: Option<Pipeline>,
     /// Its name, which captures label its runs of draws with.
     label: CString,
     /// The size of the vertices it reads.
@@ -929,16 +932,37 @@ impl MeshPass {
                     name: &added.name,
                     spirv: &added.spirv,
                     vertex: c"vertex_main",
-                    fragment: c"fragment_main",
+                    fragment: Some(c"fragment_main"),
                     format: Format::HDR.with_ids().with_depth(),
                     blend: added.blend,
                     depth_write: writes_depth,
+                    depth_bias: 0.0,
+                    depth_clamp: false,
                 },
             );
+            // What's opaque casts shadows, drawn by its own vertex shader into the shadow maps.
+            let shadow = writes_depth.then(|| {
+                let name = format!("{} shadow", added.name);
+                Pipeline::graphics(
+                    &self.device,
+                    &GraphicsDesc {
+                        name: &name,
+                        spirv: added.shadow.as_deref().unwrap_or(&added.spirv),
+                        vertex: c"vertex_main",
+                        fragment: added.shadow.as_ref().map(|_| c"shadow_main"),
+                        format: Format::DEPTH,
+                        blend: Blend::Opaque,
+                        depth_write: true,
+                        depth_bias: shadow::DEPTH_BIAS,
+                        depth_clamp: true,
+                    },
+                )
+            });
+            let made = made.and_then(|pipeline| Ok((pipeline, shadow.transpose()?)));
             match self.shaders.get_mut(index) {
                 Some(Some(old)) => match made {
-                    Ok(pipeline) => {
-                        old.pipeline = pipeline;
+                    Ok((pipeline, shadow)) => {
+                        (old.pipeline, old.shadow) = (pipeline, shadow);
                         old.writes_depth = writes_depth;
                     }
                     Err(error) => warn!(
@@ -948,15 +972,19 @@ impl MeshPass {
                     ),
                 },
                 Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
-                None => self.shaders.push(Some(GpuShader {
-                    pipeline: made?,
-                    // A name with a nul is labeled as far as it goes.
-                    label: CString::new(added.name.split('\0').next().unwrap_or_default())
-                        .expect("cut at its first nul"),
-                    vertex_size: added.vertex_size,
-                    params_size: added.params_size,
-                    writes_depth,
-                })),
+                None => {
+                    let (pipeline, shadow) = made?;
+                    self.shaders.push(Some(GpuShader {
+                        pipeline,
+                        shadow,
+                        // A name with a nul is labeled as far as it goes.
+                        label: CString::new(added.name.split('\0').next().unwrap_or_default())
+                            .expect("cut at its first nul"),
+                        vertex_size: added.vertex_size,
+                        params_size: added.params_size,
+                        writes_depth,
+                    }));
+                }
             }
         }
         Ok(())
@@ -1312,15 +1340,16 @@ impl MeshPass {
     /// of a mesh with levels of detail, as one for each level its instances draw at, and copies
     /// each draw's transforms, IDs and parameters into the frame for its shader, which reads the
     /// frame's data, a [`FrameData`], at the address `frame`. A run of a mesh that isn't drawable
-    /// yet, or was removed, or with a shader that was, draws nothing and isn't counted. Returns
-    /// what it drew.
+    /// yet, or was removed, or with a shader that was, draws nothing and isn't counted. With
+    /// `shadows`, it draws their shadows into a shadow map instead, by the shadow pipelines of
+    /// those whose shaders write depth, and nothing of the rest. Returns what it drew.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one of the pass's `Meshes`, a shader isn't one of its `Shaders`, a
     /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
     /// instances than Vulkan's 32-bit count, or the pass isn't into an image of [`Format::HDR`]
-    /// with IDs and a depth image.
+    /// with IDs and a depth image, or, with `shadows`, into depth alone.
     pub(crate) fn draw(
         &mut self,
         pass: &mut Pass<'_, '_>,
@@ -1328,6 +1357,7 @@ impl MeshPass {
         frame: u64,
         view: [u32; 2],
         draws: &Draws,
+        shadows: bool,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
@@ -1346,6 +1376,14 @@ impl MeshPass {
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
             };
+            let pipeline = if shadows {
+                let Some(shadow) = &shader.shadow else {
+                    continue;
+                };
+                shadow
+            } else {
+                &shader.pipeline
+            };
             let instances = Instances {
                 transforms: &draws.transforms[run.instances.clone()],
                 ids: &draws.ids[run.instances.clone()],
@@ -1361,7 +1399,7 @@ impl MeshPass {
                  takes, from the renderer's `Meshes` and `Shaders`"
             );
             if bound != Some(run.shader) {
-                pass.set_pipeline(&shader.pipeline);
+                pass.set_pipeline(pipeline);
                 bound = Some(run.shader);
             }
             if faces != Some(run.faces) {
@@ -1671,6 +1709,9 @@ pub(crate) struct FrameData {
     pub(crate) eye: Vec4,
     /// The frame's sky and its prefiltered light, as [`SkyData`](crate::sky::SkyData) has them.
     pub(crate) sky: crate::sky::SkyData,
+    /// The shadows of the light that casts them, if one does, as
+    /// [`ShadowData`](crate::shadow::ShadowData) has them.
+    pub(crate) shadows: crate::shadow::ShadowData,
 }
 
 #[cfg(test)]

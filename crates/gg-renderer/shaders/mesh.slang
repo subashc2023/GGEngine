@@ -1,16 +1,20 @@
 // What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang and
 // model.slang include: the bindless set's arrays, the quad's corners, the frame's data, with its
-// lights, the table of models' materials and the sky's prefiltered light, and the push constants,
-// for a shader's types of vertices and parameters, and what the fragment stage returns. `Corner`
-// in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs and `Push` and `FrameData`
-// in src/mesh.rs, which `Corner`, `Light`, `Material`, `Push` and `Frame` here match field for
-// field.
+// lights, the table of models' materials, the sky's prefiltered light and the shadows' cascades,
+// and the push constants, for a shader's types of vertices and parameters, and what the fragment
+// stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs,
+// `ShadowData` in src/shadow.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`,
+// `Light`, `Material`, `Shadows`, `Push` and `Frame` here match field for field.
 
 // The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
-// second.
+// second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(0, 0)]] TextureCube cubes[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
+[[vk::binding(1, 0)]] SamplerComparisonState comparisons[];
+
+// `COMPARISON_SAMPLER`'s index in the bindless set.
+static const uint COMPARISON_SAMPLER = 9;
 
 struct Corner {
     float3 position;
@@ -54,6 +58,32 @@ struct Material {
     uint2 textures[5];
 };
 
+// How many cascades a light's shadows are in.
+static const uint CASCADES = 4;
+
+// The shadows a directional light casts, in cascades, each a shadow map, from the nearest the view
+// out: the boxes in the light's space round spheres that hold slices of the view's depth.
+struct Shadows {
+    // From the world to the light's space, its -Z the way the light shines.
+    float4x4 light_from_world;
+    // Each cascade's center in the light's space, and 1 over its radius: a point `p` there is at
+    // `(p - center) / radius` in its box, -1 to 1 each way, whose X and Y map onto its map's U, and
+    // V, which points down, and whose Z onto its depth, from 0 at the far side to 1 at the light's.
+    float4 cascades[CASCADES];
+    // Each cascade's shadow map, a texture of the bindless set's, which `COMPARISON_SAMPLER`
+    // samples.
+    uint maps[CASCADES];
+    // How far a point `p` is ahead of the view: `dot(view_depth.xyz, p) + view_depth.w`.
+    float4 view_depth;
+    // The light that casts them, by its index among the frame's, or 0xFFFFFFFF for none.
+    uint light;
+    // How far ahead of the view they start to fade out, and how far they reach.
+    float fade_from;
+    float reach;
+    // The texels across and down each map.
+    float map_size;
+};
+
 // What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
 struct Frame {
     // Where the view sees from, in the world.
@@ -87,6 +117,8 @@ struct Frame {
     // The luminance, in candela per square meter, that a texel of the sky's of 1 stands for: what
     // its light is multiplied by, before the exposure.
     float sky_luminance;
+    // The shadows of one of its lights, if one casts them.
+    Shadows shadows;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

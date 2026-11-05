@@ -7,6 +7,7 @@
 //! that last used it has finished.
 
 use std::collections::HashSet;
+use std::iter;
 use std::sync::{Mutex, PoisonError};
 
 use ash::vk;
@@ -135,8 +136,32 @@ impl Wrap {
     }
 }
 
-/// How many samplers the set has: every [`Sampler`], then [`Wrap`]'s anisotropic ones.
-const SAMPLERS: usize = Sampler::ALL.len() + Wrap::ALL.len();
+/// Where shaders find, after every [`Sampler`] and [`Wrap`]'s anisotropic ones, the sampler that
+/// compares depth, which they take as a `SamplerComparisonState` for `SampleCmp`, to sample a shadow
+/// map ([`Graph::shadow`](crate::Graph::shadow)) by: each of the four texels nearest the point is
+/// 1 where the depth compared is as near as the texel's or nearer, depth running from 1 at the near
+/// plane, and 0 where it's farther, and the four filter linearly, as percentage-closer filtering
+/// takes them; past the edges, the edges' texels. Through it, shaders sample nothing else, nor
+/// sample anything but by comparison.
+pub const COMPARISON_SAMPLER: u32 = (Sampler::ALL.len() + Wrap::ALL.len()) as u32;
+
+/// How many samplers the set has: every [`Sampler`], then [`Wrap`]'s anisotropic ones, then the
+/// one that compares.
+const SAMPLERS: usize = COMPARISON_SAMPLER as usize + 1;
+
+/// What the sampler that compares, [`COMPARISON_SAMPLER`], is made from.
+fn comparison_info() -> vk::SamplerCreateInfo<'static> {
+    let clamp = vk::SamplerAddressMode::CLAMP_TO_EDGE;
+    vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::LINEAR)
+        .min_filter(vk::Filter::LINEAR)
+        .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+        .address_mode_u(clamp)
+        .address_mode_v(clamp)
+        .address_mode_w(clamp)
+        .compare_enable(true)
+        .compare_op(vk::CompareOp::GREATER_OR_EQUAL)
+}
 
 /// The samplers' debug names, in the order of their indices.
 fn sampler_names() -> impl Iterator<Item = String> {
@@ -144,6 +169,7 @@ fn sampler_names() -> impl Iterator<Item = String> {
         .map(|kind| format!("{kind:?} sampler"))
         .into_iter())
     .chain(Wrap::ALL.map(|wrap| format!("Anisotropic{wrap:?} sampler")))
+    .chain(iter::once("Comparison sampler".to_owned()))
 }
 
 /// The sets, their layout and the pipeline layout built on it, which texture slots are free, and
@@ -348,7 +374,8 @@ impl Bindless {
         // the infos outlive the calls.
         unsafe {
             let infos = (Sampler::ALL.map(Sampler::info).into_iter())
-                .chain(Wrap::ALL.map(Wrap::anisotropic_info));
+                .chain(Wrap::ALL.map(Wrap::anisotropic_info))
+                .chain(iter::once(comparison_info()));
             for (info, name) in infos.zip(sampler_names()) {
                 let sampler = device
                     .create_sampler(&info, None)

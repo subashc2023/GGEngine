@@ -318,6 +318,8 @@ impl<'a> Reader<'a> {
             range: (range > 0.0).then_some(range),
             inner_cone,
             outer_cone,
+            // As glTF's, which says nothing of shadows.
+            ..Light::default()
         }))
     }
 
@@ -547,6 +549,7 @@ mod tests {
             range: Some(8.0),
             inner_cone: 0.25,
             outer_cone: 0.5,
+            ..Light::default()
         };
         let parts = vec![
             Part {

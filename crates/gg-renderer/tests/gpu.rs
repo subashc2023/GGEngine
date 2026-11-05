@@ -84,6 +84,10 @@ fn main() -> ExitCode {
         a_uniform_sky_lights_white_as_itself,
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
+        shadows_fall_where_their_casters_put_them,
+        shadows_hold_still_as_the_view_moves,
+        surfaces_cast_no_shadows_on_themselves,
+        shadowed_models_match_their_reference,
         lines_match_their_reference,
         grids_match_their_reference,
         views_match_their_reference,
@@ -3770,6 +3774,7 @@ fn lights_shade_as_gltf_defines() {
         direction: Vec3::NEG_Z,
         color: pi,
         range: None,
+        shadow_distance: None,
     };
     stores.lights = vec![sun];
     let viewport = filling([WIDTH, SIDE]);
@@ -3938,6 +3943,7 @@ fn lit_spheres_match_their_reference() {
         direction: Vec3::new(1.0, -1.0, -1.0).normalize(),
         color: Vec3::splat(4.0),
         range: None,
+        shadow_distance: None,
     }];
     let viewport = filling([SIZE, SIZE]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
@@ -4261,6 +4267,343 @@ fn sky_lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
+}
+
+/// The bytes of a shadow map of a light's cascade: 2048 texels across and down, of 32-bit depth.
+const SHADOW_MAP_BYTES: u64 = 2048 * 2048 * 4;
+
+/// What places [`model_square`] facing up, `size` across, its center at `at`.
+fn facing_up(size: f32, at: Vec3) -> Mat4 {
+    let turned = Quat::from_rotation_x(-FRAC_PI_2);
+    Mat4::from_scale_rotation_translation(Vec3::new(size, size, 1.0), turned, at)
+}
+
+/// A directional light of white, of 1 lux, shining along `direction`, casting shadows as far as
+/// `shadow_distance` ahead of the view, if given.
+fn sun(direction: Vec3, shadow_distance: Option<f32>) -> Light {
+    Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: direction.normalize(),
+        color: Vec3::ONE,
+        range: None,
+        shadow_distance,
+    }
+}
+
+/// Straight down from `at`, without perspective, onto a square view `across` units of the world
+/// across, its top toward -Z, seeing what's from 1 to `far` below it.
+fn looking_down(at: Vec3, across: f32, far: f32) -> Viewpoint {
+    Viewpoint {
+        position: at,
+        rotation: Quat::from_rotation_x(-FRAC_PI_2),
+        projection: Projection::Orthographic {
+            height: across,
+            near: 1.0,
+            far,
+        },
+    }
+}
+
+/// A floor, white and rough, 20 units across, and the first `plates` of three plates a unit across,
+/// 2 above it, along Z at -2.5, 0 and 2.5 and at -2 along X, each facing up: opaque, masked and
+/// opaque, and masked and transparent, which draws nothing.
+fn floor_and_plates(stores: &mut Stores, plates: usize) -> Draws {
+    let square = model_square(&mut stores.meshes);
+    let white = Material {
+        metallic: 0.0,
+        ..Material::default()
+    };
+    let masked = AlphaMode::Mask { cutoff: 0.5 };
+    let materials = [
+        white,
+        white,
+        Material {
+            alpha: masked,
+            ..white
+        },
+        Material {
+            color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+            alpha: masked,
+            ..white
+        },
+    ];
+    let mut draws = Draws::default();
+    let places = [
+        facing_up(20.0, Vec3::ZERO),
+        facing_up(1.0, Vec3::new(-2.0, 2.0, -2.5)),
+        facing_up(1.0, Vec3::new(-2.0, 2.0, 0.0)),
+        facing_up(1.0, Vec3::new(-2.0, 2.0, 2.5)),
+    ];
+    for (material, place) in materials.iter().zip(places).take(1 + plates) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(place, &draw, 0);
+    }
+    draws
+}
+
+/// The floor and plates of [`floor_and_plates`], seen from straight above without perspective,
+/// 16 pixels a unit, under a light that comes down 2 for each 1 it goes along +X, casting shadows
+/// 100 units ahead: the light reaches the floor round the plates, as it does without the shadows,
+/// but not where the opaque and the masked opaque ones put their shadows, from a unit along +X
+/// from each, as far across as they are; the transparent one casts none. The frames' own images
+/// take the four shadow maps' memory more only in a frame whose light casts them; synchronization
+/// validation sees each map drawn before the view samples it, and drawn again after.
+fn shadows_fall_where_their_casters_put_them() {
+    const SIZE: u32 = 128;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let draws = floor_and_plates(&mut stores, 3);
+    let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 8.0, 21.0);
+    let viewport = filling([SIZE, SIZE]);
+    let direction = Vec3::new(1.0, -2.0, 0.0);
+    stores.lights = vec![sun(direction, None)];
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let unshadowed = renderer.transient_bytes();
+    let lit = frame_pixels(&mut renderer);
+    stores.lights = vec![sun(direction, Some(100.0))];
+    for _ in 0..3 {
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    }
+    let shadowed = renderer.transient_bytes();
+    let frame = frame_pixels(&mut renderer);
+    assert!(
+        unshadowed < SHADOW_MAP_BYTES && shadowed >= 4 * SHADOW_MAP_BYTES,
+        "{unshadowed} bytes without the shadows, {shadowed} with"
+    );
+    // The floor's pixel `x` along X and `z` along Z from the origin, at the view's center.
+    let at = |x: f32, z: f32| [(64.0 + 16.0 * x) as u32, (64.0 + 16.0 * z) as u32];
+    let floor = pixel_at(&lit, SIZE, at(2.5, 0.0));
+    assert!(floor[0] > 100 && floor[0] == floor[2], "{floor:?}");
+    let dark = [0, 0, 0, 255];
+    for (plate, z) in [-2.5, 0.0, 2.5].into_iter().enumerate() {
+        let casts = plate < 2;
+        let mut checks = vec![
+            ((2.5, z), floor),
+            ((-0.4, z), floor),
+            ((-1.0, z + 0.6), floor),
+            ((-1.0, z - 0.6), floor),
+        ];
+        for in_shadow in [
+            (-1.4, z),
+            (-1.0, z),
+            (-0.6, z),
+            (-1.0, z + 0.4),
+            (-1.0, z - 0.4),
+        ] {
+            checks.push((in_shadow, if casts { dark } else { floor }));
+        }
+        for ((x, z), expected) in checks {
+            let found = pixel_at(&frame, SIZE, at(x, z));
+            assert!(
+                close(found, expected),
+                "plate {plate}: the floor at ({x}, {z}) is {found:?}, not {expected:?}"
+            );
+        }
+    }
+    shut_down(renderer);
+}
+
+/// The floor and the opaque plate of [`floor_and_plates`], seen from straight above without
+/// perspective, 16 pixels a unit, under a light that comes down from +X and +Z, casting shadows
+/// as far as the view sees, 1,000 units, so that the nearest cascade's texels are 2 pixels across,
+/// and the shadow's edges, filtered, a dozen: the view moved a pixel along X shows each pixel of
+/// the frame before it a pixel over, the edges' too, as the cascade's texels stay put in the
+/// world. Were the cascade to move with the view, by a fraction of a texel, the edges would change.
+fn shadows_hold_still_as_the_view_moves() {
+    const SIZE: u32 = 128;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let draws = floor_and_plates(&mut stores, 1);
+    stores.lights = vec![sun(Vec3::new(1.0, -2.0, 0.7), Some(1000.0))];
+    let viewport = filling([SIZE, SIZE]);
+    let [before, after] = [0.0, 1.0 / 16.0].map(|x| {
+        let viewpoint = looking_down(Vec3::new(x, 5.0, 0.0), 8.0, 1001.0);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        frame_pixels(&mut renderer)
+    });
+    let between = (before.as_chunks::<4>().0.iter())
+        .filter(|pixel| pixel[0] > 8 && pixel[0] < 120)
+        .count();
+    assert!(between > 20, "{between} pixels of the shadow's edges");
+    for y in 0..SIZE {
+        for x in 0..SIZE - 1 {
+            let (was, is) = (
+                pixel_at(&before, SIZE, [x + 1, y]),
+                pixel_at(&after, SIZE, [x, y]),
+            );
+            assert!(
+                was.iter().zip(is).all(|(&a, b)| a.abs_diff(b) <= 2),
+                "({x}, {y}) shows {is:?}, where the frame before showed {was:?} a pixel over"
+            );
+        }
+    }
+    shut_down(renderer);
+}
+
+/// A floor 400 units across, seen with perspective from 2 above it, 25° down, under lights 0°,
+/// 40°, 70° and 80° from straight down, casting shadows 50 units ahead: it draws as it does without
+/// the shadows, every pixel, in every cascade and past them all, as it would not if it shadowed
+/// itself, as shadow acne does.
+fn surfaces_cast_no_shadows_on_themselves() {
+    const SIZE: u32 = 160;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let white = Material {
+        metallic: 0.0,
+        ..Material::default()
+    };
+    let material = stores.materials.add(&white);
+    let floor = MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(400.0, Vec3::ZERO), &floor, 0);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        rotation: Quat::from_rotation_x(math::to_radians(-25.0)),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    for degrees in [0.0_f32, 40.0, 70.0, 80.0] {
+        let (sin, cos) = math::libm::sincosf(math::to_radians(degrees));
+        // Turned a little round, so that the light's texels don't line up with the floor's edges.
+        let direction = Vec3::new(sin * 0.8, -cos, sin * 0.6);
+        let [lit, shadowed] = [None, Some(50.0)].map(|distance| {
+            stores.lights = vec![sun(direction, distance)];
+            settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+            frame_pixels(&mut renderer)
+        });
+        let differ = (lit.as_chunks::<4>().0.iter())
+            .zip(shadowed.as_chunks::<4>().0)
+            .filter(|(a, b)| a.iter().zip(*b).any(|(&a, &b)| a.abs_diff(b) > 1))
+            .count();
+        assert_eq!(
+            differ, 0,
+            "{differ} pixels under a light {degrees}° from straight down"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// A unit square around the origin, a model's, as [`model_square`] is, opaque at its left edge and
+/// transparent at its right, as its vertices' colors' alpha says: a masked material of it draws its
+/// left half.
+fn half_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
+    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+        position: Vec3::new(x, y, 0.0),
+        uv: Vec2::from(uv),
+        color: Vec4::new(1.0, 1.0, 1.0, 0.5 - x),
+        normal: Vec3::Z,
+        tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+    };
+    let corners = [
+        corner([-0.5, -0.5], [0.0, 1.0]),
+        corner([0.5, -0.5], [1.0, 1.0]),
+        corner([0.5, 0.5], [1.0, 0.0]),
+        corner([-0.5, 0.5], [0.0, 0.0]),
+    ];
+    meshes
+        .add("half square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh")
+}
+
+/// A gray floor, a sphere on it, an orange post standing on it, and a masked plate, upright,
+/// whose right half is cut away, seen with perspective from above and in front, under a light
+/// from the upper left, behind them, casting shadows 20 units ahead, the second of two, and a dim
+/// one from the front, which casts none, tonemapped by PBR Neutral: each casts its shadow on the
+/// floor toward the view, the plate's of its left half alone, in which the dim light still
+/// shows the floor, and the sphere's side away from the light is in its own shadow, against
+/// their reference image.
+fn shadowed_models_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let half = half_square(&mut stores.meshes);
+    let sphere = sphere(&mut stores.meshes, 0.6, 24, 48);
+    let add = |stores: &mut Stores, mesh, material: Material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+    };
+    let gray = Material {
+        color: Vec4::new(0.7, 0.7, 0.7, 1.0),
+        metallic: 0.0,
+        roughness: 0.8,
+        ..Material::default()
+    };
+    let orange = Material {
+        color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+        roughness: 0.5,
+        ..gray
+    };
+    let blue = Material {
+        color: Vec4::new(0.2, 0.4, 0.9, 1.0),
+        roughness: 0.3,
+        ..gray
+    };
+    let cut = Material {
+        alpha: AlphaMode::Mask { cutoff: 0.5 },
+        double_sided: true,
+        ..orange
+    };
+    let floor = add(&mut stores, square, gray);
+    let ball = add(&mut stores, sphere, blue);
+    let post = add(&mut stores, square, orange);
+    let plate = add(&mut stores, half, cut);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(20.0, Vec3::ZERO), &floor, 0);
+    draws.push_draw(Mat4::from_translation(Vec3::new(0.1, 0.6, 0.2)), &ball, 0);
+    // A post 0.4 across and 1.6 tall, its faces each a square turned to face out.
+    for turn in 0..4 {
+        let rotation = Quat::from_rotation_y(turn as f32 * FRAC_PI_2);
+        let out = rotation * Vec3::new(0.0, 0.0, 0.2);
+        let face = Mat4::from_scale_rotation_translation(
+            Vec3::new(0.4, 1.6, 1.0),
+            rotation,
+            Vec3::new(1.5, 0.8, -1.0) + out,
+        );
+        draws.push_draw(face, &post, 0);
+    }
+    let upright = Mat4::from_scale_rotation_translation(
+        Vec3::new(1.2, 1.0, 1.0),
+        Quat::from_rotation_y(0.3),
+        Vec3::new(-1.5, 0.5, -0.9),
+    );
+    draws.push_draw(upright, &plate, 0);
+    // From the upper left, behind, so that the shadows fall toward the view; and a dim light from
+    // the front, which casts none, so that what's in shadow shows.
+    stores.lights = vec![
+        Light {
+            color: Vec3::splat(0.6),
+            ..sun(Vec3::new(-0.3, -0.6, -1.0), None)
+        },
+        Light {
+            color: Vec3::splat(4.0),
+            ..sun(Vec3::new(0.9, -0.8, 0.7), Some(20.0))
+        },
+    ];
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.6, 4.2),
+        rotation: Quat::from_rotation_x(-0.5),
+        projection: Projection::Perspective {
+            fov: PI / 4.0,
+            near: 0.1,
+        },
+    };
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let data = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    check(renderer, "shadowed_models", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

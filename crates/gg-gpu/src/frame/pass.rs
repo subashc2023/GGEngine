@@ -32,28 +32,35 @@ impl<'a> Frame<'a> {
     ///
     /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't draw; if it
     /// draws over or samples a target that no pass has drawn into since it was made, or since its
-    /// swapchain's image was acquired; if its attachments aren't all its color target's size; or
-    /// if its target is larger than the device's viewports reach, as [`Pass::set_viewport`] says.
+    /// swapchain's image was acquired; if its attachments aren't all its color target's size, or
+    /// its depth's, for a pass of depth alone; or if they're larger than the device's viewports
+    /// reach, as [`Pass::set_viewport`] says.
     pub fn render(&mut self, pass: PassId) -> Option<Pass<'_, 'a>> {
         let decl = self.take_pass(pass, PassKind::Render);
         let graph = self.graph;
         let uses = graph.uses(pass);
-        let &(color, _) = (uses.iter())
-            .find(|(_, use_)| matches!(use_, Use::Color(_)))
-            .expect("a pass that draws has a color target, as it was checked to");
-        if let ImageDecl::Target(target) = graph.images[color.0 as usize]
+        let color =
+            (uses.iter()).find_map(|&(image, use_)| matches!(use_, Use::Color(_)).then_some(image));
+        if let Some(color) = color
+            && let ImageDecl::Target(target) = graph.images[color.0 as usize]
             && self.frames.images[target].is_none()
         {
             return None;
         }
+        // What the pass's size and format go by: its color target, or its depth, for a pass of depth
+        // alone, which is one of the graph's own.
+        let first = color.unwrap_or_else(|| {
+            (uses.iter())
+                .find_map(|&(image, use_)| (use_ == Use::Depth).then_some(image))
+                .expect("a pass that draws has a color target or depth, as it was checked to")
+        });
         // Before anything is recorded, as a refusal records nothing.
-        let (_, _, extent) = self.parts(color);
+        let (_, _, extent) = self.parts(first);
         for &(image, use_) in uses {
             let (_, _, size) = self.parts(image);
             assert!(
                 use_ == Use::Sampled || size == extent,
-                "pass {:?} draws into images of its color target's size, {}x{}, but image {} is \
-                 {}x{}",
+                "pass {:?} draws into images of one size, {}x{}, but image {} is {}x{}",
                 decl.label,
                 extent.width,
                 extent.height,
@@ -63,7 +70,10 @@ impl<'a> Frame<'a> {
             );
         }
         self.open_pass(pass);
-        let mut format = Format::new(self.format_of(color));
+        let mut format = match color {
+            Some(color) => Format::new(self.format_of(color)),
+            None => Format::new(vk::Format::UNDEFINED),
+        };
         let mut attachments = [vk::RenderingAttachmentInfo::default(); 2];
         let mut depth_attachment = None;
         for &(image, use_) in uses {
@@ -114,7 +124,9 @@ impl<'a> Frame<'a> {
                 Use::Sampled | Use::ComputeSampled | Use::Storage | Use::CopySource => {}
             }
         }
-        let attachments = &attachments[..1 + usize::from(format.ids != vk::Format::UNDEFINED)];
+        let colors =
+            usize::from(color.is_some()) + usize::from(format.ids != vk::Format::UNDEFINED);
+        let attachments = &attachments[..colors];
         let mut rendering = vk::RenderingInfo::default()
             .render_area(extent.into())
             .layer_count(1)
@@ -184,7 +196,7 @@ impl<'a> Pass<'_, 'a> {
         [self.extent.width, self.extent.height]
     }
 
-    /// The formats of its color target, and of its IDs and its depth, if it has them, which the
+    /// The formats of its color target, its IDs and its depth, of those it has, which the
     /// pipelines it draws with must be made for.
     pub fn format(&self) -> Format {
         self.format

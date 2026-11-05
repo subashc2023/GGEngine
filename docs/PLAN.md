@@ -106,19 +106,18 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **HDR and tonemapping** (2026-11-04)
 - **Lights and PBR materials** (2026-11-04)
 - **Image-based lighting** (2026-11-04)
+- **Cascaded shadow maps** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it. Its milestones after image-based lighting, in
-order:
+**Phase 12, render graph and PBR**, as Next has it. Its last milestone:
 
-- **Cascaded shadow maps.** The directional light's shadows, in four cascades fitted to the view,
-  steadied against shimmering, with depth bias and filtered edges, the cascades the graph's own.
-- **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky: Khronos
-  glTF-Sample-Assets' Sponza, fetched by a command at a pinned commit and checked against SHA-256
-  hashes into a folder git ignores, since Crytek's CRYENGINE Limited License it's under is no open
-  one, and CI's references take small scenes made in code. Done when Phase 12's *Done when* holds,
-  its frame time and memory in `engine.perf`, from its package too.
+- **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky, the sky's sun
+  lighting it once, as Deferred has it: Khronos glTF-Sample-Assets' Sponza, fetched by a command at
+  a pinned commit and checked against SHA-256 hashes into a folder git ignores, since Crytek's
+  CRYENGINE Limited License it's under is no open one, and CI's references take small scenes made
+  in code. Done when Phase 12's *Done when* holds, its frame time and memory in `engine.perf`, from
+  its package too.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -254,11 +253,19 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The editor drawing lights in its view, as icons and spots' cones | Someone places lights by eye |
 | A sky made procedurally, as Hillaire's atmosphere ("A Scalable and Production Ready Sky and Atmosphere Rendering Technique", 2020), from the world's directional light in its units, which a time of day moves, with haze over distance: a sky is an image | A game's sky follows its sun, or the user asks for one |
 | Turning a sky, as EXT_lights_image_based turns one: its image's middle column faces +X | A sky's sun must line up with the directional light that stands for it |
-| A sun in the sky lighting once: its disk lights through the sky's light as well as through a directional light a game adds for it, and its texels past 65,504, the most a half float holds, are clamped to it | Shadows, which a directional light casts and the sky's light doesn't |
+| A sun in the sky lighting once: its disk lights through the sky's light as well as through a directional light a game adds for it, which casts shadows where the sky's light doesn't, and its texels past 65,504, the most a half float holds, are clamped to it | Sponza, the first scene a sun and a sky light together; the showcase's shadows scene turns its sky down |
 | Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
 | Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes often, as a time of day's, or a hitch that shows |
 | Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
 | Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
+| Point and spot lights' shadows, as cubes and maps in an atlas: a directional light alone casts them | A game lit by them needs their shadows |
+| More than one directional light's shadows: of those that cast them, the brightest does | A scene with two suns, or a sun and a moon at once |
+| Blending between cascades over a band at each split, where shadows' sharpness now steps from one cascade to the next | The step shows, as along Sponza's floors |
+| Casters culled for each cascade against its box: each cascade draws every opaque draw, four times over the view's | Phase 13's culling, or shadows' passes that cost enough to matter |
+| Shadow maps' size, the cascades' count and splits, and the shadows' offsets and bias, set by a game or by quality settings: 2,048 texels, four cascades, three quarters logarithmic, and the constants `shaders/model.slang` and `src/shadow.rs` hold | A game needs others, or a device is too slow for them |
+| Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |
+| Shadows that soften with the distance from their casters, as PCSS's, and contact shadows: every shadow's edge is six texels of its cascade | A game's look needs them |
+| Shadows from what blends, as glass's colored ones: what blends casts none | A game's transparent objects need them |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |
@@ -272,7 +279,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
-| Depth bias, whose sign flips with depth reversed | Phase 12, with shadow maps |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
 | Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |

@@ -17,9 +17,10 @@ use std::sync::Arc;
 use ash::vk;
 use gg_core::label;
 use gg_gpu::{
-    Arenas, Blend, ColorImage, ComputePipeline, Device, Frame, Frames, GpuBuffer, Graph,
-    GraphicsDesc, Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pass, PassId, Pipeline,
-    Sampler, StorageImage, Target, Texture, TextureFormat, UploadPath, Validation, mip_sizes,
+    Arenas, Blend, COMPARISON_SAMPLER, ColorImage, ComputePipeline, Device, Format, Frame, Frames,
+    GpuBuffer, Graph, GraphicsDesc, Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pass,
+    PassId, Pipeline, Sampler, StorageImage, Target, Texture, TextureFormat, UploadPath,
+    Validation, mip_sizes,
 };
 
 /// Runs each test through `tests`, by the name it's written with, given the arguments written
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
         depth_clears_in_every_pass,
+        shadow_maps_draw_depth_alone_and_sample_by_comparison,
         ids_read_back_two_frames_later,
         the_graphs_own_images_share_memory_where_their_uses_dont_overlap,
         depth_and_colors_take_turns_in_memory,
@@ -368,10 +370,12 @@ fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
         name: "sample probes",
         spirv,
         vertex: c"vertex_main",
-        fragment: c"fragment_main",
+        fragment: Some(c"fragment_main"),
         format: ColorImage::FORMAT,
         blend: Blend::Opaque,
         depth_write: false,
+        depth_bias: 0.0,
+        depth_clamp: false,
     };
     Pipeline::graphics(device, &desc).expect("a pipeline")
 }
@@ -624,10 +628,12 @@ fn compute_passes_write_cubes_that_passes_sample() {
             name: "sample cube",
             spirv: &spirv,
             vertex: c"vertex_main",
-            fragment: c"fragment_main",
+            fragment: Some(c"fragment_main"),
             format: ColorImage::FORMAT,
             blend: Blend::Opaque,
             depth_write: false,
+            depth_bias: 0.0,
+            depth_clamp: false,
         },
     )
     .expect("a pipeline");
@@ -921,6 +927,155 @@ fn depth_clears_in_every_pass() {
     }
 
     drop((frames, image, device, instance));
+    check(&validation);
+}
+
+/// Draws the depth alone of three triangles into a 16x16 shadow map, each over a viewport of its
+/// own, and samples the map by comparison in a later pass, in three frames: the left half flat at
+/// 0.5; the top right past the near plane, at 1.5, which depth clamp holds at the plane, 1; and the
+/// bottom right sloping by 0.0375 a texel, which a slope-scaled depth bias of 2 takes back by twice
+/// that. A depth as near as the map's or nearer reads 1, and a farther one 0: half the bias nearer
+/// than the sloped triangle reads 1, as it wouldn't without the bias, or with its sign wrong.
+/// Synchronization validation sees the pass that samples wait for the depth, and the next frame's
+/// depth wait for the sampling. A pipeline without a fragment shader draws depth alone, and one
+/// clamps or biases depth only where its targets have it.
+fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = spirv(
+        "shadow",
+        &[
+            ("depth_main", "vertex"),
+            ("vertex_main", "vertex"),
+            ("fragment_main", "fragment"),
+        ],
+    );
+    let desc = |format, fragment, depth_bias, depth_clamp| GraphicsDesc {
+        name: "shadow",
+        spirv: &spirv,
+        vertex: c"depth_main",
+        fragment,
+        format,
+        blend: Blend::Opaque,
+        depth_write: true,
+        depth_bias,
+        depth_clamp,
+    };
+    let depth = Pipeline::graphics(&device, &desc(Format::DEPTH, None, 2.0, true))
+        .expect("a pipeline of depth alone");
+    let compare = Pipeline::graphics(
+        &device,
+        &GraphicsDesc {
+            vertex: c"vertex_main",
+            depth_write: false,
+            ..desc(ColorImage::FORMAT, Some(c"fragment_main"), 0.0, false)
+        },
+    )
+    .expect("a pipeline");
+    let colorless = panics(|| {
+        let undrawn = GraphicsDesc {
+            depth_write: false,
+            ..desc(ColorImage::FORMAT, None, 0.0, false)
+        };
+        drop(Pipeline::graphics(&device, &undrawn));
+    });
+    assert!(
+        colorless.contains("without a fragment shader"),
+        "{colorless}"
+    );
+    let flat = panics(|| {
+        let clamped = GraphicsDesc {
+            depth_write: false,
+            ..desc(ColorImage::FORMAT, Some(c"fragment_main"), 0.0, true)
+        };
+        drop(Pipeline::graphics(&device, &clamped));
+    });
+    assert!(flat.contains("only for targets that have it"), "{flat}");
+
+    // Each of the triangles over its viewport, its corners' depths, as one that covers it, and a
+    // point of it to compare there: a texel's center, which the filter takes alone.
+    let corners = |z: [f32; 2]| {
+        [
+            [-1.0, -1.0, z[0], 1.0],
+            [3.0, -1.0, z[1], 1.0],
+            [-1.0, 3.0, z[0], 1.0f32],
+        ]
+    };
+    let triangles = [
+        ([0, 0], [8, 16], corners([0.5; 2])),
+        ([8, 0], [8, 8], corners([1.5; 2])),
+        // 0.15 across a unit of clip space, 4 texels, from 0.2 at the left edge.
+        ([8, 8], [8, 8], corners([0.2, 0.8])),
+    ];
+    let sloped = 0.2 + 0.15 * 3.5 / 4.0;
+    let probes = [
+        ([4, 8], 0.55, 255),
+        ([4, 8], 0.45, 0),
+        ([12, 4], 0.99, 0),
+        ([11, 12], sloped - 0.0375, 255),
+    ];
+    let mut image =
+        ColorImage::new(&device, probes.len() as u32, 1, "shadow probes").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let (target, shadow) = (graph.target(0), graph.shadow("shadow map", [16, 16]));
+    let drawn = graph.render(label!("shadow")).depth(shadow).add();
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let compared = (graph.render(label!("compare")).clear(target, black))
+        .sample(shadow)
+        .add();
+    for _ in 0..3 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        let mut pass = frame
+            .render(drawn)
+            .expect("the graph's own images are always there");
+        assert_eq!(pass.format(), Format::DEPTH);
+        pass.set_pipeline(&depth);
+        // As `shadow.slang` takes them, the corners first.
+        let push = |pass: &mut Pass<'_, '_>, words: [u32; 17]| {
+            pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+        };
+        for (origin, size, corners) in triangles {
+            pass.set_viewport(origin, size);
+            let mut words = [0; 17];
+            for (word, value) in words.iter_mut().zip(corners.as_flattened()) {
+                *word = value.to_bits();
+            }
+            push(&mut pass, words);
+            pass.draw(3, 1);
+        }
+        drop(pass);
+        let mut pass = frame
+            .render(compared)
+            .expect("an offscreen image is always there");
+        let map = pass.sampled(shadow);
+        pass.set_pipeline(&compare);
+        for (x, ([u, v], depth, _)) in (0..).zip(probes) {
+            pass.set_viewport([x, 0], [1, 1]);
+            let mut words = [0; 17];
+            words[12..].copy_from_slice(&[
+                map,
+                COMPARISON_SAMPLER,
+                ((u as f32 + 0.5) / 16.0).to_bits(),
+                ((v as f32 + 0.5) / 16.0).to_bits(),
+                f32::to_bits(depth),
+            ]);
+            push(&mut pass, words);
+            pass.draw(3, 1);
+        }
+        drop(pass);
+        frame.submit().expect("the frame's submission");
+    }
+    let pixels = image.read_back().expect("the image's pixels");
+    for (pixel, (at, depth, lit)) in pixels.as_chunks::<4>().0.iter().zip(probes) {
+        assert_eq!(*pixel, [lit, lit, lit, 255], "{depth} compared at {at:?}");
+    }
+
+    drop((depth, compare, frames, image, device, instance));
     check(&validation);
 }
 

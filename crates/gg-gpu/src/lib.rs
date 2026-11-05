@@ -28,7 +28,7 @@ use std::fmt;
 use ash::vk;
 use gg_core::Error;
 
-pub use bindless::{PLACED_TEXTURES, Sampler, Wrap};
+pub use bindless::{COMPARISON_SAMPLER, PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
 pub use capture::Capture;
 pub use device::{Device, MemoryBudget, SHADER_CAPABILITIES, UploadPath};

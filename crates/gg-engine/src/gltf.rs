@@ -751,6 +751,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             range: light.range,
             inner_cone: inner,
             outer_cone: outer,
+            // KHR_lights_punctual says nothing of shadows.
+            ..Light::default()
         })
     }
 

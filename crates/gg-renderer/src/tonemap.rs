@@ -58,10 +58,12 @@ impl TonemapPass {
                 name: "tonemap",
                 spirv: SPIRV,
                 vertex: c"vertex_main",
-                fragment: c"fragment_main",
+                fragment: Some(c"fragment_main"),
                 format: ColorImage::FORMAT,
                 blend: Blend::Opaque,
                 depth_write: false,
+                depth_bias: 0.0,
+                depth_clamp: false,
             },
         )?;
         Ok(Self { pipeline })

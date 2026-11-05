@@ -54,11 +54,6 @@ fn is_atomic(opcode: u32) -> bool {
     matches!(opcode, 227 | 229..=242 | 318 | 5614 | 5615 | 6035)
 }
 
-/// The instructions that sample with a depth comparison, as `SampleCmp`, `SampleCmpLevelZero`
-/// and `GatherCmp` do: `OpImageSampleDrefImplicitLod` and `OpImageSampleDrefExplicitLod`, their
-/// projective forms, `OpImageDrefGather`, and the sparse forms of each.
-const COMPARES_DEPTH: [u32; 10] = [89, 90, 93, 94, 97, 307, 308, 311, 312, 315];
-
 // Decorations.
 const ARRAY_STRIDE: u32 = 6;
 const MATRIX_STRIDE: u32 = 7;
@@ -301,8 +296,6 @@ struct Module {
     value_types: HashMap<u32, u32>,
     /// What stores, copies and atomic operations reach through.
     written: Vec<u32>,
-    /// Whether it samples with a depth comparison.
-    compares_depth: bool,
 }
 
 impl Module {
@@ -395,7 +388,6 @@ impl Module {
                 &[pointer, ..],
             ) => self.written.push(pointer),
             (opcode, &[_, _, pointer, ..]) if is_atomic(opcode) => self.written.push(pointer),
-            (opcode, _) if COMPARES_DEPTH.contains(&opcode) => self.compares_depth = true,
             (opcode, &[ty, id, ..]) if MAKES_VALUES.contains(&opcode) => {
                 self.value_types.insert(id, ty);
             }
@@ -792,18 +784,10 @@ impl Module {
             breaches.push(format!(
                 "it binds {}, {}, {at}, where a shader binds only the bindless set's \
                  `Texture2D textures[]` or `TextureCube cubes[]` at set 0, binding 0, and \
-                 `SamplerState samplers[]` at \
-                 binding 1",
+                 `SamplerState samplers[]` or `SamplerComparisonState comparisons[]` at binding 1",
                 self.resource(variable),
                 self.name(variable.id)
             ));
-        }
-        if self.compares_depth {
-            breaches.push(
-                "it samples with a depth comparison, as `SampleCmp` and `GatherCmp` do, where the \
-                 bindless set's textures hold colors and its samplers compare nothing"
-                    .to_owned(),
-            );
         }
     }
 

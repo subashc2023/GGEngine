@@ -52,17 +52,21 @@ fn main() {
     println!("cargo::rerun-if-changed=shaders");
     let drawing: &[(&str, &str)] = &[("vertex_main", "vertex"), ("fragment_main", "fragment")];
     for shader in SHADERS {
-        compile(&slangc, &out, shader, drawing);
+        compile(&slangc, &out, shader, shader, drawing);
     }
+    // The masked model shader's shadows, cut out as it is, apart from it, which keeps to the
+    // contract games' shaders keep, of two entry points.
+    let shadow = &[("vertex_main", "vertex"), ("shadow_main", "fragment")];
+    compile(&slangc, &out, "model_masked", "model_masked_shadow", shadow);
     for (shader, entries) in COMPUTE {
         let entries: Vec<_> = (entries.iter()).map(|&entry| (entry, "compute")).collect();
-        compile(&slangc, &out, shader, &entries);
+        compile(&slangc, &out, shader, shader, &entries);
     }
 }
 
-/// Compiles `shaders/<shader>.slang` with `slangc` into `<shader>.spv` in `out`, of `entries`, each
+/// Compiles `shaders/<shader>.slang` with `slangc` into `<spirv>.spv` in `out`, of `entries`, each
 /// an entry point and its stage.
-fn compile(slangc: &Path, out: &Path, shader: &str, entries: &[(&str, &str)]) {
+fn compile(slangc: &Path, out: &Path, shader: &str, spirv: &str, entries: &[(&str, &str)]) {
     let source = format!("shaders/{shader}.slang");
     let mut command = Command::new(slangc);
     command
@@ -77,7 +81,7 @@ fn compile(slangc: &Path, out: &Path, shader: &str, entries: &[(&str, &str)]) {
     }
     let output = command
         .arg("-o")
-        .arg(out.join(format!("{shader}.spv")))
+        .arg(out.join(format!("{spirv}.spv")))
         .output()
         .unwrap_or_else(|error| {
             panic!(

@@ -33,6 +33,11 @@ pub struct Light {
     /// KHR_lights_punctual recommends; `None` for as far as its falloff takes it. Ignored for a
     /// directional light.
     pub range: Option<f32>,
+    /// How far ahead of the view a directional light casts shadows, in world units, if it casts
+    /// them: the brightest such light of the frame, the first of those as bright, casts them, in
+    /// cascades fitted to the view, fading out over the last tenth of the distance. `None` for none.
+    /// Ignored for point and spot lights, which cast none.
+    pub shadow_distance: Option<f32>,
 }
 
 /// A light as shaders read it: `Light` in `shaders/mesh.slang`, field for field.
@@ -99,6 +104,7 @@ mod tests {
             direction: Vec3::NEG_Z,
             color: Vec3::ONE,
             range: Some(4.0),
+            shadow_distance: None,
         };
         let gpu = GpuLight::new(&spot);
         let fade =

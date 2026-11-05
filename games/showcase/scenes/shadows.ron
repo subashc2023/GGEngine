@@ -1,0 +1,126 @@
+(
+    entities: {
+        "3a60803d0768eab2": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.4, 7.5),
+                rotation: (-0.15931821, 0.0, 0.0, 0.98722726),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "529e03624c69fa18": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 0.5235988,
+            ),
+            Transform: (
+                translation: (-2.0, 0.5, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "54fe2fd43352b9c6": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 8000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "5567dbdee85ed90f": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7c0906762e15b2a4": (
+            Name: ("Hint"),
+            Text: (
+                text: "A sun's shadows, in four cascades fitted to the view, over the sky's light",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b60bbdf255dfd790": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c9be0edb3a7ace11": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 100000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.49303037, -0.34512126, 0.0, 0.79863155),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d06bcbdd9863e687": (
+            Name: ("Title"),
+            Text: (
+                text: "Shadows",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fbb9e7ef88d9a8b4": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Spin: (
+                axis: (1.0, 0.5, 0.0),
+                speed: 0.87266463,
+            ),
+            Transform: (
+                translation: (1.6, 1.4, 1.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)
