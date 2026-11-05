@@ -53,6 +53,7 @@ cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names cont
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
 cargo gg run --peers 2 [-- --rollback]   # in games/shards: a host and joiner, lockstep or predicting
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
+cargo gg fetch                    # in games/showcase: Sponza, which git doesn't hold, for its scene
 ```
 
 Building needs a C and C++ compiler, for VMA, Luau, zstd and meshoptimizer, and `slangc` for the
@@ -161,8 +162,7 @@ only for what another OS could break, and run [ship.yml](.github/workflows/ship.
   tolerance, so lavapipe can run them without a GPU.
 - Name and time everything: every Vulkan object gets a debug name and every pass a debug label,
   so captures and Tracy timelines read clearly. Work that takes about 10 µs or more gets a zone
-  (`gg_core::zone!`), and nothing gets one for each draw, sprite or other item of a loop over a
-  frame's content.
+  (`gg_core::zone!`), but no draw, sprite or other item of a loop over a frame's content does.
 - Diagnostics are data: log through `tracing` with fields rather than printing, and give every
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.

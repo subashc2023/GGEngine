@@ -31,7 +31,11 @@ pub struct Environment {
     /// +X and a quarter of the way across the way toward -Z, its top row straight up, as Khronos's
     /// glTF Sample Viewer and three.js take one, which the view shows behind the world, in place of
     /// the clear color, and lights its models by from all around: a texture of colors, as a
-    /// Radiance HDR's, `.hdr`, of high dynamic range, is. `None`, the default, for none.
+    /// Radiance HDR's, `.hdr`, of high dynamic range, is. `None`, the default, for none. Its sun
+    /// lights once: in a world with a directional light that shines, which stands for the sun, the
+    /// sky's light keeps each of its texels to 10⁷ candela per square meter, leaving out the sun's
+    /// disk, so that the sun lights through that light alone, which should shine from where the
+    /// sky shows it.
     pub sky: Option<Texture>,
     /// The luminance, in candela per square meter, that a texel of the sky's of 1 stands for,
     /// which its colors are multiplied by, before the exposure, as light is: 30,000 by default,

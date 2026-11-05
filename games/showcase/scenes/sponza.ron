@@ -1,0 +1,55 @@
+(
+    entities: {
+        "042f4fce94af306b": (
+            ModelRoot: ("44ae3d1eca56e109"),
+            Name: ("Sponza"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, -0.16762912, 0.0, 0.98585016),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7620b6b1c03338b4": (
+            Camera: (
+                projection: Perspective(
+                    fov: 1.0471976,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (1.5479072, 1.7, 0.11825121),
+                rotation: (0.08525687, 0.5754002, -0.060476992, 0.81116486),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ac87aafd558e9ec0": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 1.0, 0.92),
+                intensity: 126000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 40.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 12.0, 0.0),
+                rotation: (-0.44687283, 0.33397424, 0.0, 0.8299192),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e2fe1e4adf862c0d": (
+            Environment: (
+                exposure: 14.0,
+                tonemapper: PbrNeutral,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 30000.0,
+            ),
+            Name: ("Environment"),
+        ),
+    },
+)

@@ -3,17 +3,23 @@
 //! frame that renders the view once the image shows, and again whenever it shows another: into a
 //! cube, whose levels each average the one before; from that, the light Lambert's diffuse takes,
 //! and GGX's specular at each step of roughness; and, once, the split sum's table.
+//!
+//! A sky's sun lights once: in a frame with a directional light, which stands for it, casting
+//! shadows where the sky's light can't, the sky's light keeps each of its texels to [`SUN`]'s
+//! luminance, so that the sun lights through the directional light alone; in one without, the sky
+//! lights by all of it.
 
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
+use gg_core::math::Vec3;
 use gg_core::{Result, label};
 use gg_gpu::{
     Blend, ComputePipeline, Device, Format, Frame, Graph, GraphicsDesc, ImageId, Pass, PassId,
     Pipeline, StorageImage, Target,
 };
 
-use crate::{Texture, Viewpoint};
+use crate::{Light, LightKind, Texture, Viewpoint};
 
 static PREFILTER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.spv"));
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.spv"));
@@ -42,7 +48,33 @@ const TABLE_SAMPLES: u32 = 512;
 /// The threads across and down of each workgroup, as `prefilter.slang`'s `numthreads` has them.
 const GROUP: u32 = 8;
 
-/// The sky a frame shows, as [`RenderData::sky`](crate::RenderData::sky) gives it.
+/// The luminance, in candela per square meter, past which a sky's texels are its sun's: about a
+/// hundredth of the sun's disk at noon, of some 1.6 × 10⁹, and past any cloud's. A sun low in its
+/// sky, dimmed through more air, can fall short of it, and lights through the sky's light then as
+/// well as through the directional light that stands for it.
+const SUN: f32 = 1.0e7;
+
+/// The luminance, in `sky`'s texels' units, that the sky's light keeps each of its texels to, in a
+/// frame with `lights`: [`SUN`]'s, if a directional light shines, standing for the sky's sun, so
+/// that the sun lights through it alone; and none, `f32::MAX`, if none does.
+pub(crate) fn cutoff(sky: Sky, lights: &[Light]) -> f32 {
+    let shines = |light: &Light| {
+        light.kind == LightKind::Directional
+            && light.color.cmpgt(Vec3::ZERO).any()
+            && light.direction.try_normalize().is_some()
+    };
+    if sky.luminance > 0.0 && lights.iter().any(shines) {
+        SUN / sky.luminance
+    } else {
+        f32::MAX
+    }
+}
+
+/// The sky a frame shows, as [`RenderData::sky`](crate::RenderData::sky) gives it. Its sun lights
+/// once: in a frame with a directional light that shines, which stands for it, the sky's light
+/// keeps each of its texels to 10⁷ candela per square meter, leaving out the sun's disk, some
+/// 1.6 × 10⁹ at noon, and lighting by the rest, as it shows; and lights by all of it in a frame
+/// without.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sky {
     /// Its image of the world around, equirectangular: its center column the way toward +X, a
@@ -86,6 +118,7 @@ struct PrefilterPush {
     size: u32,
     roughness: f32,
     samples: u32,
+    cutoff: f32,
 }
 
 /// What the sky's draw pushes: `Push` in `shaders/sky.slang`, field for field.
@@ -149,6 +182,7 @@ impl SkyPass {
             size: face,
             roughness: 0.0,
             samples: 0,
+            cutoff: plan.cutoff,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch(groups(face, 6));
@@ -164,6 +198,7 @@ impl SkyPass {
                 size,
                 roughness: 0.0,
                 samples: 0,
+                cutoff: f32::MAX,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -187,6 +222,7 @@ impl SkyPass {
                 size,
                 roughness,
                 samples: SPECULAR_SAMPLES,
+                cutoff: f32::MAX,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -199,6 +235,7 @@ impl SkyPass {
             size: IRRADIANCE,
             roughness: 0.0,
             samples: IRRADIANCE_SAMPLES,
+            cutoff: f32::MAX,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch(groups(IRRADIANCE, 6));
@@ -213,6 +250,7 @@ impl SkyPass {
                 size: TABLE,
                 roughness: 0.0,
                 samples: TABLE_SAMPLES,
+                cutoff: f32::MAX,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(TABLE, 1));
@@ -252,6 +290,8 @@ pub(crate) struct Plan {
     /// The sky's texture, and its size.
     sky: u32,
     sky_size: [u32; 2],
+    /// What the light keeps each of the sky's texels to, as [`cutoff`] gives it.
+    cutoff: f32,
     /// The cube's side, and the specular light's first level's, and how many levels it has.
     cube_face: u32,
     specular_face: u32,
@@ -302,21 +342,24 @@ pub(crate) struct SkyLight {
     table: Option<StorageImage>,
     /// Whether a frame has written the table.
     tabled: bool,
-    /// The texture, and how many times its slot had come to show another image, that the light
-    /// holds, once a frame has prefiltered it.
-    from: Option<(u32, u64)>,
+    /// The texture, how many times its slot had come to show another image, and the bits of what
+    /// each texel was kept to, as [`cutoff`] gives it, that the light holds, once a frame has
+    /// prefiltered it.
+    from: Option<(u32, u64, u32)>,
 }
 
 impl SkyLight {
-    /// Whether the light holds `sky`'s texture as it's shown for the `shown`th time.
-    pub(crate) fn holds(&self, sky: Sky, shown: u64) -> bool {
-        self.from == Some((sky.texture.index, shown))
+    /// Whether the light holds `sky`'s texture as it's shown for the `shown`th time, each texel
+    /// kept to `cutoff`.
+    pub(crate) fn holds(&self, sky: Sky, shown: u64, cutoff: f32) -> bool {
+        self.from == Some((sky.texture.index, shown, cutoff.to_bits()))
     }
 
     /// The sky's part of the frame's data for a frame that doesn't prefilter `sky`, its texture
-    /// shown for the `shown`th time, if the light holds it and the frames have left it to sample.
-    pub(crate) fn data(&self, sky: Sky, shown: u64) -> Option<SkyData> {
-        if !self.holds(sky, shown) {
+    /// shown for the `shown`th time, each texel kept to `cutoff`, if the light holds it and the
+    /// frames have left it to sample.
+    pub(crate) fn data(&self, sky: Sky, shown: u64, cutoff: f32) -> Option<SkyData> {
+        if !self.holds(sky, shown, cutoff) {
             return None;
         }
         let specular = self.specular.as_ref()?;
@@ -330,11 +373,12 @@ impl SkyLight {
         })
     }
 
-    /// Makes what a frame needs to prefilter `sky`, `size` texels across and down, and adds the
-    /// passes that prefilter it to `graph`, its images the frame's targets from `first` on, in
-    /// the order [`SkyLight::targets`] gives them: the cube, of [`MOST_CUBE`] texels a side at
-    /// most, with its full chain of levels; the specular light, with a level for each step of
-    /// roughness; the diffuse light; and the table, if no frame has written it.
+    /// Makes what a frame needs to prefilter `sky`, `size` texels across and down, each texel kept
+    /// to `cutoff`, and adds the passes that prefilter it to `graph`, its images the frame's
+    /// targets from `first` on, in the order [`SkyLight::targets`] gives them: the cube, of
+    /// [`MOST_CUBE`] texels a side at most, with its full chain of levels; the specular light, with
+    /// a level for each step of roughness; the diffuse light; and the table, if no frame has
+    /// written it.
     pub(crate) fn plan(
         &mut self,
         device: &Arc<Device>,
@@ -342,6 +386,7 @@ impl SkyLight {
         first: usize,
         sky: Sky,
         size: [u32; 2],
+        cutoff: f32,
     ) -> Result<Plan> {
         let face = (size[0] / 4)
             .max(1)
@@ -384,6 +429,7 @@ impl SkyLight {
         Ok(Plan {
             sky: sky.texture.index,
             sky_size: size,
+            cutoff,
             cube_face: face,
             specular_face,
             specular_levels,
@@ -416,7 +462,7 @@ impl SkyLight {
     /// Notes that a frame has prefiltered `sky`, its texture shown for the `shown`th time, into
     /// the light, by `plan`, and drops the cube, which retires until the GPU is done with it.
     pub(crate) fn prefiltered(&mut self, sky: Sky, shown: u64, plan: &Plan) {
-        self.from = Some((sky.texture.index, shown));
+        self.from = Some((sky.texture.index, shown, plan.cutoff.to_bits()));
         self.tabled |= plan.table.is_some();
         self.cube = None;
     }

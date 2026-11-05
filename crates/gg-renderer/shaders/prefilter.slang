@@ -30,10 +30,14 @@ struct Push {
     float roughness;
     // How many samples each texel takes.
     uint samples;
+    // The luminance, in the sky's texels' units, that the cube keeps each point of the sky to: what
+    // lies past it is the sun's, which a directional light stands for.
+    float cutoff;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// The sky into a cube's first level, each texel the average of four points of the image across it.
+// The sky into a cube's first level, each texel the average of four points of the image across it,
+// each kept to the cutoff's luminance, in its own hue.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cube_main(uint3 id: SV_DispatchThreadID) {
@@ -46,7 +50,9 @@ void cube_main(uint3 id: SV_DispatchThreadID) {
     for (uint i = 0; i < 4; i++) {
         float2 at = float2(id.xy) + float2(0.25 + 0.5 * (i & 1), 0.25 + 0.5 * (i >> 1));
         float3 direction = cube_direction(id.z, at, float(push.size));
-        sum += equirect(sky, repeat, float2(push.source_size), direction);
+        float3 color = equirect(sky, repeat, float2(push.source_size), direction);
+        float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
+        sum += luminance > push.cutoff ? color * (push.cutoff / luminance) : color;
     }
     storage[push.target][id] = float4(sum / 4.0, 1.0);
 }

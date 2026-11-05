@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path};
 
-use gg_api::Project;
 use gg_api::asset::{self, Found};
+use gg_api::{Fetch, Project};
 use gg_engine::cook::{self, Compressed, Kind, Lod, Writer};
 use gg_engine::{Error, Result};
 
@@ -62,8 +62,9 @@ impl Take {
 /// whole, and returns what it holds, in the order of their paths.
 ///
 /// The package holds the files under the asset root, through the folders gg-api's scan goes
-/// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, and the
-/// manifest: sounds and music, scenes and other RON, and scripts, as they are; textures compressed
+/// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, the
+/// manifest and the fetch list: sounds and music, scenes and other RON, and scripts, as they are;
+/// textures compressed
 /// to BC7, or a Radiance HDR's colors of high dynamic range to BC6H, of one level, as a layer's
 /// texture has; models read as a run reads them, with the
 /// buffers and images they name, their primitives' triangles optimized and given levels of detail,
@@ -108,9 +109,9 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
                 .is_some_and(|rest| rest.starts_with('/'))
         })
     };
-    let manifest = dir.join(Project::FILE);
+    let (manifest, fetch) = (dir.join(Project::FILE), dir.join(Fetch::FILE));
     let taken = (found.iter())
-        .filter(|found| !in_mod(&found.path) && found.file != manifest)
+        .filter(|found| !in_mod(&found.path) && found.file != manifest && found.file != fetch)
         .filter_map(|found| Some((found, Take::of(&found.path)?)));
     let mut package = Package {
         writer: Writer::new(&project.assets, Some(&project.start)),
@@ -405,8 +406,8 @@ Targets fragment_main(Varyings input) {
     /// A package holds what a game's runs load, by their paths from the asset root: a texture
     /// compressed, with the ID its ID file holds; a model cooked; a scene and a script as they
     /// are; and a shader compiled, but the module it includes, which doesn't compile alone; and
-    /// leaves out the manifest, a mod's folder, and what no run loads, as code and notes. Cooked
-    /// again, it's the same bytes.
+    /// leaves out the manifest, the fetch list, a mod's folder, and what no run loads, as code and
+    /// notes. Cooked again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
@@ -414,6 +415,7 @@ Targets fragment_main(Varyings input) {
             "holds",
             &[
                 ("project.ron", PROJECT),
+                ("fetch.ron", "[]\n"),
                 ("scenes/main.ron", SCENE),
                 ("textures/stone.png.meta", &stone),
                 ("shaders/flat.slang", FLAT),

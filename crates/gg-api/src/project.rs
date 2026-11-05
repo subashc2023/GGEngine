@@ -172,13 +172,11 @@ impl Project {
     }
 }
 
-/// Checks that `path`, field `field`'s, is relative, its parts named, neither `.` nor `..`, with
-/// `/` between them.
+/// Checks that `path`, field `field`'s, is relative, as [`is_relative`] says.
 ///
 /// Fails with `project.bad`, naming the field.
 fn relative(field: &str, path: &str) -> Result<(), Failure> {
-    let part = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(':');
-    if path.split('/').all(part) {
+    if is_relative(path) {
         return Ok(());
     }
     let message = format!(
@@ -188,6 +186,13 @@ fn relative(field: &str, path: &str) -> Result<(), Failure> {
     Err(Failure::new("project.bad", message))
 }
 
+/// Whether `path` is a path inside a directory, relative to it: its parts named, neither `.` nor
+/// `..`, nor a drive's, with `/` between them.
+pub(crate) fn is_relative(path: &str) -> bool {
+    let part = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(':');
+    path.split('/').all(part)
+}
+
 /// Whether `path` is inside directory `dir`, both relative paths: every path is inside `.`.
 fn inside(path: &str, dir: &str) -> bool {
     dir == "." || (path.strip_prefix(dir)).is_some_and(|rest| rest.starts_with('/'))
@@ -195,7 +200,7 @@ fn inside(path: &str, dir: &str) -> bool {
 
 /// `path`, relative, joined to `dir` a part at a time, so that its separators are the OS's: `dir`
 /// itself for `.`.
-fn under(dir: &Path, path: &str) -> PathBuf {
+pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
     let parts = path.split('/').filter(|&part| part != ".");
     parts.fold(dir.to_owned(), |under, part| under.join(part))
 }

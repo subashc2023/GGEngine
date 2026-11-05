@@ -1,13 +1,15 @@
 //! `gg`, the command-line tool for GGEngine's games, as ARCHITECTURE.md's Agents and tools
 //! describes: it builds a game's development build and runs it, supervising it; runs headless
-//! checks; builds a game as it ships, laid out in a folder of its own; talks to running games
-//! through the tool API; and makes new games. Inside a game's project, it builds the project's game
+//! checks; builds a game as it ships, laid out in a folder of its own; fetches the files a project
+//! uses that its repository doesn't hold; talks to running games through the tool API; and makes
+//! new games. Inside a game's project, it builds the project's game
 //! and reaches the project's games alone. It prints what it finds as JSON, a line at a time, for
 //! agents and scripts as much as for people.
 
 mod build;
 mod classify;
 mod dx;
+mod fetch;
 mod game;
 mod mcp;
 mod new;
@@ -89,6 +91,14 @@ Build and run:
       (`gg.sign`).
       Building the project's game, `run`, `check` and `ship` first check that it's the package
       beside the project's manifest (`gg.project`).
+  fetch
+      Fetch the files the project's fetch list, `fetch.ron` beside its manifest, names: those its
+      repository doesn't hold, as models whose licenses keep them out of it, each from a folder
+      at a URL pinned to what it holds, with curl, into a folder of the project the repository
+      ignores. Each is checked against its SHA-256 before it takes its place (`gg.fetch`), and one
+      there as the list has it is kept. Writes the ID file of each texture, model and font under
+      the asset root that has none, as a development run would. Prints a line for each file,
+      `fetched` or `kept`, with the `id` it wrote, then one for the list.
 
 Make a game:
   new <NAME>
@@ -236,6 +246,7 @@ enum Command {
     Run(Run),
     Check(Check),
     Ship(Ship),
+    Fetch(Scope),
     New(String),
     /// The running games, those of the project whose manifest it names alone.
     Sessions(Option<PathBuf>),
@@ -274,6 +285,7 @@ fn main() -> ExitCode {
         Command::Run(run) => run::run(&run),
         Command::Check(check) => run::check(&check),
         Command::Ship(ship) => ship::ship(&ship).map(|()| true),
+        Command::Fetch(scope) => fetch::fetch(&scope).map(|()| true),
         Command::New(name) => new::new(&name).map(|()| true),
         Command::Sessions(project) => game::sessions(project.as_deref()).map(|sessions| {
             print(&sessions.to_string());
@@ -592,6 +604,17 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 package: parsed.package("ship", project.as_ref())?,
                 project,
             })
+        }
+        "fetch" => {
+            parsed.positional(0, 0, "fetch")?;
+            let scope = parsed.scope()?.ok_or_else(|| {
+                bad(
+                    "`gg fetch` fetches a project's files: run it in a project, or name one with \
+                     `--project`"
+                        .to_owned(),
+                )
+            })?;
+            Command::Fetch(scope)
         }
         "new" => {
             let name = parsed.positional(1, 1, "new <NAME>")?.remove(0);

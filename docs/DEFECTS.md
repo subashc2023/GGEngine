@@ -116,6 +116,12 @@ file, under Workflow.
 | The tool API's `assets` lists a model renamed since a layer added it as not loaded: `loaded` goes by the file a layer added, and for a texture by its ID too, but a model's ID names its images alone | Keep the models loaded by their IDs as well as their files | A tool acts on whether a model is loaded |
 | Two runs of one project that write ID files, as the editor's game and an agent's, whose IDs differ for a renamed asset, can each write one ID back in scans that overlap, as each checks its own listing before it links its file, leaving two ID files holding it, which the next scan warns of (`asset.duplicate_id`) | After linking an ID file, list the folder again, and remove the file just written if another ID file holds its ID | Several runs of one project that write ID files are common |
 
+## Cooking
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| The cooker cooks each image a model names twice: with its model, with its full chain of levels, and again as a texture of its own, of one level, as it takes every PNG and JPEG under the asset root, which no run loads unless a layer or a scene names it alone. Sponza's 69 images, once fetched, add 50 MB to the showcase's package of 141 MB, and part of its cook's 37 s | Leave out an image that a model names unless a scene names it, or the project says the game's code adds it alone, which the cooker can't see | A package's size or its cook's time matters, as a shipped game's does |
+
 ## Editor
 
 | Defect | Fix | Worth it when |

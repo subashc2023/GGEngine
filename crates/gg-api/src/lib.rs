@@ -3,9 +3,10 @@
 //! TCP connection on the machine's loopback; the session file a running game says where it serves
 //! in; what each method takes and answers; the memory a game's view is shared through as it
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
-//! [`Project`], which tools find a game by and its development build reads, and assets' ID files,
-//! [`asset`], which its development build writes beside each texture, model and font. It depends on
-//! no crate of the engine's, so that tools build without the GPU's toolchain.
+//! [`Project`], which tools find a game by and its development build reads; assets' ID files,
+//! [`asset`], which its development build writes beside each texture, model and font; and a
+//! project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it. It depends on no crate
+//! of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -205,6 +206,7 @@
 //! create or an add gives says.
 
 pub mod asset;
+pub mod fetch;
 mod project;
 // It maps memory another process shares, which only unsafe code reaches.
 #[allow(unsafe_code)]
@@ -222,6 +224,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 
+pub use fetch::Fetch;
 pub use project::{Project, UNBUILT};
 
 /// The most bytes a line may have, its line break aside, past which the side reading it drops the

@@ -107,17 +107,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Lights and PBR materials** (2026-11-04)
 - **Image-based lighting** (2026-11-04)
 - **Cascaded shadow maps** (2026-11-04)
+- **Sponza** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it. Its last milestone:
-
-- **Sponza.** The showcase's Sponza scene, lit by a sun with shadows and a sky, the sky's sun
-  lighting it once, as Deferred has it: Khronos glTF-Sample-Assets' Sponza, fetched by a command at
-  a pinned commit and checked against SHA-256 hashes into a folder git ignores, since Crytek's
-  CRYENGINE Limited License it's under is no open one, and CI's references take small scenes made
-  in code. Done when Phase 12's *Done when* holds, its frame time and memory in `engine.perf`, from
-  its package too.
+**Phase 12, render graph and PBR**, as Next has it, its milestones done. It closes once each pass's
+time on the GPU is seen on Tracy's GPU timeline, by its viewer or `tracy-csvexport` of the release
+the root Cargo.toml pins, which this machine hasn't: the rest of its *Done when* holds, as Sponza's
+commit says. Phase 13 follows.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -188,6 +185,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
 | RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
+| `gg fetch` taking archives, as a model shipped zipped: it fetches files one at a time, each named in the fetch list with its SHA-256 | A project fetches what comes only as an archive, as Phase 13's Bistro may |
+| A scene that names a fetched file not fetched yet saying that `gg fetch` fetches it: its load fails naming the file's ID, as for any asset not there (`asset.no_model`) | Someone opens such a scene and is lost |
 | Tokens of fewer capabilities, minted for clients that can't read the session file, and grants kept to one scene: a connection's `hello` narrows its own grant, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes, but any process that reads the session file reaches everything | A client the user doesn't run as their own, such as one on another machine, an agent that can read the file but mustn't reach everything, or one kept to one scene |
 | `gg mcp --grant` listing only the tools its grant covers: it lists them all, and the game refuses the rest with `api.ungranted` | An agent's tools list misleads it |
 | A mods menu, where the player turns mods on and off and approves what each asks for: installing one is consent, and the game's limits cap what any gets | A game's players install mods from strangers |
@@ -252,15 +251,15 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A model's image that holds something else as its file is read again, as colors where it held a normal map, taking a texture of its own: the model takes nothing until the run starts again (`asset.model_changed`) | Someone retargets a model's images while its game runs |
 | The editor drawing lights in its view, as icons and spots' cones | Someone places lights by eye |
 | A sky made procedurally, as Hillaire's atmosphere ("A Scalable and Production Ready Sky and Atmosphere Rendering Technique", 2020), from the world's directional light in its units, which a time of day moves, with haze over distance: a sky is an image | A game's sky follows its sun, or the user asks for one |
-| Turning a sky, as EXT_lights_image_based turns one: its image's middle column faces +X | A sky's sun must line up with the directional light that stands for it |
-| A sun in the sky lighting once: its disk lights through the sky's light as well as through a directional light a game adds for it, which casts shadows where the sky's light doesn't, and its texels past 65,504, the most a half float holds, are clamped to it | Sponza, the first scene a sun and a sky light together; the showcase's shadows scene turns its sky down |
+| Turning a sky, as EXT_lights_image_based turns one: its image's middle column faces +X, and a scene faces its sky's sun by turning itself, as the showcase's Sponza turns its model | A scene can't turn to face its sky's sun, as a level laid out first |
+| Finding a sky's sun by its contrast with the sky round it, rather than by 10⁷ candela per square meter, which a sun low in its sky can fall short of, lighting both through the sky's light and through the directional light that stands for it; and its way and illuminance, for that light, which the showcase's Sponza's sun was given by hand from its sky's texels | A scene under a low sun lights twice, or skies change often enough that setting their suns by hand matters |
 | Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
 | Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes often, as a time of day's, or a hitch that shows |
 | Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
 | Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
 | Point and spot lights' shadows, as cubes and maps in an atlas: a directional light alone casts them | A game lit by them needs their shadows |
 | More than one directional light's shadows: of those that cast them, the brightest does | A scene with two suns, or a sun and a moon at once |
-| Blending between cascades over a band at each split, where shadows' sharpness now steps from one cascade to the next | The step shows, as along Sponza's floors |
+| Blending between cascades over a band at each split, where shadows' sharpness now steps from one cascade to the next | The step shows, as it doesn't in the showcase's Sponza at 1,280 by 720 |
 | Casters culled for each cascade against its box: each cascade draws every opaque draw, four times over the view's | Phase 13's culling, or shadows' passes that cost enough to matter |
 | Shadow maps' size, the cascades' count and splits, and the shadows' offsets and bias, set by a game or by quality settings: 2,048 texels, four cascades, three quarters logarithmic, and the constants `shaders/model.slang` and `src/shadow.rs` hold | A game needs others, or a device is too slow for them |
 | Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |

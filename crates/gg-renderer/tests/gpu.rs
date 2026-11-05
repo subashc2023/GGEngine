@@ -84,6 +84,7 @@ fn main() -> ExitCode {
         a_uniform_sky_lights_white_as_itself,
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
+        a_skys_sun_lights_once,
         shadows_fall_where_their_casters_put_them,
         shadows_hold_still_as_the_view_moves,
         surfaces_cast_no_shadows_on_themselves,
@@ -3955,13 +3956,20 @@ fn lit_spheres_match_their_reference() {
     check(renderer, "lit_spheres", SIZE, SIZE);
 }
 
-/// A sky's texture of `size` texels, each `texel(x, y)`'s linear RGB, as [`Texels::Hdr`] takes
-/// them, alpha 1.
+/// A sky's texture of `size` texels, each `texel(x, y)`'s linear RGB, as [`sky_pixels`] makes them.
 fn sky_texture(
     textures: &mut Textures,
     size: [u32; 2],
     texel: impl Fn(u32, u32) -> [f32; 3],
 ) -> Texture {
+    textures
+        .add("sky", size, sky_pixels(size, texel), Texels::Hdr)
+        .expect("a sky")
+}
+
+/// The pixels of a sky's image of `size` texels, each `texel(x, y)`'s linear RGB, as
+/// [`Texels::Hdr`] takes them, alpha 1.
+fn sky_pixels(size: [u32; 2], texel: impl Fn(u32, u32) -> [f32; 3]) -> Vec<u8> {
     let mut pixels = Vec::new();
     for y in 0..size[1] {
         for x in 0..size[0] {
@@ -3971,9 +3979,7 @@ fn sky_texture(
             }
         }
     }
-    textures
-        .add("sky", size, pixels, Texels::Hdr)
-        .expect("a sky")
+    pixels
 }
 
 /// Squares, each a model's, seen head-on without perspective under a sky of 0.5 every way, with
@@ -4267,6 +4273,107 @@ fn sky_lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
+}
+
+/// A white floor seen from above under a sky of 10⁵ candela per square meter with a sun in it, a
+/// texel past 10⁷, as a sun's disk is, 45° up: lit by a directional light from the sun too, it
+/// shows as under the sky without its sun and the light, the sky's light leaving the sun out; lit
+/// by the sky alone, its sun lights it through the sky's light, the floor much brighter than under
+/// the sky without it. The sky's light is prefiltered again as the light comes and goes.
+fn a_skys_sun_lights_once() {
+    const SIZE: u32 = 8;
+    const SKY: [u32; 2] = [512, 256];
+    const SUN: [u32; 2] = [256, 64];
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 5.0, 0.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_2),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+    };
+    // The texel's 6,260 of 10⁶ each, about 1.07 × 10⁻⁴ steradians, light the floor about as much
+    // as the sky's 0.1 does; each of the texels past 10⁷ that the sky's light keeps to it, some
+    // 10⁻⁴ of that.
+    let texel = |sun: bool| {
+        move |x, y| {
+            if sun && [x, y] == SUN {
+                [6260.0; 3]
+            } else {
+                [0.1; 3]
+            }
+        }
+    };
+    let sky = sky_texture(&mut stores.textures, SKY, texel(true));
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0e6,
+    });
+    // Toward the sun's texel's center, as the image maps ways.
+    let across = ((SUN[0] as f32 + 0.5) / SKY[0] as f32 - 0.5) * 2.0 * PI;
+    let down = (SUN[1] as f32 + 0.5) / SKY[1] as f32 * PI;
+    let (sin, cos) = (math::libm::sinf, math::libm::cosf);
+    let to_sun = Vec3::new(cos(across) * sin(down), cos(down), sin(across) * sin(down));
+    let sun = Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: -to_sun,
+        color: Vec3::splat(6.0e5),
+        range: None,
+        shadow_distance: None,
+    };
+    let square = model_square(&mut stores.meshes);
+    let white = Material {
+        color: Vec4::ONE,
+        metallic: 0.0,
+        roughness: 1.0,
+        ..Material::default()
+    };
+    let white = stores.materials.add(&white);
+    let floor = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(2.0, Vec3::ZERO), &floor, 0);
+    let viewport = filling([SIZE, SIZE]);
+    // The sky at 0.2 on the floor.
+    let floor_shows = |renderer: &mut Renderer, stores: &mut Stores| {
+        let data = RenderData {
+            exposure: 2.0e-6,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(renderer, data);
+        pixel_at(&frame_pixels(renderer), SIZE, [SIZE / 2, SIZE / 2])
+    };
+    stores.lights = vec![sun];
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let lit_with_sun = floor_shows(&mut renderer, &mut stores);
+    stores.lights.clear();
+    let with_sun = floor_shows(&mut renderer, &mut stores);
+    let without = sky_pixels(SKY, texel(false));
+    let replaced = (stores.textures).replace("sky", sky, SKY, without, Texels::Hdr);
+    replaced.expect("a sky without its sun");
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let without_sun = floor_shows(&mut renderer, &mut stores);
+    stores.lights = vec![sun];
+    let lit_without_sun = floor_shows(&mut renderer, &mut stores);
+    assert!(
+        close(lit_with_sun, lit_without_sun),
+        "lit by the light that stands for its sun, the floor shows {lit_with_sun:?} under the sky \
+         with its sun and {lit_without_sun:?} under the sky without"
+    );
+    assert!(
+        with_sun[0] >= without_sun[0] + 32,
+        "lit by the sky alone, the floor shows {with_sun:?} under the sky with its sun, too near \
+         {without_sun:?} under the sky without"
+    );
+    assert!(
+        lit_without_sun[0] >= without_sun[0] + 32,
+        "the light lights the floor, {lit_without_sun:?}, much as the sun does: {without_sun:?} \
+         without it"
+    );
+    shut_down(renderer);
 }
 
 /// The bytes of a shadow map of a light's cascade: 2048 texels across and down, of 32-bit depth.

@@ -226,7 +226,8 @@ pub struct RenderData<'a> {
     /// all around, which shaders read through the frame's data too: from the first frame that
     /// renders the view once its texture's slot shows an image of its own, which that frame
     /// prefilters, and again each time it shows another. While it shows a stand-in, the view shows
-    /// no sky and is lit by none.
+    /// no sky and is lit by none. In a frame with a directional light that shines, which stands for
+    /// the sky's sun, its light leaves the sun out, as [`Sky`] says.
     pub sky: Option<Sky>,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
@@ -684,10 +685,11 @@ impl Renderer {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
         // The sky the view shows, while its texture's slot shows an image of its own, with that
-        // image's size and how many times the slot has come to show another.
+        // image's size, how many times the slot has come to show another, and what its light
+        // keeps each texel to, leaving out a sun that a directional light stands for.
         let sky = data.sky.filter(|_| renders_view).and_then(|sky| {
             let (size, shown) = self.meshes.texture_shown(sky.texture)?;
-            Some((sky, size, shown))
+            Some((sky, size, shown, sky::cutoff(sky, data.lights)))
         });
         if sky.is_some() && self.sky.is_none() {
             self.sky = Some(SkyPass::new(&self.device)?);
@@ -705,17 +707,19 @@ impl Renderer {
         let output = graph.target(0);
         let size = data.viewport.size;
         // First, the sky's prefiltering, if this frame prefilters it: the first to render the view
-        // since its texture came to show the image it shows. Its images are the targets after the
-        // windows'. A frame that doesn't takes the light from those before.
+        // since its texture came to show the image it shows, or since a directional light came to
+        // stand for its sun or ceased to. Its images are the targets after the windows'. A frame
+        // that doesn't takes the light from those before.
         let plan = match sky {
-            Some((sky, sky_size, shown)) if !self.sky_light.holds(sky, shown) => {
+            Some((sky, sky_size, shown, cutoff)) if !self.sky_light.holds(sky, shown, cutoff) => {
                 let first = 1 + windows_drawn;
-                Some((self.sky_light).plan(&self.device, graph, first, sky, sky_size)?)
+                let sky_light = &mut self.sky_light;
+                Some(sky_light.plan(&self.device, graph, first, sky, sky_size, cutoff)?)
             }
             _ => None,
         };
         let held = match (sky, &plan) {
-            (Some((sky, _, shown)), None) => self.sky_light.data(sky, shown),
+            (Some((sky, _, shown, cutoff)), None) => self.sky_light.data(sky, shown, cutoff),
             _ => None,
         };
         let view = renders_view.then(|| {
@@ -981,7 +985,7 @@ impl Renderer {
         }
         self.ui.free_textures();
         frame.submit()?;
-        if let (Some(plan), Some((sky, _, shown))) = (&plan, sky) {
+        if let (Some(plan), Some((sky, _, shown, _))) = (&plan, sky) {
             self.sky_light.prefiltered(sky, shown, plan);
         }
         self.waited = self.frames.waited();

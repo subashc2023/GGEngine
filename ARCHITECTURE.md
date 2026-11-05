@@ -114,7 +114,8 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   scene, its Luau scripts and 2D physics, as the showcase's package runs, and shows how a game
   builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs, and which
-  builds a game as it ships, `gg ship`, as [Builds](#builds) says.
+  builds a game as it ships, `gg ship`, as [Builds](#builds) says, and fetches a project's files
+  its repository doesn't hold, `gg fetch`, as [Project state](#project-state) says.
 - **`tools/cook`:** the offline asset cooker, `gg-cook`, which writes a game's
   [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts,
   compiles shaders, decodes images, reads models and makes mip levels as runs do and writes and
@@ -444,6 +445,15 @@ A project's state is text that people and agents edit, diff and merge with ordin
   manifest's directory. Tools read a manifest and never rewrite it, and `gg new` writes one. A
   development build reads its game's, through `App::project`; shipping builds start from cooked
   data, so a build without `dev` reads none, and runs from its game's package.
+- **Fetched files.** What a project uses that its repository mustn't hold, as a model whose license
+  keeps it out, as Sponza's does the showcase's, its fetch list, `fetch.ron` beside its manifest,
+  names: each file under a folder at a URL pinned to what it holds, as a repository's at a commit,
+  with its SHA-256, and the asset ID its scenes name it by, if they do. `gg fetch` fetches them,
+  with curl, into a folder of the project its `.gitignore` leaves out, each put in its place once
+  its SHA-256 is the list's, and writes each asset's ID file, with the list's ID or a fresh one, as
+  a development run would, so that every checkout that fetches gives it the ID its scenes name. A
+  checkout that hasn't fetched them, as CI's, can't load a scene that names them, which the
+  showcase's tests leave unloaded.
 - **Packages.** A game's package is one file, which the cooker, `gg-cook`, writes from its project,
   and a build of the game without `dev` runs from: `<executable>.ggpk` beside its executable, in a
   macOS app's bundle in its `Contents/Resources`, or the one `--package` names, a run of a project
@@ -461,8 +471,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
   makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels; and the
   rest as they are, sounds and music, scenes and other RON, and scripts. It leaves out the
-  manifest, mods' folders, whose scripts a player installs, a module that shaders include rather
-  than one that compiles alone, and what no run loads, as code and docs, by its extension, a
+  manifest and the fetch list, mods' folders, whose scripts a player installs, a module that
+  shaders include rather than one that compiles alone, and what no run loads, as code and docs, by
+  its extension, a
   model's buffers among them, which its model holds. Which of
   the rest a game's code loads the cooker can't know, but it refuses a project whose package
   wouldn't hold its start scene (`cook.no_start`), and, as it takes every PNG and JPEG under the
@@ -1290,8 +1301,17 @@ diffuse takes, cosine-weighted, and a cube of the cube's side, at most 256, of t
 specular takes, a level for each step of roughness, from none at its first to 1 at its last, of 8
 texels; and, once, the split sum's table, of 128 by 128, of GGX's reflectance as F0's scale and bias
 by the cosine of the view's angle and the roughness. Those images keep that light until the sky
-shows another image, as a reload does. A view whose sky's texture shows its stand-in shows no sky,
-and is lit by none; a frame that renders no view prefilters nothing.
+shows another image, as a reload does, or a directional light comes to stand for its sun or ceases
+to. A view whose sky's texture shows its stand-in shows no sky, and is lit by none; a frame that
+renders no view prefilters nothing.
+
+A sky's sun lights once. In a frame with a directional light that shines, which stands for the sun,
+casting shadows where the sky's light can't, the cube keeps each point of the sky to 10⁷ candela
+per square meter, about a hundredth of the noon sun's disk and past any cloud, in its own hue, so
+that the sun's disk lights through the light alone; the view still draws the sky whole. A frame
+without one lights by the whole sky. The light should shine from where the sky shows its sun, its
+way and illuminance found from the sky's texels past that, as the showcase's Sponza's are; a sun low
+in its sky, dimmed through more air, can fall short of it, and then lights twice.
 
 A directional light casts shadows, unless its `Light` says it doesn't, as far ahead of the camera as
 its shadow distance, 100 units by default, fading out over the last tenth: of a world's lights that

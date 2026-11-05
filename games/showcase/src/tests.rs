@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use gg_api::Project;
+use gg_api::{Fetch, Project};
 use gg_engine::Transform;
 use gg_engine::math::{Quat, Vec3};
 use gg_engine::reflect::Value;
@@ -74,15 +74,48 @@ fn loaded() -> (Context, Showcase) {
     (cx, showcase)
 }
 
-/// Every scene loads, with the textures, models and font it names by their IDs, holds a camera
-/// the view sees through, and saves to its own bytes, so that a type of the game's or the
-/// engine's, or a script's component, that changes under it fails here.
+/// What scenes name the files the fetch list names that aren't there, as before `cargo gg fetch`
+/// has fetched them, by: their paths, and the IDs the list gives them.
+fn unfetched() -> Vec<String> {
+    let fetch = Fetch::read(dir()).expect("the fetch list reads");
+    let missing = fetch.files().filter(|file| !file.at(dir()).is_file());
+    let names = missing.flat_map(|file| [Some(file.path), file.id.map(|id| id.to_string())]);
+    names.flatten().collect()
+}
+
+/// What the fetch list fetches stays out of the repository: each folder it fetches into is one
+/// the project's .gitignore leaves out.
+#[test]
+fn fetched_files_stay_out_of_the_repository() {
+    let fetch = Fetch::read(dir()).expect("the fetch list reads");
+    let ignore = fs::read_to_string(dir().join(".gitignore")).expect("the .gitignore");
+    for source in &fetch.0 {
+        let line = format!("/{}/", source.into);
+        assert!(
+            ignore.lines().any(|ignored| ignored == line),
+            "{line} isn't in .gitignore"
+        );
+    }
+}
+
+/// Every scene loads, with the textures, models and font it names by their IDs or paths, holds a
+/// camera the view sees through, and saves to its own bytes, so that a type of the game's or the
+/// engine's, or a script's component, that changes under it fails here; but one naming a file the
+/// fetch list fetches, before it's fetched.
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 11, "{scenes:?}");
+    assert_eq!(scenes.len(), 12, "{scenes:?}");
+    let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
+        if let Some(name) = (unfetched.iter()).find(|name| text.contains(&format!("\"{name}\""))) {
+            println!(
+                "{} isn't loaded: it names {name}, which `cargo gg fetch` fetches",
+                path.display()
+            );
+            continue;
+        }
         let (mut cx, _showcase) = loaded();
         let roots = cx.load_scene_file(&path);
         let roots = roots.unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
