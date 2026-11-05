@@ -351,7 +351,10 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
 // cutoff, as it draws nothing there.
 [shader("fragment")]
 void shadow_main(Varyings input) {
-    Frame frame = *push.frame;
+    // Loaded whole, as fragment_main's is. Read for its material table alone, slangc reaches the
+    // table's address through a pointer into the frame, which AMD's driver (25.10.30) miscompiles
+    // beside a texture's sample, reading the frame at address 0 and losing the device.
+    Frame frame = loadAligned<8>(push.frame);
     Material material = frame.materials[push.params[input.instance].material];
     float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a;
     if (alpha < material.cutoff) {

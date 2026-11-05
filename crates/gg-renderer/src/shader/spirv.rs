@@ -1089,6 +1089,28 @@ pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool, bool)> {
     sampled.into_iter().map(decorated).collect()
 }
 
+/// How many of the pointer types `spirv` declares point into buffer memory, by device address, at
+/// a pointer: what a shader makes as it reaches into a buffer for a pointer the buffer holds,
+/// rather than loading what holds it whole.
+#[cfg(test)]
+pub(super) fn buffer_pointers_to_pointers(spirv: &[u8]) -> usize {
+    let words = words(spirv).expect("SPIR-V");
+    let (mut pointers, mut into_buffers) = (HashSet::new(), Vec::new());
+    for instruction in instructions(&words) {
+        if let (_, OP_TYPE_POINTER, &[id, storage, pointee]) =
+            instruction.expect("an instruction that can be read")
+        {
+            pointers.insert(id);
+            if storage == PHYSICAL_STORAGE_BUFFER {
+                into_buffers.push(pointee);
+            }
+        }
+    }
+    (into_buffers.iter())
+        .filter(|pointee| pointers.contains(pointee))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

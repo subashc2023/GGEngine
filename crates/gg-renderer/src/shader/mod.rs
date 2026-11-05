@@ -1043,6 +1043,22 @@ mod tests {
         }
     }
 
+    /// The masked model shader's shadows load the frame's data whole, as `shadow_main` in
+    /// model.slang says why: reaching into it for the material table's address alone makes a
+    /// pointer to a pointer in buffer memory.
+    #[test]
+    fn masked_shadows_load_the_frame_whole() {
+        assert_eq!(
+            spirv::buffer_pointers_to_pointers(model::MASKED_SHADOW_SPIRV),
+            0
+        );
+        assert_eq!(
+            spirv::buffer_pointers_to_pointers(model::MASKED_SPIRV),
+            0,
+            "nor does the masked model shader itself, whose shadows load as it does"
+        );
+    }
+
     #[test]
     fn a_shader_compiled_again_lists_its_files_and_replaces_itself() {
         let dir = Scratch::new("compiled-again");
