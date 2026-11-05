@@ -37,10 +37,10 @@ impl Format {
     /// [`Graph::hdr`]: crate::Graph::hdr
     pub const HDR: Self = Self::new(Kind::Hdr.format());
 
-    /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::shadow`])
+    /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::depth`])
     /// does.
     ///
-    /// [`Graph::shadow`]: crate::Graph::shadow
+    /// [`Graph::depth`]: crate::Graph::depth
     pub const DEPTH: Self = Self::new(vk::Format::UNDEFINED).with_depth();
 
     /// A target's format, `color`, without IDs or depth.

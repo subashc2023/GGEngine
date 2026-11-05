@@ -24,7 +24,8 @@ use crate::{ColorImage, Device, Faces, Format, GpuBuffer, Pipeline};
 impl<'a> Frame<'a> {
     /// Records `pass`, a pass of the frame's graph that draws, which must be the next of its passes
     /// to record: its attachments cleared or kept as it declared them, its depth cleared to 0, as far
-    /// away as depth goes, and its IDs to 0, for none. Rendering ends when the pass is dropped.
+    /// away as depth goes, and its IDs to 0, for none, unless they're kept. Rendering ends when the
+    /// pass is dropped.
     /// Returns `None`, recording nothing, for a pass into a swapchain that had no image ready this
     /// frame; the first target always has one.
     ///
@@ -51,7 +52,7 @@ impl<'a> Frame<'a> {
         // alone, which is one of the graph's own.
         let first = color.unwrap_or_else(|| {
             (uses.iter())
-                .find_map(|&(image, use_)| (use_ == Use::Depth).then_some(image))
+                .find_map(|&(image, use_)| matches!(use_, Use::Depth { .. }).then_some(image))
                 .expect("a pass that draws has a color target or depth, as it was checked to")
         });
         // Before anything is recorded, as a refusal records nothing.
@@ -88,6 +89,13 @@ impl<'a> Frame<'a> {
                 .image_view(view)
                 .image_layout(use_.access().layout)
                 .store_op(store);
+            let load = |kept| {
+                if kept {
+                    vk::AttachmentLoadOp::LOAD
+                } else {
+                    vk::AttachmentLoadOp::CLEAR
+                }
+            };
             match use_ {
                 Use::Color(clear) => {
                     attachments[0] =
@@ -101,25 +109,21 @@ impl<'a> Frame<'a> {
                                 },
                             });
                 }
-                Use::Ids => {
+                Use::Ids { kept } => {
                     format = format.with_ids();
-                    attachments[1] = attachment.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(
-                        vk::ClearValue {
-                            color: vk::ClearColorValue { uint32: [0; 4] },
-                        },
-                    );
+                    attachments[1] = attachment.load_op(load(kept)).clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue { uint32: [0; 4] },
+                    });
                 }
-                Use::Depth => {
+                Use::Depth { kept } => {
                     format = format.with_depth();
                     depth_attachment =
-                        Some(attachment.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(
-                            vk::ClearValue {
-                                depth_stencil: vk::ClearDepthStencilValue {
-                                    depth: 0.0,
-                                    stencil: 0,
-                                },
+                        Some(attachment.load_op(load(kept)).clear_value(vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue {
+                                depth: 0.0,
+                                stencil: 0,
                             },
-                        ));
+                        }));
                 }
                 Use::Sampled | Use::ComputeSampled | Use::Storage | Use::CopySource => {}
             }

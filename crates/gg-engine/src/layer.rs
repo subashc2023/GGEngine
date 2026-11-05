@@ -2796,9 +2796,10 @@ impl Context {
         by_file || id.is_some_and(|id| self.assets.live_texture(&id.to_string()).is_some())
     }
 
-    /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
-    /// meshes drawn before it but where an opaque one is nearer, in the game's view as the camera
-    /// sees it; the shader gets `params`. The view is the main window's central area, which the
+    /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, in the
+    /// game's view as the camera sees it: with what's opaque, first, hiding what's behind it, if
+    /// `shader` is opaque, or else over what's drawn before it and what's opaque, but where what's
+    /// opaque is nearer; the shader gets `params`. The view is the main window's central area, which the
     /// panels dock around, or the panel that [`App::view_panel`](crate::App::view_panel) names.
     /// Consecutive draws of one mesh with one shader render as one instanced draw, whatever their
     /// transforms and parameters, so a frame of many takes few draws on the GPU. It's of no
@@ -2813,16 +2814,18 @@ impl Context {
         self.draws.push(mesh, shader, transform, params);
     }
 
-    /// Draws `sprite` this frame, where `transform` places it in the world, over the meshes drawn
-    /// before it but where an opaque one is nearer, in the game's view as the camera sees it.
+    /// Draws `sprite` this frame, where `transform` places it in the world, over what's drawn
+    /// before it and what's opaque, but where what's opaque is nearer, in the game's view as the
+    /// camera sees it.
     /// Unscaled, a sprite is a unit square around the transform's translation, as [`Sprite`] says.
     /// It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.draws.push_sprite(transform, sprite);
     }
 
-    /// Draws `circle` this frame, where `transform` places it in the world, over the meshes drawn
-    /// before it but where an opaque one is nearer, in the game's view as the camera sees it.
+    /// Draws `circle` this frame, where `transform` places it in the world, over what's drawn
+    /// before it and what's opaque, but where what's opaque is nearer, in the game's view as the
+    /// camera sees it.
     /// Unscaled, a circle is a unit across, around the transform's translation, as [`Circle`]
     /// says. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_circle(&mut self, transform: Mat4, circle: Circle) {
@@ -2830,8 +2833,8 @@ impl Context {
     }
 
     /// Draws `text` this frame in `style`, where `transform` places its origin in the world, over
-    /// the meshes drawn before it but where an opaque one is nearer, in the game's view as the
-    /// camera sees it: a line for each of its own, which `\n` ends, or `\r\n`, laid out left to
+    /// what's drawn before it and what's opaque, but where what's opaque is nearer, in the game's
+    /// view as the camera sees it: a line for each of its own, which `\n` ends, or `\r\n`, laid out left to
     /// right, each of its characters a glyph of the style's font as its kerning places them, shaped
     /// without the features that put glyphs in place of others, as ligatures, its em `style.size`
     /// of the transform's units, and its origin the point of its box `style.align` says, in the
@@ -2929,9 +2932,10 @@ impl Context {
     /// [`grid::shown`] says, and the plane's two axes in their colors, [`grid::RED`],
     /// [`grid::GREEN`] and [`grid::BLUE`], as the editor's view shows them. The lines show once
     /// they're 8 pixels apart, are crisp, a pixel each, through an orthographic viewpoint that's
-    /// [`grid::square`], and fade toward grazing angles. It draws by straight alpha over the meshes
-    /// drawn before it but where an opaque one is nearer, and is of no entity, so drawn before the
-    /// world, which the engine draws after the layers' draws, it leaves picks to what's on top.
+    /// [`grid::square`], and fade toward grazing angles. It draws by straight alpha over what's
+    /// drawn before it and what's opaque, but where what's opaque is nearer, and is of no entity, so
+    /// drawn before the world, which the engine draws after the layers' draws, it leaves picks to
+    /// what's on top.
     /// `viewpoint` is the one the frame sees from, as [`set_viewpoint`](Self::set_viewpoint) sets
     /// it. Nothing draws while the view has no area, as in a dockspace's first frame, or while the
     /// plane is too near edge-on to show.

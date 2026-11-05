@@ -33,13 +33,12 @@ pub const MAX_BUFFER_READ: u64 = 256;
 /// passes again every frame; it keeps its memory, so that a frame that adds no more than the last
 /// allocates nothing.
 ///
-/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::depth`] and
-/// [`Graph::shadow`], last for a frame: each
-/// is undefined until a pass of the frame writes it, so its first use writes it whole, and passes
-/// whose uses of two of them don't overlap may find them in the same memory. The frames keep them
-/// for the frames after, which add them alike, by their names, kinds and sizes. Its own buffers,
-/// [`Graph::buffer`], last for a frame too, undefined until a pass writes them; the frames keep
-/// each for the frames after that add one of its name no larger.
+/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`] and [`Graph::depth`], last for
+/// a frame: each is undefined until a pass of the frame writes it, so its first use writes it
+/// whole, and passes whose uses of two of them don't overlap may find them in the same memory. The
+/// frames keep them for the frames after, which add them alike, by their names, kinds and sizes.
+/// Its own buffers, [`Graph::buffer`], last from frame to frame: the frames keep each for the
+/// frames after that add one of its name no larger, holding what the last of them left there.
 #[derive(Default)]
 pub struct Graph {
     pub(crate) images: Vec<ImageDecl>,
@@ -89,12 +88,11 @@ pub(crate) enum Kind {
     /// sample it.
     Ids,
     /// Depth, as 32-bit floats, which draws test and write: from 1 at the near plane to 0 far
-    /// away, as the renderer's cameras project it. Every device the engine opens renders it.
+    /// away, as the renderer's cameras project it. Later passes sample it: by comparison, through
+    /// the bindless set's comparison sampler, as a shadow map's is, or a texel at a time, as the
+    /// view's is to build its depth pyramid. Every device the engine opens renders it and samples
+    /// it both ways.
     Depth,
-    /// Depth, as [`Kind::Depth`] holds it, which later passes sample, as a shadow map's is: by
-    /// comparison, through the bindless set's comparison sampler, which every device the engine
-    /// opens samples it with.
-    Shadow,
 }
 
 impl Kind {
@@ -103,7 +101,7 @@ impl Kind {
             Self::Color => ColorImage::FORMAT.color,
             Self::Hdr => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids => vk::Format::R32G32_UINT,
-            Self::Depth | Self::Shadow => vk::Format::D32_SFLOAT,
+            Self::Depth => vk::Format::D32_SFLOAT,
         }
     }
 
@@ -117,8 +115,7 @@ impl Kind {
             }
             // Never read back: what a frame reads back is what it shows.
             Self::Hdr => vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-            Self::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            Self::Shadow => {
+            Self::Depth => {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
             }
         }
@@ -127,13 +124,8 @@ impl Kind {
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
             Self::Color | Self::Hdr | Self::Ids => COLOR_RANGE,
-            Self::Depth | Self::Shadow => DEPTH_RANGE,
+            Self::Depth => DEPTH_RANGE,
         }
-    }
-
-    /// Whether passes draw their depth into it.
-    fn is_depth(self) -> bool {
-        matches!(self, Self::Depth | Self::Shadow)
     }
 
     /// Whether shaders may sample it, through a slot in the bindless set.
@@ -148,10 +140,12 @@ pub(crate) enum Use {
     /// Its color target, cleared first to this color, in linear RGBA, or with `None` drawn over as
     /// the image's last use left it.
     Color(Option<[f32; 4]>),
-    /// The IDs beside its color target, cleared first to 0, for none.
-    Ids,
-    /// The depth its draws test and write, cleared first to 0, as far away as depth goes.
-    Depth,
+    /// The IDs beside its color target, cleared first to 0, for none, unless `kept`, as the image's
+    /// last use left them.
+    Ids { kept: bool },
+    /// The depth its draws test and write, cleared first to 0, as far away as depth goes, unless
+    /// `kept`, as the image's last use left it.
+    Depth { kept: bool },
     /// Sampled by its fragment shaders, through the image's slot in the bindless set.
     Sampled,
     /// Sampled by its compute shaders, through the image's slot in the bindless set.
@@ -174,17 +168,20 @@ impl Use {
             discards,
         };
         match self {
-            Self::Color(Some(_)) | Self::Ids => color(vk::AccessFlags2::NONE, true),
-            // Blending reads what's there.
-            Self::Color(None) => color(vk::AccessFlags2::COLOR_ATTACHMENT_READ, false),
-            // A clear writes at the early fragment tests, and a store at the late ones.
-            Self::Depth => Access {
+            Self::Color(Some(_)) | Self::Ids { kept: false } => color(vk::AccessFlags2::NONE, true),
+            // Blending reads what's there, as loading what's kept does.
+            Self::Color(None) | Self::Ids { kept: true } => {
+                color(vk::AccessFlags2::COLOR_ATTACHMENT_READ, false)
+            }
+            // A clear or a load writes or reads at the early fragment tests, and a store writes at
+            // the late ones.
+            Self::Depth { kept } => Access {
                 stages: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                     | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                 reads: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
                 writes: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                discards: true,
+                discards: !kept,
             },
             Self::Sampled => Access {
                 stages: vk::PipelineStageFlags2::FRAGMENT_SHADER,
@@ -216,7 +213,7 @@ impl Use {
 
     /// Whether it's one of a render pass's attachments.
     fn attaches(self) -> bool {
-        matches!(self, Self::Color(_) | Self::Ids | Self::Depth)
+        matches!(self, Self::Color(_) | Self::Ids { .. } | Self::Depth { .. })
     }
 }
 
@@ -354,26 +351,16 @@ impl Graph {
     }
 
     /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws
-    /// test and write.
-    ///
-    /// # Panics
-    ///
-    /// If a side is 0.
-    pub fn depth(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Depth, size)
-    }
-
-    /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws test
-    /// and write, as [`Graph::depth`]'s, and later passes sample, as a shadow map is: by comparison,
-    /// through the bindless set's comparison sampler, [`COMPARISON_SAMPLER`].
+    /// test and write, and later passes may sample: by comparison, through the bindless set's
+    /// comparison sampler, [`COMPARISON_SAMPLER`], as a shadow map is, or a texel at a time.
     ///
     /// [`COMPARISON_SAMPLER`]: crate::COMPARISON_SAMPLER
     ///
     /// # Panics
     ///
     /// If a side is 0.
-    pub fn shadow(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Shadow, size)
+    pub fn depth(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Depth, size)
     }
 
     fn transient(&mut self, name: &'static str, kind: Kind, size: [u32; 2]) -> ImageId {
@@ -393,7 +380,9 @@ impl Graph {
     /// A buffer of the graph's own of `size` bytes, named `name`, in the GPU's own memory, which
     /// compute shaders write through its address, as a pass that writes it says, and later passes'
     /// shaders read, draws take their commands from, or frames read back. The frames keep it for
-    /// the frames after, by its name.
+    /// the frames after, by its name, so that a pass that writes it finds there what the last frame
+    /// to add it left, unless that frame added none of its name, or one smaller, when it holds
+    /// nothing defined.
     ///
     /// # Panics
     ///
@@ -534,7 +523,7 @@ impl Graph {
                 .any(|&(used, use_)| used == buffer && use_ == BufferUse::ComputeWrite);
             assert!(
                 written || use_ == BufferUse::ComputeWrite,
-                "pass {label:?} uses buffer {} before any pass writes it, undefined until then",
+                "pass {label:?} uses buffer {} before any pass of the frame writes it",
                 buffer.0
             );
         }
@@ -599,29 +588,36 @@ impl RenderPass<'_> {
         self.with(image, Use::Color(Some(color)))
     }
 
-    /// Draws into `image`, a target or a color image of the graph's own, of either range, over
-    /// what its last use left there, which its draws blend over: a target that no pass has drawn
+    /// Draws into `image` over what its last use left there, as [`clear`](Self::clear),
+    /// [`ids`](Self::ids) or [`depth`](Self::depth) would draw into it but for the clear: a target
+    /// or a color image of the graph's own, of either range, whose colors its draws blend over, an
+    /// image of IDs, or one of depth, which its draws test against. A target that no pass has drawn
     /// into since it was made, or since its swapchain's image was acquired, holds nothing to draw
     /// over.
     pub fn keep(self, image: ImageId) -> Self {
-        self.with(image, Use::Color(None))
+        let use_ = match self.graph.kind(image) {
+            Some(Kind::Ids) => Use::Ids { kept: true },
+            Some(Kind::Depth) => Use::Depth { kept: true },
+            None | Some(Kind::Color | Kind::Hdr) => Use::Color(None),
+        };
+        self.with(image, use_)
     }
 
     /// Draws the draws' IDs into `ids`, an image of IDs of the graph's own, cleared first to 0,
     /// which pipelines made for a format [`with_ids`](crate::Format::with_ids) write.
     pub fn ids(self, ids: ImageId) -> Self {
-        self.with(ids, Use::Ids)
+        self.with(ids, Use::Ids { kept: false })
     }
 
-    /// Tests the draws against `depth`, an image of depth of the graph's own, of either kind, and
-    /// writes theirs into it as their pipelines say, cleared first to 0, as far away as depth goes.
+    /// Tests the draws against `depth`, an image of depth of the graph's own, and writes theirs
+    /// into it as their pipelines say, cleared first to 0, as far away as depth goes.
     pub fn depth(self, depth: ImageId) -> Self {
-        self.with(depth, Use::Depth)
+        self.with(depth, Use::Depth { kept: false })
     }
 
     /// Samples `image` from the draws' fragment shaders, as an earlier pass left it, through the
     /// index [`Pass::sampled`](crate::Pass::sampled) gives: a target that's an offscreen image or a
-    /// storage image, or a color image, an image of IDs or a shadow map of the graph's own.
+    /// storage image, or a color image, an image of IDs or one of depth of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::Sampled)
     }
@@ -664,8 +660,8 @@ impl RenderPass<'_> {
         let count = |is: fn(&Use) -> bool| uses.iter().filter(|(_, use_)| is(use_)).count();
         let (colors, ids, depths) = (
             count(|use_| matches!(use_, Use::Color(_))),
-            count(|use_| *use_ == Use::Ids),
-            count(|use_| *use_ == Use::Depth),
+            count(|use_| matches!(use_, Use::Ids { .. })),
+            count(|use_| matches!(use_, Use::Depth { .. })),
         );
         assert!(
             (colors == 1 && ids <= 1 && depths <= 1) || (colors, ids, depths) == (0, 0, 1),
@@ -682,8 +678,8 @@ impl RenderPass<'_> {
             let kind = graph.kind(image);
             let fits = match use_ {
                 Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
-                Use::Ids => kind == Some(Kind::Ids),
-                Use::Depth => kind.is_some_and(Kind::is_depth),
+                Use::Ids { .. } => kind == Some(Kind::Ids),
+                Use::Depth { .. } => kind == Some(Kind::Depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
                 Use::ComputeSampled | Use::Storage | Use::CopySource => {
                     unreachable!("a render pass neither computes nor copies")
@@ -724,7 +720,7 @@ pub struct ComputePass<'g> {
 impl ComputePass<'_> {
     /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
     /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
-    /// a storage image, or a color image, an image of IDs or a shadow map of the graph's own.
+    /// a storage image, or a color image, an image of IDs or one of depth of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::ComputeSampled)
     }
@@ -747,7 +743,7 @@ impl ComputePass<'_> {
 
     /// Writes and reads `buffer` from the compute shaders, through the address
     /// [`Compute::address`](crate::Compute::address) gives, as an earlier pass left it: what no
-    /// pass of the frame has written is undefined.
+    /// pass of the frame has written is what the frames before left, as [`Graph::buffer`] says.
     pub fn write_buffer(self, buffer: BufferId) -> Self {
         self.graph
             .buffer_uses
@@ -1099,15 +1095,6 @@ mod tests {
             let view = graph.color("view", [4, 4]);
             graph.render(label()).clear(view, [0.0; 4]).ids(view).add();
         }));
-        assert!(refused(|graph| {
-            let (target, depth) = (graph.target(0), graph.depth("depth", [4, 4]));
-            graph
-                .render(label())
-                .clear(target, [0.0; 4])
-                .depth(depth)
-                .add();
-            graph.render(label()).keep(target).sample(depth).add();
-        }));
         assert!(!refused(|graph| {
             let target = graph.target(0);
             graph.render(label()).clear(target, [0.0; 4]).add();
@@ -1119,7 +1106,7 @@ mod tests {
             graph.render(label()).ids(ids).depth(depth).add();
         }));
         assert!(refused(|graph| {
-            let (a, b) = (graph.shadow("a", [4, 4]), graph.shadow("b", [4, 4]));
+            let (a, b) = (graph.depth("a", [4, 4]), graph.depth("b", [4, 4]));
             graph.render(label()).depth(a).depth(b).add();
         }));
         assert!(refused(|graph| {
@@ -1127,27 +1114,60 @@ mod tests {
         }));
     }
 
-    /// A shadow map is drawn into as depth alone, and sampled by a later pass, as the view's depth
-    /// can't be; and it's depth beside a color target too.
+    /// Depth is drawn alone, as a shadow map's is, or beside a color target and IDs, and later
+    /// passes sample it, by drawing or computing, or draw over it, keeping it as they keep IDs and
+    /// colors, which only what an earlier pass wrote can be kept.
     #[test]
-    fn shadow_maps_draw_depth_alone_and_later_passes_sample_them() {
+    fn depth_draws_alone_or_beside_colors_and_later_passes_sample_or_keep_it() {
         let mut graph = Graph::default();
-        let shadow = graph.shadow("shadow", [8, 8]);
+        let shadow = graph.depth("shadow", [8, 8]);
         let drawn = graph.render(label()).depth(shadow).add();
         let target = graph.target(0);
         let shaded = (graph.render(label()).clear(target, [0.0; 4]))
             .sample(shadow)
             .add();
-        assert_eq!(graph.uses(drawn), [(shadow, Use::Depth)]);
+        assert_eq!(graph.uses(drawn), [(shadow, Use::Depth { kept: false })]);
         assert_eq!(graph.uses(shaded)[1], (shadow, Use::Sampled));
         assert_eq!(graph.lifetime(shadow), Some((0, 1)));
         let view = graph.color("view", [8, 8]);
-        let beside = graph.shadow("beside", [8, 8]);
-        graph
-            .render(label())
-            .clear(view, [0.0; 4])
-            .depth(beside)
+        let ids = graph.ids("ids", [8, 8]);
+        let depth = graph.depth("depth", [8, 8]);
+        (graph.render(label()).clear(view, [0.0; 4]))
+            .ids(ids)
+            .depth(depth)
             .add();
+        let reduced = graph.compute(label()).sample(depth).add();
+        let over = (graph.render(label()).keep(view))
+            .keep(ids)
+            .keep(depth)
+            .add();
+        assert_eq!(graph.uses(reduced), [(depth, Use::ComputeSampled)]);
+        assert_eq!(
+            graph.uses(over),
+            [
+                (view, Use::Color(None)),
+                (ids, Use::Ids { kept: true }),
+                (depth, Use::Depth { kept: true })
+            ]
+        );
+        let kept = [Use::Ids { kept: true }, Use::Depth { kept: true }];
+        assert!(kept.iter().all(|use_| !use_.access().discards));
+        let unwritten = |kind: fn(&mut Graph) -> ImageId| {
+            let mut graph = Graph::default();
+            let image = kind(&mut graph);
+            let target = graph.target(0);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (graph.render(label()).clear(target, [0.0; 4]))
+                    .keep(image)
+                    .add()
+            }))
+            .is_err()
+        };
+        assert!(unwritten(|graph| graph.ids("ids", [4, 4])), "IDs kept");
+        assert!(
+            unwritten(|graph| graph.depth("depth", [4, 4])),
+            "depth kept"
+        );
     }
 
     /// A graph's own buffers are written by compute passes before passes read them, draws take

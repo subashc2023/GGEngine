@@ -112,15 +112,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Bistro** (2026-11-05)
 - **Culling on the GPU** (2026-11-05)
 - **The scene on the GPU** (2026-11-05)
+- **Occlusion culling** (2026-11-05)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **Occlusion culling.** Two passes against a depth pyramid: the first draws what the last frame
-  showed, and the pyramid is built from its depth; the second tests the rest against it and draws
-  what shows, so that what comes into view draws in the frame it does. Shadows' cascades cull against
-  their boxes alone. In the Bistro's streets, the triangles drawn fall to about what shows.
 - **Clustered lighting.** A compute pass bins the frame's lights into the view's clusters, tiles
   across it by slices along its depth, and each lit fragment shades by its cluster's lights rather
   than by every light, games' shaders reading them through the frame's data; the Bistro's 96 point
@@ -310,19 +307,22 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | A layer's mirrored and unmirrored draws of one culling mesh, interleaved, draw a run each, since a run culls one way: the scene sorts the world's by how they wind, keeping them to two | A layer draws a culling mesh many times, some mirrored |
-| Drawing a culled run's levels in one call, through `multiDrawIndirect` where the device has it: the CPU records an indirect draw for each run and level of its mesh, up to eight, whatever its instances | A profile shows recording them |
+| Drawing a culled run's levels in one call, through `multiDrawIndirect` where the device has it: the CPU records an indirect draw for each run and level of its mesh, up to eight, whatever its instances, in each of the view's two passes and each cascade's | A profile shows recording them |
 | Counting the shadows' cascades' draws, instances and triangles: what the culling reads back is the view's alone | An agent tunes the shadows' cost by them |
 | Culling what blends and the canvas, which draw from the CPU, on its levels, whatever the view sees | A game draws many blending instances outside its view |
 | A sphere round the vertices of a mesh a layer adds without levels, from where its vertex type keeps its position: such a mesh is never culled, as `Meshes::add` can't read its positions | A game draws many of its own meshes outside its view |
 | A log of the entities that left their tables, so that a frame whose ticks spawned or despawned needn't look over every opaque mesh the scene holds, nor the renderer merge the scene's whole order again, each costing the scene's instances once | A game spawns or despawns every tick in a world of many opaque meshes |
 | Culling the scene's instances where its table holds them, through its order, rather than gathering them first, which copies each once a frame on the GPU; the cull's push constants hold no room for a second source | A profile shows the gather |
+| Building the depth pyramid in one pass, as AMD's single-pass downsampler does: a compute pass builds each level, 11 at 1,280 by 720, each waiting for the one before | A profile shows them |
+| Keeping whether each of the scene's instances was unhidden by its slot, rather than by where it's gathered, which moves as instances before it in the gather's order come and go: in the frame they do, the first pass draws those that took another's word, what's hidden among them, and the second what the first missed | A game spawns or despawns often among many opaque meshes, and its frames show it |
+| Culling the shadows' casters by what's hidden from the light, or by the view's depth, keeping only those whose shadows fall where it sees: each cascade keeps every caster in its box | A profile shows the shadows' draws |
 | Handing the renderer the lights that changed alone: a frame that finds the lights again copies them all into its data, as it does every frame, which clustered lighting may change | A game has many lights that change |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
 | Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one |
-| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
+| Keeping the view's depth past its passes, to sample: each frame clears it, and its last pass doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
 | Rendering the view's IDs only in frames that pick or outline: every frame renders them, for the reason [Rendering](../ARCHITECTURE.md#rendering) gives | A profile shows them |
 | Answering picks sooner than [Rendering](../ARCHITECTURE.md#rendering) says they come: reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
 | More than 64 picks a frame: `Context::pick` gives none past them, as many as a frame reads back | A layer picks more at once, such as many cursors or touches |
@@ -372,7 +372,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |
 | Keeping the editor's camera, tool and grid between runs, as the dock keeps its layout | Someone misses them |
 | Easing the editor's switch between projections, which jumps | It jars someone |
-| A slot between the world's opaque and blended draws for the editor's grid, so that it shows over opaque draws behind its plane: it draws after the layers' draws and before the world's, over a layer's backdrop, as Shards' floor, but under the world's opaque draws behind its plane, and what blends behind the plane would need the grid sorted among it | A world's opaque meshes behind the grid's plane hide it |
 | A rotating cursor for the editor's Orbit tool: egui has none, so it shows a hand | egui adds one, or someone misses it |
 | The lines across the editor's perspective grid reaching the horizon: they fade out some 65 to 200 camera heights away, since its f32 coordinates hold four decades of spacing; the lines toward the horizon go on | Someone misses them |
 | Cameras far from the origin: their matrices are f32, so 12,345 units out a view a tenth of a unit across moves in steps of about 1% | A game's world is that large |

@@ -849,7 +849,10 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         let unwritten = graph.buffer("unwritten", 4);
         let _ = graph.compute(label!("read")).read_buffer(unwritten).add();
     });
-    assert!(refused.contains("before any pass writes it"), "{refused}");
+    assert!(
+        refused.contains("before any pass of the frame writes it"),
+        "{refused}"
+    );
     let refused = panics(|| {
         let mut graph = Graph::default();
         let large = graph.buffer("large", gg_gpu::MAX_BUFFER_READ + 4);
@@ -1144,7 +1147,7 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
         ColorImage::new(&device, probes.len() as u32, 1, "shadow probes").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     let mut graph = Graph::default();
-    let (target, shadow) = (graph.target(0), graph.shadow("shadow map", [16, 16]));
+    let (target, shadow) = (graph.target(0), graph.depth("shadow map", [16, 16]));
     let drawn = graph.render(label!("shadow")).depth(shadow).add();
     let black = [0.0, 0.0, 0.0, 1.0];
     let compared = (graph.render(label!("compare")).clear(target, black))

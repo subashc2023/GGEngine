@@ -1066,12 +1066,17 @@ mod tests {
         }
     }
 
-    /// The cull and gather shaders take every address from their push constants, as they say
-    /// why, and none from buffer memory; the model shaders' frame holds some, which the check
-    /// would find.
+    /// The cull, gather and depth pyramid shaders take every address from their push constants, as
+    /// they say why, and none from buffer memory; the model shaders' frame holds some, which the
+    /// check would find.
     #[test]
     fn the_cull_shader_holds_no_addresses_in_buffers() {
-        for spirv in [crate::mesh::CULL_SPIRV, crate::mesh::GATHER_SPIRV] {
+        let culling = [
+            crate::mesh::CULL_SPIRV,
+            crate::mesh::GATHER_SPIRV,
+            crate::mesh::PYRAMID_SPIRV,
+        ];
+        for spirv in culling {
             assert_eq!(spirv::buffer_structs_holding_pointers(spirv), 0);
         }
         let frame = spirv::buffer_structs_holding_pointers(model::OPAQUE_SPIRV);

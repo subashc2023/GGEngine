@@ -72,7 +72,7 @@ pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
 use light::GpuLight;
-use mesh::{CullPlan, CullView, FrameData, MAX_VIEWS, MeshPass};
+use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use sky::{SkyData, SkyLight, SkyPass};
@@ -390,8 +390,10 @@ struct ViewPasses {
     /// What it shows, tonemapped.
     color: ImageId,
     ids: ImageId,
-    /// What draws the view.
-    pass: PassId,
+    /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing.
+    first: PassId,
+    /// What draws the rest over that, if it culls.
+    second: Option<PassId>,
     /// What tonemaps it.
     tonemap: PassId,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
@@ -422,6 +424,11 @@ fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
         Some(cull) => cull.drawn(pass),
         None => pass,
     }
+}
+
+/// `pass`, sampling each of `images`.
+fn sampling<'g>(images: impl Iterator<Item = ImageId>, pass: RenderPass<'g>) -> RenderPass<'g> {
+    images.fold(pass, RenderPass::sample)
 }
 
 // The engine renders on a thread of its own, which the renderer and its uploads move to.
@@ -751,12 +758,11 @@ impl Renderer {
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
             // before the view samples it, and before them, the culling of the view's opaque runs
-            // and the cascades' casters.
+            // and the cascades' casters, for the view's first pass.
             let aspect = data.viewport.aspect();
             let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
-            let views = if cascades.is_some() { MAX_VIEWS } else { 1 };
-            let cull =
-                (meshes.cull_bounds(data.draws)).map(|bounds| CullPlan::new(graph, bounds, views));
+            let mut cull = (meshes.cull_bounds(data.draws))
+                .map(|bounds| CullPlan::new(graph, bounds, cascades.is_some()));
             let shadows = cascades.map(|cascades| {
                 let names = [
                     "shadow cascade 0",
@@ -770,7 +776,7 @@ impl Renderer {
                     label!("shadow cascade 2"),
                     label!("shadow cascade 3"),
                 ];
-                let maps = names.map(|name| graph.shadow(name, [MAP_SIZE; 2]));
+                let maps = names.map(|name| graph.depth(name, [MAP_SIZE; 2]));
                 let passes = std::array::from_fn(|i| {
                     culled(cull.as_ref(), graph.render(labels[i]).depth(maps[i])).add()
                 });
@@ -783,19 +789,29 @@ impl Renderer {
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
-            let mut pass = culled(cull.as_ref(), graph.render(label!("view")))
-                .clear(hdr, data.clear_color)
-                .ids(ids)
-                .depth(depth);
             // What the draws light by, as the frame that prefilters it leaves it, and the shadows
             // they're in.
-            for light in plan.iter().flat_map(sky::Plan::sampled) {
-                pass = pass.sample(light);
-            }
-            for &map in shadows.iter().flat_map(|shadows| &shadows.maps) {
-                pass = pass.sample(map);
-            }
-            let pass = pass.add();
+            let lit = || {
+                let maps = shadows.iter().flat_map(|shadows| shadows.maps);
+                plan.iter().flat_map(sky::Plan::sampled).chain(maps)
+            };
+            let first = culled(cull.as_ref(), graph.render(label!("view")));
+            let first = sampling(lit(), first)
+                .clear(hdr, data.clear_color)
+                .ids(ids)
+                .depth(depth)
+                .add();
+            // Where the view culls, its second pass, over its first: once the depth pyramid is
+            // built from the first's depth, and the culling's second pass has culled against it,
+            // what that kept, and the runs it doesn't cull.
+            let second = cull.as_mut().map(|cull| {
+                cull.second_pass(graph, depth, size);
+                let second = cull.drawn(graph.render(label!("view second")));
+                (sampling(lit(), second).keep(hdr))
+                    .keep(ids)
+                    .keep(depth)
+                    .add()
+            });
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
@@ -820,7 +836,8 @@ impl Renderer {
                 hdr,
                 color,
                 ids,
-                pass,
+                first,
+                second,
                 tonemap,
                 read_ids,
                 outline,
@@ -886,28 +903,32 @@ impl Renderer {
                             size,
                             clamped: false,
                         };
-                        // The view, then each cascade, as the plan has them.
-                        let mut views = [seen; MAX_VIEWS];
+                        let mut cascades = [seen; CASCADES];
                         let count = match &view.shadows {
                             Some(shadows) => {
-                                for (i, cascade) in views[1..].iter_mut().enumerate() {
+                                for (i, cascade) in cascades.iter_mut().enumerate() {
                                     *cascade = CullView {
                                         clip_from_world: shadows.cascades.clip_from_world(i),
                                         size: [MAP_SIZE; 2],
                                         clamped: true,
                                     };
                                 }
-                                MAX_VIEWS
+                                CASCADES
                             }
-                            None => 1,
+                            None => 0,
                         };
-                        let views = &views[..count];
-                        (self.meshes).cull(&mut frame, plan, data.draws, uploaded, views)?
+                        let cascades = &cascades[..count];
+                        (self.meshes)
+                            .cull(&mut frame, plan, data.draws, uploaded, seen, cascades)?
                     }
                     None => false,
                 };
-                // The culling of the view's runs, the `i`th view of those it culled for.
-                let cull = |i: usize| view.cull.as_ref().map(|plan| (plan, i));
+                // What a pass draws: what the culling's view in `slot` kept, or, if the frame
+                // culls nothing, every run.
+                let runs = |slot: usize| match &view.cull {
+                    Some(plan) => Runs::Culled(plan, slot),
+                    None => Runs::All,
+                };
                 self.lights.clear();
                 self.lights.extend(data.lights.iter().map(GpuLight::new));
                 let lights = if self.lights.is_empty() {
@@ -936,14 +957,15 @@ impl Renderer {
                         let clip = shadows.cascades.clip_from_world(i);
                         let map = [MAP_SIZE; 2];
                         let draws = data.draws;
-                        let cascade = cull(1 + i);
+                        // Each cascade's slot is 1 past its index.
+                        let cascade = runs(1 + i);
                         (self.meshes).draw(
                             &mut pass, clip, address, map, draws, uploaded, cascade, true,
                         )?;
                     }
                 }
                 let mut pass =
-                    (frame.render(view.pass)).expect("the graph's own images are always there");
+                    (frame.render(view.first)).expect("the graph's own images are always there");
                 let lit = match (&plan, sky) {
                     (Some(plan), Some((sky, ..))) => Some(plan.data(&pass, sky)),
                     _ => held,
@@ -972,14 +994,40 @@ impl Renderer {
                     size,
                     data.draws,
                     uploaded,
-                    cull(0),
+                    runs(FIRST),
                     false,
                 )?;
+                // What the first pass didn't draw, over it: after the depth pyramid, from the
+                // first's depth, and the culling's second pass, against it.
+                if let (Some(plan), Some(second)) = (&view.cull, view.second) {
+                    drop(pass);
+                    self.meshes.cull_second(&mut frame, plan)?;
+                    pass = (frame.render(second)).expect("the graph's own images are always there");
+                    let rest = Runs::CulledThenRest(plan, plan.second());
+                    counts += (self.meshes).draw(
+                        &mut pass,
+                        view_projection,
+                        shared,
+                        size,
+                        data.draws,
+                        uploaded,
+                        rest,
+                        false,
+                    )?;
+                }
                 pass.begin_label(c"canvas");
                 let canvas = canvas_projection(size);
                 let on = data.canvas;
-                counts += (self.meshes)
-                    .draw(&mut pass, canvas, shared, size, on, on_canvas, None, false)?;
+                counts += (self.meshes).draw(
+                    &mut pass,
+                    canvas,
+                    shared,
+                    size,
+                    on,
+                    on_canvas,
+                    Runs::All,
+                    false,
+                )?;
                 pass.end_label();
                 drop(pass);
                 if let Some(read) = view.read_ids {

@@ -1374,18 +1374,20 @@ bindless set's own for storage images, in the general layout, as their last use 
 storage image is among a frame's targets, as an offscreen image is, and keeps the layout its last
 frame left it in, so that once a frame whose last use of it sampled it is submitted, frames after
 sample it through its texture slot without declaring it. A pass may draw depth alone, as a shadow
-map's does. The view's images, its colors of high dynamic range, IDs, depth and tonemapped colors,
-and the shadows' maps, are the graph's own: each lasts for a frame,
+map's does, and may draw over the colors, IDs and depth an earlier pass left, as the view's second
+pass does; later passes sample depth by comparison, as shadow maps, or a texel at a time, as the
+view's depth pyramid reads the view's. The view's images, its colors of high dynamic range, IDs,
+depth and tonemapped colors, and the shadows' maps, are the graph's own: each lasts for a frame,
 undefined until a pass there writes it, and is made from what the passes say of it, in a block of
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
 after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
 store it, and an image's next use waits for what its own last use left as well as for what the
 block's did, as the view's tonemapped colors follow its depth there. The graph's own buffers last
-for a frame too, undefined until a compute pass there writes them, each in the GPU's memory of its
-own, which shaders reach through its address, kept for the frames after that declare one of its
-name no larger, and made again at the next power of two bytes past that; a frame's first use of
-one waits for the frame before's last, as both run on one queue. A pass reads back up to 256 bytes
-of one, as the frame two later finds them. Each pass is a debug label, and
+from frame to frame, each in the GPU's memory of its own, which shaders reach through its address,
+kept for the frames after that declare one of its name no larger, holding what the last of them
+left, and made again at the next power of two bytes past that, holding nothing defined; a frame's
+first use of one waits for the frame before's last, as both run on one queue. A pass reads back up
+to 256 bytes of one, as the frame two later finds them. Each pass is a debug label, and
 the draws inside it have labels of their own, each run of draws its shader's name, and the
 canvas's, and the frame pass's view and UI, apart. Each pass writes a timestamp as it begins and as
 it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy's GPU
@@ -1405,9 +1407,11 @@ which the renderer's scene holds, as below; then what blends, back to front by t
 world, those at one z drawing sprites, then circles, then text, under meshes; each z in the order of
 their IDs, which overlapping entities keep as others come and go. World z orders what blends rightly as seen
 from in front of layers parallel to XY, as 2D cameras see them; from behind or the side, what blends
-draws in the wrong order among itself, though rightly against what's opaque. At one depth, an opaque
-mesh goes under what blends; a layer's opaque draws hide the world's behind them, and its draws
-that blend go under the world's opaque ones behind them.
+draws in the wrong order among itself, though rightly against what's opaque. The view draws
+everything opaque, the layers' and the world's, before anything that blends, as culling, below,
+draws it in two passes: what blends, in its order, goes over what's opaque behind it, whatever
+order the two were drawn in, and at one depth, an opaque mesh goes under what blends. Of two opaque
+draws at one depth, the later goes over, but in the frame the earlier comes into view.
 
 Every draw into the view writes its ID beside its color, into an image of IDs the view's size, a
 64-bit number as two 32-bit halves, which each frame clears to 0: the world's draws their entities'
@@ -1421,7 +1425,7 @@ for each shader, or `VK_EXT_dynamic_rendering_unused_attachments`.
 
 `Context::outline` outlines what the view shows of an entity for a frame, as the editor outlines
 what's picked, from the same IDs: a pass samples the image of IDs, which has a slot in the bindless
-set, and draws into the view's image once the view's pass has drawn it, so that captures and the
+set, and draws into the view's image once the view's passes have drawn it, so that captures and the
 view shared show it too, round whatever shape the entity shows, its colliders' outlines among it,
 going across what's in front of it rather than round what's hidden.
 
@@ -1641,9 +1645,10 @@ and tools edit it, as any component.
 editor's view shows one: lines a power of ten apart, fading as they near each other and toward
 grazing angles, and the plane's two axes in their colors, with a shader and a mesh of the engine's
 own, each added the first time something draws with it, the mesh a fan round the point under the
-eye, which keeps the grid's precision there. It draws in the layers' order, over what's drawn
-before it; the tool API's look's grid draws after the layers' draws and before the world's, so over
-a backdrop a layer draws, as Shards' floor, and under the world's entities.
+eye, which keeps the grid's precision there. It blends in the layers' order, over what's drawn
+before it and what's opaque behind it; the tool API's look's grid draws after the layers' draws and
+before the world's, so over a backdrop a layer draws, as Shards' floor, and the world's opaque
+meshes behind its plane, and under those in front of it and what of the world blends.
 
 3D games draw models: `Context::add_model` reads a glTF 2.0 file and adds its meshes and its images,
 as textures, once, all of itself or nothing, or the engine does as text names it, and a root with a
@@ -1691,21 +1696,34 @@ plane draws the finest. A mesh a layer adds without levels has no sphere, as the
 its vertices' positions.
 
 The scene's runs and the layers' opaque ones are culled on the GPU, in compute passes before the
-shadows' and the view's, which first gather their instances, from the scene's table in its order
-and from the frame's arrays, into arrays of the graph's own, for the view and for each of the
-shadows' cascades: an instance is kept
-where its mesh's sphere, as its transform places it and grown by the most it stretches, reaches
-inside every plane of what that view sees, its far plane at infinity under perspective, and, for a
-cascade, but its near side, which casters past cast from; a mesh without a sphere is always kept.
-The same passes pick each kept instance's level, as above, and write each view's, each level's in
-the order they came, into buffers of the graph's own, with the commands of indirect draws, whose
-instance counts and first instances they write: the CPU records a draw for each run and level of
-its mesh, whatever its instances, and a run's shader reads its instances as any does, from where
-the commands' first instance says. What blends and the canvas draw from the frame's arrays on the
-CPU's levels, once for each stretch of draws in a row at one level, keeping their order. The
-renderer counts the view's draws that have instances, their instances and their triangles, the
-culled runs' on the GPU, which come back as the frame two later begins; the Performance panel
-shows them and `engine.perf` logs their peaks.
+shadows' and the view's, which first gather their instances, the scene's from its table in its
+order and then the frame's from its arrays, into arrays of the graph's own, for the view and for
+each of the shadows' cascades: an instance is kept where its mesh's sphere, as its transform places
+it and grown by the most it stretches, reaches inside every plane of what that view sees, its far
+plane at infinity under perspective, and, for a cascade, but its near side, which casters past cast
+from; a mesh without a sphere is always kept. The same passes pick each kept instance's level, as
+above, and write each view's, each level's in the order they came, into buffers of the graph's own,
+with the commands of indirect draws, whose instance counts and first instances they write: the CPU
+records a draw for each run and level of its mesh, whatever its instances, and a run's shader reads
+its instances as any does, from where the commands' first instance says.
+
+The view culls what's hidden too, in two passes. Its first pass draws what the last frame found
+unhidden, of what's in view, and then compute passes build a depth pyramid from its depth: half the
+view each way, each texel the farthest of the 2 by 2 under it, and each level after half the one
+before, down to a texel. The culling's second pass tests what the first didn't draw against it: the
+rectangle a sphere covers on screen, which its tangents through the camera bound under perspective,
+falls within 2 by 2 texels of the level whose texels are as wide, and an instance whose sphere's
+nearest point is farther than the farthest of those is hidden. The
+view's second pass draws what isn't, over the first's, so that what comes into view draws in the
+frame it does, and then what blends and the canvas, from the frame's arrays on the CPU's levels,
+once for each stretch of draws in a row at one level, keeping their order. The second pass finds
+again whether each instance is unhidden, for the next frame's first, a word of a buffer of the
+graph's own that lasts from frame to frame, by where the instance is gathered: a frame in which
+instances before one came or went takes another's word for it, which draws in its first pass what
+may be hidden, and in its second what the first missed, for a frame. The shadows' cascades cull by
+their boxes alone. The renderer counts the view's draws that have instances in either pass, their
+instances and their triangles, the culled runs' on the GPU, which come back as the frame two later
+begins; the Performance panel shows them and `engine.perf` logs their peaks.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

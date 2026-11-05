@@ -89,6 +89,8 @@ fn main() -> ExitCode {
         shadows_fall_where_their_casters_put_them,
         culling_keeps_what_each_view_sees,
         the_scene_draws_as_draws_do,
+        occlusion_culling_draws_what_shows,
+        what_blends_goes_over_what_is_opaque_behind_it_in_any_order,
         shadows_hold_still_as_the_view_moves,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
@@ -4940,6 +4942,182 @@ fn the_scene_draws_as_draws_do() {
         assert_eq!(scene_counts, draws_counts, "frame {i}'s counts");
         assert!(scene == draws, "frame {i}'s pixels differ");
     }
+}
+
+/// A wall across the left of a view with perspective, 128 pixels a side, of a mesh without a
+/// sphere, never culled, and plates a unit across of a mesh with one, flat-colored: a red plate
+/// wholly behind the wall, which the depth pyramid built from the view's first pass hides, so that
+/// the view doesn't draw it; a green one beside the wall and a blue one half behind its edge,
+/// which it draws; and a yellow one in front of it. The frame the wall is taken away draws the red
+/// plate, bit for bit as a renderer that never saw the wall draws them all; and once the wall is
+/// back, the frames are as before it went, the red plate hidden again and counted out.
+fn occlusion_culling_draws_what_shows() {
+    const SIZE: u32 = 128;
+    let viewport = filling([SIZE, SIZE]);
+    // 5 in front of the origin, seeing a sixth of a turn across: 22 pixels a unit at z = 0, the
+    // wall's, and 14 at z = -3, the plates'.
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    // What a renderer draws with, and the frames with the wall and without.
+    let made = || {
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let wall = square(&mut stores.meshes);
+        let corners = [
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+            [-0.5, 0.5, 0.0],
+        ];
+        let whole = Lod {
+            start: 0,
+            count: 6,
+            error: 0.0,
+        };
+        let sphere = Lods {
+            levels: vec![whole],
+            center: Vec3::ZERO,
+            // Half the square's diagonal, to its corners.
+            radius: std::f32::consts::FRAC_1_SQRT_2,
+        };
+        let plate = (stores.meshes)
+            .add_lods("plate", &corners, &[0, 1, 2, 2, 3, 0], sphere)
+            .expect("a mesh");
+        let scene = |walled: bool| {
+            let mut draws = Draws::default();
+            if walled {
+                // From past the view's left edge to 0.5 along X, and past its bottom and top.
+                let across = Mat4::from_scale_rotation_translation(
+                    Vec3::new(4.0, 6.0, 1.0),
+                    Quat::IDENTITY,
+                    Vec3::new(-1.5, 0.0, 0.0),
+                );
+                draws.push(wall, flat, across, Vec4::new(0.5, 0.5, 0.5, 1.0));
+            }
+            // Behind the wall; beside it; half behind its edge, which the line from the camera
+            // past it, 0.5 along X at z = 0, meets at 0.8 along X at z = -3; and in front of it.
+            for (x, z, color) in [
+                (-2.0, -3.0, Vec4::new(0.8, 0.1, 0.1, 1.0)),
+                (2.5, -3.0, Vec4::new(0.1, 0.7, 0.1, 1.0)),
+                (0.8, -3.0, Vec4::new(0.1, 0.2, 0.8, 1.0)),
+                (-1.5, 2.0, Vec4::new(0.8, 0.7, 0.1, 1.0)),
+            ] {
+                draws.push(
+                    plate,
+                    flat,
+                    Mat4::from_translation(Vec3::new(x, 0.0, z)),
+                    color,
+                );
+            }
+            draws
+        };
+        (stores, scene(true), scene(false))
+    };
+    let (mut fresh, mut renderer) = (renderer(SIZE, SIZE), renderer(SIZE, SIZE));
+    let (mut stores, walled, open) = made();
+    // The culling's first frame finds nothing shown before it, so its second pass draws all, the
+    // red plate among them; the next frame's first pass draws all the first showed, and its second
+    // finds the red plate hidden; the frame after draws it in neither.
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    // The wall, and of one run the plates but the red.
+    let kept = DrawCounts {
+        draws: 2,
+        instances: 4,
+        triangles: 8,
+    };
+    assert_eq!(drawn, kept, "what the wall hides is drawn");
+    let hidden = frame_pixels(&mut renderer);
+    // The red plate's middle, and the blue one's right of the wall's edge.
+    let (red, blue) = ([36, 64], [79, 64]);
+    let gray = [encoded(0.5), encoded(0.5), encoded(0.5), 255];
+    let found = pixel_at(&hidden, SIZE, red);
+    assert!(
+        close(found, gray),
+        "the wall over the red plate is {found:?}"
+    );
+    let found = pixel_at(&hidden, SIZE, blue);
+    let blue_shown = [encoded(0.1), encoded(0.2), encoded(0.8), 255];
+    assert!(close(found, blue_shown), "the blue plate is {found:?}");
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &open));
+    let shown = frame_pixels(&mut renderer);
+    let found = pixel_at(&shown, SIZE, red);
+    let red_shown = [encoded(0.8), encoded(0.1), encoded(0.1), 255];
+    assert!(close(found, red_shown), "the red plate is {found:?}");
+    let (mut fresh_stores, _, open) = made();
+    settle(&mut fresh, &mut fresh_stores, viewport, viewpoint, &open);
+    assert!(
+        shown == frame_pixels(&mut fresh),
+        "the frame the wall went differs from one that never saw it"
+    );
+    shut_down(fresh);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
+    assert_eq!(drawn, kept, "what the wall hides once it's back is drawn");
+    assert!(
+        frame_pixels(&mut renderer) == hidden,
+        "the wall back draws otherwise than before it went"
+    );
+    shut_down(renderer);
+}
+
+/// Squares that blend, each pushed before an opaque square, seen without perspective: on the left,
+/// one in front of its opaque square, and on the right, one behind. Opaque draws draw first, so the
+/// one in front blends over the opaque square, as it would pushed after it, and the one behind is
+/// hidden.
+fn what_blends_goes_over_what_is_opaque_behind_it_in_any_order() {
+    const SIZE: u32 = 64;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // 16 pixels a unit, seeing from 2 behind the camera to 2 in front.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -2.0,
+            far: 2.0,
+        },
+        ..Viewpoint::default()
+    };
+    let at = |x: f32, z: f32| Mat4::from_translation(Vec3::new(x, 0.0, z));
+    let veil = Sprite {
+        color: Vec4::new(1.0, 1.0, 1.0, 0.5),
+        ..Sprite::default()
+    };
+    let red = Vec4::new(0.8, 0.1, 0.1, 1.0);
+    let mut draws = Draws::default();
+    draws.push_sprite(at(-1.0, 0.5), veil);
+    draws.push(square, flat, at(-1.0, 0.0), red);
+    draws.push_sprite(at(1.0, -0.5), veil);
+    draws.push(square, flat, at(1.0, 0.0), red);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIZE, SIZE]),
+        viewpoint,
+        &draws,
+    );
+    let frame = frame_pixels(&mut renderer);
+    shut_down(renderer);
+    let veiled = [encoded(0.9), encoded(0.55), encoded(0.55), 255];
+    let found = pixel_at(&frame, SIZE, [16, 32]);
+    assert!(close(found, veiled), "the square in front is {found:?}");
+    let opaque = [encoded(0.8), encoded(0.1), encoded(0.1), 255];
+    let found = pixel_at(&frame, SIZE, [48, 32]);
+    assert!(close(found, opaque), "the square behind is {found:?}");
 }
 
 /// The floor and the opaque plate of [`floor_and_plates`], seen from straight above without

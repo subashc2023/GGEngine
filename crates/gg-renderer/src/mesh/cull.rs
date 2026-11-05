@@ -1,14 +1,15 @@
 //! Culling a frame's opaque runs on the GPU, its draws' and its scene's, for each view that draws
-//! them, the game's view and the shadows' cascades, and picking each instance's level of detail
-//! there, as `shaders/cull.slang` says, once `shaders/gather.slang` has gathered their instances;
-//! and the indirect draws of what each view keeps, a draw for each run and level, whatever its
-//! instances.
+//! them: the game's view in each of its two passes, against what it sees and, in its second, the
+//! depth pyramid its first pass's depth builds, and the shadows' cascades; and picking each
+//! instance's level of detail there, as `shaders/cull.slang` says, once `shaders/gather.slang` has
+//! gathered their instances; and the indirect draws of what each view keeps, a draw for each run
+//! and level, whatever its instances.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::label;
 use gg_core::math::{Mat4, Vec4};
-use gg_gpu::{BufferId, ComputePipeline, Device, Frame, Graph, Pass, PassId, RenderPass};
+use gg_gpu::{BufferId, ComputePipeline, Device, Frame, Graph, ImageId, Pass, PassId, RenderPass};
 
 use super::scene::SceneRun;
 use super::{GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, Push, Uploaded};
@@ -17,6 +18,7 @@ use crate::{Draws, MeshDraw};
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
 pub(crate) static GATHER_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gather.spv"));
+pub(crate) static PYRAMID_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pyramid.spv"));
 
 /// A copy's `source_params` for one from the scene: `SCENE` in `shaders/gather.slang`.
 const SCENE: u32 = u32::MAX;
@@ -25,7 +27,7 @@ const SCENE: u32 = u32::MAX;
 const BLOCK: u64 = 64;
 
 /// The most workgroups a dispatch takes across, the least `maxComputeWorkGroupCount` Vulkan
-/// allows: past it, each takes blocks that many apart.
+/// allows: past it, each takes blocks that many apart. `MOST_GROUPS` in `shaders/cull.slang`.
 const MOST_GROUPS: u64 = 65_535;
 
 /// The bytes of a `VkDrawIndexedIndirectCommand`.
@@ -35,21 +37,50 @@ const COMMAND: u64 = 20;
 const TRANSFORM: u64 = size_of::<Mat4>() as u64;
 const ID: u64 = size_of::<[u32; 2]>() as u64;
 
-/// The most views a frame culls for: the game's view and the shadows' cascades.
-pub(crate) const MAX_VIEWS: usize = 1 + CASCADES;
+/// The side of the workgroups that build the depth pyramid, a texel each: `numthreads` in
+/// `shaders/pyramid.slang`.
+const PYRAMID_GROUP: u32 = 8;
 
-/// The compute pipelines that cull, and what a frame culls, kept between frames, so that one that
-/// culls no more than the last allocates nothing.
+/// The most levels a depth pyramid has: one for each halving of a side of a view of 2^32 pixels.
+const MOST_PYRAMID_LEVELS: usize = 32;
+
+/// The slot among the views a frame culls for of the game's view's first pass, which the shadows'
+/// cascades follow, each at 1 past its index, if the frame draws them, and then the view's second
+/// pass ([`CullPlan::second`]): `FIRST` in `shaders/cull.slang`.
+pub(crate) const FIRST: usize = 0;
+
+/// The most views a frame culls for: the game's view's two passes and the shadows' cascades.
+pub(crate) const MAX_VIEWS: usize = 2 + CASCADES;
+
+/// What a view keeps of what reaches inside its planes: `KEEP_ALL`, `KEEP_SHOWN` and
+/// `KEEP_UNHIDDEN` in `shaders/cull.slang`, which says what each is.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum Keep {
+    /// A shadow cascade's: all of it.
+    All = 0,
+    /// The game's view's first pass: what the last frame found unhidden.
+    Shown = 1,
+    /// The game's view's second pass: what the first didn't keep that its depth doesn't hide.
+    Unhidden = 2,
+}
+
+/// The compute pipelines that cull and build the depth pyramid, and what a frame culls, kept
+/// between frames, so that one that culls no more than the last allocates nothing.
 pub(crate) struct Culling {
     gather: ComputePipeline,
     choose: ComputePipeline,
     offsets: ComputePipeline,
     write: ComputePipeline,
+    /// What builds the depth pyramid's first level, from the view's depth, and each after it.
+    pyramid_depth: ComputePipeline,
+    pyramid_reduce: ComputePipeline,
     runs: Vec<GpuRun>,
     blocks: Vec<[u32; 2]>,
     /// What the gather copies: a block of a run each, as `blocks` has them.
     copies: Vec<GpuCopy>,
     levels: Vec<GpuLevel>,
+    /// Every view, in its slot: the first pass's, then the second's, last.
     views: Vec<GpuView>,
     /// For each run of the frame's draws, by its index, its index in `runs`, if it's culled.
     of_run: Vec<Option<u32>>,
@@ -58,16 +89,22 @@ pub(crate) struct Culling {
     /// The instances of `runs`, and the words of their parameters: what each view keeps room for.
     instances: u32,
     params_words: u32,
+    /// What the first pass's culling pushed, which the second's pushes but for its view and the
+    /// pyramid; `None` in a frame that culls no run.
+    pushed: Option<CullPush>,
 }
 
 impl Culling {
     pub(crate) fn new(device: &std::sync::Arc<Device>) -> Result<Self> {
         let pipeline = |name, entry| ComputePipeline::new(device, name, SPIRV, entry);
+        let pyramid = |name, entry| ComputePipeline::new(device, name, PYRAMID_SPIRV, entry);
         Ok(Self {
             gather: ComputePipeline::new(device, "cull gather", GATHER_SPIRV, c"gather_main")?,
             choose: pipeline("cull choose", c"choose_main")?,
             offsets: pipeline("cull offsets", c"offsets_main")?,
             write: pipeline("cull write", c"write_main")?,
+            pyramid_depth: pyramid("depth pyramid", c"depth_main")?,
+            pyramid_reduce: pyramid("depth pyramid levels", c"reduce_main")?,
             runs: Vec::new(),
             blocks: Vec::new(),
             copies: Vec::new(),
@@ -77,6 +114,7 @@ impl Culling {
             of_scene: Vec::new(),
             instances: 0,
             params_words: 0,
+            pushed: None,
         })
     }
 
@@ -126,9 +164,27 @@ impl Bounds {
     }
 }
 
+/// The depth pyramid of a view `size` pixels: how many levels it has, and their texels together.
+/// Its first level is half the view each way, rounded up, and each after half the one before, down
+/// to a texel, as `shaders/pyramid.slang` builds them and `shaders/cull.slang` finds them.
+fn pyramid(size: [u32; 2]) -> (usize, u64) {
+    let mut texels = size.map(|side| side.div_ceil(2));
+    let (mut levels, mut total) = (1, 0);
+    loop {
+        total += u64::from(texels[0]) * u64::from(texels[1]);
+        if texels == [1, 1] {
+            return (levels, total);
+        }
+        texels = texels.map(|side| side.div_ceil(2));
+        levels += 1;
+    }
+}
+
 /// What a frame's culling takes of its graph: the buffers it writes, of a view's room each for
-/// as many views as it culls for, what it reads back, and its passes, which go before those that
-/// draw what it keeps.
+/// as many views as it culls for, what it reads back, and its passes: the first pass's, for the
+/// game's view's first pass and the cascades, which go before those that draw what they keep; and
+/// once the view's first pass has drawn, the depth pyramid's and the second pass's, before the
+/// view's second.
 pub(crate) struct CullPlan {
     views: usize,
     bounds: Bounds,
@@ -138,27 +194,48 @@ pub(crate) struct CullPlan {
     instances: BufferId,
     /// Each view's commands.
     commands: BufferId,
-    /// Each view's instances' places and its blocks' counts.
+    /// Whether each instance was unhidden, kept from frame to frame, then each view's instances'
+    /// places and its blocks' counts.
     scratch: BufferId,
-    /// What the first view drew, as `shaders/cull.slang` counts it.
+    /// What the game's view drew, as `shaders/cull.slang` counts it.
     counts: BufferId,
+    gather: PassId,
+    choose: PassId,
+    offsets: PassId,
+    write: PassId,
+    /// The second pass's, once [`CullPlan::second_pass`] has declared it.
+    second: Option<SecondPass>,
+}
+
+/// The depth pyramid of the game's view and the culling's second pass, in a frame's graph.
+struct SecondPass {
+    /// The view's depth, and its size.
+    depth: ImageId,
+    size: [u32; 2],
+    pyramid: BufferId,
+    /// The passes that build the pyramid's levels, in order, as many as it has.
+    levels: [Option<PassId>; MOST_PYRAMID_LEVELS],
     choose: PassId,
     offsets: PassId,
     write: PassId,
     read: PassId,
-    gather: PassId,
 }
 
 impl CullPlan {
-    /// Declares in `graph` the culling of runs within `bounds`, for `views` views, which go in the
-    /// order of the [`CullView`]s [`MeshPass::cull`] is given: the passes that draw what it keeps
-    /// come after it, and take it as [`CullPlan::drawn`] has them.
-    pub(crate) fn new(graph: &mut Graph, bounds: Bounds, views: usize) -> Self {
+    /// Declares in `graph` the culling of runs within `bounds` for the game's view's two passes,
+    /// and for the shadows' cascades, if `cascades`; its first pass's, for the view's first and the
+    /// cascades, the passes that draw what it keeps come after, and take it as [`CullPlan::drawn`]
+    /// has them; its second, [`CullPlan::second_pass`], is declared after the view's first.
+    pub(crate) fn new(graph: &mut Graph, bounds: Bounds, cascades: bool) -> Self {
+        let views = if cascades { MAX_VIEWS } else { 2 };
         let count = views as u64;
         let gathered = graph.buffer("gathered instances", bounds.kept_bytes());
         let instances = graph.buffer("culled instances", count * bounds.kept_bytes());
         let commands = graph.buffer("culled draws", count * bounds.commands_bytes());
-        let scratch = graph.buffer("culling", count * bounds.scratch_bytes());
+        let scratch = graph.buffer(
+            "culling",
+            bounds.instances * 4 + count * bounds.scratch_bytes(),
+        );
         let counts = graph.buffer("culled counts", 16);
         let gather = (graph.compute(label!("cull gather")))
             .write_buffer(gathered)
@@ -178,7 +255,6 @@ impl CullPlan {
             .read_buffer(scratch)
             .write_buffer(instances)
             .add();
-        let read = graph.read_back(label!("read culled counts"), counts);
         Self {
             views,
             bounds,
@@ -187,12 +263,64 @@ impl CullPlan {
             commands,
             scratch,
             counts,
+            gather,
+            choose,
+            offsets,
+            write,
+            second: None,
+        }
+    }
+
+    /// Declares in `graph` the depth pyramid of the game's view, from `depth`, as its first pass
+    /// drew it, `size` pixels, and the second pass of the culling, against it, and what reads back
+    /// what the view drew: after the view's first pass, and before its second, which takes what
+    /// it keeps as [`CullPlan::drawn`] has it.
+    ///
+    /// # Panics
+    ///
+    /// If it's declared already.
+    pub(crate) fn second_pass(&mut self, graph: &mut Graph, depth: ImageId, size: [u32; 2]) {
+        assert!(self.second.is_none(), "a culling has one second pass");
+        let (count, texels) = pyramid(size);
+        let pyramid = graph.buffer("depth pyramid", texels * 4);
+        let mut levels = [None; MOST_PYRAMID_LEVELS];
+        for (i, level) in levels.iter_mut().take(count).enumerate() {
+            let pass = graph.compute(label!("depth pyramid"));
+            let pass = if i == 0 { pass.sample(depth) } else { pass };
+            *level = Some(pass.write_buffer(pyramid).add());
+        }
+        let choose = (graph.compute(label!("cull choose second")))
+            .read_buffer(self.gathered)
+            .read_buffer(pyramid)
+            .write_buffer(self.scratch)
+            .write_buffer(self.counts)
+            .add();
+        let offsets = (graph.compute(label!("cull offsets second")))
+            .write_buffer(self.scratch)
+            .write_buffer(self.commands)
+            .write_buffer(self.counts)
+            .add();
+        let write = (graph.compute(label!("cull write second")))
+            .read_buffer(self.gathered)
+            .read_buffer(self.scratch)
+            .write_buffer(self.instances)
+            .add();
+        let read = graph.read_back(label!("read culled counts"), self.counts);
+        self.second = Some(SecondPass {
+            depth,
+            size,
+            pyramid,
+            levels,
             choose,
             offsets,
             write,
             read,
-            gather,
-        }
+        });
+    }
+
+    /// The slot of the game's view's second pass among the views it culls for, the last.
+    pub(crate) fn second(&self) -> usize {
+        self.views - 1
     }
 
     /// `pass`, taking the instances and commands of what the culling keeps.
@@ -288,8 +416,41 @@ struct GpuLevel {
 struct GpuView {
     planes: [Vec4; 6],
     w: Vec4,
+    x: Vec4,
+    y: Vec4,
+    z: Vec4,
     w_slope: f32,
     pixels_per_unit: f32,
+    slot: u32,
+    keep: u32,
+    width: u32,
+    height: u32,
+    pyramid_levels: u32,
+    unused: u32,
+}
+
+impl GpuView {
+    /// `view`, in slot `slot`, keeping as `keep` says.
+    fn new(view: &CullView, slot: usize, keep: Keep) -> Self {
+        let clip = &view.clip_from_world;
+        let lod = LodView::new(clip, view.size);
+        let [width, height] = view.size;
+        Self {
+            planes: planes(clip, view.clamped),
+            w: lod.w,
+            x: clip.row(0),
+            y: clip.row(1),
+            z: clip.row(2),
+            w_slope: lod.w_slope,
+            pixels_per_unit: lod.pixels_per_unit,
+            slot: slot as u32,
+            keep: keep as u32,
+            width,
+            height,
+            pyramid_levels: pyramid(view.size).0 as u32,
+            unused: 0,
+        }
+    }
 }
 
 /// What the culling pushes, as `Push` in `shaders/cull.slang` has it: every address it takes, as
@@ -310,12 +471,26 @@ struct CullPush {
     commands: u64,
     scratch: u64,
     counts: u64,
+    pyramid: u64,
     run_count: u32,
     block_count: u32,
-    groups: u32,
     instances: u32,
     params_words: u32,
-    /// Making the struct a whole number of its alignment, as bytemuck has it.
+}
+
+/// What a pass that builds a level of the depth pyramid pushes, as `Push` in
+/// `shaders/pyramid.slang` has it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+struct PyramidPush {
+    pyramid: u64,
+    source: u32,
+    source_width: u32,
+    source_height: u32,
+    target: u32,
+    target_width: u32,
+    target_height: u32,
+    depth: u32,
     unused: u32,
 }
 
@@ -357,26 +532,28 @@ impl MeshPass {
     }
 
     /// Culls the runs of `draws` and of the scene whose meshes are drawable and whose shaders are
-    /// opaque, as `plan` declared in the frame's graph, for each of `views`, from their instances
-    /// as `uploaded` has the draws' and the scene's table has its own, gathered first, and records
-    /// its passes, the next of the frame's, and what reads back what the first view drew. Returns
-    /// whether it culled any run: the frame's read back counts nothing if it didn't, as no meshes
-    /// it may cull are drawable yet.
+    /// opaque, as `plan` declared in the frame's graph, for its first pass's views, the game's
+    /// view, `seen`, in its first pass, and `cascades`, from their instances as `uploaded` has the
+    /// draws' and the scene's table has its own, gathered first, and records its passes, the next
+    /// of the frame's. Returns whether it culled any run: the frame's read back counts nothing if
+    /// it didn't, as no meshes it may cull are drawable yet. [`MeshPass::cull_second`] culls for
+    /// the view's second pass.
     ///
     /// # Panics
     ///
-    /// If `views` aren't as many as `plan` was declared for, or `draws` aren't what bounded it.
+    /// If `cascades` aren't as many as `plan` was declared for, or `draws` aren't what bounded it.
     pub(crate) fn cull(
         &mut self,
         frame: &mut Frame<'_>,
         plan: &CullPlan,
         draws: &Draws,
         uploaded: Uploaded,
-        views: &[CullView],
+        seen: CullView,
+        cascades: &[CullView],
     ) -> Result<bool> {
         let _zone = gg_core::zone!();
         assert_eq!(
-            views.len(),
+            2 + cascades.len(),
             plan.views,
             "a culling's views are those it was planned for"
         );
@@ -388,7 +565,16 @@ impl MeshPass {
         culling.views.clear();
         culling.of_run.clear();
         culling.of_scene.clear();
+        culling.pushed = None;
         let mut totals = Totals::default();
+        // The scene's first, so that where each of its instances is gathered, which what was
+        // unhidden is kept by, doesn't move as the draws change.
+        for run in self.scene.runs() {
+            let source = Source::Scene { first: run.first };
+            let count = run.count as usize;
+            let culled = culling.add(&self.meshes, &self.shaders, run, count, source, &mut totals);
+            culling.of_scene.push(culled);
+        }
         for run in &draws.runs {
             let source = Source::Frame {
                 first: run.instances.start as u32,
@@ -397,12 +583,6 @@ impl MeshPass {
             let count = run.instances.len();
             let culled = culling.add(&self.meshes, &self.shaders, run, count, source, &mut totals);
             culling.of_run.push(culled);
-        }
-        for run in self.scene.runs() {
-            let source = Source::Scene { first: run.first };
-            let count = run.count as usize;
-            let culled = culling.add(&self.meshes, &self.shaders, run, count, source, &mut totals);
-            culling.of_scene.push(culled);
         }
         let Totals {
             instances,
@@ -426,18 +606,14 @@ impl MeshPass {
             drop(frame.compute(plan.choose));
             drop(frame.compute(plan.offsets));
             drop(frame.compute(plan.write));
-            frame.read_back(plan.read)?;
             return Ok(false);
         }
-        culling.views.extend(views.iter().map(|view| {
-            let lod = LodView::new(&view.clip_from_world, view.size);
-            GpuView {
-                planes: planes(&view.clip_from_world, view.clamped),
-                w: lod.w,
-                w_slope: lod.w_slope,
-                pixels_per_unit: lod.pixels_per_unit,
-            }
-        }));
+        // In their slots: the view's first pass, the cascades, then its second.
+        culling.views.push(GpuView::new(&seen, FIRST, Keep::Shown));
+        let cascades = cascades.iter().enumerate();
+        (culling.views)
+            .extend(cascades.map(|(i, cascade)| GpuView::new(cascade, 1 + i, Keep::All)));
+        (culling.views).push(GpuView::new(&seen, plan.second(), Keep::Unhidden));
         let [kept_transforms, kept_ids, kept_params] =
             culling.kept(frame.address(plan.instances), plan.views as u64);
         // Laid out as one view's kept instances are, each run's at its `output`.
@@ -477,39 +653,96 @@ impl MeshPass {
             commands,
             scratch,
             counts,
+            // The second pass's alone, once the pyramid is built.
+            pyramid: 0,
             run_count: run_count as u32,
             block_count: block_count as u32,
-            groups,
             instances,
             params_words,
-            unused: 0,
         };
-        let views = views.len() as u32;
         let mut pass = frame.compute(plan.gather);
         pass.set_pipeline(&culling.gather);
         pass.push_constants(bytemuck::bytes_of(&gather));
         pass.dispatch([groups, 1, 1]);
         drop(pass);
-        let passes = [
-            (plan.choose, &culling.choose, groups),
-            (
-                plan.offsets,
-                &culling.offsets,
-                run_count.div_ceil(BLOCK) as u32,
-            ),
-            (plan.write, &culling.write, groups),
-        ];
-        for (pass, pipeline, across) in passes {
-            let mut pass = frame.compute(pass);
-            pass.set_pipeline(pipeline);
-            pass.push_constants(bytemuck::bytes_of(&push));
-            pass.dispatch([across, views, 1]);
-        }
-        frame.read_back(plan.read)?;
+        // Every view but the second pass's, the last.
+        culling.dispatch(
+            frame,
+            [plan.choose, plan.offsets, plan.write],
+            &push,
+            plan.views - 1,
+        );
+        culling.pushed = Some(push);
         Ok(true)
     }
 
-    /// Draws the instances that view `view` of `plan` kept of the `run`th of the runs it culled,
+    /// Builds the depth pyramid of the game's view from its depth, as its first pass drew it, and
+    /// culls the runs [`MeshPass::cull`] culled for the view's second pass against it, as `plan`
+    /// declared them in the frame's graph, recording their passes, the next of the frame's, and what
+    /// reads back what the view drew.
+    ///
+    /// # Panics
+    ///
+    /// If `plan` has no second pass declared.
+    pub(crate) fn cull_second(&self, frame: &mut Frame<'_>, plan: &CullPlan) -> Result<()> {
+        let _zone = gg_core::zone!();
+        let second = (plan.second.as_ref()).expect("a culling's second pass, declared");
+        let culling = &self.culling;
+        let levels = second.levels.iter().map_while(|&level| level);
+        let Some(push) = culling.pushed else {
+            // Its passes are the frame's all the same.
+            for level in levels {
+                drop(frame.compute(level));
+            }
+            drop(frame.compute(second.choose));
+            drop(frame.compute(second.offsets));
+            drop(frame.compute(second.write));
+            frame.read_back(second.read)?;
+            return Ok(());
+        };
+        let pyramid = frame.address(second.pyramid);
+        let (mut source, mut source_size) = (0, second.size);
+        let mut target = 0;
+        for (i, level) in levels.enumerate() {
+            let mut pass = frame.compute(level);
+            let target_size = source_size.map(|side| side.div_ceil(2));
+            let depth = if i == 0 {
+                pass.set_pipeline(&culling.pyramid_depth);
+                pass.sampled(second.depth)
+            } else {
+                pass.set_pipeline(&culling.pyramid_reduce);
+                0
+            };
+            let built = PyramidPush {
+                pyramid,
+                source,
+                source_width: source_size[0],
+                source_height: source_size[1],
+                target,
+                target_width: target_size[0],
+                target_height: target_size[1],
+                depth,
+                unused: 0,
+            };
+            pass.push_constants(bytemuck::bytes_of(&built));
+            let [across, down] = target_size.map(|side| side.div_ceil(PYRAMID_GROUP));
+            pass.dispatch([across, down, 1]);
+            (source, source_size) = (target, target_size);
+            target += target_size[0] * target_size[1];
+        }
+        // The second pass's view alone, the last.
+        let push = CullPush {
+            views: push.views + (plan.second() * size_of::<GpuView>()) as u64,
+            pyramid,
+            ..push
+        };
+        let passes = [second.choose, second.offsets, second.write];
+        culling.dispatch(frame, passes, &push, 1);
+        frame.read_back(second.read)?;
+        Ok(())
+    }
+
+    /// Draws the instances that view `slot` of `plan` kept of the `run`th of the runs it culled,
     /// with `push`'s mesh, a draw for each of its mesh's levels, as the commands written for them
     /// say.
     pub(super) fn draw_culled(
@@ -517,19 +750,19 @@ impl MeshPass {
         pass: &mut Pass<'_, '_>,
         mesh: &GpuMesh,
         push: Push,
-        (plan, view): (&CullPlan, usize),
+        (plan, slot): (&CullPlan, usize),
         run: usize,
     ) {
         let culling = &self.culling;
         let run = &culling.runs[run];
         let [transforms, ids, params] =
             culling.kept(pass.address(plan.instances), plan.views as u64);
-        let view = view as u64;
-        let first = view * u64::from(culling.instances) + u64::from(run.output);
+        let slot = slot as u64;
+        let first = slot * u64::from(culling.instances) + u64::from(run.output);
         let params = if run.params_words == 0 {
             0
         } else {
-            params + (view * u64::from(culling.params_words) + u64::from(run.params_output)) * 4
+            params + (slot * u64::from(culling.params_words) + u64::from(run.params_output)) * 4
         };
         let push = Push {
             transforms: transforms + first * TRANSFORM,
@@ -539,7 +772,7 @@ impl MeshPass {
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         let runs = culling.runs.len() as u64;
-        let commands = (view * runs * MAX_LEVELS as u64 + u64::from(run.commands)) * COMMAND;
+        let commands = (slot * runs * MAX_LEVELS as u64 + u64::from(run.commands)) * COMMAND;
         for level in 0..u64::from(run.level_count) {
             pass.draw_indexed_indirect(&mesh.indices, plan.commands, commands + level * COMMAND);
         }
@@ -590,6 +823,25 @@ impl Culled for SceneRun {
 }
 
 impl Culling {
+    /// Records `passes`, the choosing, the offsets and the writing of a pass of the culling, each
+    /// pushing `push`, for the first `views` of the views it points to.
+    fn dispatch(&self, frame: &mut Frame<'_>, passes: [PassId; 3], push: &CullPush, views: usize) {
+        let groups = u64::from(push.block_count).min(MOST_GROUPS) as u32;
+        let runs = u64::from(push.run_count).div_ceil(BLOCK) as u32;
+        let [choose, offsets, write] = passes;
+        let views = views as u32;
+        for (pass, pipeline, across) in [
+            (choose, &self.choose, groups),
+            (offsets, &self.offsets, runs),
+            (write, &self.write, groups),
+        ] {
+            let mut pass = frame.compute(pass);
+            pass.set_pipeline(pipeline);
+            pass.push_constants(bytemuck::bytes_of(push));
+            pass.dispatch([across, views, 1]);
+        }
+    }
+
     /// Adds `run`, of `count` instances at `source`, to the runs culled, its blocks and their
     /// copies, if its mesh is drawable and its shader opaque, and returns its index among them;
     /// `None` if it isn't culled.
@@ -734,5 +986,34 @@ mod tests {
             (3, 40, (1 << 32) + 5)
         );
         assert_eq!(super::counts(&words[..12]), None, "too few");
+    }
+
+    /// A depth pyramid halves the view, rounding up, level by level down to a texel, and holds
+    /// each level's texels.
+    #[test]
+    fn a_depth_pyramid_halves_the_view_down_to_a_texel() {
+        // 640 by 360, 320 by 180, ..., 3 by 2, 2 by 1, 1 by 1: 11 levels.
+        let texels = [
+            640 * 360,
+            320 * 180,
+            160 * 90,
+            80 * 45,
+            40 * 23,
+            20 * 12,
+            10 * 6,
+            5 * 3,
+            3 * 2,
+            2,
+            1,
+        ];
+        assert_eq!(pyramid([1280, 720]), (11, texels.iter().sum()));
+        assert_eq!(pyramid([1, 1]), (1, 1), "a texel already");
+        assert_eq!(pyramid([2, 1]), (1, 1));
+        assert_eq!(pyramid([3, 1]), (2, 2 + 1));
+        assert_eq!(
+            pyramid([u32::MAX; 2]).0,
+            MOST_PYRAMID_LEVELS,
+            "the most levels a view's sides make"
+        );
     }
 }

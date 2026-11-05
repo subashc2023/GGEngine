@@ -11,17 +11,19 @@ use crate::{
     Circle, Glyph, Grid, Line, Mesh, MeshDraw, Meshes, Shader, Shaders, Sprite, halves, sprite,
 };
 
-/// What a frame draws besides UI, in order, each over those before it, but where an opaque one
-/// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
-/// takes, and where it is in the world. Each run of consecutive draws of one mesh with one shader
-/// that draw the same [`Faces`] renders as one instanced draw, whatever their transforms, IDs and
-/// parameters, a texture among them, or, of a mesh with levels of detail, as one for each level its
-/// instances draw at: every draw draws both faces of its mesh's triangles but a
-/// material's that isn't double-sided. Each draw has an ID, a 64-bit number that the view writes
-/// where it shows, which [picks](crate::Pick) read back: what the engine gives it, an entity's ID
-/// for a draw of the world's; 0 for a draw of no entity, as [`push`](Self::push),
-/// [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle) give. Clearing it
-/// keeps its memory, so that a frame that draws no more than the last allocates nothing.
+/// What a frame draws besides UI: meshes, each with a shader for its vertex type, the parameters
+/// that shader takes, and where it is in the world. Those whose shaders are opaque draw first,
+/// whatever their order, each hiding what's behind it; then those that blend, in order, each over
+/// those before it and over what's opaque, but where what's opaque is nearer. Each run of
+/// consecutive draws of one mesh with one shader that draw the same [`Faces`] renders as one
+/// instanced draw, whatever their transforms, IDs and parameters, a texture among them, or, of a
+/// mesh with levels of detail, as one for each level its instances draw at: every draw draws both
+/// faces of its mesh's triangles but a material's that isn't double-sided. Each draw has an ID, a
+/// 64-bit number that the view writes where it shows, which [picks](crate::Pick) read back: what
+/// the engine gives it, an entity's ID for a draw of the world's; 0 for a draw of no entity, as
+/// [`push`](Self::push), [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle)
+/// give. Clearing it keeps its memory, so that a frame that draws no more than the last allocates
+/// nothing.
 ///
 /// The renderer's [`Scene`](crate::Scene) draws among them where [`draw_scene`](Self::draw_scene)
 /// says, or else before them all.
@@ -53,9 +55,10 @@ pub(crate) struct Run {
 }
 
 impl Draws {
-    /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, over the
-    /// meshes drawn before it but where an opaque one is nearer. `transform` takes the mesh's own
-    /// space, which its vertices' positions are in, to the world's. Its ID is 0, of no entity.
+    /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, where
+    /// [`Draws`] puts it by how `shader` blends: among the opaque, first, or else in its turn.
+    /// `transform` takes the mesh's own space, which its vertices' positions are in, to the
+    /// world's. Its ID is 0, of no entity.
     pub fn push<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -82,8 +85,8 @@ impl Draws {
         self.extend_run(mesh.index, shader.index, Faces::Both, instance, start);
     }
 
-    /// Draws `draw` over the meshes drawn before it but where an opaque one is nearer, as
-    /// [`push`](Self::push) draws its mesh with its shader and parameters, with the ID `id`. A
+    /// Draws `draw` as [`push`](Self::push) draws its mesh with its shader and parameters, with
+    /// the ID `id`. A
     /// material's draw that isn't double-sided draws its mesh's fronts: the triangles whose corners
     /// wind counterclockwise, as glTF's fronts do, or clockwise where `transform` mirrors them, as
     /// glTF has it.
@@ -102,8 +105,8 @@ impl Draws {
         self.extend_run(draw.mesh, draw.shader, faces, instance, start);
     }
 
-    /// Draws `sprite` over the meshes drawn before it but where an opaque one is nearer, as
-    /// [`Sprite`] describes. `transform` takes the sprite's own space, where it's a unit square
+    /// Draws `sprite` over what's drawn before it and what's opaque, but where what's opaque is
+    /// nearer, as [`Sprite`] describes. `transform` takes the sprite's own space, where it's a unit square
     /// around the origin, to the world's. Its ID is 0, of no entity.
     pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
@@ -117,8 +120,8 @@ impl Draws {
         self.extend_quads(sprite::SHADER, sprites);
     }
 
-    /// Draws `circle` over the meshes drawn before it but where an opaque one is nearer, as
-    /// [`Circle`] describes, with the engine's circle shader, which `shaders` adds the first time
+    /// Draws `circle` over what's drawn before it and what's opaque, but where what's opaque is
+    /// nearer, as [`Circle`] describes, with the engine's circle shader, which `shaders` adds the first time
     /// it's asked for. `transform` takes the circle's own space, where it's as large as fits a unit
     /// square around the origin, to the world's. Its ID is 0, of no entity.
     pub fn push_circle(&mut self, shaders: &mut Shaders, transform: Mat4, circle: Circle) {
@@ -141,8 +144,8 @@ impl Draws {
         self.extend_quads(shaders.circle(), circles);
     }
 
-    /// Draws each of `glyphs`, a transform, a glyph and its ID, in turn, over the meshes drawn
-    /// before it but where an opaque one is nearer, as [`Glyph`] describes, with the engine's text
+    /// Draws each of `glyphs`, a transform, a glyph and its ID, in turn, over what's drawn before
+    /// it and what's opaque, but where what's opaque is nearer, as [`Glyph`] describes, with the engine's text
     /// shader, which `shaders` adds the first time it's asked for, making room for them and joining
     /// a run once for them all. Each transform takes the glyph's own space, where it's a unit square
     /// around the origin, to the world's.
@@ -159,16 +162,16 @@ impl Draws {
         self.extend_quads(shaders.text(), glyphs);
     }
 
-    /// Draws `line` over the meshes drawn before it but where an opaque one is nearer, as [`Line`]
-    /// describes, with the engine's line shader, which `shaders` adds the first time it's asked
+    /// Draws `line` over what's drawn before it and what's opaque, but where what's opaque is
+    /// nearer, as [`Line`] describes, with the engine's line shader, which `shaders` adds the first time it's asked
     /// for, and with the ID `id`: an entity's, or 0 for none. `transform` takes the space its
     /// points are in to the world's, and leaves its width as it is, in the view's pixels.
     pub fn push_line(&mut self, shaders: &mut Shaders, transform: Mat4, line: Line, id: u64) {
         self.push_with_id(sprite::QUAD, shaders.line(), transform, line.params(), id);
     }
 
-    /// Draws `grid` over the meshes drawn before it but where an opaque one is nearer, as [`Grid`]
-    /// describes, with the engine's grid mesh and shader, which `meshes` and `shaders` add the
+    /// Draws `grid` over what's drawn before it and what's opaque, but where what's opaque is
+    /// nearer, as [`Grid`] describes, with the engine's grid mesh and shader, which `meshes` and `shaders` add the
     /// first time they're asked for. `transform` takes the grid's own space, where it's a unit
     /// square around the origin in its XY plane, to the world's: its first two columns are the
     /// square's sides in the grid's plane, and its translation the square's center. Its ID is 0, of

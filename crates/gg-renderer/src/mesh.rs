@@ -26,10 +26,10 @@ mod cull;
 mod scene;
 
 #[cfg(test)]
-pub(crate) use cull::GATHER_SPIRV;
-#[cfg(test)]
 pub(crate) use cull::SPIRV as CULL_SPIRV;
-pub(crate) use cull::{CullPlan, CullView, MAX_VIEWS, counts};
+pub(crate) use cull::{CullPlan, CullView, FIRST, counts};
+#[cfg(test)]
+pub(crate) use cull::{GATHER_SPIRV, PYRAMID_SPIRV};
 pub(crate) use scene::Change as SceneChange;
 pub use scene::Scene;
 
@@ -1430,16 +1430,18 @@ impl MeshPass {
         })
     }
 
-    /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
-    /// `view_projection` takes the world to clip space, from their instances as `uploaded` has
-    /// them, for shaders that read the frame's data, a [`FrameData`], at the address `frame`; and
-    /// the scene's runs where `draws` place them, if `culled`. A run that `culled`, a plan and a
-    /// view of it, culled draws what that view kept of it, a draw for each of its mesh's levels;
-    /// any other is one instanced draw, or, of a mesh with levels of detail, one for each stretch
-    /// of its instances in a row that draw at one level, in order. A run of a mesh that isn't
-    /// drawable yet, or was removed, or with a shader that was, draws nothing. With `shadows`, it draws their shadows into a shadow map instead, by the shadow
-    /// pipelines of those whose shaders write depth, and nothing of the rest. Returns what it drew
-    /// of the runs it didn't cull, which the culling counts of the rest.
+    /// Draws `runs` of `draws` and of the scene over the whole of the pass's target, `view` pixels
+    /// across and down, where `view_projection` takes the world to clip space, from their instances
+    /// as `uploaded` has the draws', for shaders that read the frame's data, a [`FrameData`], at
+    /// the address `frame`: the culled runs first, then the rest, each in the order the draws say,
+    /// the scene's runs where they place them. A run that's culled draws what the culling's view
+    /// kept of it, a draw for each of its mesh's levels; any other is one instanced draw, or, of a
+    /// mesh with levels of detail, one for each stretch of its instances in a row that draw at one
+    /// level, in order. The scene's runs draw only as they're culled. A run of a mesh that isn't
+    /// drawable yet, or was removed, or with a shader that was, draws nothing. With `shadows`, it
+    /// draws their shadows into a shadow map instead, by the shadow pipelines of those whose
+    /// shaders write depth, and nothing of the rest. Returns what it drew of the runs it didn't
+    /// cull, which the culling counts of the rest.
     ///
     /// # Panics
     ///
@@ -1459,7 +1461,7 @@ impl MeshPass {
         view: [u32; 2],
         draws: &Draws,
         uploaded: Uploaded,
-        culled: Option<(&CullPlan, usize)>,
+        runs: Runs<'_>,
         shadows: bool,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
@@ -1469,11 +1471,23 @@ impl MeshPass {
         let (mut bound, mut faces) = (None, None);
         // The draws before the scene's place, the scene's runs, then the draws after.
         let scene_at = draws.scene_at.unwrap_or(0);
-        let frame_runs = |runs: std::ops::Range<usize>| runs.map(Drawn::Frame);
-        let order = (frame_runs(0..scene_at))
-            .chain((0..self.scene.runs().len()).map(Drawn::Scene))
-            .chain(frame_runs(scene_at..draws.runs.len()));
-        for drawn_run in order {
+        let order = || {
+            let frame_runs = |runs: std::ops::Range<usize>| runs.map(Drawn::Frame);
+            (frame_runs(0..scene_at))
+                .chain((0..self.scene.runs().len()).map(Drawn::Scene))
+                .chain(frame_runs(scene_at..draws.runs.len()))
+        };
+        let (culled, rest) = match runs {
+            Runs::Culled(plan, slot) => (Some((plan, slot)), false),
+            Runs::CulledThenRest(plan, slot) => (Some((plan, slot)), true),
+            Runs::All => (None, true),
+        };
+        // The culled runs, then the rest, which don't hide them.
+        let culled_order = culled
+            .into_iter()
+            .flat_map(|_| order().map(|run| (run, true)));
+        let rest_order = rest.then(order).into_iter().flatten();
+        for (drawn_run, culling) in culled_order.chain(rest_order.map(|run| (run, false))) {
             // Its mesh, its shader, the faces it draws, the draws' run, if it's theirs, and its
             // index among the runs culled, if it's culled.
             let (run, culled_run) = match drawn_run {
@@ -1489,8 +1503,8 @@ impl MeshPass {
                 }
             };
             let (mesh, shader, run_faces, run) = run;
-            // The scene's runs draw only as they're culled.
-            if run.is_none() && culled_run.is_none() {
+            // Each in its turn, and the scene's runs only as they're culled.
+            if culled_run.is_some() != culling || (run.is_none() && culled_run.is_none()) {
                 continue;
             }
             let mesh = self
@@ -1561,6 +1575,19 @@ impl MeshPass {
         }
         Ok(drawn)
     }
+}
+
+/// Which of a frame's runs a pass draws, as [`MeshPass::draw`] draws them.
+#[derive(Clone, Copy)]
+pub(crate) enum Runs<'p> {
+    /// What the culling's view in the slot given kept of the runs it culled, alone: the game's
+    /// view's first pass, or a shadow cascade's.
+    Culled(&'p CullPlan, usize),
+    /// What the culling's view in the slot given kept of the runs it culled, then the rest: the
+    /// game's view's second pass.
+    CulledThenRest(&'p CullPlan, usize),
+    /// Every run, on the CPU's levels: the canvas's, or a view's whose frame culls none.
+    All,
 }
 
 /// A run a pass draws: the draws' run of that index, or the scene's.
