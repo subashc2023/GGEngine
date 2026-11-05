@@ -67,6 +67,7 @@ fn main() -> ExitCode {
         arenas_hold_more_than_a_frame_took,
         sampled_images_keep_their_layout,
         compute_passes_write_cubes_that_passes_sample,
+        compute_passes_write_buffers_that_draws_take_commands_from,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
@@ -752,6 +753,130 @@ fn compute_passes_write_cubes_that_passes_sample() {
     assert!(refused.contains("no pass writes as storage"), "{refused}");
 
     drop((frames, image, cube, fill, halve, draw, device, instance));
+    check(&validation);
+}
+
+/// A compute pass writes two commands of indirect draws into a buffer of the graph's own, the
+/// instances' colors into another and two counts into a third, the second by an atomic add; a
+/// render pass draws by the commands, the first of two instances from the second, the other of
+/// none, each instance over a pixel of its own in the color it reads; and the counts come back
+/// as the frame two later begins. Three frames, so that synchronization validation sees each
+/// frame's writes wait for the frame before's reads, of the commands and of the copy.
+fn compute_passes_write_buffers_that_draws_take_commands_from() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = spirv(
+        "indirect",
+        &[
+            ("write_main", "compute"),
+            ("vertex_main", "vertex"),
+            ("fragment_main", "fragment"),
+        ],
+    );
+    let write = ComputePipeline::new(&device, "write commands", &spirv, c"write_main").expect("a");
+    let draw = Pipeline::graphics(
+        &device,
+        &GraphicsDesc {
+            name: "draw by commands",
+            spirv: &spirv,
+            vertex: c"vertex_main",
+            fragment: Some(c"fragment_main"),
+            format: ColorImage::FORMAT,
+            blend: Blend::Opaque,
+            depth_write: false,
+            depth_bias: 0.0,
+            depth_clamp: false,
+        },
+    )
+    .expect("a pipeline");
+    let mut image = ColorImage::new(&device, 2, 1, "indirect draws").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let color = graph.target(0);
+    let (commands, colors, counts) = (
+        graph.buffer("test commands", 40),
+        graph.buffer("test colors", 48),
+        graph.buffer("test counts", 8),
+    );
+    let written = (graph.compute(label!("write")))
+        .write_buffer(commands)
+        .write_buffer(counts)
+        .write_buffer(colors)
+        .add();
+    let read = graph.read_back(label!("read counts"), counts);
+    let drawn = (graph.render(label!("draw")))
+        .clear(color, [0.0; 4])
+        .indirect(commands)
+        .read_buffer(colors)
+        .add();
+    let mut reads = Vec::new();
+    for _ in 0..3 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        reads.push((frame.buffer_read().0, frame.buffer_read().1.to_vec()));
+        let indices = frame
+            .upload(&[0u32, 1, 2].map(u32::to_ne_bytes).concat())
+            .expect("indices");
+        let mut pass = frame.compute(written);
+        pass.set_pipeline(&write);
+        let addresses = [commands, counts, colors].map(|buffer| pass.address(buffer));
+        pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+        pass.dispatch([1, 1, 1]);
+        drop(pass);
+        frame.read_back(read).expect("a read back");
+        let mut pass = frame
+            .render(drawn)
+            .expect("an offscreen image is always there");
+        pass.set_pipeline(&draw);
+        let addresses = [0, 0, pass.address(colors)];
+        pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+        pass.draw_indexed_indirect(indices, commands, 0);
+        pass.draw_indexed_indirect(indices, commands, 20);
+        drop(pass);
+        frame.submit().expect("the frame's submission");
+    }
+    let counted = [2u32, 7].map(u32::to_ne_bytes).concat();
+    assert_eq!(reads, [(0, Vec::new()), (0, Vec::new()), (1, counted)]);
+    let pixels = image.read_back().expect("the image's pixels");
+    assert_eq!(pixels, [255, 0, 0, 255, 0, 255, 0, 255], "red, then green");
+
+    // What no pass wrote isn't read, nor read back, and a command past its buffer isn't drawn.
+    let refused = panics(|| {
+        let mut graph = Graph::default();
+        let unwritten = graph.buffer("unwritten", 4);
+        let _ = graph.compute(label!("read")).read_buffer(unwritten).add();
+    });
+    assert!(refused.contains("before any pass writes it"), "{refused}");
+    let refused = panics(|| {
+        let mut graph = Graph::default();
+        let large = graph.buffer("large", gg_gpu::MAX_BUFFER_READ + 4);
+        let _ = graph.compute(label!("write")).write_buffer(large).add();
+        let _ = graph.read_back(label!("read"), large);
+    });
+    assert!(refused.contains("reads back"), "{refused}");
+    let refused = tries(|| {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        let indices = frame
+            .upload(&[0u32, 1, 2].map(u32::to_ne_bytes).concat())
+            .expect("indices");
+        drop(frame.compute(written));
+        frame.read_back(read).expect("a read back");
+        let mut pass = frame
+            .render(drawn)
+            .expect("an offscreen image is always there");
+        pass.set_pipeline(&draw);
+        pass.draw_indexed_indirect(indices, commands, 24);
+    });
+    let refused = refused.expect_err("a command past its buffer's end");
+    assert!(refused.contains("within its buffer"), "{refused}");
+
+    drop((frames, image, write, draw, device, instance));
     check(&validation);
 }
 

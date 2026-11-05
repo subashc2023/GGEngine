@@ -283,14 +283,16 @@ impl Device {
         // For models' textures, which recede from the camera; for passes that render IDs beside
         // colors, whose targets blend apart, since integers don't blend; for games' cooked
         // textures, which are compressed as BC7; for compute shaders, which pick their storage
-        // images from the bindless set by an index they're pushed; and for shadow maps, whose
-        // casters between the light and the near plane cast from it.
+        // images from the bindless set by an index they're pushed; for shadow maps, whose
+        // casters between the light and the near plane cast from it; and for indirect draws whose
+        // instances start where their commands say.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .independent_blend(true)
             .texture_compression_bc(true)
             .shader_storage_image_array_dynamic_indexing(true)
-            .depth_clamp(true);
+            .depth_clamp(true)
+            .draw_indirect_first_instance(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -303,8 +305,9 @@ impl Device {
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
         // features but the bindless ones, BC texture compression, depth clamp and host image
         // copy, which `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy,
-        // independent blending and indexing storage images dynamically, in vk.xml's feature
-        // requirements), and the create info's pointers outlive the call.
+        // independent blending, indexing storage images dynamically and indirect draws' first
+        // instance, in vk.xml's feature requirements), and the create info's pointers outlive the
+        // call.
         let raw =
             unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
                 let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);

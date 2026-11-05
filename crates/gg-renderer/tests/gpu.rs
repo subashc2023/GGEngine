@@ -87,6 +87,7 @@ fn main() -> ExitCode {
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         shadows_fall_where_their_casters_put_them,
+        culling_keeps_what_each_view_sees,
         shadows_hold_still_as_the_view_moves,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
@@ -1466,7 +1467,9 @@ fn batches_match_their_reference() {
         instances: 6 + 1 + BIG,
         triangles: 2 * (6 + 1 + BIG),
     };
-    assert_eq!(renderer.drawn(), drew, "each run is one instanced draw");
+    let viewport = filling([WIDTH, HEIGHT]);
+    let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    assert_eq!(drawn, drew, "each run is one instanced draw");
     check(renderer, "batches", WIDTH, HEIGHT);
 }
 
@@ -1739,7 +1742,6 @@ fn views_match_their_reference() {
         render_without_ui(&mut renderer, data);
         match frame {
             1 => {
-                assert_eq!(renderer.drawn(), DrawCounts::default());
                 let pixels = read_back(&mut renderer);
                 // `CLEAR`, encoded.
                 let clear = [39, 48, 63, 255];
@@ -1749,6 +1751,8 @@ fn views_match_their_reference() {
                 }
             }
             3 => {
+                // What the shut view drew, nothing, which comes back two frames later.
+                assert_eq!(renderer.drawn(), DrawCounts::default());
                 let pixels = read_back(&mut renderer);
                 compare("views", WIDTH, HEIGHT, &pixels);
                 shown = Some(pixels);
@@ -1987,8 +1991,12 @@ fn levels_of_detail_match_their_reference() {
             ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
-        assert_eq!(renderer.drawn(), drew, "frame {frame}");
     }
+    assert_eq!(
+        renderer.drawn(),
+        drew,
+        "the first frame's, as the third began"
+    );
     let found: Vec<(u64, u64)> = shows.iter().map(|&(id, ..)| (id, id)).collect();
     assert_eq!(renderer.picked(), found, "each pick found its instance");
 
@@ -2222,6 +2230,13 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
             break;
         }
     }
+    // What each frame drew comes back two frames later.
+    for _ in 0..2 {
+        let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+        instances.push(renderer.drawn().instances);
+    }
+    let instances = &instances[2..];
     shut_down(renderer);
     let frames = streaming.len();
     assert!(
@@ -2695,7 +2710,14 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         &draws,
     );
     shows(&mut renderer, [red, gray, gray, CLEARED], "drawn");
-    assert_eq!(renderer.drawn().instances, 3);
+    let drawn = drawn_again(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(drawn.instances, 3);
 
     stores.textures.remove(texture);
     stores.textures.remove(texture);
@@ -2705,7 +2727,14 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
     );
     let removed = [white, gray, gray, CLEARED];
     shows(&mut renderer, removed, "the texture removed");
-    assert_eq!(renderer.drawn().instances, 3);
+    let drawn = drawn_again(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(drawn.instances, 3);
     stores.meshes.remove(plain_a);
     stores.meshes.remove(plain_a);
     render_without_ui(
@@ -2714,7 +2743,14 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
     );
     let removed = [white, CLEARED, gray, CLEARED];
     shows(&mut renderer, removed, "the mesh removed");
-    assert_eq!(renderer.drawn().instances, 2);
+    let drawn = drawn_again(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(drawn.instances, 2);
     stores.shaders.remove(flat_b);
     stores.shaders.remove(flat_b);
     render_without_ui(
@@ -2723,7 +2759,14 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
     );
     let removed = [white, CLEARED, CLEARED, CLEARED];
     shows(&mut renderer, removed, "the shader removed");
-    assert_eq!(renderer.drawn().instances, 1);
+    let drawn = drawn_again(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(drawn.instances, 1);
     // An image and vertices for what's removed change nothing.
     (stores.textures)
         .replace("red", texture, [2, 2], red.repeat(4), Mipmaps::None)
@@ -2973,7 +3016,9 @@ fn models_match_their_reference() {
         instances: 9,
         triangles: 18,
     };
-    assert_eq!(renderer.drawn(), drawn);
+    let viewport = filling([WIDTH, HEIGHT]);
+    let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    assert_eq!(drew, drawn);
     check(renderer, "models", WIDTH, HEIGHT);
 }
 
@@ -3084,7 +3129,9 @@ fn mixed_textures_match_their_reference() {
         instances: 2 * instances,
         triangles: 4 * instances,
     };
-    assert_eq!(renderer.drawn(), drawn, "each run is one instanced draw");
+    let viewport = filling([WIDTH, HEIGHT]);
+    let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    assert_eq!(drew, drawn, "each run is one instanced draw");
     check(renderer, "mixed_textures", WIDTH, HEIGHT);
 }
 
@@ -4667,6 +4714,125 @@ fn shadows_fall_where_their_casters_put_them() {
     shut_down(renderer);
 }
 
+/// A floor seen from straight above without perspective, 16 pixels a unit, 8 units across, under a
+/// light that comes down 2 for each 1 it goes along +X, casting shadows 100 units ahead, and plates
+/// a unit across over it, of a mesh with a sphere round its vertices: one in the view, which
+/// draws and casts its shadow; one past the view's side, which the view culls but the shadows'
+/// cascades keep, so that its shadow falls in the view; one 200 units away, which both cull; and
+/// a red one across the view's other side, which draws where it shows. And a red square of a mesh
+/// whose vertices are 10 units from its own origin, which is outside the view, added without a
+/// sphere, so never culled: it draws. What the view counts on the GPU leaves out those it culled.
+fn culling_keeps_what_each_view_sees() {
+    const SIZE: u32 = 128;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let corners = |offset: f32| {
+        let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+            position: Vec3::new(x + offset, y, 0.0),
+            uv: Vec2::from(uv),
+            color: Vec4::ONE,
+            normal: Vec3::Z,
+            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+        };
+        [
+            corner([-0.5, -0.5], [0.0, 1.0]),
+            corner([0.5, -0.5], [1.0, 1.0]),
+            corner([0.5, 0.5], [1.0, 0.0]),
+            corner([-0.5, 0.5], [0.0, 0.0]),
+        ]
+    };
+    let indices = [0, 1, 2, 2, 3, 0];
+    let floor = model_square(&mut stores.meshes);
+    let whole = Lod {
+        start: 0,
+        count: 6,
+        error: 0.0,
+    };
+    let sphere = Lods {
+        levels: vec![whole],
+        center: Vec3::ZERO,
+        // Half the square's diagonal, to its corners.
+        radius: std::f32::consts::FRAC_1_SQRT_2,
+    };
+    let plate = (stores.meshes)
+        .add_lods("plate", &corners(0.0), &indices, sphere)
+        .expect("a mesh");
+    let away = (stores.meshes)
+        .add("away", &corners(10.0), &indices)
+        .expect("a mesh");
+    let white = Material {
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    };
+    let red = Material {
+        color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+        ..white
+    };
+    let mut draw = |mesh, material: &Material| {
+        let material = stores.materials.add(material);
+        MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+    };
+    let (floor, white_plate, red_plate, away) = (
+        draw(floor, &white),
+        draw(plate, &white),
+        draw(plate, &red),
+        draw(away, &red),
+    );
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(20.0, Vec3::ZERO), &floor, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(-2.0, 2.0, -2.0)), &white_plate, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(-4.75, 2.0, 1.0)), &white_plate, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(200.0, 2.0, 0.0)), &white_plate, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(4.25, 2.0, 3.0)), &red_plate, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(-10.0, 1.0, 2.5)), &away, 0);
+    let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 8.0, 21.0);
+    let viewport = filling([SIZE, SIZE]);
+    stores.lights = vec![sun(Vec3::new(1.0, -2.0, 0.0), Some(100.0))];
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // The floor, the plate in the view and the one across its side, of one run, and the square.
+    let kept = DrawCounts {
+        draws: 3,
+        instances: 4,
+        triangles: 8,
+    };
+    assert_eq!(drawn, kept);
+    let frame = frame_pixels(&mut renderer);
+    shut_down(renderer);
+    // The floor's pixel `x` along X and `z` along Z from the origin, at the view's center.
+    let at = |x: f32, z: f32| {
+        pixel_at(
+            &frame,
+            SIZE,
+            [(64.0 + 16.0 * x) as u32, (64.0 + 16.0 * z) as u32],
+        )
+    };
+    let floor = at(2.0, -3.0);
+    assert!(floor[0] > 100 && floor[0] == floor[2], "{floor:?}");
+    let dark = [0, 0, 0, 255];
+    let shadows = [
+        ((-1.0, -2.0), "the plate's in the view"),
+        ((-3.6, 1.0), "the plate's past it"),
+    ];
+    for ((x, z), what) in shadows {
+        let found = at(x, z);
+        assert!(
+            close(found, dark),
+            "{what} shadow at ({x}, {z}) is {found:?}"
+        );
+    }
+    for ((x, z), what) in [
+        ((3.9, 3.0), "the plate across the side"),
+        ((0.0, 2.5), "the square"),
+    ] {
+        let found = at(x, z);
+        assert!(
+            found[0] > 100 && found[1] < 40 && found[2] < 40,
+            "{what} at ({x}, {z}) is {found:?}, not red"
+        );
+    }
+}
+
 /// The floor and the opaque plate of [`floor_and_plates`], seen from straight above without
 /// perspective, 16 pixels a unit, under a light that comes down from +X and +Z, casting shadows
 /// as far as the view sees, 1,000 units, so that the nearest cascade's texels are 2 pixels across,
@@ -4864,6 +5030,21 @@ fn shadowed_models_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "shadowed_models", WIDTH, HEIGHT);
+}
+
+/// What the last frame drew in the view of `draws` in `viewport` from `viewpoint`, which comes back
+/// as the frame two later begins: renders them twice more, as they were.
+fn drawn_again(
+    renderer: &mut Renderer,
+    stores: &mut Stores,
+    viewport: Viewport,
+    viewpoint: Viewpoint,
+    draws: &Draws,
+) -> DrawCounts {
+    for _ in 0..2 {
+        render_without_ui(renderer, stores.data(viewport, viewpoint, draws));
+    }
+    renderer.drawn()
 }
 
 /// Renders a frame of `data`, without UI.

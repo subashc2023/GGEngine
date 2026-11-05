@@ -40,8 +40,8 @@ use std::time::Duration;
 use gg_core::math::{Mat4, Vec4};
 use gg_core::{Error, Result, label};
 use gg_gpu::{
-    ColorImage, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId, Surface, Swapchain,
-    Target, Texture as GpuTexture, TextureFormat,
+    ColorImage, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId, RenderPass,
+    Surface, Swapchain, Target, Texture as GpuTexture, TextureFormat,
 };
 use tracing::info;
 
@@ -54,7 +54,7 @@ pub use gg_gpu::{
 pub use grid::{Grid, GridLines};
 pub use light::{Light, LightKind};
 pub use line::Line;
-pub use mesh::{Lod, Lods, Mesh, MeshDraw, Meshes};
+pub use mesh::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
@@ -72,7 +72,7 @@ pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
 use light::GpuLight;
-use mesh::{FrameData, MeshPass};
+use mesh::{CullPlan, CullView, FrameData, MAX_VIEWS, MeshPass};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use sky::{SkyData, SkyLight, SkyPass};
@@ -131,11 +131,12 @@ fn canvas_projection(size: [u32; 2]) -> Mat4 {
 /// What a frame drew in the game's view, which [`Renderer::drawn`] tells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawCounts {
-    /// Instanced draws: one for each run of consecutive draws of one mesh with one shader that draw
-    /// the same faces, or, of a mesh with levels of detail, one for each level its run's instances
-    /// drew at, or each stretch of them in a row that did, if its shader blends.
+    /// Instanced draws of an instance or more: one for each run of consecutive draws of one mesh
+    /// with one shader that draw the same faces, or, of a mesh with levels of detail, one for each
+    /// level its run's instances drew at, or, if its shader blends or it's on the canvas, each
+    /// stretch of them in a row that did.
     pub draws: usize,
-    /// The meshes they drew, one for each draw pushed to [`Draws`].
+    /// The meshes they drew, one for each draw pushed to [`Draws`] that culling kept.
     pub instances: usize,
     /// The triangles of those meshes, at the levels they drew, culled ones among them: the GPU's
     /// work in drawing them.
@@ -353,8 +354,11 @@ pub struct Renderer {
     failed: bool,
     /// How long the last frame waited, which [`Renderer::waited`] describes.
     waited: Duration,
-    /// What the last frame drew, which [`Renderer::drawn`] describes.
+    /// What the frame two before the last drew, which [`Renderer::drawn`] describes.
     drawn: DrawCounts,
+    /// What each frame in flight drew of the draws it didn't cull, and whether it culled any, by
+    /// its number, for the frame two later to add what the culling counted, as it comes back.
+    counted: [(u64, DrawCounts, bool); 2],
     /// The frame's lights as shaders read them, kept between frames, so that one with no more than
     /// the last allocates nothing.
     lights: Vec<GpuLight>,
@@ -368,6 +372,8 @@ enum Output {
 
 /// The game's view's images and passes in a frame's graph.
 struct ViewPasses {
+    /// What culls the view's opaque runs and their shadows' casters, if it draws any.
+    cull: Option<CullPlan>,
     /// What draws the shadows the view shows, if a light casts them.
     shadows: Option<ShadowPasses>,
     /// What the view draws into, of high dynamic range.
@@ -399,6 +405,14 @@ struct ShadowPasses {
 enum Shown {
     Image(ImageId),
     Texture(u32),
+}
+
+/// `pass`, taking the instances and commands of what `cull` keeps, if the frame culls.
+fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
+    match cull {
+        Some(cull) => cull.drawn(pass),
+        None => pass,
+    }
 }
 
 // The engine renders on a thread of its own, which the renderer and its uploads move to.
@@ -495,6 +509,7 @@ impl Renderer {
             failed: false,
             waited: Duration::ZERO,
             drawn: DrawCounts::default(),
+            counted: [(0, DrawCounts::default(), false); 2],
             lights: Vec::new(),
         })
     }
@@ -723,11 +738,17 @@ impl Renderer {
             (Some((sky, _, shown, cutoff)), None) => self.sky_light.data(sky, shown, cutoff),
             _ => None,
         };
+        let meshes = &self.meshes;
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
-            // before the view samples it.
+            // before the view samples it, and before them, the culling of the view's opaque runs
+            // and the cascades' casters.
             let aspect = data.viewport.aspect();
-            let shadows = Cascades::fit(data.lights, &data.viewpoint, aspect).map(|cascades| {
+            let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
+            let views = if cascades.is_some() { MAX_VIEWS } else { 1 };
+            let cull =
+                (meshes.cull_bounds(data.draws)).map(|bounds| CullPlan::new(graph, bounds, views));
+            let shadows = cascades.map(|cascades| {
                 let names = [
                     "shadow cascade 0",
                     "shadow cascade 1",
@@ -741,7 +762,9 @@ impl Renderer {
                     label!("shadow cascade 3"),
                 ];
                 let maps = names.map(|name| graph.shadow(name, [MAP_SIZE; 2]));
-                let passes = std::array::from_fn(|i| graph.render(labels[i]).depth(maps[i]).add());
+                let passes = std::array::from_fn(|i| {
+                    culled(cull.as_ref(), graph.render(labels[i]).depth(maps[i])).add()
+                });
                 ShadowPasses {
                     cascades,
                     maps,
@@ -751,7 +774,7 @@ impl Renderer {
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
-            let mut pass = (graph.render(label!("view")))
+            let mut pass = culled(cull.as_ref(), graph.render(label!("view")))
                 .clear(hdr, data.clear_color)
                 .ids(ids)
                 .depth(depth);
@@ -783,6 +806,7 @@ impl Renderer {
             });
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
+                cull,
                 shadows,
                 hdr,
                 color,
@@ -823,15 +847,58 @@ impl Renderer {
         };
         // The frame two before has finished, and what it read with it.
         self.picks.answer(frame.ids_read());
+        let (finished, read) = frame.buffer_read();
+        if let Some(&(_, counted, culled)) =
+            (self.counted.iter()).find(|&&(number, ..)| number == finished && finished > 0)
+        {
+            self.drawn = counted;
+            if culled && let Some(culled) = mesh::counts(read) {
+                self.drawn += culled;
+            }
+        }
+        let number = frame.number();
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
         if let Some(plan) = &plan {
             let pass = self.sky.as_ref().expect("made for a sky to show");
             pass.prefilter(&mut frame, plan);
         }
-        // What the view shows, and how much of its area that covers.
-        let (counts, view) = match (view, pixels_shown) {
+        // What the view shows, how much of its area that covers, what its draws that weren't
+        // culled drew, and whether the frame culled any.
+        let (counts, view, culled) = match (view, pixels_shown) {
             (Some(view), _) => {
+                // Every pass's instances, copied once, culled for the view and the cascades.
+                let uploaded = MeshPass::upload_draws(&mut frame, data.draws)?;
+                let on_canvas = MeshPass::upload_draws(&mut frame, data.canvas)?;
+                let culled = match &view.cull {
+                    Some(plan) => {
+                        let seen = CullView {
+                            clip_from_world: view_projection,
+                            size,
+                            clamped: false,
+                        };
+                        // The view, then each cascade, as the plan has them.
+                        let mut views = [seen; MAX_VIEWS];
+                        let count = match &view.shadows {
+                            Some(shadows) => {
+                                for (i, cascade) in views[1..].iter_mut().enumerate() {
+                                    *cascade = CullView {
+                                        clip_from_world: shadows.cascades.clip_from_world(i),
+                                        size: [MAP_SIZE; 2],
+                                        clamped: true,
+                                    };
+                                }
+                                MAX_VIEWS
+                            }
+                            None => 1,
+                        };
+                        let views = &views[..count];
+                        (self.meshes).cull(&mut frame, plan, data.draws, uploaded, views)?
+                    }
+                    None => false,
+                };
+                // The culling of the view's runs, the `i`th view of those it culled for.
+                let cull = |i: usize| view.cull.as_ref().map(|plan| (plan, i));
                 self.lights.clear();
                 self.lights.extend(data.lights.iter().map(GpuLight::new));
                 let lights = if self.lights.is_empty() {
@@ -859,7 +926,11 @@ impl Renderer {
                             .expect("the graph's own images are always there");
                         let clip = shadows.cascades.clip_from_world(i);
                         let map = [MAP_SIZE; 2];
-                        (self.meshes).draw(&mut pass, clip, address, map, data.draws, true)?;
+                        let draws = data.draws;
+                        let cascade = cull(1 + i);
+                        (self.meshes).draw(
+                            &mut pass, clip, address, map, draws, uploaded, cascade, true,
+                        )?;
                     }
                 }
                 let mut pass =
@@ -891,12 +962,15 @@ impl Renderer {
                     shared,
                     size,
                     data.draws,
+                    uploaded,
+                    cull(0),
                     false,
                 )?;
                 pass.begin_label(c"canvas");
                 let canvas = canvas_projection(size);
-                counts +=
-                    (self.meshes).draw(&mut pass, canvas, shared, size, data.canvas, false)?;
+                let on = data.canvas;
+                counts += (self.meshes)
+                    .draw(&mut pass, canvas, shared, size, on, on_canvas, None, false)?;
                 pass.end_label();
                 drop(pass);
                 if let Some(read) = view.read_ids {
@@ -918,7 +992,7 @@ impl Renderer {
                     self.view_read = frame.number();
                     frame.read_image(read)?;
                 }
-                (counts, Some((Shown::Image(view.color), size)))
+                (counts, Some((Shown::Image(view.color), size)), culled)
             }
             (None, Some(Pixels { size, bytes })) => {
                 if data.read_picks {
@@ -934,15 +1008,18 @@ impl Renderer {
                 (
                     DrawCounts::default(),
                     Some((Shown::Texture(texture.index()), shown)),
+                    false,
                 )
             }
             (None, None) => {
                 if data.read_picks {
                     self.picks.take(frame.number(), None);
                 }
-                (DrawCounts::default(), None)
+                (DrawCounts::default(), None, false)
             }
         };
+        // What the GPU counts of the frame comes back with the frame two later, which adds it.
+        self.counted[(number % 2) as usize] = (number, counts, culled);
         let mut pass = (frame.render(frame_pass)).expect("a frame's first target has an image");
         let view = view.map(|(shown, size)| {
             let image = match shown {
@@ -990,7 +1067,6 @@ impl Renderer {
             self.sky_light.prefiltered(sky, shown, plan);
         }
         self.waited = self.frames.waited();
-        self.drawn = counts;
         Ok(true)
     }
 
@@ -1000,9 +1076,12 @@ impl Renderer {
         self.waited
     }
 
-    /// What the last [`Renderer::render`] drew in the game's view, if it rendered a frame. Zero if
-    /// it didn't, or if the view had no area. The UI's draws aren't counted, nor the draws of
-    /// meshes not yet drawable or removed, or with shaders removed.
+    /// What the GPU drew in the game's view in the frame whose counts the last [`Renderer::render`]
+    /// that rendered a frame read, two frames before it, once it had finished, as the culling of
+    /// its opaque runs counts them on the GPU. Zero if the last call rendered no frame, before then,
+    /// and for a frame that didn't render the view or whose view had no area. The UI's draws
+    /// aren't counted, nor the draws of meshes not yet drawable or removed, or with shaders
+    /// removed.
     pub fn drawn(&self) -> DrawCounts {
         self.drawn
     }

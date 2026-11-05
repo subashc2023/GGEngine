@@ -1,7 +1,7 @@
 //! The Vulkan layer, built on `ash`: instance and device setup, memory, buffers and images,
 //! bindless descriptors, graphics and compute pipelines, swapchain, synchronization and queue
-//! submission, the render graph, which places a frame's barriers and makes its own images, and
-//! frame captures through RenderDoc.
+//! submission, the render graph, which places a frame's barriers and makes its own images and
+//! buffers, and frame captures through RenderDoc.
 //!
 //! `gg-renderer` is its only client; the engine reaches the GPU through the renderer.
 
@@ -33,8 +33,8 @@ pub use buffer::GpuBuffer;
 pub use capture::Capture;
 pub use device::{Device, MemoryBudget, SHADER_CAPABILITIES, UploadPath};
 pub use frame::{
-    Arenas, Compute, ComputePass, Frame, Frames, Graph, ImageId, ImageRead, Indices, MAX_READS,
-    Pass, PassId, RenderPass, Target, Upload,
+    Arenas, BufferId, Compute, ComputePass, Frame, Frames, Graph, ImageId, ImageRead, Indices,
+    MAX_BUFFER_READ, MAX_READS, Pass, PassId, RenderPass, Target, Upload,
 };
 pub use image::ColorImage;
 pub use instance::{Instance, InstanceDesc, Validation};

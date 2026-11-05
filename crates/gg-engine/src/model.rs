@@ -8,8 +8,8 @@ use std::path::Path;
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Lods, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex,
-    Sampled, Shaders, Texels, Texture, Textures,
+    AlphaMode, Lod, Lods, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
+    ModelVertex, Sampled, Shaders, Texels, Texture, Textures,
 };
 
 use crate::gltf::{self, Imported, Part, Primitive, Slot};
@@ -289,13 +289,22 @@ pub(crate) fn reload(
         let name = format!("{name} {}", primitive.name);
         let vertices = vertices(primitive);
         // Read again from its files, as a development run does, it has one level.
+        let lods = lods(primitive);
         match made.meshes.get(i) {
             Some(&mesh) => {
-                let replaced = meshes.replace(&name, mesh, &vertices, finest(primitive));
+                let replaced = match lods {
+                    Some(lods) => {
+                        meshes.replace_lods(&name, mesh, &vertices, &primitive.indices, lods)
+                    }
+                    None => meshes.replace(&name, mesh, &vertices, finest(primitive)),
+                };
                 replaced.expect("a primitive is whole triangles of its own vertices");
             }
             None => {
-                let mesh = meshes.add(&name, &vertices, finest(primitive));
+                let mesh = match lods {
+                    Some(lods) => meshes.add_lods(&name, &vertices, &primitive.indices, lods),
+                    None => meshes.add(&name, &vertices, finest(primitive)),
+                };
                 made.meshes
                     .push(mesh.expect("whole triangles of its own vertices"));
             }
@@ -344,13 +353,20 @@ fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshD
         .collect()
 }
 
-/// The levels of detail of `primitive`, as the cooker made them, with the sphere round its vertices
-/// that a draw picks one by; `None` for a primitive of one level, and for one whose vertices aren't
-/// all finite, which no sphere holds.
+/// The levels of detail of `primitive`, as the cooker made them, or its one, all its indices, as
+/// glTF has it, with the sphere round its vertices that a draw picks one by and that views cull it
+/// by; `None` for one whose vertices aren't all finite, which no sphere holds.
 fn lods(primitive: &Primitive) -> Option<Lods> {
-    if primitive.lods.len() < 2 {
-        return None;
-    }
+    let levels = if primitive.lods.is_empty() {
+        let count = u32::try_from(primitive.indices.len()).ok()?;
+        vec![Lod {
+            start: 0,
+            count,
+            error: 0.0,
+        }]
+    } else {
+        primitive.lods.clone()
+    };
     let positions = primitive
         .positions
         .iter()
@@ -361,8 +377,8 @@ fn lods(primitive: &Primitive) -> Option<Lods> {
         });
     let center = (low + high) / 2.0;
     let radius = positions.map(|p| p.distance(center)).fold(0.0, f32::max);
-    (center.is_finite() && radius.is_finite()).then(|| Lods {
-        levels: primitive.lods.clone(),
+    (center.is_finite() && radius.is_finite()).then_some(Lods {
+        levels,
         center,
         radius,
     })

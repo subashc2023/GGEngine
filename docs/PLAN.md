@@ -110,19 +110,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sponza** (2026-11-04)
 - **Phase 12, render graph and PBR** (2026-11-04)
 - **Bistro** (2026-11-05)
+- **Culling on the GPU** (2026-11-05)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **Culling on the GPU.** Buffers in the graph, which a pass writes and later passes read, as images
-  are. A compute pass culls each opaque run's instances against the view, its far plane at infinity
-  as now, and against each shadow cascade's box, so that a cascade draws its casters alone; picks
-  each one's level of detail, as the render thread picks them now; and writes those left, each
-  level's in their order, for indirect draws whose instance counts it writes, so that the CPU
-  records a draw for each run and level whatever its instances. Games' shaders read their instances
-  as they do now; what blends, and the canvas, draw as now. Every reference image unchanged; the 16
-  Bistros' triangles drawn, and their shadows' time on the GPU, fall.
 - **The scene on the GPU.** The world's opaque meshes kept on the GPU from frame to frame, each
   instance written as it changes rather than every frame: the world keeps the tick at which each
   component's rows last changed, marked wherever a system, a set or a load reaches them mutably, and
@@ -324,6 +317,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
+| Drawing a culled run's levels in one call, through `multiDrawIndirect` where the device has it: the CPU records an indirect draw for each run and level of its mesh, up to eight, whatever its instances | A profile shows recording them |
+| Counting the shadows' cascades' draws, instances and triangles: what the culling reads back is the view's alone | An agent tunes the shadows' cost by them |
+| Culling what blends and the canvas, which draw from the CPU, on its levels, whatever the view sees | A game draws many blending instances outside its view |
+| A sphere round the vertices of a mesh a layer adds without levels, from where its vertex type keeps its position: such a mesh is never culled, as `Meshes::add` can't read its positions | A game draws many of its own meshes outside its view |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |

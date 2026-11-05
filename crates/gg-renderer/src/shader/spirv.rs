@@ -1111,6 +1111,40 @@ pub(super) fn buffer_pointers_to_pointers(spirv: &[u8]) -> usize {
         .count()
 }
 
+/// How many of the struct types `spirv` reaches in buffer memory, by device address, hold a
+/// pointer, as a member or in a struct or array they hold.
+#[cfg(test)]
+pub(super) fn buffer_structs_holding_pointers(spirv: &[u8]) -> usize {
+    let words = words(spirv).expect("SPIR-V");
+    let (mut pointers, mut into_buffers) = (HashSet::new(), Vec::new());
+    // The types each struct and array holds.
+    let mut holds = HashMap::new();
+    for instruction in instructions(&words) {
+        match instruction.expect("an instruction that can be read") {
+            (_, OP_TYPE_POINTER, &[id, storage, pointee]) => {
+                pointers.insert(id);
+                if storage == PHYSICAL_STORAGE_BUFFER {
+                    into_buffers.push(pointee);
+                }
+            }
+            (_, OP_TYPE_STRUCT, &[id, ref members @ ..]) => {
+                holds.insert(id, members.to_vec());
+            }
+            (_, OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY, &[id, element, ..]) => {
+                holds.insert(id, vec![element]);
+            }
+            _ => {}
+        }
+    }
+    fn holds_pointer(ty: u32, holds: &HashMap<u32, Vec<u32>>, pointers: &HashSet<u32>) -> bool {
+        (holds.get(&ty).into_iter().flatten())
+            .any(|&held| pointers.contains(&held) || holds_pointer(held, holds, pointers))
+    }
+    (into_buffers.iter())
+        .filter(|&&pointee| holds_pointer(pointee, &holds, &pointers))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

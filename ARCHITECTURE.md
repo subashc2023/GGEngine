@@ -1336,8 +1336,10 @@ so that its texels stay put in the world as the view turns and moves, and shadow
 shimmer. What a shader that's opaque draws casts shadows, through a pipeline of the shader's vertex
 shader alone, drawing depth alone, into each cascade; the masked model shader's, through a fragment
 shader of its own too, which cuts them out as it cuts out what it draws; what blends casts none, nor
-what a layer draws on its canvas. Casters between the light and a cascade's near side cast from it,
-their depth clamped there, and a cascade's depths sit back from its casters by a texel's worth of
+what a layer draws on its canvas. Each cascade draws the casters whose spheres reach into its box,
+as culling on the GPU, below, keeps them, whether or not the view sees them. Casters between the
+light and a cascade's near side cast from it, their depth clamped there, and are kept for it; a
+cascade's depths sit back from its casters by a texel's worth of
 their slope. A lit fragment takes the nearest cascade whose map holds it and the texels the filter
 reads round it, moves a texel toward the light, and off its surface along its normal by three
 texels times the sine of the light's angle to it, so that a surface doesn't shadow itself, and
@@ -1347,9 +1349,11 @@ makes no shadow maps and draws no shadows.
 
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, writing them from
-compute shaders, sampling them or copying from them, from which the frame places every barrier and
-layout transition as each pass begins, each use waiting for the uses before it that it must and no
-more, so that no pass records one itself. The passes run in that order, on the graphics queue. A
+compute shaders, sampling them or copying from them, and the buffers, writing and reading them from
+compute shaders, reading them from draws' shaders, taking indirect draws' commands from them or
+reading them back, from which the frame places every barrier and layout transition as each pass
+begins, each use waiting for the uses before it that it must and no more, so that no pass records
+one itself. The passes run in that order, on the graphics queue. A
 pass that computes dispatches compute shaders, which write storage images, 16-bit floats in linear
 RGBA, of a 2D image's one layer or a cube's six faces, a mip level at a time through slots of the
 bindless set's own for storage images, in the general layout, as their last use left them. A
@@ -1362,12 +1366,18 @@ undefined until a pass there writes it, and is made from what the passes say of 
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
 after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
 store it, and an image's next use waits for what its own last use left as well as for what the
-block's did, as the view's tonemapped colors follow its depth there. Each pass is a debug label, and
+block's did, as the view's tonemapped colors follow its depth there. The graph's own buffers last
+for a frame too, undefined until a compute pass there writes them, each in the GPU's memory of its
+own, which shaders reach through its address, kept for the frames after that declare one of its
+name no larger, and made again at the next power of two bytes past that; a frame's first use of
+one waits for the frame before's last, as both run on one queue. A pass reads back up to 256 bytes
+of one, as the frame two later finds them. Each pass is a debug label, and
 the draws inside it have labels of their own, each run of draws its shader's name, and the
 canvas's, and the frame pass's view and UI, apart. Each pass writes a timestamp as it begins and as
 it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy's GPU
 timeline shows each pass, and every run's `engine.perf` logs the frames' time on the GPU
-(`gpu_ms_mean`, `gpu_ms_p95`) and the memory of the graph's own images (`transient_bytes`).
+(`gpu_ms_mean`, `gpu_ms_p95`) and the memory of the graph's own images and buffers
+(`transient_bytes`).
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
@@ -1633,24 +1643,37 @@ leads.
 
 Draws are batched, every mesh and not only quads: each run of consecutive draws of one mesh with one
 shader, drawing the same faces, is a single instanced draw, whose instances are the draws, and the
-frame copies the run's transforms and its parameters into its memory, each in an array of its own,
-which shaders read by the instance's index. A change of texture is a change of parameters, which
-bindless textures make free, so 100,000 sprites take a handful of draws; shaders index their
+frame copies the draws' transforms, IDs and parameters into its memory once, each in an array of
+its own, which shaders read by the instance's index. A change of texture is a change of parameters,
+which bindless textures make free, so 100,000 sprites take a handful of draws; shaders index their
 textures through `NonUniformResourceIndex`, since the instances of a draw can carry different ones,
 and the engine decorates as non-uniform the sampled images slangc makes of them, as Vulkan requires.
 Nothing caps a run: the frame's memory grows to hold it, where a renderer with a buffer of fixed
-size would draw what it holds and start another. The renderer counts each frame's draws, instances
-and triangles; the Performance panel shows them and `engine.perf` logs their peaks.
+size would draw what it holds and start another.
 
-A mesh may have levels of detail, as a cooked model's primitives do: ranges of its one index buffer,
-finest first, each with how far its surface strays from the finest's, in the mesh's own units, and
-a sphere round its vertices. Each draw of it draws the coarsest level whose error, grown by its
-transform's longest axis, spans no more than a pixel of the view where the sphere comes nearest the
-camera, which the clip space's w there gives, a rigid view keeping the pixels a unit spans; a draw
-whose sphere reaches the camera's plane draws the finest. The render thread picks each draw's level
-as it records the frame. A run of a mesh with levels draws once for each level its draws picked,
-each level's draws gathered, if its shader is opaque, whose depth makes their order moot, and once
-for each stretch of draws in a row at one level, keeping their order, if it blends.
+A mesh may have levels of detail, as a cooked model's primitives do: up to eight ranges of its one
+index buffer, finest first, each with how far its surface strays from the finest's, in the mesh's
+own units, and a sphere round its vertices, which a model's primitive of one level has too. Each
+draw of it draws the coarsest level whose error, grown by its transform's longest axis, spans no
+more than a pixel of the view where the sphere comes nearest the camera, which the clip space's w
+there gives, a rigid view keeping the pixels a unit spans; a draw whose sphere reaches the camera's
+plane draws the finest. A mesh a layer adds without levels has no sphere, as the engine can't read
+its vertices' positions.
+
+The world's and the layers' opaque runs are culled on the GPU, in compute passes before the
+shadows' and the view's, for the view and for each of the shadows' cascades: an instance is kept
+where its mesh's sphere, as its transform places it and grown by the most it stretches, reaches
+inside every plane of what that view sees, its far plane at infinity under perspective, and, for a
+cascade, but its near side, which casters past cast from; a mesh without a sphere is always kept.
+The same passes pick each kept instance's level, as above, and write each view's, each level's in
+the order they came, into buffers of the graph's own, with the commands of indirect draws, whose
+instance counts and first instances they write: the CPU records a draw for each run and level of
+its mesh, whatever its instances, and a run's shader reads its instances as any does, from where
+the commands' first instance says. What blends and the canvas draw from the frame's arrays on the
+CPU's levels, once for each stretch of draws in a row at one level, keeping their order. The
+renderer counts the view's draws that have instances, their instances and their triangles, the
+culled runs' on the GPU, which come back as the frame two later begins; the Performance panel
+shows them and `engine.perf` logs their peaks.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

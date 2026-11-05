@@ -3,10 +3,10 @@
 //! runs the passes of a [`Graph`], in order, which place every barrier between them, and can
 //! render into several targets, such as an app's windows, presenting all their swapchains at once;
 //! its later passes can sample what its earlier ones rendered offscreen. It reads back a few pixels
-//! of the IDs its passes render, which the frame two later, which reuses its resources once it has
-//! finished, finds read, with the times its passes took on the GPU. On a device that uploads
-//! through a transfer queue, a frame's copies go in a submission of their own, which another
-//! timeline paces, and no frame waits for.
+//! of the IDs its passes render, and a small buffer its compute shaders write, which the frame two
+//! later, which reuses its resources once it has finished, finds read, with the times its passes
+//! took on the GPU. On a device that uploads through a transfer queue, a frame's copies go in a
+//! submission of their own, which another timeline paces, and no frame waits for.
 
 mod compute;
 pub(crate) mod graph;
@@ -33,7 +33,7 @@ use transients::Transients;
 use upload::Arena;
 
 pub use compute::Compute;
-pub use graph::{ComputePass, Graph, ImageId, PassId, RenderPass};
+pub use graph::{BufferId, ComputePass, Graph, ImageId, MAX_BUFFER_READ, PassId, RenderPass};
 pub use pass::{Indices, Pass};
 pub use upload::Upload;
 
@@ -99,6 +99,12 @@ pub struct Frames {
     /// What the last frame to use the slot of the frame being begun read back, as that one finds
     /// it: [`Frame::ids_read`]'s.
     read: Read,
+    /// What frames read buffers back into ([`Frame::read_back`]), [`MAX_BUFFER_READ`] bytes for
+    /// each slot, in the slots' order: made by the first read.
+    buffer_reads: Option<Buffer>,
+    /// The number of the frame whose buffer read the frame being begun gives, 0 for none, how
+    /// many bytes it read, and its bytes: [`Frame::buffer_read`]'s.
+    buffer_read: (u64, usize, [u8; MAX_BUFFER_READ as usize]),
     /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in the
     /// slots' order.
     image_reads: Vec<ImageReads>,
@@ -111,6 +117,7 @@ pub struct Frames {
     timer: Timer,
     /// The barriers before the pass being recorded, kept so that frames don't allocate.
     barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
+    buffer_barriers: Vec<vk::BufferMemoryBarrier2<'static>>,
     /// The last frame's list of targets, emptied, whose memory the next frame reuses.
     spare_targets: Vec<Target<'static>>,
     scratch: Scratch,
@@ -148,6 +155,8 @@ struct Slot {
     /// The number of the frame that last began in the slot, 0 for none, and how many IDs it read
     /// back into the slot's part of `Frames::reads`.
     reads: (u64, usize),
+    /// How many bytes that frame read back into the slot's part of `Frames::buffer_reads`.
+    buffer_read: usize,
 }
 
 /// A command buffer that copies on the transfer queue record into, for one submission at a time.
@@ -258,6 +267,8 @@ impl Frames {
                 count: 0,
                 values: [[0; 2]; MAX_READS],
             },
+            buffer_reads: None,
+            buffer_read: (0, 0, [0; MAX_BUFFER_READ as usize]),
             image_reads: (0..FRAMES_IN_FLIGHT)
                 .map(|_| ImageReads::default())
                 .collect(),
@@ -265,6 +276,7 @@ impl Frames {
             transients: Transients::new(device),
             timer,
             barriers: Vec::new(),
+            buffer_barriers: Vec::new(),
             spare_targets: Vec::new(),
             scratch: Scratch::default(),
             waited: Duration::ZERO,
@@ -291,6 +303,7 @@ impl Frames {
                 commands_name,
                 acquired: Vec::new(),
                 reads: (0, 0),
+                buffer_read: 0,
             });
         }
         Ok(frames)
@@ -310,9 +323,10 @@ impl Frames {
     /// A failure to make them fails the frame before it acquires anything.
     ///
     /// Once the frame that last used this one's resources has finished, it copies what that frame
-    /// read back ([`Frame::read_ids`]), which the frame begun gives ([`Frame::ids_read`]), and the
-    /// time its passes took on the GPU ([`Frames::gpu_time`]). A frame that doesn't begin leaves
-    /// its IDs for the next that does: the slot forgets them only as one begins.
+    /// read back ([`Frame::read_ids`], [`Frame::read_back`]), which the frame begun gives
+    /// ([`Frame::ids_read`], [`Frame::buffer_read`]), and the time its passes took on the GPU
+    /// ([`Frames::gpu_time`]). A frame that doesn't begin leaves what was read for the next that
+    /// does: the slot forgets it only as one begins.
     ///
     /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, or to
     /// submit or present: the semaphores its acquires signaled may have no wait pending, so no
@@ -425,6 +439,7 @@ impl Frames {
         }
         self.recording = true;
         self.slots[slot].reads = (self.submitted + 1, 0);
+        self.slots[slot].buffer_read = 0;
         Ok(Some(Frame {
             frames: self,
             targets: list,
@@ -509,6 +524,15 @@ impl Frames {
     /// in the slot to give.
     fn find_read(&mut self, slot: usize) -> Result<()> {
         let (frame, count) = self.slots[slot].reads;
+        let bytes = self.slots[slot].buffer_read;
+        self.buffer_read.0 = frame;
+        self.buffer_read.1 = bytes;
+        if bytes > 0 {
+            let reads = (self.buffer_reads.as_ref())
+                .expect("a frame that read a buffer back made what it read into");
+            let out = &mut self.buffer_read.2[..bytes];
+            reads.read_into(slot as u64 * MAX_BUFFER_READ, out)?;
+        }
         self.read.frame = frame;
         self.read.count = count;
         if count == 0 {
@@ -763,6 +787,15 @@ impl<'a> Frame<'a> {
         (read.frame, &read.values[..read.count])
     }
 
+    /// What the frame that last used this one's resources, two before it, read back of a buffer
+    /// ([`Frame::read_back`]), which has finished: its number, and the buffer's bytes; none if it
+    /// read none, and 0 for the number of no frame, as [`Frame::ids_read`] gives what it read of
+    /// IDs.
+    pub fn buffer_read(&self) -> (u64, &[u8]) {
+        let (frame, bytes, read) = &self.frames.buffer_read;
+        (*frame, &read[..*bytes])
+    }
+
     /// Checks that no pass is open: only outside one does the frame record its own commands, or
     /// end them.
     ///
@@ -863,17 +896,36 @@ impl<'a> Frame<'a> {
                 barriers.push(barrier.on(raw, range));
             }
         }
-        if !barriers.is_empty() {
-            // SAFETY: the commands are recording outside a pass, and the images live until the
-            // frame has finished.
+        let mut buffer_barriers = std::mem::take(&mut self.frames.buffer_barriers);
+        buffer_barriers.clear();
+        for &(buffer, use_) in graph.buffer_uses(pass) {
+            let transients = &mut self.frames.transients;
+            if let Some(barrier) = transients.follow_buffer(buffer, use_.access()) {
+                buffer_barriers.push(
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(barrier.src_stages)
+                        .src_access_mask(barrier.src_access)
+                        .dst_stage_mask(barrier.dst_stages)
+                        .dst_access_mask(barrier.dst_access)
+                        .buffer(transients.buffer(buffer).raw())
+                        .size(vk::WHOLE_SIZE),
+                );
+            }
+        }
+        if !barriers.is_empty() || !buffer_barriers.is_empty() {
+            // SAFETY: the commands are recording outside a pass, and the images and buffers live
+            // until the frame has finished.
             unsafe {
                 self.frames.device.raw().cmd_pipeline_barrier2(
                     commands,
-                    &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+                    &vk::DependencyInfo::default()
+                        .image_memory_barriers(&barriers)
+                        .buffer_memory_barriers(&buffer_barriers),
                 );
             }
         }
         self.frames.barriers = barriers;
+        self.frames.buffer_barriers = buffer_barriers;
     }
 
     /// Ends the pass started last: its label, and its timestamp.
@@ -1068,6 +1120,86 @@ impl<'a> Frame<'a> {
         }
         self.close_pass();
         Ok(count)
+    }
+
+    /// Records `pass`, a pass of the frame's graph that reads a buffer back, which must be the
+    /// next of its passes to record: the buffer, as the passes before left it, read once the frame
+    /// has finished, which the frame that next uses its resources, two later, waits for as it
+    /// begins: [`Frame::buffer_read`] gives it there. A frame reads one buffer back; a later read
+    /// takes the place of an earlier one's. The first read makes the buffer the frames read into,
+    /// and fails if it can't be made.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, or `pass` isn't the graph's next, or doesn't read a
+    /// buffer back.
+    pub fn read_back(&mut self, pass: PassId) -> Result<()> {
+        self.take_pass(pass, PassKind::ReadBack);
+        let [(buffer, _)] = *self.graph.buffer_uses(pass) else {
+            unreachable!("a read back uses its buffer alone");
+        };
+        if self.frames.buffer_reads.is_none() {
+            let (device, memory) = (&self.frames.device, Memory::Readback);
+            let size = MAX_BUFFER_READ * FRAMES_IN_FLIGHT;
+            let usage = vk::BufferUsageFlags::TRANSFER_DST;
+            let reads = Buffer::new(device, size, usage, memory, "buffers read")?;
+            self.frames.buffer_reads = Some(reads);
+        }
+        self.open_pass(pass);
+        let size = self.graph.buffers[buffer.0 as usize].size;
+        let offset = self.slot as u64 * MAX_BUFFER_READ;
+        let source = self.frames.transients.buffer(buffer).raw();
+        let read = (self.frames.buffer_reads.as_ref())
+            .map(Buffer::raw)
+            .expect("the buffer was just made");
+        let region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: offset,
+            size,
+        };
+        let to_host = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)
+            .buffer(read)
+            .offset(offset)
+            .size(size);
+        let commands = self.commands();
+        let raw = self.frames.device.raw();
+        // SAFETY: the commands are recording outside a pass, after the barrier that lets the copy
+        // read the buffer; the region lies within the graph's buffer, which the graph checked holds
+        // at most `MAX_BUFFER_READ` bytes, and within the slot's part of what it reads into; and
+        // both live until the frame has finished: the graph's buffer retires until then, and what
+        // it reads into lives as long as the frames, which wait for theirs before they go.
+        unsafe {
+            raw.cmd_copy_buffer(commands, source, read, slice::from_ref(&region));
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().buffer_memory_barriers(slice::from_ref(&to_host)),
+            );
+        }
+        self.frames.slots[self.slot].buffer_read = size as usize;
+        self.close_pass();
+        Ok(())
+    }
+
+    /// The address that shaders reach `buffer`, one of the graph's own, through during the frame,
+    /// for data that a pass reads where it is, as a table of where compute shaders write: a pass
+    /// that reaches it must use it as its graph declared, as [`Pass::address`] and
+    /// [`Compute::address`] give it.
+    ///
+    /// # Panics
+    ///
+    /// If `buffer` isn't the graph's.
+    pub fn address(&self, buffer: BufferId) -> u64 {
+        self.buffer_parts(buffer).0
+    }
+
+    /// The address of `buffer`, one of the graph's own, and its bytes, as the graph declared it.
+    fn buffer_parts(&self, buffer: BufferId) -> (u64, u64) {
+        let address = self.frames.transients.buffer(buffer).address();
+        (address, self.graph.buffers[buffer.0 as usize].size)
     }
 
     /// Sends the frame's commands to the GPU and presents the images of its swapchains.

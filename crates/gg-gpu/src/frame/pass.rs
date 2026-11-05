@@ -16,7 +16,7 @@ use std::ops::Range;
 use ash::vk;
 use gg_core::Result;
 
-use super::graph::{ImageDecl, ImageId, PassId, PassKind, Use};
+use super::graph::{BufferId, BufferUse, ImageDecl, ImageId, PassId, PassKind, Use};
 use super::{Frame, Target, Upload};
 use crate::bindless::PUSH_CONSTANTS;
 use crate::{ColorImage, Device, Faces, Format, GpuBuffer, Pipeline};
@@ -156,6 +156,7 @@ impl<'a> Frame<'a> {
             extent,
             format,
             uses: decl.uses.clone(),
+            buffer_uses: decl.buffer_uses.clone(),
             labels: 0,
             pipeline_set: false,
         })
@@ -176,14 +177,18 @@ impl<'a> Frame<'a> {
 
 /// Rendering into a frame's target, which ends when the pass is dropped; a pass forgotten
 /// instead stays open, which the frame's next call catches. Draws read geometry and data through
-/// addresses pushed as push constants, of [`Upload`]s or [`GpuBuffer`]s, take indices from either,
-/// and textures from the bindless set, the images the pass samples among them.
+/// addresses pushed as push constants, of [`Upload`]s, [`GpuBuffer`]s or the buffers the pass
+/// reads, take indices from either of the first two, and textures from the bindless set, the
+/// images the pass samples among them; indirect draws take their commands from a buffer the pass
+/// takes them from.
 pub struct Pass<'p, 'a> {
     frame: &'p mut Frame<'a>,
     extent: vk::Extent2D,
     format: Format,
     /// Its uses, in its graph's.
     uses: Range<usize>,
+    /// Its uses of buffers, in its graph's.
+    buffer_uses: Range<usize>,
     /// How many labels inside it are open, which its drop closes.
     labels: u32,
     /// Whether a pipeline is set, which draws need.
@@ -216,6 +221,25 @@ impl<'a> Pass<'_, 'a> {
             image.0
         );
         self.frame.sampled_index(image)
+    }
+
+    /// The address that shaders read `buffer` through, which the pass reads, as its graph
+    /// declared, during the pass alone.
+    ///
+    /// # Panics
+    ///
+    /// If the pass doesn't read `buffer`.
+    pub fn address(&self, buffer: BufferId) -> u64 {
+        assert!(
+            self.declared(buffer, BufferUse::Read),
+            "a pass reads only the buffers it was added reading, and not buffer {}",
+            buffer.0
+        );
+        self.frame.buffer_parts(buffer).0
+    }
+
+    fn declared(&self, buffer: BufferId, use_: BufferUse) -> bool {
+        self.frame.graph.buffer_uses[self.buffer_uses.clone()].contains(&(buffer, use_))
     }
 
     /// As [`Frame::upload`].
@@ -412,6 +436,61 @@ impl<'a> Pass<'_, 'a> {
                 vk::IndexType::UINT32,
             );
             raw.cmd_draw_indexed(self.commands(), count, instances, first, vertex_offset, 0);
+        }
+    }
+
+    /// Draws `indices` as the command at byte `offset` of `commands` says, a buffer the pass takes
+    /// commands from, as an earlier pass wrote it, with the pipeline set last: a
+    /// `VkDrawIndexedIndirectCommand`, five 32-bit words, how many indices, how many instances,
+    /// the first index, what each index is offset by and the first instance, whose index the
+    /// vertex shader sees as `SV_VulkanInstanceID`, counted from it. What wrote the command is
+    /// trusted to keep the indices it draws within `indices`, as shaders are trusted with
+    /// addresses.
+    ///
+    /// # Panics
+    ///
+    /// If no pipeline is set; the pass doesn't take commands from `commands`; the command isn't
+    /// 4-byte aligned, or runs past the buffer's end; or the indices are a buffer no frame has
+    /// filled or another device made.
+    pub fn draw_indexed_indirect<'i>(
+        &mut self,
+        indices: impl Into<Indices<'i>>,
+        commands: BufferId,
+        offset: u64,
+    ) {
+        /// A `VkDrawIndexedIndirectCommand`'s bytes.
+        const COMMAND: u64 = 20;
+        let indices = indices.into();
+        self.frame
+            .frames
+            .device
+            .check_made("the indices' buffer", indices.device);
+        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        assert!(
+            self.declared(commands, BufferUse::Indirect),
+            "a pass takes commands only from the buffers it was added taking them from, and not \
+             buffer {}",
+            commands.0
+        );
+        let size = self.frame.buffer_parts(commands).1;
+        assert!(
+            offset.is_multiple_of(4) && offset.checked_add(COMMAND).is_some_and(|end| end <= size),
+            "a command at byte {offset} of a buffer of {size}: a command is {COMMAND} bytes, 4-byte \
+             aligned, within its buffer"
+        );
+        let buffer = self.frame.frames.transients.buffer(commands).raw();
+        // SAFETY: the commands are recording inside a pass with a pipeline set, after the barrier
+        // that lets draws read the command, which lies within its buffer; the buffer and the
+        // indices live until the frame has finished, as the graph's own buffers retire until then.
+        unsafe {
+            let raw = self.frame.frames.device.raw();
+            raw.cmd_bind_index_buffer(
+                self.commands(),
+                indices.buffer,
+                indices.offset,
+                vk::IndexType::UINT32,
+            );
+            raw.cmd_draw_indexed_indirect(self.commands(), buffer, offset, 1, COMMAND as u32);
         }
     }
 

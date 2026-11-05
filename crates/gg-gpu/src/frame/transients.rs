@@ -3,7 +3,9 @@
 //! and kept for the frames after, which declare them alike, while their uses still don't overlap
 //! within a block. Each block remembers what the last use of any image in it left, so that the
 //! first use of another, in the frame or the next, waits for it; and each image what its own last
-//! use left, which its next waits for too.
+//! use left, which its next waits for too. And its own buffers, each in memory of its own, kept for
+//! the frames after that declare one of its name no larger, each remembering what its last use
+//! left likewise.
 
 use std::sync::Arc;
 
@@ -11,14 +13,15 @@ use ash::vk;
 use gg_core::Result;
 use tracing::trace;
 
-use super::graph::{Access, Barrier, Graph, Hazard, ImageDecl, ImageId, Kind};
+use super::graph::{Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId, Kind};
 use crate::Device;
+use crate::buffer::Buffer;
 use crate::device::Retired;
 use crate::image::{image_info, image_view};
-use crate::vma::Allocation;
+use crate::vma::{Allocation, Memory};
 
 /// The images made for a graph's own, the blocks of memory they're in, and which of the graph being
-/// recorded's images each is.
+/// recorded's images each is; and the buffers made for its own, and which of its buffers each is.
 pub(crate) struct Transients {
     device: Arc<Device>,
     made: Vec<Made>,
@@ -30,6 +33,18 @@ pub(crate) struct Transients {
     lifetimes: Vec<Option<(usize, usize)>>,
     /// Which of `made` the graph's images have matched so far, as it's prepared.
     taken: Vec<bool>,
+    buffers: Vec<MadeBuffer>,
+    /// For each of the graph's buffers, by its index, the one made for it, in `buffers`.
+    buffer_of: Vec<usize>,
+}
+
+/// A buffer made for one of a graph's own.
+struct MadeBuffer {
+    name: &'static str,
+    buffer: Buffer,
+    /// What its last use left, in the frame or one before: a frame's first use waits for the
+    /// frame before's last, as both run on one queue.
+    hazard: Hazard,
 }
 
 /// An image made for one of a graph's own.
@@ -71,6 +86,8 @@ impl Transients {
             of: Vec::new(),
             lifetimes: Vec::new(),
             taken: Vec::new(),
+            buffers: Vec::new(),
+            buffer_of: Vec::new(),
         }
     }
 
@@ -105,6 +122,43 @@ impl Transients {
         }
         for made in &mut self.made {
             made.layout = vk::ImageLayout::UNDEFINED;
+        }
+        self.prepare_buffers(graph)
+    }
+
+    /// Readies the buffers for `graph`'s own: for each, the one made for an earlier frame of its
+    /// name, if it holds as many bytes; otherwise one made now, of the next power of two bytes, so
+    /// that a buffer a frame declares a little larger than the last's isn't made every frame. Those
+    /// made before that no buffer of the graph's takes retire until the frames that use them have
+    /// finished.
+    fn prepare_buffers(&mut self, graph: &Graph) -> Result<()> {
+        let wanted = |made: &MadeBuffer| {
+            (graph.buffers.iter())
+                .any(|decl| decl.name == made.name && decl.size <= made.buffer.size())
+        };
+        self.buffers.retain(wanted);
+        self.buffer_of.clear();
+        for decl in &graph.buffers {
+            let found = self.buffers.iter().position(|made| made.name == decl.name);
+            let index = match found {
+                Some(found) => found,
+                None => {
+                    let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::INDIRECT_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::TRANSFER_SRC;
+                    let size = decl.size.next_power_of_two();
+                    let buffer = Buffer::new(&self.device, size, usage, Memory::Gpu, decl.name)?;
+                    trace!(name = decl.name, bytes = size, "Transient buffer made");
+                    self.buffers.push(MadeBuffer {
+                        name: decl.name,
+                        buffer,
+                        hazard: Hazard::default(),
+                    });
+                    self.buffers.len() - 1
+                }
+            };
+            self.buffer_of.push(index);
         }
         Ok(())
     }
@@ -243,9 +297,31 @@ impl Transients {
         barrier
     }
 
-    /// The bytes of the blocks of memory the images are in.
+    /// The buffer made for the graph's `buffer`.
+    pub(crate) fn buffer(&self, buffer: BufferId) -> &Buffer {
+        &self.buffers[self.buffer_of[buffer.0 as usize]].buffer
+    }
+
+    /// The barrier that lets `access`, a use of the graph's `buffer`, follow what the uses so far
+    /// of the buffer left, if it needs one, which the use then leaves for its next. A write to a
+    /// buffer nothing has used needs none.
+    pub(crate) fn follow_buffer(&mut self, buffer: BufferId, access: Access) -> Option<Barrier> {
+        let made = &mut self.buffers[self.buffer_of[buffer.0 as usize]];
+        // Buffers have no layouts, so a use's is undefined, which follows another's without a
+        // transition.
+        let mut layout = vk::ImageLayout::UNDEFINED;
+        let barrier = made.hazard.follow(&mut layout, access)?;
+        (!barrier.src_stages.is_empty()).then_some(barrier)
+    }
+
+    /// The bytes of the blocks of memory the images are in, and of the buffers.
     pub(crate) fn bytes(&self) -> u64 {
-        self.blocks.iter().map(|block| block.size).sum()
+        let buffers = self.buffers.iter().map(|made| made.buffer.size());
+        self.blocks
+            .iter()
+            .map(|block| block.size)
+            .chain(buffers)
+            .sum()
     }
 
     /// The last pass that uses the graph's `image`, if it's one of the graph's own.

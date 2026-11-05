@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use ash::vk;
 
-use super::graph::{ImageDecl, ImageId, PassId, PassKind, Use};
+use super::graph::{BufferId, BufferUse, ImageDecl, ImageId, PassId, PassKind, Use};
 use super::{Frame, Target};
 use crate::ComputePipeline;
 use crate::bindless::PUSH_CONSTANTS;
@@ -32,6 +32,7 @@ impl<'a> Frame<'a> {
         Compute {
             frame: self,
             uses: decl.uses.clone(),
+            buffer_uses: decl.buffer_uses.clone(),
             labels: 0,
             pipeline_set: false,
         }
@@ -41,11 +42,14 @@ impl<'a> Frame<'a> {
 /// Dispatching compute shaders in a frame's pass, which ends when it's dropped; a pass forgotten
 /// instead stays open, which the frame's next call catches. Shaders read data through addresses
 /// pushed as push constants, write the storage images the pass writes through their levels' slots,
-/// and sample textures from the bindless set, the images the pass samples among them.
+/// write the buffers it writes through their addresses, and sample textures from the bindless set,
+/// the images the pass samples among them.
 pub struct Compute<'p, 'a> {
     frame: &'p mut Frame<'a>,
     /// Its uses, in its graph's.
     uses: Range<usize>,
+    /// Its uses of buffers, in its graph's.
+    buffer_uses: Range<usize>,
     /// How many labels inside it are open, which its drop closes.
     labels: u32,
     /// Whether a pipeline is set, which dispatches need.
@@ -93,6 +97,23 @@ impl Compute<'_, '_> {
 
     fn declared(&self, image: ImageId, use_: Use) -> bool {
         self.frame.graph.uses[self.uses.clone()].contains(&(image, use_))
+    }
+
+    /// The address that shaders read, or write, `buffer` through, which the pass reads or writes,
+    /// as its graph declared, during the pass alone.
+    ///
+    /// # Panics
+    ///
+    /// If the pass neither reads nor writes `buffer`.
+    pub fn address(&self, buffer: BufferId) -> u64 {
+        let uses = &self.frame.graph.buffer_uses[self.buffer_uses.clone()];
+        assert!(
+            uses.contains(&(buffer, BufferUse::ComputeRead))
+                || uses.contains(&(buffer, BufferUse::ComputeWrite)),
+            "a pass reads and writes only the buffers it was added using, and not buffer {}",
+            buffer.0
+        );
+        self.frame.buffer_parts(buffer).0
     }
 
     /// Opens a label inside the pass, named `name`, which captures show the dispatches after it

@@ -25,16 +25,19 @@ const SHADERS: [&str; 13] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 1] = [(
-    "prefilter",
-    &[
-        "cube_main",
-        "downsample_main",
-        "irradiance_main",
-        "specular_main",
-        "brdf_main",
-    ],
-)];
+const COMPUTE: [(&str, &[&str]); 2] = [
+    ("cull", &["choose_main", "offsets_main", "write_main"]),
+    (
+        "prefilter",
+        &[
+            "cube_main",
+            "downsample_main",
+            "irradiance_main",
+            "specular_main",
+            "brdf_main",
+        ],
+    ),
+];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=SLANGC");

@@ -1,8 +1,9 @@
 //! A frame's render graph: the passes a frame runs, in the order they're added, and how each uses
-//! the images it renders into, computes into, samples and copies from, which the frame places
-//! every barrier and layout transition from as each pass begins; and the images that are the
-//! graph's own, which last for a frame, made from what the passes say of them, in memory that
-//! those whose uses in a frame don't overlap share, as `transients` says.
+//! the images it renders into, computes into, samples and copies from, and the buffers its shaders
+//! write and read and its draws take their commands from, which the frame places every barrier and
+//! layout transition from as each pass begins; and the images and buffers that are the graph's own,
+//! which last for a frame, made from what the passes say of them, images in memory that those
+//! whose uses in a frame don't overlap share, as `transients` says.
 
 use std::ops::Range;
 
@@ -15,9 +16,16 @@ use crate::{COLOR_RANGE, ColorImage, DEPTH_RANGE};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageId(pub(crate) u32);
 
+/// A buffer of a [`Graph`]'s own, which its passes use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferId(pub(crate) u32);
+
 /// A pass a [`Graph`] runs: the frame records them in the order they were added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassId(pub(crate) u32);
+
+/// The most bytes of a buffer a pass reads back ([`Graph::read_back`]).
+pub const MAX_BUFFER_READ: u64 = 256;
 
 /// What a frame runs: its passes, in order, each with the images it uses and how. A frame places
 /// the barriers and layout transitions between passes from those uses, the image's last use before
@@ -29,13 +37,25 @@ pub struct PassId(pub(crate) u32);
 /// [`Graph::shadow`], last for a frame: each
 /// is undefined until a pass of the frame writes it, so its first use writes it whole, and passes
 /// whose uses of two of them don't overlap may find them in the same memory. The frames keep them
-/// for the frames after, which add them alike, by their names, kinds and sizes.
+/// for the frames after, which add them alike, by their names, kinds and sizes. Its own buffers,
+/// [`Graph::buffer`], last for a frame too, undefined until a pass writes them; the frames keep
+/// each for the frames after that add one of its name no larger.
 #[derive(Default)]
 pub struct Graph {
     pub(crate) images: Vec<ImageDecl>,
+    pub(crate) buffers: Vec<BufferDecl>,
     pub(crate) passes: Vec<PassDecl>,
-    /// Each pass's uses, one after another, in the order they were given.
+    /// Each pass's uses of images, one after another, in the order they were given.
     pub(crate) uses: Vec<(ImageId, Use)>,
+    /// Each pass's uses of buffers, likewise.
+    pub(crate) buffer_uses: Vec<(BufferId, BufferUse)>,
+}
+
+/// A buffer of a graph's own: its debug name, and its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BufferDecl {
+    pub(crate) name: &'static str,
+    pub(crate) size: u64,
 }
 
 /// An image of a graph's.
@@ -200,6 +220,50 @@ impl Use {
     }
 }
 
+/// How a pass uses a buffer of the graph's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BufferUse {
+    /// Read by its compute shaders, through the buffer's address.
+    ComputeRead,
+    /// Written and read by its compute shaders, through the buffer's address.
+    ComputeWrite,
+    /// Read by its draws' shaders, through the buffer's address.
+    Read,
+    /// The commands its indirect draws take.
+    Indirect,
+    /// Copied from, as a read back is.
+    CopySource,
+}
+
+impl BufferUse {
+    /// What the use does to the buffer, in no layout, as buffers have none.
+    pub(crate) fn access(self) -> Access {
+        let access = |stages, reads, writes| Access {
+            stages,
+            reads,
+            writes,
+            layout: vk::ImageLayout::UNDEFINED,
+            discards: false,
+        };
+        use vk::{AccessFlags2 as A, PipelineStageFlags2 as S};
+        match self {
+            Self::ComputeRead => access(S::COMPUTE_SHADER, A::SHADER_STORAGE_READ, A::NONE),
+            Self::ComputeWrite => access(
+                S::COMPUTE_SHADER,
+                A::SHADER_STORAGE_READ,
+                A::SHADER_STORAGE_WRITE,
+            ),
+            Self::Read => access(
+                S::VERTEX_SHADER | S::FRAGMENT_SHADER,
+                A::SHADER_STORAGE_READ,
+                A::NONE,
+            ),
+            Self::Indirect => access(S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ, A::NONE),
+            Self::CopySource => access(S::COPY, A::TRANSFER_READ, A::NONE),
+        }
+    }
+}
+
 /// What a use does to an image: the stages it's used in, and the reads and writes they make there,
 /// in a layout; and whether it discards what the image held, as a clear does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +281,8 @@ pub(crate) struct PassDecl {
     pub(crate) kind: PassKind,
     /// Its uses, in [`Graph::uses`].
     pub(crate) uses: Range<usize>,
+    /// Its uses of buffers, in [`Graph::buffer_uses`].
+    pub(crate) buffer_uses: Range<usize>,
 }
 
 /// What a pass does.
@@ -230,14 +296,18 @@ pub(crate) enum PassKind {
     ReadImage,
     /// Dispatches compute shaders, as [`Frame::compute`](crate::Frame::compute) records them.
     Compute,
+    /// Reads a buffer back, as [`Frame::read_back`](crate::Frame::read_back) does.
+    ReadBack,
 }
 
 impl Graph {
     /// Empties it for the next frame, keeping its memory.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.buffers.clear();
         self.passes.clear();
         self.uses.clear();
+        self.buffer_uses.clear();
     }
 
     /// The frame's `target`th target, as [`Frames::begin`](crate::Frames::begin) takes them: the
@@ -320,10 +390,31 @@ impl Graph {
         ImageId(self.images.len() as u32 - 1)
     }
 
-    /// A pass that draws, named `label`, whose attachments and the images it samples the builder
-    /// it returns takes, before [`RenderPass::add`] adds it.
+    /// A buffer of the graph's own of `size` bytes, named `name`, in the GPU's own memory, which
+    /// compute shaders write through its address, as a pass that writes it says, and later passes'
+    /// shaders read, draws take their commands from, or frames read back. The frames keep it for
+    /// the frames after, by its name.
+    ///
+    /// # Panics
+    ///
+    /// If `size` is 0, or the graph has a buffer of that name already.
+    pub fn buffer(&mut self, name: &'static str, size: u64) -> BufferId {
+        assert!(
+            size > 0,
+            "buffer {name:?} is empty, but a buffer holds a byte"
+        );
+        assert!(
+            self.buffers.iter().all(|decl| decl.name != name),
+            "the graph has a buffer named {name:?} already; frames keep its buffers by their names"
+        );
+        self.buffers.push(BufferDecl { name, size });
+        BufferId(self.buffers.len() as u32 - 1)
+    }
+
+    /// A pass that draws, named `label`, whose attachments, the images it samples and the buffers
+    /// it reads the builder it returns takes, before [`RenderPass::add`] adds it.
     pub fn render(&mut self, label: Label) -> RenderPass<'_> {
-        let start = self.uses.len();
+        let start = (self.uses.len(), self.buffer_uses.len());
         RenderPass {
             graph: self,
             label,
@@ -331,15 +422,42 @@ impl Graph {
         }
     }
 
-    /// A pass that dispatches compute shaders, named `label`, whose images the builder it returns
-    /// takes, before [`ComputePass::add`] adds it.
+    /// A pass that dispatches compute shaders, named `label`, whose images and buffers the builder
+    /// it returns takes, before [`ComputePass::add`] adds it.
     pub fn compute(&mut self, label: Label) -> ComputePass<'_> {
-        let start = self.uses.len();
+        let start = (self.uses.len(), self.buffer_uses.len());
         ComputePass {
             graph: self,
             label,
             start,
         }
+    }
+
+    /// A pass, named `label`, that reads `buffer` back, as an earlier pass left it, as
+    /// [`Frame::read_back`](crate::Frame::read_back) records it.
+    ///
+    /// # Panics
+    ///
+    /// If `buffer` isn't the graph's, holds more than [`MAX_BUFFER_READ`] bytes, or no earlier
+    /// pass wrote it.
+    pub fn read_back(&mut self, label: Label, buffer: BufferId) -> PassId {
+        let size = (self.buffers.get(buffer.0 as usize))
+            .map(|decl| decl.size)
+            .unwrap_or_else(|| {
+                panic!(
+                    "pass {label:?} reads back buffer {}, not the graph's",
+                    buffer.0
+                )
+            });
+        assert!(
+            size <= MAX_BUFFER_READ,
+            "pass {label:?} reads back buffer {}, of {size} bytes, but a pass reads back \
+             {MAX_BUFFER_READ} at most",
+            buffer.0
+        );
+        let start = (self.uses.len(), self.buffer_uses.len());
+        self.buffer_uses.push((buffer, BufferUse::CopySource));
+        self.add_pass(label, PassKind::ReadBack, start)
     }
 
     /// A pass, named `label`, that reads pixels of `ids` back, as an earlier pass left them, as
@@ -375,13 +493,14 @@ impl Graph {
     }
 
     fn read(&mut self, label: Label, kind: PassKind, image: ImageId) -> PassId {
-        let start = self.uses.len();
+        let start = (self.uses.len(), self.buffer_uses.len());
         self.uses.push((image, Use::CopySource));
         self.add_pass(label, kind, start)
     }
 
-    /// Adds the pass whose uses start at `start`, once they're checked.
-    fn add_pass(&mut self, label: Label, kind: PassKind, start: usize) -> PassId {
+    /// Adds the pass whose uses of images and of buffers start at `start`, once they're checked.
+    fn add_pass(&mut self, label: Label, kind: PassKind, start: (usize, usize)) -> PassId {
+        let (start, buffers_start) = start;
         let uses = start..self.uses.len();
         for &(image, use_) in &self.uses[uses.clone()] {
             assert!(
@@ -398,7 +517,33 @@ impl Graph {
                 image.0
             );
         }
-        self.passes.push(PassDecl { label, kind, uses });
+        let buffer_uses = buffers_start..self.buffer_uses.len();
+        let pass_uses = &self.buffer_uses[buffer_uses.clone()];
+        for (i, &(buffer, use_)) in pass_uses.iter().enumerate() {
+            assert!(
+                (buffer.0 as usize) < self.buffers.len(),
+                "pass {label:?} uses buffer {}, which isn't the graph's",
+                buffer.0
+            );
+            assert!(
+                pass_uses[..i].iter().all(|&(used, _)| used != buffer),
+                "pass {label:?} uses buffer {} twice",
+                buffer.0
+            );
+            let written = (self.buffer_uses[..buffers_start].iter())
+                .any(|&(used, use_)| used == buffer && use_ == BufferUse::ComputeWrite);
+            assert!(
+                written || use_ == BufferUse::ComputeWrite,
+                "pass {label:?} uses buffer {} before any pass writes it, undefined until then",
+                buffer.0
+            );
+        }
+        self.passes.push(PassDecl {
+            label,
+            kind,
+            uses,
+            buffer_uses,
+        });
         PassId(self.passes.len() as u32 - 1)
     }
 
@@ -413,6 +558,11 @@ impl Graph {
     /// `pass`'s uses.
     pub(crate) fn uses(&self, pass: PassId) -> &[(ImageId, Use)] {
         &self.uses[self.passes[pass.0 as usize].uses.clone()]
+    }
+
+    /// `pass`'s uses of buffers.
+    pub(crate) fn buffer_uses(&self, pass: PassId) -> &[(BufferId, BufferUse)] {
+        &self.buffer_uses[self.passes[pass.0 as usize].buffer_uses.clone()]
     }
 
     /// The first and the last of the passes that use `image`, if any does.
@@ -432,14 +582,14 @@ impl Graph {
 }
 
 /// A pass that draws, being built: its color target, the IDs and depth beside it, if any, or its
-/// depth alone, as a shadow map's pass draws, and the images it samples. [`RenderPass::add`] adds
-/// it to its graph.
+/// depth alone, as a shadow map's pass draws, the images it samples, and the buffers its shaders
+/// read and its draws take their commands from. [`RenderPass::add`] adds it to its graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct RenderPass<'g> {
     graph: &'g mut Graph,
     label: Label,
-    /// Where its uses start in the graph's.
-    start: usize,
+    /// Where its uses of images and of buffers start in the graph's.
+    start: (usize, usize),
 }
 
 impl RenderPass<'_> {
@@ -476,6 +626,20 @@ impl RenderPass<'_> {
         self.with(image, Use::Sampled)
     }
 
+    /// Reads `buffer` from the draws' shaders, as an earlier pass wrote it, through the address
+    /// [`Pass::address`](crate::Pass::address) gives.
+    pub fn read_buffer(self, buffer: BufferId) -> Self {
+        self.graph.buffer_uses.push((buffer, BufferUse::Read));
+        self
+    }
+
+    /// Takes the commands of indirect draws from `buffer`, as an earlier pass wrote them, as
+    /// [`Pass::draw_indexed_indirect`](crate::Pass::draw_indexed_indirect) draws them.
+    pub fn indirect(self, buffer: BufferId) -> Self {
+        self.graph.buffer_uses.push((buffer, BufferUse::Indirect));
+        self
+    }
+
     fn with(self, image: ImageId, use_: Use) -> Self {
         self.graph.uses.push((image, use_));
         self
@@ -487,15 +651,16 @@ impl RenderPass<'_> {
     ///
     /// If it hasn't one color target, beside at most one image of IDs and one of depth, or one
     /// image of depth alone; if it uses an image twice, as one another kind of image, or as images
-    /// of the graph's own of other sizes; or if it samples or draws over one of the graph's own
-    /// images that no earlier pass wrote.
+    /// of the graph's own of other sizes; if it samples or draws over one of the graph's own
+    /// images that no earlier pass wrote; or if it uses a buffer twice, or one no earlier pass
+    /// wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
             label,
             start,
         } = self;
-        let uses = &graph.uses[start..];
+        let uses = &graph.uses[start.0..];
         let count = |is: fn(&Use) -> bool| uses.iter().filter(|(_, use_)| is(use_)).count();
         let (colors, ids, depths) = (
             count(|use_| matches!(use_, Use::Color(_))),
@@ -546,14 +711,14 @@ impl RenderPass<'_> {
     }
 }
 
-/// A pass that dispatches compute shaders, being built: the images it samples and those it writes.
-/// [`ComputePass::add`] adds it to its graph.
+/// A pass that dispatches compute shaders, being built: the images it samples and those it writes,
+/// and the buffers it reads and writes. [`ComputePass::add`] adds it to its graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct ComputePass<'g> {
     graph: &'g mut Graph,
     label: Label,
-    /// Where its uses start in the graph's.
-    start: usize,
+    /// Where its uses of images and of buffers start in the graph's.
+    start: (usize, usize),
 }
 
 impl ComputePass<'_> {
@@ -571,6 +736,25 @@ impl ComputePass<'_> {
         self.with(image, Use::Storage)
     }
 
+    /// Reads `buffer` from the compute shaders, as an earlier pass wrote it, through the address
+    /// [`Compute::address`](crate::Compute::address) gives.
+    pub fn read_buffer(self, buffer: BufferId) -> Self {
+        self.graph
+            .buffer_uses
+            .push((buffer, BufferUse::ComputeRead));
+        self
+    }
+
+    /// Writes and reads `buffer` from the compute shaders, through the address
+    /// [`Compute::address`](crate::Compute::address) gives, as an earlier pass left it: what no
+    /// pass of the frame has written is undefined.
+    pub fn write_buffer(self, buffer: BufferId) -> Self {
+        self.graph
+            .buffer_uses
+            .push((buffer, BufferUse::ComputeWrite));
+        self
+    }
+
     fn with(self, image: ImageId, use_: Use) -> Self {
         self.graph.uses.push((image, use_));
         self
@@ -581,14 +765,15 @@ impl ComputePass<'_> {
     /// # Panics
     ///
     /// If it uses an image twice, writes one of the graph's own, which are no storage images,
-    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote.
+    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote; or if it uses
+    /// a buffer twice, or reads one no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
             label,
             start,
         } = self;
-        let uses = &graph.uses[start..];
+        let uses = &graph.uses[start.0..];
         for (i, &(image, use_)) in uses.iter().enumerate() {
             assert!(
                 uses[..i].iter().all(|&(used, _)| used != image),
@@ -705,15 +890,17 @@ impl Hazard {
             new_layout: access.layout,
         };
         if writes {
-            // A transition is made visible to the barrier's second scope, which the next barrier
-            // then waits for.
+            // A transition alone is made visible to the barrier's second scope, whose reads have
+            // seen it, and which the next barrier then waits for; the use's own writes come after
+            // the barrier, which no read has seen, even in the stages that made them.
+            let seen = access.writes.is_empty() && !access.reads.is_empty();
             *self = Self {
                 write_stages: access.stages,
                 write_access: access.writes,
-                reads: if access.reads.is_empty() {
-                    vk::PipelineStageFlags2::NONE
-                } else {
+                reads: if seen {
                     access.stages
+                } else {
+                    vk::PipelineStageFlags2::NONE
                 },
             };
         } else {
@@ -961,6 +1148,80 @@ mod tests {
             .clear(view, [0.0; 4])
             .depth(beside)
             .add();
+    }
+
+    /// A graph's own buffers are written by compute passes before passes read them, draws take
+    /// commands from them or frames read them back, each once a pass, and are named apart; and the
+    /// barriers between their uses wait for writes, and a write for the reads since, with no
+    /// layouts.
+    #[test]
+    fn buffers_are_written_before_theyre_read() {
+        let refused = |build: fn(&mut Graph)| {
+            let mut graph = Graph::default();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut graph))).is_err()
+        };
+        assert!(!refused(|graph| {
+            let (data, commands) = (graph.buffer("data", 64), graph.buffer("commands", 20));
+            graph
+                .compute(label())
+                .write_buffer(data)
+                .write_buffer(commands)
+                .add();
+            graph.compute(label()).read_buffer(data).add();
+            let target = graph.target(0);
+            (graph.render(label()).clear(target, [0.0; 4]))
+                .read_buffer(data)
+                .indirect(commands)
+                .add();
+            graph.read_back(label(), data);
+        }));
+        assert!(refused(|graph| {
+            let data = graph.buffer("data", 64);
+            graph.compute(label()).read_buffer(data).add();
+        }));
+        assert!(refused(|graph| {
+            let data = graph.buffer("data", 64);
+            graph.read_back(label(), data);
+        }));
+        assert!(refused(|graph| {
+            let data = graph.buffer("data", 64);
+            graph
+                .compute(label())
+                .write_buffer(data)
+                .write_buffer(data)
+                .add();
+        }));
+        assert!(refused(|graph| {
+            graph.buffer("data", 64);
+            graph.buffer("data", 32);
+        }));
+        assert!(refused(|graph| {
+            graph.buffer("empty", 0);
+        }));
+        let mut hazard = Hazard::default();
+        let mut layout = vk::ImageLayout::UNDEFINED;
+        let write = BufferUse::ComputeWrite.access();
+        let first = hazard.follow(&mut layout, write).expect("a write");
+        assert_eq!(first.src_stages, S::NONE, "nothing to wait for");
+        // Read in the stage that wrote it, by a later pass, which the write's own pass doesn't
+        // make wait.
+        let read = (hazard.follow(&mut layout, BufferUse::ComputeRead.access()))
+            .expect("a read of the write in its own stage");
+        assert_eq!(
+            (read.src_stages, read.src_access),
+            (S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE)
+        );
+        let indirect = (hazard.follow(&mut layout, BufferUse::Indirect.access()))
+            .expect("a read of the write");
+        assert_eq!(
+            (indirect.src_stages, indirect.src_access),
+            (S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE)
+        );
+        assert_eq!(indirect.old_layout, indirect.new_layout, "no transition");
+        let again = hazard
+            .follow(&mut layout, write)
+            .expect("a write after the read");
+        assert_eq!(again.src_stages, S::COMPUTE_SHADER | S::DRAW_INDIRECT);
     }
 
     /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,

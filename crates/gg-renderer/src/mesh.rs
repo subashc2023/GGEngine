@@ -6,7 +6,6 @@ use std::collections::{HashSet, VecDeque};
 use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
@@ -18,9 +17,16 @@ use gg_gpu::{
 };
 use tracing::warn;
 
+use crate::draws::Run;
 use crate::shader::{self, Shader};
 use crate::texture::{self, Map, Texels};
 use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
+
+mod cull;
+
+#[cfg(test)]
+pub(crate) use cull::SPIRV as CULL_SPIRV;
+pub(crate) use cull::{CullPlan, CullView, MAX_VIEWS, counts};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -162,23 +168,28 @@ pub struct Lod {
     pub error: f32,
 }
 
-/// A mesh's levels of detail, and the sphere round its vertices that decides which a draw uses.
-/// The levels go finest first, so level 0 is the mesh itself, usually with an error of 0, and each
-/// has at least the error of the one before. They may share indices, as a chain of levels
-/// simplified one from another does.
+/// The most levels of detail a mesh has, its own among them.
+pub const MAX_LEVELS: usize = 8;
+
+/// A mesh's levels of detail, and the sphere round its vertices that decides which a draw uses,
+/// and whether a view sees it. The levels go finest first, so level 0 is the mesh itself, usually
+/// with an error of 0, and each has at least the error of the one before. They may share indices,
+/// as a chain of levels simplified one from another does.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lods {
-    /// The levels, finest first.
+    /// The levels, finest first, [`MAX_LEVELS`] at most.
     pub levels: Vec<Lod>,
     /// The center of a sphere that holds every vertex, in the mesh's own space.
     pub center: Vec3,
     /// Its radius: how near the camera the mesh can reach, where it is largest on screen. One
-    /// larger than the tightest only keeps finer levels in use at greater distances.
+    /// larger than the tightest only keeps finer levels in use at greater distances, and draws
+    /// where no view sees it; one smaller leaves out draws that a view sees.
     pub radius: f32,
 }
 
 impl Lods {
-    /// The levels of a mesh that has one, all of its `indices`.
+    /// The levels of a mesh that has one, all of its `indices`, in a sphere of infinite radius,
+    /// which holds whatever vertices it has: [`Meshes::add`] can't read its vertices' positions.
     fn whole(indices: usize) -> Self {
         let level = Lod {
             start: 0,
@@ -188,7 +199,7 @@ impl Lods {
         Self {
             levels: vec![level],
             center: Vec3::ZERO,
-            radius: 0.0,
+            radius: f32::INFINITY,
         }
     }
 }
@@ -255,7 +266,9 @@ impl Meshes {
 
     /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
     /// in errors and GPU captures. It draws with shaders for `V`, which read its vertices as
-    /// [`Shaders::add`](crate::Shaders::add) says. It has one level of detail, all its indices.
+    /// [`Shaders::add`](crate::Shaders::add) says. It has one level of detail, all its indices,
+    /// and no sphere round its vertices, whose positions it can't read: every draw of it draws,
+    /// wherever a view sees.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
@@ -273,12 +286,15 @@ impl Meshes {
     /// triangles are among `indices`: each draw of it uses the coarsest level whose error spans no
     /// more than a pixel on screen, as the draw sees it, or level 0 if none does, or if the sphere
     /// reaches the camera's plane. Every level indexes the same vertices, and all of them are
-    /// kept in one buffer on the GPU.
+    /// kept in one buffer on the GPU. A draw with an opaque shader whose sphere, as its transform
+    /// places it, is wholly outside what a view sees, the game's view or a shadow's cascade, isn't
+    /// drawn there, so a shader that moves the mesh's vertices outside the sphere may lose them.
     ///
     /// Fails with `renderer.bad_mesh` as `add` does over all of `indices`, and if `lods` has no
-    /// levels; has a level that is empty, isn't whole triangles or reaches past `indices`; has an
-    /// error that is negative, isn't finite, or is less than the level before's; has a center that
-    /// isn't finite; or a radius that is negative or isn't finite.
+    /// levels, or more than [`MAX_LEVELS`]; has a level that is empty, isn't whole triangles or
+    /// reaches past `indices`; has an error that is negative, isn't finite, or is less than the
+    /// level before's; has a center that isn't finite; or a radius that is negative or isn't
+    /// finite.
     pub fn add_lods<V: NoUninit>(
         &mut self,
         name: &str,
@@ -332,15 +348,50 @@ impl Meshes {
         vertices: &[V],
         indices: &[u32],
     ) -> Result<()> {
+        self.replace_with(name, mesh, vertices, indices, None)
+    }
+
+    /// Puts other triangles in place of `mesh`'s, as [`replace`](Self::replace) does, with the
+    /// levels of detail `lods` describes, as [`add_lods`](Self::add_lods) takes them.
+    ///
+    /// Fails with `renderer.bad_mesh` as `add_lods` does, leaving the mesh as it was.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    pub fn replace_lods<V: NoUninit>(
+        &mut self,
+        name: &str,
+        mesh: Mesh<V>,
+        vertices: &[V],
+        indices: &[u32],
+        lods: Lods,
+    ) -> Result<()> {
+        self.replace_with(name, mesh, vertices, indices, Some(lods))
+    }
+
+    /// Puts other triangles in place of `mesh`'s, of the levels `lods` describes, or of one, all of
+    /// `indices`, as [`replace_lods`](Self::replace_lods) and [`replace`](Self::replace) say.
+    fn replace_with<V: NoUninit>(
+        &mut self,
+        name: &str,
+        mesh: Mesh<V>,
+        vertices: &[V],
+        indices: &[u32],
+        lods: Option<Lods>,
+    ) -> Result<()> {
         assert!(
             mesh.index < self.count,
             "mesh {name:?} replaces one of another `Meshes`"
         );
         check(name, vertices, indices)?;
+        if let Some(lods) = &lods {
+            check_lods(name, indices, lods)?;
+        }
         if self.removed.contains(&mesh.index) {
             return Ok(());
         }
-        let lods = Lods::whole(indices.len());
+        let lods = lods.unwrap_or_else(|| Lods::whole(indices.len()));
         let (vertices, indices) = (bytemuck::cast_slice(vertices).to_vec(), indices.to_vec());
         let waiting = (self.changes.iter_mut()).find_map(|change| match change {
             Change::Added(added) if added.index == mesh.index => Some(added),
@@ -429,6 +480,12 @@ fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()> {
     let bad = |problem: String| bad_mesh(name, problem);
     if lods.levels.is_empty() {
         return Err(bad("has no levels of detail".to_owned()));
+    }
+    if lods.levels.len() > MAX_LEVELS {
+        return Err(bad(format!(
+            "has {} levels of detail, past the {MAX_LEVELS} a mesh has at most",
+            lods.levels.len()
+        )));
     }
     // 0 for level 0, since an error may not be negative.
     let mut finer = 0.0;
@@ -522,8 +579,17 @@ pub(crate) struct MeshPass {
     /// The most bytes a frame copies, as [`Settings::upload_budget`](crate::Settings::upload_budget)
     /// has it, but for the smallest whole part.
     budget: u64,
-    /// Kept between frames, so that those that draw no more than the last allocate nothing.
-    scratch: LodScratch,
+    /// What culls the frame's opaque runs, and what it culled.
+    culling: cull::Culling,
+}
+
+/// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
+/// the addresses of their transforms, their IDs and their parameters, 0 for none.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Uploaded {
+    transforms: u64,
+    ids: u64,
+    params: u64,
 }
 
 struct GpuShader {
@@ -876,7 +942,7 @@ impl MeshPass {
                 entries: Vec::new(),
             },
             budget,
-            scratch: LodScratch::default(),
+            culling: cull::Culling::new(device)?,
         })
     }
 
@@ -1335,14 +1401,34 @@ impl MeshPass {
         }
     }
 
+    /// Copies `draws`' transforms, IDs and parameters into the frame, each array once, for every
+    /// pass that draws them, and for culling them: where they are.
+    pub(crate) fn upload_draws(frame: &mut Frame<'_>, draws: &Draws) -> Result<Uploaded> {
+        // Each array in an upload of its own, so that each starts 16-byte aligned.
+        let mut address = |bytes: &[u8]| -> Result<u64> {
+            Ok(if bytes.is_empty() {
+                0
+            } else {
+                frame.upload(bytes)?.address()
+            })
+        };
+        Ok(Uploaded {
+            transforms: address(bytemuck::cast_slice(&draws.transforms))?,
+            ids: address(bytemuck::cast_slice(&draws.ids))?,
+            params: address(&draws.params)?,
+        })
+    }
+
     /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
-    /// `view_projection` takes the world to clip space, each run of them as one instanced draw, or,
-    /// of a mesh with levels of detail, as one for each level its instances draw at, and copies
-    /// each draw's transforms, IDs and parameters into the frame for its shader, which reads the
-    /// frame's data, a [`FrameData`], at the address `frame`. A run of a mesh that isn't drawable
-    /// yet, or was removed, or with a shader that was, draws nothing and isn't counted. With
-    /// `shadows`, it draws their shadows into a shadow map instead, by the shadow pipelines of
-    /// those whose shaders write depth, and nothing of the rest. Returns what it drew.
+    /// `view_projection` takes the world to clip space, from their instances as `uploaded` has
+    /// them, for shaders that read the frame's data, a [`FrameData`], at the address `frame`. A run
+    /// that `culled`, a plan and a view of it, culled draws what that view kept of it, a draw for
+    /// each of its mesh's levels; any other is one instanced draw, or, of a mesh with levels of
+    /// detail, one for each stretch of its instances in a row that draw at one level, in order. A
+    /// run of a mesh that isn't drawable yet, or was removed, or with a shader that was, draws
+    /// nothing. With `shadows`, it draws their shadows into a shadow map instead, by the shadow
+    /// pipelines of those whose shaders write depth, and nothing of the rest. Returns what it drew
+    /// of the runs it didn't cull, which the culling counts of the rest.
     ///
     /// # Panics
     ///
@@ -1350,13 +1436,19 @@ impl MeshPass {
     /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
     /// instances than Vulkan's 32-bit count, or the pass isn't into an image of [`Format::HDR`]
     /// with IDs and a depth image, or, with `shadows`, into depth alone.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "what a pass draws by, each apart"
+    )]
     pub(crate) fn draw(
-        &mut self,
+        &self,
         pass: &mut Pass<'_, '_>,
         view_projection: Mat4,
         frame: u64,
         view: [u32; 2],
         draws: &Draws,
+        uploaded: Uploaded,
+        culled: Option<(&CullPlan, usize)>,
         shadows: bool,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
@@ -1364,7 +1456,7 @@ impl MeshPass {
         let lod_view = LodView::new(&view_projection, view);
         // What's set, which a pipeline's binding leaves as it is.
         let (mut bound, mut faces) = (None, None);
-        for run in &draws.runs {
+        for (i, run) in draws.runs.iter().enumerate() {
             let mesh = self
                 .meshes
                 .get(run.mesh as usize)
@@ -1384,17 +1476,11 @@ impl MeshPass {
             } else {
                 &shader.pipeline
             };
-            let instances = Instances {
-                transforms: &draws.transforms[run.instances.clone()],
-                ids: &draws.ids[run.instances.clone()],
-                params: &draws.params[run.params.clone()],
-                params_size: shader.params_size,
-            };
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
             assert_eq!(
-                (mesh.vertex_size, instances.params.len()),
-                (shader.vertex_size, shader.params_size * instances.len()),
+                (mesh.vertex_size, run.params.len()),
+                (shader.vertex_size, shader.params_size * run.instances.len()),
                 "a mesh draws with a shader for its vertex type, and the parameters that shader \
                  takes, from the renderer's `Meshes` and `Shaders`"
             );
@@ -1406,25 +1492,26 @@ impl MeshPass {
                 pass.set_faces(run.faces);
                 faces = Some(run.faces);
             }
-            let batch = Batch {
-                mesh,
-                push: Push {
-                    clip_from_world: view_projection,
-                    vertices: mesh.vertices.address(),
-                    // Where each draw's instances are, which it sets.
-                    transforms: 0,
-                    ids: 0,
-                    params: 0,
-                    view: view.map(|side| side as f32),
-                    frame,
-                },
-                opaque: shader.writes_depth,
+            let push = Push {
+                clip_from_world: view_projection,
+                vertices: mesh.vertices.address(),
+                // Where each draw's instances are, which it sets.
+                transforms: 0,
+                ids: 0,
+                params: 0,
+                view: view.map(|side| side as f32),
+                frame,
             };
             pass.begin_label(&shader.label);
-            drawn += match mesh.lods.levels.as_slice() {
-                [level] => batch.draw(pass, *level, instances)?,
-                _ => batch.draw_levels(pass, &mut self.scratch, &lod_view, instances)?,
-            };
+            let culled = culled.and_then(|culled| self.draw_culled(pass, mesh, push, culled, i));
+            if culled.is_none() {
+                let instances = Instances {
+                    run,
+                    uploaded,
+                    params_size: shader.params_size,
+                };
+                drawn += draw_run(pass, mesh, push, instances, &lod_view, &draws.transforms);
+            }
             pass.end_label();
         }
         Ok(drawn)
@@ -1498,161 +1585,71 @@ impl LodView {
     }
 }
 
-/// A run's instances, or some of them: each one's transform, ID and parameters, in the same order.
+/// A run's instances, where they were uploaded.
 #[derive(Clone, Copy)]
 struct Instances<'a> {
-    transforms: &'a [Mat4],
-    ids: &'a [[u32; 2]],
-    /// Every instance's parameters, one after another.
-    params: &'a [u8],
+    run: &'a Run,
+    uploaded: Uploaded,
     /// The size of one instance's parameters.
     params_size: usize,
 }
 
-impl Instances<'_> {
-    fn len(&self) -> usize {
-        self.transforms.len()
-    }
-
-    /// Those from `range`.
-    fn range(&self, range: Range<usize>) -> Instances<'_> {
-        let params = range.start * self.params_size..range.end * self.params_size;
-        Instances {
-            transforms: &self.transforms[range.clone()],
-            ids: &self.ids[range],
-            params: &self.params[params],
-            params_size: self.params_size,
-        }
-    }
-}
-
-/// Memory for drawing instances of a mesh with levels of detail, which a pass keeps between draws
-/// and frames: the level each instance of a run draws at, and the instances of one level gathered
-/// where the run's own are apart. Each holds the largest run it has seen, so that a frame that
-/// draws no more than the last allocates nothing, wherever its instances move between levels.
-#[derive(Default)]
-struct LodScratch {
-    levels: Vec<usize>,
-    transforms: Vec<Mat4>,
-    ids: Vec<[u32; 2]>,
-    params: Vec<u8>,
-}
-
-/// A run of instances of one mesh, with what its draws share.
-struct Batch<'a> {
-    mesh: &'a GpuMesh,
-    /// What the pass pushes, but for the addresses of the instances, which each draw sets.
+/// Draws `instances` of `mesh` directly, with what `push` has but for the instances, which each
+/// draw sets: one instanced draw, or, of a mesh with levels of detail, one for each stretch of
+/// instances in a row that draw at the level `view` picks for them, by their `transforms`, in their
+/// order, as what blends and the canvas draw in order. Returns what it drew.
+fn draw_run(
+    pass: &mut Pass<'_, '_>,
+    mesh: &GpuMesh,
     push: Push,
-    /// Whether the shader writes depth.
-    opaque: bool,
-}
-
-impl Batch<'_> {
-    /// Draws `instances` of the mesh's `level` as one instanced draw, copying their transforms, IDs
-    /// and parameters into the frame. Returns what it drew.
-    fn draw(
-        &self,
-        pass: &mut Pass<'_, '_>,
-        level: Lod,
-        instances: Instances<'_>,
-    ) -> Result<DrawCounts> {
-        let count = u32::try_from(instances.len())
-            .expect("a run's instances fit the 32-bit count Vulkan takes");
-        // Where the shader reads them during this frame, each array in an upload of its own, so
-        // that each starts 16-byte aligned; a shader that takes no parameters gets 0.
-        let transforms = pass
-            .upload(bytemuck::cast_slice(instances.transforms))?
-            .address();
-        let ids = pass.upload(bytemuck::cast_slice(instances.ids))?.address();
-        let params = if instances.params.is_empty() {
+    instances: Instances<'_>,
+    view: &LodView,
+    transforms: &[Mat4],
+) -> DrawCounts {
+    let Instances {
+        run,
+        uploaded,
+        params_size,
+    } = instances;
+    let lods = &mesh.lods;
+    let level_at = |i: usize| match lods.levels.as_slice() {
+        [_] => 0,
+        _ => view.level(lods, &transforms[i]),
+    };
+    let mut drawn = DrawCounts::default();
+    let (mut start, end) = (run.instances.start, run.instances.end);
+    let mut level = level_at(start);
+    for i in start + 1..=end {
+        let next = if i < end { level_at(i) } else { usize::MAX };
+        if next == level {
+            continue;
+        }
+        let count =
+            u32::try_from(i - start).expect("a run's instances fit the 32-bit count Vulkan takes");
+        // Its parameters are its run's from where its instances are in the run.
+        let params = if params_size == 0 {
             0
         } else {
-            pass.upload(instances.params)?.address()
+            let at = run.params.start + (start - run.instances.start) * params_size;
+            uploaded.params + at as u64
         };
         let push = Push {
-            transforms,
-            ids,
+            transforms: uploaded.transforms + (start * size_of::<Mat4>()) as u64,
+            ids: uploaded.ids + (start * size_of::<[u32; 2]>()) as u64,
             params,
-            ..self.push
+            ..push
         };
         pass.push_constants(bytemuck::bytes_of(&push));
-        pass.draw_indexed(&self.mesh.indices, level.start, level.count, 0, count);
-        Ok(DrawCounts {
+        let lod = lods.levels[level];
+        pass.draw_indexed(&mesh.indices, lod.start, lod.count, 0, count);
+        drawn += DrawCounts {
             draws: 1,
-            instances: instances.len(),
-            triangles: level.count as usize / 3 * instances.len(),
-        })
+            instances: count as usize,
+            triangles: lod.count as usize / 3 * count as usize,
+        };
+        (start, level) = (i, next);
     }
-
-    /// Draws `instances` of a mesh with several levels of detail, each at the level `view` picks
-    /// for it: one draw for each level in use if the shader writes depth, which hides what's
-    /// behind whatever order the instances draw in, so that they join wherever they are in the
-    /// run, each level's keeping their order; otherwise one for each stretch of instances in a
-    /// row that use the same level, as what blends draws in order.
-    fn draw_levels(
-        &self,
-        pass: &mut Pass<'_, '_>,
-        scratch: &mut LodScratch,
-        view: &LodView,
-        instances: Instances<'_>,
-    ) -> Result<DrawCounts> {
-        let lods = &self.mesh.lods;
-        let LodScratch {
-            levels,
-            transforms,
-            ids,
-            params,
-        } = scratch;
-        levels.clear();
-        levels.extend((instances.transforms.iter()).map(|transform| view.level(lods, transform)));
-        let mut drawn = DrawCounts::default();
-        if !self.opaque {
-            // A stretch's instances are already together in the run's arrays.
-            let mut start = 0;
-            for same in levels.chunk_by(|a, b| a == b) {
-                let end = start + same.len();
-                drawn += self.draw(pass, lods.levels[same[0]], instances.range(start..end))?;
-                start = end;
-            }
-            return Ok(drawn);
-        }
-        let (finest, coarsest) = (levels.iter())
-            .fold((usize::MAX, 0), |(finest, coarsest), &level| {
-                (finest.min(level), coarsest.max(level))
-            });
-        if finest == coarsest {
-            return self.draw(pass, lods.levels[finest], instances);
-        }
-        // A pass over the run for each level from the finest in use to the coarsest, which is cheap
-        // while a mesh has a handful of levels. With many, a counting sort would gather them all
-        // in one pass.
-        for level in finest..=coarsest {
-            transforms.clear();
-            ids.clear();
-            params.clear();
-            transforms.reserve(instances.len());
-            ids.reserve(instances.len());
-            params.reserve(instances.params.len());
-            let at = (levels.iter().enumerate()).filter(|&(_, &used)| used == level);
-            for (i, _) in at {
-                let one = instances.range(i..i + 1);
-                transforms.extend_from_slice(one.transforms);
-                ids.extend_from_slice(one.ids);
-                params.extend_from_slice(one.params);
-            }
-            if transforms.is_empty() {
-                continue;
-            }
-            let gathered = Instances {
-                transforms,
-                ids,
-                params,
-                params_size: instances.params_size,
-            };
-            drawn += self.draw(pass, lods.levels[level], gathered)?;
-        }
-        Ok(drawn)
-    }
+    drawn
 }
 
 /// What the mesh pass pushes before each draw, which a mesh shader's push constants read the
@@ -1925,6 +1922,10 @@ mod tests {
         let levels = |levels: Vec<Lod>| sphere(levels, Vec3::ZERO, 1.0);
         let bad = [
             ("no levels of detail", levels(vec![])),
+            (
+                "9 levels of detail, past the 8",
+                levels(vec![level(0, 3, 0.0); MAX_LEVELS + 1]),
+            ),
             ("past its 9 indices", levels(vec![level(6, 6, 0.0)])),
             ("past its 9 indices", levels(vec![level(u32::MAX, 3, 0.0)])),
             ("without triangles", levels(vec![level(3, 0, 0.0)])),
@@ -1997,8 +1998,9 @@ mod tests {
                 count: indices,
                 error: 0.0,
             }],
+            // No sphere, as `add` can't read the vertices' positions.
             center: Vec3::ZERO,
-            radius: 0.0,
+            radius: f32::INFINITY,
         };
         assert_eq!(adds(&meshes)[0].lods, whole(6), "the quad");
         let plain = meshes.add("plain", &TRIANGLE, &THREE).expect("a mesh");
@@ -2031,6 +2033,19 @@ mod tests {
             .replace("plain", plain, &TRIANGLE, &[0, 1, 2, 2, 1, 0])
             .expect("others");
         assert_eq!(adds(&meshes)[0].lods, whole(6));
+        // Replaced with levels, which it takes as `add_lods` takes them, and checks alike, leaving
+        // what waits as it was where they're refused.
+        meshes
+            .replace_lods("plain", plain, &TRIANGLE, &THREE, finer.clone())
+            .expect("levels");
+        assert_eq!(adds(&meshes)[0].lods, finer);
+        let unbounded = Lods {
+            radius: f32::INFINITY,
+            ..finer.clone()
+        };
+        let refused = meshes.replace_lods("plain", plain, &TRIANGLE, &THREE, unbounded);
+        assert_eq!(refused.expect_err("no sphere").code(), "renderer.bad_mesh");
+        assert_eq!(adds(&meshes)[0].lods, finer);
     }
 
     /// What a viewpoint at the origin facing down -Z, or as `viewpoint` has it, sees of a view
