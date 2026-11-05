@@ -1426,7 +1426,9 @@ camera.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
 doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer makes
-its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without padding,
+its pipeline the next time it renders. slangc compiles every shader, the engine's too, unoptimized:
+drivers optimize what they compile, and slangc's optimizer reads a struct through an address a field
+at a time, which AMD's driver miscompiles. A mesh's vertices are any `#[repr(C)]` type without padding,
 with glam's vectors and matrices among its fields, which stream into GPU memory with the indices,
 as below, where they stay until the mesh is removed. Shaders read vertices through their buffer's address
 rather than through vertex input, and Slang lays out what a pointer points at as `#[repr(C)]` does,

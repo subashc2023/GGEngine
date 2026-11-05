@@ -73,6 +73,7 @@ fn compile(slangc: &Path, out: &Path, shader: &str, spirv: &str, entries: &[(&st
         .arg(&source)
         // As `compile` in src/shader/mod.rs compiles games' shaders, which says why.
         .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
+        .arg("-O0")
         .arg("-matrix-layout-column-major")
         .args(["-warnings-as-errors", "38006"])
         .args(["-warnings-disable", "39001"]);

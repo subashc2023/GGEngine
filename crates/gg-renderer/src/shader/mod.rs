@@ -620,6 +620,13 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
     command
         .arg(path)
         .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
+        // Unoptimized: slangc's optimizer turns a struct's read through an address, as
+        // `*push.frame` reads the frame's data, into reads of the fields used (2026.20's always,
+        // the Vulkan SDK's 2025.23.2 where few are), which AMD's driver (25.10.30.02) compiles as
+        // reads through the wrong address, losing the device. Unoptimized, slangc reads the struct
+        // whole, and AMD's code reads what the shader does. Drop it once AMD's driver compiles
+        // those reads right.
+        .arg("-O0")
         // As glam lays matrices out. It's slangc's default too, but only for legacy reasons, as
         // Slang's docs have it: elsewhere the default is row-major.
         .arg("-matrix-layout-column-major")
@@ -1043,20 +1050,20 @@ mod tests {
         }
     }
 
-    /// The masked model shader's shadows load the frame's data whole, as `shadow_main` in
-    /// model.slang says why: reaching into it for the material table's address alone makes a
-    /// pointer to a pointer in buffer memory.
+    /// The model shaders load the frame's data whole, unoptimized as `compile` says why: reaching
+    /// into it for its lights' or materials' address alone makes a pointer to a pointer in buffer
+    /// memory.
     #[test]
-    fn masked_shadows_load_the_frame_whole() {
-        assert_eq!(
-            spirv::buffer_pointers_to_pointers(model::MASKED_SHADOW_SPIRV),
-            0
-        );
-        assert_eq!(
-            spirv::buffer_pointers_to_pointers(model::MASKED_SPIRV),
-            0,
-            "nor does the masked model shader itself, whose shadows load as it does"
-        );
+    fn the_model_shaders_load_the_frame_whole() {
+        let shaders = [
+            ("opaque", model::OPAQUE_SPIRV),
+            ("masked", model::MASKED_SPIRV),
+            ("masked shadows", model::MASKED_SHADOW_SPIRV),
+            ("blended", model::BLENDED_SPIRV),
+        ];
+        for (name, spirv) in shaders {
+            assert_eq!(spirv::buffer_pointers_to_pointers(spirv), 0, "{name}");
+        }
     }
 
     #[test]
