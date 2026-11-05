@@ -108,13 +108,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Image-based lighting** (2026-11-04)
 - **Cascaded shadow maps** (2026-11-04)
 - **Sponza** (2026-11-04)
+- **Phase 12, render graph and PBR** (2026-11-04)
 
 ## Now
 
-**Phase 12, render graph and PBR**, as Next has it, its milestones done. It closes once each pass's
-time on the GPU is seen on Tracy's GPU timeline, by its viewer or `tracy-csvexport` of the release
-the root Cargo.toml pins, which this machine hasn't: the rest of its *Done when* holds, as Sponza's
-commit says. Phase 13 follows.
+**Phase 13, GPU-driven rendering**, as Next has it, its milestones to be set out as it starts.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -140,13 +138,8 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phase 11 is done, as Done has it, but for what Deferred holds.
+Phases 11 and 12 are done, as Done has it, but for what Deferred holds.
 
-12. **Render graph and PBR.** Passes declare the resources they read and write; the graph
-    places barriers and layout transitions and aliases transient memory. Physically based shading
-    (glTF metallic-roughness), image-based lighting, cascaded shadow maps, HDR and tonemapping;
-    reference-image tests on lavapipe. *Done when* Sponza renders lit and shadowed,
-    synchronization validation is clean, and per-pass GPU timings show in Tracy.
 13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
     pyramid); async compute, which the graph schedules on a queue of its own where the device has
     one, culling and light culling beside the shadows' passes; indirect draws; meshlets, which the
@@ -197,7 +190,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
 | Ordering a graph's passes by what they use, rather than as they're added, and leaving out those whose results nothing uses | Passes come from more than one place, as games' own would |
 | Buffers in the graph: a pass that writes a buffer for a later one to read, as the graph tracks images alone | The first such pass, as Phase 13's culling |
-| Reading the GPU's clock again for Tracy's timeline as a run goes on: it's read once, as the frames start, so a GPU whose clock drifts from the CPU's, or resets in a low-power state, as AMD's may, misplaces later zones | Someone profiles a long run whose GPU zones drift |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
