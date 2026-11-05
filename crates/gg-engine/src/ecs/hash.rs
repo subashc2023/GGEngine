@@ -167,18 +167,18 @@ impl World {
             // Its types as a set, by their keys, which the order they registered in, which sorts
             // its columns, doesn't change.
             let mut types = 0u64;
-            for (&component, column) in table.components.iter().zip(&table.columns) {
+            for (&component, column) in table.components().iter().zip(table.columns()) {
                 let key = self.components.key(component);
                 types = types.wrapping_add(key);
-                content = content.wrapping_add(column.digest(&table.entities, key, self));
+                content = content.wrapping_add(column.digest(table.entities(), key, self));
             }
             layout = absorb(layout, types);
-            layout = absorb(layout, table.entities.len() as u64);
-            for &entity in &table.entities {
+            layout = absorb(layout, table.entities().len() as u64);
+            for &entity in table.entities() {
                 layout = absorb(layout, id(entity));
             }
         }
-        for &entity in self.tables.iter().flat_map(|table| &table.entities) {
+        for &entity in self.tables.iter().flat_map(|table| table.entities()) {
             let children = self.children(entity).expect("a table's rows are alive");
             let mut children = children.peekable();
             if children.peek().is_none() {

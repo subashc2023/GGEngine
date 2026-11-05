@@ -111,19 +111,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 12, render graph and PBR** (2026-11-04)
 - **Bistro** (2026-11-05)
 - **Culling on the GPU** (2026-11-05)
+- **The scene on the GPU** (2026-11-05)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **The scene on the GPU.** The world's opaque meshes kept on the GPU from frame to frame, each
-  instance written as it changes rather than every frame: the world keeps the tick at which each
-  component's rows last changed, marked wherever a system, a set or a load reaches them mutably, and
-  keeps world transforms, propagated after the ticks as they change, where drawing computes each
-  child's from its ancestors every frame now; frames between ticks blend what the last tick moved
-  alone. A frame's CPU time then follows what changes rather than what's drawn: `update_ms` and
-  `render_ms` the same for 16 Bistros as for one, as the phase's *Done when* asks. Sprites, text and
-  what blends are drawn from the world every frame, as now.
 - **Occlusion culling.** Two passes against a depth pyramid: the first draws what the last frame
   showed, and the pyramid is built from its depth; the second tests the rest against it and draws
   what shows, so that what comes into view draws in the frame it does. Shadows' cascades cull against
@@ -316,11 +309,14 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
-| Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
+| A layer's mirrored and unmirrored draws of one culling mesh, interleaved, draw a run each, since a run culls one way: the scene sorts the world's by how they wind, keeping them to two | A layer draws a culling mesh many times, some mirrored |
 | Drawing a culled run's levels in one call, through `multiDrawIndirect` where the device has it: the CPU records an indirect draw for each run and level of its mesh, up to eight, whatever its instances | A profile shows recording them |
 | Counting the shadows' cascades' draws, instances and triangles: what the culling reads back is the view's alone | An agent tunes the shadows' cost by them |
 | Culling what blends and the canvas, which draw from the CPU, on its levels, whatever the view sees | A game draws many blending instances outside its view |
 | A sphere round the vertices of a mesh a layer adds without levels, from where its vertex type keeps its position: such a mesh is never culled, as `Meshes::add` can't read its positions | A game draws many of its own meshes outside its view |
+| A log of the entities that left their tables, so that a frame whose ticks spawned or despawned needn't look over every opaque mesh the scene holds, nor the renderer merge the scene's whole order again, each costing the scene's instances once | A game spawns or despawns every tick in a world of many opaque meshes |
+| Culling the scene's instances where its table holds them, through its order, rather than gathering them first, which copies each once a frame on the GPU; the cull's push constants hold no room for a second source | A profile shows the gather |
+| Handing the renderer the lights that changed alone: a frame that finds the lights again copies them all into its data, as it does every frame, which clustered lighting may change | A game has many lights that change |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |

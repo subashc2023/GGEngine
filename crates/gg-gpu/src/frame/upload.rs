@@ -172,18 +172,41 @@ impl<'a> Frame<'a> {
         offset: u64,
         bytes: &[u8],
     ) -> Result<()> {
+        let size = bytes.len() as u64;
+        self.write_buffer_pieces(buffer, size, &[offset], bytes)
+    }
+
+    /// Writes `bytes`, in pieces of `piece` bytes each, into `buffer`, the `i`th piece from byte
+    /// `offsets[i]` on, as [`write_buffer`](Self::write_buffer) writes them, in one copy: such as
+    /// records scattered through a table, each where its index puts it. Pieces that overlap leave
+    /// the later's bytes, as Vulkan copies them, undefined.
+    ///
+    /// # Panics
+    ///
+    /// As `write_buffer` does, for any piece; and if `bytes` aren't `offsets` pieces.
+    pub fn write_buffer_pieces(
+        &mut self,
+        buffer: &mut GpuBuffer,
+        piece: u64,
+        offsets: &[u64],
+        bytes: &[u8],
+    ) -> Result<()> {
         self.outside_pass();
         self.frames
             .device
             .check_made("the buffer written", buffer.device());
-        let size = buffer.size();
-        assert!(
-            offset
-                .checked_add(bytes.len() as u64)
-                .is_some_and(|end| end <= size),
-            "{} bytes at {offset} overflow a buffer of {size}",
-            bytes.len()
+        assert_eq!(
+            piece.checked_mul(offsets.len() as u64),
+            Some(bytes.len() as u64),
+            "a write's bytes are its pieces"
         );
+        let size = buffer.size();
+        for &offset in offsets {
+            assert!(
+                offset.checked_add(piece).is_some_and(|end| end <= size),
+                "{piece} bytes at {offset} overflow a buffer of {size}"
+            );
+        }
         let written = buffer.written();
         let (copied, _) = buffer.progress();
         assert!(
@@ -195,11 +218,13 @@ impl<'a> Frame<'a> {
             return Ok(());
         }
         let staged = self.upload(bytes)?;
-        let region = vk::BufferCopy {
-            src_offset: staged.offset,
+        let copies = &mut self.frames.scratch.copies;
+        copies.clear();
+        copies.extend((0..).zip(offsets).map(|(i, &offset)| vk::BufferCopy {
+            src_offset: staged.offset + i * piece,
             dst_offset: offset,
-            size: bytes.len() as u64,
-        };
+            size: piece,
+        }));
         // Earlier frames on this queue may still read the buffer, and an earlier write may still be
         // copying into it; the copy waits for both.
         let (src_stage, src_access) = if written {
@@ -223,16 +248,16 @@ impl<'a> Frame<'a> {
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
         let raw = device.raw();
-        // SAFETY: the commands are recording outside a pass, the region fits the buffer, and the
-        // staged bytes and the buffer live until the frame has finished: the arena is reset only
-        // after that, and the buffer retires until then.
+        // SAFETY: the commands are recording outside a pass, each region fits the buffer and the
+        // staged bytes, and the staged bytes and the buffer live until the frame has finished: the
+        // arena is reset only after that, and the buffer retires until then.
         unsafe {
             device.begin_label(commands, c"write buffer");
             raw.cmd_pipeline_barrier2(
                 commands,
                 &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_copy)),
             );
-            raw.cmd_copy_buffer(commands, staged.buffer, buffer.raw(), &[region]);
+            raw.cmd_copy_buffer(commands, staged.buffer, buffer.raw(), copies);
             raw.cmd_pipeline_barrier2(
                 commands,
                 &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_read)),

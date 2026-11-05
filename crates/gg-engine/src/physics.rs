@@ -757,6 +757,7 @@ mod tests {
     use super::*;
     use crate::Context;
     use crate::interpolation::Past;
+    use crate::placed::Placed;
     use crate::render_thread::Extracted;
 
     /// A floor 10 units wide and a unit tall, its top at y 0.5, static.
@@ -1040,7 +1041,8 @@ mod tests {
         world.set_parent(child, Some(parent)).expect("no cycle");
         world.spawn(boxed);
         let past = Past::default();
-        let poses = Poses::new(&world, &past, 1.0).expect("transforms");
+        let placed = Placed::of(&world, &past, 1.0);
+        let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
         let mut found = Vec::new();
         outlines(&world, &poses, |outline, id| found.push((outline, id)));
         let id = |entity| world.id(entity).expect("alive").get();
@@ -1117,6 +1119,7 @@ mod tests {
             let mut shaders = Shaders::default();
             let mut want = Draws::default();
             want.push_circle(&mut shaders, Mat4::IDENTITY, Circle::default());
+            want.draw_scene();
             let drawn = (Mat4::IDENTITY, Sprite::default(), id);
             want.extend_sprites(std::iter::once(drawn));
             want.push_line(&mut shaders, Mat4::IDENTITY, line, 0);

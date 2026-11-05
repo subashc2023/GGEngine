@@ -223,6 +223,8 @@ impl ImageRead<'_> {
 /// The lists a submission and its present are built in, kept so that frames don't allocate.
 #[derive(Default)]
 struct Scratch {
+    /// The regions of a buffer's write, as [`Frame::write_buffer_pieces`] copies them.
+    copies: Vec<vk::BufferCopy>,
     waits: Vec<vk::SemaphoreSubmitInfo<'static>>,
     signals: Vec<vk::SemaphoreSubmitInfo<'static>>,
     rendered: Vec<vk::Semaphore>,

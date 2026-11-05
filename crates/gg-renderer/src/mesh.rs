@@ -23,10 +23,15 @@ use crate::texture::{self, Map, Texels};
 use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
 
 mod cull;
+mod scene;
 
+#[cfg(test)]
+pub(crate) use cull::GATHER_SPIRV;
 #[cfg(test)]
 pub(crate) use cull::SPIRV as CULL_SPIRV;
 pub(crate) use cull::{CullPlan, CullView, MAX_VIEWS, counts};
+pub(crate) use scene::Change as SceneChange;
+pub use scene::Scene;
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -581,6 +586,8 @@ pub(crate) struct MeshPass {
     budget: u64,
     /// What culls the frame's opaque runs, and what it culled.
     culling: cull::Culling,
+    /// The scene's instances, as the GPU keeps them.
+    scene: scene::Kept,
 }
 
 /// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
@@ -943,13 +950,15 @@ impl MeshPass {
             },
             budget,
             culling: cull::Culling::new(device)?,
+            scene: scene::Kept::default(),
         })
     }
 
     /// Makes the pipelines of the shaders in `uploads`, taking them, and drops those of the shaders
     /// it removes. A shader that has a pipeline already, compiled again, gets a new one in place of
     /// the old, which retires until the GPU is done with it; one whose new pipeline can't be made
-    /// warns, and keeps the old; one removed stays removed.
+    /// warns, and keeps the old; one removed stays removed. Then takes the changes to the scene,
+    /// which the next frame that begins writes to the GPU.
     ///
     /// # Panics
     ///
@@ -1053,12 +1062,13 @@ impl MeshPass {
                 }
             }
         }
+        self.scene.apply(&mut uploads.scene);
         Ok(())
     }
 
     /// Takes the changes to the meshes, textures and materials in `uploads`, writes the materials
-    /// into their table, and streams what's queued to the GPU, within the frame's budget, which
-    /// must happen before the frame's passes. A texture
+    /// into their table and the scene's changes into its, and streams what's queued to the GPU,
+    /// within the frame's budget, which must happen before the frame's passes. A texture
     /// added gets its slot, which shows a stand-in; its pixels, and a mesh's vertices and indices,
     /// queue up behind what was added before, and each frame copies parts of the queue in order,
     /// making an asset's buffers or image as its turn comes, if the GPU's memory has room for
@@ -1083,6 +1093,7 @@ impl MeshPass {
             self.texture_changed(frame, change)?;
         }
         (self.materials).write(&self.device, frame, &mut uploads.materials)?;
+        self.scene.write(&self.device, frame)?;
         self.stream(frame)
     }
 
@@ -1421,12 +1432,12 @@ impl MeshPass {
 
     /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
     /// `view_projection` takes the world to clip space, from their instances as `uploaded` has
-    /// them, for shaders that read the frame's data, a [`FrameData`], at the address `frame`. A run
-    /// that `culled`, a plan and a view of it, culled draws what that view kept of it, a draw for
-    /// each of its mesh's levels; any other is one instanced draw, or, of a mesh with levels of
-    /// detail, one for each stretch of its instances in a row that draw at one level, in order. A
-    /// run of a mesh that isn't drawable yet, or was removed, or with a shader that was, draws
-    /// nothing. With `shadows`, it draws their shadows into a shadow map instead, by the shadow
+    /// them, for shaders that read the frame's data, a [`FrameData`], at the address `frame`; and
+    /// the scene's runs where `draws` place them, if `culled`. A run that `culled`, a plan and a
+    /// view of it, culled draws what that view kept of it, a draw for each of its mesh's levels;
+    /// any other is one instanced draw, or, of a mesh with levels of detail, one for each stretch
+    /// of its instances in a row that draw at one level, in order. A run of a mesh that isn't
+    /// drawable yet, or was removed, or with a shader that was, draws nothing. With `shadows`, it draws their shadows into a shadow map instead, by the shadow
     /// pipelines of those whose shaders write depth, and nothing of the rest. Returns what it drew
     /// of the runs it didn't cull, which the culling counts of the rest.
     ///
@@ -1456,14 +1467,40 @@ impl MeshPass {
         let lod_view = LodView::new(&view_projection, view);
         // What's set, which a pipeline's binding leaves as it is.
         let (mut bound, mut faces) = (None, None);
-        for (i, run) in draws.runs.iter().enumerate() {
+        // The draws before the scene's place, the scene's runs, then the draws after.
+        let scene_at = draws.scene_at.unwrap_or(0);
+        let frame_runs = |runs: std::ops::Range<usize>| runs.map(Drawn::Frame);
+        let order = (frame_runs(0..scene_at))
+            .chain((0..self.scene.runs().len()).map(Drawn::Scene))
+            .chain(frame_runs(scene_at..draws.runs.len()));
+        for drawn_run in order {
+            // Its mesh, its shader, the faces it draws, the draws' run, if it's theirs, and its
+            // index among the runs culled, if it's culled.
+            let (run, culled_run) = match drawn_run {
+                Drawn::Frame(i) => {
+                    let run = &draws.runs[i];
+                    let culled_run = culled.and_then(|_| self.culling.of_run(i));
+                    ((run.mesh, run.shader, run.faces, Some(run)), culled_run)
+                }
+                Drawn::Scene(i) => {
+                    let run = &self.scene.runs()[i];
+                    let culled_run = culled.and_then(|_| self.culling.of_scene(i));
+                    ((run.mesh, run.shader, run.faces, None), culled_run)
+                }
+            };
+            let (mesh, shader, run_faces, run) = run;
+            // The scene's runs draw only as they're culled.
+            if run.is_none() && culled_run.is_none() {
+                continue;
+            }
             let mesh = self
                 .meshes
-                .get(run.mesh as usize)
+                .get(mesh as usize)
                 .expect("a mesh of the renderer's `Meshes`");
+            let shader_index = shader;
             let shader = self
                 .shaders
-                .get(run.shader as usize)
+                .get(shader as usize)
                 .expect("a shader of the renderer's `Shaders`");
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
@@ -1478,19 +1515,22 @@ impl MeshPass {
             };
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
+            let params =
+                run.map(|run| (run.params.len(), shader.params_size * run.instances.len()));
+            let (has, takes) = params.unwrap_or_default();
             assert_eq!(
-                (mesh.vertex_size, run.params.len()),
-                (shader.vertex_size, shader.params_size * run.instances.len()),
+                (mesh.vertex_size, has),
+                (shader.vertex_size, takes),
                 "a mesh draws with a shader for its vertex type, and the parameters that shader \
                  takes, from the renderer's `Meshes` and `Shaders`"
             );
-            if bound != Some(run.shader) {
+            if bound != Some(shader_index) {
                 pass.set_pipeline(pipeline);
-                bound = Some(run.shader);
+                bound = Some(shader_index);
             }
-            if faces != Some(run.faces) {
-                pass.set_faces(run.faces);
-                faces = Some(run.faces);
+            if faces != Some(run_faces) {
+                pass.set_faces(run_faces);
+                faces = Some(run_faces);
             }
             let push = Push {
                 clip_from_world: view_projection,
@@ -1503,19 +1543,31 @@ impl MeshPass {
                 frame,
             };
             pass.begin_label(&shader.label);
-            let culled = culled.and_then(|culled| self.draw_culled(pass, mesh, push, culled, i));
-            if culled.is_none() {
-                let instances = Instances {
-                    run,
-                    uploaded,
-                    params_size: shader.params_size,
-                };
-                drawn += draw_run(pass, mesh, push, instances, &lod_view, &draws.transforms);
+            match (culled, culled_run, run) {
+                (Some(culled), Some(culled_run), _) => {
+                    self.draw_culled(pass, mesh, push, culled, culled_run);
+                }
+                (_, _, Some(run)) => {
+                    let instances = Instances {
+                        run,
+                        uploaded,
+                        params_size: shader.params_size,
+                    };
+                    drawn += draw_run(pass, mesh, push, instances, &lod_view, &draws.transforms);
+                }
+                _ => unreachable!("the scene's runs draw only as they're culled"),
             }
             pass.end_label();
         }
         Ok(drawn)
     }
+}
+
+/// A run a pass draws: the draws' run of that index, or the scene's.
+#[derive(Clone, Copy)]
+enum Drawn {
+    Frame(usize),
+    Scene(usize),
 }
 
 /// How many pixels a level's error may span on screen for a draw to use the level: the least that

@@ -353,13 +353,61 @@ fn described(
 }
 
 /// The entities with one set of component types, a row each: each column holds one type's
-/// values, row by row, and `entities` which entity each row is.
+/// values, row by row, `entities` which entity each row is, `changed` when each column's rows last
+/// changed, by the world's change ticks, and `joined` when each row joined the table. Its fields
+/// are its own, so that whatever reaches a column's values to change them does it through the
+/// table, which marks what it reaches.
 pub struct Table {
     /// Sorted.
-    pub(super) components: Box<[ComponentId]>,
+    components: Box<[ComponentId]>,
     /// `components[i]`'s values in `columns[i]`.
-    pub(super) columns: Box<[Box<dyn AnyColumn>]>,
-    pub(super) entities: Vec<Entity>,
+    columns: Box<[Box<dyn AnyColumn>]>,
+    /// When `columns[i]`'s rows last changed, in `changed[i]`.
+    changed: Box<[Changed]>,
+    /// When each row's entity joined the table, spawned or moved into it, as a table without
+    /// columns marks too.
+    joined: Changed,
+    entities: Vec<Entity>,
+}
+
+/// When the rows of one of a table's columns last changed, by the world's change ticks: each row's
+/// own tick, and the tick at which they all changed, as a query that reaches the column to change
+/// it changes them, without visiting them. A row is new at the tick it joins the table, as an
+/// entity spawned or moved into it is; and the last row moves with its values into a row taken out.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Changed {
+    rows: Vec<u64>,
+    all: u64,
+    /// The latest tick of any row, or of all of them, which no row's is past.
+    latest: u64,
+}
+
+impl Changed {
+    /// Whether a row changed after tick `tick`, or may have: one that changed and then left keeps
+    /// its tick here.
+    pub(crate) fn since(&self, tick: u64) -> bool {
+        self.latest > tick
+    }
+
+    /// The tick at which row `row` last changed.
+    pub(crate) fn row(&self, row: usize) -> u64 {
+        self.rows[row].max(self.all)
+    }
+
+    fn mark(&mut self, row: usize, tick: u64) {
+        self.rows[row] = tick;
+        self.latest = tick;
+    }
+
+    fn mark_all(&mut self, tick: u64) {
+        self.all = tick;
+        self.latest = tick;
+    }
+
+    fn push(&mut self, tick: u64) {
+        self.rows.push(tick);
+        self.latest = tick;
+    }
 }
 
 impl Table {
@@ -372,8 +420,17 @@ impl Table {
         Self {
             components: signature.into(),
             columns,
+            changed: iter::repeat_with(Changed::default)
+                .take(signature.len())
+                .collect(),
+            joined: Changed::default(),
             entities: Vec::new(),
         }
+    }
+
+    /// Its component types, sorted, whose values its columns hold, in that order.
+    pub fn components(&self) -> &[ComponentId] {
+        &self.components
     }
 
     /// Where component `id`'s column is, if the table has one.
@@ -390,23 +447,162 @@ impl Table {
         &self.entities
     }
 
+    /// How many rows it has room for, without growing.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.entities.capacity()
+    }
+
     /// Component `id`'s values, of type `T`, if the table has them.
     pub fn column<T: Component>(&self, id: ComponentId) -> Option<&[T]> {
         Some(self.columns[self.position(id)?].vec())
     }
 
-    pub fn column_mut<T: Component>(&mut self, id: ComponentId) -> Option<&mut Vec<T>> {
+    /// When component `id`'s rows last changed, if the table has them.
+    pub(crate) fn changed(&self, id: ComponentId) -> Option<&Changed> {
+        Some(&self.changed[self.position(id)?])
+    }
+
+    /// When each row's entity joined the table: spawned into it, or moved into it as it was given
+    /// a component or had one taken away.
+    pub(crate) fn joined(&self) -> &Changed {
+        &self.joined
+    }
+
+    /// Its columns, without their types, in its components' order.
+    pub(super) fn columns(&self) -> &[Box<dyn AnyColumn>] {
+        &self.columns
+    }
+
+    /// The column at `position`, without its type.
+    pub(super) fn column_at(&self, position: usize) -> &dyn AnyColumn {
+        &*self.columns[position]
+    }
+
+    /// The column at `position`, without its type, to change its row `row`, which it marks changed
+    /// at tick `tick`.
+    pub(super) fn row_mut(&mut self, position: usize, row: usize, tick: u64) -> &mut dyn AnyColumn {
+        self.changed[position].mark(row, tick);
+        &mut *self.columns[position]
+    }
+
+    /// The column at `position`, without its type, to change any of its rows, which it marks all
+    /// changed at tick `tick`.
+    pub(super) fn column_at_mut(&mut self, position: usize, tick: u64) -> &mut dyn AnyColumn {
+        self.changed[position].mark_all(tick);
+        &mut *self.columns[position]
+    }
+
+    /// Row `row`'s value of component `id`, of type `T`, to change, which it marks changed at tick
+    /// `tick`; `None` if the table hasn't the component.
+    pub(super) fn get_mut<T: Component>(
+        &mut self,
+        id: ComponentId,
+        row: usize,
+        tick: u64,
+    ) -> Option<&mut T> {
         let position = self.position(id)?;
-        Some(self.columns[position].vec_mut())
+        Some(&mut self.row_mut(position, row, tick).vec_mut::<T>()[row])
+    }
+
+    /// Its component types, its columns, which it marks all changed at tick `tick` where `changes`
+    /// says of a column's type that they change, and its entities: for a query, whose terms take
+    /// the columns apart.
+    pub(super) fn reach(
+        &mut self,
+        tick: u64,
+        changes: impl Fn(ComponentId) -> bool,
+    ) -> (&[ComponentId], &mut [Box<dyn AnyColumn>], &[Entity]) {
+        for (&id, changed) in self.components.iter().zip(&mut self.changed) {
+            if changes(id) {
+                changed.mark_all(tick);
+            }
+        }
+        (&self.components, &mut self.columns, &self.entities)
+    }
+
+    /// Pushes `value` onto the end of component `id`'s column, of type `T`, for the row that
+    /// [`push_entity`](Self::push_entity) makes, before or after.
+    ///
+    /// # Panics
+    ///
+    /// If the table hasn't the component.
+    pub(super) fn push<T: Component>(&mut self, id: ComponentId, value: T) {
+        let position = self.position(id).expect("the table has the component");
+        self.columns[position].vec_mut::<T>().push(value);
+    }
+
+    /// Moves the value in `from`, a one-row column of the type at `position`, onto the end of that
+    /// column, for the row that [`push_entity`](Self::push_entity) makes, before or after.
+    pub(super) fn push_from(&mut self, position: usize, from: &mut dyn AnyColumn) {
+        from.move_row(0, &mut *self.columns[position]);
+    }
+
+    /// Ends a row of `entity`, whose values the columns have had pushed onto them or will, new in
+    /// every column at tick `tick`.
+    pub(super) fn push_entity(&mut self, entity: Entity, tick: u64) {
+        self.entities.push(entity);
+        self.joined.push(tick);
+        for changed in &mut self.changed {
+            changed.push(tick);
+        }
+    }
+
+    /// Moves row `row`'s value of the column at `position` onto the end of `to`, a column of its
+    /// type, the last row's taking its place: as the row leaves the table, which takes its other
+    /// values or moves them after.
+    pub(super) fn take_out(&mut self, position: usize, row: usize, to: &mut dyn AnyColumn) {
+        self.columns[position].move_row(row, to);
+        self.changed[position].rows.swap_remove(row);
+    }
+
+    /// Takes row `row`'s value of component `id`, of type `T`, out of its column, the last row's
+    /// taking its place, as the row leaves the table, which takes its other values or moves them
+    /// after; `None` if the table hasn't the component.
+    pub(super) fn take<T: Component>(&mut self, id: ComponentId, row: usize) -> Option<T> {
+        let position = self.position(id)?;
+        self.changed[position].rows.swap_remove(row);
+        Some(self.columns[position].vec_mut::<T>().swap_remove(row))
+    }
+
+    /// Moves row `row`, whose entity is `entity`, onto the end of `into`, new there at tick
+    /// `tick`: its values of the types `into` has, the rest of its values having left already, as
+    /// [`take`](Self::take) and [`take_out`](Self::take_out) take them; the last row taking its
+    /// place. Returns the entity whose row `row` is now, if one moved. Values of `into`'s types it
+    /// hadn't are pushed onto `into` before or after.
+    pub(super) fn move_row(
+        &mut self,
+        row: usize,
+        into: &mut Table,
+        entity: Entity,
+        tick: u64,
+    ) -> Option<Entity> {
+        for ((id, column), changed) in self
+            .components
+            .iter()
+            .zip(&mut self.columns)
+            .zip(&mut self.changed)
+        {
+            if let Some(position) = into.position(*id) {
+                column.move_row(row, &mut *into.columns[position]);
+                changed.rows.swap_remove(row);
+            }
+        }
+        self.entities.swap_remove(row);
+        self.joined.rows.swap_remove(row);
+        into.push_entity(entity, tick);
+        self.entities.get(row).copied()
     }
 
     /// Takes `row` out of every column and the entities, the last row taking its place, and
     /// returns the entity whose row that is now, if one moved.
     pub(super) fn swap_remove(&mut self, row: usize) -> Option<Entity> {
-        for column in &mut self.columns {
+        for (column, changed) in self.columns.iter_mut().zip(&mut self.changed) {
             column.swap_remove(row);
+            changed.rows.swap_remove(row);
         }
         self.entities.swap_remove(row);
+        self.joined.rows.swap_remove(row);
         self.entities.get(row).copied()
     }
 
@@ -418,13 +614,24 @@ impl Table {
         components: &Components,
     ) -> (Row, Option<Entity>) {
         let mut taken = Vec::with_capacity(self.columns.len());
-        for (&id, column) in self.components.iter().zip(&mut self.columns) {
+        let columns = self.columns.iter_mut().zip(&mut self.changed);
+        for (&id, (column, changed)) in self.components.iter().zip(columns) {
             let mut one = components.new_column(id);
             column.move_row(row, &mut *one);
+            changed.rows.swap_remove(row);
             taken.push((id, one));
         }
         self.entities.swap_remove(row);
+        self.joined.rows.swap_remove(row);
         (taken, self.entities.get(row).copied())
+    }
+
+    /// Marks every row of every column changed at tick `tick`, and as joining the table then.
+    pub(super) fn mark_all(&mut self, tick: u64) {
+        self.joined.mark_all(tick);
+        for changed in &mut self.changed {
+            changed.mark_all(tick);
+        }
     }
 }
 
@@ -433,6 +640,8 @@ impl Clone for Table {
         Self {
             components: self.components.clone(),
             columns: self.columns.iter().map(|column| column.cloned()).collect(),
+            changed: self.changed.clone(),
+            joined: self.joined.clone(),
             entities: self.entities.clone(),
         }
     }
@@ -446,6 +655,11 @@ impl Clone for Table {
         }
         for (from, to) in source.columns.iter().zip(&mut self.columns) {
             from.copy_to(&mut **to);
+        }
+        let changed = source.changed.iter().zip(&mut self.changed);
+        for (from, to) in changed.chain([(&source.joined, &mut self.joined)]) {
+            to.rows.clone_from(&from.rows);
+            (to.all, to.latest) = (from.all, from.latest);
         }
         self.entities.clone_from(&source.entities);
     }

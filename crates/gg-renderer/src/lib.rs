@@ -54,7 +54,7 @@ pub use gg_gpu::{
 pub use grid::{Grid, GridLines};
 pub use light::{Light, LightKind};
 pub use line::Line;
-pub use mesh::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes};
+pub use mesh::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes, Scene};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
@@ -154,7 +154,8 @@ impl std::ops::AddAssign for DrawCounts {
 /// What's been added to a [`Meshes`], [`Shaders`], [`Textures`] and [`Materials`], replaced in
 /// them or removed from them, since it was last taken from them, in order: the shaders a frame
 /// makes pipelines for, the meshes and textures it queues to stream to the GPU, the materials it
-/// writes into their table, and the removals it applies, before it draws. Taking moves them out of
+/// writes into their table, and the removals it applies, before it draws; and what's changed in a
+/// [`Scene`], which it writes into the scene's table. Taking moves them out of
 /// the registries, which go on handing out handles where they are, so that a renderer on another
 /// thread renders what they handed out before. It keeps its memory, so that a frame that adds
 /// nothing allocates nothing.
@@ -164,6 +165,7 @@ pub struct Uploads {
     pub(crate) shaders: Vec<shader::Change>,
     pub(crate) textures: Vec<texture::Change>,
     pub(crate) materials: Vec<(u32, model::Entry)>,
+    pub(crate) scene: Vec<mesh::SceneChange>,
 }
 
 impl Uploads {
@@ -180,6 +182,13 @@ impl Uploads {
         self.shaders.append(&mut shaders.changes);
         self.textures.append(&mut textures.changes);
         self.materials.append(&mut materials.changes);
+    }
+
+    /// Takes what's changed in `scene` since it was last taken from, after what it holds
+    /// already, for a frame to write to the GPU before it draws the scene: so that one that
+    /// doesn't render, as one with no image to render into, leaves them for the next.
+    pub fn take_scene(&mut self, scene: &mut Scene) {
+        self.scene.append(&mut scene.changes);
     }
 }
 

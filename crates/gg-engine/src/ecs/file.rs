@@ -108,18 +108,18 @@ impl World {
         let id = |entity: Entity| self.id(entity).expect("a row's entity is alive");
         for table in &self.tables {
             out.push_str("table");
-            for &component in &table.components {
+            for &component in table.components() {
                 let name = self.components.name(component);
                 one_word(name)?;
                 write!(out, " {name}").expect(text);
             }
             out.push('\n');
-            for (row, &entity) in table.entities.iter().enumerate() {
+            for (row, &entity) in table.entities().iter().enumerate() {
                 write!(out, "row {} {} ", entity.index, id(entity)).expect(text);
-                let values: Vec<Value> = (table.columns.iter())
+                let values: Vec<Value> = (table.columns().iter())
                     .map(|column| column.value(row))
                     .collect();
-                let name = |at: usize| self.components.name(table.components[at]);
+                let name = |at: usize| self.components.name(table.components()[at]);
                 if let Some(at) = values.iter().position(|value| depth(value) > MAX_DEPTH) {
                     return Err(Error::new(
                         "snapshot.too_deep",
@@ -133,7 +133,7 @@ impl World {
                 }
                 text::write(out, &Value::List(values), self);
                 out.push('\n');
-                for (at, column) in table.columns.iter().enumerate() {
+                for (at, column) in table.columns().iter().enumerate() {
                     if let Some(opaque) = column.opaque(row) {
                         let what = format!("entity {}'s `{}`", id(entity), name(at));
                         one_line(&opaque, &what)?;
@@ -143,7 +143,7 @@ impl World {
             }
         }
         for table in &self.tables {
-            for &entity in &table.entities {
+            for &entity in table.entities() {
                 let mut children = self.children(entity).expect("a row's entity is alive");
                 let Some(first) = children.next() else {
                     continue;
@@ -320,6 +320,7 @@ impl World {
             stream: IdStream::new(stream),
             serial: next_serial(),
             version: 0,
+            change_tick: self.change_tick,
             tables: Vec::new(),
             by_signature: HashMap::new(),
             components: self.components.clone(),
@@ -448,7 +449,7 @@ impl World {
             }
         }
         for table in &world.tables {
-            for &entity in &table.entities {
+            for &entity in table.entities() {
                 let parent = world.get::<Parent>(entity).map(|up| up.0);
                 if parent.is_some() && world.parent(entity)? != parent {
                     let id = world.id(entity).expect("alive");
@@ -460,7 +461,7 @@ impl World {
         // Each entity's parents end at one without a parent, or every walk up the hierarchy would
         // go round for good: each slot is unseen, on the walk going on, or reaches the top.
         let (mut walked, mut walk) = (vec![0u8; slots], Vec::new());
-        for &entity in world.tables.iter().flat_map(|table| &table.entities) {
+        for &entity in world.tables.iter().flat_map(|table| table.entities()) {
             let mut at = Some(entity);
             while let Some(up) = at
                 && walked[up.slot()] != 2
@@ -917,7 +918,7 @@ mod tests {
         let tables = |world: &World| -> Vec<(Box<[ComponentId]>, Vec<Entity>)> {
             let tables = world.tables.iter();
             tables
-                .map(|table| (table.components.clone(), table.entities.clone()))
+                .map(|table| (table.components().into(), table.entities().to_vec()))
                 .collect()
         };
         assert_eq!(

@@ -90,7 +90,7 @@ impl World {
         }
         let roots = self.tables[..table].iter();
         let roots = roots.filter(|table| has(table, None, parent));
-        let before: usize = roots.map(|table| table.entities.len()).sum();
+        let before: usize = roots.map(|table| table.entities().len()).sum();
         Some(before + at.row as usize)
     }
 
@@ -99,7 +99,7 @@ impl World {
     /// Fails with `ecs.no_entity` if it isn't alive.
     pub fn components_of(&self, entity: Entity) -> Result<impl ExactSizeIterator<Item = &str>> {
         let at = self.locate(entity)?;
-        let ids = self.tables[at.table as usize].components.iter();
+        let ids = self.tables[at.table as usize].components().iter();
         Ok(ids.map(|&id| self.components.name(id)))
     }
 
@@ -121,7 +121,7 @@ impl World {
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
-        let column = &*self.tables[at.table as usize].columns[column];
+        let column = self.tables[at.table as usize].column_at(column);
         let row = at.row as usize;
         if to.ty.is_opaque(types) {
             reach(column, row, opaque_steps(&to)).map_err(about)?;
@@ -177,7 +177,7 @@ impl World {
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
         let row = at.row as usize;
         if to.ty.is_opaque(types) {
-            let column = &*self.tables[at.table as usize].columns[column];
+            let column = self.tables[at.table as usize].column_at(column);
             reach(column, row, opaque_steps(&to)).map_err(about)?;
             return match value {
                 Value::Opaque => Ok(Value::Opaque),
@@ -185,7 +185,8 @@ impl World {
             };
         }
         reflect::check(types, &to.ty, &to.meta, value).map_err(about)?;
-        let column = &mut *self.tables[at.table as usize].columns[column];
+        let tick = self.change_tick;
+        let column = self.tables[at.table as usize].row_mut(column, row, tick);
         let old = match to.steps.split_first() {
             None => {
                 let old = column.value(row);
@@ -277,9 +278,10 @@ impl World {
         fields: Vec<(Ident, Kind, Value)>,
     ) -> Result<()> {
         let declared = self.components.redeclare(id, doc, fields)?;
+        let tick = self.change_tick;
         for table in &mut self.tables {
             if let Some(at) = table.position(id) {
-                declared::migrate(&mut *table.columns[at], &declared);
+                declared::migrate(table.column_at_mut(at, tick), &declared);
             }
         }
         Ok(())
@@ -339,7 +341,8 @@ impl World {
         index: u32,
     ) -> Result<&dyn Reflect> {
         let (table, row) = self.row_of(entity, id)?;
-        let column = &*self.tables[table].columns[self.tables[table].position(id).expect(HAS)];
+        let table = &self.tables[table];
+        let column = table.column_at(table.position(id).expect(HAS));
         Ok(column.part(row, index).expect(FIELD))
     }
 
@@ -350,8 +353,9 @@ impl World {
         index: u32,
     ) -> Result<&mut dyn Reflect> {
         let (table, row) = self.row_of(entity, id)?;
+        let tick = self.change_tick;
         let table = &mut self.tables[table];
-        let column = &mut *table.columns[table.position(id).expect(HAS)];
+        let column = table.row_mut(table.position(id).expect(HAS), row, tick);
         Ok(column.part_mut(row, index).expect(FIELD))
     }
 
@@ -383,7 +387,7 @@ impl World {
     pub(crate) fn list_with(&self, id: ComponentId, list: &mut Vec<Entity>) {
         list.clear();
         let tables = self.tables.iter().filter(|table| table.has(id));
-        list.extend(tables.flat_map(|table| &table.entities));
+        list.extend(tables.flat_map(|table| table.entities()));
     }
 
     /// Where `entity` is, and the id of component type `component`.
@@ -401,7 +405,10 @@ impl World {
     pub(super) fn column(&self, at: Location, id: ComponentId, component: &str) -> Result<usize> {
         let table = &self.tables[at.table as usize];
         let Some(column) = table.position(id) else {
-            let names = table.components.iter().map(|&id| self.components.name(id));
+            let names = table
+                .components()
+                .iter()
+                .map(|&id| self.components.name(id));
             return Err(Error::new(
                 "reflect.missing_component",
                 format!(
@@ -426,7 +433,7 @@ impl World {
             .tables
             .iter()
             .filter(|table| has(table, with, without))
-            .map(|table| table.entities.len())
+            .map(|table| table.entities().len())
             .sum();
         Entities {
             tables: self.tables.iter(),
@@ -508,7 +515,7 @@ impl Entities<'_> {
         let (with, without) = (self.with, self.without);
         match self.tables.find(|table| has(table, with, without)) {
             Some(table) => {
-                self.rows = table.entities.iter();
+                self.rows = table.entities().iter();
                 true
             }
             None => false,

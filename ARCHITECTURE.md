@@ -787,6 +787,16 @@ made, and no hash map is iterated, so it's the same in every run, as determinism
 nothing a game may rely on: anything ordered, such as what's drawn over what, orders by its
 components' values, or by its entities' IDs.
 
+Each table keeps, for each of its columns, the change tick at which each of its rows last changed,
+and when each row joined it, as the world reaches them to change them: a row spawned or moved into a
+table is new in each of its columns; `get_mut`, `insert`, a set and an operation mark the row's
+component; a query's `&mut` term marks its column's rows all, without visiting them; and a rewind
+marks every row, as rows came back as they were. A table keeps its columns to itself, so that
+nothing reaches one to change it but through what marks it. The world's change tick moves on as
+each tick starts and once each frame has drawn the world, so that drawing finds what changed since
+it last looked, and costs what changed rather than what's drawn: a column's latest mark tells at
+once whether any of its rows did. No hash, scene, snapshot file or recording holds the ticks.
+
 Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number. Each world draws its IDs
 from a stream of its own: SplitMix64, which gives no ID twice until it's reseeded, seeded from the
 OS's randomness, so that two sessions' IDs meet only by chance, as a world's on either side of a
@@ -837,9 +847,12 @@ parent carries its children along, and despawning an entity despawns its descend
 keeps the hierarchy whole: once an entity is spawned, only `World::set_parent` gives, changes or
 takes away its `Parent`, which isn't `Writable`, so that code changing it any other way doesn't
 compile, and `set_field` and operations refuse it by name. A parent's children are in the order
-they became its children, which means no more than the order queries find entities in. World
-transforms aren't stored: drawing computes each child's from its ancestors, every frame, and
-`World::pose` an entity's for code, as the latest tick left it.
+they became its children, which means no more than the order queries find entities in. Drawing
+keeps each entity's world matrix, its parent's times its own transform's from its root down, and
+its rotation likewise, outside the world, as the latest tick left it, and places again, after the
+frame's ticks, the entities whose transforms or parents changed, or that joined a table, and what
+they carry, each once, from the topmost that changed; `World::pose` computes an entity's for code,
+bit for bit as drawing places it.
 
 A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
 snapshot, or takes a snapshot into one kept from before, in the memory it holds, so that one taken
@@ -1258,7 +1271,8 @@ entity draws, falling off with the square of the distance, eased to nothing at i
 one, as the extension recommends; and spot, a point light within a cone round its -Z, wholly within
 its inner angle and fading to nothing at its outer. Each frame hands the renderer every light, from
 where its entity draws and facing as it does, ancestors carrying it, as a camera sees from where its
-entity draws; and each lit fragment shades with each of them in turn, forward, so that its cost
+entity draws, found again only as a light, its transform, its parent or its table changes, what
+carries it moves, or it draws on its way between ticks; and each lit fragment shades with each of them in turn, forward, so that its cost
 grows with the lights, until clustered lighting culls them. A model's node that KHR_lights_punctual
 gives a light has it as a component, which fits as the model's nodes do. Scenes save lights, and the
 Inspector and tools edit them, as any component.
@@ -1387,11 +1401,9 @@ frame's ticks and the layers' updates, the engine draws the world's entities tha
 and a sprite, a circle, a `Text` or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, after what the layers drew, children where their ancestors carry them: first the
 meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw in,
-by shader, then mesh, so that each mesh with each shader is one instanced draw, or one for each of
-its levels of detail drawn, and their z's never
-sort them; then what blends, back to front by their z's in the world, those at one z drawing
-sprites, then circles, then text, under meshes; each batch and each z in the order of their IDs,
-which overlapping entities keep as others come and go. World z orders what blends rightly as seen
+which the renderer's scene holds, as below; then what blends, back to front by their z's in the
+world, those at one z drawing sprites, then circles, then text, under meshes; each z in the order of
+their IDs, which overlapping entities keep as others come and go. World z orders what blends rightly as seen
 from in front of layers parallel to XY, as 2D cameras see them; from behind or the side, what blends
 draws in the wrong order among itself, though rightly against what's opaque. At one depth, an opaque
 mesh goes under what blends; a layer's opaque draws hide the world's behind them, and its draws
@@ -1415,8 +1427,10 @@ going across what's in front of it rather than round what's hidden.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,
-scene, snapshot or recording holds the copy; each frame draws every entity as far on from where its
-last tick found it to where the tick left it as the frame is past the tick, its translation and
+scene, snapshot or recording holds the copy, each table's copy taking again only the rows whose
+transforms or parents changed, while no row joined or left it; each frame draws what the last tick
+moved, and what it carries, as far on from where the tick found it to where the tick left it as the
+frame is past the tick, its translation and
 scale blended and its rotation the shorter way round. So drawing runs up to a tick behind the
 simulation, besides the frame the render thread runs behind. A child blends its own transform and
 each ancestor's, then composes them, so that it keeps to its orbit; and the order everything draws
@@ -1651,6 +1665,22 @@ and the engine decorates as non-uniform the sampled images slangc makes of them,
 Nothing caps a run: the frame's memory grows to hold it, where a renderer with a buffer of fixed
 size would draw what it holds and start another.
 
+The world's opaque meshes stay on the GPU from frame to frame, in the renderer's scene, which the
+engine changes as the world does, rather than drawing them every frame: each entity with a
+`Transform` and a `MeshDraw` whose shader writes depth is an instance in the scene's slot of its
+entity's own, its transform, ID and parameters a record in a table in the GPU's own memory, set as
+the entity joins a table, its mesh changes, drawing places it again, or it draws on its way between
+ticks, and once more as it stops, and taken away as it goes, which, as rows changed, the engine
+looks over the instances held for. A frame writes the records that changed into the table, each
+where its slot puts it, in one copy, after earlier frames' reads, and the instances' order whole as
+it changes: by shader, then mesh, then the faces they draw, then ID, as many instanced draws for
+each batch as its mesh has levels, culled as below, whatever its instances. The table is made again
+twice the size as slots past it are used, from the records the renderer keeps, and the scene's
+changes go to the renderer with the uploads, which a frame that doesn't render leaves for the next.
+So a frame costs the CPU what changed of the world, rather than what it draws: as much for 16
+Bistros as for one, but for the lights, which a frame finds again only as one changes, or what
+carries it, or one moves between ticks.
+
 A mesh may have levels of detail, as a cooked model's primitives do: up to eight ranges of its one
 index buffer, finest first, each with how far its surface strays from the finest's, in the mesh's
 own units, and a sphere round its vertices, which a model's primitive of one level has too. Each
@@ -1660,8 +1690,10 @@ there gives, a rigid view keeping the pixels a unit spans; a draw whose sphere r
 plane draws the finest. A mesh a layer adds without levels has no sphere, as the engine can't read
 its vertices' positions.
 
-The world's and the layers' opaque runs are culled on the GPU, in compute passes before the
-shadows' and the view's, for the view and for each of the shadows' cascades: an instance is kept
+The scene's runs and the layers' opaque ones are culled on the GPU, in compute passes before the
+shadows' and the view's, which first gather their instances, from the scene's table in its order
+and from the frame's arrays, into arrays of the graph's own, for the view and for each of the
+shadows' cascades: an instance is kept
 where its mesh's sphere, as its transform places it and grown by the most it stretches, reaches
 inside every plane of what that view sees, its far plane at infinity under perspective, and, for a
 cascade, but its near side, which casters past cast from; a mesh without a sphere is always kept.

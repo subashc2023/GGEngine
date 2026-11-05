@@ -22,6 +22,7 @@ impl Clone for World {
             stream,
             serial: _,
             version,
+            change_tick,
             tables,
             by_signature,
             components,
@@ -43,6 +44,7 @@ impl Clone for World {
             stream: *stream,
             serial: next_serial(),
             version: *version,
+            change_tick: *change_tick,
             tables: tables.clone(),
             by_signature: by_signature.clone(),
             components: components.clone(),
@@ -70,6 +72,7 @@ impl Clone for World {
             stream,
             serial: _,
             version,
+            change_tick,
             tables,
             by_signature,
             components,
@@ -86,8 +89,8 @@ impl Clone for World {
         }
         // The map of tables by their types follows from the tables, so it's `source`'s already if
         // they have the same types in the same order; copying it would allocate each key.
-        let ours = self.tables.iter().map(|table| &table.components);
-        let shaped = ours.eq(tables.iter().map(|table| &table.components));
+        let ours = self.tables.iter().map(|table| table.components());
+        let shaped = ours.eq(tables.iter().map(|table| table.components()));
         // Cuts away the tables made since, and copies each table into the one in its place, in
         // its memory.
         self.tables.clone_from(tables);
@@ -105,6 +108,8 @@ impl Clone for World {
         self.kept.clone_from(kept);
         self.stream = *stream;
         self.version = *version;
+        // Only ever growing, so that a tick drawing saw is never one the world marks again.
+        self.change_tick = self.change_tick.max(*change_tick);
         self.resources.clone_from(resources);
         self.assets.clone_from(assets);
         self.serial = next_serial();
@@ -117,12 +122,18 @@ impl World {
     /// restores it, but the very world still, its serial its own, so that what's kept of it by its
     /// serial holds, as its logs, which undo through it as before, since none changed it since; its
     /// version moves on past both's, so that what's kept by its version, as drawing's order, is
-    /// found again.
+    /// found again; and every row of every column changes at a change tick past both's, since
+    /// rows have come back as they were, which what's kept by its ticks, as drawing's copies of
+    /// it, takes again.
     pub(crate) fn rewind(&mut self, snapshot: &World) {
         let (serial, version) = (self.serial, self.version.max(snapshot.version));
         self.clone_from(snapshot);
         self.serial = serial;
         self.version = version + 1;
+        self.change_tick += 1;
+        for table in &mut self.tables {
+            table.mark_all(self.change_tick);
+        }
     }
 }
 
@@ -175,15 +186,17 @@ mod tests {
         assert_eq!(world.tables.len(), twin.tables.len(), "{case}: the tables");
         for (index, (table, other)) in world.tables.iter().zip(&twin.tables).enumerate() {
             assert_eq!(
-                table.components, other.components,
+                table.components(),
+                other.components(),
                 "{case}: table {index}'s types"
             );
             assert_eq!(
-                table.entities, other.entities,
+                table.entities(),
+                other.entities(),
                 "{case}: table {index}'s rows"
             );
             for world in [world, twin] {
-                let found = world.by_signature.get(&table.components);
+                let found = world.by_signature.get(table.components());
                 assert_eq!(
                     found,
                     Some(&(index as u32)),
@@ -586,7 +599,7 @@ mod tests {
         ];
         let transform = world.component::<Transform>().expect("registered");
         for table in &world.tables {
-            held.push((table.entities.as_ptr().addr(), table.entities.capacity()));
+            held.push((table.entities().as_ptr().addr(), table.capacity()));
             if let Some(column) = table.column::<Transform>(transform) {
                 held.push((column.as_ptr().addr(), column.len()));
             }

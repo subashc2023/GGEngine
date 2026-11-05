@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::draw::Poses;
 use crate::interpolation::Past;
+use crate::placed::Placed;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{
     Actions, Binding, Component, Context, Entity, EntityId, Event, Key, MouseButton, Source, Stick,
@@ -236,12 +237,13 @@ impl Tie {
 }
 
 /// What the game's view sees through in frames no layer sets a viewpoint, as `world` draws `alpha`
-/// of the way on from `past`: its primary camera, from where it draws, and of several, the one of
+/// of the way on from `past`, placed as `placed` has it: its primary camera, from where it draws, and of several, the one of
 /// the lowest ID; `None` without one. Several warn (`engine.camera_tie`) as they come to be and as
 /// they change, which `warned` keeps track of, rather than every frame.
 pub(crate) fn seen(
     world: &World,
     past: &Past,
+    placed: &Placed,
     alpha: f32,
     warned: &mut Option<Tie>,
 ) -> Option<Viewpoint> {
@@ -265,7 +267,7 @@ pub(crate) fn seen(
         );
     }
     let (table, row, _, camera) = best?;
-    let (position, rotation) = Poses::new(world, past, alpha)?.pose(table, row);
+    let (position, rotation) = Poses::new(world, past, placed, alpha)?.pose(table, row);
     Some(Viewpoint {
         position,
         rotation,
@@ -617,7 +619,13 @@ mod tests {
 
     /// What the view sees through in a frame of `world` as it is, with nothing to draw on from.
     fn seen_now(world: &World) -> Option<Viewpoint> {
-        seen(world, &Past::default(), 1.0, &mut None)
+        seen(
+            world,
+            &Past::default(),
+            &Placed::of(world, &Past::default(), 1.0),
+            1.0,
+            &mut None,
+        )
     }
 
     /// The view sees through the primary camera; without one, through none, though the world has
@@ -649,7 +657,14 @@ mod tests {
         let ids = tied.map(|camera| world.id(camera).expect("alive"));
         let lowest = usize::from(ids[1] < ids[0]);
         let mut warned = None;
-        let seen = seen(&world, &Past::default(), 1.0, &mut warned).expect("a camera");
+        let seen = seen(
+            &world,
+            &Past::default(),
+            &Placed::of(&world, &Past::default(), 1.0),
+            1.0,
+            &mut warned,
+        )
+        .expect("a camera");
         assert_eq!(seen.position.x, [1.0, 2.0][lowest]);
         let tie = Tie {
             seen: ids[lowest],
@@ -659,7 +674,14 @@ mod tests {
         // That one no longer primary, the view sees through the other, and nothing ties.
         let camera = world.get_mut::<Camera>(tied[lowest]).expect("alive");
         camera.primary = false;
-        let seen = super::seen(&world, &Past::default(), 1.0, &mut warned).expect("a camera");
+        let seen = super::seen(
+            &world,
+            &Past::default(),
+            &Placed::of(&world, &Past::default(), 1.0),
+            1.0,
+            &mut warned,
+        )
+        .expect("a camera");
         assert_eq!(seen.position.x, [2.0, 1.0][lowest]);
         assert_eq!(warned, None);
     }
@@ -744,7 +766,7 @@ mod tests {
             world.set_parent(child, Some(parent)).expect("both alive");
         }
         let mut past = Past::default();
-        past.capture(&world);
+        past.capture(&mut world);
         // The tick moves the parent 2 along X.
         let moved = world.get_mut::<Transform>(parent).expect("alive");
         moved.translation.x = 2.0;
@@ -759,6 +781,7 @@ mod tests {
             parent.matrix() * local.matrix()
         };
         let mut want = Draws::default();
+        want.draw_scene();
         let id = world.id(children[1]).expect("alive").get();
         want.extend_sprites(std::iter::once((carried(1.0), Sprite::default(), id)));
         let mut draws = Draws::default();
@@ -766,6 +789,7 @@ mod tests {
         draw_world(
             &world,
             &past,
+            &Placed::of(&world, &past, 0.5),
             0.5,
             &mut draws,
             shaders,
@@ -773,12 +797,26 @@ mod tests {
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);
-        let halfway = seen(&world, &past, 0.5, &mut None).expect("a camera");
+        let halfway = seen(
+            &world,
+            &past,
+            &Placed::of(&world, &past, 0.5),
+            0.5,
+            &mut None,
+        )
+        .expect("a camera");
         assert_eq!(halfway.position, carried(1.0).w_axis.truncate());
         let facing = turned.rotation * local.rotation;
         let rotation = halfway.rotation;
         assert!(rotation.abs_diff_eq(facing, 1e-6), "{rotation}");
-        let headless = seen(&world, &past, 1.0, &mut None).expect("a camera");
+        let headless = seen(
+            &world,
+            &past,
+            &Placed::of(&world, &past, 1.0),
+            1.0,
+            &mut None,
+        )
+        .expect("a camera");
         assert_eq!(headless.position, carried(2.0).w_axis.truncate());
     }
 
@@ -795,7 +833,8 @@ mod tests {
                 world.reset_interpolation(camera).expect("alive");
             }
             past.resolve(world);
-            let halfway = seen(world, &past, 0.5, &mut None).expect("a camera");
+            let halfway = seen(world, &past, &Placed::of(world, &past, 0.5), 0.5, &mut None)
+                .expect("a camera");
             halfway.position.x
         };
         assert_eq!(tick(&mut world, 4.0, false), 2.0);

@@ -48,6 +48,9 @@ pub struct QueryIterMut<'w, Q: Query> {
     tables: slice::IterMut<'w, Table>,
     needs: Option<Q::Needs>,
     rows: Option<Q::Fetch<'w>>,
+    /// The world's change tick, which each table it reaches marks the columns its `&mut` terms
+    /// take with, all their rows.
+    tick: u64,
 }
 
 impl<'w, Q: ReadOnlyQuery> QueryIter<'w, Q> {
@@ -62,12 +65,13 @@ impl<'w, Q: ReadOnlyQuery> QueryIter<'w, Q> {
 }
 
 impl<'w, Q: Query> QueryIterMut<'w, Q> {
-    pub(super) fn new(tables: &'w mut [Table], components: &Components) -> Self {
+    pub(super) fn new(tables: &'w mut [Table], components: &Components, tick: u64) -> Self {
         Q::check();
         Self {
             tables: tables.iter_mut(),
             needs: Q::needs(components),
             rows: None,
+            tick,
         }
     }
 }
@@ -114,7 +118,7 @@ impl<'w, Q: Query> Iterator for QueryIterMut<'w, Q> {
             }
             let needs = self.needs?;
             let table = self.tables.find(|table| Q::matches(needs, table))?;
-            self.rows = Some(Q::fetch_mut(needs, table));
+            self.rows = Some(Q::fetch_mut(needs, table, self.tick));
         }
     }
 
@@ -129,7 +133,7 @@ impl<'w, Q: Query> Iterator for QueryIterMut<'w, Q> {
         };
         for table in self.tables {
             if Q::matches(needs, table) {
-                acc = Q::fetch_mut(needs, table).fold(acc, &mut f);
+                acc = Q::fetch_mut(needs, table, self.tick).fold(acc, &mut f);
             }
         }
         acc
@@ -161,8 +165,8 @@ impl<'w, Q: Query> QueryIterMut<'w, Q> {
         };
         for table in self.tables {
             if Q::matches(needs, table) {
-                let len = table.entities.len();
-                split::<Q, _>(Q::slices_mut(needs, table), len, &f);
+                let len = table.entities().len();
+                split::<Q, _>(Q::slices_mut(needs, table, self.tick), len, &f);
             }
         }
     }
@@ -208,8 +212,9 @@ mod seal {
 
         fn matches(needs: Self::Needs, table: &Table) -> bool;
 
-        /// The rows of `table`, which matches, as slices.
-        fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w>;
+        /// The rows of `table`, which matches, as slices, its columns that `&mut` terms take
+        /// marked changed at tick `tick`, all their rows.
+        fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table, tick: u64) -> Self::Slices<'w>;
 
         /// The first `mid` rows of `slices`, and the rest.
         fn split_at<'w>(
@@ -219,9 +224,9 @@ mod seal {
 
         fn rows<'w>(slices: Self::Slices<'w>) -> Self::Fetch<'w>;
 
-        /// The rows of `table`, which matches.
-        fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Fetch<'w> {
-            Self::rows(Self::slices_mut(needs, table))
+        /// The rows of `table`, which matches, as [`slices_mut`](Self::slices_mut) marks them.
+        fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table, tick: u64) -> Self::Fetch<'w> {
+            Self::rows(Self::slices_mut(needs, table, tick))
         }
     }
 
@@ -242,6 +247,8 @@ mod seal {
         type Slice<'w>: Send;
         /// What it needs of a table: its component's id, or nothing for `Entity`.
         type Need: Copy;
+        /// Whether it changes the values it takes, as `&mut T` does.
+        const CHANGES: bool;
 
         /// Its component's type and name; `None` for `Entity`.
         fn component() -> Option<(TypeId, &'static str)>;
@@ -281,6 +288,7 @@ impl<T: Component> Term for &T {
     type Fetch<'w> = slice::Iter<'w, T>;
     type Slice<'w> = &'w [T];
     type Need = ComponentId;
+    const CHANGES: bool = false;
 
     fn component() -> Option<(TypeId, &'static str)> {
         Some((TypeId::of::<T>(), type_name::<T>()))
@@ -324,6 +332,7 @@ impl<T: Writable> Term for &mut T {
     type Fetch<'w> = slice::IterMut<'w, T>;
     type Slice<'w> = &'w mut [T];
     type Need = ComponentId;
+    const CHANGES: bool = true;
 
     fn component() -> Option<(TypeId, &'static str)> {
         Some((TypeId::of::<T>(), type_name::<T>()))
@@ -360,6 +369,7 @@ impl Term for Entity {
     type Fetch<'w> = Copied<slice::Iter<'w, Entity>>;
     type Slice<'w> = &'w [Entity];
     type Need = ();
+    const CHANGES: bool = false;
 
     fn component() -> Option<(TypeId, &'static str)> {
         None
@@ -395,7 +405,7 @@ impl Term for Entity {
 
 impl ReadTerm for Entity {
     fn fetch<'w>((): (), table: &'w Table) -> Copied<slice::Iter<'w, Entity>> {
-        table.entities.iter().copied()
+        table.entities().iter().copied()
     }
 }
 
@@ -418,12 +428,13 @@ macro_rules! term_query {
                 <$term as Term>::has(needs, table)
             }
 
-            fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w> {
-                let Table {
-                    components,
-                    columns,
-                    entities,
-                } = table;
+            fn slices_mut<'w>(
+                needs: Self::Needs,
+                table: &'w mut Table,
+                tick: u64,
+            ) -> Self::Slices<'w> {
+                let changes = |id| <$term as Term>::CHANGES && <$term as Term>::takes(needs, id);
+                let (components, columns, entities) = table.reach(tick, changes);
                 let column = components
                     .iter()
                     .zip(columns.iter_mut())
@@ -566,13 +577,13 @@ macro_rules! tuple_query {
                 $($T::has(needs.$i, table))&&+
             }
 
-            fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w> {
-                let Table {
-                    components,
-                    columns,
-                    entities,
-                } = table;
-                let entities: &'w [Entity] = entities;
+            fn slices_mut<'w>(
+                needs: Self::Needs,
+                table: &'w mut Table,
+                tick: u64,
+            ) -> Self::Slices<'w> {
+                let changes = |id| $(($T::CHANGES && $T::takes(needs.$i, id)))||+;
+                let (components, columns, entities) = table.reach(tick, changes);
                 // Each column goes to the one term that takes it, so that no two terms reach
                 // the same values: the borrow checker sees each reference moved once.
                 $(let mut $t = None;)+

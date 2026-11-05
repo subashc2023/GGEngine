@@ -18,7 +18,7 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Blend, Circle, Draws, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps, ModelParams,
-    ModelVertex, Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture,
+    ModelVertex, Outline, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture,
     Textures, Tonemapper, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
@@ -51,9 +51,11 @@ use crate::model::{self, Made, Nodes};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
 use crate::net::{Outside, Session, Turn};
+use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
 use crate::perf::Perf;
 use crate::physics::{self, CircleCollider2D, Physics2D};
+use crate::placed::Placed;
 use crate::recording::Recorder;
 use crate::recording::text::Text;
 use crate::reflect::{Reflect, Value};
@@ -295,7 +297,7 @@ pub struct Context {
     /// The tie among the world's environments last warned of, while they've tied since.
     environment_tie: Option<environment::Tie>,
     /// The world's lights as the world was last drawn, which keep their memory.
-    lights: Vec<gg_renderer::Light>,
+    lit: light::Lit,
     /// The simulation's time in seconds as the world was last drawn.
     time: f32,
     meshes: Meshes,
@@ -351,6 +353,16 @@ pub struct Context {
     /// Where the world's entities were as the latest tick started, which drawing draws them on
     /// from.
     past: Past,
+    /// Where the world's entities are, kept from frame to frame, and where those on their way
+    /// draw this frame.
+    placed: Placed,
+    /// The world's change tick as the latest tick started, at and after which the entities whose
+    /// transforms changed draw on their way between ticks.
+    tick_started: u64,
+    /// What the renderer's scene holds of the world's opaque meshes, and what's changed of it
+    /// since a frame last took it.
+    opaque: OpaqueMeshes,
+    scene: Scene,
     /// Set from when the layers have attached until they detach: the world then changes only at
     /// ticks.
     attached: bool,
@@ -588,7 +600,7 @@ impl Context {
             tie: None,
             environment: None,
             environment_tie: None,
-            lights: Vec::new(),
+            lit: light::Lit::default(),
             time: 0.0,
             meshes: Meshes::default(),
             shaders: Shaders::default(),
@@ -619,6 +631,10 @@ impl Context {
             world,
             scratch: Scratch::default(),
             past: Past::default(),
+            placed: Placed::default(),
+            tick_started: 0,
+            opaque: OpaqueMeshes::default(),
+            scene: Scene::default(),
             attached: false,
             root: None,
             files: Files::default(),
@@ -3120,9 +3136,11 @@ impl Context {
     }
 
     /// Copies where the world's entities are, as a tick starts, for the frames after it to draw
-    /// them on from.
+    /// them on from; and moves the world's change tick on, so that what the tick changes is marked
+    /// as changed since it started.
     pub(crate) fn capture(&mut self) {
-        self.past.capture(&self.world);
+        self.past.capture(&mut self.world);
+        self.tick_started = self.world.change_tick();
     }
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
@@ -3134,24 +3152,32 @@ impl Context {
     /// sees it.
     pub(crate) fn draw_world(&mut self, alpha: f32, time: f32) {
         self.past.resolve(&self.world);
-        self.seen = camera::seen(&self.world, &self.past, alpha, &mut self.tie);
-        self.environment = environment::seen(&self.world, &mut self.environment_tie);
-        light::lights(&self.world, &self.past, alpha, &mut self.lights);
+        self.placed.place(&self.world);
+        let held = self.world.component::<MeshDraw>();
+        (self.placed).draw(&self.world, &self.past, alpha, self.tick_started, held);
+        (self.opaque).hold(&self.world, &self.placed, &mut self.scene);
+        let (world, past, placed) = (&self.world, &self.past, &self.placed);
+        self.seen = camera::seen(world, past, placed, alpha, &mut self.tie);
+        self.environment = environment::seen(world, &mut self.environment_tie);
+        (self.lit).find(world, past, placed, alpha, self.tick_started);
         self.time = time;
         #[cfg(feature = "dev")]
         if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
             let viewpoint = self.look.viewpoint.or(self.viewpoint).or(self.seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
         }
-        let (world, past) = (&self.world, &self.past);
+        let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
-        draw::draw_world(world, past, alpha, draws, shaders, fonts, &mut self.scratch);
+        let scratch = &mut self.scratch;
+        draw::draw_world(world, past, placed, alpha, draws, shaders, fonts, scratch);
         if self.colliders_drawn()
-            && let Some(poses) = Poses::new(world, past, alpha)
+            && let Some(poses) = Poses::new(world, past, placed, alpha)
         {
             let scale = self.scale() as f32;
             physics::draw_colliders(world, &poses, scale, &mut self.over, &mut self.shaders);
         }
+        // What changes after, until the next frame draws, is marked past what this one saw.
+        self.world.advance();
     }
 
     /// Whether the frame draws the colliders' outlines: as the look shows them, where it says, in
@@ -3193,7 +3219,7 @@ impl Context {
         frame.exposure = self.environment.unwrap_or_default().light_scale();
         frame.sky = self.environment.and_then(|seen| seen.sky());
         frame.lights.clear();
-        frame.lights.extend_from_slice(&self.lights);
+        frame.lights.extend_from_slice(self.lit.lights());
         frame.time = self.time;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
@@ -3234,6 +3260,7 @@ impl Context {
             &mut self.textures,
             &mut self.materials,
         );
+        frame.uploads.take_scene(&mut self.scene);
         frame.picks.clear();
         #[cfg(feature = "dev")]
         if self.look.bare {

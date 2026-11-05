@@ -7,7 +7,8 @@ use gg_core::math::Vec3;
 
 use crate::draw::Poses;
 use crate::interpolation::Past;
-use crate::{Component, Reflect, Transform, World};
+use crate::placed::Placed;
+use crate::{Component, Parent, Reflect, Transform, World};
 
 /// How a [`Light`] shines.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
@@ -109,16 +110,92 @@ impl Light {
     }
 }
 
+/// The lights of a world as frames draw it, kept from frame to frame, and found again only as what
+/// they're found from changes, so that a frame whose lights didn't change costs nothing of them.
+#[derive(Default)]
+pub(crate) struct Lit {
+    lights: Vec<gg_renderer::Light>,
+    /// The world they were found in, by its serial, and its version and change tick then.
+    seen: Option<(u64, u64, u64)>,
+    /// Whether one was on its way between ticks then, which the next frame finds again.
+    moving: bool,
+}
+
+impl Lit {
+    /// The lights, as they were last found.
+    pub(crate) fn lights(&self) -> &[gg_renderer::Light] {
+        &self.lights
+    }
+
+    /// Finds the lights of `world` as it draws `alpha` of the way on from `past`, the latest tick
+    /// having started at change tick `started`, placed as `placed` has it, as [`lights`] does:
+    /// again, if it's another world, or the same with rows changed, a light, a light's transform
+    /// or its parent changed, `placed` placed one again, one is on its way between ticks, or was
+    /// last frame; or else as they were.
+    pub(crate) fn find(
+        &mut self,
+        world: &World,
+        past: &Past,
+        placed: &Placed,
+        alpha: f32,
+        started: u64,
+    ) {
+        let (serial, version) = world.version();
+        let seen = self.seen.replace((serial, version, world.change_tick()));
+        let (Some(light), Some(transform)) =
+            (world.component::<Light>(), world.component::<Transform>())
+        else {
+            self.lights.clear();
+            return;
+        };
+        let parent = world.component::<Parent>();
+        let lit = |entity| world.get::<Light>(entity).is_some();
+        let tables = || {
+            let tables = world.tables().iter().enumerate();
+            tables.filter(|(_, table)| table.has(light) && table.has(transform))
+        };
+        let moved = |(index, table): (usize, &crate::ecs::Table)| {
+            let marks = table.changed(transform).expect("it has transforms");
+            let blends = alpha < 1.0 && past.from(world, index).is_some();
+            !past.instead_of(index).is_empty() || blends && marks.since(started.saturating_sub(1))
+        };
+        let moving = tables().any(moved) || placed.moving().iter().any(|&entity| lit(entity));
+        let same = seen.is_some_and(|(was, then, tick)| {
+            let changed = |table: &crate::ecs::Table| {
+                let ids = [Some(light), Some(transform), parent].into_iter().flatten();
+                ids.filter_map(|id| table.changed(id))
+                    .any(|marks| marks.since(tick))
+            };
+            (was, then) == (serial, version)
+                && !self.moving
+                && !moving
+                && !tables().any(|(_, table)| changed(table))
+                && !placed.changed().iter().any(|&entity| lit(entity))
+        });
+        self.moving = moving;
+        if !same {
+            lights(world, past, placed, alpha, &mut self.lights);
+        }
+    }
+}
+
 /// Puts in `lit`, in place of what it held, the lights of `world` as it draws `alpha` of the way on
-/// from `past`: each from where its entity draws, shining along the entity's -Z as it faces then.
-pub(crate) fn lights(world: &World, past: &Past, alpha: f32, lit: &mut Vec<gg_renderer::Light>) {
+/// from `past`, placed as `placed` has it: each from where its entity draws, shining along the
+/// entity's -Z as it faces then.
+pub(crate) fn lights(
+    world: &World,
+    past: &Past,
+    placed: &Placed,
+    alpha: f32,
+    lit: &mut Vec<gg_renderer::Light>,
+) {
     lit.clear();
     let (Some(light), Some(transform)) =
         (world.component::<Light>(), world.component::<Transform>())
     else {
         return;
     };
-    let Some(poses) = Poses::new(world, past, alpha) else {
+    let Some(poses) = Poses::new(world, past, placed, alpha) else {
         return;
     };
     for (index, table) in world.tables().iter().enumerate() {
@@ -138,6 +215,7 @@ mod tests {
     use gg_core::math::Quat;
 
     use super::*;
+    use crate::Entity;
 
     /// A light shines along its entity's -Z from where the entity draws, its parent carrying it,
     /// its color times its intensity; one without a transform lights nothing; and a spot's angles
@@ -169,7 +247,13 @@ mod tests {
         world.set_parent(child, Some(parent)).expect("parented");
         world.spawn(Light::default());
         let mut lit = vec![];
-        lights(&world, &Past::default(), 1.0, &mut lit);
+        lights(
+            &world,
+            &Past::default(),
+            &Placed::of(&world, &Past::default(), 1.0),
+            1.0,
+            &mut lit,
+        );
         let [light] = lit[..] else {
             panic!("one light with a transform: {lit:?}");
         };
@@ -200,5 +284,70 @@ mod tests {
             ..sun
         };
         assert_eq!(lit(shadowless), None);
+    }
+
+    /// Lights kept from frame to frame are those found afresh each frame, through frames that
+    /// change nothing, move what carries one, change one, move one between ticks and after, and
+    /// take one away.
+    #[test]
+    fn kept_lights_are_found_again_as_they_change() {
+        let mut world = World::default();
+        let point = Light {
+            kind: LightKind::Point,
+            ..Light::default()
+        };
+        let lone = world.spawn((Transform::default(), point));
+        let parent = world.spawn(Transform::default());
+        let carried = world.spawn((Transform::default(), point));
+        world.set_parent(carried, Some(parent)).expect("no cycle");
+        world.spawn(Transform::default());
+        let (mut past, mut placed, mut kept) = (Past::default(), Placed::default(), Lit::default());
+        let mut started = 0;
+        type Change = fn(&mut World, [Entity; 3]);
+        let frames: [(&str, bool, f32, Change); 7] = [
+            ("the first", false, 1.0, |_, _| {}),
+            ("nothing", false, 1.0, |_, _| {}),
+            ("a carrier moved", false, 1.0, |world, [_, parent, _]| {
+                world
+                    .get_mut::<Transform>(parent)
+                    .expect("alive")
+                    .translation
+                    .x = 2.0;
+            }),
+            ("a light changed", false, 1.0, |world, [lone, ..]| {
+                world.get_mut::<Light>(lone).expect("alive").intensity = 3.0;
+            }),
+            ("one moved in a tick", true, 0.5, |world, [lone, ..]| {
+                world
+                    .get_mut::<Transform>(lone)
+                    .expect("alive")
+                    .translation
+                    .y = 4.0;
+            }),
+            (
+                "the frame after the tick that moved it",
+                true,
+                0.5,
+                |_, _| {},
+            ),
+            ("one taken away", false, 1.0, |world, [lone, ..]| {
+                world.despawn(lone).expect("alive");
+            }),
+        ];
+        for (what, ticks, alpha, change) in frames {
+            if ticks {
+                past.capture(&mut world);
+                started = world.change_tick();
+            }
+            change(&mut world, [lone, parent, carried]);
+            past.resolve(&world);
+            placed.place(&world);
+            placed.draw(&world, &past, alpha, started, None);
+            kept.find(&world, &past, &placed, alpha, started);
+            let mut fresh = Vec::new();
+            lights(&world, &past, &placed, alpha, &mut fresh);
+            assert_eq!(kept.lights(), fresh, "after {what}");
+            world.advance();
+        }
     }
 }

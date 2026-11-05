@@ -56,8 +56,8 @@ pub use resources::{Resource, Saved};
 pub(crate) use scene::read_scene_from;
 pub(crate) use scene::{MAX_DEPTH, float, quote};
 pub use scene::{read_scene, write_scene};
-pub(crate) use table::ComponentId;
-use table::{AnyColumn, Components, Row, Table};
+use table::{AnyColumn, Components, Row};
+pub(crate) use table::{ComponentId, Table};
 
 use crate::assets::Assets;
 use crate::reflect::Reflect;
@@ -268,6 +268,11 @@ pub struct World {
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
     version: u64,
+    /// The world's change tick, which each table marks the rows of its columns with as they
+    /// change, as [`Changed`](table::Changed) says: moved on by the engine as each tick starts and
+    /// as each frame has drawn the world, so that drawing finds what changed since it last drew.
+    /// Neither it nor the marks are hashed, saved or recorded.
+    change_tick: u64,
     /// In the order they were made, which is the order queries search them in.
     tables: Vec<Table>,
     /// Each table, by its sorted component types; looked up, never iterated, so that its random
@@ -347,6 +352,7 @@ impl World {
             stream: IdStream::new(seed),
             serial: next_serial(),
             version: 0,
+            change_tick: 1,
             tables: Vec::new(),
             by_signature: HashMap::new(),
             components,
@@ -425,9 +431,9 @@ impl World {
         };
         self.entity_ids[entity.index as usize] = Some(id);
         let into = &mut self.tables[table as usize];
-        let row = into.entities.len() as u32;
+        let row = into.entities().len() as u32;
         components.push(into, ids);
-        into.entities.push(entity);
+        into.push_entity(entity, self.change_tick);
         self.meta[entity.index as usize].location = Some(Location { table, row });
         self.version += 1;
         entity
@@ -497,11 +503,11 @@ impl World {
         self.scratch = signature;
         self.entity_ids[entity.index as usize] = Some(id);
         let into = &mut self.tables[table as usize];
-        let row_at = into.entities.len() as u32;
-        for ((_, mut from), to) in row.into_iter().zip(into.columns.iter_mut()) {
-            from.move_row(0, &mut **to);
+        let row_at = into.entities().len() as u32;
+        for (position, (_, mut from)) in row.into_iter().enumerate() {
+            into.push_from(position, &mut *from);
         }
-        into.entities.push(entity);
+        into.push_entity(entity, self.change_tick);
         let at = Location { table, row: row_at };
         self.meta[entity.index as usize].location = Some(at);
         self.version += 1;
@@ -522,14 +528,14 @@ impl World {
     fn put<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
         let at = self.locate(entity)?;
         let id = self.components.id::<T>();
-        if let Some(column) = self.tables[at.table as usize].column_mut::<T>(id) {
-            column[at.row as usize] = component;
+        let (row, tick) = (at.row as usize, self.change_tick);
+        if let Some(value) = self.tables[at.table as usize].get_mut::<T>(id, row, tick) {
+            *value = component;
             return Ok(());
         }
         let to = self.table_with(at, id);
         self.move_entity(entity, at, to);
-        let column = self.tables[to as usize].column_mut::<T>(id);
-        column.expect("the table has the component").push(component);
+        self.tables[to as usize].push(id, component);
         Ok(())
     }
 
@@ -546,10 +552,10 @@ impl World {
         let Some(id) = self.components.get(TypeId::of::<T>()) else {
             return Ok(None);
         };
-        let Some(column) = self.tables[at.table as usize].column_mut::<T>(id) else {
+        let table = &mut self.tables[at.table as usize];
+        let Some(component) = table.take::<T>(id, at.row as usize) else {
             return Ok(None);
         };
-        let component = column.swap_remove(at.row as usize);
         let to = self.table_without(at, id);
         self.move_entity(entity, at, to);
         Ok(Some(component))
@@ -568,7 +574,7 @@ impl World {
         self.move_entity(entity, at, to);
         let into = &mut self.tables[to as usize];
         let position = into.position(id).expect("the table has the component");
-        column.move_row(0, &mut *into.columns[position]);
+        into.push_from(position, &mut *column);
     }
 
     /// Takes `entity`'s component `id` away, at `at`, and returns it in a one-row column of its
@@ -577,7 +583,7 @@ impl World {
         let mut column = self.components.new_column(id);
         let from = &mut self.tables[at.table as usize];
         let position = from.position(id).expect("the entity has the component");
-        from.columns[position].move_row(at.row as usize, &mut *column);
+        from.take_out(position, at.row as usize, &mut *column);
         let to = self.table_without(at, id);
         self.move_entity(entity, at, to);
         column
@@ -587,7 +593,7 @@ impl World {
     fn table_with(&mut self, at: Location, id: ComponentId) -> u32 {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
-        signature.extend_from_slice(&self.tables[at.table as usize].components);
+        signature.extend_from_slice(self.tables[at.table as usize].components());
         let place = signature.binary_search(&id).unwrap_err();
         signature.insert(place, id);
         let to = self.table(&signature);
@@ -599,7 +605,7 @@ impl World {
     fn table_without(&mut self, at: Location, id: ComponentId) -> u32 {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
-        let from = &self.tables[at.table as usize].components;
+        let from = self.tables[at.table as usize].components();
         signature.extend(from.iter().filter(|&&other| other != id));
         let to = self.table(&signature);
         self.scratch = signature;
@@ -619,9 +625,8 @@ impl World {
     pub fn get_mut<T: Writable>(&mut self, entity: Entity) -> Option<&mut T> {
         let at = self.location(entity)?;
         let id = self.components.get(TypeId::of::<T>())?;
-        self.tables[at.table as usize]
-            .column_mut::<T>(id)?
-            .get_mut(at.row as usize)
+        let tick = self.change_tick;
+        self.tables[at.table as usize].get_mut(id, at.row as usize, tick)
     }
 
     /// Whether `entity` is alive.
@@ -699,7 +704,7 @@ impl World {
     ///
     /// If `Q` names a component twice, since two of its terms would reach the same values.
     pub fn query_mut<Q: Query>(&mut self) -> QueryIterMut<'_, Q> {
-        QueryIterMut::new(&mut self.tables, &self.components)
+        QueryIterMut::new(&mut self.tables, &self.components, self.change_tick)
     }
 
     /// The tables, in the order they were made, for the engine's systems.
@@ -729,6 +734,19 @@ impl World {
         (self.serial, self.version)
     }
 
+    /// The world's change tick: what its tables mark the rows of their columns with as they change,
+    /// as [`Changed`](table::Changed) says, from 1 on. It moves on only as
+    /// [`advance`](Self::advance) moves it, so that the marks after one are past those before it.
+    pub(crate) fn change_tick(&self) -> u64 {
+        self.change_tick
+    }
+
+    /// Moves the world's change tick on: as each tick starts, and as each frame has drawn the
+    /// world, so that drawing tells what changed since it last looked.
+    pub(crate) fn advance(&mut self) {
+        self.change_tick += 1;
+    }
+
     /// How many times entities' interpolation has been reset, which drawing keeps before a tick.
     pub(crate) fn resets(&self) -> u64 {
         self.reset_count
@@ -738,6 +756,11 @@ impl World {
     /// `count` resets.
     pub(crate) fn reset_since(&self, entity: Entity, count: u64) -> bool {
         self.resets[entity.slot()] > count
+    }
+
+    /// How many slots it has, free or not: each entity's [`slot`](Entity::slot) is below it.
+    pub(crate) fn slots(&self) -> usize {
+        self.meta.len()
     }
 
     /// The table and the row `entity` is in, by their indices, if it's alive, for drawing.
@@ -911,6 +934,7 @@ impl World {
             serial: next_serial(),
             // Its rows changed, as the serial says too.
             version: self.version + 1,
+            change_tick: self.change_tick,
             tables: Vec::new(),
             by_signature: HashMap::new(),
             components: self.components.clone(),
@@ -935,18 +959,10 @@ impl World {
             .tables
             .get_disjoint_mut([at.table as usize, to as usize])
             .expect("an entity moves between two tables");
-        let row = at.row as usize;
-        for (id, column) in from.components.iter().zip(from.columns.iter_mut()) {
-            if let Some(position) = into.position(*id) {
-                column.move_row(row, &mut *into.columns[position]);
-            }
-        }
-        from.entities.swap_remove(row);
-        if let Some(&moved) = from.entities.get(row) {
+        let row = into.entities().len() as u32;
+        if let Some(moved) = from.move_row(at.row as usize, into, entity, self.change_tick) {
             self.meta[moved.index as usize].location = Some(at);
         }
-        let row = into.entities.len() as u32;
-        into.entities.push(entity);
         self.meta[entity.index as usize].location = Some(Location { table: to, row });
         self.version += 1;
     }
@@ -982,8 +998,7 @@ impl<T: Writable> seal::Bundle for T {
     }
 
     fn push(self, table: &mut Table, ids: &[ComponentId]) {
-        let column = table.column_mut::<T>(ids[0]);
-        column.expect("the table has the component").push(self);
+        table.push(ids[0], self);
     }
 }
 
@@ -1009,10 +1024,7 @@ macro_rules! tuple_bundle {
             }
 
             fn push(self, table: &mut Table, ids: &[ComponentId]) {
-                $(
-                    let column = table.column_mut::<$T>(ids[$i]);
-                    column.expect("the table has the component").push(self.$i);
-                )+
+                $(table.push(ids[$i], self.$i);)+
             }
         }
 
@@ -1046,6 +1058,75 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct Marked;
+
+    /// The change tick at which `entity`'s `T` last changed.
+    fn changed_at<T: Component>(world: &World, entity: Entity) -> u64 {
+        let at = world.location(entity).expect("alive");
+        let table = &world.tables[at.table as usize];
+        let id = world.component::<T>().expect("registered");
+        table.changed(id).expect("it has one").row(at.row as usize)
+    }
+
+    /// Each component's rows keep the change tick at which they last changed, as the world reaches
+    /// them to change them: spawned or moved into a table, each of its columns; through `get_mut`,
+    /// `insert` or a set, the row's component alone; through a query's `&mut` term, its column's
+    /// rows, the others' not. A row keeps its ticks as another leaves and it takes that one's
+    /// place, and a rewind changes every row.
+    #[test]
+    fn rows_keep_the_tick_they_last_changed_at() -> Result<()> {
+        let mut world = World::default();
+        let start = world.change_tick();
+        let [a, b, c] = [0, 1, 2].map(|i| world.spawn((Index(i), crate::Transform::IDENTITY)));
+        let snapshot = world.clone();
+        let at = |world: &World, entity| {
+            let index = changed_at::<Index>(world, entity) - start;
+            (index, changed_at::<crate::Transform>(world, entity) - start)
+        };
+        assert_eq!([a, b, c].map(|entity| at(&world, entity)), [(0, 0); 3]);
+        let index = world.component::<Index>().expect("registered");
+        let table = &world.tables[world.location(a).expect("alive").table as usize];
+        assert!(!table.changed(index).expect("it has one").since(start));
+
+        world.advance();
+        world.get_mut::<Index>(b).expect("it has one").0 = 9;
+        world.advance();
+        world.insert(c, Index(7))?;
+        world.advance();
+        world.set_field(a, "Transform", "translation.x", &Value::F32(2.5))?;
+        assert_eq!(
+            [a, b, c].map(|entity| at(&world, entity)),
+            [(0, 3), (1, 0), (2, 0)],
+        );
+        let table = &world.tables[world.location(a).expect("alive").table as usize];
+        assert!(table.changed(index).expect("it has one").since(start + 1));
+        assert!(!table.changed(index).expect("it has one").since(start + 2));
+
+        world.advance();
+        for (_, transform) in world.query_mut::<(&Index, &mut crate::Transform)>() {
+            transform.translation.y = 1.0;
+        }
+        assert_eq!(
+            [a, b, c].map(|entity| at(&world, entity)),
+            [(0, 4), (1, 4), (2, 4)],
+        );
+
+        world.advance();
+        world.insert(b, Marked)?;
+        assert_eq!(at(&world, b), (5, 5));
+        assert_eq!(changed_at::<Marked>(&world, b) - start, 5);
+        // `c` takes `a`'s row as `a` goes.
+        world.despawn(a)?;
+        assert_eq!(at(&world, c), (2, 4));
+
+        world.rewind(&snapshot);
+        let tick = world.change_tick() - start;
+        assert!(tick > 5);
+        assert_eq!(
+            [a, b, c].map(|entity| at(&world, entity)),
+            [(tick, tick); 3]
+        );
+        Ok(())
+    }
 
     #[test]
     fn entities_keep_their_handles_and_ids_as_others_are_removed() {

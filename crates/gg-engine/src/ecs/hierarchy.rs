@@ -11,7 +11,6 @@ use std::iter;
 use gg_core::math::{Mat4, Quat};
 use gg_core::{Error, Result};
 
-use super::table::Table;
 use super::{Component, Entity, World};
 use crate::Transform;
 use crate::reflect::Reflect;
@@ -84,16 +83,17 @@ impl Component for Parent {}
 /// frames draw it once they've drawn up to the tick, rather than where they draw it on the way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
-    /// The matrix from its own space to the world's: its [`Transform`]'s, then each of its
-    /// ancestors' in turn up to its root, as drawing carries it, bit for bit. An ancestor without
+    /// The matrix from its own space to the world's: its root's [`Transform`]'s times each of its
+    /// descendants' in turn down to its own, as drawing places it, bit for bit. An ancestor without
     /// a transform carries its children as though its transform were the identity, at its parent's
     /// origin, unturned and unscaled, and an entity without one is placed so too. Its last column
     /// is where its origin is.
     pub matrix: Mat4,
     /// Which way it faces: its own rotation turned by each of its ancestors' in turn, their scales
     /// aside, as the world's camera faces from it, so that a mirrored ancestor mirrors where it is
-    /// but not which way it faces. A root's is its own; a child's is normalized, since each product
-    /// of unit quaternions rounds a little off a unit.
+    /// but not which way it faces; multiplied from its root down, as the matrix is. A root's is
+    /// its own; a child's is normalized, since each product of unit quaternions rounds a little
+    /// off a unit.
     pub rotation: Quat,
 }
 
@@ -223,29 +223,37 @@ impl World {
         self.locate(entity)?;
         let own = self.get::<Transform>(entity).copied();
         let own = own.unwrap_or(Transform::IDENTITY);
+        let own = (own.matrix(), own.rotation);
         let Some(parent) = self.parent_of(entity.index) else {
             return Ok(Pose {
-                matrix: own.matrix(),
-                rotation: own.rotation,
+                matrix: own.0,
+                rotation: own.1,
             });
         };
-        let transform = self.component::<Transform>();
-        let start = (own.matrix(), own.rotation);
-        let (matrix, rotation) =
-            self.lineage(Parent(parent))
-                .fold(start, |(at, rotation), (_, table, row)| {
-                    match transform.and_then(|id| table.column::<Transform>(id)) {
-                        Some(transforms) => {
-                            let ancestor = &transforms[row];
-                            (ancestor.matrix() * at, ancestor.rotation * rotation)
-                        }
-                        None => (at, rotation),
-                    }
-                });
+        let (matrix, rotation) = match self.placed(parent) {
+            Some((matrix, rotation)) => (matrix * own.0, rotation * own.1),
+            None => own,
+        };
         Ok(Pose {
             matrix,
             rotation: rotation.normalize(),
         })
+    }
+
+    /// Where `entity`, which is alive, is as the latest tick left it, as drawing places it: its
+    /// parent's matrix and rotation times its transform's, from its root down; `None` at the
+    /// origin, unturned, at its own size, as a root without a transform is, and what it carries
+    /// without one.
+    fn placed(&self, entity: Entity) -> Option<(Mat4, Quat)> {
+        let parent = self
+            .parent_of(entity.index)
+            .and_then(|parent| self.placed(parent));
+        let own = self.get::<Transform>(entity);
+        let own = own.map(|own| (own.matrix(), own.rotation));
+        match (parent, own) {
+            (Some(parent), Some(own)) => Some((parent.0 * own.0, parent.1 * own.1)),
+            (parent, own) => own.or(parent),
+        }
     }
 
     /// Removes `entity`, its components and its descendants, children before their parents.
@@ -297,22 +305,6 @@ impl World {
             at += 1;
         }
         subtree
-    }
-
-    /// The table, by its index too, and row of `parent`, and of each of its ancestors in turn up to
-    /// its root, for the engine's drawing, which carries each child along with them.
-    pub(crate) fn lineage(
-        &self,
-        parent: Parent,
-    ) -> impl Iterator<Item = (usize, &Table, usize)> + '_ {
-        let up = |&at: &u32| some(self.meta[at as usize].links.parent);
-        iter::successors(Some(parent.0.index), up).map(|at| {
-            let at = self.meta[at as usize]
-                .location
-                .expect("a linked slot's entity is alive");
-            let table = at.table as usize;
-            (table, &self.tables[table], at.row as usize)
-        })
     }
 
     /// The entity in slot `index`, which is alive.
@@ -380,6 +372,7 @@ pub(super) mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+    use crate::placed::Placed;
     use crate::reflect::Value;
     use crate::reflect::tests::{same_snapshots, snapshot};
     use crate::{EntityId, Transform};
@@ -712,6 +705,7 @@ pub(super) mod tests {
         draw::draw_world(
             &world,
             &past,
+            &Placed::of(&world, &past, 1.0),
             1.0,
             &mut draws,
             shaders,
@@ -723,7 +717,8 @@ pub(super) mod tests {
         let matrix = format!("transforms: [{:?}]", pose.matrix);
         assert!(drawn.contains(&matrix), "{matrix} in {drawn}");
         let at = world.location(child).expect("alive");
-        let poses = Poses::new(&world, &past, 1.0).expect("transforms");
+        let placed = Placed::of(&world, &past, 1.0);
+        let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
         let (position, rotation) = poses.pose(at.table as usize, at.row as usize);
         let bits = |floats: &[f32]| floats.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let origin = pose.matrix.w_axis.truncate();

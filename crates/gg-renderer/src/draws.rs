@@ -22,10 +22,15 @@ use crate::{
 /// for a draw of the world's; 0 for a draw of no entity, as [`push`](Self::push),
 /// [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle) give. Clearing it
 /// keeps its memory, so that a frame that draws no more than the last allocates nothing.
+///
+/// The renderer's [`Scene`](crate::Scene) draws among them where [`draw_scene`](Self::draw_scene)
+/// says, or else before them all.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
     pub(crate) runs: Vec<Run>,
+    /// The run the scene draws before, if [`draw_scene`](Self::draw_scene) says one.
+    pub(crate) scene_at: Option<usize>,
     /// Every draw's transform, in order.
     pub(crate) transforms: Vec<Mat4>,
     /// Every draw's ID, in order, as its low and high halves, which shaders write.
@@ -233,15 +238,21 @@ impl Draws {
         self.transforms.append(&mut other.transforms);
         self.ids.append(&mut other.ids);
         self.params.append(&mut other.params);
-        for run in other.runs.drain(..) {
+        let (scene_at, count) = (other.scene_at.take(), other.runs.len());
+        for (i, run) in other.runs.drain(..).enumerate() {
+            if scene_at == Some(i) {
+                self.draw_scene();
+            }
             let instances = instance + run.instances.start..instance + run.instances.end;
             let params = start + run.params.start..start + run.params.end;
+            let scene_last = self.scene_at == Some(self.runs.len());
             match self.runs.last_mut() {
                 // Its first run goes on from these' last, if it's of the same mesh, shader and
-                // faces: the last ends where it begins.
+                // faces, and the scene doesn't draw between them: the last ends where it begins.
                 Some(last)
                     if (last.mesh, last.shader, last.faces)
-                        == (run.mesh, run.shader, run.faces) =>
+                        == (run.mesh, run.shader, run.faces)
+                        && !scene_last =>
                 {
                     last.instances.end = instances.end;
                     last.params.end = params.end;
@@ -253,13 +264,19 @@ impl Draws {
                 }),
             }
         }
+        if scene_at == Some(count) {
+            self.draw_scene();
+        }
     }
 
     /// Adds the draws from `instance` on, whose parameters start at `start`, of `mesh` with
     /// `shader`, drawing `faces`, to the last run if it's of them too, or as a run of their own.
     fn extend_run(&mut self, mesh: u32, shader: u32, faces: Faces, instance: usize, start: usize) {
+        let scene_last = self.scene_at == Some(self.runs.len());
         match self.runs.last_mut() {
-            Some(run) if (run.mesh, run.shader, run.faces) == (mesh, shader, faces) => {
+            Some(run)
+                if (run.mesh, run.shader, run.faces) == (mesh, shader, faces) && !scene_last =>
+            {
                 run.instances.end = self.transforms.len();
                 run.params.end = self.params.len();
             }
@@ -271,6 +288,13 @@ impl Draws {
                 params: start..self.params.len(),
             }),
         }
+    }
+
+    /// Has the renderer's [`Scene`](crate::Scene) draw here, after the draws so far and before
+    /// those after: over what's drawn so far, and under what's drawn after, but where what's
+    /// opaque is nearer. The last place it says is the scene's.
+    pub fn draw_scene(&mut self) {
+        self.scene_at = Some(self.runs.len());
     }
 
     /// How many draws there are: one for each mesh drawn, of whichever run.
@@ -299,6 +323,7 @@ impl Draws {
     /// Forgets every draw.
     pub fn clear(&mut self) {
         self.runs.clear();
+        self.scene_at = None;
         self.transforms.clear();
         self.ids.clear();
         self.params.clear();

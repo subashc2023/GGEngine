@@ -1,7 +1,8 @@
-//! Culling a frame's opaque runs on the GPU, for each view that draws them, the game's view and the
-//! shadows' cascades, and picking each instance's level of detail there, as `shaders/cull.slang`
-//! says; and the indirect draws of what each view keeps, a draw for each run and level, whatever
-//! its instances.
+//! Culling a frame's opaque runs on the GPU, its draws' and its scene's, for each view that draws
+//! them, the game's view and the shadows' cascades, and picking each instance's level of detail
+//! there, as `shaders/cull.slang` says, once `shaders/gather.slang` has gathered their instances;
+//! and the indirect draws of what each view keeps, a draw for each run and level, whatever its
+//! instances.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
@@ -9,11 +10,16 @@ use gg_core::label;
 use gg_core::math::{Mat4, Vec4};
 use gg_gpu::{BufferId, ComputePipeline, Device, Frame, Graph, Pass, PassId, RenderPass};
 
-use super::{GpuMesh, Held, LodView, MAX_LEVELS, MeshPass, Push, Uploaded};
-use crate::Draws;
+use super::scene::SceneRun;
+use super::{GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, Push, Uploaded};
 use crate::shadow::CASCADES;
+use crate::{Draws, MeshDraw};
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
+pub(crate) static GATHER_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gather.spv"));
+
+/// A copy's `source_params` for one from the scene: `SCENE` in `shaders/gather.slang`.
+const SCENE: u32 = u32::MAX;
 
 /// How many of a run's instances a workgroup takes: `BLOCK` in `shaders/cull.slang`.
 const BLOCK: u64 = 64;
@@ -35,15 +41,20 @@ pub(crate) const MAX_VIEWS: usize = 1 + CASCADES;
 /// The compute pipelines that cull, and what a frame culls, kept between frames, so that one that
 /// culls no more than the last allocates nothing.
 pub(crate) struct Culling {
+    gather: ComputePipeline,
     choose: ComputePipeline,
     offsets: ComputePipeline,
     write: ComputePipeline,
     runs: Vec<GpuRun>,
     blocks: Vec<[u32; 2]>,
+    /// What the gather copies: a block of a run each, as `blocks` has them.
+    copies: Vec<GpuCopy>,
     levels: Vec<GpuLevel>,
     views: Vec<GpuView>,
     /// For each run of the frame's draws, by its index, its index in `runs`, if it's culled.
     of_run: Vec<Option<u32>>,
+    /// For each of the scene's runs, by its index, its index in `runs`, if it's culled.
+    of_scene: Vec<Option<u32>>,
     /// The instances of `runs`, and the words of their parameters: what each view keeps room for.
     instances: u32,
     params_words: u32,
@@ -53,23 +64,30 @@ impl Culling {
     pub(crate) fn new(device: &std::sync::Arc<Device>) -> Result<Self> {
         let pipeline = |name, entry| ComputePipeline::new(device, name, SPIRV, entry);
         Ok(Self {
+            gather: ComputePipeline::new(device, "cull gather", GATHER_SPIRV, c"gather_main")?,
             choose: pipeline("cull choose", c"choose_main")?,
             offsets: pipeline("cull offsets", c"offsets_main")?,
             write: pipeline("cull write", c"write_main")?,
             runs: Vec::new(),
             blocks: Vec::new(),
+            copies: Vec::new(),
             levels: Vec::new(),
             views: Vec::new(),
             of_run: Vec::new(),
+            of_scene: Vec::new(),
             instances: 0,
             params_words: 0,
         })
     }
 
-    /// The frame's run of the draws' `run`th, if it's culled.
-    fn run(&self, run: usize) -> Option<&GpuRun> {
-        let culled = (*self.of_run.get(run)?)?;
-        Some(&self.runs[culled as usize])
+    /// The index among the frame's culled runs of the draws' `run`th, if it's culled.
+    pub(super) fn of_run(&self, run: usize) -> Option<usize> {
+        Some((*self.of_run.get(run)?)? as usize)
+    }
+
+    /// The index among the frame's culled runs of the scene's `run`th, if it's culled.
+    pub(super) fn of_scene(&self, run: usize) -> Option<usize> {
+        Some((*self.of_scene.get(run)?)? as usize)
     }
 
     /// The addresses of the arrays of the instances `views` views keep, in the graph's buffer at
@@ -114,6 +132,8 @@ impl Bounds {
 pub(crate) struct CullPlan {
     views: usize,
     bounds: Bounds,
+    /// The instances of the runs it culls, gathered as one view's are kept.
+    gathered: BufferId,
     /// The instances each view keeps, as [`Culling::kept`] lays them out.
     instances: BufferId,
     /// Each view's commands.
@@ -126,6 +146,7 @@ pub(crate) struct CullPlan {
     offsets: PassId,
     write: PassId,
     read: PassId,
+    gather: PassId,
 }
 
 impl CullPlan {
@@ -134,11 +155,16 @@ impl CullPlan {
     /// come after it, and take it as [`CullPlan::drawn`] has them.
     pub(crate) fn new(graph: &mut Graph, bounds: Bounds, views: usize) -> Self {
         let count = views as u64;
+        let gathered = graph.buffer("gathered instances", bounds.kept_bytes());
         let instances = graph.buffer("culled instances", count * bounds.kept_bytes());
         let commands = graph.buffer("culled draws", count * bounds.commands_bytes());
         let scratch = graph.buffer("culling", count * bounds.scratch_bytes());
         let counts = graph.buffer("culled counts", 16);
+        let gather = (graph.compute(label!("cull gather")))
+            .write_buffer(gathered)
+            .add();
         let choose = (graph.compute(label!("cull choose")))
+            .read_buffer(gathered)
             .write_buffer(scratch)
             .write_buffer(counts)
             .add();
@@ -148,6 +174,7 @@ impl CullPlan {
             .write_buffer(counts)
             .add();
         let write = (graph.compute(label!("cull write")))
+            .read_buffer(gathered)
             .read_buffer(scratch)
             .write_buffer(instances)
             .add();
@@ -155,6 +182,7 @@ impl CullPlan {
         Self {
             views,
             bounds,
+            gathered,
             instances,
             commands,
             scratch,
@@ -163,6 +191,7 @@ impl CullPlan {
             offsets,
             write,
             read,
+            gather,
         }
     }
 
@@ -213,6 +242,35 @@ struct GpuRun {
     commands: u32,
     blocks: u32,
     block_count: u32,
+}
+
+/// What the gather copies of a run, as `Copy` in `shaders/gather.slang` has it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+struct GpuCopy {
+    dest: u32,
+    dest_params: u32,
+    count: u32,
+    params_words: u32,
+    source: u32,
+    source_params: u32,
+}
+
+/// What the gather pushes, as `Push` in `shaders/gather.slang` has it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+struct GatherPush {
+    copies: u64,
+    frame_transforms: u64,
+    frame_ids: u64,
+    frame_params: u64,
+    scene: u64,
+    order: u64,
+    transforms: u64,
+    ids: u64,
+    params: u64,
+    copy_count: u32,
+    groups: u32,
 }
 
 /// A level of detail, as `Level` in `shaders/cull.slang` has it.
@@ -273,16 +331,22 @@ fn planes(clip_from_world: &Mat4, clamped: bool) -> [Vec4; 6] {
 }
 
 impl MeshPass {
-    /// The most a frame's culling of `draws` takes, of their runs whose shaders are opaque, by the
-    /// shaders the pass has, whatever their meshes; `None` if no run's is.
+    /// The most a frame's culling of `draws` and the scene takes, of their runs whose shaders are
+    /// opaque, by the shaders the pass has, whatever their meshes; `None` if no run's is.
     pub(crate) fn cull_bounds(&self, draws: &Draws) -> Option<Bounds> {
         let mut bounds = Bounds::default();
-        for run in &draws.runs {
-            let Some(Some(shader)) = self.shaders.get(run.shader as usize) else {
+        let frame = draws
+            .runs
+            .iter()
+            .map(|run| (run.shader, run.instances.len()));
+        let scene = self.scene.runs().iter();
+        let scene = scene.map(|run| (run.shader, run.count as usize));
+        for (shader, count) in frame.chain(scene) {
+            let Some(Some(shader)) = self.shaders.get(shader as usize) else {
                 continue;
             };
             if shader.writes_depth {
-                let count = run.instances.len() as u64;
+                let count = count as u64;
                 bounds.runs += 1;
                 bounds.instances += count;
                 bounds.blocks += count.div_ceil(BLOCK);
@@ -292,11 +356,12 @@ impl MeshPass {
         (bounds.runs > 0).then_some(bounds)
     }
 
-    /// Culls the runs of `draws` whose meshes are drawable and whose shaders are opaque, as `plan`
-    /// declared in the frame's graph, for each of `views`, from their instances as `uploaded` has
-    /// them, and records its passes, the next of the frame's, and what reads back what the first
-    /// view drew. Returns whether it culled any run: the frame's read back counts nothing if it
-    /// didn't, as no meshes it may cull are drawable yet.
+    /// Culls the runs of `draws` and of the scene whose meshes are drawable and whose shaders are
+    /// opaque, as `plan` declared in the frame's graph, for each of `views`, from their instances
+    /// as `uploaded` has the draws' and the scene's table has its own, gathered first, and records
+    /// its passes, the next of the frame's, and what reads back what the first view drew. Returns
+    /// whether it culled any run: the frame's read back counts nothing if it didn't, as no meshes
+    /// it may cull are drawable yet.
     ///
     /// # Panics
     ///
@@ -318,56 +383,32 @@ impl MeshPass {
         let culling = &mut self.culling;
         culling.runs.clear();
         culling.blocks.clear();
+        culling.copies.clear();
         culling.levels.clear();
         culling.views.clear();
         culling.of_run.clear();
-        let (mut instances, mut params_words, mut commands) = (0, 0, 0);
-        for (i, run) in draws.runs.iter().enumerate() {
-            culling.of_run.push(None);
-            let mesh = self.meshes.get(run.mesh as usize).and_then(Held::ready);
-            let shader = self
-                .shaders
-                .get(run.shader as usize)
-                .and_then(Option::as_ref);
-            let (Some(mesh), Some(shader)) = (mesh, shader) else {
-                continue;
-            };
-            if !shader.writes_depth {
-                continue;
-            }
-            let GpuMesh { lods, .. } = mesh;
-            let count = u32::try_from(run.instances.len())
-                .expect("a run's instances fit the 32-bit count Vulkan takes");
-            let words = (shader.params_size / 4) as u32;
-            let (first_block, block_count) = (culling.blocks.len(), count.div_ceil(BLOCK as u32));
-            let run_index = culling.runs.len() as u32;
-            (culling.blocks)
-                .extend((0..block_count).map(|block| [run_index, block * BLOCK as u32]));
-            let first_level = culling.levels.len();
-            (culling.levels).extend(lods.levels.iter().map(|lod| GpuLevel {
-                start: lod.start,
-                count: lod.count,
-                error: lod.error,
-            }));
-            culling.runs.push(GpuRun {
+        culling.of_scene.clear();
+        let mut totals = Totals::default();
+        for run in &draws.runs {
+            let source = Source::Frame {
                 first: run.instances.start as u32,
-                count,
                 params: (run.params.start / 4) as u32,
-                params_words: words,
-                sphere: lods.center.extend(lods.radius),
-                levels: first_level as u32,
-                level_count: lods.levels.len() as u32,
-                output: instances,
-                params_output: params_words,
-                commands,
-                blocks: first_block as u32,
-                block_count,
-            });
-            culling.of_run[i] = Some(run_index);
-            instances += count;
-            params_words += count * words;
-            commands += lods.levels.len() as u32;
+            };
+            let count = run.instances.len();
+            let culled = culling.add(&self.meshes, &self.shaders, run, count, source, &mut totals);
+            culling.of_run.push(culled);
         }
+        for run in self.scene.runs() {
+            let source = Source::Scene { first: run.first };
+            let count = run.count as usize;
+            let culled = culling.add(&self.meshes, &self.shaders, run, count, source, &mut totals);
+            culling.of_scene.push(culled);
+        }
+        let Totals {
+            instances,
+            params_words,
+            ..
+        } = totals;
         // What the GPU writes stays within what the graph's buffers were made for.
         let bounds = plan.bounds;
         assert!(
@@ -381,6 +422,7 @@ impl MeshPass {
         let (run_count, block_count) = (culling.runs.len() as u64, culling.blocks.len() as u64);
         if run_count == 0 {
             // Its passes are the frame's all the same.
+            drop(frame.compute(plan.gather));
             drop(frame.compute(plan.choose));
             drop(frame.compute(plan.offsets));
             drop(frame.compute(plan.write));
@@ -398,21 +440,37 @@ impl MeshPass {
         }));
         let [kept_transforms, kept_ids, kept_params] =
             culling.kept(frame.address(plan.instances), plan.views as u64);
+        // Laid out as one view's kept instances are, each run's at its `output`.
+        let [transforms, ids, params] = culling.kept(frame.address(plan.gathered), 1);
         let (commands, scratch, counts) = (
             frame.address(plan.commands),
             frame.address(plan.scratch),
             frame.address(plan.counts),
         );
+        let [scene, order] = self.scene.addresses();
         let mut address = |bytes: &[u8]| -> Result<u64> { Ok(frame.upload(bytes)?.address()) };
         let groups = block_count.min(MOST_GROUPS) as u32;
+        let gather = GatherPush {
+            copies: address(bytemuck::cast_slice(&culling.copies))?,
+            frame_transforms: uploaded.transforms,
+            frame_ids: uploaded.ids,
+            frame_params: uploaded.params,
+            scene,
+            order,
+            transforms,
+            ids,
+            params,
+            copy_count: block_count as u32,
+            groups,
+        };
         let push = CullPush {
             runs: address(bytemuck::cast_slice(&culling.runs))?,
             blocks: address(bytemuck::cast_slice(&culling.blocks))?,
             levels: address(bytemuck::cast_slice(&culling.levels))?,
             views: address(bytemuck::cast_slice(&culling.views))?,
-            transforms: uploaded.transforms,
-            ids: uploaded.ids,
-            params: uploaded.params,
+            transforms,
+            ids,
+            params,
             kept_transforms,
             kept_ids,
             kept_params,
@@ -427,6 +485,11 @@ impl MeshPass {
             unused: 0,
         };
         let views = views.len() as u32;
+        let mut pass = frame.compute(plan.gather);
+        pass.set_pipeline(&culling.gather);
+        pass.push_constants(bytemuck::bytes_of(&gather));
+        pass.dispatch([groups, 1, 1]);
+        drop(pass);
         let passes = [
             (plan.choose, &culling.choose, groups),
             (
@@ -446,9 +509,9 @@ impl MeshPass {
         Ok(true)
     }
 
-    /// Draws the instances that view `view` of `plan` kept of the draws' `run`th, if it's culled,
+    /// Draws the instances that view `view` of `plan` kept of the `run`th of the runs it culled,
     /// with `push`'s mesh, a draw for each of its mesh's levels, as the commands written for them
-    /// say: `None` if it isn't culled.
+    /// say.
     pub(super) fn draw_culled(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -456,9 +519,9 @@ impl MeshPass {
         push: Push,
         (plan, view): (&CullPlan, usize),
         run: usize,
-    ) -> Option<()> {
+    ) {
         let culling = &self.culling;
-        let run = culling.run(run)?;
+        let run = &culling.runs[run];
         let [transforms, ids, params] =
             culling.kept(pass.address(plan.instances), plan.views as u64);
         let view = view as u64;
@@ -480,7 +543,138 @@ impl MeshPass {
         for level in 0..u64::from(run.level_count) {
             pass.draw_indexed_indirect(&mesh.indices, plan.commands, commands + level * COMMAND);
         }
-        Some(())
+    }
+}
+
+/// Where a culled run's instances are, which the gather copies them from: the frame's draws', from
+/// their first and the first word of their parameters; or the scene's, from their first in its
+/// order.
+#[derive(Clone, Copy)]
+enum Source {
+    Frame { first: u32, params: u32 },
+    Scene { first: u32 },
+}
+
+/// The culled runs' instances, the words of their parameters, and their commands, so far.
+#[derive(Default)]
+struct Totals {
+    instances: u32,
+    params_words: u32,
+    commands: u32,
+}
+
+/// A run that may be culled: its mesh and shader.
+trait Culled {
+    fn mesh(&self) -> u32;
+    fn shader(&self) -> u32;
+}
+
+impl Culled for crate::draws::Run {
+    fn mesh(&self) -> u32 {
+        self.mesh
+    }
+
+    fn shader(&self) -> u32 {
+        self.shader
+    }
+}
+
+impl Culled for SceneRun {
+    fn mesh(&self) -> u32 {
+        self.mesh
+    }
+
+    fn shader(&self) -> u32 {
+        self.shader
+    }
+}
+
+impl Culling {
+    /// Adds `run`, of `count` instances at `source`, to the runs culled, its blocks and their
+    /// copies, if its mesh is drawable and its shader opaque, and returns its index among them;
+    /// `None` if it isn't culled.
+    ///
+    /// # Panics
+    ///
+    /// If its instances don't fit the 32-bit count Vulkan takes, or the scene's instances take
+    /// parameters of more than a [`MeshDraw`] holds.
+    fn add(
+        &mut self,
+        meshes: &[Held<GpuMesh>],
+        shaders: &[Option<GpuShader>],
+        run: &impl Culled,
+        count: usize,
+        source: Source,
+        totals: &mut Totals,
+    ) -> Option<u32> {
+        let mesh = meshes.get(run.mesh() as usize).and_then(Held::ready)?;
+        let shader = shaders
+            .get(run.shader() as usize)
+            .and_then(Option::as_ref)?;
+        if !shader.writes_depth {
+            return None;
+        }
+        let GpuMesh { lods, .. } = mesh;
+        let count =
+            u32::try_from(count).expect("a run's instances fit the 32-bit count Vulkan takes");
+        let words = (shader.params_size / 4) as u32;
+        let (first_block, block_count) = (self.blocks.len(), count.div_ceil(BLOCK as u32));
+        let run_index = self.runs.len() as u32;
+        let Totals {
+            instances,
+            params_words,
+            commands,
+        } = *totals;
+        for block in 0..block_count {
+            let first = block * BLOCK as u32;
+            self.blocks.push([run_index, first]);
+            let (source, source_params) = match source {
+                Source::Frame { first: at, params } => (at + first, params + first * words),
+                Source::Scene { first: at } => {
+                    assert!(
+                        shader.params_size <= MeshDraw::MAX_PARAMS,
+                        "a scene's instance takes parameters of up to {} bytes",
+                        MeshDraw::MAX_PARAMS
+                    );
+                    (at + first, SCENE)
+                }
+            };
+            self.copies.push(GpuCopy {
+                dest: instances + first,
+                dest_params: params_words + first * words,
+                count: (count - first).min(BLOCK as u32),
+                params_words: words,
+                source,
+                source_params,
+            });
+        }
+        let first_level = self.levels.len();
+        self.levels.extend(lods.levels.iter().map(|lod| GpuLevel {
+            start: lod.start,
+            count: lod.count,
+            error: lod.error,
+        }));
+        // Gathered as one view's are kept: each run's at its `output`.
+        self.runs.push(GpuRun {
+            first: instances,
+            count,
+            params: params_words,
+            params_words: words,
+            sphere: lods.center.extend(lods.radius),
+            levels: first_level as u32,
+            level_count: lods.levels.len() as u32,
+            output: instances,
+            params_output: params_words,
+            commands,
+            blocks: first_block as u32,
+            block_count,
+        });
+        *totals = Totals {
+            instances: instances + count,
+            params_words: params_words + count * words,
+            commands: commands + lods.levels.len() as u32,
+        };
+        Some(run_index)
     }
 }
 

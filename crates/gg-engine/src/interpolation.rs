@@ -1,6 +1,8 @@
 //! Drawing between ticks: a copy of where the world's entities were as its latest tick started,
 //! which each frame draws them on from, part of the way to where the tick left them, and what each
-//! row of the world's tables draws from, found from the copy once a frame that ticked.
+//! row of the world's tables draws from, found from the copy once a frame that ticked. Both follow
+//! what changed: a table's copy takes again only the rows whose transforms or parents changed
+//! since, while no row joined or left it, and its rows draw from it as they are while none did.
 
 use std::iter;
 
@@ -9,18 +11,37 @@ use gg_core::math::Vec3;
 use crate::{Entity, EntityId, Parent, Transform, World};
 
 /// For a slot that no row copied.
-const NONE: u32 = u32::MAX;
+const NONE: (u32, u32) = (u32::MAX, u32::MAX);
 
 /// What a table's rows draw from.
 #[derive(Clone, Copy)]
 enum Rows {
     /// Nothing: the table has no transforms.
     None,
-    /// The copy of its rows, from where they start: they're the entities copied, with the parents
-    /// copied, and the copy of each reset is its transform.
-    Copied(u32),
+    /// The table's copy: its rows are the entities copied, with the parents copied, and the copy
+    /// of each reset is its transform.
+    Copied,
     /// What was found for each of its rows, in `from`, from where they start.
     Found(u32),
+}
+
+/// A table's rows as the latest tick started: their entities, their transforms, and their
+/// parents, [`Entity::DEAD`] for a root's; and whether it had transforms then.
+#[derive(Default)]
+struct Copy {
+    transformed: bool,
+    entities: Vec<Entity>,
+    transforms: Vec<Transform>,
+    parents: Vec<Entity>,
+}
+
+impl Copy {
+    fn clear(&mut self) {
+        self.transformed = false;
+        self.entities.clear();
+        self.transforms.clear();
+        self.parents.clear();
+    }
 }
 
 /// Where the world's entities were as its latest tick started, and what each row of its tables
@@ -28,20 +49,16 @@ enum Rows {
 /// world's tables keep their sizes.
 #[derive(Default)]
 pub(crate) struct Past {
-    /// The world copied, by its serial, and how many resets of interpolation it had made then;
-    /// `None` before the first copy.
-    copied: Option<(u64, u64)>,
-    /// Each table's rows in the copy, by the table's index, `start..end`; `None` for a table
-    /// without transforms.
-    tables: Vec<Option<(u32, u32)>>,
-    /// Each row copied: its entity, its transform, and its parent, [`Entity::DEAD`] for a root.
-    entities: Vec<Entity>,
-    transforms: Vec<Transform>,
-    parents: Vec<Entity>,
-    /// Each slot's row in the copy, or [`NONE`]: made only for a tick that left some row where its
-    /// copy isn't, as a despawn or a change of table moves rows, and a spawn appends one, so that a
-    /// row moved still draws on from where it was.
-    slots: Vec<u32>,
+    /// The world copied, by its serial, the change tick it had as it was copied, after which its
+    /// changes are copied again, and how many resets of interpolation it had made then; `None`
+    /// before the first copy.
+    copied: Option<(u64, u64, u64)>,
+    /// Each table's rows copied, by the table's index.
+    tables: Vec<Copy>,
+    /// Each slot's table and row in the copy, or [`NONE`]: made only for a tick that left some
+    /// table's rows other than its copy's, as a despawn or a change of table moves rows, and a
+    /// spawn appends one, so that a row moved still draws on from where it was.
+    slots: Vec<(u32, u32)>,
     /// Whether what rows draw from has been found from the copy since it was taken.
     resolved: bool,
     /// What each table's rows draw from, by the table's index.
@@ -59,38 +76,62 @@ pub(crate) struct Past {
 
 impl Past {
     /// Copies where `world`'s entities are, as a tick starts: every table with transforms, drawn
-    /// or not, since a drawn child's ancestors can be in any. It copies a table at a time, rather
-    /// than by entity, so that it's a few copies of whole columns.
-    pub(crate) fn capture(&mut self, world: &World) {
+    /// or not, since a drawn child's ancestors can be in any; of a table whose rows are those it
+    /// copied before, as no row joined or left it since, the rows whose transforms or parents
+    /// changed alone, and of another, all of it, a few copies of whole columns. Then moves the
+    /// world's change tick on, so that what the tick changes is marked as changed since the copy.
+    pub(crate) fn capture(&mut self, world: &mut World) {
         let _zone = gg_core::zone!();
-        self.copied = Some((world.version().0, world.resets()));
-        self.resolved = false;
-        self.tables.clear();
-        self.entities.clear();
-        self.transforms.clear();
-        self.parents.clear();
-        let Some(transform) = world.component::<Transform>() else {
-            return;
+        let since = match self.copied {
+            Some((serial, tick, _)) if serial == world.serial() => Some(tick),
+            _ => None,
         };
-        let parent = world.component::<Parent>();
-        for table in world.tables() {
-            let Some(transforms) = table.column::<Transform>(transform) else {
-                self.tables.push(None);
+        self.copied = Some((world.serial(), world.change_tick(), world.resets()));
+        self.resolved = false;
+        let (transform, parent) = (world.component::<Transform>(), world.component::<Parent>());
+        self.tables.resize_with(world.tables().len(), Copy::default);
+        for (table, copy) in world.tables().iter().zip(&mut self.tables) {
+            let Some(transform) = transform.filter(|&id| table.has(id)) else {
+                copy.clear();
                 continue;
             };
-            let start = self.entities.len();
-            self.entities.extend_from_slice(table.entities());
-            self.transforms.extend_from_slice(transforms);
-            match parent.and_then(|id| table.column::<Parent>(id)) {
-                Some(parents) => self.parents.extend(parents.iter().map(|parent| parent.0)),
-                None => self
-                    .parents
-                    .extend(iter::repeat_n(Entity::DEAD, transforms.len())),
+            let transforms = table
+                .column::<Transform>(transform)
+                .expect("it has transforms");
+            let parents = parent.and_then(|id| table.column::<Parent>(id));
+            let entities = table.entities();
+            let same = since.filter(|&tick| {
+                copy.transformed
+                    && copy.entities.len() == entities.len()
+                    && !table.joined().since(tick)
+            });
+            if let Some(tick) = same {
+                let marks = [
+                    table.changed(transform),
+                    parent.and_then(|id| table.changed(id)),
+                ];
+                for marks in marks
+                    .into_iter()
+                    .flatten()
+                    .filter(|marks| marks.since(tick))
+                {
+                    for row in (0..entities.len()).filter(|&row| marks.row(row) > tick) {
+                        copy.transforms[row] = transforms[row];
+                        copy.parents[row] = parents.map_or(Entity::DEAD, |parents| parents[row].0);
+                    }
+                }
+                continue;
             }
-            let rows = [start, self.entities.len()];
-            let [start, end] = rows.map(|at| u32::try_from(at).expect("fewer than 2^32 rows"));
-            self.tables.push(Some((start, end)));
+            copy.clear();
+            copy.transformed = true;
+            copy.entities.extend_from_slice(entities);
+            copy.transforms.extend_from_slice(transforms);
+            match parents {
+                Some(parents) => copy.parents.extend(parents.iter().map(|parent| parent.0)),
+                None => (copy.parents).extend(iter::repeat_n(Entity::DEAD, entities.len())),
+            }
         }
+        world.advance();
     }
 
     /// Finds what each row of `world`'s tables draws from, once a tick has been copied since it
@@ -99,9 +140,9 @@ impl Past {
     /// wasn't copied, as an entity spawned in the tick, given its transform there, or put back by
     /// an undone delete wasn't; if its slot holds another entity than was copied; if its parent
     /// changed; or if it was reset. A world restored or replaced in the tick draws where it is, all
-    /// of it. A table whose rows are the entities copied, with the parents copied, as most are at
-    /// most ticks, draws from its copy, which takes each reset row's transform; the others' rows
-    /// are found one by one.
+    /// of it. A table that no row joined or left since its copy, and whose parents didn't change,
+    /// as most are at most ticks, draws from its copy, which takes the transform of each of its
+    /// rows that changed and was reset; the others' rows are found one by one.
     pub(crate) fn resolve(&mut self, world: &World) {
         if self.resolved {
             return;
@@ -110,9 +151,6 @@ impl Past {
         let Self {
             copied,
             tables,
-            entities,
-            transforms: copies,
-            parents: copied_parents,
             slots,
             resolved,
             starts,
@@ -124,13 +162,13 @@ impl Past {
         *found = None;
         starts.clear();
         from.clear();
-        let Some((serial, resets)) = *copied else {
+        let Some((serial, tick, resets)) = *copied else {
             return;
         };
         let Some(transform) = world.component::<Transform>() else {
             return;
         };
-        if serial != world.version().0 {
+        if serial != world.serial() {
             return;
         }
         let parent = world.component::<Parent>();
@@ -142,50 +180,49 @@ impl Past {
                 continue;
             };
             let parents = parent.and_then(|id| table.column::<Parent>(id));
-            let rows = tables.get(index).copied().flatten();
-            if let Some((start, end)) = rows {
-                let copy = start as usize..end as usize;
-                // A table's parents are copied with its index while the world is the same, which
-                // only adds tables.
-                let same = entities[copy.clone()] == *table.entities()
-                    && parents.is_none_or(|parents| {
-                        let now = parents.iter().map(|parent| parent.0);
-                        now.eq(copied_parents[copy.clone()].iter().copied())
-                    });
-                if same {
-                    let rows = table.entities().iter().zip(transforms);
-                    for (copied, (&entity, now)) in copies[copy].iter_mut().zip(rows) {
-                        if reset && world.reset_since(entity, resets) {
-                            *copied = *now;
+            let parented = parent.and_then(|id| table.changed(id));
+            let entities = table.entities();
+            let copy = tables.get_mut(index).filter(|copy| copy.transformed);
+            if let Some(copy) = copy
+                && copy.entities.len() == entities.len()
+                && !table.joined().since(tick)
+                && parented.is_none_or(|marks| !marks.since(tick))
+            {
+                let marks = table.changed(transform).expect("it has transforms");
+                if reset && marks.since(tick) {
+                    for row in (0..entities.len()).filter(|&row| marks.row(row) > tick) {
+                        if world.reset_since(entities[row], resets) {
+                            copy.transforms[row] = transforms[row];
                         }
                     }
-                    starts.push(Rows::Copied(start));
-                    continue;
                 }
+                starts.push(Rows::Copied);
+                continue;
             }
             starts.push(Rows::Found(
                 u32::try_from(from.len()).expect("fewer than 2^32 rows"),
             ));
-            for (row, (&entity, now)) in table.entities().iter().zip(transforms).enumerate() {
-                // The same row, or else the row its slot was copied in, if it was its entity's.
-                let same = rows.and_then(|(start, end)| {
-                    let at = start as usize + row;
-                    (at < end as usize && entities[at] == entity).then_some(at)
-                });
+            for (row, (&entity, now)) in entities.iter().zip(transforms).enumerate() {
+                // The same row of its table's copy, or else the row its slot was copied in, if it
+                // was its entity's.
+                let same = (tables.get(index))
+                    .filter(|copy| copy.entities.get(row) == Some(&entity))
+                    .map(|_| (index, row));
                 let at = same.or_else(|| {
                     if !mapped {
-                        map(entities, slots);
+                        map(tables, slots);
                         mapped = true;
                     }
-                    let at = slots.get(entity.slot()).copied().filter(|&at| at != NONE);
-                    at.map(|at| at as usize)
-                        .filter(|&at| entities[at] == entity)
+                    let &(table, row) = slots.get(entity.slot())?;
+                    let (table, row) = (table as usize, row as usize);
+                    let copied = tables.get(table)?.entities.get(row)?;
+                    (*copied == entity).then_some((table, row))
                 });
                 let parent = parents.map_or(Entity::DEAD, |parents| parents[row].0);
-                let was = at.filter(|&at| {
-                    copied_parents[at] == parent && !world.reset_since(entity, resets)
+                let was = at.filter(|&(table, row)| {
+                    tables[table].parents[row] == parent && !world.reset_since(entity, resets)
                 });
-                from.push(was.map_or(*now, |at| copies[at]));
+                from.push(was.map_or(*now, |(table, row)| tables[table].transforms[row]));
             }
         }
         *found = Some(world.version());
@@ -224,22 +261,24 @@ impl Past {
         }
         match *self.starts.get(table)? {
             Rows::None => None,
-            Rows::Copied(start) => Some(&self.transforms[start as usize..]),
+            Rows::Copied => Some(&self.tables[table].transforms),
             Rows::Found(start) => Some(&self.from[start as usize..]),
         }
     }
 }
 
-/// Fills `slots` with the row of the copy each slot's entity was copied in, by `entities`, the
-/// copy's.
-fn map(entities: &[Entity], slots: &mut Vec<u32>) {
+/// Fills `slots` with the table and row of the copy each slot's entity was copied in, by
+/// `tables`, the copy's.
+fn map(tables: &[Copy], slots: &mut Vec<(u32, u32)>) {
     slots.clear();
-    for (at, entity) in entities.iter().enumerate() {
-        let slot = entity.slot();
-        if slots.len() <= slot {
-            slots.resize(slot + 1, NONE);
+    for (index, copy) in (0..).zip(tables) {
+        for (row, entity) in (0..).zip(&copy.entities) {
+            let slot = entity.slot();
+            if slots.len() <= slot {
+                slots.resize(slot + 1, NONE);
+            }
+            slots[slot] = (index, row);
         }
-        slots[slot] = at as u32;
     }
 }
 
@@ -280,6 +319,7 @@ mod tests {
     use super::*;
     use crate::draw::{Scratch, draw_world};
     use crate::font::Fonts;
+    use crate::placed::Placed;
     use crate::{Log, Operation};
 
     /// A transform at `x` and `z`, which tell the cases apart.
@@ -309,6 +349,7 @@ mod tests {
         draw_world(
             world,
             past,
+            &Placed::of(world, past, 0.5),
             0.5,
             &mut draws,
             shaders,
@@ -344,7 +385,7 @@ mod tests {
         log.apply(&mut world, delete).expect("deleted");
         let swapped = world.spawn((at(30.0, 0.9), sprite(11.0)));
         let mut past = Past::default();
-        past.capture(&world);
+        past.capture(&mut world);
 
         // The tick.
         moved(&mut world, mover, at(2.0, 0.0));
@@ -373,6 +414,7 @@ mod tests {
         // Back to front by z, each with its entity's ID, the deleted one's put back with its own.
         let deleted = world.entity(id).expect("put back");
         let mut want = Draws::default();
+        want.draw_scene();
         for (matrix, n, entity) in [
             (at(1.0, 0.0).matrix(), 0.0, mover),
             (at(3.0, 0.1).matrix(), 1.0, spawned),
@@ -407,13 +449,14 @@ mod tests {
         world.set_parent(child, Some(theirs)).expect("alive");
         let ours = world.spawn((at(0.0, 0.3), sprite(3.0)));
         let mut past = Past::default();
-        past.capture(&world);
+        past.capture(&mut world);
         moved(&mut world, theirs, at(2.0, 0.1));
         moved(&mut world, ours, at(2.0, 0.3));
         let id = |entity: Entity| world.id(entity).expect("alive");
         let pose = at(10.0, 0.1);
         past.instead(&world, &[(id(theirs), pose)]);
         let mut want = Draws::default();
+        want.draw_scene();
         for (matrix, n, entity) in [
             (pose.matrix(), 1.0, theirs),
             (pose.matrix() * at(1.0, 0.05).matrix(), 2.0, child),
@@ -437,11 +480,12 @@ mod tests {
             child
         });
         let mut past = Past::default();
-        past.capture(&world);
+        past.capture(&mut world);
         world.set_parent(moved_away, Some(second)).expect("alive");
         moved(&mut world, moved_away, at(2.0, 0.5));
         moved(&mut world, sibling, at(2.0, 0.6));
         let mut want = Draws::default();
+        want.draw_scene();
         let id = |entity: Entity| world.id(entity).expect("alive").get();
         let carried = at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix();
         let halfway_there = Transform::IDENTITY.matrix() * at(1.0, 0.6).matrix();
@@ -461,34 +505,33 @@ mod tests {
         let mover = world.spawn((at(0.0, 0.0), sprite(0.0)));
         let snapshot = world.clone();
         let mut past = Past::default();
-        past.capture(&world);
+        past.capture(&mut world);
         world.clone_from(&snapshot);
         moved(&mut world, mover, at(2.0, 0.0));
         let id = world.id(mover).expect("alive").get();
         let mut want = Draws::default();
+        want.draw_scene();
         want.extend_sprites(iter::once((at(2.0, 0.0).matrix(), sprite(0.0), id)));
         assert_eq!(halfway(&world, &mut past), want, "restored");
 
-        past.capture(&world);
+        past.capture(&mut world);
         let mut other = World::seeded(1);
         let same = other.spawn((at(4.0, 0.0), sprite(0.0)));
         assert_eq!(same, mover, "the same handle");
         world = other;
         let id = world.id(same).expect("alive").get();
         let mut want = Draws::default();
+        want.draw_scene();
         want.extend_sprites(iter::once((at(4.0, 0.0).matrix(), sprite(0.0), id)));
         assert_eq!(halfway(&world, &mut past), want, "replaced");
     }
 
     /// Where a past's buffers are, and how big, which copying and finding again without taking
     /// more memory leaves as they were.
-    fn held(past: &Past) -> [(usize, usize); 7] {
+    fn held(past: &Past) -> Vec<(usize, usize)> {
         let Past {
             copied: _,
             tables,
-            entities,
-            transforms,
-            parents,
             slots,
             resolved: _,
             starts,
@@ -496,15 +539,18 @@ mod tests {
             found: _,
             instead: _,
         } = past;
-        [
+        let mut held = vec![
             (tables.as_ptr().addr(), tables.capacity()),
-            (entities.as_ptr().addr(), entities.capacity()),
-            (transforms.as_ptr().addr(), transforms.capacity()),
-            (parents.as_ptr().addr(), parents.capacity()),
             (slots.as_ptr().addr(), slots.capacity()),
             (starts.as_ptr().addr(), starts.capacity()),
             (from.as_ptr().addr(), from.capacity()),
-        ]
+        ];
+        for copy in tables {
+            held.push((copy.entities.as_ptr().addr(), copy.entities.capacity()));
+            held.push((copy.transforms.as_ptr().addr(), copy.transforms.capacity()));
+            held.push((copy.parents.as_ptr().addr(), copy.parents.capacity()));
+        }
+        held
     }
 
     /// Copying a world, and finding what it draws from, again, through ticks that move every
@@ -522,7 +568,7 @@ mod tests {
         let mut past = Past::default();
         let mut grown = None;
         for round in 0..4 {
-            past.capture(&world);
+            past.capture(&mut world);
             for transform in world.query_mut::<&mut Transform>() {
                 transform.translation.x += 1.0;
             }
@@ -534,7 +580,70 @@ mod tests {
             halfway(&world, &mut past);
             assert!(!past.slots.is_empty(), "round {round} moved a row");
             let held = held(&past);
-            assert_eq!(*grown.get_or_insert(held), held, "round {round}");
+            assert_eq!(
+                *grown.get_or_insert_with(|| held.clone()),
+                held,
+                "round {round}"
+            );
+        }
+    }
+
+    /// A past kept from tick to tick, which copies again only what changed, draws each row from
+    /// what a past copying the world afresh as each tick starts does, bit for bit, through ticks
+    /// that move some entities, change a parent, reset one, move one to another table, spawn and
+    /// despawn, and change nothing.
+    #[test]
+    fn a_kept_past_draws_from_what_a_fresh_one_does() {
+        let mut world = World::default();
+        let entities: Vec<Entity> = (0..8)
+            .map(|i| world.spawn((at(i as f32, 0.0), sprite(0.0))))
+            .collect();
+        let pivot = world.spawn(at(-1.0, 0.0));
+        world
+            .set_parent(entities[0], Some(pivot))
+            .expect("no cycle");
+        let mut kept = Past::default();
+        type Tick = fn(&mut World, &[Entity], Entity);
+        let ticks: [(&str, Tick); 7] = [
+            ("some moved", |world, entities, _| {
+                moved(world, entities[2], at(9.0, 0.0))
+            }),
+            ("nothing", |_, _, _| {}),
+            ("a parent changed", |world, entities, pivot| {
+                world
+                    .set_parent(entities[3], Some(pivot))
+                    .expect("no cycle");
+            }),
+            ("one reset", |world, entities, _| {
+                moved(world, entities[4], at(20.0, 0.0));
+                world.reset_interpolation(entities[4]).expect("alive");
+            }),
+            ("one to another table", |world, entities, _| {
+                world
+                    .insert(entities[5], gg_renderer::Circle::default())
+                    .expect("alive");
+                moved(world, entities[5], at(30.0, 0.0));
+            }),
+            ("a despawn", |world, entities, _| {
+                world.despawn(entities[6]).expect("alive")
+            }),
+            ("a spawn", |world, _, _| {
+                world.spawn((at(40.0, 0.0), sprite(0.0)));
+            }),
+        ];
+        for (what, tick) in ticks {
+            // As a tick starts, a copy afresh, and the kept one's, of the changes since it last
+            // copied.
+            let mut fresh = Past::default();
+            fresh.capture(&mut world);
+            kept.capture(&mut world);
+            tick(&mut world, &entities, pivot);
+            fresh.resolve(&world);
+            kept.resolve(&world);
+            for index in 0..world.tables().len() {
+                let bits = |past: &Past| format!("{:?}", past.from(&world, index));
+                assert_eq!(bits(&kept), bits(&fresh), "after {what}, table {index}");
+            }
         }
     }
 }

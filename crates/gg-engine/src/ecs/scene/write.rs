@@ -115,7 +115,7 @@ impl Writer<'_> {
         let table = &world.tables[at.table as usize];
         let parent = world.component::<Parent>();
         let mut components = Vec::new();
-        for (column, &component) in table.components.iter().enumerate() {
+        for (column, &component) in table.components().iter().enumerate() {
             if world.components.ty(component).is_opaque(self.types) {
                 continue;
             }
@@ -139,9 +139,9 @@ impl Writer<'_> {
         self.out.push_str("(\n");
         for (name, column) in components {
             let about = |error: Error| about(error, "save", Named::Id(id), name, "");
-            let component = table.components[column];
+            let component = table.components()[column];
             let ty = world.components.ty(component);
-            let value = table.columns[column].value(at.row as usize);
+            let value = table.column_at(column).value(at.row as usize);
             reflect::check(self.types, &ty, &NO_HINTS, &value).map_err(about)?;
             let built = self
                 .built

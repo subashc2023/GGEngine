@@ -23,7 +23,7 @@ use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
     Light, LightKind, Line, Lod, Lods, Map, Material, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler,
+    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene,
     Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
     UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
@@ -88,6 +88,7 @@ fn main() -> ExitCode {
         a_skys_sun_lights_once,
         shadows_fall_where_their_casters_put_them,
         culling_keeps_what_each_view_sees,
+        the_scene_draws_as_draws_do,
         shadows_hold_still_as_the_view_moves,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
@@ -269,6 +270,7 @@ struct Stores {
     shaders: Shaders,
     textures: Textures,
     materials: Materials,
+    scene: Scene,
     uploads: Uploads,
     lights: Vec<Light>,
     sky: Option<Sky>,
@@ -278,8 +280,8 @@ struct Stores {
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
     /// draws nothing on its canvas, picks and outlines nothing and isn't tonemapped, at time 0
-    /// with an exposure of 1 and the stores' lights and sky, with the uploads of what's been added
-    /// since the last frame's.
+    /// with an exposure of 1 and the stores' lights and sky, with the uploads of what's been added,
+    /// and what's changed in the scene, since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -291,12 +293,14 @@ impl Stores {
             shaders,
             textures,
             materials,
+            scene,
             uploads,
             lights,
             sky,
             none,
         } = self;
         uploads.take(meshes, shaders, textures, materials);
+        uploads.take_scene(scene);
         RenderData {
             clear_color: CLEAR,
             tonemapper: Tonemapper::None,
@@ -4830,6 +4834,111 @@ fn culling_keeps_what_each_view_sees() {
             found[0] > 100 && found[1] < 40 && found[2] < 40,
             "{what} at ({x}, {z}) is {found:?}, not red"
         );
+    }
+}
+
+/// The floor and the plates of [`culling_keeps_what_each_view_sees`], white but one red, in two
+/// frames, the second moving one plate, taking one away and adding one: held by the renderer's
+/// scene, drawn where the draws place it, they draw the same frames, bit for bit, culled as the
+/// same draws pushed are, counting the same.
+fn the_scene_draws_as_draws_do() {
+    const SIZE: u32 = 128;
+    // Each instance's slot, which its ID is one past, and where it is across the floor, in each
+    // frame: the floor's slot is 9.
+    let frames: [&[(u32, f32, f32)]; 2] = [
+        &[
+            (0, -2.0, -2.0),
+            (1, -4.75, 1.0),
+            (2, 200.0, 0.0),
+            (3, 4.25, 3.0),
+        ],
+        &[
+            (0, -1.0, -2.0),
+            (2, 200.0, 0.0),
+            (3, 4.25, 3.0),
+            (5, 1.0, 1.5),
+        ],
+    ];
+    let render = |through_scene: bool| {
+        let mut renderer = renderer(SIZE, SIZE);
+        let mut stores = Stores::default();
+        let floor = model_square(&mut stores.meshes);
+        let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+            position: Vec3::new(x, y, 0.0),
+            uv: Vec2::from(uv),
+            color: Vec4::ONE,
+            normal: Vec3::Z,
+            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+        };
+        let corners = [
+            corner([-0.5, -0.5], [0.0, 1.0]),
+            corner([0.5, -0.5], [1.0, 1.0]),
+            corner([0.5, 0.5], [1.0, 0.0]),
+            corner([-0.5, 0.5], [0.0, 0.0]),
+        ];
+        let whole = Lod {
+            start: 0,
+            count: 6,
+            error: 0.0,
+        };
+        let sphere = Lods {
+            levels: vec![whole],
+            center: Vec3::ZERO,
+            radius: std::f32::consts::FRAC_1_SQRT_2,
+        };
+        let plate = (stores.meshes)
+            .add_lods("plate", &corners, &[0, 1, 2, 2, 3, 0], sphere)
+            .expect("a mesh");
+        let white = Material {
+            workflow: metallic(0.0, 1.0),
+            ..Material::default()
+        };
+        let red = Material {
+            color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            ..white
+        };
+        let mut draw = |mesh, material: &Material| {
+            let material = stores.materials.add(material);
+            MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+        };
+        let (floor, white_plate, red_plate) =
+            (draw(floor, &white), draw(plate, &white), draw(plate, &red));
+        let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 8.0, 21.0);
+        let viewport = filling([SIZE, SIZE]);
+        stores.lights = vec![sun(Vec3::new(1.0, -2.0, 0.0), Some(100.0))];
+        let mut drawn = Vec::new();
+        for (i, placed) in frames.iter().enumerate() {
+            let mut instances = vec![(9, facing_up(20.0, Vec3::ZERO), floor)];
+            for &(slot, x, z) in placed.iter() {
+                let draw = if slot == 3 { red_plate } else { white_plate };
+                instances.push((slot, facing_up(1.0, Vec3::new(x, 2.0, z)), draw));
+            }
+            let mut draws = Draws::default();
+            if through_scene {
+                draws.draw_scene();
+                if i == 1 {
+                    stores.scene.remove(1);
+                }
+                for &(slot, at, draw) in &instances {
+                    stores.scene.set(slot, at, &draw, u64::from(slot) + 1);
+                }
+            } else {
+                for &(slot, at, draw) in &instances {
+                    draws.push_draw(at, &draw, u64::from(slot) + 1);
+                }
+            }
+            settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+            let counts = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+            drawn.push((counts, frame_pixels(&mut renderer)));
+        }
+        shut_down(renderer);
+        drawn
+    };
+    let (scene, draws) = (render(true), render(false));
+    for (i, ((scene_counts, scene), (draws_counts, draws))) in scene.iter().zip(&draws).enumerate()
+    {
+        assert_eq!(scene_counts, draws_counts, "frame {i}'s counts");
+        assert!(scene == draws, "frame {i}'s pixels differ");
     }
 }
 

@@ -381,9 +381,10 @@ impl World {
         let now = self.get_field(handle, component, path)?;
         let at = self.location(handle).expect("alive");
         let id = self.named(component).expect("its field was read");
+        let tick = self.change_tick;
         let table = &mut self.tables[at.table as usize];
         let column = table.position(id).expect("its field was read");
-        table.columns[column].swap_row(at.row as usize, kept);
+        (table.row_mut(column, at.row as usize, tick)).swap_row(at.row as usize, kept);
         if Some(id) == self.component::<ModelRoot>() && now != *value {
             self.despawn_nodes(handle);
             self.fit_nodes(handle, None);
@@ -644,7 +645,7 @@ impl World {
         let at = self.location(entity)?;
         let table = &self.tables[at.table as usize];
         let column = table.position(self.components.named(name)?)?;
-        Some(table.columns[column].clone_row(at.row as usize))
+        Some(table.column_at(column).clone_row(at.row as usize))
     }
 
     /// Fits `entity`'s nodes to its [`ModelRoot`], as [`fit_nodes`](Self::fit_nodes) does, if
@@ -810,7 +811,7 @@ impl World {
             .map(|&(original, _)| {
                 let at = self.location(original).expect("alive");
                 let table = &self.tables[at.table as usize];
-                let columns = table.components.iter().zip(&table.columns);
+                let columns = table.components().iter().zip(table.columns());
                 let columns = columns.filter(|&(&component, _)| component != parent_id);
                 let copied = columns
                     .map(|(&component, column)| (component, column.clone_row(at.row as usize)));
@@ -873,12 +874,14 @@ impl World {
         };
         for &copy in &copies {
             let at = self.location(copy).expect("alive");
+            let (row, tick) = (at.row as usize, self.change_tick);
             let table = &mut self.tables[at.table as usize];
-            let columns = table.components.iter().zip(&mut table.columns);
-            for (_, column) in columns.filter(|&(&component, _)| component != parent_id) {
-                column.entities_mut(at.row as usize, &mut retarget);
+            for position in 0..table.components().len() {
+                if table.components()[position] != parent_id {
+                    (table.row_mut(position, row, tick)).entities_mut(row, &mut retarget);
+                }
             }
-            let components = self.tables[at.table as usize].components.clone();
+            let components = self.tables[at.table as usize].components().to_vec();
             for component in components.into_iter().filter(|&id| id != parent_id) {
                 let name = self.components.name(component).to_owned();
                 if let Some(field) = self.components.exclusive(component) {

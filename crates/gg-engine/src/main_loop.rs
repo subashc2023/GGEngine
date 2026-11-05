@@ -1050,6 +1050,7 @@ pub(crate) mod tests {
             world.id(entity).expect("alive").get()
         };
         let mut want = Draws::default();
+        want.draw_scene();
         let mut sprite = |x: f32, z: f32| {
             want.extend_sprites(iter::once((slid(x, z).matrix(), red(), id(z))));
         };
@@ -1343,13 +1344,15 @@ pub(crate) mod tests {
         let mut stepper = Stepper::default();
         let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
         assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
-        // The layer's sprite, of no entity, then the world's, with its entity's ID.
+        // The layer's sprite, of no entity, then the scene's place and the world's, with its
+        // entity's ID, which the scene's place keeps from joining the layer's run.
         let world = cx.world();
         let red_one = world.query::<(Entity, &Sprite)>().next();
         let (red_one, _) = red_one.expect("the sprite the layer spawned");
         let id = world.id(red_one).expect("alive").get();
         let mut expected = Draws::default();
         expected.push_sprite(Mat4::IDENTITY, Sprite::default());
+        expected.draw_scene();
         let red_one = (Transform::IDENTITY.matrix(), red(), id);
         expected.extend_sprites(iter::once(red_one));
         let viewport = Viewport {
