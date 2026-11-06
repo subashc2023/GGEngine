@@ -66,22 +66,18 @@ fn main() {
     let shadow = &[("vertex_main", "vertex"), ("shadow_main", "fragment")];
     compile(&slangc, &out, "model_masked", "model_masked_shadow", shadow);
     // The opaque and masked model shaders' meshlets, drawn through vertex shaders or through a mesh
-    // shader, each apart, so that a device without mesh shaders takes no SPIR-V of one.
-    for (geometry, stage) in [("meshlet_vertex_main", "vertex"), ("mesh_main", "mesh")] {
-        let path = if stage == "mesh" { "mesh" } else { "meshlets" };
-        for shader in ["model_opaque", "model_masked"] {
-            let entries = &[(geometry, stage), ("fragment_main", "fragment")];
-            compile(&slangc, &out, shader, &format!("{shader}_{path}"), entries);
-        }
-        let shadow = &[(geometry, stage), ("shadow_main", "fragment")];
-        compile(
-            &slangc,
-            &out,
-            "model_masked",
-            &format!("model_masked_{path}_shadow"),
-            shadow,
-        );
+    // shader, each apart, so that a device without mesh shaders takes no SPIR-V of one; the mesh
+    // shader alone, as gg-gpu's `GraphicsDesc::mesh` says why.
+    let meshlets = ("meshlet_vertex_main", "vertex");
+    for name in ["model_opaque", "model_masked"] {
+        let entries = &[meshlets, ("fragment_main", "fragment")];
+        compile(&slangc, &out, name, &format!("{name}_meshlets"), entries);
+        let mesh = &[("mesh_main", "mesh")];
+        compile(&slangc, &out, name, &format!("{name}_mesh"), mesh);
     }
+    let shadow = &[meshlets, ("shadow_main", "fragment")];
+    let spirv = "model_masked_meshlets_shadow";
+    compile(&slangc, &out, "model_masked", spirv, shadow);
     for (shader, entries) in COMPUTE {
         let entries: Vec<_> = (entries.iter()).map(|&entry| (entry, "compute")).collect();
         compile(&slangc, &out, shader, shader, &entries);

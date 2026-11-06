@@ -1049,13 +1049,14 @@ fn out_of_memory(error: &Error) -> bool {
 
 /// A shader's geometry, which its pipelines draw with: its module, named `name`, and the module of
 /// its shadows if they're cut out, as [`shader::Added::shadow`] says; and its geometry's entry
-/// point in each, a mesh shader's if `mesh`.
+/// point in each, or in `mesh`, a mesh shader's module apart from them, as [`GraphicsDesc::mesh`]
+/// says.
 struct Geometry<'a> {
     name: &'a str,
     spirv: &'a [u8],
     shadow: Option<&'a [u8]>,
     entry: &'a CStr,
-    mesh: bool,
+    mesh: Option<&'a [u8]>,
 }
 
 impl Geometry<'_> {
@@ -1220,25 +1221,29 @@ impl MeshPass {
                 spirv: &added.spirv,
                 shadow: added.shadow.as_deref(),
                 entry: c"vertex_main",
-                mesh: false,
+                mesh: None,
             };
             let made = geometry.pipelines(device, added.blend);
-            // A model shader's meshlets, through the device's mesh shaders if it has them.
+            // A model shader's meshlets, through the device's mesh shaders if it has them, with the
+            // shader's own fragment shaders.
             let meshlets = (added.meshlets.as_deref()).map(|meshlets| {
                 let name = format!("{} meshlets", added.name);
-                let mesh = device.mesh_shaders();
-                let (spirv, shadow, entry) = if mesh {
-                    (&meshlets.mesh, &meshlets.mesh_shadow, c"mesh_main")
+                let geometry = if device.mesh_shaders() {
+                    Geometry {
+                        name: &name,
+                        spirv: &added.spirv,
+                        shadow: added.shadow.as_deref(),
+                        entry: c"mesh_main",
+                        mesh: Some(&meshlets.mesh),
+                    }
                 } else {
-                    let vertices = (&meshlets.vertices, &meshlets.vertices_shadow);
-                    (vertices.0, vertices.1, c"meshlet_vertex_main")
-                };
-                let geometry = Geometry {
-                    name: &name,
-                    spirv,
-                    shadow: shadow.as_deref(),
-                    entry,
-                    mesh,
+                    Geometry {
+                        name: &name,
+                        spirv: &meshlets.vertices,
+                        shadow: meshlets.vertices_shadow.as_deref(),
+                        entry: c"meshlet_vertex_main",
+                        mesh: None,
+                    }
                 };
                 geometry.pipelines(device, added.blend)
             });

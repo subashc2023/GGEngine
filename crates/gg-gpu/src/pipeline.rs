@@ -155,16 +155,20 @@ impl Faces {
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
-    /// A SPIR-V module holding its entry points, which slangc compiled. It's trusted to be valid
-    /// and to keep to the pipeline layout: to read only the push constants set before a draw,
-    /// to use only the device's enabled features, and to bind nothing but the bindless set's
-    /// textures and samplers. Vulkan checks none of it; validation does in debug builds.
+    /// A SPIR-V module holding its entry points, but a mesh shader's, which slangc compiled. It's
+    /// trusted to be valid and to keep to the pipeline layout: to read only the push constants set
+    /// before a draw, to use only the device's enabled features, and to bind nothing but the
+    /// bindless set's textures and samplers. Vulkan checks none of it; validation does in debug
+    /// builds.
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
-    /// Whether `vertex` is a mesh shader's entry point, in place of a vertex shader's, which only
-    /// a device that draws through mesh shaders takes ([`Device::mesh_shaders`]): the pipeline
-    /// draws through [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect).
-    pub mesh: bool,
+    /// A mesh shader's module, holding `vertex` alone, in place of a vertex shader, which only a
+    /// device that draws through mesh shaders takes ([`Device::mesh_shaders`]): the pipeline draws
+    /// through [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect). Trusted
+    /// as `spirv` is. A module of its own, as validation before the Vulkan SDK 1.4.328's, as
+    /// Debian 13's, refuses a mesh shader beside a fragment shader in one module: it checked the
+    /// mesh shader's outputs against every entry point of the module (SPIRV-Tools #6313).
+    pub mesh: Option<&'a [u8]>,
     /// `None` for a pipeline that draws depth alone, all of each triangle, as a shadow map's
     /// opaque casters are drawn.
     pub fragment: Option<&'a CStr>,
@@ -210,7 +214,7 @@ impl Pipeline {
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
         assert!(
-            !desc.mesh || device.mesh_shaders(),
+            desc.mesh.is_none() || device.mesh_shaders(),
             "a pipeline of a mesh shader is made only on a device that draws through them"
         );
         assert!(
@@ -223,15 +227,26 @@ impl Pipeline {
         );
         let raw_device = device.raw();
         let module = shader_module(device, desc.name, desc.spirv)?;
+        let mesh = match desc.mesh {
+            Some(spirv) => match shader_module(device, desc.name, spirv) {
+                Ok(mesh) => Some(mesh),
+                Err(error) => {
+                    // SAFETY: the module is live, and nothing has used it.
+                    unsafe { raw_device.destroy_shader_module(module, None) };
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
 
-        let geometry = if desc.mesh {
+        let geometry = if mesh.is_some() {
             vk::ShaderStageFlags::MESH_EXT
         } else {
             vk::ShaderStageFlags::VERTEX
         };
         let vertex = vk::PipelineShaderStageCreateInfo::default()
             .stage(geometry)
-            .module(module)
+            .module(mesh.unwrap_or(module))
             .name(desc.vertex);
         let fragment = desc.fragment.map(|entry| {
             vk::PipelineShaderStageCreateInfo::default()
@@ -300,16 +315,18 @@ impl Pipeline {
             .layout(device.bindless().pipeline_layout())
             .push_next(&mut rendering)
             .push_next(&mut feedback_info);
-        // SAFETY: the module, the layout and the pipeline cache, if the device has one, are live,
-        // and the infos outlive the call; the module can go once the pipeline is made. The module
-        // is trusted to have its entry points and to keep to the layout, as `GraphicsDesc::spirv`
+        // SAFETY: the modules, the layout and the pipeline cache, if the device has one, are live,
+        // and the infos outlive the call; the modules can go once the pipeline is made. The modules
+        // are trusted to have their entry points and to keep to the layout, as `GraphicsDesc::spirv`
         // says. The device has depth clamp, which `Candidate::new` checked, and mesh shaders, for a
         // mesh shader's pipeline, as asserted; Vulkan ignores the vertex input and input assembly
         // of a pipeline with a mesh shader.
         let made = unsafe {
             let cache = device.raw_pipeline_cache();
             let made = raw_device.create_graphics_pipelines(cache, &[info], None);
-            raw_device.destroy_shader_module(module, None);
+            for module in iter::once(module).chain(mesh) {
+                raw_device.destroy_shader_module(module, None);
+            }
             made
         };
         let raw = made.map_err(|(_, e)| {
@@ -326,7 +343,7 @@ impl Pipeline {
             device: device.clone(),
             raw,
             format: desc.format,
-            mesh: desc.mesh,
+            mesh: desc.mesh.is_some(),
         })
     }
 

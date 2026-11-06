@@ -34,13 +34,13 @@ pub(crate) static MASKED_MESHLETS_SHADOW_SPIRV: &[u8] = include_bytes!(concat!(
     "/model_masked_meshlets_shadow.spv"
 ));
 
-/// The same through a mesh shader, `mesh_main`, for a device with them.
+/// The same through a mesh shader, `mesh_main`, alone, for a device with them: its pipelines take
+/// their fragment shaders from the modules above, as
+/// [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says.
 pub(crate) static OPAQUE_MESH_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_mesh.spv"));
 pub(crate) static MASKED_MESH_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh.spv"));
-pub(crate) static MASKED_MESH_SHADOW_SPIRV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh_shadow.spv"));
 
 /// A vertex of a model's mesh: where it is in the mesh's space, where it samples its material's
 /// textures, a color the material's is multiplied by, in linear RGBA, the way its surface faces,

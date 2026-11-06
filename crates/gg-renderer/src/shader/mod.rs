@@ -122,15 +122,14 @@ pub(crate) struct Added {
     pub(crate) meshlets: Option<Box<Meshlets>>,
 }
 
-/// What draws a model shader's meshlets, each a module of its geometry and `fragment_main`, or, for
-/// shadows cut out, `shadow_main`: through vertex shaders, `meshlet_vertex_main`, and through a mesh
-/// shader, `mesh_main`; and, of those, what draws its shadows, if they're cut out, as
-/// [`Added::shadow`] says.
+/// What draws a model shader's meshlets: through vertex shaders, a module of `meshlet_vertex_main`
+/// and `fragment_main`, and one of it and `shadow_main` for shadows cut out, as [`Added::shadow`]
+/// says; and through a mesh shader, a module of `mesh_main` alone, whose pipelines take the shader's
+/// own modules' fragment shaders, as [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says.
 pub(crate) struct Meshlets {
     pub(crate) vertices: Vec<u8>,
     pub(crate) vertices_shadow: Option<Vec<u8>>,
     pub(crate) mesh: Vec<u8>,
-    pub(crate) mesh_shadow: Option<Vec<u8>>,
 }
 
 /// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
@@ -407,7 +406,7 @@ impl Shaders {
         name: &str,
         spirv: Vec<u8>,
         shadow: Option<Vec<u8>>,
-        meshlets: Option<[&[u8]; 4]>,
+        meshlets: Option<[&[u8]; 3]>,
         blend: Blend,
         types: Types,
     ) -> u32 {
@@ -422,15 +421,13 @@ impl Shaders {
             params_size: types.params_size,
             blend,
             shadow: shadow.map(spirv::decorate_non_uniform),
-            meshlets: meshlets.map(|[vertices, vertices_shadow, mesh, mesh_shadow]| {
-                // An empty module for a shadow that isn't cut out.
+            meshlets: meshlets.map(|[vertices, vertices_shadow, mesh]| {
                 let module = |spirv: &[u8]| spirv::decorate_non_uniform(spirv.to_vec());
-                let cut = |spirv: &[u8]| (!spirv.is_empty()).then(|| module(spirv));
                 Box::new(Meshlets {
                     vertices: module(vertices),
-                    vertices_shadow: cut(vertices_shadow),
+                    // An empty module for a shadow that isn't cut out.
+                    vertices_shadow: (!vertices_shadow.is_empty()).then(|| module(vertices_shadow)),
                     mesh: module(mesh),
-                    mesh_shadow: cut(mesh_shadow),
                 })
             }),
         }));
@@ -450,17 +447,13 @@ impl Shaders {
         let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
         // What blends draws in its order, by its indices.
         let meshlets = match alpha {
-            AlphaMode::Opaque => Some([
-                model::OPAQUE_MESHLETS_SPIRV,
-                &[],
-                model::OPAQUE_MESH_SPIRV,
-                &[],
-            ]),
+            AlphaMode::Opaque => {
+                Some([model::OPAQUE_MESHLETS_SPIRV, &[], model::OPAQUE_MESH_SPIRV])
+            }
             AlphaMode::Mask { .. } => Some([
                 model::MASKED_MESHLETS_SPIRV,
                 model::MASKED_MESHLETS_SHADOW_SPIRV,
                 model::MASKED_MESH_SPIRV,
-                model::MASKED_MESH_SHADOW_SPIRV,
             ]),
             AlphaMode::Blend => None,
         };
@@ -515,7 +508,7 @@ impl Shaders {
         name: &str,
         spirv: &[u8],
         shadow: Option<&[u8]>,
-        meshlets: Option<[&[u8]; 4]>,
+        meshlets: Option<[&[u8]; 3]>,
         blend: Blend,
     ) -> Shader<V, P> {
         let index = match self.lazy[slot] {
