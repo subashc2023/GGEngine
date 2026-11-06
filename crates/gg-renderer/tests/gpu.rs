@@ -9,7 +9,7 @@
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
 
-use std::f32::consts::{FRAC_PI_2, PI, SQRT_2};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::num::NonZeroU64;
@@ -81,6 +81,7 @@ fn main() -> ExitCode {
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         lit_spheres_match_their_reference,
+        many_lights_match_their_reference,
         a_uniform_sky_lights_white_as_itself,
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
@@ -4036,6 +4037,108 @@ fn lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "lit_spheres", SIZE, SIZE);
+}
+
+/// A floor and spheres under many lights: 81 points of six colors, each 0.8 over the floor and
+/// reaching 2.2, in a grid 1.5 apart that runs past what the views see, so that some shine into
+/// them from outside; four white spots, high over the floor, shining down; a point without a
+/// range, far off; and a sun among them, casting shadows. Seen with perspective, then without,
+/// against their reference images, which every light shading each fragment drew.
+fn many_lights_match_their_reference() {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 144;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 0.6, 16, 32);
+    let floor = Material {
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    };
+    let shiny = Material {
+        color: Vec4::new(0.8, 0.8, 0.8, 1.0),
+        workflow: metallic(0.0, 0.4),
+        ..Material::default()
+    };
+    let mut draws = Draws::default();
+    let floor = stores.materials.add(&floor);
+    let floor = MeshDraw::with_material(square, floor, &stores.materials, &mut stores.shaders);
+    draws.push_draw(facing_up(24.0, Vec3::ZERO), &floor, 0);
+    let shiny = stores.materials.add(&shiny);
+    let ball = MeshDraw::with_material(ball, shiny, &stores.materials, &mut stores.shaders);
+    for at in [
+        [-2.5, -1.0],
+        [0.0, 1.5],
+        [2.5, -1.0],
+        [-1.0, -3.5],
+        [3.5, 2.5],
+    ] {
+        let at = Vec3::new(at[0], 0.6, at[1]);
+        draws.push_draw(Mat4::from_translation(at), &ball, 0);
+    }
+    let colors = [
+        Vec3::new(1.0, 0.2, 0.2),
+        Vec3::new(0.2, 1.0, 0.2),
+        Vec3::new(0.2, 0.3, 1.0),
+        Vec3::new(1.0, 0.9, 0.2),
+        Vec3::new(1.0, 0.2, 1.0),
+        Vec3::new(0.2, 1.0, 1.0),
+    ];
+    let mut lights = Vec::new();
+    for row in 0..9 {
+        for column in 0..9 {
+            let at = Vec3::new(column as f32 * 1.5 - 6.0, 0.8, row as f32 * 1.5 - 6.0);
+            lights.push(Light {
+                kind: LightKind::Point,
+                position: at,
+                direction: Vec3::NEG_Y,
+                color: colors[(row * 9 + column) % colors.len()],
+                range: Some(2.2),
+                shadow_distance: None,
+            });
+        }
+        // The sun among them, rather than first, as a world's lights come in any order.
+        if row == 4 {
+            lights.push(sun(Vec3::new(0.4, -1.0, -0.3), Some(40.0)));
+        }
+    }
+    for at in [[-3.0, -3.0], [3.0, -3.0], [-3.0, 3.0], [3.0, 3.0]] {
+        lights.push(Light {
+            kind: LightKind::Spot {
+                inner: 0.3,
+                outer: 0.5,
+            },
+            position: Vec3::new(at[0], 4.0, at[1]),
+            direction: Vec3::NEG_Y,
+            color: Vec3::splat(3.0),
+            range: Some(7.0),
+            shadow_distance: None,
+        });
+    }
+    lights.push(Light {
+        kind: LightKind::Point,
+        position: Vec3::new(0.0, 3.0, -9.0),
+        direction: Vec3::NEG_Y,
+        color: Vec3::new(2.0, 1.4, 0.8),
+        range: None,
+        shadow_distance: None,
+    });
+    stores.lights = lights;
+    let viewport = filling([WIDTH, HEIGHT]);
+    let tilt = -math::libm::atan2f(7.0, 10.0);
+    let perspective = Viewpoint {
+        position: Vec3::new(0.0, 7.0, 10.0),
+        rotation: Quat::from_rotation_x(tilt),
+        projection: Projection::Perspective {
+            fov: FRAC_PI_4,
+            near: 0.5,
+        },
+    };
+    settle(&mut renderer, &mut stores, viewport, perspective, &draws);
+    compare("many_lights", WIDTH, HEIGHT, &frame_pixels(&mut renderer));
+    let orthographic = looking_down(Vec3::new(0.0, 10.0, 0.0), 12.0, 20.0);
+    render_without_ui(&mut renderer, stores.data(viewport, orthographic, &draws));
+    check(renderer, "many_lights_orthographic", WIDTH, HEIGHT);
 }
 
 /// A sky's texture of `size` texels, each `texel(x, y)`'s linear RGB, as [`sky_pixels`] makes them.

@@ -14,6 +14,7 @@
 //! can run on its own thread, a frame behind simulation.
 
 mod circle;
+mod cluster;
 mod draws;
 mod grid;
 mod light;
@@ -71,7 +72,7 @@ pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
-use light::GpuLight;
+use cluster::{ClusterData, ClusterPlan, Lighting};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
@@ -368,9 +369,8 @@ pub struct Renderer {
     /// What each frame in flight drew of the draws it didn't cull, and whether it culled any, by
     /// its number, for the frame two later to add what the culling counted, as it comes back.
     counted: [(u64, DrawCounts, bool); 2],
-    /// The frame's lights as shaders read them, kept between frames, so that one with no more than
-    /// the last allocates nothing.
-    lights: Vec<GpuLight>,
+    /// The frame's lights as shaders read them, and what bins them into the view's clusters.
+    lighting: Lighting,
 }
 
 enum Output {
@@ -383,6 +383,8 @@ enum Output {
 struct ViewPasses {
     /// What culls the view's opaque runs and their shadows' casters, if it draws any.
     cull: Option<CullPlan>,
+    /// What bins the lights into the view's clusters, if a light is binned.
+    clusters: Option<ClusterPlan>,
     /// What draws the shadows the view shows, if a light casts them.
     shadows: Option<ShadowPasses>,
     /// What the view draws into, of high dynamic range.
@@ -429,6 +431,14 @@ fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
 /// `pass`, sampling each of `images`.
 fn sampling<'g>(images: impl Iterator<Item = ImageId>, pass: RenderPass<'g>) -> RenderPass<'g> {
     images.fold(pass, RenderPass::sample)
+}
+
+/// `pass`, reading the clusters the lights are binned into, if `clusters` bins them.
+fn binned<'g>(clusters: Option<&ClusterPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
+    match clusters {
+        Some(clusters) => pass.read_buffer(clusters.buffer),
+        None => pass,
+    }
 }
 
 // The engine renders on a thread of its own, which the renderer and its uploads move to.
@@ -526,7 +536,7 @@ impl Renderer {
             waited: Duration::ZERO,
             drawn: DrawCounts::default(),
             counted: [(0, DrawCounts::default(), false); 2],
-            lights: Vec::new(),
+            lighting: Lighting::new(device)?,
         })
     }
 
@@ -726,6 +736,9 @@ impl Renderer {
         if sky.is_some() && self.sky.is_none() {
             self.sky = Some(SkyPass::new(&self.device)?);
         }
+        if renders_view {
+            self.lighting.order(data.lights, &data.viewpoint);
+        }
         // The frame's passes: the view, into images of its own, its size, so that it never shows
         // stretched, made again in the frame that changes its size, which a drag that resizes the
         // view does every frame, as growing them in steps and rendering into part of them wouldn't;
@@ -755,14 +768,17 @@ impl Renderer {
             _ => None,
         };
         let meshes = &self.meshes;
+        let lighting = &self.lighting;
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
             // before the view samples it, and before them, the culling of the view's opaque runs
-            // and the cascades' casters, for the view's first pass.
+            // and the cascades' casters, for the view's first pass, and the binning of the lights
+            // into the view's clusters, which its passes read.
             let aspect = data.viewport.aspect();
             let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
             let mut cull = (meshes.cull_bounds(data.draws))
                 .map(|bounds| CullPlan::new(graph, bounds, cascades.is_some()));
+            let clusters = lighting.plan(graph);
             let shadows = cascades.map(|cascades| {
                 let names = [
                     "shadow cascade 0",
@@ -796,7 +812,7 @@ impl Renderer {
                 plan.iter().flat_map(sky::Plan::sampled).chain(maps)
             };
             let first = culled(cull.as_ref(), graph.render(label!("view")));
-            let first = sampling(lit(), first)
+            let first = binned(clusters.as_ref(), sampling(lit(), first))
                 .clear(hdr, data.clear_color)
                 .ids(ids)
                 .depth(depth)
@@ -807,7 +823,7 @@ impl Renderer {
             let second = cull.as_mut().map(|cull| {
                 cull.second_pass(graph, depth, size);
                 let second = cull.drawn(graph.render(label!("view second")));
-                (sampling(lit(), second).keep(hdr))
+                (binned(clusters.as_ref(), sampling(lit(), second)).keep(hdr))
                     .keep(ids)
                     .keep(depth)
                     .add()
@@ -832,6 +848,7 @@ impl Renderer {
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
                 cull,
+                clusters,
                 shadows,
                 hdr,
                 color,
@@ -929,24 +946,28 @@ impl Renderer {
                     Some(plan) => Runs::Culled(plan, slot),
                     None => Runs::All,
                 };
-                self.lights.clear();
-                self.lights.extend(data.lights.iter().map(GpuLight::new));
-                let lights = if self.lights.is_empty() {
+                let gpu_lights = self.lighting.lights();
+                let lights = if gpu_lights.is_empty() {
                     0
                 } else {
-                    frame.upload(bytemuck::cast_slice(&self.lights))?.address()
+                    frame.upload(bytemuck::cast_slice(gpu_lights))?.address()
                 };
                 let shared = FrameData {
                     camera: data.viewpoint.position,
                     time: data.time,
                     exposure: data.exposure,
-                    light_count: u32::try_from(self.lights.len()).expect("fewer than 2^32 lights"),
+                    light_count: gpu_lights.len() as u32,
                     lights,
                     materials: self.meshes.materials_address(),
                     eye: data.viewpoint.eye(),
                     sky: SkyData::default(),
                     shadows: ShadowData::default(),
+                    clusters: ClusterData::default(),
                 };
+                let aspect = data.viewport.aspect();
+                let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
+                let (view_lights, clusters) =
+                    (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
                 // The casters, each cascade's from the light, which read the frame's data but for
                 // what the view alone samples.
                 if let Some(shadows) = &view.shadows {
@@ -975,8 +996,10 @@ impl Renderer {
                     shadows.cascades.data(maps)
                 });
                 let shared = FrameData {
+                    lights: view_lights,
                     sky: lit.unwrap_or_default(),
                     shadows: shadows.unwrap_or_default(),
+                    clusters,
                     ..shared
                 };
                 let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();

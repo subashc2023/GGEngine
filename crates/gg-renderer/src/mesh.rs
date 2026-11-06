@@ -1775,7 +1775,10 @@ pub(crate) struct FrameData {
     /// How many lights the frame has, as [`RenderData::lights`](crate::RenderData::lights) gives
     /// them.
     pub(crate) light_count: u32,
-    /// The address of its lights, a [`GpuLight`](crate::light::GpuLight) each, or 0 for none.
+    /// The address of its lights, a [`GpuLight`](crate::light::GpuLight) each, in the order
+    /// [`Lighting::lights`](crate::cluster::Lighting::lights) has them, or 0 for none: for the
+    /// game's view, if a light is binned, their copies, which the clusters follow, as
+    /// [`Lighting::bin`](crate::cluster::Lighting::bin) returns them.
     pub(crate) lights: u64,
     /// The address of the table of materials, each by its index, or 0 before any is added.
     pub(crate) materials: u64,
@@ -1788,6 +1791,9 @@ pub(crate) struct FrameData {
     /// The shadows of the light that casts them, if one does, as
     /// [`ShadowData`](crate::shadow::ShadowData) has them.
     pub(crate) shadows: crate::shadow::ShadowData,
+    /// The clusters the lights are binned into, as [`ClusterData`](crate::cluster::ClusterData)
+    /// has them.
+    pub(crate) clusters: crate::cluster::ClusterData,
 }
 
 #[cfg(test)]

@@ -1,10 +1,11 @@
-// What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang and
-// model.slang include: the bindless set's arrays, the quad's corners, the frame's data, with its
-// lights, the table of models' materials, the sky's prefiltered light and the shadows' cascades,
-// and the push constants, for a shader's types of vertices and parameters, and what the fragment
-// stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs,
-// `ShadowData` in src/shadow.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`,
-// `Light`, `Material`, `Shadows`, `Push` and `Frame` here match field for field.
+// What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, model.slang
+// and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
+// its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades
+// and the clusters its lights are binned into, and the push constants, for a shader's types of
+// vertices and parameters, and what the fragment stage returns. `Corner` in src/sprite.rs,
+// `GpuLight` in src/light.rs, `Entry` in src/model.rs, `ShadowData` in src/shadow.rs,
+// `ClusterData` in src/cluster.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`,
+// `Light`, `Material`, `Shadows`, `Clusters`, `Push` and `Frame` here match field for field.
 
 // The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
 // second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
@@ -90,6 +91,40 @@ struct Shadows {
     float map_size;
 };
 
+// The clusters of the game's view that the frame's lights are binned into, as clusters.slang bins
+// them, and model.slang's `cluster` finds a point's: the view cut into `across` tiles across and
+// `down` down, each cut into `slices` along its depth.
+struct Clusters {
+    // How many of the frame's lights, the first, light everywhere, which no cluster bins:
+    // directional lights, and those without a range. The rest are binned.
+    uint everywhere;
+    // Each cluster's words, a light binned a bit, its first light's the first word's lowest; 0 in a
+    // frame without clusters, whose fragments each shade by every light.
+    uint words;
+    // Where, in words from the lights' address, `(uint*)lights`, each cluster's first word that
+    // holds a bit and the word past its last start, followed by each cluster's words, by its index,
+    // `(slice * down + y) * across + x`. They follow the lights in one buffer, reached through one
+    // address: AMD's driver (25.10.30) drops the address of a second pointer read from memory, as
+    // a fragment's loops over a cluster's lights read them, and reads through the index alone.
+    uint bits;
+    // Where a point `p` is across and down the tiles, from the view's top left, and how far ahead
+    // of the view it is: `dot(x, q) / dot(w, q)`, `dot(y, q) / dot(w, q)` and `dot(depth, q)`, of
+    // `q = float4(p, 1.0)`.
+    float4 x;
+    float4 y;
+    float4 w;
+    float4 depth;
+    // Its slice, from that depth: `log2(depth) * slice_scale + slice_bias` with perspective,
+    // `depth * slice_scale + slice_bias` without, the last taking what's past it.
+    float slice_scale;
+    float slice_bias;
+    uint perspective;
+    uint across;
+    uint down;
+    uint slices;
+    uint unused;
+};
+
 // What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
 struct Frame {
     // Where the view sees from, in the world.
@@ -125,6 +160,8 @@ struct Frame {
     float sky_luminance;
     // The shadows of one of its lights, if one casts them.
     Shadows shadows;
+    // The clusters its lights are binned into.
+    Clusters clusters;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

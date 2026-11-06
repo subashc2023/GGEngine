@@ -1260,10 +1260,11 @@ last of its push constants: where the view sees from, the time, the simulation's
 draws, which stops with it and draws alike in a replay, and the exposure; the frame's lights, how
 many and where; the address of the table of models' materials; where shading sees from, the
 camera's position, or for an orthographic projection, which sees along one way, the way back
-toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance; and
+toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
-through the bindless set's sampler that compares. Fields are added at its end, so that games'
-shaders that read the fields before them keep to the contract.
+through the bindless set's sampler that compares; and the clusters the lights are binned into.
+Fields are added at its end, so that games' shaders that read the fields before them keep to the
+contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1272,10 +1273,19 @@ one, as the extension recommends; and spot, a point light within a cone round it
 its inner angle and fading to nothing at its outer. Each frame hands the renderer every light, from
 where its entity draws and facing as it does, ancestors carrying it, as a camera sees from where its
 entity draws, found again only as a light, its transform, its parent or its table changes, what
-carries it moves, or it draws on its way between ticks; and each lit fragment shades with each of them in turn, forward, so that its cost
-grows with the lights, until clustered lighting culls them. A model's node that KHR_lights_punctual
-gives a light has it as a component, which fits as the model's nodes do. Scenes save lights, and the
-Inspector and tools edit them, as any component.
+carries it moves, or it draws on its way between ticks. Each lit fragment shades forward, with the
+lights that light everywhere, directional lights and those without a range, which shaders read
+first, then with those whose reach meets its cluster of the game's view, in the frame's order, so
+that what it adds up is what every light would add. A compute pass bins them each frame, before the
+view draws, into clusters: 16 tiles across, 9 down and 24 slices along the depth, which grow with
+it under a perspective, as far as the farthest light binned reaches, and which are even under an
+orthographic projection; each cluster's lights are bits of its words, with the first word that holds
+one and the word past its last. The pass copies the lights to the front of the clusters' buffer,
+where the view's shaders read them, and the clusters through their address, as AMD's driver drops
+the address of a second pointer read from memory in such loops. What falls outside every cluster,
+as what the canvas draws under its own projection may, shades with every light. A model's node that
+KHR_lights_punctual gives a light has it as a component, which fits as the model's nodes do. Scenes
+save lights, and the Inspector and tools edit them, as any component.
 
 Models shade as glTF's metallic-roughness materials say, by Appendix B's BRDF, as Khronos's sample
 viewer has it: Lambert's diffuse and GGX's specular, with Smith's height-correlated visibility,

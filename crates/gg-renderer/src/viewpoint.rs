@@ -113,7 +113,7 @@ impl Viewpoint {
     /// # Panics
     ///
     /// If its projection can't project, as [`Projection`] says.
-    fn projection_matrix(&self, aspect: f32) -> Mat4 {
+    pub(crate) fn projection_matrix(&self, aspect: f32) -> Mat4 {
         // glam checks none of it, without its `glam-assert` feature.
         assert!(
             self.projection.projects(),

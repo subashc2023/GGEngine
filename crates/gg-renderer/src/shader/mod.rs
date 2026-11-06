@@ -164,8 +164,8 @@ impl Shaders {
     /// what's behind it still shows through it. What one that's opaque draws casts shadows, from
     /// the light that casts them, of whole triangles, as its vertex shader places them, pushed a
     /// shadow map's matrix from the world to its clip space and the map's size in place of the
-    /// view's, and the frame's data without the sky or the shadows. `name` names it in errors and
-    /// GPU captures.
+    /// view's, and the frame's data without the sky, the shadows or the clusters. `name` names it
+    /// in errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine checks, in the SPIR-V slangc writes,
     /// that it keeps to this contract:
@@ -191,16 +191,20 @@ impl Shaders {
     ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
-    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; }`, where the view sees
-    ///   from in the world, the time it shows, what lit shading multiplies light by, and the
-    ///   frame's lights, as [`RenderData`](crate::RenderData) gives them, `Light` as
-    ///   `shaders/mesh.slang` declares it; the address of the table of models' materials; where
-    ///   shading sees from, the camera's position and 1, or for an orthographic projection the way
-    ///   back toward it and 0, so that the way to the eye from `p` is `eye.xyz - p * eye.w`; the
-    ///   sky, as `shaders/mesh.slang` says, its texture, its prefiltered light, cubes, the split
-    ///   sum's table and its luminance, `specular_levels` 0 in a frame without one; and the
-    ///   shadows of the light that casts them, their cascades' shadow maps among them, `Shadows`
-    ///   as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in a frame without them; or a
+    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; }`,
+    ///   where the view sees from in the world, the time it shows, what lit shading multiplies
+    ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
+    ///   that light everywhere first, directional lights and those without a range, then the rest,
+    ///   each in the order it gives them, `Light` as `shaders/mesh.slang` declares it; the address
+    ///   of the table of models' materials; where shading sees from, the camera's position and 1,
+    ///   or for an orthographic projection the way back toward it and 0, so that the way to the eye
+    ///   from `p` is `eye.xyz - p * eye.w`; the sky, as `shaders/mesh.slang` says, its texture,
+    ///   its prefiltered light, cubes, the split sum's table and its luminance, `specular_levels` 0
+    ///   in a frame without one; the shadows of the light that casts them, their cascades' shadow
+    ///   maps among them, `Shadows` as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in
+    ///   a frame without them; and which of the lights reach each cluster of the view, the view
+    ///   cut into tiles and those along its depth, `Clusters` as `shaders/mesh.slang` declares it,
+    ///   its `words` 0 in a frame without them, where each fragment shades by every light; or a
     ///   struct of as many of its first fields: the engine adds fields at its end. A shader that
     ///   takes no parameters leaves out the fifth, and so those after it. A shader may end the
     ///   struct after the last of them it reads, and one that reads none has none.
@@ -960,7 +964,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 260 bytes, past the 256 the engine's take",
+                "its frame's data, Frame, take 372 bytes, past the 360 the engine's take",
                 "it reads brightness from its push constants, past the 112 bytes",
             ],
         );

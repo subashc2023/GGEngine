@@ -113,15 +113,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Culling on the GPU** (2026-11-05)
 - **The scene on the GPU** (2026-11-05)
 - **Occlusion culling** (2026-11-05)
+- **Clustered lighting** (2026-11-05)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **Clustered lighting.** A compute pass bins the frame's lights into the view's clusters, tiles
-  across it by slices along its depth, and each lit fragment shades by its cluster's lights rather
-  than by every light, games' shaders reading them through the frame's data; the Bistro's 96 point
-  lights shade where they reach. References on lavapipe of many lights, against every light's.
 - **Async compute.** The graph runs compute passes on a queue of their own where the device has a
   compute family apart from graphics, as the RTX 4090 and the AMD iGPU here do, waiting through
   semaphores where the two queues' uses meet, and on the graphics queue elsewhere, as on lavapipe:
@@ -316,7 +313,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Building the depth pyramid in one pass, as AMD's single-pass downsampler does: a compute pass builds each level, 11 at 1,280 by 720, each waiting for the one before | A profile shows them |
 | Keeping whether each of the scene's instances was unhidden by its slot, rather than by where it's gathered, which moves as instances before it in the gather's order come and go: in the frame they do, the first pass draws those that took another's word, what's hidden among them, and the second what the first missed | A game spawns or despawns often among many opaque meshes, and its frames show it |
 | Culling the shadows' casters by what's hidden from the light, or by the view's depth, keeping only those whose shadows fall where it sees: each cascade keeps every caster in its box | A profile shows the shadows' draws |
-| Handing the renderer the lights that changed alone: a frame that finds the lights again copies them all into its data, as it does every frame, which clustered lighting may change | A game has many lights that change |
+| Handing the renderer the lights that changed alone: a frame that finds the lights again copies them all into its data, as it does every frame, and the view's clusters' buffer copies them again on the GPU | A game has many lights that change |
+| Binning a spot by its cone, rather than by the sphere of its range, into each cluster that sphere meets, though its cone lights only some of them; and binning by each cluster's frustum, rather than by the box round it, which a perspective's far clusters leave loose | A game's clusters hold many lights that light none of them, as with narrow spots |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |

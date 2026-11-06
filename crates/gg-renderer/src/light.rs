@@ -40,6 +40,37 @@ pub struct Light {
     pub shadow_distance: Option<f32>,
 }
 
+impl Light {
+    /// Whether it lights everywhere, as shaders read it, so that no cluster bins it: a directional
+    /// light, or one without a range, or of none, or of an infinite one, which shaders take for
+    /// none too.
+    pub(crate) fn everywhere(&self) -> bool {
+        self.kind == LightKind::Directional
+            || !self
+                .range
+                .is_some_and(|range| range > 0.0 && range.is_finite())
+    }
+}
+
+/// The index of `lights[i]` among `lights` as shaders read them: those that light everywhere
+/// first, as [`Light::everywhere`] says, then the rest, each in the order they come.
+///
+/// # Panics
+///
+/// If `i` is past the lights, or there are 2^32 of them or more.
+pub(crate) fn shader_index(lights: &[Light], i: usize) -> u32 {
+    let everywhere = lights[i].everywhere();
+    let alike = (lights[..i].iter())
+        .filter(|light| light.everywhere() == everywhere)
+        .count();
+    let before = if everywhere {
+        0
+    } else {
+        lights.iter().filter(|light| light.everywhere()).count()
+    };
+    u32::try_from(before + alike).expect("fewer than 2^32 lights")
+}
+
 /// A light as shaders read it: `Light` in `shaders/mesh.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
@@ -70,6 +101,7 @@ impl GpuLight {
                 (2, scale, -outer * scale)
             }
         };
+        // 1 over an infinite range is 0, as none.
         let inverse_range = light
             .range
             .filter(|&range| range > 0.0)
@@ -127,5 +159,41 @@ mod tests {
             ),
             (1, 0.0, 0.0, 1.0)
         );
+    }
+
+    /// Shaders read the lights that light everywhere first, directional ones and those without a
+    /// range, of none or of an infinite one, then the rest, each in the order they came.
+    #[test]
+    fn lights_that_light_everywhere_come_first() {
+        let point = |range| Light {
+            kind: LightKind::Point,
+            position: Vec3::ZERO,
+            direction: Vec3::NEG_Z,
+            color: Vec3::ONE,
+            range,
+            shadow_distance: None,
+        };
+        let lights = [
+            point(Some(2.0)),
+            Light {
+                kind: LightKind::Directional,
+                ..point(Some(2.0))
+            },
+            point(Some(3.0)),
+            point(None),
+            point(Some(0.0)),
+            point(Some(f32::INFINITY)),
+            Light {
+                kind: LightKind::Spot {
+                    inner: 0.1,
+                    outer: 0.2,
+                },
+                ..point(Some(1.0))
+            },
+        ];
+        let order: Vec<u32> = (0..lights.len())
+            .map(|i| shader_index(&lights, i))
+            .collect();
+        assert_eq!(order, [4, 0, 5, 1, 2, 3, 6]);
     }
 }

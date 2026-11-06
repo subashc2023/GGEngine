@@ -1,5 +1,5 @@
-// Models' meshes, shaded as glTF's metallic-roughness materials are, by every light of the frame
-// and its sky; or, in a frame without either and for a material that's unlit, drawn unlit, as
+// Models' meshes, shaded as glTF's metallic-roughness materials are, by the frame's lights and its
+// sky; or, in a frame without either and for a material that's unlit, drawn unlit, as
 // KHR_materials_unlit defines it: each fragment its material's base color times its texture's,
 // sampled at the vertices' texture coordinates, times the vertices' color. Each instance is a mesh
 // with its own transform, ID and material, writing its ID where it shows. `ModelVertex` in
@@ -19,6 +19,12 @@
 // which the occlusion map darkens, as it darkens nothing else. The light that casts the frame's
 // shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
 // then the material's emission, as the view shows it, make the color.
+//
+// Each fragment shades by the lights that light everywhere, then by those binned into its cluster
+// of the game's view, as clusters.slang bins them, each in the frame's order: those a cluster
+// leaves out reach none of it, so they'd add nothing. Where it's in no cluster, as what the canvas
+// draws under its own projection may be, or the frame has none, it shades by every light, in the
+// same order.
 //
 // As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
 // which blending would leave as it was, so that a pick there finds what's behind it; it writes no
@@ -223,6 +229,93 @@ float shadowed(Shadows shadows, float3 world, float3 normal, float3 to_light) {
     return 1.0;
 }
 
+// What a fragment's lights shade: where it is, which way it faces, as its normal map has it and
+// before, where it's seen from, and its material's terms.
+struct Surface {
+    float3 world;
+    float3 normal;
+    // Before its normal map, where its shadows are sampled: the map's bumps cast none.
+    float3 surface_normal;
+    float3 view;
+    float n_dot_v;
+    // What it diffuses and reflects head-on, and its roughness squared, squared.
+    float3 diffuse_color;
+    float3 f0;
+    float alpha2;
+};
+
+// The light that the frame's `i`th light reflects toward the view from `surface`, before the
+// exposure.
+float3 reflected(Frame frame, Surface surface, uint i) {
+    Light light = frame.lights[i];
+    float3 radiance = light.color;
+    float3 to_light;
+    if (light.kind == 0) {
+        to_light = -light.direction;
+    } else {
+        float3 between = light.position - surface.world;
+        // Kept off 0 at the light itself.
+        float distance2 = max(dot(between, between), 1e-4);
+        to_light = between * rsqrt(distance2);
+        float reach = sqrt(distance2) * light.inverse_range;
+        float reach2 = reach * reach;
+        float window = saturate(1.0 - reach2 * reach2);
+        radiance *= window * window / distance2;
+        float cone = saturate(dot(light.direction, -to_light) * light.angle_scale
+            + light.angle_offset);
+        radiance *= cone * cone;
+    }
+    float3 normal = surface.normal;
+    float n_dot_l = dot(normal, to_light);
+    if (n_dot_l <= 0.0) {
+        return float3(0.0);
+    }
+    if (i == frame.shadows.light) {
+        radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
+    }
+    float3 view = surface.view;
+    float n_dot_v = surface.n_dot_v;
+    float alpha2 = surface.alpha2;
+    float3 f0 = surface.f0;
+    float3 halfway = normalize(to_light + view);
+    float n_dot_h = saturate(dot(normal, halfway));
+    float v_dot_h = saturate(dot(view, halfway));
+    float3 fresnel = f0 + (1.0 - f0) * pow5(1.0 - v_dot_h);
+    float spread = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+    float distribution = alpha2 / (PI * spread * spread);
+    float visibility = 0.5
+        / (n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2)
+            + n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2));
+    float3 specular = fresnel * distribution * visibility;
+    float3 diffuse = (1.0 - fresnel) * surface.diffuse_color / PI;
+    return (diffuse + specular) * radiance * n_dot_l;
+}
+
+// Where a point is in no cluster.
+static const uint NO_CLUSTER = 0xFFFFFFFF;
+
+// The index of the cluster of the game's view that `world` is in, as `Clusters` has them; or
+// `NO_CLUSTER` in a frame without clusters, or for a point the view doesn't see.
+uint cluster(Clusters clusters, float3 world) {
+    if (clusters.words == 0) {
+        return NO_CLUSTER;
+    }
+    float4 p = float4(world, 1.0);
+    float w = dot(clusters.w, p);
+    float2 tile = float2(dot(clusters.x, p), dot(clusters.y, p)) / w;
+    float depth = dot(clusters.depth, p);
+    float slice = (clusters.perspective != 0 ? log2(depth) : depth) * clusters.slice_scale
+        + clusters.slice_bias;
+    // Written so that NaN, as a point behind a perspective's eye gives, is outside too.
+    bool inside = w > 0.0 && tile.x >= 0.0 && tile.y >= 0.0 && tile.x < float(clusters.across)
+        && tile.y < float(clusters.down) && slice >= 0.0;
+    if (!inside) {
+        return NO_CLUSTER;
+    }
+    uint3 at = uint3(uint2(tile), min(uint(slice), clusters.slices - 1));
+    return (at.z * clusters.down + at.y) * clusters.across + at.x;
+}
+
 [shader("fragment")]
 Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
@@ -293,49 +386,45 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
         sky_f0 = float3(0.04);
     }
     float alpha = roughness * roughness;
-    float alpha2 = alpha * alpha;
     float3 view = normalize(frame.eye.xyz - input.world * frame.eye.w);
-    float n_dot_v = max(dot(normal, view), 1e-4);
+    Surface lit;
+    lit.world = input.world;
+    lit.normal = normal;
+    lit.surface_normal = surface_normal;
+    lit.view = view;
+    lit.n_dot_v = max(dot(normal, view), 1e-4);
+    lit.diffuse_color = diffuse_color;
+    lit.f0 = f0;
+    lit.alpha2 = alpha * alpha;
     float3 light_sum = float3(0.0);
-    for (uint i = 0; i < frame.light_count; i++) {
-        Light light = frame.lights[i];
-        float3 radiance = light.color;
-        float3 to_light;
-        if (light.kind == 0) {
-            to_light = -light.direction;
-        } else {
-            float3 between = light.position - input.world;
-            // Kept off 0 at the light itself.
-            float distance2 = max(dot(between, between), 1e-4);
-            to_light = between * rsqrt(distance2);
-            float reach = sqrt(distance2) * light.inverse_range;
-            float reach2 = reach * reach;
-            float window = saturate(1.0 - reach2 * reach2);
-            radiance *= window * window / distance2;
-            float cone = saturate(dot(light.direction, -to_light) * light.angle_scale
-                + light.angle_offset);
-            radiance *= cone * cone;
-        }
-        float n_dot_l = dot(normal, to_light);
-        if (n_dot_l <= 0.0) {
-            continue;
-        }
-        if (i == frame.shadows.light) {
-            radiance *= shadowed(frame.shadows, input.world, surface_normal, to_light);
-        }
-        float3 halfway = normalize(to_light + view);
-        float n_dot_h = saturate(dot(normal, halfway));
-        float v_dot_h = saturate(dot(view, halfway));
-        float3 fresnel = f0 + (1.0 - f0) * pow5(1.0 - v_dot_h);
-        float spread = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
-        float distribution = alpha2 / (PI * spread * spread);
-        float visibility = 0.5
-            / (n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2)
-                + n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2));
-        float3 specular = fresnel * distribution * visibility;
-        float3 diffuse = (1.0 - fresnel) * diffuse_color / PI;
-        light_sum += (diffuse + specular) * radiance * n_dot_l;
+    Clusters clusters = frame.clusters;
+    for (uint i = 0; i < clusters.everywhere; i++) {
+        light_sum += reflected(frame, lit, i);
     }
+    uint found = cluster(clusters, input.world);
+    if (found == NO_CLUSTER) {
+        for (uint i = clusters.everywhere; i < frame.light_count; i++) {
+            light_sum += reflected(frame, lit, i);
+        }
+    } else {
+        // Read through the lights' address, which they follow, as `Clusters` says why; past them
+        // by a pointer made once, as AMD's driver drops the address of an index past them made in
+        // the loop. A change here needs AMD's ISA of it checked again, under both slangc releases
+        // the build may use.
+        uint* at = (uint*)frame.lights + clusters.bits;
+        uint first = at[2 * found];
+        uint end = at[2 * found + 1];
+        uint words = 2 * clusters.across * clusters.down * clusters.slices + found * clusters.words;
+        for (uint word = first; word < end; word++) {
+            uint bits = at[words + word];
+            while (bits != 0) {
+                uint bit = firstbitlow(bits);
+                bits &= bits - 1;
+                light_sum += reflected(frame, lit, clusters.everywhere + word * 32 + bit);
+            }
+        }
+    }
+    float n_dot_v = lit.n_dot_v;
     if (frame.specular_levels > 0) {
         light_sum += sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
                                view, n_dot_v)

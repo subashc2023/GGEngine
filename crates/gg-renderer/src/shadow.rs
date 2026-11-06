@@ -48,7 +48,7 @@ const FADE_FROM: f32 = 0.9;
 /// how far ahead of the view they reach.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Cascades {
-    /// The light's index among the frame's.
+    /// The light's index among the frame's, as shaders read them.
     light: u32,
     /// From the world to the light's space, which turns with the light alone: its -Z the way the
     /// light shines.
@@ -128,7 +128,7 @@ impl Cascades {
             snapped.extend(center.z).extend(radius)
         });
         Some(Self {
-            light: u32::try_from(light).expect("fewer than 2^32 lights"),
+            light: crate::light::shader_index(lights, light),
             light_from_world,
             spheres,
             view_depth: forward.extend(-forward.dot(viewpoint.position)),
@@ -237,7 +237,8 @@ pub(crate) struct ShadowData {
     maps: [u32; CASCADES],
     /// How far a point is ahead of the view: its dot product with XYZ, plus W.
     view_depth: Vec4,
-    /// The light that casts them, by its index among the frame's; `u32::MAX` for none.
+    /// The light that casts them, by its index among the frame's, as shaders read them; `u32::MAX`
+    /// for none.
     light: u32,
     /// How far ahead of the view they start to fade, and how far they reach.
     fade_from: f32,
