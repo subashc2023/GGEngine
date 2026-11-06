@@ -4844,7 +4844,7 @@ mod tests {
         for primitive in &mut model.primitives {
             let count = primitive.indices.len() as u32;
             primitive.indices.extend_from_within(..);
-            primitive.lods = vec![
+            let levels = vec![
                 gg_renderer::Lod {
                     start: 0,
                     count,
@@ -4856,6 +4856,9 @@ mod tests {
                     error: 0.5,
                 },
             ];
+            let mut mesh = crate::model::model_mesh(primitive);
+            mesh.lods.levels = levels;
+            primitive.mesh = Some(mesh);
         }
         // Each compressed as what it holds says, as the cooker compresses it.
         let images: Vec<_> = (model.images.iter().enumerate())

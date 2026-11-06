@@ -2,23 +2,60 @@
 //! them: the game's view in each of its two passes, against what it sees and, in its second, the
 //! depth pyramid its first pass's depth builds, and the shadows' cascades; and picking each
 //! instance's level of detail there, as `shaders/cull.slang` says, once `shaders/gather.slang` has
-//! gathered their instances; and the indirect draws of what each view keeps, a draw for each run
-//! and level, whatever its instances.
+//! gathered their instances; then the meshlets of the instances kept of a run whose mesh has them
+//! and whose shader draws them, as `shaders/meshlets.slang` says; and the indirect draws of what
+//! each view keeps, a draw for each run and level, whatever its instances, or, of a run drawn by its
+//! meshlets, one of all it keeps of them, through mesh shaders or vertex shaders.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::label;
-use gg_core::math::{Mat4, Vec4};
-use gg_gpu::{BufferId, ComputePipeline, Device, Frame, Graph, ImageId, Pass, PassId, RenderPass};
+use gg_core::math::{Mat3, Mat4, Vec3, Vec4};
+use gg_gpu::{
+    BufferId, Compute, ComputePipeline, Device, Faces, Frame, Graph, ImageId, Pass, PassId,
+    RenderPass,
+};
 
 use super::scene::SceneRun;
-use super::{GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, Push, Uploaded};
+use super::{
+    GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, PlacedMeshlets, Push, Uploaded,
+};
 use crate::shadow::CASCADES;
 use crate::{Draws, MeshDraw};
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
 pub(crate) static GATHER_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gather.spv"));
 pub(crate) static PYRAMID_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pyramid.spv"));
+pub(crate) static MESHLETS_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/meshlets.spv"));
+
+/// What a run drawn by its levels' indices has for its first meshlet: `NO_MESHLETS` in
+/// `shaders/culling.slang`.
+const NO_MESHLETS: u32 = u32::MAX;
+
+/// How many workgroups across a draw of meshlets through a mesh shader takes, as many rows down as
+/// they need: `ACROSS` in `shaders/meshlets.slang` and `shaders/model.slang`.
+const MESHLET_ACROSS: u64 = 32_768;
+
+/// The most meshlets a run's draw in a view takes: as many workgroups as `VK_EXT_mesh_shader` lets
+/// a draw through a mesh shader take on any device, its least `maxMeshWorkGroupTotalCount`, as
+/// `MESHLET_ACROSS` across and 128 rows down. Those a view keeps past it are left out, as of a run
+/// of thousands of instances of a mesh of thousands of meshlets, all in view at their finest.
+const MOST_MESHLETS: u64 = 1 << 22;
+
+// Within the least `maxMeshWorkGroupCount` across and down `VK_EXT_mesh_shader` allows.
+const _: () = assert!(MESHLET_ACROSS <= 65_535 && MOST_MESHLETS / MESHLET_ACROSS <= 65_535);
+
+/// The words of a run's draw of its meshlets in a view, before the meshlets it keeps, two words
+/// each: as `offsets_main` in `shaders/cull.slang` lays them out, a `VkDrawIndirectCommand`, a
+/// `VkDrawMeshTasksIndirectCommandEXT` and how many it kept.
+const MESHLET_DRAW: u64 = 8;
+
+/// The words a run of `count` instances of a mesh whose meshlets are `placed` takes in each view's
+/// meshlets: its draw, and room for every meshlet of its largest level, of every instance, up to
+/// [`MOST_MESHLETS`].
+fn meshlet_words(placed: &PlacedMeshlets, count: u64) -> u64 {
+    MESHLET_DRAW + 2 * (count * u64::from(placed.most)).min(MOST_MESHLETS)
+}
 
 /// A copy's `source_params` for one from the scene: `SCENE` in `shaders/gather.slang`.
 const SCENE: u32 = u32::MAX;
@@ -72,6 +109,7 @@ pub(crate) struct Culling {
     choose: ComputePipeline,
     offsets: ComputePipeline,
     write: ComputePipeline,
+    meshlets: ComputePipeline,
     /// What builds the depth pyramid's first level, from the view's depth, and each after it.
     pyramid_depth: ComputePipeline,
     pyramid_reduce: ComputePipeline,
@@ -90,8 +128,13 @@ pub(crate) struct Culling {
     instances: u32,
     params_words: u32,
     /// What the first pass's culling pushed, which the second's pushes but for its view and the
-    /// pyramid; `None` in a frame that culls no run.
+    /// pyramid; `None` in a frame that culls no run. Its meshlets', if it culls any run by them.
     pushed: Option<CullPush>,
+    meshlets_pushed: Option<MeshletPush>,
+    /// The words of each view's meshlets the frame plans, which a run drawn by its meshlets past
+    /// them is drawn by its levels' indices instead, as of a mesh that came to be drawable after
+    /// the frame planned its graph.
+    meshlet_budget: u64,
 }
 
 impl Culling {
@@ -103,6 +146,12 @@ impl Culling {
             choose: pipeline("cull choose", c"choose_main")?,
             offsets: pipeline("cull offsets", c"offsets_main")?,
             write: pipeline("cull write", c"write_main")?,
+            meshlets: ComputePipeline::new(
+                device,
+                "cull meshlets",
+                MESHLETS_SPIRV,
+                c"meshlets_main",
+            )?,
             pyramid_depth: pyramid("depth pyramid", c"depth_main")?,
             pyramid_reduce: pyramid("depth pyramid levels", c"reduce_main")?,
             runs: Vec::new(),
@@ -115,6 +164,8 @@ impl Culling {
             instances: 0,
             params_words: 0,
             pushed: None,
+            meshlets_pushed: None,
+            meshlet_budget: 0,
         })
     }
 
@@ -126,6 +177,11 @@ impl Culling {
     /// The index among the frame's culled runs of the scene's `run`th, if it's culled.
     pub(super) fn of_scene(&self, run: usize) -> Option<usize> {
         Some((*self.of_scene.get(run)?)? as usize)
+    }
+
+    /// Whether the `run`th of the frame's culled runs is drawn by its meshlets.
+    pub(super) fn by_meshlets(&self, run: usize) -> bool {
+        self.runs[run].meshlets != NO_MESHLETS
     }
 
     /// The addresses of the arrays of the instances `views` views keep, in the graph's buffer at
@@ -145,6 +201,9 @@ pub(crate) struct Bounds {
     instances: u64,
     blocks: u64,
     params_words: u64,
+    /// The words of each view's meshlets, as [`meshlet_words`] counts them for each run drawn by
+    /// them.
+    meshlet_words: u64,
 }
 
 impl Bounds {
@@ -156,6 +215,12 @@ impl Bounds {
     /// Each view's room for its commands: a run's levels' each, at most [`MAX_LEVELS`].
     fn commands_bytes(&self) -> u64 {
         self.runs * MAX_LEVELS as u64 * COMMAND
+    }
+
+    /// Where the meshlets of the view in slot `slot`, of `views`, start among the commands, in
+    /// words: after every view's commands, each view's after the one before's.
+    fn meshlets_at(&self, views: u64, slot: u64) -> u64 {
+        views * self.commands_bytes() / 4 + slot * self.meshlet_words
     }
 
     /// Each view's room for its instances' places, then its blocks' counts of each level.
@@ -192,7 +257,8 @@ pub(crate) struct CullPlan {
     gathered: BufferId,
     /// The instances each view keeps, as [`Culling::kept`] lays them out.
     instances: BufferId,
-    /// Each view's commands.
+    /// Each view's commands, then each view's meshlets: each run's draw of them, and those it
+    /// keeps.
     commands: BufferId,
     /// Whether each instance was unhidden, kept from frame to frame, then each view's instances'
     /// places and its blocks' counts.
@@ -203,6 +269,7 @@ pub(crate) struct CullPlan {
     choose: PassId,
     offsets: PassId,
     write: PassId,
+    meshlets: PassId,
     /// The second pass's, once [`CullPlan::second_pass`] has declared it.
     second: Option<SecondPass>,
 }
@@ -218,6 +285,7 @@ struct SecondPass {
     choose: PassId,
     offsets: PassId,
     write: PassId,
+    meshlets: PassId,
     read: PassId,
 }
 
@@ -232,7 +300,8 @@ impl CullPlan {
         let count = views as u64;
         let gathered = graph.buffer("gathered instances", bounds.kept_bytes());
         let instances = graph.buffer("culled instances", count * bounds.kept_bytes());
-        let commands = graph.buffer("culled draws", count * bounds.commands_bytes());
+        let commands_bytes = bounds.commands_bytes() + bounds.meshlet_words * 4;
+        let commands = graph.buffer("culled draws", count * commands_bytes);
         let scratch = graph.buffer(
             "culling",
             bounds.instances * 4 + count * bounds.scratch_bytes(),
@@ -256,6 +325,12 @@ impl CullPlan {
             .read_buffer(scratch)
             .write_buffer(instances)
             .add();
+        let meshlets = (graph.compute(label!("cull meshlets")).on_compute_queue())
+            .read_buffer(gathered)
+            .read_buffer(scratch)
+            .write_buffer(commands)
+            .write_buffer(counts)
+            .add();
         Self {
             views,
             bounds,
@@ -268,6 +343,7 @@ impl CullPlan {
             choose,
             offsets,
             write,
+            meshlets,
             second: None,
         }
     }
@@ -306,6 +382,13 @@ impl CullPlan {
             .read_buffer(self.scratch)
             .write_buffer(self.instances)
             .add();
+        let meshlets = (graph.compute(label!("cull meshlets second")))
+            .read_buffer(self.gathered)
+            .read_buffer(self.scratch)
+            .read_buffer(pyramid)
+            .write_buffer(self.commands)
+            .write_buffer(self.counts)
+            .add();
         let read = graph.read_back(label!("read culled counts"), self.counts);
         self.second = Some(SecondPass {
             depth,
@@ -315,6 +398,7 @@ impl CullPlan {
             choose,
             offsets,
             write,
+            meshlets,
             read,
         });
     }
@@ -324,9 +408,15 @@ impl CullPlan {
         self.views - 1
     }
 
-    /// `pass`, taking the instances and commands of what the culling keeps.
+    /// `pass`, taking the instances and commands of what the culling keeps, and the meshlets it
+    /// keeps of the runs drawn by them, which follow the commands.
     pub(crate) fn drawn<'g>(&self, pass: RenderPass<'g>) -> RenderPass<'g> {
         pass.read_buffer(self.instances).indirect(self.commands)
+    }
+
+    /// Where the meshlets of the view in slot `slot` start among the commands, in words.
+    fn meshlets_at(&self, slot: usize) -> u64 {
+        self.bounds.meshlets_at(self.views as u64, slot as u64)
     }
 }
 
@@ -355,7 +445,7 @@ pub(crate) fn counts(read: &[u8]) -> Option<crate::DrawCounts> {
     })
 }
 
-/// A run, as `Run` in `shaders/cull.slang` has it.
+/// A run, as `Run` in `shaders/culling.slang` has it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuRun {
@@ -371,6 +461,10 @@ struct GpuRun {
     commands: u32,
     blocks: u32,
     block_count: u32,
+    meshlets: u32,
+    meshlet_draw: u32,
+    meshlet_room: u32,
+    cones: u32,
 }
 
 /// What the gather copies of a run, as `Copy` in `shaders/gather.slang` has it.
@@ -402,16 +496,18 @@ struct GatherPush {
     groups: u32,
 }
 
-/// A level of detail, as `Level` in `shaders/cull.slang` has it.
+/// A level of detail, as `Level` in `shaders/culling.slang` has it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuLevel {
     start: u32,
     count: u32,
     error: f32,
+    meshlet_first: u32,
+    meshlet_count: u32,
 }
 
-/// A view, as `View` in `shaders/cull.slang` has it.
+/// A view, as `View` in `shaders/culling.slang` has it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuView {
@@ -427,12 +523,13 @@ struct GpuView {
     width: u32,
     height: u32,
     pyramid_levels: u32,
-    unused: u32,
+    meshlets: u32,
+    eye: Vec4,
 }
 
 impl GpuView {
-    /// `view`, in slot `slot`, keeping as `keep` says.
-    fn new(view: &CullView, slot: usize, keep: Keep) -> Self {
+    /// `view`, in slot `slot` of `plan`'s, keeping as `keep` says.
+    fn new(view: &CullView, plan: &CullPlan, slot: usize, keep: Keep) -> Self {
         let clip = &view.clip_from_world;
         let lod = LodView::new(clip, view.size);
         let [width, height] = view.size;
@@ -449,9 +546,50 @@ impl GpuView {
             width,
             height,
             pyramid_levels: pyramid(view.size).0 as u32,
-            unused: 0,
+            meshlets: plan.meshlets_at(slot) as u32,
+            eye: eye(clip),
         }
     }
+}
+
+/// Where the view `clip_from_world` takes the world into the clip space of sees from, and 1, under
+/// perspective, where clip W is 0 at the camera; or, without it, the way it looks, and 0: the way
+/// along which clip X and Y stay put and depth falls, as reversed depth falls away from the camera.
+fn eye(clip_from_world: &Mat4) -> Vec4 {
+    let [x, y, z, w] = [0, 1, 2, 3].map(|row| clip_from_world.row(row));
+    if w.truncate() != Vec3::ZERO {
+        // Where clip X, Y and W are all 0.
+        let rows = Mat3::from_cols(x.truncate(), y.truncate(), w.truncate()).transpose();
+        let at = rows.inverse() * -Vec3::new(x.w, y.w, w.w);
+        return at.extend(1.0);
+    }
+    let way = x.truncate().cross(y.truncate()).normalize_or_zero();
+    let way = if way.dot(z.truncate()) > 0.0 {
+        -way
+    } else {
+        way
+    };
+    way.extend(0.0)
+}
+
+/// What the culling of meshlets pushes, as `Push` in `shaders/meshlets.slang` has it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+struct MeshletPush {
+    runs: u64,
+    blocks: u64,
+    levels: u64,
+    views: u64,
+    transforms: u64,
+    scratch: u64,
+    counts: u64,
+    pyramid: u64,
+    bounds: u64,
+    commands: u64,
+    run_count: u32,
+    block_count: u32,
+    instances: u32,
+    unused: u32,
 }
 
 /// What the culling pushes, as `Push` in `shaders/cull.slang` has it: every address it takes, as
@@ -508,16 +646,14 @@ fn planes(clip_from_world: &Mat4, clamped: bool) -> [Vec4; 6] {
 
 impl MeshPass {
     /// The most a frame's culling of `draws` and the scene takes, of their runs whose shaders are
-    /// opaque, by the shaders the pass has, whatever their meshes; `None` if no run's is.
+    /// opaque, by the shaders the pass has, whatever their meshes, and the meshlets of those drawn
+    /// by them, of the meshes drawable as it's asked; `None` if no run's shader is opaque.
     pub(crate) fn cull_bounds(&self, draws: &Draws) -> Option<Bounds> {
         let mut bounds = Bounds::default();
-        let frame = draws
-            .runs
-            .iter()
-            .map(|run| (run.shader, run.instances.len()));
+        let frame = (draws.runs.iter()).map(|run| (run.mesh, run.shader, run.instances.len()));
         let scene = self.scene.runs().iter();
-        let scene = scene.map(|run| (run.shader, run.count as usize));
-        for (shader, count) in frame.chain(scene) {
+        let scene = scene.map(|run| (run.mesh, run.shader, run.count as usize));
+        for (mesh, shader, count) in frame.chain(scene) {
             let Some(Some(shader)) = self.shaders.get(shader as usize) else {
                 continue;
             };
@@ -527,6 +663,11 @@ impl MeshPass {
                 bounds.instances += count;
                 bounds.blocks += count.div_ceil(BLOCK);
                 bounds.params_words += count * (shader.params_size / 4) as u64;
+                let mesh = self.meshes.get(mesh as usize).and_then(Held::ready);
+                let placed = mesh.and_then(|mesh| mesh.meshlets.as_ref());
+                if let (Some(placed), Some(_)) = (placed, &shader.meshlets) {
+                    bounds.meshlet_words += meshlet_words(placed, count);
+                }
             }
         }
         (bounds.runs > 0).then_some(bounds)
@@ -567,6 +708,8 @@ impl MeshPass {
         culling.of_run.clear();
         culling.of_scene.clear();
         culling.pushed = None;
+        culling.meshlets_pushed = None;
+        culling.meshlet_budget = plan.bounds.meshlet_words;
         let mut totals = Totals::default();
         // The scene's first, so that where each of its instances is gathered, which what was
         // unhidden is kept by, doesn't move as the draws change.
@@ -588,6 +731,7 @@ impl MeshPass {
         let Totals {
             instances,
             params_words,
+            meshlet_words,
             ..
         } = totals;
         // What the GPU writes stays within what the graph's buffers were made for.
@@ -607,14 +751,18 @@ impl MeshPass {
             drop(frame.compute(plan.choose));
             drop(frame.compute(plan.offsets));
             drop(frame.compute(plan.write));
+            drop(frame.compute(plan.meshlets));
             return Ok(false);
         }
         // In their slots: the view's first pass, the cascades, then its second.
-        culling.views.push(GpuView::new(&seen, FIRST, Keep::Shown));
+        culling
+            .views
+            .push(GpuView::new(&seen, plan, FIRST, Keep::Shown));
         let cascades = cascades.iter().enumerate();
         (culling.views)
-            .extend(cascades.map(|(i, cascade)| GpuView::new(cascade, 1 + i, Keep::All)));
-        (culling.views).push(GpuView::new(&seen, plan.second(), Keep::Unhidden));
+            .extend(cascades.map(|(i, cascade)| GpuView::new(cascade, plan, 1 + i, Keep::All)));
+        let second = GpuView::new(&seen, plan, plan.second(), Keep::Unhidden);
+        culling.views.push(second);
         let [kept_transforms, kept_ids, kept_params] =
             culling.kept(frame.address(plan.instances), plan.views as u64);
         // Laid out as one view's kept instances are, each run's at its `output`.
@@ -674,6 +822,27 @@ impl MeshPass {
             plan.views - 1,
         );
         culling.pushed = Some(push);
+        let mut pass = frame.compute(plan.meshlets);
+        if meshlet_words > 0 {
+            let meshlets = MeshletPush {
+                runs: push.runs,
+                blocks: push.blocks,
+                levels: push.levels,
+                views: push.views,
+                transforms,
+                scratch,
+                counts,
+                pyramid: 0,
+                bounds: self.meshlet_table.address(),
+                commands,
+                run_count: push.run_count,
+                block_count: push.block_count,
+                instances,
+                unused: 0,
+            };
+            culling.meshlets_dispatch(&mut pass, &meshlets, plan.views - 1);
+            culling.meshlets_pushed = Some(meshlets);
+        }
         Ok(true)
     }
 
@@ -698,6 +867,7 @@ impl MeshPass {
             drop(frame.compute(second.choose));
             drop(frame.compute(second.offsets));
             drop(frame.compute(second.write));
+            drop(frame.compute(second.meshlets));
             frame.read_back(second.read)?;
             return Ok(());
         };
@@ -732,13 +902,24 @@ impl MeshPass {
             target += target_size[0] * target_size[1];
         }
         // The second pass's view alone, the last.
+        let view = (plan.second() * size_of::<GpuView>()) as u64;
         let push = CullPush {
-            views: push.views + (plan.second() * size_of::<GpuView>()) as u64,
+            views: push.views + view,
             pyramid,
             ..push
         };
         let passes = [second.choose, second.offsets, second.write];
         culling.dispatch(frame, passes, &push, 1);
+        let mut pass = frame.compute(second.meshlets);
+        if let Some(meshlets) = culling.meshlets_pushed {
+            let meshlets = MeshletPush {
+                views: meshlets.views + view,
+                pyramid,
+                ..meshlets
+            };
+            culling.meshlets_dispatch(&mut pass, &meshlets, 1);
+        }
+        drop(pass);
         frame.read_back(second.read)?;
         Ok(())
     }
@@ -771,6 +952,21 @@ impl MeshPass {
             params,
             ..push
         };
+        if run.meshlets != NO_MESHLETS {
+            // Its draw's eight words, then the meshlets it keeps, which the shader reads.
+            let draw = (plan.meshlets_at(slot as usize) + u64::from(run.meshlet_draw)) * 4;
+            let push = Push {
+                meshlets: pass.address(plan.commands) + draw,
+                ..push
+            };
+            pass.push_constants(bytemuck::bytes_of(&push));
+            if self.device.mesh_shaders() {
+                pass.draw_mesh_tasks_indirect(plan.commands, draw + 16);
+            } else {
+                pass.draw_indirect(plan.commands, draw);
+            }
+            return;
+        }
         pass.push_constants(bytemuck::bytes_of(&push));
         let runs = culling.runs.len() as u64;
         let commands = (slot * runs * MAX_LEVELS as u64 + u64::from(run.commands)) * COMMAND;
@@ -789,18 +985,21 @@ enum Source {
     Scene { first: u32 },
 }
 
-/// The culled runs' instances, the words of their parameters, and their commands, so far.
+/// The culled runs' instances, the words of their parameters, their commands, and the words of
+/// each view's meshlets of those drawn by them, so far.
 #[derive(Default)]
 struct Totals {
     instances: u32,
     params_words: u32,
     commands: u32,
+    meshlet_words: u32,
 }
 
-/// A run that may be culled: its mesh and shader.
+/// A run that may be culled: its mesh and shader, and the faces it draws.
 trait Culled {
     fn mesh(&self) -> u32;
     fn shader(&self) -> u32;
+    fn faces(&self) -> Faces;
 }
 
 impl Culled for crate::draws::Run {
@@ -811,6 +1010,10 @@ impl Culled for crate::draws::Run {
     fn shader(&self) -> u32 {
         self.shader
     }
+
+    fn faces(&self) -> Faces {
+        self.faces
+    }
 }
 
 impl Culled for SceneRun {
@@ -820,6 +1023,10 @@ impl Culled for SceneRun {
 
     fn shader(&self) -> u32 {
         self.shader
+    }
+
+    fn faces(&self) -> Faces {
+        self.faces
     }
 }
 
@@ -843,9 +1050,19 @@ impl Culling {
         }
     }
 
+    /// Records `pass`, the culling of meshlets of a pass of the culling, pushing `push`, for the
+    /// first `views` of the views it points to.
+    fn meshlets_dispatch(&self, pass: &mut Compute<'_, '_>, push: &MeshletPush, views: usize) {
+        let groups = u64::from(push.block_count).min(MOST_GROUPS) as u32;
+        pass.set_pipeline(&self.meshlets);
+        pass.push_constants(bytemuck::bytes_of(push));
+        pass.dispatch([groups, views as u32, 1]);
+    }
+
     /// Adds `run`, of `count` instances at `source`, to the runs culled, its blocks and their
     /// copies, if its mesh is drawable and its shader opaque, and returns its index among them;
-    /// `None` if it isn't culled.
+    /// `None` if it isn't culled. A run whose mesh has meshlets and whose shader draws them is
+    /// drawn by them, with room for them in each view's meshlets, if the frame planned it.
     ///
     /// # Panics
     ///
@@ -870,6 +1087,13 @@ impl Culling {
         let GpuMesh { lods, .. } = mesh;
         let count =
             u32::try_from(count).expect("a run's instances fit the 32-bit count Vulkan takes");
+        // Drawn by its meshlets where the frame planned room for them.
+        let placed = (mesh.meshlets.as_ref()).filter(|_| shader.meshlets.is_some());
+        let words = placed.map(|placed| meshlet_words(placed, u64::from(count)));
+        let placed = placed.filter(|_| {
+            let words = words.unwrap_or_default();
+            u64::from(totals.meshlet_words) + words <= self.meshlet_budget
+        });
         let words = (shader.params_size / 4) as u32;
         let (first_block, block_count) = (self.blocks.len(), count.div_ceil(BLOCK as u32));
         let run_index = self.runs.len() as u32;
@@ -877,6 +1101,7 @@ impl Culling {
             instances,
             params_words,
             commands,
+            meshlet_words,
         } = *totals;
         for block in 0..block_count {
             let first = block * BLOCK as u32;
@@ -902,11 +1127,21 @@ impl Culling {
             });
         }
         let first_level = self.levels.len();
-        self.levels.extend(lods.levels.iter().map(|lod| GpuLevel {
-            start: lod.start,
-            count: lod.count,
-            error: lod.error,
-        }));
+        let meshlets_of = |level: usize| placed.map_or([0, 0], |placed| placed.levels[level]);
+        self.levels
+            .extend(lods.levels.iter().enumerate().map(|(i, lod)| {
+                let [meshlet_first, meshlet_count] = meshlets_of(i);
+                GpuLevel {
+                    start: lod.start,
+                    count: lod.count,
+                    error: lod.error,
+                    meshlet_first,
+                    meshlet_count,
+                }
+            }));
+        let room = placed.map_or(0, |placed| {
+            (u64::from(count) * u64::from(placed.most)).min(MOST_MESHLETS) as u32
+        });
         // Gathered as one view's are kept: each run's at its `output`.
         self.runs.push(GpuRun {
             first: instances,
@@ -921,11 +1156,17 @@ impl Culling {
             commands,
             blocks: first_block as u32,
             block_count,
+            meshlets: placed.map_or(NO_MESHLETS, |placed| placed.first),
+            meshlet_draw: meshlet_words,
+            meshlet_room: room,
+            cones: u32::from(run.faces() != Faces::Both),
         });
+        let drawn = placed.map_or(0, |_| MESHLET_DRAW as u32 + 2 * room);
         *totals = Totals {
             instances: instances + count,
             params_words: params_words + count * words,
             commands: commands + lods.levels.len() as u32,
+            meshlet_words: meshlet_words + drawn,
         };
         Some(run_index)
     }
@@ -975,6 +1216,42 @@ mod tests {
         );
         let clamped = planes(&clip, true);
         assert_eq!(clamped[4], Vec4::W, "no plane at its near side");
+    }
+
+    /// A view under perspective sees from its camera, and one without looks the way its camera
+    /// faces, whatever it's turned to, as meshlets' cones are tested from.
+    #[test]
+    fn a_view_sees_from_its_camera_or_looks_its_way() {
+        let rotation = Quat::from_euler(gg_core::math::EulerRot::YXZ, 0.7, -0.4, 0.2);
+        let position = Vec3::new(3.0, -2.0, 5.5);
+        let seen = |projection| {
+            let viewpoint = Viewpoint {
+                position,
+                rotation,
+                projection,
+            };
+            eye(&viewpoint.view_projection(1.5))
+        };
+        let perspective = seen(Projection::Perspective {
+            fov: std::f32::consts::FRAC_PI_3,
+            near: 0.1,
+        });
+        assert!(perspective.w == 1.0, "{perspective}");
+        assert!(
+            perspective.truncate().distance(position) < 1e-4,
+            "{perspective}"
+        );
+        let orthographic = seen(Projection::Orthographic {
+            height: 4.0,
+            near: -10.0,
+            far: 10.0,
+        });
+        let ahead = rotation * Vec3::NEG_Z;
+        assert!(orthographic.w == 0.0, "{orthographic}");
+        assert!(
+            orthographic.truncate().distance(ahead) < 1e-5,
+            "{orthographic}"
+        );
     }
 
     /// The counts read back come apart into the draws, the instances and the 64-bit triangles.

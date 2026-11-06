@@ -92,7 +92,7 @@ const DIM_2D: u32 = 1;
 const DIM_CUBE: u32 = 3;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
-const PUSHED: [(u32, &str, Pushed); 7] = [
+const PUSHED: [(u32, &str, Pushed); 8] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -128,6 +128,11 @@ const PUSHED: [(u32, &str, Pushed); 7] = [
         "the frame's data's address",
         Pushed::Frame,
     ),
+    (
+        offset_of!(Push, meshlets) as u32,
+        "the address of a draw of meshlets",
+        Pushed::Meshlets,
+    ),
 ];
 
 /// What a member of a [`Push`] is.
@@ -147,6 +152,9 @@ enum Pushed {
     View,
     /// The address of the frame's data, a [`FrameData`].
     Frame,
+    /// The address of a draw of meshlets, uint2s, which the model shaders' meshlet geometry reads:
+    /// 0 for any other draw.
+    Meshlets,
 }
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
@@ -653,10 +661,10 @@ impl Module {
                 }
                 // Not a struct: a P* params of 8 bytes declared where the IDs go would read as
                 // their address otherwise.
-                Pushed::Ids => {
-                    let ids = self.pointee(ty, PHYSICAL_STORAGE_BUFFER);
+                Pushed::Ids | Pushed::Meshlets => {
+                    let pointee = self.pointee(ty, PHYSICAL_STORAGE_BUFFER);
                     let stride = self.decoration(ty, ARRAY_STRIDE);
-                    let uint2 = ids.is_some_and(|ty| self.signed_int2(ty) == Some(false));
+                    let uint2 = pointee.is_some_and(|ty| self.signed_int2(ty) == Some(false));
                     if !uint2 || stride.is_some_and(|stride| stride != 8) {
                         breaches.push(format!(
                             "its push constants' {name} isn't the address of uint2s, where the \

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use bevy_mikktspace::{Geometry, Ops, TangentSpace};
 use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Lod, Map, Workflow, Wrap};
+use gg_renderer::{AlphaMode, Map, ModelMesh, Workflow, Wrap};
 
 use crate::image::{self, Image};
 use crate::package::Files;
@@ -91,9 +91,11 @@ pub struct Primitive {
     pub tangents: Vec<[f32; 4]>,
     /// Three for each triangle; 0..count where the primitive has none.
     pub indices: Vec<u32>,
-    /// Its levels of detail among its indices, finest first, as the cooker makes them, the first
-    /// its own triangles; none as glTF is read, which draws all of its indices.
-    pub lods: Vec<Lod>,
+    /// Its mesh as the cooker made it, its triangles optimized, with levels of detail and
+    /// meshlets, and its vertices packed, as a run from a package reads it in place of the
+    /// vertices and indices above, which are then empty; none as glTF is read, which a run packs
+    /// as it adds the primitive.
+    pub mesh: Option<ModelMesh>,
     pub(crate) material: Material,
 }
 
@@ -174,7 +176,7 @@ impl Primitive {
             normals: Vec::new(),
             tangents: Vec::new(),
             indices: Vec::new(),
-            lods: self.lods.clone(),
+            mesh: self.mesh.clone(),
             material: self.material,
         }
     }
@@ -972,7 +974,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             normals: Vec::new(),
             tangents: Vec::new(),
             indices,
-            lods: Vec::new(),
+            mesh: None,
             material,
         };
         // Tangents without normals are ignored, as glTF says, as the primitive is drawn flat; but
@@ -2197,7 +2199,7 @@ pub(crate) mod tests {
                     normals: front.clone(),
                     tangents: unused.clone(),
                     indices: vec![0, 1, 2],
-                    lods: Vec::new(),
+                    mesh: None,
                     material: Material {
                         color: [1.0, 0.5, 0.25, 1.0],
                         workflow: Workflow::MetallicRoughness {
@@ -2225,7 +2227,7 @@ pub(crate) mod tests {
                     normals: back,
                     tangents: vec![[1.0, 0.0, 0.0, -1.0]; 3],
                     indices: vec![0, 1, 2],
-                    lods: Vec::new(),
+                    mesh: None,
                     material: Material {
                         normal_scale: 0.5,
                         textures: [
@@ -2252,7 +2254,7 @@ pub(crate) mod tests {
                     normals: front,
                     tangents: unused,
                     indices: vec![0, 1, 2],
-                    lods: Vec::new(),
+                    mesh: None,
                     material: Material::default(),
                 },
             ]
@@ -2374,7 +2376,7 @@ pub(crate) mod tests {
             normals: vec![[0.0, 0.0, -1.0]; 3],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
-            lods: Vec::new(),
+            mesh: None,
             material: Material {
                 textures: [
                     Some(Sampling {

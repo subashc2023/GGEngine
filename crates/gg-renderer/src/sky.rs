@@ -155,6 +155,7 @@ impl SkyPass {
                     name: "sky",
                     spirv: SPIRV,
                     vertex: c"vertex_main",
+                    mesh: false,
                     fragment: Some(c"fragment_main"),
                     format: Format::HDR.with_ids().with_depth(),
                     // Drawn first, at depth 0, which the cleared depth passes, writing none.

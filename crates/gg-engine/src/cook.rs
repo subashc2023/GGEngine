@@ -7,7 +7,10 @@
 use std::path::Path;
 
 use gg_core::Result;
-pub use gg_renderer::{Lod, Map, Mipmaps, Texels, mip_sizes};
+pub use gg_renderer::{
+    Lod, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Meshlet, Meshlets, Mipmaps, ModelMesh,
+    ModelVertex, Texels, mip_sizes,
+};
 
 pub use crate::gltf::{Imported, Primitive};
 pub use crate::image::{Compressed, Format, Image, decode_ktx2};
@@ -62,6 +65,12 @@ pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
 /// do.
 pub fn texels(model: &Imported, image: usize) -> Texels {
     crate::model::texels(&model.primitives, image)
+}
+
+/// `primitive`'s vertices, as glTF has them, packed as a run packs them, with its indices, of
+/// `levels` among them, as a game's package holds them; without meshlets, which the cooker cuts.
+pub fn pack(primitive: &Primitive, levels: Vec<Lod>) -> ModelMesh {
+    crate::model::pack(primitive, levels)
 }
 
 /// `image`'s RGBA8, then the rest of its full chain of mip levels, smallest last, made as `texels`

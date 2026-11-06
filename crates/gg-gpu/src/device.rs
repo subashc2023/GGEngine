@@ -190,6 +190,8 @@ pub struct Device {
     device_local_heaps: u32,
     /// RenderDoc, for a device it can capture: one its layer is active on.
     renderdoc: Option<&'static RenderDoc>,
+    /// The mesh shaders' functions, for a device that draws through them.
+    mesh_shader_fn: Option<ext::mesh_shader::Device>,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -209,7 +211,12 @@ impl Device {
     /// Opens the best GPU that supports Vulkan 1.4 and, given a surface, can present to it.
     /// Given `gpu`, only GPUs whose names contain it, ignoring case, are considered. Discrete
     /// GPUs come first, then integrated ones; among equals, the one with the most memory. It
-    /// uploads by `uploads`, if given, and otherwise by the best way the GPU has.
+    /// uploads by `uploads`, if given, and otherwise by the best way the GPU has; and draws through
+    /// mesh shaders as `mesh_shaders` says, if given, and otherwise if the GPU has them.
+    ///
+    /// Fails with `gpu.no_device` if no GPU can run the engine, `gpu.no_upload_path` if the GPU
+    /// hasn't the upload path asked for, and `gpu.no_mesh_shaders` if it hasn't the mesh shaders
+    /// asked for.
     ///
     /// # Panics
     ///
@@ -219,6 +226,7 @@ impl Device {
         gpu: Option<&str>,
         surface: Option<&Surface>,
         uploads: Option<UploadPath>,
+        mesh_shaders: Option<bool>,
     ) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
         if let Some(surface) = surface {
@@ -249,6 +257,7 @@ impl Device {
         }
         let chosen = pick(&candidates, gpu)?;
         let uploads = chosen.upload_path(uploads)?;
+        let mesh_shaders = chosen.mesh_shaders(mesh_shaders)?;
         let physical = chosen.physical;
         let graphics = chosen
             .graphics
@@ -287,6 +296,9 @@ impl Device {
         if chosen.memory_budget {
             extensions.push(vk::EXT_MEMORY_BUDGET_NAME.as_ptr());
         }
+        if mesh_shaders {
+            extensions.push(vk::EXT_MESH_SHADER_NAME.as_ptr());
+        }
         // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
             .timeline_semaphore(true)
@@ -297,6 +309,7 @@ impl Device {
             .synchronization2(true);
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
+        let mut mesh_shader = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
         // For models' textures, which recede from the camera; for passes that render IDs beside
         // colors, whose targets blend apart, since integers don't blend; for games' cooked
         // textures, which are compressed as BC7; for compute shaders, which pick their storage
@@ -319,9 +332,12 @@ impl Device {
         if uploads == UploadPath::HostImageCopy {
             create_info = create_info.push_next(&mut host_image_copy);
         }
+        if mesh_shaders {
+            create_info = create_info.push_next(&mut mesh_shader);
+        }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones, BC texture compression, depth clamp and host image
-        // copy, which `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy,
+        // features but the bindless ones, BC texture compression, depth clamp, host image copy and
+        // mesh shaders, which `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy,
         // independent blending, indexing storage images dynamically and indirect draws' first
         // instance, in vk.xml's feature requirements), and the create info's pointers outlive the
         // call.
@@ -396,6 +412,8 @@ impl Device {
                 .then(|| khr::calibrated_timestamps::Device::new(instance.raw(), &raw)),
             device_local_heaps,
             renderdoc,
+            mesh_shader_fn: mesh_shaders
+                .then(|| ext::mesh_shader::Device::new(instance.raw(), &raw)),
             debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
             instance: instance.clone(),
@@ -431,6 +449,7 @@ impl Device {
             vram_mib = chosen.vram_mib,
             uploads = %uploads,
             compute_queue = compute.is_some(),
+            mesh_shaders,
             memory_budget = chosen.memory_budget,
             "GPU selected"
         );
@@ -446,6 +465,17 @@ impl Device {
     /// How the device uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.uploads
+    }
+
+    /// Whether the device draws through mesh shaders, which pipelines whose geometry is a mesh
+    /// shader need.
+    pub fn mesh_shaders(&self) -> bool {
+        self.mesh_shader_fn.is_some()
+    }
+
+    /// The mesh shaders' functions, for a device that draws through them.
+    pub(crate) fn mesh_shader_fn(&self) -> Option<&ext::mesh_shader::Device> {
+        self.mesh_shader_fn.as_ref()
     }
 
     /// How much of the GPU's own memory, its device-local heaps', is in use, by this process and

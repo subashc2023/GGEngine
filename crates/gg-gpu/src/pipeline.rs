@@ -161,6 +161,10 @@ pub struct GraphicsDesc<'a> {
     /// textures and samplers. Vulkan checks none of it; validation does in debug builds.
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
+    /// Whether `vertex` is a mesh shader's entry point, in place of a vertex shader's, which only
+    /// a device that draws through mesh shaders takes ([`Device::mesh_shaders`]): the pipeline
+    /// draws through [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect).
+    pub mesh: bool,
     /// `None` for a pipeline that draws depth alone, all of each triangle, as a shadow map's
     /// opaque casters are drawn.
     pub fragment: Option<&'a CStr>,
@@ -189,6 +193,8 @@ pub struct Pipeline {
     device: Arc<Device>,
     raw: vk::Pipeline,
     format: Format,
+    /// Whether its geometry is a mesh shader.
+    mesh: bool,
 }
 
 impl Pipeline {
@@ -198,10 +204,15 @@ impl Pipeline {
     ///
     /// # Panics
     ///
-    /// If it writes, biases or clamps depth for targets without it, or it has no fragment shader
-    /// but its targets have colors.
+    /// If it writes, biases or clamps depth for targets without it, it has no fragment shader but
+    /// its targets have colors, or its geometry is a mesh shader and the device draws through
+    /// none.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
+        assert!(
+            !desc.mesh || device.mesh_shaders(),
+            "a pipeline of a mesh shader is made only on a device that draws through them"
+        );
         assert!(
             depth || !(desc.depth_write || desc.depth_bias != 0.0 || desc.depth_clamp),
             "a pipeline writes, biases and clamps depth only for targets that have it"
@@ -213,8 +224,13 @@ impl Pipeline {
         let raw_device = device.raw();
         let module = shader_module(device, desc.name, desc.spirv)?;
 
+        let geometry = if desc.mesh {
+            vk::ShaderStageFlags::MESH_EXT
+        } else {
+            vk::ShaderStageFlags::VERTEX
+        };
         let vertex = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
+            .stage(geometry)
             .module(module)
             .name(desc.vertex);
         let fragment = desc.fragment.map(|entry| {
@@ -287,7 +303,9 @@ impl Pipeline {
         // SAFETY: the module, the layout and the pipeline cache, if the device has one, are live,
         // and the infos outlive the call; the module can go once the pipeline is made. The module
         // is trusted to have its entry points and to keep to the layout, as `GraphicsDesc::spirv`
-        // says. The device has depth clamp, which `Candidate::new` checked.
+        // says. The device has depth clamp, which `Candidate::new` checked, and mesh shaders, for a
+        // mesh shader's pipeline, as asserted; Vulkan ignores the vertex input and input assembly
+        // of a pipeline with a mesh shader.
         let made = unsafe {
             let cache = device.raw_pipeline_cache();
             let made = raw_device.create_graphics_pipelines(cache, &[info], None);
@@ -308,6 +326,7 @@ impl Pipeline {
             device: device.clone(),
             raw,
             format: desc.format,
+            mesh: desc.mesh,
         })
     }
 
@@ -323,6 +342,12 @@ impl Pipeline {
     /// The formats of the targets it draws into.
     pub(crate) fn format(&self) -> Format {
         self.format
+    }
+
+    /// Whether its geometry is a mesh shader, which draws through
+    /// [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect) alone.
+    pub(crate) fn mesh(&self) -> bool {
+        self.mesh
     }
 }
 

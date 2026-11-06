@@ -531,7 +531,8 @@ mod tests {
             normal: Vec3::Z,
             tangent: Vec4::X,
         };
-        let mesh = meshes.add("a", &[corner; 3], &[0, 1, 2]).unwrap();
+        let packed = crate::ModelMesh::pack(&[corner; 3], vec![0, 1, 2], Vec::new());
+        let mesh = meshes.add_model("a", &packed).unwrap();
         let mut draw = |double_sided| {
             let material = Material {
                 double_sided,

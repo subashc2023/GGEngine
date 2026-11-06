@@ -8,7 +8,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_gpu::{Sampler, Wrap};
 
-use crate::{Mesh, MeshDraw, Shaders, Texture};
+use crate::{Mesh, MeshDraw, PackedVertex, Shaders, Texture};
 
 /// The model shaders, which the build compiled from `shaders/model.slang`, for materials that
 /// blend, and from the two files that include it, for opaque and masked ones.
@@ -21,6 +21,26 @@ pub(crate) static MASKED_SPIRV: &[u8] =
 /// is.
 pub(crate) static MASKED_SHADOW_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_shadow.spv"));
+
+/// The opaque and masked model shaders again, drawing the meshlets a view kept of a mesh through
+/// vertex shaders, `meshlet_vertex_main`, and the masked one's shadows; for a device without mesh
+/// shaders.
+pub(crate) static OPAQUE_MESHLETS_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_meshlets.spv"));
+pub(crate) static MASKED_MESHLETS_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_meshlets.spv"));
+pub(crate) static MASKED_MESHLETS_SHADOW_SPIRV: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/model_masked_meshlets_shadow.spv"
+));
+
+/// The same through a mesh shader, `mesh_main`, for a device with them.
+pub(crate) static OPAQUE_MESH_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_mesh.spv"));
+pub(crate) static MASKED_MESH_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh.spv"));
+pub(crate) static MASKED_MESH_SHADOW_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh_shadow.spv"));
 
 /// A vertex of a model's mesh: where it is in the mesh's space, where it samples its material's
 /// textures, a color the material's is multiplied by, in linear RGBA, the way its surface faces,
@@ -330,7 +350,7 @@ impl MeshDraw {
     ///
     /// If `material` isn't one of `materials`.
     pub fn with_material(
-        mesh: Mesh<ModelVertex>,
+        mesh: Mesh<PackedVertex>,
         material: MaterialId,
         materials: &Materials,
         shaders: &mut Shaders,
@@ -364,7 +384,8 @@ mod tests {
         let mut meshes = Meshes::default();
         let mut shaders = Shaders::default();
         let mut materials = Materials::default();
-        let mesh = meshes.add("a", &[corner(); 3], &[0, 1, 2]).unwrap();
+        let packed = crate::ModelMesh::pack(&[corner(); 3], vec![0, 1, 2], Vec::new());
+        let mesh = meshes.add_model("a", &packed).unwrap();
         let mut draw = |alpha, double_sided| {
             let material = Material {
                 alpha,

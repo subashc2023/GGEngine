@@ -2,9 +2,10 @@
 // sky; or, in a frame without either and for a material that's unlit, drawn unlit, as
 // KHR_materials_unlit defines it: each fragment its material's base color times its texture's,
 // sampled at the vertices' texture coordinates, times the vertices' color. Each instance is a mesh
-// with its own transform, ID and material, writing its ID where it shows. `ModelVertex` in
-// src/model.rs, which `Vertex` here matches field for field, and `Params`, which `Params` here
-// matches byte for byte; the material itself is in the table the frame's data points at.
+// with its own transform, ID and material, writing its ID where it shows. Its mesh's vertices are
+// packed, as src/packed.rs packs them, behind a header that says how they unpack; `Params` matches
+// `Params` in src/model.rs byte for byte; the material itself is in the table the frame's data
+// points at.
 //
 // Shading follows glTF 2.0's Appendix B, as Khronos's sample viewer implements it: a Lambertian
 // diffuse lobe and a GGX specular lobe, with Smith's height-correlated visibility, Schlick's
@@ -37,6 +38,34 @@
 
 #include "mesh.slang"
 
+// A vertex as a model's mesh holds it, `PackedVertex` in src/packed.rs, read as words: its X and Y;
+// its Z and its bitangent's sign; its normal; its tangent; its texture coordinates; and its color.
+struct PackedVertex {
+    uint position_xy;
+    uint position_z_sign;
+    uint normal;
+    uint tangent;
+    uint uv;
+    uint color;
+};
+
+// What a mesh's buffer starts with, in `HEADER` vertices' room, `Header` in src/packed.rs: how its
+// vertices unpack, and where its meshlets' parts start, in words from the buffer's start.
+struct Header {
+    float3 offset;
+    float step;
+    float2 uv_offset;
+    float2 uv_scale;
+    uint meshlets;
+    uint meshlet_vertices;
+    uint triangles;
+    uint unused;
+};
+
+// `HEADER_VERTICES` in src/packed.rs.
+static const uint HEADER = 2;
+
+// A vertex unpacked.
 struct Vertex {
     float3 position;
     float2 uv;
@@ -52,7 +81,48 @@ struct Params {
     uint material;
 };
 
-[[vk::push_constant]] ConstantBuffer<Push<Vertex, Params>> push;
+[[vk::push_constant]] ConstantBuffer<Push<PackedVertex, Params>> push;
+
+// The low and the high halves of `word`, each a signed 16-bit fraction of 1.
+float2 snorm_halves(uint word) {
+    int2 halves = int2(int(word << 16) >> 16, int(word) >> 16);
+    return max(float2(halves) / 32767.0, -1.0);
+}
+
+// The unit vector `word` holds folded onto an octahedron, as `octahedral` in src/packed.rs folds
+// it, unfolded.
+float3 unfolded(uint word) {
+    float2 e = snorm_halves(word);
+    float3 v = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = max(-v.z, 0.0);
+    v.x += v.x >= 0.0 ? -t : t;
+    v.y += v.y >= 0.0 ? -t : t;
+    return normalize(v);
+}
+
+// sRGB-encoded `c`, decoded.
+float linear(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+// The mesh's vertex `index`, unpacked as its header says.
+Vertex unpacked(uint index) {
+    Header header = *(Header*)push.vertices;
+    PackedVertex packed = push.vertices[HEADER + index];
+    float3 steps = float3(packed.position_xy & 0xFFFF, packed.position_xy >> 16,
+                          packed.position_z_sign & 0xFFFF);
+    float2 uv = float2(packed.uv & 0xFFFF, packed.uv >> 16);
+    float4 color = float4(packed.color & 0xFF, (packed.color >> 8) & 0xFF,
+                          (packed.color >> 16) & 0xFF, packed.color >> 24) / 255.0;
+    Vertex vertex;
+    vertex.position = header.offset + steps * header.step;
+    vertex.uv = header.uv_offset + uv * header.uv_scale;
+    vertex.color = float4(linear(color.r), linear(color.g), linear(color.b), color.a);
+    vertex.normal = unfolded(packed.normal);
+    float sign = int(packed.position_z_sign) < 0 ? -1.0 : 1.0;
+    vertex.tangent = float4(unfolded(packed.tangent), sign);
+    return vertex;
+}
 
 static const float PI = 3.14159265358979;
 // The least roughness shading takes, as Filament's: below it the specular lobe is too narrow to
@@ -96,7 +166,81 @@ struct Varyings {
 
 [shader("vertex")]
 Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
-    Vertex vertex = push.vertices[index];
+    return placed(unpacked(index), instance);
+}
+
+// The most vertices and triangles a meshlet has: `MAX_MESHLET_VERTICES` and
+// `MAX_MESHLET_TRIANGLES` in src/packed.rs.
+static const uint MAX_VERTICES = 64;
+static const uint MAX_TRIANGLES = 124;
+// Where a draw's meshlets start in `push.meshlets`, past the draw's eight words.
+static const uint KEPT = 4;
+// How many workgroups across a draw of meshlets through a mesh shader takes: `ACROSS` in
+// meshlets.slang.
+static const uint ACROSS = 32768;
+
+// Byte `byte` of the mesh's meshlets' triangles, as its header places them.
+uint triangle_byte(Header header, uint byte) {
+    uint word = ((uint*)push.vertices)[header.triangles + byte / 4];
+    return (word >> ((byte & 3) * 8)) & 0xFF;
+}
+
+// A corner of a meshlet a view kept, drawn through vertex shaders: each meshlet kept an instance of
+// the draw, of `MAX_TRIANGLES` triangles, whose `corner`th this is. The corners of a triangle past
+// the meshlet's own are all its first vertex, which draws nothing.
+[shader("vertex")]
+Varyings meshlet_vertex_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
+    uint2 entry = push.meshlets[KEPT + kept];
+    Header header = *(Header*)push.vertices;
+    // What draws the meshlet: `GpuMeshlet` in src/packed.rs.
+    uint at = header.meshlets + entry.y * 4;
+    uint first_vertex = ((uint*)push.vertices)[at];
+    uint first_triangle = ((uint*)push.vertices)[at + 2];
+    uint triangle_count = ((uint*)push.vertices)[at + 3];
+    uint local = 0;
+    if (corner / 3 < triangle_count) {
+        local = triangle_byte(header, first_triangle + corner);
+    }
+    uint index = ((uint*)push.vertices)[header.meshlet_vertices + first_vertex + local];
+    return placed(unpacked(index), entry.x);
+}
+
+// A meshlet a view kept, drawn through a mesh shader: a workgroup each, `ACROSS` across, as many
+// rows down as they take, those past the draw's meshlets drawing nothing; a thread for each of its
+// vertices, and for each of its triangles and the one `MAX_VERTICES` after it.
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(MAX_VERTICES, 1, 1)]
+void mesh_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex,
+               OutputVertices<Varyings, MAX_VERTICES> vertices,
+               OutputIndices<uint3, MAX_TRIANGLES> triangles) {
+    uint kept = group.y * ACROSS + group.x;
+    // How many the draw has, its second word.
+    if (kept >= push.meshlets[0].y) {
+        SetMeshOutputCounts(0, 0);
+        return;
+    }
+    uint2 entry = push.meshlets[KEPT + kept];
+    Header header = *(Header*)push.vertices;
+    uint at = header.meshlets + entry.y * 4;
+    uint first_vertex = ((uint*)push.vertices)[at];
+    uint vertex_count = ((uint*)push.vertices)[at + 1];
+    uint first_triangle = ((uint*)push.vertices)[at + 2];
+    uint triangle_count = ((uint*)push.vertices)[at + 3];
+    SetMeshOutputCounts(vertex_count, triangle_count);
+    if (thread < vertex_count) {
+        uint index = ((uint*)push.vertices)[header.meshlet_vertices + first_vertex + thread];
+        vertices[thread] = placed(unpacked(index), entry.x);
+    }
+    for (uint t = thread; t < triangle_count; t += MAX_VERTICES) {
+        uint byte = first_triangle + 3 * t;
+        triangles[t] = uint3(triangle_byte(header, byte), triangle_byte(header, byte + 1),
+                             triangle_byte(header, byte + 2));
+    }
+}
+
+// `vertex` as instance `instance` places it in the world and the view sees it.
+Varyings placed(Vertex vertex, uint instance) {
     float4x4 transform = push.transforms[instance];
     float4 world = mul(transform, float4(vertex.position, 1.0));
     float3x3 linear = (float3x3)transform;

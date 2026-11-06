@@ -178,6 +178,9 @@ struct Push<V, P> {
     // The view's size in pixels.
     float2 view;
     Frame* frame;
+    // For a draw of the meshlets a view kept of a mesh: the draw as the culling wrote it, in its
+    // first four, then each meshlet kept, its instance and its index among the mesh's.
+    uint2* meshlets;
 };
 
 // The color, and the instance's ID, which picks read back where it shows.

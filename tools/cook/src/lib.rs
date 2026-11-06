@@ -2,8 +2,9 @@
 //! package its builds without `dev` run from, of the files under its asset root that its runs load,
 //! each as the engine makes it as it loads it where that takes more than reading it, a font baked
 //! into its field and a shader compiled to SPIR-V; a texture compressed to BC7, or a sky's to
-//! BC6H, and a model's meshes optimized, with levels of detail, and its images compressed with
-//! their mip levels, so that they load and draw faster; and the rest as they are.
+//! BC6H, and a model's meshes optimized, with levels of detail, their vertices packed and their
+//! levels cut into meshlets, and its images compressed with their mip levels, so that they load and
+//! draw faster; and the rest as they are.
 
 mod mesh;
 mod texture;
@@ -173,7 +174,8 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
 
 /// Model `path`'s file at `file`, cooked as a run from the package reads it: read as a run reads
 /// it, each primitive's triangles optimized and given levels of detail, keeping their order where
-/// its material blends, and each image compressed as what it holds says, BC7 of colors or values
+/// its material blends, its vertices packed as a run packs them, and each level cut into meshlets
+/// but where its material blends; and each image compressed as what it holds says, BC7 of colors or values
 /// or BC5 of a normal map, with the full chain of mip levels a run gives it, made as a run makes
 /// them; but a DDS image, as MSFT_texture_dds names one, keeps its BC7 blocks and its levels, as
 /// colors or values as what it holds says.
@@ -213,13 +215,19 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
             &mut primitive.indices,
             blends,
         );
-        primitive.lods = (lods.into_iter())
+        let levels = (lods.into_iter())
             .map(|lod| Lod {
                 start: lod.start,
                 count: lod.count,
                 error: lod.error,
             })
             .collect();
+        let mut packed = cook::pack(primitive, levels);
+        // What blends draws its triangles in their order, through its indices.
+        if !blends {
+            mesh::cut(&mut packed);
+        }
+        primitive.mesh = Some(packed);
     }
     Ok(cook::model_bytes(&model, &images))
 }
@@ -475,10 +483,19 @@ Targets fragment_main(Varyings input) {
                 .unwrap_or_else(|error| panic!("{name}: {error:#}"));
             assert_eq!(cooked.primitives.len(), read.primitives.len(), "{name}");
             for (cooked, read) in cooked.primitives.iter().zip(&read.primitives) {
-                let finest = cooked.lods.first().expect("a level");
+                let mesh = cooked.mesh.as_ref().expect("a cooked mesh");
+                let finest = mesh.lods.levels.first().expect("a level");
                 assert_eq!(finest.start, 0, "{name}");
                 assert_eq!(finest.count as usize, read.indices.len(), "{name}");
                 assert_eq!(finest.error, 0.0, "{name}");
+                // Cut into meshlets but where it blends.
+                let levels = mesh.meshlets.levels.len();
+                let cut = if read.blends() {
+                    0
+                } else {
+                    mesh.lods.levels.len()
+                };
+                assert_eq!(levels, cut, "{name}");
             }
             assert_eq!(cooked.images.len(), read.images.len(), "{name}");
             for (i, (cooked, image)) in cooked.images.iter().zip(&read.images).enumerate() {
@@ -494,7 +511,12 @@ Targets fragment_main(Varyings input) {
         let torus = showcase_model("torus.gltf");
         let bytes = model("torus.gltf", &torus).unwrap();
         let cooked = cook::read_cooked_model("torus.gltf", &bytes).unwrap();
-        let lods = &cooked.primitives[0].lods;
+        let lods = &cooked.primitives[0]
+            .mesh
+            .as_ref()
+            .expect("a mesh")
+            .lods
+            .levels;
         assert!(lods.len() > 1, "{lods:?}");
     }
 

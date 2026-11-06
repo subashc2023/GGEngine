@@ -115,19 +115,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Occlusion culling** (2026-11-05)
 - **Clustered lighting** (2026-11-05)
 - **Async compute** (2026-11-05)
+- **Meshlets and packed vertices** (2026-11-06)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **Meshlets and packed vertices.** The cooker cuts each level of a model's meshes into meshlets,
-  meshoptimizer's, each with its bounds and the cone its triangles face within, and packs models'
-  vertices into 8- and 16-bit fields. Meshlets draw through mesh shaders where the device has
-  `VK_EXT_mesh_shader`, as the RTX 4090 and lavapipe (Mesa 23.2.1 or later) do, and elsewhere, as on
-  the AMD iGPU here and KosmicKrisp, through a compute pass that writes the triangles of the meshlets
-  left for an indirect draw; meshlets are culled against the view, their cones and the depth
-  pyramid. Development runs draw a model's primitives whole, as they draw its one level. Both paths'
-  references on lavapipe, the compute path forced there.
 - **A visibility buffer.** Models' opaque and masked materials draw into a visibility buffer, each
   pixel the instance and triangle it shows, beside the view's depth and IDs; a compute pass then
   shades each pixel by its material from the table, its texture coordinates' derivatives from its
@@ -174,7 +167,7 @@ Phases 11 and 12 are done, as Done has it, but for what Deferred holds.
 13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
     pyramid); async compute, which the graph schedules on a queue of its own where the device has
     one, culling and light culling beside the shadows' passes; indirect draws; meshlets, which the
-    cooker builds, drawn through mesh shaders where supported and a compute path elsewhere;
+    cooker builds, drawn through mesh shaders where supported and vertex shaders elsewhere;
     vertices the cooker packs into 8- and 16-bit fields; a visibility buffer; clustered lighting;
     TAA. *Done when* CPU frame time stays flat as the instance count grows, and a cooked Amazon
     Lumberyard Bistro with many instances meets a frame-time target set in this phase on the
@@ -201,7 +194,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
 | ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`); and Phase 13's 16 Bistros on a Mac, their frame time against a target set there, their meshlets drawn through the compute path, as KosmicKrisp has no mesh shaders | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`); and Phase 13's 16 Bistros on a Mac, their frame time against a target set there, their meshlets drawn through vertex shaders, as KosmicKrisp has no mesh shaders | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C in a windowed run started from a console, which ends the process at once, as headless runs and servers don't; the JSON log keeps every line written until then, and a recording every whole line but its `end` | Someone ends windowed runs from their console |
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -223,6 +216,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Passes on the compute queue that sample or write images: images, the graph's own among them, are the graphics queue's family's alone, so a pass there uses buffers alone; the depth pyramid and the culling's second pass, which sample the view's depth, run on the graphics queue, as do a sky's prefiltering and its compute passes. Images shared by both families, which can cost some GPUs their compression, or handed between them by a barrier on each queue | A pass that uses an image gains from running beside the graphics queue's |
 | A compute queue on a device whose one family for compute apart from graphics takes the uploads, as one without a family for transfers alone: a second queue of that family, or uploads on the graphics queue, where the device has the queues; its compute passes run on the graphics queue | Such a device is one a game targets |
 | Submitting each queue's batches in one call, a wait submitted before what signals it, which timeline semaphores allow: a frame submits runs of one queue's batches each after what it waits for, two calls in the 16 Bistros, 66 µs each at the median on the RTX 4090's render thread, three where the compute queue waits for a buffer the frame wrote | The render thread's time is measured to go in submits |
+| Each meshlet's visibility from frame to frame, so that the view's first pass draws only the meshlets the last found unhidden, and its second tests every meshlet against the depth pyramid: the first pass draws all the meshlets in view of what it draws, as the pyramid isn't built yet | A view's large instances, partly hidden, are measured to cost its first pass |
+| A run's meshlets past 2^22 in a view, which are left out: a draw through a mesh shader takes at most that many workgroups on some devices, so a run's draw holds no more | A game keeps that many of a run's meshlets in view, as thousands of instances of a mesh of thousands of meshlets at their finest |
+| Reusing the room of removed meshes' meshlets in the renderer's table of their bounds, which grows by every mesh with meshlets a run adds | A game streams models in and out as it plays |
+| Room for each view's meshlets sized by what the frames before kept, rather than every instance's of its mesh's largest level: 66 MB of the 197 MB the 16 Bistros' graph takes | The graph's memory is measured to matter, as on a GPU of little memory |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |

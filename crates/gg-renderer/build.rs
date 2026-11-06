@@ -25,10 +25,11 @@ const SHADERS: [&str; 13] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 5] = [
+const COMPUTE: [(&str, &[&str]); 6] = [
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
     ("gather", &["gather_main"]),
+    ("meshlets", &["meshlets_main"]),
     ("pyramid", &["depth_main", "reduce_main"]),
     (
         "prefilter",
@@ -64,6 +65,23 @@ fn main() {
     // contract games' shaders keep, of two entry points.
     let shadow = &[("vertex_main", "vertex"), ("shadow_main", "fragment")];
     compile(&slangc, &out, "model_masked", "model_masked_shadow", shadow);
+    // The opaque and masked model shaders' meshlets, drawn through vertex shaders or through a mesh
+    // shader, each apart, so that a device without mesh shaders takes no SPIR-V of one.
+    for (geometry, stage) in [("meshlet_vertex_main", "vertex"), ("mesh_main", "mesh")] {
+        let path = if stage == "mesh" { "mesh" } else { "meshlets" };
+        for shader in ["model_opaque", "model_masked"] {
+            let entries = &[(geometry, stage), ("fragment_main", "fragment")];
+            compile(&slangc, &out, shader, &format!("{shader}_{path}"), entries);
+        }
+        let shadow = &[(geometry, stage), ("shadow_main", "fragment")];
+        compile(
+            &slangc,
+            &out,
+            "model_masked",
+            &format!("model_masked_{path}_shadow"),
+            shadow,
+        );
+    }
     for (shader, entries) in COMPUTE {
         let entries: Vec<_> = (entries.iter()).map(|&entry| (entry, "compute")).collect();
         compile(&slangc, &out, shader, shader, &entries);

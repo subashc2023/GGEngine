@@ -163,6 +163,7 @@ impl<'a> Frame<'a> {
             buffer_uses: decl.buffer_uses.clone(),
             labels: 0,
             pipeline_set: false,
+            mesh_pipeline: false,
         })
     }
 
@@ -197,6 +198,8 @@ pub struct Pass<'p, 'a> {
     labels: u32,
     /// Whether a pipeline is set, which draws need.
     pipeline_set: bool,
+    /// Whether the pipeline set last draws through a mesh shader.
+    mesh_pipeline: bool,
 }
 
 impl<'a> Pass<'_, 'a> {
@@ -227,15 +230,15 @@ impl<'a> Pass<'_, 'a> {
         self.frame.sampled_index(image)
     }
 
-    /// The address that shaders read `buffer` through, which the pass reads, as its graph
-    /// declared, during the pass alone.
+    /// The address that shaders read `buffer` through, which the pass reads, or takes commands
+    /// from, as its graph declared, during the pass alone.
     ///
     /// # Panics
     ///
-    /// If the pass doesn't read `buffer`.
+    /// If the pass neither reads `buffer` nor takes commands from it.
     pub fn address(&self, buffer: BufferId) -> u64 {
         assert!(
-            self.declared(buffer, BufferUse::Read),
+            self.declared(buffer, BufferUse::Read) || self.declared(buffer, BufferUse::Indirect),
             "a pass reads only the buffers it was added reading, and not buffer {}",
             buffer.0
         );
@@ -288,6 +291,7 @@ impl<'a> Pass<'_, 'a> {
              its depth image's"
         );
         self.pipeline_set = true;
+        self.mesh_pipeline = pipeline.mesh();
         // SAFETY: the commands are recording inside a pass whose formats, its target's, its IDs'
         // and its depth image's, are the pipeline's, and the pipeline retires until the frame has
         // finished.
@@ -389,7 +393,7 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// If no pipeline is set.
     pub fn draw(&mut self, vertices: u32, instances: u32) {
-        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        self.check_vertices();
         // SAFETY: the commands are recording inside a pass with a pipeline set.
         unsafe {
             self.frame
@@ -422,7 +426,7 @@ impl<'a> Pass<'_, 'a> {
             .frames
             .device
             .check_made("the indices' buffer", indices.device);
-        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        self.check_vertices();
         assert!(
             u64::from(first) + u64::from(count) <= indices.count,
             "{count} indices from index {first} run past the {} there are",
@@ -469,20 +473,8 @@ impl<'a> Pass<'_, 'a> {
             .frames
             .device
             .check_made("the indices' buffer", indices.device);
-        assert!(self.pipeline_set, "a draw needs a pipeline set first");
-        assert!(
-            self.declared(commands, BufferUse::Indirect),
-            "a pass takes commands only from the buffers it was added taking them from, and not \
-             buffer {}",
-            commands.0
-        );
-        let size = self.frame.buffer_parts(commands).1;
-        assert!(
-            offset.is_multiple_of(4) && offset.checked_add(COMMAND).is_some_and(|end| end <= size),
-            "a command at byte {offset} of a buffer of {size}: a command is {COMMAND} bytes, 4-byte \
-             aligned, within its buffer"
-        );
-        let buffer = self.frame.frames.transients.buffer(commands).raw();
+        self.check_vertices();
+        let buffer = self.command_buffer(commands, offset, COMMAND);
         // SAFETY: the commands are recording inside a pass with a pipeline set, after the barrier
         // that lets draws read the command, which lies within its buffer; the buffer and the
         // indices live until the frame has finished, as the graph's own buffers retire until then.
@@ -496,6 +488,98 @@ impl<'a> Pass<'_, 'a> {
             );
             raw.cmd_draw_indexed_indirect(self.commands(), buffer, offset, 1, COMMAND as u32);
         }
+    }
+
+    /// Draws as the command at byte `offset` of `commands` says, a buffer the pass takes commands
+    /// from, as an earlier pass wrote it, with the pipeline set last: a `VkDrawIndirectCommand`,
+    /// four 32-bit words, how many vertices, how many instances, the first vertex and the first
+    /// instance, each vertex's index seen by the vertex shader as `SV_VulkanVertexID` and each
+    /// instance's as `SV_VulkanInstanceID`, counted from them.
+    ///
+    /// # Panics
+    ///
+    /// If no pipeline is set, or the one set draws through a mesh shader; the pass doesn't take
+    /// commands from `commands`; or the command isn't 4-byte aligned, or runs past the buffer's
+    /// end.
+    pub fn draw_indirect(&mut self, commands: BufferId, offset: u64) {
+        /// A `VkDrawIndirectCommand`'s bytes.
+        const COMMAND: u64 = 16;
+        self.check_vertices();
+        let buffer = self.command_buffer(commands, offset, COMMAND);
+        // SAFETY: the commands are recording inside a pass with a pipeline set, after the barrier
+        // that lets draws read the command, which lies within its buffer, which lives until the
+        // frame has finished, as the graph's own buffers retire until then.
+        unsafe {
+            let raw = self.frame.frames.device.raw();
+            raw.cmd_draw_indirect(self.commands(), buffer, offset, 1, COMMAND as u32);
+        }
+    }
+
+    /// Draws through the mesh shader of the pipeline set last as the command at byte `offset` of
+    /// `commands` says, a buffer the pass takes commands from, as an earlier pass wrote it: a
+    /// `VkDrawMeshTasksIndirectCommandEXT`, three 32-bit words, how many workgroups across, down
+    /// and deep, each of which the mesh shader sees as `SV_GroupID`. What wrote the command is
+    /// trusted to keep them within the device's limits, as shaders are trusted with addresses.
+    ///
+    /// # Panics
+    ///
+    /// If no pipeline is set, or the one set doesn't draw through a mesh shader; the pass doesn't
+    /// take commands from `commands`; or the command isn't 4-byte aligned, or runs past the buffer's
+    /// end.
+    pub fn draw_mesh_tasks_indirect(&mut self, commands: BufferId, offset: u64) {
+        /// A `VkDrawMeshTasksIndirectCommandEXT`'s bytes.
+        const COMMAND: u64 = 12;
+        assert!(
+            self.pipeline_set && self.mesh_pipeline,
+            "a draw through a mesh shader needs a pipeline of one set first"
+        );
+        let buffer = self.command_buffer(commands, offset, COMMAND);
+        let device = &self.frame.frames.device;
+        let mesh_shader = (device.mesh_shader_fn()).expect("a mesh shader's pipeline's device");
+        // SAFETY: as for `draw_indirect`; the pipeline set draws through a mesh shader, which only
+        // a device whose mesh shaders are enabled makes, as `Pipeline::graphics` asserts.
+        unsafe {
+            mesh_shader.cmd_draw_mesh_tasks_indirect(
+                self.commands(),
+                buffer,
+                offset,
+                1,
+                COMMAND as u32,
+            );
+        }
+    }
+
+    /// Checks that a pipeline is set for a draw of vertices, as the draws but
+    /// [`draw_mesh_tasks_indirect`](Self::draw_mesh_tasks_indirect) are.
+    fn check_vertices(&self) {
+        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        assert!(
+            !self.mesh_pipeline,
+            "a pipeline that draws through a mesh shader draws through draw_mesh_tasks_indirect"
+        );
+    }
+
+    /// The buffer of the graph's own `commands`, whose `size` bytes at `offset` are a command the
+    /// pass's indirect draws take.
+    ///
+    /// # Panics
+    ///
+    /// If the pass doesn't take commands from `commands`, or the command isn't 4-byte aligned, or
+    /// runs past the buffer's end.
+    fn command_buffer(&self, commands: BufferId, offset: u64, size: u64) -> vk::Buffer {
+        assert!(
+            self.declared(commands, BufferUse::Indirect),
+            "a pass takes commands only from the buffers it was added taking them from, and not \
+             buffer {}",
+            commands.0
+        );
+        let held = self.frame.buffer_parts(commands).1;
+        assert!(
+            offset.is_multiple_of(4) && offset.checked_add(size).is_some_and(|end| end <= held),
+            "a command at byte {offset} of a buffer of {held}: a command is {size} bytes, 4-byte \
+             aligned, within its buffer"
+        );
+        self.frame.frames.transients.buffer(commands).raw()
     }
 
     fn commands(&self) -> vk::CommandBuffer {

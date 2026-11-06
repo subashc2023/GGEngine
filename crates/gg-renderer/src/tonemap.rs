@@ -58,6 +58,7 @@ impl TonemapPass {
                 name: "tonemap",
                 spirv: SPIRV,
                 vertex: c"vertex_main",
+                mesh: false,
                 fragment: Some(c"fragment_main"),
                 format: ColorImage::FORMAT,
                 blend: Blend::Opaque,

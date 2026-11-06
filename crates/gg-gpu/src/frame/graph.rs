@@ -224,9 +224,10 @@ pub(crate) enum BufferUse {
     ComputeRead,
     /// Written and read by its compute shaders, through the buffer's address.
     ComputeWrite,
-    /// Read by its draws' shaders, through the buffer's address.
+    /// Read by its draws' shaders, vertex, mesh or fragment, through the buffer's address.
     Read,
-    /// The commands its indirect draws take.
+    /// The commands its indirect draws take, which its draws' shaders may read too, through the
+    /// buffer's address, as a draw of meshlets reads those kept after its command.
     Indirect,
     /// Copied from, as a read back is.
     CopySource,
@@ -255,12 +256,17 @@ impl BufferUse {
                 A::SHADER_STORAGE_READ,
                 A::SHADER_STORAGE_WRITE,
             ),
+            // Every stage before rasterizing, so that a mesh shader's reads are among them.
             Self::Read => access(
-                S::VERTEX_SHADER | S::FRAGMENT_SHADER,
+                S::PRE_RASTERIZATION_SHADERS | S::FRAGMENT_SHADER,
                 A::SHADER_STORAGE_READ,
                 A::NONE,
             ),
-            Self::Indirect => access(S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ, A::NONE),
+            Self::Indirect => access(
+                S::DRAW_INDIRECT | S::PRE_RASTERIZATION_SHADERS | S::FRAGMENT_SHADER,
+                A::INDIRECT_COMMAND_READ | A::SHADER_STORAGE_READ,
+                A::NONE,
+            ),
             Self::CopySource => access(S::COPY, A::TRANSFER_READ, A::NONE),
         }
     }
@@ -673,7 +679,9 @@ impl RenderPass<'_> {
     }
 
     /// Takes the commands of indirect draws from `buffer`, as an earlier pass wrote them, as
-    /// [`Pass::draw_indexed_indirect`](crate::Pass::draw_indexed_indirect) draws them.
+    /// [`Pass::draw_indexed_indirect`](crate::Pass::draw_indexed_indirect) draws them; its draws'
+    /// shaders may read it too, through its address, as [`Pass::address`](crate::Pass::address)
+    /// gives it.
     pub fn indirect(self, buffer: BufferId) -> Self {
         self.graph.buffer_uses.push((buffer, BufferUse::Indirect));
         self
@@ -1309,7 +1317,8 @@ mod tests {
         let again = hazard
             .follow(&mut layout, write)
             .expect("a write after the read");
-        assert_eq!(again.src_stages, S::COMPUTE_SHADER | S::DRAW_INDIRECT);
+        let draws = S::DRAW_INDIRECT | S::PRE_RASTERIZATION_SHADERS | S::FRAGMENT_SHADER;
+        assert_eq!(again.src_stages, S::COMPUTE_SHADER | draws);
     }
 
     /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,

@@ -764,6 +764,7 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         gpu: args.gpu.as_deref(),
         vsync: args.vsync,
         uploads: None,
+        mesh_shaders: None,
         upload_budget: gg_renderer::DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: args.capture,

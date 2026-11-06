@@ -46,6 +46,8 @@ pub(super) struct Candidate {
     pub(super) memory: vk::PhysicalDeviceMemoryProperties,
     /// Whether the driver reports each heap's budget (`VK_EXT_memory_budget`).
     pub(super) memory_budget: bool,
+    /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`).
+    pub(super) mesh_shaders: bool,
     pub(super) problem: Option<String>,
 }
 
@@ -223,6 +225,11 @@ impl Candidate {
             host_copy,
             memory,
             memory_budget: has_extension(&extensions, vk::EXT_MEMORY_BUDGET_NAME),
+            // The extension requires its `meshShader` feature (vk.xml's `<feature>` among its
+            // requirements), so it isn't queried: querying it under the Vulkan SDK 1.4.335's
+            // validation layer crashed test runs that open dozens of devices, well after the query.
+            mesh_shaders: properties.api_version >= REQUIRED_VERSION
+                && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME),
             problem,
         }
     }
@@ -234,6 +241,24 @@ impl Candidate {
             vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
             vk::PhysicalDeviceType::CPU => "cpu",
             _ => "other",
+        }
+    }
+
+    /// Whether the GPU draws through mesh shaders: as `wanted` says, if it's given, and otherwise if
+    /// it can.
+    ///
+    /// Fails with `gpu.no_mesh_shaders` if they're wanted and the GPU has none.
+    pub(super) fn mesh_shaders(&self, wanted: Option<bool>) -> Result<bool> {
+        match wanted {
+            Some(true) if !self.mesh_shaders => {
+                let message = format!(
+                    "mesh shaders were asked for, but {} has none (VK_EXT_mesh_shader)",
+                    self.name
+                );
+                Err(Error::new("gpu.no_mesh_shaders", message))
+            }
+            Some(wanted) => Ok(wanted),
+            None => Ok(self.mesh_shaders),
         }
     }
 
@@ -526,6 +551,7 @@ mod tests {
             host_copy: HostCopy::Unsupported,
             memory: vk::PhysicalDeviceMemoryProperties::default(),
             memory_budget: false,
+            mesh_shaders: false,
             problem: None,
         }
     }
@@ -659,5 +685,21 @@ mod tests {
             .upload_path(Some(HostImageCopy))
             .expect_err("no host image copy");
         assert_eq!(error.code(), "gpu.no_upload_path");
+    }
+
+    #[test]
+    fn mesh_shaders_are_used_where_the_gpu_has_them_unless_asked_otherwise() {
+        let gpu = |mesh_shaders| Candidate {
+            mesh_shaders,
+            ..candidate(0, "Some GPU", vk::PhysicalDeviceType::DISCRETE_GPU, 8192)
+        };
+        let (with, without) = (gpu(true), gpu(false));
+        let used = |gpu: &Candidate, wanted| gpu.mesh_shaders(wanted).expect("a choice");
+        assert!(used(&with, None) && used(&with, Some(true)));
+        assert!(!used(&with, Some(false)));
+        assert!(!used(&without, None) && !used(&without, Some(false)));
+        let error = without.mesh_shaders(Some(true)).expect_err("none");
+        assert_eq!(error.code(), "gpu.no_mesh_shaders");
+        assert!(error.to_string().contains("Some GPU has none"), "{error}");
     }
 }

@@ -204,6 +204,11 @@ fn instance() -> Arc<Instance> {
     instance
 }
 
+/// A device of the best GPU, as it draws best.
+fn device(instance: &Arc<Instance>) -> Arc<Device> {
+    Device::new(instance, None, None, None, None).expect("a GPU that supports Vulkan 1.4")
+}
+
 /// Checks that validation reported nothing, once what it validated has been dropped.
 fn check(validation: &Validation) {
     assert_eq!(
@@ -372,6 +377,7 @@ fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
         name: "sample probes",
         spirv,
         vertex: c"vertex_main",
+        mesh: false,
         fragment: Some(c"fragment_main"),
         format: ColorImage::FORMAT,
         blend: Blend::Opaque,
@@ -477,7 +483,7 @@ fn clearing(targets: usize, color: [f32; 4]) -> (Graph, Vec<PassId>) {
 fn clear_reads_back() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut images = [
         ColorImage::new(&device, 64, 32, "clear test target 0").expect("an image"),
         ColorImage::new(&device, 64, 32, "clear test target 1").expect("an image"),
@@ -538,7 +544,7 @@ fn clear_reads_back() {
 fn arenas_hold_more_than_a_frame_took() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 8, 8, "arena test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     assert_eq!(frames.arenas(), Arenas::default());
@@ -567,7 +573,7 @@ fn arenas_hold_more_than_a_frame_took() {
 fn sampled_images_keep_their_layout() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 16, 16, "sampled test target").expect("an image");
     let mut drawn = ColorImage::new(&device, 16, 16, "sampling test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
@@ -612,7 +618,7 @@ fn sampled_images_keep_their_layout() {
 fn compute_passes_write_cubes_that_passes_sample() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = spirv(
         "cube",
         &[
@@ -630,6 +636,7 @@ fn compute_passes_write_cubes_that_passes_sample() {
             name: "sample cube",
             spirv: &spirv,
             vertex: c"vertex_main",
+            mesh: false,
             fragment: Some(c"fragment_main"),
             format: ColorImage::FORMAT,
             blend: Blend::Opaque,
@@ -766,7 +773,7 @@ fn compute_passes_write_cubes_that_passes_sample() {
 fn compute_passes_write_buffers_that_draws_take_commands_from() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = spirv(
         "indirect",
         &[
@@ -782,6 +789,7 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
             name: "draw by commands",
             spirv: &spirv,
             vertex: c"vertex_main",
+            mesh: false,
             fragment: Some(c"fragment_main"),
             format: ColorImage::FORMAT,
             blend: Blend::Opaque,
@@ -903,7 +911,7 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
 fn compute_queue_passes_run_beside_the_graphics_queues() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = spirv(
         "indirect",
         &[
@@ -919,6 +927,7 @@ fn compute_queue_passes_run_beside_the_graphics_queues() {
             name: "draw by commands",
             spirv: &spirv,
             vertex: c"vertex_main",
+            mesh: false,
             fragment: Some(c"fragment_main"),
             format: ColorImage::FORMAT,
             blend: Blend::Opaque,
@@ -1034,7 +1043,7 @@ fn compute_queue_passes_run_beside_the_graphics_queues() {
 fn passes_over_keep_what_their_target_holds() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 16, 16, "kept test target").expect("an image");
     let mut drawn = ColorImage::new(&device, 16, 16, "kept test sampler").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
@@ -1084,7 +1093,7 @@ fn passes_over_keep_what_their_target_holds() {
 fn images_read_back_once_their_frame_has_finished() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut images = [
         ColorImage::new(&device, 8, 4, "small read target").expect("an image"),
         ColorImage::new(&device, 16, 16, "large read target").expect("an image"),
@@ -1154,7 +1163,7 @@ fn images_read_back_once_their_frame_has_finished() {
 fn dropped_images_free_their_slots() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     for i in 0..5_000 {
         let image = ColorImage::new(&device, 4, 4, "dropped test image");
         drop(image.unwrap_or_else(|error| panic!("image {i}: {error:#}")));
@@ -1171,7 +1180,7 @@ fn dropped_images_free_their_slots() {
 fn depth_clears_in_every_pass() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 16, 16, "depth test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     let mut graph = Graph::default();
@@ -1213,7 +1222,7 @@ fn depth_clears_in_every_pass() {
 fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = spirv(
         "shadow",
         &[
@@ -1226,6 +1235,7 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
         name: "shadow",
         spirv: &spirv,
         vertex: c"depth_main",
+        mesh: false,
         fragment,
         format,
         blend: Blend::Opaque,
@@ -1239,6 +1249,7 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
         &device,
         &GraphicsDesc {
             vertex: c"vertex_main",
+            mesh: false,
             depth_write: false,
             ..desc(ColorImage::FORMAT, Some(c"fragment_main"), 0.0, false)
         },
@@ -1363,7 +1374,7 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
 fn ids_read_back_two_frames_later() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 8, 4, "read test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     let black = [0.0, 0.0, 0.0, 1.0];
@@ -1468,7 +1479,7 @@ fn ids_read_back_two_frames_later() {
 fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = sampling_spirv();
     let pipeline = sampling_pipeline(&device, &spirv);
     let mut image = ColorImage::new(&device, 2, 1, "shared test target").expect("an image");
@@ -1550,7 +1561,7 @@ fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
 fn depth_and_colors_take_turns_in_memory() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let spirv = sampling_spirv();
     let pipeline = sampling_pipeline(&device, &spirv);
     let mut image = ColorImage::new(&device, 2, 1, "turns test target").expect("an image");
@@ -1605,7 +1616,7 @@ fn depth_and_colors_take_turns_in_memory() {
 fn frames_time_their_passes_on_the_gpu() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 64, 64, "timed test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     let once = clearing(1, [0.0, 1.0, 0.0, 1.0]);
@@ -1649,7 +1660,7 @@ fn streamed_textures_can_be_written_over_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path)) {
+        let device = match Device::new(&instance, None, None, Some(path), None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1725,7 +1736,7 @@ fn bc7_textures_stream_and_decode_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path)) {
+        let device = match Device::new(&instance, None, None, Some(path), None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1819,7 +1830,7 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path)) {
+        let device = match Device::new(&instance, None, None, Some(path), None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1921,7 +1932,7 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path)) {
+        let device = match Device::new(&instance, None, None, Some(path), None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -2064,7 +2075,7 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
 fn textures_come_to_show_images_before_the_frames_passes() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 4, 4, "refill test target").expect("an image");
     let format = TextureFormat::Rgba8Srgb;
     let mut stand_in = stand_in(&device, "refill test stand-in");
@@ -2121,8 +2132,7 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
     let (graph, _) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
     // Each on a device of its own, since a device has one `Frames`, and a caught leak ends it.
     {
-        let device =
-            Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+        let device = device(&instance);
         let mut image = ColorImage::new(&device, 4, 4, "forgotten frame target").expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
         let mut read_graph = Graph::default();
@@ -2148,8 +2158,7 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
         drop((frames, image, device));
     }
     {
-        let device =
-            Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+        let device = device(&instance);
         let mut image = ColorImage::new(&device, 4, 4, "forgotten pass target").expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
         let (mut two, passes_of_two) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
@@ -2194,8 +2203,8 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
-    let other = Device::new(&instance, None, None, None).expect("a second device");
+    let other = device(&instance);
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 4, 4, "identity test target").expect("an image");
     let mut others_image = ColorImage::new(&other, 4, 4, "the other's image").expect("an image");
     let format = TextureFormat::Rgba8Srgb;
@@ -2268,7 +2277,7 @@ fn another_devices_objects_are_refused() {
 fn refused_texture_slots_leak_nothing() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let stand_in = stand_in(&device, "slot test stand-in");
     let placed = Texture::placed(&device, 7, &stand_in, "placed test texture");
     let placed = placed.expect("a texture");
@@ -2305,7 +2314,7 @@ fn refused_texture_slots_leak_nothing() {
 fn passes_refuse_what_the_device_cant_draw() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let mut image = ColorImage::new(&device, 4, 4, "limits test target").expect("an image");
     let buffer = GpuBuffer::new(&device, 12, "unfilled test buffer").expect("a buffer");
     let mut frames = Frames::new(&device).expect("frames");
@@ -2337,8 +2346,7 @@ fn passes_refuse_what_the_device_cant_draw() {
 fn pipeline_caches_load_what_this_gpu_saved_whole() {
     let instance = instance();
     let validation = instance.validation();
-    let device =
-        || Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = || device(&instance);
     let first = device();
     assert_eq!(first.pipeline_cache().expect("no cache"), None);
     assert!(!first.load_pipeline_cache(&[]).expect("an empty cache"));
@@ -2366,7 +2374,7 @@ fn pipeline_caches_load_what_this_gpu_saved_whole() {
 fn captures_are_refused_without_renderdoc() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let error = device
         .start_capture()
         .err()
@@ -2383,7 +2391,7 @@ fn validation_errors_reach_the_json_log(log: &Path) {
     const NAME: &str = "deliberately misviewed image";
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = device(&instance);
     let image = ColorImage::new(&device, 4, 4, NAME).expect("an image");
     let info = vk::ImageViewCreateInfo::default()
         .image(image.raw())

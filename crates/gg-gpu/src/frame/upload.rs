@@ -35,10 +35,12 @@ const TEXTURE_READERS: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_r
         | vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw(),
 );
 
-/// The stages that read buffers during a frame: shaders, through their addresses, and draws'
-/// indices.
+/// The stages that read buffers during a frame: shaders, through their addresses, mesh shaders
+/// among them, which every stage before rasterizing takes in, and draws' indices.
 const BUFFER_READERS: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
-    TEXTURE_READERS.as_raw() | vk::PipelineStageFlags2::INDEX_INPUT.as_raw(),
+    TEXTURE_READERS.as_raw()
+        | vk::PipelineStageFlags2::PRE_RASTERIZATION_SHADERS.as_raw()
+        | vk::PipelineStageFlags2::INDEX_INPUT.as_raw(),
 );
 
 /// What reads buffers, as [`BUFFER_READERS`] read them.

@@ -21,6 +21,7 @@ mod light;
 mod line;
 mod mesh;
 mod model;
+mod packed;
 mod pick;
 mod shader;
 mod shadow;
@@ -59,6 +60,10 @@ pub use mesh::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes, Scene};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
+pub use packed::{
+    MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, Meshlets, ModelMesh, PackedVertex,
+    Packing,
+};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sky::Sky;
@@ -303,6 +308,11 @@ pub struct Settings<'a> {
     /// measurements of each way. A way the GPU lacks keeps the renderer from starting
     /// (`gpu.no_upload_path`).
     pub uploads: Option<UploadPath>,
+    /// Draw meshlets through mesh shaders, or not, rather than as the GPU can, for tests and
+    /// measurements of each way: through mesh shaders where the GPU has them, and otherwise
+    /// through vertex shaders, as `shaders/model.slang` says. Mesh shaders asked for that the GPU
+    /// lacks keep the renderer from starting (`gpu.no_mesh_shaders`).
+    pub mesh_shaders: Option<bool>,
     /// The most bytes a frame copies to the GPU of the meshes and textures being streamed:
     /// [`DEFAULT_UPLOAD_BUDGET`], 16 MiB, unless a test or a measurement wants another. A frame
     /// copies parts of what's queued, in the order it was added, while its bytes are under the
@@ -463,7 +473,13 @@ impl Renderer {
             window: Some(&*window),
         })?;
         let surface = Surface::new(&instance, window, "main window")?;
-        let device = Device::new(&instance, settings.gpu, Some(&surface), settings.uploads)?;
+        let device = Device::new(
+            &instance,
+            settings.gpu,
+            Some(&surface),
+            settings.uploads,
+            settings.mesh_shaders,
+        )?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
         Self::new(&instance, &device, Output::Window(swapchain), settings)
     }
@@ -481,7 +497,13 @@ impl Renderer {
             validation: settings.validation,
             window: None,
         })?;
-        let device = Device::new(&instance, settings.gpu, None, settings.uploads)?;
+        let device = Device::new(
+            &instance,
+            settings.gpu,
+            None,
+            settings.uploads,
+            settings.mesh_shaders,
+        )?;
         let image = ColorImage::new(&device, width, height, OFFSCREEN)?;
         let output = Output::Offscreen(image, [width, height]);
         Self::new(&instance, &device, output, settings)

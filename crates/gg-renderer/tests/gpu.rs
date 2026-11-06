@@ -22,8 +22,9 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
-    Light, LightKind, Line, Lod, Lods, Map, Material, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene,
+    Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
+    Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
+    PackedVertex, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene,
     Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
     UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
@@ -112,6 +113,21 @@ fn main() -> ExitCode {
         picks_wait_through_frames_that_read_none,
         removed_assets_draw_nothing_or_their_stand_in,
     );
+    // Through mesh shaders, where the GPU has them, and through vertex shaders, as every GPU can.
+    for mesh_shaders in [true, false] {
+        let settings = Settings {
+            mesh_shaders: Some(mesh_shaders),
+            ..settings(None)
+        };
+        if let Err(error) = Renderer::headless(&settings, 1, 1) {
+            assert_eq!(error.code(), "gpu.no_mesh_shaders", "{error:#}");
+            println!("tests drawing meshlets through mesh shaders skipped: {error}");
+            continue;
+        }
+        let through = if mesh_shaders { "mesh" } else { "vertex" };
+        let name = format!("meshlets_draw_as_their_indices_do through {through} shaders");
+        tests.run(&name, || meshlets_draw_as_their_indices_do(mesh_shaders));
+    }
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
         if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
@@ -216,6 +232,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         gpu: None,
         vsync: false,
         uploads,
+        mesh_shaders: None,
         upload_budget: DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: None,
@@ -403,7 +420,18 @@ fn metallic(metallic: f32, roughness: f32) -> Workflow {
 
 /// A unit square around the origin, a model's, counterclockwise seen from +Z, which it faces, its
 /// texture's top left at its top left, its tangent along +X.
-fn model_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
+/// A model's mesh of `vertices` and `indices`, packed, of one level, all of them.
+fn add_model(
+    meshes: &mut Meshes,
+    name: &str,
+    vertices: &[ModelVertex],
+    indices: &[u32],
+) -> Mesh<PackedVertex> {
+    let packed = ModelMesh::pack(vertices, indices.to_vec(), Vec::new());
+    meshes.add_model(name, &packed).expect("a mesh")
+}
+
+fn model_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
         position: Vec3::new(x, y, 0.0),
         uv: Vec2::from(uv),
@@ -417,9 +445,7 @@ fn model_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
         corner([0.5, 0.5], [1.0, 0.0]),
         corner([-0.5, 0.5], [0.0, 0.0]),
     ];
-    meshes
-        .add("model square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh")
+    add_model(meshes, "model square", &corners, &[0, 1, 2, 2, 3, 0])
 }
 
 /// Draws a window of egui widgets offscreen, and compares it with its reference image.
@@ -2929,9 +2955,7 @@ fn models_match_their_reference() {
             corner([0.5, 0.5], [1.0, 0.0], colors[2]),
             corner([-0.5, 0.5], [0.0, 0.0], colors[3]),
         ];
-        (stores.meshes)
-            .add(name, &corners, &[0, 1, 2, 2, 3, 0])
-            .expect("a mesh")
+        add_model(&mut stores.meshes, name, &corners, &[0, 1, 2, 2, 3, 0])
     };
     let plain = square("square", [Vec4::ONE; 4]);
     let (red_corner, green_corner) = (Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::new(0.0, 1.0, 0.0, 1.0));
@@ -3954,7 +3978,13 @@ fn lights_shade_as_gltf_defines() {
 
 /// A sphere of `radius` about the origin, a model's, of `rings` rings from pole to pole and
 /// `segments` around, its normals out and its tangents along its lines of latitude, eastward.
-fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<ModelVertex> {
+fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<PackedVertex> {
+    let (vertices, indices) = sphere_of(radius, rings, segments);
+    add_model(meshes, "sphere", &vertices, &indices)
+}
+
+/// The vertices and indices of [`sphere`]'s mesh.
+fn sphere_of(radius: f32, rings: u32, segments: u32) -> (Vec<ModelVertex>, Vec<u32>) {
     use math::libm::{cosf, sinf};
     let mut vertices = Vec::new();
     for ring in 0..=rings {
@@ -3984,7 +4014,7 @@ fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<M
             indices.extend_from_slice(&[at, below, next, next, below, below + 1]);
         }
     }
-    meshes.add("sphere", &vertices, &indices).expect("a mesh")
+    (vertices, indices)
 }
 
 /// Spheres of one color, opaque and rough 0 to 1 from left to right, metallic 0 to 1 from top to
@@ -4829,8 +4859,8 @@ fn shadows_fall_where_their_casters_put_them() {
 /// draws and casts its shadow; one past the view's side, which the view culls but the shadows'
 /// cascades keep, so that its shadow falls in the view; one 200 units away, which both cull; and
 /// a red one across the view's other side, which draws where it shows. And a red square of a mesh
-/// whose vertices are 10 units from its own origin, which is outside the view, added without a
-/// sphere, so never culled: it draws. What the view counts on the GPU leaves out those it culled.
+/// whose vertices are 10 units from its own origin, which is outside the view, its sphere round
+/// its vertices there: it draws. What the view counts on the GPU leaves out those it culled.
 fn culling_keeps_what_each_view_sees() {
     const SIZE: u32 = 128;
     let mut renderer = renderer(SIZE, SIZE);
@@ -4852,23 +4882,8 @@ fn culling_keeps_what_each_view_sees() {
     };
     let indices = [0, 1, 2, 2, 3, 0];
     let floor = model_square(&mut stores.meshes);
-    let whole = Lod {
-        start: 0,
-        count: 6,
-        error: 0.0,
-    };
-    let sphere = Lods {
-        levels: vec![whole],
-        center: Vec3::ZERO,
-        // Half the square's diagonal, to its corners.
-        radius: std::f32::consts::FRAC_1_SQRT_2,
-    };
-    let plate = (stores.meshes)
-        .add_lods("plate", &corners(0.0), &indices, sphere)
-        .expect("a mesh");
-    let away = (stores.meshes)
-        .add("away", &corners(10.0), &indices)
-        .expect("a mesh");
+    let plate = add_model(&mut stores.meshes, "plate", &corners(0.0), &indices);
+    let away = add_model(&mut stores.meshes, "away", &corners(10.0), &indices);
     let white = Material {
         workflow: metallic(0.0, 1.0),
         ..Material::default()
@@ -4981,19 +4996,7 @@ fn the_scene_draws_as_draws_do() {
             corner([0.5, 0.5], [1.0, 0.0]),
             corner([-0.5, 0.5], [0.0, 0.0]),
         ];
-        let whole = Lod {
-            start: 0,
-            count: 6,
-            error: 0.0,
-        };
-        let sphere = Lods {
-            levels: vec![whole],
-            center: Vec3::ZERO,
-            radius: std::f32::consts::FRAC_1_SQRT_2,
-        };
-        let plate = (stores.meshes)
-            .add_lods("plate", &corners, &[0, 1, 2, 2, 3, 0], sphere)
-            .expect("a mesh");
+        let plate = add_model(&mut stores.meshes, "plate", &corners, &[0, 1, 2, 2, 3, 0]);
         let white = Material {
             workflow: metallic(0.0, 1.0),
             ..Material::default()
@@ -5310,7 +5313,7 @@ fn surfaces_cast_no_shadows_on_themselves() {
 /// A unit square around the origin, a model's, as [`model_square`] is, opaque at its left edge and
 /// transparent at its right, as its vertices' colors' alpha says: a masked material of it draws its
 /// left half.
-fn half_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
+fn half_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
         position: Vec3::new(x, y, 0.0),
         uv: Vec2::from(uv),
@@ -5324,9 +5327,212 @@ fn half_square(meshes: &mut Meshes) -> Mesh<ModelVertex> {
         corner([0.5, 0.5], [1.0, 0.0]),
         corner([-0.5, 0.5], [0.0, 0.0]),
     ];
-    meshes
-        .add("half square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh")
+    add_model(meshes, "half square", &corners, &[0, 1, 2, 2, 3, 0])
+}
+
+/// Cuts each of `mesh`'s levels into meshlets as the cooker does, more simply: its triangles in
+/// their order, a meshlet ending where the next triangle would take it past a meshlet's vertices or
+/// triangles, each in the sphere round its vertices' box, facing within a cone round its
+/// triangles' mean normal, as `meshopt_computeClusterBounds` makes one, widened for its bytes'
+/// rounding.
+fn cut_meshlets(mesh: &mut ModelMesh) {
+    let positions = mesh.positions();
+    let mut meshlets = Meshlets::default();
+    for lod in &mesh.lods.levels {
+        let start = lod.start as usize;
+        let triangles = mesh.indices[start..start + lod.count as usize]
+            .as_chunks::<3>()
+            .0;
+        let first = meshlets.meshlets.len() as u32;
+        let mut rest = triangles;
+        while !rest.is_empty() {
+            let mut vertices: Vec<u32> = Vec::new();
+            let mut taken = 0;
+            for corners in rest {
+                let new = corners.iter().filter(|c| !vertices.contains(c)).count();
+                let full = vertices.len() + new > MAX_MESHLET_VERTICES as usize;
+                if full || taken == MAX_MESHLET_TRIANGLES as usize {
+                    break;
+                }
+                for &corner in corners {
+                    if !vertices.contains(&corner) {
+                        vertices.push(corner);
+                    }
+                }
+                taken += 1;
+            }
+            let (cut, after) = rest.split_at(taken);
+            rest = after;
+            let at = |vertex: u32| positions[vertex as usize];
+            let (low, high) = (vertices.iter())
+                .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(low, high), &v| {
+                    (low.min(at(v)), high.max(at(v)))
+                });
+            let center = (low + high) / 2.0;
+            let radius = vertices
+                .iter()
+                .map(|&v| at(v).distance(center))
+                .fold(0.0, f32::max);
+            let normals: Vec<Vec3> = (cut.iter())
+                .map(|&[a, b, c]| (at(b) - at(a)).cross(at(c) - at(a)).normalize())
+                .collect();
+            let axis = normals.iter().sum::<Vec3>().normalize_or_zero();
+            let least = normals.iter().map(|n| n.dot(axis)).fold(1.0, f32::min);
+            let cone = if least <= 0.1 {
+                [0, 0, 0, 127]
+            } else {
+                let cutoff = (1.0 - least * least).sqrt() + 0.03;
+                let [x, y, z] = (axis * 127.0).round().to_array().map(|c| c as i8);
+                [x, y, z, (cutoff * 127.0).ceil().min(127.0) as i8]
+            };
+            let place = |vertex: u32| vertices.iter().position(|&v| v == vertex).unwrap() as u8;
+            meshlets.meshlets.push(Meshlet {
+                vertices: meshlets.vertices.len() as u32,
+                vertex_count: vertices.len() as u32,
+                triangles: meshlets.triangles.len() as u32,
+                triangle_count: cut.len() as u32,
+                center,
+                radius,
+                cone,
+            });
+            meshlets.vertices.extend_from_slice(&vertices);
+            meshlets
+                .triangles
+                .extend(cut.iter().flatten().map(|&corner| place(corner)));
+            // Each meshlet's triangles from a word, as the cooker's are.
+            let padded = meshlets.triangles.len().next_multiple_of(4);
+            meshlets.triangles.resize(padded, 0);
+        }
+        meshlets
+            .levels
+            .push([first, meshlets.meshlets.len() as u32 - first]);
+    }
+    mesh.meshlets = meshlets;
+}
+
+/// Spheres of a mesh of two levels of detail, cut into meshlets, on a floor, lit by a sun that casts
+/// their shadows, seen with perspective: opaque and masked, near enough for their finest level and
+/// far enough for the coarser, mirrored, stretched along one axis, which their cones don't turn
+/// with, and part past the view's side, which culls some of their meshlets. Drawn by their
+/// meshlets, through mesh shaders if `mesh_shaders` and through vertex shaders otherwise, they draw
+/// bit for bit as the same spheres of the mesh without meshlets, by their indices, the same
+/// instances at the same levels, counting fewer triangles, as the meshlets that face away from the
+/// view or lie past its sides are culled; and match their reference.
+fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
+    const WIDTH: u32 = 200;
+    const HEIGHT: u32 = 128;
+    let render = |meshlets: bool| {
+        let settings = Settings {
+            mesh_shaders: Some(mesh_shaders),
+            ..settings(None)
+        };
+        let mut renderer = Renderer::headless(&settings, WIDTH, HEIGHT).expect("a renderer");
+        let mut stores = Stores::default();
+        let floor = model_square(&mut stores.meshes);
+        // Its finest level, then every other ring and segment of it.
+        let (vertices, mut indices) = sphere_of(1.0, 24, 48);
+        let finest = indices.len() as u32;
+        let across = 49;
+        for ring in (0..24).step_by(2) {
+            for segment in (0..48).step_by(2) {
+                let at = ring * across + segment;
+                let (below, next) = (at + 2 * across, at + 2);
+                indices.extend_from_slice(&[at, below, next, next, below, below + 2]);
+            }
+        }
+        let coarse = indices.len() as u32 - finest;
+        let levels = vec![
+            Lod {
+                start: 0,
+                count: finest,
+                error: 0.0,
+            },
+            Lod {
+                start: finest,
+                count: coarse,
+                error: 0.03,
+            },
+        ];
+        let mut ball = ModelMesh::pack(&vertices, indices, levels);
+        if meshlets {
+            cut_meshlets(&mut ball);
+        }
+        let ball = stores.meshes.add_model("ball", &ball).expect("a mesh");
+        let add = |stores: &mut Stores, mesh, material: Material| {
+            let material = stores.materials.add(&material);
+            MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+        };
+        let gray = Material {
+            color: Vec4::new(0.7, 0.7, 0.7, 1.0),
+            workflow: metallic(0.0, 0.8),
+            ..Material::default()
+        };
+        let blue = Material {
+            color: Vec4::new(0.2, 0.4, 0.9, 1.0),
+            workflow: metallic(0.0, 0.3),
+            ..gray
+        };
+        let masked = Material {
+            color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+            alpha: AlphaMode::Mask { cutoff: 0.5 },
+            ..blue
+        };
+        let floor = add(&mut stores, floor, gray);
+        let opaque = add(&mut stores, ball, blue);
+        let masked = add(&mut stores, ball, masked);
+        let mut draws = Draws::default();
+        draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 1);
+        let placed = [
+            (Vec3::ONE, Vec3::new(0.0, 1.0, 0.0), &opaque),
+            (Vec3::ONE, Vec3::new(2.4, 1.0, -1.0), &masked),
+            (
+                Vec3::new(-1.0, 1.0, 1.0),
+                Vec3::new(-2.2, 1.0, 1.0),
+                &opaque,
+            ),
+            (Vec3::new(1.0, 0.5, 1.0), Vec3::new(3.0, 0.5, 2.0), &masked),
+            (Vec3::ONE, Vec3::new(-6.0, 1.0, -1.0), &opaque),
+            (Vec3::ONE, Vec3::new(-3.0, 1.0, -14.0), &masked),
+        ];
+        for (i, &(scale, at, draw)) in placed.iter().enumerate() {
+            let transform = Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, at);
+            draws.push_draw(transform, draw, 2 + i as u64);
+        }
+        stores.lights = vec![Light {
+            color: Vec3::splat(4.0),
+            ..sun(Vec3::new(0.9, -0.8, 0.7), Some(30.0))
+        }];
+        let viewpoint = Viewpoint {
+            position: Vec3::new(0.0, 3.0, 7.0),
+            rotation: Quat::from_rotation_x(-0.35),
+            projection: Projection::Perspective {
+                fov: PI / 4.0,
+                near: 0.1,
+            },
+        };
+        let viewport = filling([WIDTH, HEIGHT]);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        // Past the frame the mesh came to be drawable in, which planned no room for its meshlets
+        // and drew it by its indices.
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        let counts = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        (counts, pixels)
+    };
+    let (by_indices, indexed) = render(false);
+    let (by_meshlets, cut) = render(true);
+    assert!(cut == indexed, "the pixels differ");
+    assert_eq!(
+        (by_meshlets.draws, by_meshlets.instances),
+        (by_indices.draws, by_indices.instances),
+        "the same instances at the same levels"
+    );
+    assert!(
+        by_meshlets.triangles > 0 && by_meshlets.triangles < by_indices.triangles,
+        "{by_meshlets:?} against {by_indices:?}"
+    );
+    compare("meshlets", WIDTH, HEIGHT, &cut);
 }
 
 /// A gray floor, a sphere on it, an orange post standing on it, and a masked plate, upright,

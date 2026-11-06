@@ -1,7 +1,8 @@
 //! Cooked models: a model as the cooker writes it into a game's package, which a run from the
 //! package reads in place of its glTF file and the files that names. It holds what [`gltf::read`]
-//! makes of them, its primitives' triangles as the cooker optimized them, with their levels of
-//! detail, and its images compressed in KTX2 as what each holds says, BC7 of colors or of values,
+//! makes of them, its primitives' meshes as the cooker made them, their triangles optimized, with
+//! their levels of detail, their vertices packed and their levels cut into meshlets, as
+//! [`ModelMesh`] holds them, and its images compressed in KTX2 as what each holds says, BC7 of colors or of values,
 //! or BC5 of a normal map, or BC7 of one, as a DDS image holds it, with their mip levels, as
 //! [`read_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes levels for
 //! them, but takes the levels' blocks out of zstd, as the loader does.
@@ -15,11 +16,17 @@
 //!             parent's index and its primitive's, each u32::MAX for none; and its light's kind,
 //!             a byte (0 for none, then directional, point, spot), and, if it has one, its color
 //!             (3 f32s), intensity, range (0 for none), inner cone and outer cone (an f32 each)
-//! primitives  a count, then each one's name, as a string; its vertices' count, then their
-//!             positions (3 f32s each), their texture coordinates (2), their colors (4), their
-//!             normals (3) and their tangents (4); its indices' count and its indices; its levels'
-//!             count and each one's start, count and error (an f32); its material's color (4
-//!             f32s), its workflow, a byte (0 for metallic-roughness, 1 for specular-glossiness),
+//! primitives  a count, then each one's name, as a string; its mesh: its packing (8 f32s: offset,
+//!             step, offset and scale of its texture coordinates), its vertices' count and each
+//!             vertex as `PackedVertex` lays it out (3 u16s, an i16, 4 i16s, 2 u16s and 4 bytes),
+//!             its indices' count and its indices, its levels' count and each one's start, count
+//!             and error (an f32), its sphere's center (3 f32s) and radius, its meshlets' count and
+//!             each one's first vertex, vertex count, first triangle and triangle count, its
+//!             center (3 f32s) and radius and its cone (4 bytes), its meshlets' vertices' count and
+//!             each, its meshlets' triangles' bytes' count and the bytes, and the count of its
+//!             levels' meshlets, none or as many as its levels, and each one's first and count;
+//!             its material's color (4 f32s), its workflow, a byte (0 for metallic-roughness, 1 for
+//!             specular-glossiness),
 //!             then its metallic and roughness (an f32 each) or its specular color (3 f32s) and
 //!             glossiness (an f32), its normal scale and occlusion strength (an f32 each) and
 //!             emission (3 f32s); each of its textures in `Slot`'s order, as its image (u32::MAX
@@ -34,9 +41,11 @@
 
 use std::path::Path;
 
-use gg_core::math::{Quat, Vec3};
+use gg_core::math::{Quat, Vec2, Vec3};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Lod, Workflow, Wrap};
+use gg_renderer::{
+    AlphaMode, Lod, Lods, Meshlet, Meshlets, ModelMesh, PackedVertex, Packing, Workflow, Wrap,
+};
 
 use crate::gltf::{self, Imported, Material, Part, Primitive, Sampling};
 use crate::image::read_ktx2;
@@ -118,22 +127,83 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     count(&mut bytes, imported.primitives.len());
     for primitive in &imported.primitives {
         string(&mut bytes, &primitive.name);
-        count(&mut bytes, primitive.positions.len());
-        floats(&mut bytes, primitive.positions.as_flattened());
-        floats(&mut bytes, primitive.uvs.as_flattened());
-        floats(&mut bytes, primitive.colors.as_flattened());
-        floats(&mut bytes, primitive.normals.as_flattened());
-        floats(&mut bytes, primitive.tangents.as_flattened());
-        count(&mut bytes, primitive.indices.len());
-        for index in &primitive.indices {
-            bytes.extend_from_slice(&index.to_le_bytes());
+        let packed;
+        let mesh = match &primitive.mesh {
+            Some(mesh) => mesh,
+            None => {
+                packed = crate::model::model_mesh(primitive);
+                &packed
+            }
+        };
+        let words = |bytes: &mut Vec<u8>, words: &[u32]| {
+            for word in words {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+        };
+        let Packing {
+            offset,
+            step,
+            uv_offset,
+            uv_scale,
+        } = mesh.packing;
+        floats(&mut bytes, &offset.to_array());
+        floats(&mut bytes, &[step]);
+        floats(&mut bytes, &uv_offset.to_array());
+        floats(&mut bytes, &uv_scale.to_array());
+        count(&mut bytes, mesh.vertices.len());
+        for vertex in &mesh.vertices {
+            for half in vertex.position {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+            let signed = [
+                vertex.sign,
+                vertex.normal[0],
+                vertex.normal[1],
+                vertex.tangent[0],
+            ];
+            for half in signed.into_iter().chain([vertex.tangent[1]]) {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+            for half in vertex.uv {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+            bytes.extend_from_slice(&vertex.color);
         }
-        count(&mut bytes, primitive.lods.len());
-        for lod in &primitive.lods {
-            bytes.extend_from_slice(&lod.start.to_le_bytes());
-            bytes.extend_from_slice(&lod.count.to_le_bytes());
+        count(&mut bytes, mesh.indices.len());
+        words(&mut bytes, &mesh.indices);
+        count(&mut bytes, mesh.lods.levels.len());
+        for lod in &mesh.lods.levels {
+            words(&mut bytes, &[lod.start, lod.count]);
             floats(&mut bytes, &[lod.error]);
         }
+        floats(&mut bytes, &mesh.lods.center.to_array());
+        floats(&mut bytes, &[mesh.lods.radius]);
+        let meshlets = &mesh.meshlets;
+        count(&mut bytes, meshlets.meshlets.len());
+        for meshlet in &meshlets.meshlets {
+            let Meshlet {
+                vertices,
+                vertex_count,
+                triangles,
+                triangle_count,
+                center,
+                radius,
+                cone,
+            } = *meshlet;
+            words(
+                &mut bytes,
+                &[vertices, vertex_count, triangles, triangle_count],
+            );
+            floats(&mut bytes, &center.to_array());
+            floats(&mut bytes, &[radius]);
+            bytes.extend(cone.map(|byte| byte as u8));
+        }
+        count(&mut bytes, meshlets.vertices.len());
+        words(&mut bytes, &meshlets.vertices);
+        count(&mut bytes, meshlets.triangles.len());
+        bytes.extend_from_slice(&meshlets.triangles);
+        count(&mut bytes, meshlets.levels.len());
+        words(&mut bytes, meshlets.levels.as_flattened());
         let material = &primitive.material;
         floats(&mut bytes, &material.color);
         match material.workflow {
@@ -202,8 +272,8 @@ pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Imported> {
 }
 
 /// Reads model `name`, as the cooker writes it, from `bytes`, its file at `path`, checking that it
-/// holds what [`gltf::read`] would give: each part after its parent, primitives of whole triangles
-/// of their own vertices, levels within their indices, errors that don't shrink, and images that
+/// holds what [`gltf::read`] would give: each part after its parent, primitives whose meshes hold
+/// together, as [`ModelMesh::check`] checks them, and images that
 /// read, each the KTX2 of BC7 that [`read_ktx2`] takes, read as far as its header, taking no more
 /// memory than [`gltf::MAX_MEMORY`], what its images decode to among it.
 ///
@@ -267,8 +337,13 @@ impl<'a> Reader<'a> {
             let primitive = self
                 .primitive()
                 .map_err(|problem| format!("its primitive {i} {problem}"))?;
-            held += primitive.positions.len() * size_of::<gg_renderer::ModelVertex>()
-                + primitive.indices.len() * size_of::<u32>();
+            let mesh = primitive.mesh.as_ref().expect("a cooked primitive's mesh");
+            let meshlets = &mesh.meshlets;
+            held += size_of_val(mesh.vertices.as_slice())
+                + size_of_val(mesh.indices.as_slice())
+                + size_of_val(meshlets.meshlets.as_slice())
+                + size_of_val(meshlets.vertices.as_slice())
+                + meshlets.triangles.len();
             primitives.push(primitive);
         }
         if let Some(i) = drawn.iter().find(|&&i| i >= primitives.len()) {
@@ -340,47 +415,7 @@ impl<'a> Reader<'a> {
     /// A primitive. The error says what's wrong with it.
     fn primitive(&mut self) -> Result<Primitive, String> {
         let name = self.string()?;
-        let vertices = self.count(size_of::<gg_renderer::ModelVertex>())?;
-        let positions = self.vectors(vertices)?;
-        let uvs = self.vectors(vertices)?;
-        let colors = self.vectors(vertices)?;
-        let normals = self.vectors(vertices)?;
-        let tangents = self.vectors(vertices)?;
-        let count = self.count(4)?;
-        let indices: Vec<u32> = (0..count).map(|_| self.u32()).collect::<Result<_, _>>()?;
-        if indices.is_empty() || !indices.len().is_multiple_of(3) {
-            return Err(format!(
-                "has {} indices, not whole triangles",
-                indices.len()
-            ));
-        }
-        if let Some(index) = indices.iter().find(|&&index| index as usize >= vertices) {
-            return Err(format!("has index {index}, past its {vertices} vertices"));
-        }
-        let mut lods: Vec<Lod> = Vec::new();
-        for i in 0..self.count(12)? {
-            let (start, count) = (self.u32()?, self.u32()?);
-            let [error] = self.floats()?;
-            let end = start.checked_add(count).map(|end| end as usize);
-            if count == 0 || !count.is_multiple_of(3) || end.is_none_or(|end| end > indices.len()) {
-                return Err(format!(
-                    "has level {i} of indices {start} on, {count} of them, not whole triangles \
-                     among its {}",
-                    indices.len()
-                ));
-            }
-            let finer = lods.last().map_or(0.0, |finer| finer.error);
-            if !error.is_finite() || error < finer {
-                return Err(format!(
-                    "has level {i} of error {error}, less than the level before's or not finite"
-                ));
-            }
-            lods.push(Lod {
-                start,
-                count,
-                error,
-            });
-        }
+        let mesh = self.mesh()?;
         let color = self.floats()?;
         let [workflow]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
         let workflow = match workflow {
@@ -435,13 +470,13 @@ impl<'a> Reader<'a> {
         };
         Ok(Primitive {
             name,
-            positions,
-            uvs,
-            colors,
-            normals,
-            tangents,
-            indices,
-            lods,
+            positions: Vec::new(),
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            normals: Vec::new(),
+            tangents: Vec::new(),
+            indices: Vec::new(),
+            mesh: Some(mesh),
             material: Material {
                 color,
                 workflow,
@@ -454,6 +489,101 @@ impl<'a> Reader<'a> {
                 unlit: flag(unlit, "unlitness")?,
             },
         })
+    }
+
+    /// A primitive's mesh, which holds together as [`ModelMesh::check`] checks it. The error says
+    /// what's wrong with it.
+    fn mesh(&mut self) -> Result<ModelMesh, String> {
+        let [x, y, z, step, u, v, u_scale, v_scale] = self.floats()?;
+        let packing = Packing {
+            offset: Vec3::new(x, y, z),
+            step,
+            uv_offset: Vec2::new(u, v),
+            uv_scale: Vec2::new(u_scale, v_scale),
+        };
+        let vertices = (0..self.count(size_of::<PackedVertex>())?)
+            .map(|_| {
+                let bytes = self.take(size_of::<PackedVertex>())?;
+                let (halves, color) = bytes.split_at(20);
+                let (halves, _) = halves.as_chunks::<2>();
+                let half = |i: usize| u16::from_le_bytes(halves[i]);
+                let signed = |i: usize| i16::from_le_bytes(halves[i]);
+                Ok(PackedVertex {
+                    position: [half(0), half(1), half(2)],
+                    sign: signed(3),
+                    normal: [signed(4), signed(5)],
+                    tangent: [signed(6), signed(7)],
+                    uv: [half(8), half(9)],
+                    color: color.try_into().expect("4 bytes"),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let indices = self.words(4)?;
+        let levels = (0..self.count(12)?)
+            .map(|_| {
+                let [start, count] = [self.u32()?, self.u32()?];
+                let [error] = self.floats()?;
+                Ok(Lod {
+                    start,
+                    count,
+                    error,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let [cx, cy, cz, radius] = self.floats()?;
+        // Its first vertex and triangle, their counts, its sphere and its cone.
+        let meshlets = (0..self.count(36)?)
+            .map(|_| {
+                let [vertices, vertex_count, triangles, triangle_count] =
+                    [self.u32()?, self.u32()?, self.u32()?, self.u32()?];
+                let [x, y, z, radius] = self.floats()?;
+                let cone: [u8; 4] = self.take(4)?.try_into().expect("4 bytes");
+                Ok(Meshlet {
+                    vertices,
+                    vertex_count,
+                    triangles,
+                    triangle_count,
+                    center: Vec3::new(x, y, z),
+                    radius,
+                    cone: cone.map(|byte| byte as i8),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let meshlet_vertices = self.words(4)?;
+        let len = self.count(1)?;
+        let triangles = self.take(len)?.to_vec();
+        let meshlet_levels = (0..self.count(8)?)
+            .map(|_| Ok([self.u32()?, self.u32()?]))
+            .collect::<Result<Vec<_>, String>>()?;
+        let mesh = ModelMesh {
+            packing,
+            vertices,
+            indices,
+            lods: Lods {
+                levels,
+                center: Vec3::new(cx, cy, cz),
+                radius,
+            },
+            meshlets: Meshlets {
+                meshlets,
+                vertices: meshlet_vertices,
+                triangles,
+                levels: meshlet_levels,
+            },
+        };
+        // What's wrong with it, which follows the primitive's own name in the error.
+        mesh.check("its").map_err(|error| {
+            let message = error.to_string();
+            let problem = message.strip_prefix("mesh \"its\" ").unwrap_or(&message);
+            format!("has a mesh that {problem}")
+        })?;
+        Ok(mesh)
+    }
+
+    /// A count of words, then the words, the count checked against the bytes left, `each` bytes a
+    /// word.
+    fn words(&mut self, each: usize) -> Result<Vec<u32>, String> {
+        (0..self.count(each)?).map(|_| self.u32()).collect()
     }
 
     /// The next `len` bytes.
@@ -496,14 +626,6 @@ impl<'a> Reader<'a> {
         Ok(std::array::from_fn(|i| f32::from_le_bytes(floats[i])))
     }
 
-    /// `count` vectors of `N` floats each, the count checked against the bytes left.
-    fn vectors<const N: usize>(&mut self, count: usize) -> Result<Vec<[f32; N]>, String> {
-        if count.saturating_mul(N * 4) > self.bytes.len() {
-            return Err(format!("it ends before its {count} vertices"));
-        }
-        (0..count).map(|_| self.floats()).collect()
-    }
-
     fn string(&mut self) -> Result<String, String> {
         let len = self.count(1)?;
         let bytes = self.take(len)?;
@@ -515,6 +637,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::image::tests::ktx2;
+    use gg_renderer::ModelVertex;
 
     /// A model of two parts, the first a spot light and the second under it drawing a primitive of
     /// two levels with a masked material that samples its two images, colors and a normal map; and
@@ -529,26 +652,55 @@ mod tests {
                 wrap,
             })
         };
+        let corners = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let colors_of = [[1.0; 4], [0.5; 4], [0.25; 4], [0.0, 0.0, 0.0, 1.0]];
+        let vertices: Vec<_> = (corners.iter().zip(colors_of))
+            .map(|(&[x, y], color)| ModelVertex {
+                position: Vec3::new(x, y, 0.0),
+                uv: Vec2::new(x, y),
+                color: color.into(),
+                normal: Vec3::Z,
+                tangent: gg_core::math::Vec4::new(1.0, 0.0, 0.0, -1.0),
+            })
+            .collect();
+        let levels = vec![
+            Lod {
+                start: 0,
+                count: 6,
+                error: 0.0,
+            },
+            Lod {
+                start: 6,
+                count: 3,
+                error: 0.5,
+            },
+        ];
+        let mut mesh = ModelMesh::pack(&vertices, vec![0, 1, 2, 2, 1, 3, 0, 1, 2], levels);
+        // A meshlet for each level: both triangles, then one.
+        let meshlet = |vertices, vertex_count, triangles, triangle_count| Meshlet {
+            vertices,
+            vertex_count,
+            triangles,
+            triangle_count,
+            center: Vec3::new(0.5, 0.5, 0.0),
+            radius: 0.75,
+            cone: [0, 0, 127, -20],
+        };
+        mesh.meshlets = Meshlets {
+            meshlets: vec![meshlet(0, 4, 0, 2), meshlet(4, 3, 8, 1)],
+            vertices: vec![0, 1, 2, 3, 0, 1, 2],
+            triangles: vec![0, 1, 2, 2, 1, 3, 0, 0, 0, 1, 2, 0],
+            levels: vec![[0, 1], [1, 1]],
+        };
         let primitive = Primitive {
             name: "square/0".to_owned(),
-            positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
-            uvs: vec![[0.0; 2], [1.0, 0.0], [0.0, 1.0], [1.0; 2]],
-            colors: vec![[1.0; 4], [0.5; 4], [0.25; 4], [0.0, 0.0, 0.0, 1.0]],
-            normals: vec![[0.0, 0.0, 1.0]; 4],
-            tangents: vec![[1.0, 0.0, 0.0, -1.0]; 4],
-            indices: vec![0, 1, 2, 2, 1, 3, 0, 1, 2],
-            lods: vec![
-                Lod {
-                    start: 0,
-                    count: 6,
-                    error: 0.0,
-                },
-                Lod {
-                    start: 6,
-                    count: 3,
-                    error: 0.5,
-                },
-            ],
+            positions: Vec::new(),
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            normals: Vec::new(),
+            tangents: Vec::new(),
+            indices: Vec::new(),
+            mesh: Some(mesh),
             material: Material {
                 color: [1.0, 0.5, 0.25, 1.0],
                 workflow: Workflow::MetallicRoughness {
@@ -666,45 +818,61 @@ mod tests {
             "a part drawing what it hasn't",
             edited(&|imported| imported.parts[1].primitive = Some(2)),
         ));
-        let primitive = |edit: fn(&mut Primitive)| {
-            move |imported: &mut Imported| edit(&mut imported.primitives[0])
+        let mesh = |edit: fn(&mut ModelMesh)| {
+            move |imported: &mut Imported| {
+                edit(imported.primitives[0].mesh.as_mut().expect("a mesh"));
+            }
         };
         cases.push((
             "an index past its vertices",
-            edited(&primitive(|primitive| primitive.indices[8] = 4)),
+            edited(&mesh(|mesh| mesh.indices[8] = 4)),
         ));
         cases.push((
             "indices that aren't whole triangles",
-            edited(&primitive(|primitive| {
-                primitive.indices.pop();
-                primitive.lods.pop();
+            edited(&mesh(|mesh| {
+                mesh.indices.pop();
+                mesh.lods.levels.pop();
+                mesh.meshlets.levels.pop();
             })),
         ));
         cases.push((
             "a level past its indices",
-            edited(&primitive(|primitive| primitive.lods[1].start = 7)),
+            edited(&mesh(|mesh| mesh.lods.levels[1].start = 7)),
         ));
         cases.push((
             "a level of no triangles",
-            edited(&primitive(|primitive| primitive.lods[1].count = 0)),
+            edited(&mesh(|mesh| mesh.lods.levels[1].count = 0)),
         ));
         cases.push((
             "an error that shrinks",
-            edited(&primitive(|primitive| primitive.lods[0].error = 1.0)),
+            edited(&mesh(|mesh| mesh.lods.levels[0].error = 1.0)),
         ));
         cases.push((
             "an error that isn't finite",
-            edited(&primitive(|primitive| primitive.lods[1].error = f32::NAN)),
+            edited(&mesh(|mesh| mesh.lods.levels[1].error = f32::NAN)),
         ));
         cases.push((
+            "a meshlet's vertex past the mesh's",
+            edited(&mesh(|mesh| mesh.meshlets.vertices[3] = 4)),
+        ));
+        cases.push((
+            "a meshlet's corner past its vertices",
+            edited(&mesh(|mesh| mesh.meshlets.triangles[9] = 3)),
+        ));
+        cases.push((
+            "a meshlet past its triangles",
+            edited(&mesh(|mesh| mesh.meshlets.meshlets[1].triangle_count = 2)),
+        ));
+        cases.push(("a step of 0", edited(&mesh(|mesh| mesh.packing.step = 0.0))));
+        cases.push((
             "a material sampling what it hasn't",
-            edited(&primitive(|primitive| {
-                primitive.material.textures[0] =
-                    primitive.material.textures[2].map(|texture| Sampling {
-                        image: 2,
-                        ..texture
-                    });
-            })),
+            edited(&|imported| {
+                let material = &mut imported.primitives[0].material;
+                material.textures[0] = material.textures[2].map(|texture| Sampling {
+                    image: 2,
+                    ..texture
+                });
+            }),
         ));
         let mut image = images.clone();
         image[0][0] ^= 1;

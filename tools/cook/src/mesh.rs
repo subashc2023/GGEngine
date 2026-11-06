@@ -1,13 +1,17 @@
 //! A model primitive's triangles, optimized with meshoptimizer for drawing: identical vertices
 //! merged, the triangles and the vertices ordered for the GPU's caches, and a chain of coarser
-//! levels of detail over the same vertices, which a draw picks from by its size on screen.
+//! levels of detail over the same vertices, which a draw picks from by its size on screen; and,
+//! once its vertices are packed, each level cut into meshlets, which views cull and draw apart.
 
 use std::ops::Range;
 
+use gg_engine::cook::{MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, Meshlets, ModelMesh};
+use gg_engine::math::Vec3;
 use meshopt::{
-    SimplifyOptions, VertexStream, generate_vertex_remap_multi, optimize_overdraw_in_place_decoder,
+    SimplifyOptions, VertexDataAdapter, VertexStream, build_meshlets, compute_meshlet_bounds,
+    generate_vertex_remap_multi, optimize_overdraw_in_place_decoder,
     optimize_vertex_cache_in_place, optimize_vertex_fetch_remap, remap_index_buffer,
-    remap_vertex_buffer, simplify_decoder,
+    remap_vertex_buffer, simplify_decoder, typed_to_bytes,
 };
 
 /// How many levels a chain holds at most, level 0 among them. Each level has about half the
@@ -206,6 +210,57 @@ pub(crate) fn optimize(
     *indices = remap_index_buffer(Some(indices.as_slice()), count, &remap);
     vertices.remap(count, &remap);
     lods
+}
+
+/// How much meshoptimizer's meshlet builder weighs keeping each meshlet's triangles facing one way,
+/// which narrows the cones views cull them by, against keeping meshlets full: the README's
+/// suggestion for meshlets culled by their cones.
+const CONE_WEIGHT: f32 = 0.25;
+
+/// Cuts each of `mesh`'s levels into meshlets, as [`ModelMesh`]'s holds them: each level's
+/// triangles, by meshoptimizer's builder, into meshlets of at most [`MAX_MESHLET_VERTICES`] vertices
+/// and [`MAX_MESHLET_TRIANGLES`] triangles, each with the sphere round its vertices as they unpack,
+/// which is where they draw, and the cone its triangles face within; one level's after another's,
+/// in the levels' order, each triangle in one meshlet of its level.
+pub(crate) fn cut(mesh: &mut ModelMesh) {
+    let positions: Vec<[f32; 3]> = (mesh.positions().iter())
+        .map(|position| position.to_array())
+        .collect();
+    let adapter = VertexDataAdapter::new(typed_to_bytes(&positions), size_of::<[f32; 3]>(), 0)
+        .expect("positions are whole vertices of 12 bytes from 0");
+    let mut meshlets = Meshlets::default();
+    for lod in &mesh.lods.levels {
+        let start = lod.start as usize;
+        let indices = &mesh.indices[start..start + lod.count as usize];
+        let built = build_meshlets(
+            indices,
+            &adapter,
+            MAX_MESHLET_VERTICES as usize,
+            MAX_MESHLET_TRIANGLES as usize,
+            CONE_WEIGHT,
+        );
+        let first = meshlets.meshlets.len() as u32;
+        let (vertices, triangles) = (meshlets.vertices.len(), meshlets.triangles.len());
+        for (meshlet, cut) in built.meshlets.iter().zip(built.iter()) {
+            let bounds = compute_meshlet_bounds(cut, &adapter);
+            let [x, y, z] = bounds.cone_axis_s8;
+            meshlets.meshlets.push(Meshlet {
+                vertices: vertices as u32 + meshlet.vertex_offset,
+                vertex_count: meshlet.vertex_count,
+                triangles: triangles as u32 + meshlet.triangle_offset,
+                triangle_count: meshlet.triangle_count,
+                center: Vec3::from_array(bounds.center),
+                radius: bounds.radius,
+                cone: [x, y, z, bounds.cone_cutoff_s8],
+            });
+        }
+        meshlets.vertices.extend_from_slice(&built.vertices);
+        // Each meshlet's triangles start at a word, the builder's padding kept.
+        meshlets.triangles.extend_from_slice(&built.triangles);
+        let count = meshlets.meshlets.len() as u32 - first;
+        meshlets.levels.push([first, count]);
+    }
+    mesh.meshlets = meshlets;
 }
 
 #[cfg(test)]
@@ -677,6 +732,125 @@ mod tests {
             )
         };
         assert!(run() == run());
+    }
+
+    /// `mesh` optimized into levels, packed, and cut into meshlets.
+    fn cut_mesh(mut mesh: Mesh) -> ModelMesh {
+        let lods = mesh.optimize();
+        let vertices: Vec<_> = (0..mesh.positions.len())
+            .map(|i| gg_engine::cook::ModelVertex {
+                position: mesh.positions[i].into(),
+                uv: mesh.uvs[i].into(),
+                color: mesh.colors[i].into(),
+                normal: mesh.normals[i].into(),
+                tangent: mesh.tangents[i].into(),
+            })
+            .collect();
+        let levels = (lods.iter())
+            .map(|lod| gg_engine::cook::Lod {
+                start: lod.start,
+                count: lod.count,
+                error: lod.error,
+            })
+            .collect();
+        let mut packed = ModelMesh::pack(&vertices, mesh.indices, levels);
+        cut(&mut packed);
+        packed
+    }
+
+    /// `corners` of a triangle, from its least on, keeping its winding.
+    fn rotated(corners: [u32; 3]) -> [u32; 3] {
+        let least = (0..3).min_by_key(|&i| corners[i]).unwrap();
+        [0, 1, 2].map(|i| corners[(least + i) % 3])
+    }
+
+    /// Each level's meshlets hold its triangles, each once, winding as they did, within a
+    /// meshlet's limits, each in a sphere round its vertices as they unpack; and the mesh holds
+    /// together.
+    #[test]
+    fn each_levels_meshlets_hold_its_triangles() {
+        for (name, input) in [("grid", grid(48)), ("cube", cube(12))] {
+            let mesh = cut_mesh(input);
+            mesh.check(name).unwrap_or_else(|error| panic!("{error:#}"));
+            let positions = mesh.positions();
+            let meshlets = &mesh.meshlets;
+            assert_eq!(meshlets.levels.len(), mesh.lods.levels.len(), "{name}");
+            for (lod, &[first, count]) in mesh.lods.levels.iter().zip(&meshlets.levels) {
+                let start = lod.start as usize;
+                let indices = &mesh.indices[start..start + lod.count as usize];
+                let mut level: Vec<_> = (indices.as_chunks::<3>().0.iter())
+                    .map(|&corners| rotated(corners))
+                    .collect();
+                let mut held = Vec::new();
+                for meshlet in &meshlets.meshlets[first as usize..(first + count) as usize] {
+                    let vertex = |corner: u8| {
+                        meshlets.vertices[(meshlet.vertices + u32::from(corner)) as usize]
+                    };
+                    let start = meshlet.triangles as usize;
+                    let bytes =
+                        &meshlets.triangles[start..start + 3 * meshlet.triangle_count as usize];
+                    for corners in bytes.as_chunks::<3>().0 {
+                        held.push(rotated(corners.map(vertex)));
+                    }
+                    for i in meshlet.vertices..meshlet.vertices + meshlet.vertex_count {
+                        let p = positions[meshlets.vertices[i as usize] as usize];
+                        let apart = p.distance(meshlet.center);
+                        assert!(
+                            apart <= meshlet.radius * 1.0001 + 1e-6,
+                            "{name}: {meshlet:?}"
+                        );
+                    }
+                }
+                level.sort_unstable();
+                held.sort_unstable();
+                assert_eq!(held, level, "{name}: a level's triangles, each once");
+            }
+        }
+    }
+
+    /// Wherever a meshlet's cone says a camera sees only its triangles' backs, as the culling tests
+    /// it, it does: no triangle faces a camera on the cone's axis, behind its sphere, at any
+    /// distance.
+    #[test]
+    fn a_meshlets_cone_hides_only_triangles_facing_away() {
+        let mesh = cut_mesh(cube(12));
+        let positions = mesh.positions();
+        let meshlets = &mesh.meshlets;
+        let mut tested = 0;
+        for meshlet in &meshlets.meshlets {
+            let [x, y, z, cutoff] = meshlet.cone.map(|c| f32::from(c) / 127.0);
+            let axis = Vec3::new(x, y, z);
+            // A cone of no axis, of a meshlet facing every way, hides it from no camera.
+            let Some(way) = axis.try_normalize() else {
+                continue;
+            };
+            for distance in [1.5, 4.0, 40.0] {
+                let camera = meshlet.center - way * meshlet.radius * distance;
+                let d = meshlet.center - camera;
+                if d.dot(axis) < cutoff * d.length() + meshlet.radius {
+                    continue;
+                }
+                tested += 1;
+                let start = meshlet.triangles as usize;
+                let bytes = &meshlets.triangles[start..start + 3 * meshlet.triangle_count as usize];
+                for corners in bytes.as_chunks::<3>().0 {
+                    let [a, b, c] = corners.map(|corner| {
+                        let vertex =
+                            meshlets.vertices[(meshlet.vertices + u32::from(corner)) as usize];
+                        positions[vertex as usize]
+                    });
+                    let normal = (b - a).cross(c - a);
+                    assert!(
+                        normal.dot(a - camera) >= -1e-4 * normal.length(),
+                        "{meshlet:?} shows a triangle's front to {camera}"
+                    );
+                }
+            }
+        }
+        assert!(
+            tested > 0,
+            "some cones hide their meshlets from some cameras"
+        );
     }
 
     /// Inputs that make no sense don't panic or hang, and give levels that hold what any do.

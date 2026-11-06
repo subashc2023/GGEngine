@@ -82,6 +82,7 @@ impl UiPass {
                     name: "egui",
                     spirv: SPIRV,
                     vertex: c"vertex_main",
+                    mesh: false,
                     fragment: Some(c"fragment_main"),
                     format,
                     blend: Blend::PremultipliedAlpha,

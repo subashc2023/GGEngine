@@ -3,7 +3,7 @@
 //! as its camera sees them.
 
 use std::collections::{HashSet, VecDeque};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use gg_gpu::{
 use tracing::warn;
 
 use crate::draws::Run;
+use crate::packed::{MeshletBounds, ModelMesh, PackedVertex};
 use crate::shader::{self, Shader};
 use crate::texture::{self, Map, Texels};
 use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
@@ -245,6 +246,36 @@ pub(crate) struct Added {
     vertex_size: usize,
     indices: Vec<u32>,
     lods: Lods,
+    /// A model's mesh's meshlets, if it has them: what culls each, and each level's.
+    meshlets: Option<MeshletParts>,
+}
+
+/// What culls a mesh's meshlets, as the renderer keeps it apart from the mesh's buffer: each
+/// meshlet's bounds, and each level's meshlets, as [`Meshlets::levels`](crate::Meshlets::levels)
+/// has them.
+pub(crate) struct MeshletParts {
+    bounds: Vec<MeshletBounds>,
+    levels: Vec<[u32; 2]>,
+}
+
+impl Added {
+    /// Model's mesh `model`, named `name`, of handle `index`, as a replacement or as one added.
+    fn model(index: u32, replacement: bool, name: &str, model: &ModelMesh) -> Self {
+        let meshlets = &model.meshlets;
+        Self {
+            index,
+            replacement,
+            name: name.to_owned(),
+            vertices: model.bytes(),
+            vertex_size: size_of::<PackedVertex>(),
+            indices: model.indices.clone(),
+            lods: model.lods.clone(),
+            meshlets: (!meshlets.meshlets.is_empty()).then(|| MeshletParts {
+                bounds: model.meshlet_bounds(),
+                levels: meshlets.levels.clone(),
+            }),
+        }
+    }
 }
 
 impl Meshes {
@@ -312,6 +343,20 @@ impl Meshes {
         Ok(self.push(name, vertices, indices, lods))
     }
 
+    /// Adds a model's mesh, `mesh`, as [`add_lods`](Self::add_lods) adds one, its vertices packed,
+    /// which the model shaders draw, and its meshlets, if it has any, which views cull and draw it
+    /// by where it's opaque, as [`ModelMesh`] says; its indices draw it elsewhere.
+    ///
+    /// Fails with `renderer.bad_mesh` as [`ModelMesh::check`] does.
+    pub fn add_model(&mut self, name: &str, mesh: &ModelMesh) -> Result<Mesh<PackedVertex>> {
+        mesh.check(name)?;
+        let index = self.count;
+        self.count += 1;
+        self.changes
+            .push(Change::Added(Added::model(index, false, name, mesh)));
+        Ok(Mesh::new(index))
+    }
+
     /// Hands out the next handle for a mesh `check` has passed.
     fn push<V: NoUninit>(
         &mut self,
@@ -330,6 +375,7 @@ impl Meshes {
             vertex_size: size_of::<V>(),
             indices: indices.to_vec(),
             lods,
+            meshlets: None,
         }));
         Mesh::new(index)
     }
@@ -393,32 +439,62 @@ impl Meshes {
         if let Some(lods) = &lods {
             check_lods(name, indices, lods)?;
         }
-        if self.removed.contains(&mesh.index) {
-            return Ok(());
-        }
         let lods = lods.unwrap_or_else(|| Lods::whole(indices.len()));
-        let (vertices, indices) = (bytemuck::cast_slice(vertices).to_vec(), indices.to_vec());
+        self.replace_added(Added {
+            index: mesh.index,
+            replacement: true,
+            name: name.to_owned(),
+            vertices: bytemuck::cast_slice(vertices).to_vec(),
+            vertex_size: size_of::<V>(),
+            indices: indices.to_vec(),
+            lods,
+            meshlets: None,
+        });
+        Ok(())
+    }
+
+    /// Puts a model's mesh, `model`, in place of `mesh`'s, as [`replace_lods`](Self::replace_lods)
+    /// does, as [`add_model`](Self::add_model) takes one.
+    ///
+    /// Fails with `renderer.bad_mesh` as `add_model` does, leaving the mesh as it was.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    pub fn replace_model(
+        &mut self,
+        name: &str,
+        mesh: Mesh<PackedVertex>,
+        model: &ModelMesh,
+    ) -> Result<()> {
+        assert!(
+            mesh.index < self.count,
+            "mesh {name:?} replaces one of another `Meshes`"
+        );
+        model.check(name)?;
+        self.replace_added(Added::model(mesh.index, true, name, model));
+        Ok(())
+    }
+
+    /// Queues `added`, a mesh's replacement, in place of any of it still waiting for a frame, unless
+    /// the mesh was removed.
+    fn replace_added(&mut self, added: Added) {
+        if self.removed.contains(&added.index) {
+            return;
+        }
         let waiting = (self.changes.iter_mut()).find_map(|change| match change {
-            Change::Added(added) if added.index == mesh.index => Some(added),
+            Change::Added(waiting) if waiting.index == added.index => Some(waiting),
             _ => None,
         });
         match waiting {
             Some(waiting) => {
-                waiting.vertices = vertices;
-                waiting.indices = indices;
-                waiting.lods = lods;
+                waiting.vertices = added.vertices;
+                waiting.indices = added.indices;
+                waiting.lods = added.lods;
+                waiting.meshlets = added.meshlets;
             }
-            None => self.changes.push(Change::Added(Added {
-                index: mesh.index,
-                replacement: true,
-                name: name.to_owned(),
-                vertices,
-                vertex_size: size_of::<V>(),
-                indices,
-                lods,
-            })),
+            None => self.changes.push(Change::Added(added)),
         }
-        Ok(())
     }
 
     /// Removes `mesh`: its buffers go from the GPU once the frames and copies that may use them
@@ -457,7 +533,7 @@ impl Meshes {
 
 /// Checks that `indices` are whole triangles of `vertices`, mesh `name`'s, as [`Meshes::add`]
 /// says.
-fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()> {
+pub(crate) fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()> {
     // Vulkan's buffers hold at least a byte.
     const { assert!(size_of::<V>() > 0, "a vertex type has a size") };
     let bad = |problem: String| bad_mesh(name, problem);
@@ -481,7 +557,7 @@ fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()> {
 
 /// Checks that `lods`' levels are whole triangles among `indices`, mesh `name`'s, and the rest of
 /// what [`Meshes::add_lods`] says.
-fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()> {
+pub(crate) fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()> {
     let bad = |problem: String| bad_mesh(name, problem);
     if lods.levels.is_empty() {
         return Err(bad("has no levels of detail".to_owned()));
@@ -541,7 +617,7 @@ fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()> {
 
 /// The error for mesh `name`, which has the problem `problem` says, in a phrase that follows its
 /// name.
-fn bad_mesh(name: &str, problem: String) -> Error {
+pub(crate) fn bad_mesh(name: &str, problem: String) -> Error {
     Error::new("renderer.bad_mesh", format!("mesh {name:?} {problem}"))
 }
 
@@ -588,6 +664,8 @@ pub(crate) struct MeshPass {
     culling: cull::Culling,
     /// The scene's instances, as the GPU keeps them.
     scene: scene::Kept,
+    /// What culls the meshlets of the meshes drawn by them.
+    meshlet_table: MeshletTable,
 }
 
 /// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
@@ -604,6 +682,10 @@ struct GpuShader {
     /// What draws its shadows into a shadow map, if it writes depth: its vertex shader, and
     /// `shadow_main` if its shadows are cut out ([`shader::Added::shadow`]).
     shadow: Option<Pipeline>,
+    /// What draws the meshlets a view keeps of a mesh, and their shadows, for a model shader that
+    /// views draw meshes with meshlets by: through mesh shaders where the device has them, and
+    /// through vertex shaders elsewhere ([`shader::Added::meshlets`]).
+    meshlets: Option<(Pipeline, Option<Pipeline>)>,
     /// Its name, which captures label its runs of draws with.
     label: CString,
     /// The size of the vertices it reads.
@@ -622,6 +704,8 @@ struct GpuMesh {
     /// without levels has one, all its indices.
     lods: Lods,
     vertex_size: usize,
+    /// Where its meshlets are in the table, for a model's mesh that has them.
+    meshlets: Option<PlacedMeshlets>,
 }
 
 /// What the pass holds for a mesh's handle: nothing yet, while what was added streams, what it
@@ -765,6 +849,70 @@ impl MaterialTable {
     }
 }
 
+/// What culls the meshlets of the meshes drawn by them, in one table in the GPU's own memory,
+/// which the culling reaches through one address, as `shaders/meshlets.slang` takes every address
+/// from its push constants: each mesh's meshlets a run of entries, added as the mesh comes to be
+/// drawable, and written in the frame's own commands, before its passes; the table made again,
+/// twice the size, as it fills, the old one retiring until the GPU is done with it, from what's kept
+/// of it on the CPU. A mesh removed or replaced leaves its run unused, which no mesh takes again:
+/// the table grows by every mesh with meshlets a run adds, as a texture's slot isn't given out
+/// again, until reusing runs is worth it, as for a game that streams levels in and out.
+struct MeshletTable {
+    /// The table, and how many entries it has room for.
+    table: Option<(GpuBuffer, usize)>,
+    entries: Vec<MeshletBounds>,
+    /// How many of `entries` the table holds.
+    written: usize,
+}
+
+impl MeshletTable {
+    /// The fewest entries a table holds.
+    const LEAST: usize = 1024;
+
+    /// Adds `bounds`, a mesh's meshlets', and returns where they start.
+    fn add(&mut self, bounds: &[MeshletBounds]) -> u32 {
+        let first = self.entries.len();
+        self.entries.extend_from_slice(bounds);
+        u32::try_from(first).expect("fewer than 2^32 meshlets")
+    }
+
+    /// Writes the entries added since it last wrote into the table, which it makes, or makes again
+    /// larger, as they need: one copy of those added, or of them all into a table made again.
+    fn write(&mut self, device: &Arc<Device>, frame: &mut Frame<'_>) -> Result<()> {
+        let len = self.entries.len();
+        if self.written == len {
+            return Ok(());
+        }
+        let size = size_of::<MeshletBounds>();
+        if self.table.as_ref().is_none_or(|&(_, room)| room < len) {
+            let room = len.next_power_of_two().max(Self::LEAST);
+            let table = GpuBuffer::new(device, (room * size) as u64, "meshlet bounds")?;
+            self.table = Some((table, room));
+            self.written = 0;
+        }
+        let (table, _) = self.table.as_mut().expect("just made");
+        let bytes = bytemuck::cast_slice(&self.entries[self.written..]);
+        frame.write_buffer(table, (self.written * size) as u64, bytes)?;
+        self.written = len;
+        Ok(())
+    }
+
+    /// The address of the table: 0 before any meshlet is added.
+    fn address(&self) -> u64 {
+        self.table.as_ref().map_or(0, |(table, _)| table.address())
+    }
+}
+
+/// Where a mesh's meshlets are in the [`MeshletTable`], and each level's.
+pub(crate) struct PlacedMeshlets {
+    /// The mesh's first entry.
+    pub(crate) first: u32,
+    /// Each level's meshlets among the mesh's: the first, and how many.
+    pub(crate) levels: Vec<[u32; 2]>,
+    /// The most meshlets a level has.
+    pub(crate) most: u32,
+}
+
 /// An asset being streamed to the GPU.
 struct Item {
     index: u32,
@@ -785,6 +933,7 @@ enum Asset {
         vertex_bytes: u64,
         vertex_size: usize,
         lods: Lods,
+        meshlets: Option<MeshletParts>,
         /// Its buffers, once there's room for them: boxed, so that the queue's items stay small.
         buffers: Option<Box<(GpuBuffer, GpuBuffer)>>,
     },
@@ -898,6 +1047,65 @@ fn out_of_memory(error: &Error) -> bool {
     error.code() == "gpu.out_of_memory"
 }
 
+/// A shader's geometry, which its pipelines draw with: its module, named `name`, and the module of
+/// its shadows if they're cut out, as [`shader::Added::shadow`] says; and its geometry's entry
+/// point in each, a mesh shader's if `mesh`.
+struct Geometry<'a> {
+    name: &'a str,
+    spirv: &'a [u8],
+    shadow: Option<&'a [u8]>,
+    entry: &'a CStr,
+    mesh: bool,
+}
+
+impl Geometry<'_> {
+    /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says; and, if
+    /// that writes depth, what draws its shadows into a shadow map, by its geometry and, if they're
+    /// cut out, `shadow_main`.
+    fn pipelines(
+        &self,
+        device: &Arc<Device>,
+        blend: Blend,
+    ) -> Result<(Pipeline, Option<Pipeline>)> {
+        let writes_depth = shader::writes_depth(blend);
+        let pipeline = Pipeline::graphics(
+            device,
+            &GraphicsDesc {
+                name: self.name,
+                spirv: self.spirv,
+                vertex: self.entry,
+                mesh: self.mesh,
+                fragment: Some(c"fragment_main"),
+                format: Format::HDR.with_ids().with_depth(),
+                blend,
+                depth_write: writes_depth,
+                depth_bias: 0.0,
+                depth_clamp: false,
+            },
+        )?;
+        // What's opaque casts shadows, drawn by its own geometry into the shadow maps.
+        let shadow = writes_depth.then(|| {
+            let name = format!("{} shadow", self.name);
+            Pipeline::graphics(
+                device,
+                &GraphicsDesc {
+                    name: &name,
+                    spirv: self.shadow.unwrap_or(self.spirv),
+                    vertex: self.entry,
+                    mesh: self.mesh,
+                    fragment: self.shadow.map(|_| c"shadow_main"),
+                    format: Format::DEPTH,
+                    blend: Blend::Opaque,
+                    depth_write: true,
+                    depth_bias: shadow::DEPTH_BIAS,
+                    depth_clamp: true,
+                },
+            )
+        });
+        Ok((pipeline, shadow.transpose()?))
+    }
+}
+
 /// What `made`, the buffers or image of the asset `name`, of `bytes`, gave: `None` if the GPU's
 /// memory had no room, which warns the first time, `warned` keeping it, and leaves the asset to
 /// wait, to be tried again as room comes; any other error as it is.
@@ -951,6 +1159,11 @@ impl MeshPass {
             budget,
             culling: cull::Culling::new(device)?,
             scene: scene::Kept::default(),
+            meshlet_table: MeshletTable {
+                table: None,
+                entries: Vec::new(),
+                written: 0,
+            },
         })
     }
 
@@ -1001,43 +1214,39 @@ impl MeshPass {
                 );
             }
             let writes_depth = shader::writes_depth(added.blend);
-            let made = Pipeline::graphics(
-                &self.device,
-                &GraphicsDesc {
-                    name: &added.name,
-                    spirv: &added.spirv,
-                    vertex: c"vertex_main",
-                    fragment: Some(c"fragment_main"),
-                    format: Format::HDR.with_ids().with_depth(),
-                    blend: added.blend,
-                    depth_write: writes_depth,
-                    depth_bias: 0.0,
-                    depth_clamp: false,
-                },
-            );
-            // What's opaque casts shadows, drawn by its own vertex shader into the shadow maps.
-            let shadow = writes_depth.then(|| {
-                let name = format!("{} shadow", added.name);
-                Pipeline::graphics(
-                    &self.device,
-                    &GraphicsDesc {
-                        name: &name,
-                        spirv: added.shadow.as_deref().unwrap_or(&added.spirv),
-                        vertex: c"vertex_main",
-                        fragment: added.shadow.as_ref().map(|_| c"shadow_main"),
-                        format: Format::DEPTH,
-                        blend: Blend::Opaque,
-                        depth_write: true,
-                        depth_bias: shadow::DEPTH_BIAS,
-                        depth_clamp: true,
-                    },
-                )
+            let device = &self.device;
+            let geometry = Geometry {
+                name: &added.name,
+                spirv: &added.spirv,
+                shadow: added.shadow.as_deref(),
+                entry: c"vertex_main",
+                mesh: false,
+            };
+            let made = geometry.pipelines(device, added.blend);
+            // A model shader's meshlets, through the device's mesh shaders if it has them.
+            let meshlets = (added.meshlets.as_deref()).map(|meshlets| {
+                let name = format!("{} meshlets", added.name);
+                let mesh = device.mesh_shaders();
+                let (spirv, shadow, entry) = if mesh {
+                    (&meshlets.mesh, &meshlets.mesh_shadow, c"mesh_main")
+                } else {
+                    let vertices = (&meshlets.vertices, &meshlets.vertices_shadow);
+                    (vertices.0, vertices.1, c"meshlet_vertex_main")
+                };
+                let geometry = Geometry {
+                    name: &name,
+                    spirv,
+                    shadow: shadow.as_deref(),
+                    entry,
+                    mesh,
+                };
+                geometry.pipelines(device, added.blend)
             });
-            let made = made.and_then(|pipeline| Ok((pipeline, shadow.transpose()?)));
+            let made = made.and_then(|made| Ok((made, meshlets.transpose()?)));
             match self.shaders.get_mut(index) {
                 Some(Some(old)) => match made {
-                    Ok((pipeline, shadow)) => {
-                        (old.pipeline, old.shadow) = (pipeline, shadow);
+                    Ok(((pipeline, shadow), meshlets)) => {
+                        (old.pipeline, old.shadow, old.meshlets) = (pipeline, shadow, meshlets);
                         old.writes_depth = writes_depth;
                     }
                     Err(error) => warn!(
@@ -1048,10 +1257,11 @@ impl MeshPass {
                 },
                 Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
                 None => {
-                    let (pipeline, shadow) = made?;
+                    let ((pipeline, shadow), meshlets) = made?;
                     self.shaders.push(Some(GpuShader {
                         pipeline,
                         shadow,
+                        meshlets,
                         // A name with a nul is labeled as far as it goes.
                         label: CString::new(added.name.split('\0').next().unwrap_or_default())
                             .expect("cut at its first nul"),
@@ -1094,7 +1304,9 @@ impl MeshPass {
         }
         (self.materials).write(&self.device, frame, &mut uploads.materials)?;
         self.scene.write(&self.device, frame)?;
-        self.stream(frame)
+        self.stream(frame)?;
+        // The meshlets of the meshes that came to be drawable.
+        self.meshlet_table.write(&self.device, frame)
     }
 
     /// The address of the table of materials, which the frame's data carries: 0 before any is
@@ -1147,6 +1359,7 @@ impl MeshPass {
                 vertex_bytes,
                 vertex_size: added.vertex_size,
                 lods: added.lods,
+                meshlets: added.meshlets,
                 buffers: None,
             },
         });
@@ -1254,6 +1467,7 @@ impl MeshPass {
             meshes,
             textures,
             streaming,
+            meshlet_table,
             ..
         } = self;
         let item = &mut streaming[i];
@@ -1264,6 +1478,7 @@ impl MeshPass {
                 vertex_bytes,
                 vertex_size,
                 lods,
+                meshlets,
                 buffers,
             } => {
                 if buffers.is_none() {
@@ -1317,6 +1532,14 @@ impl MeshPass {
                     indices,
                     lods: std::mem::replace(lods, Lods::whole(0)),
                     vertex_size: *vertex_size,
+                    meshlets: meshlets.take().map(|parts| PlacedMeshlets {
+                        first: meshlet_table.add(&parts.bounds),
+                        most: (parts.levels.iter())
+                            .map(|&[_, count]| count)
+                            .max()
+                            .unwrap_or(0),
+                        levels: parts.levels,
+                    }),
                 };
                 let held = &mut meshes[item.index as usize];
                 // Which the draws' sizes are checked against: its own type, since only the
@@ -1519,13 +1742,19 @@ impl MeshPass {
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
             };
+            // A run the culling draws by its meshlets, by its shader's meshlet geometry.
+            let by_meshlets = culled_run.is_some_and(|run| self.culling.by_meshlets(run));
+            let (geometry, shadow) = match &shader.meshlets {
+                Some((geometry, shadow)) if by_meshlets => (geometry, shadow),
+                _ => (&shader.pipeline, &shader.shadow),
+            };
             let pipeline = if shadows {
-                let Some(shadow) = &shader.shadow else {
+                let Some(shadow) = shadow else {
                     continue;
                 };
                 shadow
             } else {
-                &shader.pipeline
+                geometry
             };
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
@@ -1538,9 +1767,9 @@ impl MeshPass {
                 "a mesh draws with a shader for its vertex type, and the parameters that shader \
                  takes, from the renderer's `Meshes` and `Shaders`"
             );
-            if bound != Some(shader_index) {
+            if bound != Some((shader_index, by_meshlets)) {
                 pass.set_pipeline(pipeline);
-                bound = Some(shader_index);
+                bound = Some((shader_index, by_meshlets));
             }
             if faces != Some(run_faces) {
                 pass.set_faces(run_faces);
@@ -1555,6 +1784,8 @@ impl MeshPass {
                 params: 0,
                 view: view.map(|side| side as f32),
                 frame,
+                // A draw of meshlets sets it.
+                meshlets: 0,
             };
             pass.begin_label(&shader.label);
             match (culled, culled_run, run) {
@@ -1736,9 +1967,9 @@ fn draw_run(
 /// shaders declare as `Push` in `shaders/mesh.slang`. The matrix goes first, so that every offset
 /// is the same under every layout Slang gives push constants; the IDs before the parameters, so
 /// that a shader that takes none still ends its struct after the last member it reads; and the
-/// view's size and the frame's data after them, each added at the end, so that it moved none of
-/// the offsets games' shaders declare before it, though a shader that takes no parameters can't
-/// read them.
+/// view's size, the frame's data and a draw of meshlets after them, each added at the end, so that
+/// it moved none of the offsets games' shaders declare before it, though a shader that takes no
+/// parameters can't read them.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {
@@ -1756,6 +1987,10 @@ pub(crate) struct Push {
     pub(crate) view: [f32; 2],
     /// The address of the frame's data, a [`FrameData`].
     pub(crate) frame: u64,
+    /// For a draw of the meshlets a view kept of a mesh, through the model shaders' meshlet
+    /// geometry, the address of the draw as the culling wrote it, which those it kept follow; 0
+    /// for any other draw.
+    pub(crate) meshlets: u64,
 }
 
 /// What every draw's shader may read of the frame, through [`Push::frame`]: `Frame` in

@@ -21,7 +21,8 @@ use gg_core::{Error, Result};
 use gg_gpu::Blend;
 use tracing::{debug, warn};
 
-use crate::model::{self, AlphaMode, ModelVertex};
+use crate::model::{self, AlphaMode};
+use crate::packed::PackedVertex;
 use crate::sprite::{self, Corner, Params};
 use crate::{circle, grid, line, text};
 
@@ -116,6 +117,20 @@ pub(crate) struct Added {
     /// does, as the engine's masked model shader has. Those of the others that write depth are of
     /// whole triangles, drawn by their vertex shaders alone.
     pub(crate) shadow: Option<Vec<u8>>,
+    /// What draws the meshlets a view keeps of a mesh, for the engine's opaque and masked model
+    /// shaders, which views draw meshes with meshlets by.
+    pub(crate) meshlets: Option<Box<Meshlets>>,
+}
+
+/// What draws a model shader's meshlets, each a module of its geometry and `fragment_main`, or, for
+/// shadows cut out, `shadow_main`: through vertex shaders, `meshlet_vertex_main`, and through a mesh
+/// shader, `mesh_main`; and, of those, what draws its shadows, if they're cut out, as
+/// [`Added::shadow`] says.
+pub(crate) struct Meshlets {
+    pub(crate) vertices: Vec<u8>,
+    pub(crate) vertices_shadow: Option<Vec<u8>>,
+    pub(crate) mesh: Vec<u8>,
+    pub(crate) mesh_shadow: Option<Vec<u8>>,
 }
 
 /// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
@@ -259,7 +274,7 @@ impl Shaders {
         let compiled_at = SystemTime::now();
         let (spirv, files) = compile(Path::new(SLANGC), name, path)?;
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, None, blend, types);
+        let index = self.push(name, spirv, None, None, blend, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -288,7 +303,7 @@ impl Shaders {
     ) -> Result<Shader<V, P>> {
         let types = Types::of::<V, P>();
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, None, blend, types);
+        let index = self.push(name, spirv, None, None, blend, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -359,6 +374,7 @@ impl Shaders {
             params_size: source.types.params_size,
             blend: source.blend,
             shadow: None,
+            meshlets: None,
         }));
     }
 
@@ -391,6 +407,7 @@ impl Shaders {
         name: &str,
         spirv: Vec<u8>,
         shadow: Option<Vec<u8>>,
+        meshlets: Option<[&[u8]; 4]>,
         blend: Blend,
         types: Types,
     ) -> u32 {
@@ -405,6 +422,17 @@ impl Shaders {
             params_size: types.params_size,
             blend,
             shadow: shadow.map(spirv::decorate_non_uniform),
+            meshlets: meshlets.map(|[vertices, vertices_shadow, mesh, mesh_shadow]| {
+                // An empty module for a shadow that isn't cut out.
+                let module = |spirv: &[u8]| spirv::decorate_non_uniform(spirv.to_vec());
+                let cut = |spirv: &[u8]| (!spirv.is_empty()).then(|| module(spirv));
+                Box::new(Meshlets {
+                    vertices: module(vertices),
+                    vertices_shadow: cut(vertices_shadow),
+                    mesh: module(mesh),
+                    mesh_shadow: cut(mesh_shadow),
+                })
+            }),
         }));
         index
     }
@@ -413,14 +441,30 @@ impl Shaders {
     /// which the build compiled, added as a game's are the first time it's asked for: a renderer
     /// draws models with it, but makes no pipeline for it without them, and games' handles come
     /// where they would have.
-    pub(crate) fn model(&mut self, alpha: AlphaMode) -> Shader<ModelVertex, model::Params> {
+    pub(crate) fn model(&mut self, alpha: AlphaMode) -> Shader<PackedVertex, model::Params> {
         let (slot, name, spirv, blend) = match alpha {
             AlphaMode::Opaque => (0, "model", model::OPAQUE_SPIRV, Blend::Opaque),
             AlphaMode::Mask { .. } => (1, "model masked", model::MASKED_SPIRV, Blend::Opaque),
             AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
         };
         let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
-        self.lazy(slot, name, spirv, shadow, blend)
+        // What blends draws in its order, by its indices.
+        let meshlets = match alpha {
+            AlphaMode::Opaque => Some([
+                model::OPAQUE_MESHLETS_SPIRV,
+                &[],
+                model::OPAQUE_MESH_SPIRV,
+                &[],
+            ]),
+            AlphaMode::Mask { .. } => Some([
+                model::MASKED_MESHLETS_SPIRV,
+                model::MASKED_MESHLETS_SHADOW_SPIRV,
+                model::MASKED_MESH_SPIRV,
+                model::MASKED_MESH_SHADOW_SPIRV,
+            ]),
+            AlphaMode::Blend => None,
+        };
+        self.lazy(slot, name, spirv, shadow, meshlets, blend)
     }
 
     /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
@@ -441,25 +485,25 @@ impl Shaders {
     /// The engine's circle shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
-        self.lazy(3, "circle", circle::SPIRV, None, Blend::Alpha)
+        self.lazy(3, "circle", circle::SPIRV, None, None, Blend::Alpha)
     }
 
     /// The engine's line shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
-        self.lazy(4, "line", line::SPIRV, None, Blend::Alpha)
+        self.lazy(4, "line", line::SPIRV, None, None, Blend::Alpha)
     }
 
     /// The engine's grid shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn grid(&mut self) -> Shader<Vec2, grid::Params> {
-        self.lazy(5, "grid", grid::SPIRV, None, Blend::Alpha)
+        self.lazy(5, "grid", grid::SPIRV, None, None, Blend::Alpha)
     }
 
     /// The engine's text shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
-        self.lazy(6, "text", text::SPIRV, None, Blend::Alpha)
+        self.lazy(6, "text", text::SPIRV, None, None, Blend::Alpha)
     }
 
     /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, with `shadow`
@@ -471,13 +515,15 @@ impl Shaders {
         name: &str,
         spirv: &[u8],
         shadow: Option<&[u8]>,
+        meshlets: Option<[&[u8]; 4]>,
         blend: Blend,
     ) -> Shader<V, P> {
         let index = match self.lazy[slot] {
             Some(index) => index,
             None => {
                 let (spirv, shadow) = (spirv.to_vec(), shadow.map(<[u8]>::to_vec));
-                let index = self.push(name, spirv, shadow, blend, Types::of::<V, P>());
+                let types = Types::of::<V, P>();
+                let index = self.push(name, spirv, shadow, meshlets, blend, types);
                 *self.lazy[slot].insert(index)
             }
         };
@@ -495,7 +541,14 @@ impl Default for Shaders {
             sources: Vec::new(),
         };
         let types = Types::of::<Corner, Params>();
-        let index = shaders.push("sprite", sprite::SPIRV.to_vec(), None, Blend::Alpha, types);
+        let index = shaders.push(
+            "sprite",
+            sprite::SPIRV.to_vec(),
+            None,
+            None,
+            Blend::Alpha,
+            types,
+        );
         assert_eq!(index, sprite::SHADER.index, "the sprite shader comes first");
         shaders
     }
@@ -907,7 +960,7 @@ mod tests {
 
     #[test]
     fn the_engines_shaders_and_the_fixtures_keep_to_the_contract() {
-        let models = Types::of::<ModelVertex, model::Params>();
+        let models = Types::of::<PackedVertex, model::Params>();
         let engines = [
             (sprite::SPIRV, Types::of::<Corner, Params>()),
             (circle::SPIRV, Types::of::<Corner, circle::Params>()),
@@ -965,7 +1018,7 @@ mod tests {
             &[
                 "its push constants' view isn't a float2",
                 "its frame's data, Frame, take 372 bytes, past the 360 the engine's take",
-                "it reads brightness from its push constants, past the 112 bytes",
+                "it reads brightness from its push constants, past the 120 bytes",
             ],
         );
         says(
@@ -1096,7 +1149,7 @@ mod tests {
         }
         let path = dir.0.join("model_opaque.slang");
         let mut shaders = Shaders::default();
-        let shader = (shaders.add::<ModelVertex, model::Params>("copy", &path, Blend::Opaque))
+        let shader = (shaders.add::<PackedVertex, model::Params>("copy", &path, Blend::Opaque))
             .expect("a shader");
         let [source] = shaders.sources() else {
             panic!("one source");
@@ -1153,15 +1206,15 @@ mod tests {
         assert!(matches!(shaders.changes[..], [Change::Removed(1)]));
         shaders.replace(compiled);
         assert_eq!(shaders.changes.len(), 1, "the replacement was dropped");
-        let found = shaders.find::<ModelVertex, model::Params>(Blend::Opaque, |_| true);
+        let found = shaders.find::<PackedVertex, model::Params>(Blend::Opaque, |_| true);
         assert!(found.is_none(), "a removed shader isn't found");
 
         // A change that doesn't compile, and one that breaks the contract.
         fs::write(&include, "struct Vertex {").expect("the include broken");
         let error = source.compile().expect_err("the include doesn't compile");
         assert_eq!(error.code(), "renderer.bad_shader");
-        // The vertex, the first struct with texture coordinates, a float wider than its type.
-        let wider = text.replacen("float2 uv;", "float2 uv;\n    float extra;", 1);
+        // The packed vertex, the first struct with a color, a word wider than its type.
+        let wider = text.replacen("uint color;", "uint color;\n    uint extra;", 1);
         assert_ne!(wider, text, "the vertex is wider");
         fs::write(&include, wider).expect("the include changed");
         let error = source.compile().expect_err("a vertex too wide");

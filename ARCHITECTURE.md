@@ -467,7 +467,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   the files it names, each primitive's triangles optimized by meshoptimizer for the GPU's vertex
   cache, overdraw and fetches, but those of a material that blends, which cover each other in
   their order and keep it, with levels of detail it simplified, each about half the triangles
-  of the one before, and each image compressed as what its materials sample it as, BC7 of colors
+  of the one before, its vertices packed as a run packs them, and each level cut by meshoptimizer
+  into meshlets but where its material blends, as [Rendering](#rendering) says, and each image
+  compressed as what its materials sample it as, BC7 of colors
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
   makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels, but
   a DDS image's BC7 blocks and levels kept as they are; and the
@@ -1374,8 +1376,9 @@ makes no shadow maps and draws no shadows.
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, writing them from
 compute shaders, sampling them or copying from them, and the buffers, writing and reading them from
-compute shaders, reading them from draws' shaders, taking indirect draws' commands from them or
-reading them back, from which the frame places every barrier and layout transition as each pass
+compute shaders, reading them from draws' shaders, vertex, mesh or fragment, taking indirect draws'
+commands from them, which the draws' shaders may read too, or reading them back, a use of each
+buffer a pass, from which the frame places every barrier and layout transition as each pass
 begins, each use waiting for the uses before it that it must and no more, so that no pass records
 one itself. The passes run in that order, on the graphics queue, but those that compute added to
 run on the compute queue: they run on a queue of their own where the device has a family for compute
@@ -1496,6 +1499,18 @@ most; and the shader writes each draw's ID beside its color. A shader is added w
 too, since Vulkan bakes blending into its pipeline: opaque, which writes its depth as well as
 testing it, or by the alpha it returns, straight or premultiplied, which only tests it, so that
 what's behind it shows through.
+
+A model's mesh holds its vertices packed, 24 bytes each where the floats of a `ModelVertex`, as
+glTF is read, take 64: packed by the cooker, and by a development run as it adds a model, so that
+the model shaders read one layout. A vertex's position is 16-bit steps from an offset, the step the
+least power of two that spans the mesh's longest side in 65,534 and the offset a multiple of it,
+so that meshes of sizes within a factor of two put their vertices on one grid, and an edge two of
+them share keeps its ends together; its normal and tangent are each folded onto an octahedron as
+two signed 16-bit numbers, and its bitangent's sign sits beside its position; its texture
+coordinates are 16-bit fractions of the mesh's box of them, and its color bytes, sRGB-encoded but
+for its alpha. The mesh's buffer starts with what unpacks them, which the shaders read as they read
+a vertex, and the sphere round a model's mesh, which views cull it by, holds its vertices as they
+unpack.
 
 Vulkan checks nothing about a shader, so the engine checks the SPIR-V slangc writes against the
 contract `Shaders::add` describes, as the shader's added and as it reloads, and refuses one that
@@ -1750,6 +1765,29 @@ may be hidden, and in its second what the first missed, for a frame. The shadows
 their boxes alone. The renderer counts the view's draws that have instances in either pass, their
 instances and their triangles, the culled runs' on the GPU, which come back as the frame two later
 begins; the Performance panel shows them and `engine.perf` logs their peaks.
+
+A cooked model's opaque and masked meshes are cut into meshlets, each level's apart, each of up
+to 64 vertices and 124 triangles, with the sphere round them and the cone their triangles face
+within, which the mesh's buffer holds after its vertices, and the renderer's table of meshlets'
+bounds, in the GPU's own memory, holds for the culling, each mesh's added as it comes to be
+drawable, the table made again twice the size as it fills. A culled run of such a mesh with a model
+shader is drawn by its meshlets: after the culling's passes keep its instances, as above, a compute
+pass in each keeps each kept instance's meshlets of its level where the meshlet's sphere, as the
+instance's transform places it, reaches inside every plane of the view; where the view sees its
+triangles' fronts, as its cone says, for a run that draws fronts alone, of a transform that keeps
+angles, which a cone turns with; and, in the view's second pass, where the depth pyramid doesn't
+hide it. The meshlets of what the view's first pass draws aren't tested against a pyramid, which
+isn't built yet. Each meshlet kept goes into the run's draw in that view, as its instance's place
+and its index among the mesh's, after the draw's command, in the culling's buffer of commands, with
+room for every instance's meshlets of the mesh's largest level, to 2^22, past which they're left out;
+the draw is one for the run, of all its levels' meshlets. A device that draws through mesh shaders
+(`VK_EXT_mesh_shader`), as the RTX 4090 and lavapipe do, draws a workgroup of the model's mesh
+shader for each meshlet kept; any other, as the AMD iGPU here and KosmicKrisp, an instance of a
+vertex shader's draw for each, of 124 triangles, the corners of those past the meshlet's own its
+first vertex, which draw nothing; their fragments shade alike. A run whose meshlets the frame
+planned no room for, as of a mesh that came to be drawable after its graph was planned, is drawn by
+its levels' indices for that frame; so is what blends, which keeps its triangles' order, and a model
+read as a development run reads it, which has no meshlets.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

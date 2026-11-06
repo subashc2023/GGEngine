@@ -8,8 +8,8 @@ use std::path::Path;
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Lod, Lods, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Sampled, Shaders, Texels, Texture, Textures,
+    AlphaMode, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
+    ModelVertex, PackedVertex, Sampled, Shaders, Texels, Texture, Textures,
 };
 
 use crate::gltf::{self, Imported, Part, Primitive, Slot};
@@ -94,7 +94,7 @@ pub(crate) struct Nodes {
 /// read, which a reload compares its own with.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
-    pub(crate) meshes: Vec<Mesh<ModelVertex>>,
+    pub(crate) meshes: Vec<Mesh<PackedVertex>>,
     pub(crate) materials: Vec<MaterialId>,
     pub(crate) images: Vec<(Texture, Texels)>,
     counts: (usize, usize),
@@ -154,11 +154,7 @@ pub(crate) fn add(
     let meshes: Vec<_> = (primitives.iter())
         .map(|primitive| {
             let name = format!("{name} {}", primitive.name);
-            let vertices = vertices(primitive);
-            let mesh = match lods(primitive) {
-                Some(lods) => meshes.add_lods(&name, &vertices, &primitive.indices, lods),
-                None => meshes.add(&name, &vertices, finest(primitive)),
-            };
+            let mesh = meshes.add_model(&name, &model_mesh(primitive));
             mesh.expect("a primitive is whole triangles of its own vertices, in its levels")
         })
         .collect();
@@ -287,26 +283,17 @@ pub(crate) fn reload(
     }
     for (i, primitive) in primitives.iter().enumerate() {
         let name = format!("{name} {}", primitive.name);
-        let vertices = vertices(primitive);
         // Read again from its files, as a development run does, it has one level.
-        let lods = lods(primitive);
+        let mesh = model_mesh(primitive);
         match made.meshes.get(i) {
-            Some(&mesh) => {
-                let replaced = match lods {
-                    Some(lods) => {
-                        meshes.replace_lods(&name, mesh, &vertices, &primitive.indices, lods)
-                    }
-                    None => meshes.replace(&name, mesh, &vertices, finest(primitive)),
-                };
+            Some(&made_mesh) => {
+                let replaced = meshes.replace_model(&name, made_mesh, &mesh);
                 replaced.expect("a primitive is whole triangles of its own vertices");
             }
             None => {
-                let mesh = match lods {
-                    Some(lods) => meshes.add_lods(&name, &vertices, &primitive.indices, lods),
-                    None => meshes.add(&name, &vertices, finest(primitive)),
-                };
+                let added = meshes.add_model(&name, &mesh);
                 made.meshes
-                    .push(mesh.expect("whole triangles of its own vertices"));
+                    .push(added.expect("whole triangles of its own vertices"));
             }
         }
     }
@@ -353,49 +340,22 @@ fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshD
         .collect()
 }
 
-/// The levels of detail of `primitive`, as the cooker made them, or its one, all its indices, as
-/// glTF has it, with the sphere round its vertices that a draw picks one by and that views cull it
-/// by; `None` for one whose vertices aren't all finite, which no sphere holds.
-fn lods(primitive: &Primitive) -> Option<Lods> {
-    let levels = if primitive.lods.is_empty() {
-        let count = u32::try_from(primitive.indices.len()).ok()?;
-        vec![Lod {
-            start: 0,
-            count,
-            error: 0.0,
-        }]
-    } else {
-        primitive.lods.clone()
-    };
-    let positions = primitive
-        .positions
-        .iter()
-        .map(|&position| Vec3::from(position));
-    let (low, high) = (positions.clone())
-        .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(low, high), p| {
-            (low.min(p), high.max(p))
-        });
-    let center = (low + high) / 2.0;
-    let radius = positions.map(|p| p.distance(center)).fold(0.0, f32::max);
-    (center.is_finite() && radius.is_finite()).then_some(Lods {
-        levels,
-        center,
-        radius,
-    })
-}
-
-/// The indices of `primitive`'s finest level, all of them for one read from glTF.
-fn finest(primitive: &Primitive) -> &[u32] {
-    match primitive.lods.first() {
-        Some(lod) => {
-            let start = lod.start as usize;
-            &primitive.indices[start..start + lod.count as usize]
-        }
-        None => &primitive.indices,
+/// `primitive`'s mesh, as the cooker made it, or else packed as glTF has it, of one level, all its
+/// indices, which a development run draws whole.
+pub(crate) fn model_mesh(primitive: &Primitive) -> ModelMesh {
+    match &primitive.mesh {
+        Some(mesh) => mesh.clone(),
+        None => pack(primitive, Vec::new()),
     }
 }
 
-/// The vertices of `primitive`, as the model shader reads them.
+/// `primitive`'s vertices, as glTF has them, packed, with its indices, of `levels` among them, or
+/// of one level, all of them, for none.
+pub(crate) fn pack(primitive: &Primitive, levels: Vec<gg_renderer::Lod>) -> ModelMesh {
+    ModelMesh::pack(&vertices(primitive), primitive.indices.clone(), levels)
+}
+
+/// The vertices of `primitive`, as glTF has them, to pack.
 fn vertices(primitive: &Primitive) -> Vec<ModelVertex> {
     (primitive.positions.iter())
         .zip(&primitive.uvs)
@@ -521,7 +481,7 @@ pub(crate) mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
-            lods: Vec::new(),
+            mesh: None,
             material,
         };
         let masked = gltf::Material {
