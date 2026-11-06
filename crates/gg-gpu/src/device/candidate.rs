@@ -28,14 +28,20 @@ pub(super) struct Candidate {
     pub(super) graphics: Option<u32>,
     /// A queue family for uploads apart from graphics, if there is one.
     pub(super) transfer: Option<u32>,
+    /// A queue family for compute apart from graphics and from `transfer`, if there is one.
+    pub(super) compute: Option<u32>,
     /// The least a copy to or from an image moves on the graphics family's queues, and on the
     /// transfer family's (`minImageTransferGranularity`), in texels, or in blocks of a compressed
     /// image.
     pub(super) graphics_granularity: vk::Extent3D,
     pub(super) transfer_granularity: vk::Extent3D,
     /// How many of the bits of the timestamps the graphics family's queues write count
-    /// (`timestampValidBits`); 0 for none.
+    /// (`timestampValidBits`), and the compute family's; 0 for none.
     pub(super) timestamp_bits: u32,
+    pub(super) compute_timestamp_bits: u32,
+    /// Whether the driver reads the GPU's clock at once, without a submission
+    /// (`VK_KHR_calibrated_timestamps`, with the device's own time domain).
+    pub(super) calibrated: bool,
     pub(super) host_copy: HostCopy,
     pub(super) memory: vk::PhysicalDeviceMemoryProperties,
     /// Whether the driver reports each heap's budget (`VK_EXT_memory_budget`).
@@ -130,6 +136,11 @@ impl Candidate {
             })
             .map(|(_, index)| index);
         let transfer = transfer_family(&families);
+        let compute = compute_family(&families, transfer);
+        let bits = |family: Option<u32>| {
+            (family.and_then(|family| families.get(family as usize)))
+                .map_or(0, |family| family.timestamp_valid_bits)
+        };
         let granularity = |family: Option<u32>| {
             family
                 .and_then(|family| families.get(family as usize))
@@ -202,11 +213,13 @@ impl Candidate {
             identity: Identity::new(&properties),
             graphics,
             transfer,
+            compute,
             graphics_granularity: granularity(graphics),
             transfer_granularity: granularity(transfer),
-            timestamp_bits: graphics
-                .and_then(|family| families.get(family as usize))
-                .map_or(0, |family| family.timestamp_valid_bits),
+            timestamp_bits: bits(graphics),
+            compute_timestamp_bits: bits(compute),
+            calibrated: has_extension(&extensions, vk::KHR_CALIBRATED_TIMESTAMPS_NAME)
+                && reads_clock(instance, physical),
             host_copy,
             memory,
             memory_budget: has_extension(&extensions, vk::EXT_MEMORY_BUDGET_NAME),
@@ -331,6 +344,38 @@ fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
             (work.as_raw().count_ones(), index)
         })
         .map(|(_, index)| index)
+}
+
+/// The queue family that compute passes run on beside the graphics queue, if there is one: of
+/// those with compute but without graphics, other than `transfer`'s, which uploads may take, the
+/// one that does the fewest other kinds of work, then the first.
+fn compute_family(families: &[vk::QueueFamilyProperties], transfer: Option<u32>) -> Option<u32> {
+    let features = vk::QueueFlags::SPARSE_BINDING | vk::QueueFlags::PROTECTED;
+    families
+        .iter()
+        .zip(0u32..)
+        .filter(|&(family, index)| {
+            family.queue_count > 0
+                && family.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                && !family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                && Some(index) != transfer
+        })
+        .min_by_key(|&(family, index)| {
+            let work = family.queue_flags & !features;
+            (work.as_raw().count_ones(), index)
+        })
+        .map(|(_, index)| index)
+}
+
+/// Whether the device's driver reads its clock in the device's own time domain through
+/// `VK_KHR_calibrated_timestamps`, which it lists.
+fn reads_clock(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+    let functions =
+        ash::khr::calibrated_timestamps::Instance::new(instance.entry(), instance.raw());
+    // SAFETY: the physical device came from this instance, and lists the extension, whose
+    // physical-device functions it may then be asked for.
+    let domains = unsafe { functions.get_physical_device_calibrateable_time_domains(physical) };
+    domains.is_ok_and(|domains| domains.contains(&vk::TimeDomainKHR::DEVICE))
 }
 
 /// Whether the device can write the engine's textures from the CPU, and at what cost: host image
@@ -472,9 +517,12 @@ mod tests {
             identity: Identity::new(&vk::PhysicalDeviceProperties::default()),
             graphics: Some(0),
             transfer: None,
+            compute: None,
             graphics_granularity: vk::Extent3D::default(),
             transfer_granularity: vk::Extent3D::default(),
             timestamp_bits: 64,
+            compute_timestamp_bits: 0,
+            calibrated: false,
             host_copy: HostCopy::Unsupported,
             memory: vk::PhysicalDeviceMemoryProperties::default(),
             memory_budget: false,
@@ -523,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_queue_is_the_family_apart_from_graphics_with_the_fewest_flags() {
+    fn transfers_and_compute_take_the_families_apart_from_graphics_with_the_fewest_flags() {
         use vk::QueueFlags as Q;
         let families = |flags: &[Q]| {
             flags
@@ -546,6 +594,7 @@ mod tests {
             Q::TRANSFER | Q::OPTICAL_FLOW_NV,
         ]);
         assert_eq!(transfer_family(&nvidia), Some(1));
+        assert_eq!(compute_family(&nvidia, Some(1)), Some(2));
         // An AMD iGPU's: compute before transfers alone, and video that can't copy.
         let amd = families(&[
             all,
@@ -555,14 +604,19 @@ mod tests {
             Q::VIDEO_ENCODE_KHR,
         ]);
         assert_eq!(transfer_family(&amd), Some(2));
-        // lavapipe's one family has graphics.
+        assert_eq!(compute_family(&amd, Some(2)), Some(1));
+        // lavapipe's one family has graphics, so compute passes run on the graphics queue there.
         assert_eq!(transfer_family(&families(&[all])), None);
+        assert_eq!(compute_family(&families(&[all]), None), None);
         // A compute family that leaves out the transfer bit it implies, as RADV may: it copies, but
         // a family for transfers alone after it does less else.
         let compute = families(&[Q::GRAPHICS | Q::COMPUTE | Q::TRANSFER, Q::COMPUTE]);
         assert_eq!(transfer_family(&compute), Some(1));
+        // The one family apart from graphics takes the uploads, not compute passes too.
+        assert_eq!(compute_family(&compute, Some(1)), None);
         let both = families(&[all, Q::COMPUTE, Q::TRANSFER]);
         assert_eq!(transfer_family(&both), Some(2));
+        assert_eq!(compute_family(&both, Some(2)), Some(1));
         // Video before transfers alone.
         let video = families(&[all, Q::TRANSFER | Q::VIDEO_DECODE_KHR, Q::TRANSFER]);
         assert_eq!(transfer_family(&video), Some(2));

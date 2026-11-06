@@ -1377,7 +1377,20 @@ compute shaders, sampling them or copying from them, and the buffers, writing an
 compute shaders, reading them from draws' shaders, taking indirect draws' commands from them or
 reading them back, from which the frame places every barrier and layout transition as each pass
 begins, each use waiting for the uses before it that it must and no more, so that no pass records
-one itself. The passes run in that order, on the graphics queue. A
+one itself. The passes run in that order, on the graphics queue, but those that compute added to
+run on the compute queue: they run on a queue of their own where the device has a family for compute
+apart from graphics and from uploads, as the RTX 4090 and AMD's GPUs do, and on the graphics queue
+elsewhere, as on lavapipe. Such a pass uses buffers alone, which every queue shares, so that nothing
+is handed between families. A frame plans as it begins the batches each queue runs, from the passes'
+uses of buffers and what the frames before left of each: a pass that must follow a use on the other
+queue, a write following any use and a read a write, begins a batch that waits by a semaphore for the
+other queue's batch that holds that use, which ends there. So a pass on the compute queue runs beside
+the graphics passes added after the last it waits for and before the first that waits for it: the
+first pass of the culling runs there, and the binning of the lights after it, beside the shadows,
+which draw what the culling keeps. What a frame records outside its
+passes, its writes and uploads, comes before them, in its first batch, which the compute queue's
+first waits for if it wrote a buffer; the graphics queue's last batch waits for all the compute
+queue ran, and the frame's timeline is signaled after it. A
 pass that computes dispatches compute shaders, which write storage images, 16-bit floats in linear
 RGBA, of a 2D image's one layer or a cube's six faces, a mip level at a time through slots of the
 bindless set's own for storage images, in the general layout, as their last use left them. A
@@ -1396,14 +1409,17 @@ block's did, as the view's tonemapped colors follow its depth there. The graph's
 from frame to frame, each in the GPU's memory of its own, which shaders reach through its address,
 kept for the frames after that declare one of its name no larger, holding what the last of them
 left, and made again at the next power of two bytes past that, holding nothing defined; a frame's
-first use of one waits for the frame before's last, as both run on one queue. A pass reads back up
-to 256 bytes of one, as the frame two later finds them. Each pass is a debug label, and
+first use of one waits for the frame before's last, by a barrier on one queue and by a semaphore
+across the two. A pass reads back up to 256 bytes of one, as the frame two later finds them. Each
+pass is a debug label, and
 the draws inside it have labels of their own, each run of draws its shader's name, and the
 canvas's, and the frame pass's view and UI, apart. Each pass writes a timestamp as it begins and as
-it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy's GPU
-timeline shows each pass, and every run's `engine.perf` logs the frames' time on the GPU
-(`gpu_ms_mean`, `gpu_ms_p95`) and the memory of the graph's own images and buffers
-(`transient_bytes`).
+it ends, which come back as the frame two later begins: with the `tracy` feature, Tracy has a GPU
+timeline for each queue, which shows each pass there, placed against the CPU's timeline by the
+GPU's clock, read at once through `VK_KHR_calibrated_timestamps` as the run starts and each second
+after, where the driver can; and every run's `engine.perf` logs the frames' time on the GPU, from a
+frame's first pass on either queue to its last (`gpu_ms_mean`, `gpu_ms_p95`), and the memory of the
+graph's own images and buffers (`transient_bytes`).
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
@@ -1567,8 +1583,8 @@ goes in parts, a buffer by ranges of bytes and a texture by whole rows of one le
 levels together, so that every frame copies something and what stages them holds about a frame's
 budget. They go the best way the device has, as gg-gpu's `UploadPath` says: through a queue apart
 from graphics, where the device has one, whose copies no frame waits for, an asset drawing from the
-first frame that begins once its last part has been copied, which takes it over from that queue,
-and a frame that begins with two frames' copies still running there copying nothing, so that what's
+first frame that begins once its last part has been copied, which waits for that queue and takes a
+texture over from it, and a frame that begins with two frames' copies still running there copying nothing, so that what's
 in flight stays bounded however fast frames come;
 otherwise in the frame's own commands, or from the CPU, drawing in the frame that copies its last
 part. Until then a texture's slot in the bindless set shows a stand-in, a white texel for colors and

@@ -224,8 +224,9 @@ struct SecondPass {
 impl CullPlan {
     /// Declares in `graph` the culling of runs within `bounds` for the game's view's two passes,
     /// and for the shadows' cascades, if `cascades`; its first pass's, for the view's first and the
-    /// cascades, the passes that draw what it keeps come after, and take it as [`CullPlan::drawn`]
-    /// has them; its second, [`CullPlan::second_pass`], is declared after the view's first.
+    /// cascades, on the compute queue, the passes that draw what it keeps come after, and take it
+    /// as [`CullPlan::drawn`] has them; its second, [`CullPlan::second_pass`], is declared after the
+    /// view's first, on the graphics queue, as it samples the view's depth.
     pub(crate) fn new(graph: &mut Graph, bounds: Bounds, cascades: bool) -> Self {
         let views = if cascades { MAX_VIEWS } else { 2 };
         let count = views as u64;
@@ -237,20 +238,20 @@ impl CullPlan {
             bounds.instances * 4 + count * bounds.scratch_bytes(),
         );
         let counts = graph.buffer("culled counts", 16);
-        let gather = (graph.compute(label!("cull gather")))
+        let gather = (graph.compute(label!("cull gather")).on_compute_queue())
             .write_buffer(gathered)
             .add();
-        let choose = (graph.compute(label!("cull choose")))
+        let choose = (graph.compute(label!("cull choose")).on_compute_queue())
             .read_buffer(gathered)
             .write_buffer(scratch)
             .write_buffer(counts)
             .add();
-        let offsets = (graph.compute(label!("cull offsets")))
+        let offsets = (graph.compute(label!("cull offsets")).on_compute_queue())
             .write_buffer(scratch)
             .write_buffer(commands)
             .write_buffer(counts)
             .add();
-        let write = (graph.compute(label!("cull write")))
+        let write = (graph.compute(label!("cull write")).on_compute_queue())
             .read_buffer(gathered)
             .read_buffer(scratch)
             .write_buffer(instances)

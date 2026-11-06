@@ -77,10 +77,10 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the texture, its slot shows a
-    /// stand-in rather than an image of its own, it's compressed, it has mip levels, whose others a
-    /// write would leave undefined, the region doesn't fit in it, or `pixels` doesn't fill the
-    /// region exactly.
+    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// texture, its slot shows a stand-in rather than an image of its own, it's compressed, it has
+    /// mip levels, whose others a write would leave undefined, the region doesn't fit in it, or
+    /// `pixels` doesn't fill the region exactly.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -88,7 +88,7 @@ impl<'a> Frame<'a> {
         size: [u32; 2],
         pixels: &[u8],
     ) -> Result<()> {
-        self.outside_pass();
+        let commands = self.before_passes();
         self.frames
             .device
             .check_made("the texture written", texture.device());
@@ -124,7 +124,6 @@ impl<'a> Frame<'a> {
         let staged = self.upload(pixels)?;
         let region = copy_region(staged.offset, origin, size, 0);
         let device = &self.frames.device;
-        let commands = self.frames.slots[self.slot].commands;
         // Earlier frames on this queue may still sample the image; the copy waits for them.
         let (old_layout, src_stage) = if image.written {
             (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, TEXTURE_READERS)
@@ -164,8 +163,8 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the buffer, frames are streaming it,
-    /// or the bytes don't fit in it.
+    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// buffer, frames are streaming it, or the bytes don't fit in it.
     pub fn write_buffer(
         &mut self,
         buffer: &mut GpuBuffer,
@@ -191,7 +190,7 @@ impl<'a> Frame<'a> {
         offsets: &[u64],
         bytes: &[u8],
     ) -> Result<()> {
-        self.outside_pass();
+        let commands = self.before_passes();
         self.frames
             .device
             .check_made("the buffer written", buffer.device());
@@ -225,8 +224,9 @@ impl<'a> Frame<'a> {
             dst_offset: offset,
             size: piece,
         }));
-        // Earlier frames on this queue may still read the buffer, and an earlier write may still be
-        // copying into it; the copy waits for both.
+        // Earlier frames on this queue may still read the buffer, after all the compute queue's
+        // passes read of it, which each frame's last batch here waits for, and an earlier write
+        // may still be copying into it; the copy waits for both.
         let (src_stage, src_access) = if written {
             (
                 BUFFER_READERS | vk::PipelineStageFlags2::COPY,
@@ -245,8 +245,9 @@ impl<'a> Frame<'a> {
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(BUFFER_READERS)
             .dst_access_mask(BUFFER_READS);
+        // A pass on the compute queue waits for the batch the copy is in.
+        self.frames.buffers_written = true;
         let device = &self.frames.device;
-        let commands = self.frames.slots[self.slot].commands;
         let raw = device.raw();
         // SAFETY: the commands are recording outside a pass, each region fits the buffer and the
         // staged bytes, and the staged bytes and the buffer live until the frame has finished: the
@@ -283,16 +284,16 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the texture, no refill has made an
-    /// image for it, `pixels` doesn't fill the image's levels exactly, or every part is copied
-    /// already.
+    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// texture, no refill has made an image for it, `pixels` doesn't fill the image's levels
+    /// exactly, or every part is copied already.
     pub fn stream_texture(
         &mut self,
         texture: &mut Texture,
         pixels: &[u8],
         budget: u64,
     ) -> Result<u64> {
-        self.outside_pass();
+        let commands = self.before_passes();
         let device = &self.frames.device;
         device.check_made("the texture streamed", texture.device());
         let path = device.upload_path();
@@ -332,7 +333,6 @@ impl<'a> Frame<'a> {
                     self.stage(&pixels[part.offset as usize..][..part.bytes as usize])?;
                 let regions = buffer_regions(&part, offset);
                 let device = &self.frames.device;
-                let commands = self.frames.slots[self.slot].commands;
                 // SAFETY: the commands are recording outside a pass, the regions fit the image's
                 // levels, and the staged pixels and the image live until the frame has finished:
                 // staging and the image retire until then.
@@ -431,11 +431,11 @@ impl<'a> Frame<'a> {
             "a texture comes to show an image before the frame's passes, which would sample it \
              before it's ready"
         );
+        let commands = self.before_passes();
         let pending = texture.take_pending().expect("just there");
         let mut image = pending.image;
         if path == UploadPath::TransferQueue {
             let [_, acquire] = texture_handover(handover_families(device), image.raw);
-            let commands = self.frames.slots[self.slot].commands;
             // SAFETY: the commands are recording outside a pass, and the image lives until the
             // frame has finished: it retires until then.
             unsafe {
@@ -504,15 +504,16 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the buffer, frames have taken it
-    /// for drawing, `bytes` doesn't fill it exactly, or every part is copied already.
+    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// buffer, frames have taken it for drawing, `bytes` doesn't fill it exactly, or every part is
+    /// copied already.
     pub fn stream_buffer(
         &mut self,
         buffer: &mut GpuBuffer,
         bytes: &[u8],
         budget: u64,
     ) -> Result<u64> {
-        self.outside_pass();
+        let commands = self.before_passes();
         self.frames
             .device
             .check_made("the buffer streamed", buffer.device());
@@ -542,22 +543,15 @@ impl<'a> Frame<'a> {
             UploadPath::TransferQueue => {
                 let transfers = self.transfer_commands()?;
                 let device = &self.frames.device;
-                let [release, _] = buffer_handover(handover_families(device), target);
                 // SAFETY: the transfer commands are recording, the region fits the buffer, and the
                 // staged bytes and the buffer live until the copies have finished: staging and the
-                // buffer retire until then.
+                // buffer retire until then. Every queue shares the buffer, so the semaphore that
+                // a frame which takes it waits on is all it needs.
                 unsafe {
                     device.begin_label(transfers, c"stream buffer");
                     device
                         .raw()
                         .cmd_copy_buffer(transfers, staging, target, &[region]);
-                    if last {
-                        device.raw().cmd_pipeline_barrier2(
-                            transfers,
-                            &vk::DependencyInfo::default()
-                                .buffer_memory_barriers(slice::from_ref(&release)),
-                        );
-                    }
                     device.end_label(transfers);
                 }
                 if last {
@@ -566,8 +560,9 @@ impl<'a> Frame<'a> {
                 }
             }
             UploadPath::HostImageCopy | UploadPath::GraphicsQueue => {
+                // A pass on the compute queue waits for the batch the copy is in.
+                self.frames.buffers_written = true;
                 let device = &self.frames.device;
-                let commands = self.frames.slots[self.slot].commands;
                 let to_read = vk::MemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COPY)
                     .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -613,7 +608,6 @@ impl<'a> Frame<'a> {
             return Ok(true);
         }
         let size = buffer.size();
-        let target = buffer.raw();
         let (copied, released) = buffer.progress();
         if *copied < size {
             return Ok(false);
@@ -623,19 +617,8 @@ impl<'a> Frame<'a> {
             if released > self.frames.transfers_finished {
                 return Ok(false);
             }
-            let [_, acquire] = buffer_handover(handover_families(device), target);
-            let commands = self.frames.slots[self.slot].commands;
-            // SAFETY: the commands are recording outside a pass, and the buffer lives until the
-            // frame has finished: it retires until then.
-            unsafe {
-                device.begin_label(commands, c"finish buffer");
-                device.raw().cmd_pipeline_barrier2(
-                    commands,
-                    &vk::DependencyInfo::default()
-                        .buffer_memory_barriers(slice::from_ref(&acquire)),
-                );
-                device.end_label(commands);
-            }
+            // Every queue shares the buffer, so the frame's wait for the copies, which makes what
+            // they wrote visible to all its commands, is all it takes.
             self.frames.transfer_wait = self.frames.transfer_wait.max(released);
         }
         buffer.set_written();
@@ -833,7 +816,7 @@ fn to_read(image: vk::Image) -> vk::ImageMemoryBarrier2<'static> {
         .subresource_range(COLOR_RANGE)
 }
 
-/// The families of the queues a resource is handed over between: the transfer queue's, then the
+/// The families of the queues a texture is handed over between: the transfer queue's, then the
 /// graphics queue's.
 fn handover_families(device: &Device) -> [u32; 2] {
     let transfer = device
@@ -866,27 +849,6 @@ fn texture_handover(
         barrier
             .dst_stage_mask(TEXTURE_READERS)
             .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ),
-    ]
-}
-
-/// The release and acquire that hand a buffer the transfer queue filled over to the graphics
-/// queue, as [`texture_handover`]'s do a texture.
-fn buffer_handover(
-    [transfer, graphics]: [u32; 2],
-    buffer: vk::Buffer,
-) -> [vk::BufferMemoryBarrier2<'static>; 2] {
-    let barrier = vk::BufferMemoryBarrier2::default()
-        .src_queue_family_index(transfer)
-        .dst_queue_family_index(graphics)
-        .buffer(buffer)
-        .size(vk::WHOLE_SIZE);
-    [
-        barrier
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE),
-        barrier
-            .dst_stage_mask(BUFFER_READERS)
-            .dst_access_mask(BUFFER_READS),
     ]
 }
 
@@ -1096,28 +1058,6 @@ mod tests {
         );
         let sampled = (TEXTURE_READERS, Access::SHADER_SAMPLED_READ);
         assert_eq!(sides(&acquire), (none, sampled));
-
-        let buffer = vk::Buffer::from_raw(9);
-        let [release, acquire] = buffer_handover(families, buffer);
-        let alike = |barrier: &vk::BufferMemoryBarrier2<'_>| {
-            let queues = (
-                barrier.src_queue_family_index,
-                barrier.dst_queue_family_index,
-            );
-            (queues, barrier.buffer, barrier.offset, barrier.size)
-        };
-        let expected = ((1, 0), buffer, 0, vk::WHOLE_SIZE);
-        assert_eq!(alike(&release), expected);
-        assert_eq!(alike(&acquire), expected);
-        let sides = |barrier: &vk::BufferMemoryBarrier2<'_>| {
-            let src = (barrier.src_stage_mask, barrier.src_access_mask);
-            (src, (barrier.dst_stage_mask, barrier.dst_access_mask))
-        };
-        assert_eq!(
-            sides(&release),
-            ((Stage::COPY, Access::TRANSFER_WRITE), none)
-        );
-        assert_eq!(sides(&acquire), (none, (BUFFER_READERS, BUFFER_READS)));
     }
 
     /// A buffer's parts are 16 bytes at least and in multiples of 16 within the budget, but for

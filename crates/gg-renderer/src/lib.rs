@@ -772,13 +772,13 @@ impl Renderer {
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
             // before the view samples it, and before them, the culling of the view's opaque runs
-            // and the cascades' casters, for the view's first pass, and the binning of the lights
-            // into the view's clusters, which its passes read.
+            // and the cascades' casters, for the view's first pass; and after them, the binning of
+            // the lights into the view's clusters, which its passes read. The culling and the
+            // binning run on the compute queue where there's one, the binning beside the shadows.
             let aspect = data.viewport.aspect();
             let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
             let mut cull = (meshes.cull_bounds(data.draws))
                 .map(|bounds| CullPlan::new(graph, bounds, cascades.is_some()));
-            let clusters = lighting.plan(graph);
             let shadows = cascades.map(|cascades| {
                 let names = [
                     "shadow cascade 0",
@@ -802,6 +802,7 @@ impl Renderer {
                     passes,
                 }
             });
+            let clusters = lighting.plan(graph);
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
             let depth = graph.depth("view depth", size);
@@ -964,10 +965,6 @@ impl Renderer {
                     shadows: ShadowData::default(),
                     clusters: ClusterData::default(),
                 };
-                let aspect = data.viewport.aspect();
-                let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
-                let (view_lights, clusters) =
-                    (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
                 // The casters, each cascade's from the light, which read the frame's data but for
                 // what the view alone samples.
                 if let Some(shadows) = &view.shadows {
@@ -985,6 +982,10 @@ impl Renderer {
                         )?;
                     }
                 }
+                let aspect = data.viewport.aspect();
+                let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
+                let (view_lights, clusters) =
+                    (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
                 let mut pass =
                     (frame.render(view.first)).expect("the graph's own images are always there");
                 let lit = match (&plan, sky) {

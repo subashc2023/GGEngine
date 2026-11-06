@@ -114,17 +114,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The scene on the GPU** (2026-11-05)
 - **Occlusion culling** (2026-11-05)
 - **Clustered lighting** (2026-11-05)
+- **Async compute** (2026-11-05)
 
 ## Now
 
 **Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
 
-- **Async compute.** The graph runs compute passes on a queue of their own where the device has a
-  compute family apart from graphics, as the RTX 4090 and the AMD iGPU here do, waiting through
-  semaphores where the two queues' uses meet, and on the graphics queue elsewhere, as on lavapipe:
-  culling and light culling beside the shadows' passes. Each queue is a timeline in Tracy, its clock
-  read through `VK_KHR_calibrated_timestamps`, which both GPUs here have, as the run starts and again
-  as it goes on, which fixes the offset [DEFECTS.md](DEFECTS.md) has.
 - **Meshlets and packed vertices.** The cooker cuts each level of a model's meshes into meshlets,
   meshoptimizer's, each with its bounds and the cone its triangles face within, and packs models'
   vertices into 8- and 16-bit fields. Meshlets draw through mesh shaders where the device has
@@ -225,6 +220,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `hello`, `ping`, `view`, `patch`, `note` and `quit`, and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
 | Ordering a graph's passes by what they use, rather than as they're added, and leaving out those whose results nothing uses | Passes come from more than one place, as games' own would |
+| Passes on the compute queue that sample or write images: images, the graph's own among them, are the graphics queue's family's alone, so a pass there uses buffers alone; the depth pyramid and the culling's second pass, which sample the view's depth, run on the graphics queue, as do a sky's prefiltering and its compute passes. Images shared by both families, which can cost some GPUs their compression, or handed between them by a barrier on each queue | A pass that uses an image gains from running beside the graphics queue's |
+| A compute queue on a device whose one family for compute apart from graphics takes the uploads, as one without a family for transfers alone: a second queue of that family, or uploads on the graphics queue, where the device has the queues; its compute passes run on the graphics queue | Such a device is one a game targets |
+| Submitting each queue's batches in one call, a wait submitted before what signals it, which timeline semaphores allow: a frame submits runs of one queue's batches each after what it waits for, two calls in the 16 Bistros, 66 µs each at the median on the RTX 4090's render thread, three where the compute queue waits for a buffer the frame wrote | The render thread's time is measured to go in submits |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |

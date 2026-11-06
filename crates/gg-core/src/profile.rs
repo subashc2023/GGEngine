@@ -235,4 +235,13 @@ impl GpuTimeline {
         #[cfg(not(feature = "tracy"))]
         let _ = (query, timestamp);
     }
+
+    /// The GPU's clock read `timestamp` just now: Tracy places the timeline's timestamps from here
+    /// on by it, against its own clock as this is called, so that the two don't drift apart.
+    pub fn sync(&self, timestamp: i64) {
+        #[cfg(feature = "tracy")]
+        self.context.sync_gpu_time(timestamp);
+        #[cfg(not(feature = "tracy"))]
+        let _ = timestamp;
+    }
 }

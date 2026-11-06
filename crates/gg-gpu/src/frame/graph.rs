@@ -233,6 +233,11 @@ pub(crate) enum BufferUse {
 }
 
 impl BufferUse {
+    /// Whether it writes the buffer.
+    pub(crate) fn writes(self) -> bool {
+        self == Self::ComputeWrite
+    }
+
     /// What the use does to the buffer, in no layout, as buffers have none.
     pub(crate) fn access(self) -> Access {
         let access = |stages, reads, writes| Access {
@@ -276,10 +281,38 @@ pub(crate) struct Access {
 pub(crate) struct PassDecl {
     pub(crate) label: Label,
     pub(crate) kind: PassKind,
+    /// The queue it was added to run on.
+    pub(crate) queue: Queue,
     /// Its uses, in [`Graph::uses`].
     pub(crate) uses: Range<usize>,
     /// Its uses of buffers, in [`Graph::buffer_uses`].
     pub(crate) buffer_uses: Range<usize>,
+}
+
+/// A queue a pass runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Queue {
+    Graphics,
+    /// The device's queue for compute apart from graphics, where it has one; the graphics queue
+    /// otherwise.
+    Compute,
+}
+
+impl Queue {
+    /// Its index among a frame's queues, which lists of them are in.
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Graphics => 0,
+            Self::Compute => 1,
+        }
+    }
+
+    pub(crate) const fn other(self) -> Self {
+        match self {
+            Self::Graphics => Self::Compute,
+            Self::Compute => Self::Graphics,
+        }
+    }
 }
 
 /// What a pass does.
@@ -412,13 +445,15 @@ impl Graph {
     }
 
     /// A pass that dispatches compute shaders, named `label`, whose images and buffers the builder
-    /// it returns takes, before [`ComputePass::add`] adds it.
+    /// it returns takes, before [`ComputePass::add`] adds it: on the graphics queue, unless
+    /// [`ComputePass::on_compute_queue`] says otherwise.
     pub fn compute(&mut self, label: Label) -> ComputePass<'_> {
         let start = (self.uses.len(), self.buffer_uses.len());
         ComputePass {
             graph: self,
             label,
             start,
+            queue: Queue::Graphics,
         }
     }
 
@@ -446,7 +481,7 @@ impl Graph {
         );
         let start = (self.uses.len(), self.buffer_uses.len());
         self.buffer_uses.push((buffer, BufferUse::CopySource));
-        self.add_pass(label, PassKind::ReadBack, start)
+        self.add_pass(label, PassKind::ReadBack, Queue::Graphics, start)
     }
 
     /// A pass, named `label`, that reads pixels of `ids` back, as an earlier pass left them, as
@@ -484,11 +519,18 @@ impl Graph {
     fn read(&mut self, label: Label, kind: PassKind, image: ImageId) -> PassId {
         let start = (self.uses.len(), self.buffer_uses.len());
         self.uses.push((image, Use::CopySource));
-        self.add_pass(label, kind, start)
+        self.add_pass(label, kind, Queue::Graphics, start)
     }
 
-    /// Adds the pass whose uses of images and of buffers start at `start`, once they're checked.
-    fn add_pass(&mut self, label: Label, kind: PassKind, start: (usize, usize)) -> PassId {
+    /// Adds the pass, on `queue`, whose uses of images and of buffers start at `start`, once
+    /// they're checked.
+    fn add_pass(
+        &mut self,
+        label: Label,
+        kind: PassKind,
+        queue: Queue,
+        start: (usize, usize),
+    ) -> PassId {
         let (start, buffers_start) = start;
         let uses = start..self.uses.len();
         for &(image, use_) in &self.uses[uses.clone()] {
@@ -530,6 +572,7 @@ impl Graph {
         self.passes.push(PassDecl {
             label,
             kind,
+            queue,
             uses,
             buffer_uses,
         });
@@ -703,21 +746,36 @@ impl RenderPass<'_> {
                 size = Some(own);
             }
         }
-        graph.add_pass(label, PassKind::Render, start)
+        graph.add_pass(label, PassKind::Render, Queue::Graphics, start)
     }
 }
 
 /// A pass that dispatches compute shaders, being built: the images it samples and those it writes,
-/// and the buffers it reads and writes. [`ComputePass::add`] adds it to its graph.
+/// the buffers it reads and writes, and the queue it runs on. [`ComputePass::add`] adds it to its
+/// graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct ComputePass<'g> {
     graph: &'g mut Graph,
     label: Label,
     /// Where its uses of images and of buffers start in the graph's.
     start: (usize, usize),
+    queue: Queue,
 }
 
 impl ComputePass<'_> {
+    /// Runs the pass on the device's queue for compute apart from graphics, where it has one, as
+    /// the RTX 4090 and AMD's GPUs do, and on the graphics queue otherwise, as on lavapipe; the
+    /// frame records it in its place among the graph's passes either way. A pass that uses a
+    /// buffer a pass on the other queue used last, and must follow it, waits by a semaphore for
+    /// every pass added before it on that queue: so a pass on the compute queue runs beside the
+    /// graphics passes added after the last it waits for and before the first that waits for it.
+    ///
+    /// It uses buffers alone: images would need handing over between the queues' families, which
+    /// buffers, shared by every queue, don't.
+    pub fn on_compute_queue(mut self) -> Self {
+        self.queue = Queue::Compute;
+        self
+    }
     /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
     /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
     /// a storage image, or a color image, an image of IDs or one of depth of the graph's own.
@@ -761,15 +819,22 @@ impl ComputePass<'_> {
     /// # Panics
     ///
     /// If it uses an image twice, writes one of the graph's own, which are no storage images,
-    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote; or if it uses
-    /// a buffer twice, or reads one no earlier pass wrote.
+    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote, or runs on
+    /// the compute queue and uses any; or if it uses a buffer twice, or reads one no earlier pass
+    /// wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
             label,
             start,
+            queue,
         } = self;
         let uses = &graph.uses[start.0..];
+        assert!(
+            queue == Queue::Graphics || uses.is_empty(),
+            "pass {label:?} runs on the compute queue, whose passes use buffers alone, but it uses \
+             {uses:?}"
+        );
         for (i, &(image, use_)) in uses.iter().enumerate() {
             assert!(
                 uses[..i].iter().all(|&(used, _)| used != image),
@@ -790,7 +855,7 @@ impl ComputePass<'_> {
                 kind.map_or_else(|| "a target".to_owned(), |kind| format!("{kind:?}"))
             );
         }
-        graph.add_pass(label, PassKind::Compute, start)
+        graph.add_pass(label, PassKind::Compute, queue, start)
     }
 }
 
@@ -868,6 +933,9 @@ impl Hazard {
         let unseen = !self.write_stages.is_empty() && !self.reads.contains(access.stages);
         *layout = access.layout;
         if !writes && !unseen {
+            // A read with nothing to wait for, as of a buffer the other queue wrote, which a
+            // semaphore waited for: a write after it waits for it all the same.
+            self.reads |= access.stages;
             return None;
         }
         // A write, or a layout transition, which writes too, waits for the reads since the last

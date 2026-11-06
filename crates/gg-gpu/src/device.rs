@@ -166,15 +166,26 @@ pub struct Device {
     graphics: Queue,
     /// The queue uploads are copied on, for a device that uploads through a transfer queue.
     transfer: Option<Queue>,
+    /// The queue compute passes run on beside the graphics queue, for a device with a family for
+    /// compute apart from graphics and from uploads; they run on the graphics queue otherwise.
+    compute: Option<Queue>,
+    /// The families of the queues above, each once: every buffer is shared by them all, so that
+    /// any of the queues reads what another wrote once it has waited for it, without handing it
+    /// over. Images are the graphics queue's alone, but textures that the transfer queue fills.
+    families: Vec<u32>,
     /// The host image copy functions, for a device that uploads by host image copy.
     host_image_copy_fn: Option<ext::host_image_copy::Device>,
     uploads: UploadPath,
     /// The least a copy to an image moves on the queue that copies textures, in texels, or in
     /// blocks of a compressed image.
     copy_granularity: vk::Extent3D,
-    /// How many of the bits of the timestamps the graphics queue writes count; 0 for a queue
-    /// that writes none.
+    /// How many of the bits of the timestamps the graphics queue writes count, and the compute
+    /// queue's; 0 for a queue that writes none.
     timestamp_bits: u32,
+    compute_timestamp_bits: u32,
+    /// What reads the GPU's clock at once, for Tracy's timelines, with gg-core's `tracy` feature,
+    /// on a device whose driver can.
+    calibrated: Option<khr::calibrated_timestamps::Device>,
     /// Which memory heaps are the GPU's own, by their indices' bits.
     device_local_heaps: u32,
     /// RenderDoc, for a device it can capture: one its layer is active on.
@@ -230,6 +241,7 @@ impl Device {
                 driver = candidate.driver,
                 vram_mib = candidate.vram_mib,
                 transfer = candidate.transfer,
+                compute = candidate.compute,
                 host_image_copy = candidate.host_copy.name(),
                 problem = candidate.problem.as_deref(),
                 "GPU found"
@@ -244,22 +256,27 @@ impl Device {
         let transfer = chosen
             .transfer
             .filter(|_| uploads == UploadPath::TransferQueue);
+        let compute = chosen.compute;
+        // A family for transfers or compute has no graphics, and the compute family isn't the
+        // transfer family, so each is another family.
+        let families: Vec<u32> = [Some(graphics), transfer, compute]
+            .into_iter()
+            .flatten()
+            .collect();
 
         let priorities = [1.0];
-        let mut queue_infos = vec![
-            vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(graphics)
-                .queue_priorities(&priorities),
-        ];
-        // A family for transfers has no graphics, so it's another family.
-        if let Some(transfer) = transfer {
-            queue_infos.push(
+        let queue_infos: Vec<_> = (families.iter())
+            .map(|&family| {
                 vk::DeviceQueueCreateInfo::default()
-                    .queue_family_index(transfer)
-                    .queue_priorities(&priorities),
-            );
-        }
+                    .queue_family_index(family)
+                    .queue_priorities(&priorities)
+            })
+            .collect();
+        let calibrated = chosen.calibrated && gg_core::profile::ENABLED;
         let mut extensions = Vec::new();
+        if calibrated {
+            extensions.push(vk::KHR_CALIBRATED_TIMESTAMPS_NAME.as_ptr());
+        }
         if surface.is_some() {
             extensions.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
@@ -359,22 +376,24 @@ impl Device {
         } else {
             chosen.graphics_granularity
         };
+        let queue = |family| Queue {
+            family,
+            // SAFETY: the device was created with one queue in each of its families.
+            raw: Mutex::new(unsafe { raw.get_device_queue(family, 0) }),
+        };
         let device = Self {
-            graphics: Queue {
-                family: graphics,
-                // SAFETY: the device was created with one queue in this family.
-                raw: Mutex::new(unsafe { raw.get_device_queue(graphics, 0) }),
-            },
-            transfer: transfer.map(|family| Queue {
-                family,
-                // SAFETY: the device was created with one queue in this family.
-                raw: Mutex::new(unsafe { raw.get_device_queue(family, 0) }),
-            }),
+            graphics: queue(graphics),
+            transfer: transfer.map(queue),
+            compute: compute.map(queue),
+            families,
             host_image_copy_fn: (uploads == UploadPath::HostImageCopy)
                 .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
             uploads,
             copy_granularity,
             timestamp_bits: chosen.timestamp_bits,
+            compute_timestamp_bits: chosen.compute_timestamp_bits,
+            calibrated: calibrated
+                .then(|| khr::calibrated_timestamps::Device::new(instance.raw(), &raw)),
             device_local_heaps,
             renderdoc,
             debug_utils,
@@ -398,6 +417,9 @@ impl Device {
             if let Some(transfer) = &device.transfer {
                 device.set_name(*transfer.lock(), "transfer queue");
             }
+            if let Some(compute) = &device.compute {
+                device.set_name(*compute.lock(), "compute queue");
+            }
             device.bindless.set_names(&device);
         }
         instance.name_through(&device);
@@ -408,10 +430,11 @@ impl Device {
             driver = chosen.driver,
             vram_mib = chosen.vram_mib,
             uploads = %uploads,
+            compute_queue = compute.is_some(),
             memory_budget = chosen.memory_budget,
             "GPU selected"
         );
-        debug!(graphics, transfer, "Queue families");
+        debug!(graphics, transfer, compute, "Queue families");
         Ok(Arc::new(device))
     }
 
@@ -607,6 +630,7 @@ impl Device {
         // taken in this order.
         let _graphics = self.graphics.lock();
         let _transfer = self.transfer.as_ref().map(Queue::lock);
+        let _compute = self.compute.as_ref().map(Queue::lock);
         // SAFETY: the device is live, and its queues' locks are held.
         unsafe { self.raw.device_wait_idle() }.map_err(|e| {
             vk_error(
@@ -755,9 +779,47 @@ impl Device {
         self.timestamp_bits
     }
 
+    /// How many of the bits of the timestamps the compute queue writes count; 0 for a queue
+    /// that writes none, and without a compute queue.
+    pub(crate) fn compute_timestamp_bits(&self) -> u32 {
+        self.compute_timestamp_bits
+    }
+
     /// The transfer queue's family, for a device that uploads through one.
     pub(crate) fn transfer_family(&self) -> Option<u32> {
         self.transfer.as_ref().map(|queue| queue.family)
+    }
+
+    /// The compute queue's family, for a device with a compute queue apart from graphics.
+    pub(crate) fn compute_family(&self) -> Option<u32> {
+        self.compute.as_ref().map(|queue| queue.family)
+    }
+
+    /// The families of the device's queues, each once, which every buffer is shared by.
+    pub(crate) fn families(&self) -> &[u32] {
+        &self.families
+    }
+
+    /// What the GPU's clock reads now, in the ticks its timestamps count, read at once through
+    /// `VK_KHR_calibrated_timestamps`: `None` for a device whose driver can't, or without
+    /// gg-core's `tracy` feature, which alone reads it so. Allocates nothing.
+    pub(crate) fn read_clock(&self) -> Option<u64> {
+        let calibrated = self.calibrated.as_ref()?;
+        let info = vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE);
+        let (mut timestamp, mut deviation) = (0, 0);
+        // SAFETY: the device is live with the extension enabled, and the device's own time domain
+        // is one its driver calibrates, as choosing it checked; the pointers are to one info and
+        // one timestamp, as the count says. ash's wrapper would allocate.
+        let read = unsafe {
+            (calibrated.fp().get_calibrated_timestamps_khr)(
+                self.raw.handle(),
+                1,
+                &info,
+                &mut timestamp,
+                &mut deviation,
+            )
+        };
+        (read == vk::Result::SUCCESS).then_some(timestamp)
     }
 
     /// The host image copy functions, which a device that uploads by host image copy has.
@@ -784,6 +846,31 @@ impl Device {
         // SAFETY: the caller guarantees the submissions; the lock is held.
         unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
             let submitted = format_args!("{work} on device {:?}'s graphics queue", self.name);
+            vk_error("vkQueueSubmit2", submitted, e)
+        })
+    }
+
+    /// Submits `work`, as its errors call it, to the compute queue.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Device::submit`].
+    ///
+    /// # Panics
+    ///
+    /// If the device has no compute queue.
+    pub(crate) unsafe fn submit_compute(
+        &self,
+        submits: &[vk::SubmitInfo2<'_>],
+        work: impl fmt::Display,
+    ) -> Result<()> {
+        let compute = self.compute.as_ref();
+        let queue = compute
+            .expect("only a device with a compute queue submits to one")
+            .lock();
+        // SAFETY: the caller guarantees the submissions; the lock is held.
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
+            let submitted = format_args!("{work} on device {:?}'s compute queue", self.name);
             vk_error("vkQueueSubmit2", submitted, e)
         })
     }

@@ -2,12 +2,15 @@
 //! paces them, so that the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU. A frame
 //! runs the passes of a [`Graph`], in order, which place every barrier between them, and can
 //! render into several targets, such as an app's windows, presenting all their swapchains at once;
-//! its later passes can sample what its earlier ones rendered offscreen. It reads back a few pixels
-//! of the IDs its passes render, and a small buffer its compute shaders write, which the frame two
-//! later, which reuses its resources once it has finished, finds read, with the times its passes
-//! took on the GPU. On a device that uploads through a transfer queue, a frame's copies go in a
-//! submission of their own, which another timeline paces, and no frame waits for.
+//! its later passes can sample what its earlier ones rendered offscreen. Passes added to run on the
+//! compute queue run there, on a device that has one, in batches of their own, which semaphores
+//! order against the graphics queue's, as `batches` says. It reads back a few pixels of the IDs
+//! its passes render, and a small buffer its compute shaders write, which the frame two later,
+//! which reuses its resources once it has finished, finds read, with the times its passes took on
+//! the GPU. On a device that uploads through a transfer queue, a frame's copies go in a submission
+//! of their own, which another timeline paces, and no frame waits for.
 
+mod batches;
 mod compute;
 pub(crate) mod graph;
 mod pass;
@@ -16,6 +19,7 @@ mod transients;
 mod upload;
 
 use std::ffi::{CStr, CString};
+use std::ops::Range;
 use std::slice;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +31,8 @@ use tracing::error;
 use crate::buffer::Buffer;
 use crate::vma::Memory;
 use crate::{COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error};
-use graph::{Hazard, ImageDecl, PassKind, Use};
+use batches::{Plan, Timelines};
+use graph::{Hazard, ImageDecl, PassKind, Queue, Use};
 use timer::Timer;
 use transients::Transients;
 use upload::Arena;
@@ -71,10 +76,22 @@ pub enum Target<'a> {
 /// has one for its whole life; its resources retire by its frames.
 pub struct Frames {
     device: Arc<Device>,
-    /// Reaches N when the Nth frame has finished on the GPU.
+    /// Reaches N when the Nth frame has finished on the GPU, on every queue.
     timeline: vk::Semaphore,
     submitted: u64,
     slots: Vec<Slot>,
+    /// For a device with a compute queue, each queue's timeline, by [`Queue::index`], which
+    /// reaches N when the queue has run its Nth batch; null otherwise.
+    queue_timelines: [vk::Semaphore; 2],
+    /// How far the timelines are planned and waited for, as the last frame begun left them.
+    timelines: Timelines,
+    /// The batches of the frame being recorded.
+    plan: Plan,
+    /// The command buffer of each of its batches, as `plan` has them.
+    batch_commands: Vec<vk::CommandBuffer>,
+    /// Whether the frame being recorded has written a buffer outside its passes, in its first
+    /// batch, which a batch on the compute queue then waits for.
+    buffers_written: bool,
     /// Each slot's arena.
     arenas: Vec<Arena>,
     staging: Arena,
@@ -113,8 +130,8 @@ pub struct Frames {
     images: Vec<Option<Tracked>>,
     /// The images of the graphs' own.
     transients: Transients,
-    /// The passes' timestamps.
-    timer: Timer,
+    /// The passes' timestamps on each queue, by [`Queue::index`].
+    timers: [Timer; 2],
     /// The barriers before the pass being recorded, kept so that frames don't allocate.
     barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
     buffer_barriers: Vec<vk::BufferMemoryBarrier2<'static>>,
@@ -144,11 +161,11 @@ struct Tracked {
 
 /// What one frame in flight records into and synchronizes with.
 struct Slot {
-    pool: vk::CommandPool,
-    commands: vk::CommandBuffer,
-    /// The pool's and the commands' name, kept to name the commands again as they're begun,
-    /// without allocating.
-    commands_name: CString,
+    /// Each queue's command pool, by [`Queue::index`]; null for a queue the device hasn't.
+    pools: [vk::CommandPool; 2],
+    /// The command buffers made from each pool, which the frame's batches on its queue take in
+    /// turn, each with its name, kept to name it again as it's begun, without allocating.
+    commands: [Vec<(vk::CommandBuffer, CString)>; 2],
     /// For each target, signaled when the swapchain image the frame renders into is ready for
     /// it. There are as many as the most targets a frame has had.
     acquired: Vec<vk::Semaphore>,
@@ -220,13 +237,26 @@ impl ImageRead<'_> {
     }
 }
 
-/// The lists a submission and its present are built in, kept so that frames don't allocate.
+/// A batch's submission: its waits and signals, in `Scratch::waits` and `Scratch::signals`, and
+/// the value of the other queue's timeline it waits for, 0 for none.
+struct Submission {
+    waits: Range<usize>,
+    signals: Range<usize>,
+    waits_on: u64,
+}
+
+/// The lists submissions and their present are built in, kept so that frames don't allocate.
 #[derive(Default)]
 struct Scratch {
     /// The regions of a buffer's write, as [`Frame::write_buffer_pieces`] copies them.
     copies: Vec<vk::BufferCopy>,
     waits: Vec<vk::SemaphoreSubmitInfo<'static>>,
     signals: Vec<vk::SemaphoreSubmitInfo<'static>>,
+    commands: Vec<vk::CommandBufferSubmitInfo<'static>>,
+    /// Each batch's submission.
+    batches: Vec<Submission>,
+    /// The batches submitted in a call, emptied between calls: their lists borrow the ones above.
+    submits: Vec<vk::SubmitInfo2<'static>>,
     rendered: Vec<vk::Semaphore>,
     swapchains: Vec<vk::SwapchainKHR>,
     images: Vec<u32>,
@@ -242,7 +272,10 @@ impl Frames {
     pub fn new(device: &Arc<Device>) -> Result<Self> {
         device.claim_frames();
         // Before anything that `Frames`' drop would destroy, as a failure here would leave it.
-        let timer = Timer::new(device)?;
+        let timers = [
+            Timer::new(device, Queue::Graphics)?,
+            Timer::new(device, Queue::Compute)?,
+        ];
         let raw = device.raw();
         let mut timeline_info =
             vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
@@ -256,6 +289,11 @@ impl Frames {
             timeline,
             submitted: 0,
             slots: Vec::new(),
+            queue_timelines: [vk::Semaphore::null(); 2],
+            timelines: Timelines::default(),
+            plan: Plan::default(),
+            batch_commands: Vec::new(),
+            buffers_written: false,
             arenas: (0..FRAMES_IN_FLIGHT).map(Arena::frame).collect(),
             staging: Arena::staging(),
             transfer_timeline: vk::Semaphore::null(),
@@ -276,7 +314,7 @@ impl Frames {
                 .collect(),
             images: Vec::new(),
             transients: Transients::new(device),
-            timer,
+            timers,
             barriers: Vec::new(),
             buffer_barriers: Vec::new(),
             spare_targets: Vec::new(),
@@ -295,18 +333,36 @@ impl Frames {
             // SAFETY: the semaphore is live.
             unsafe { device.set_name(frames.transfer_timeline, "upload timeline") };
         }
+        let compute_family = device.compute_family();
+        if compute_family.is_some() {
+            for (timeline, name) in (frames.queue_timelines.iter_mut())
+                .zip(["graphics queue timeline", "compute queue timeline"])
+            {
+                // SAFETY: as above.
+                *timeline = unsafe { raw.create_semaphore(&info, None) }.map_err(|e| {
+                    vk_error("vkCreateSemaphore", format_args!("semaphore {name:?}"), e)
+                })?;
+                // SAFETY: the semaphore is live.
+                unsafe { device.set_name(*timeline, name) };
+            }
+        }
         for i in 0..FRAMES_IN_FLIGHT {
-            let name = format!("frame {i} commands");
-            let (pool, commands, commands_name) =
-                command_buffer(device, device.graphics_family(), name)?;
+            // In the list first, so that dropping `frames` destroys the pools made.
             frames.slots.push(Slot {
-                pool,
-                commands,
-                commands_name,
+                pools: [vk::CommandPool::null(); 2],
+                commands: [Vec::new(), Vec::new()],
                 acquired: Vec::new(),
                 reads: (0, 0),
                 buffer_read: 0,
             });
+            let slot = frames.slots.last_mut().expect("just pushed");
+            let families = [Some(device.graphics_family()), compute_family];
+            let names = ["graphics", "compute"];
+            for ((pool, family), queue) in slot.pools.iter_mut().zip(families).zip(names) {
+                if let Some(family) = family {
+                    *pool = command_pool(device, family, &format!("frame {i} {queue}"))?;
+                }
+            }
         }
         Ok(frames)
     }
@@ -389,7 +445,9 @@ impl Frames {
         unsafe { self.device.bindless().apply(self.device.raw(), slot) };
         // The slot's last frame has finished, and its reads and timestamps with it.
         self.find_read(slot)?;
-        self.timer.finished(&self.device, slot)?;
+        for timer in &mut self.timers {
+            timer.finished(&self.device, slot)?;
+        }
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
         list.extend(targets);
         assert!(!list.is_empty(), "a frame renders into at least one target");
@@ -409,9 +467,14 @@ impl Frames {
         }
         check_targets(graph, &list);
         if let Err(error) = self.transients.prepare(graph) {
-            self.spare_targets = recycle(list);
+            self.spare_targets = emptied(list);
             return Err(error);
         }
+        // What the frame leaves of the buffers and the timelines takes effect only once it begins.
+        let transients = &self.transients;
+        let computes = self.device.compute_family().is_some();
+        let crossing = |buffer| transients.crossing(BufferId(buffer as u32));
+        self.plan.make(graph, computes, crossing, self.timelines);
         let acquired = &mut self.slots[slot].acquired;
         while acquired.len() < list.len() {
             let name = format!("frame {slot} target {} image acquired", acquired.len());
@@ -427,18 +490,21 @@ impl Frames {
             acquired.push(semaphore);
         }
         self.images.clear();
-        if let Err(error) = self.start(slot, &mut list, graph.passes.len()) {
+        if let Err(error) = self.start(slot, &mut list) {
             // A swapchain image acquired before the failure goes unpresented, and its semaphore
             // stays signaled, so no frame may acquire with it again.
             self.failed |= (list.iter().zip(&self.images))
                 .any(|(target, image)| matches!(target, Target::Swapchain(_)) && image.is_some());
-            self.spare_targets = recycle(list);
+            self.spare_targets = emptied(list);
             return Err(error);
         }
         if self.images.is_empty() {
-            self.spare_targets = recycle(list);
+            self.spare_targets = emptied(list);
             return Ok(None);
         }
+        self.timelines = self.plan.timelines;
+        self.transients.cross(&self.plan.crossings);
+        self.buffers_written = false;
         self.recording = true;
         self.slots[slot].reads = (self.submitted + 1, 0);
         self.slots[slot].buffer_read = 0;
@@ -450,15 +516,17 @@ impl Frames {
             slot,
             submitted: false,
             transfers: None,
+            commands: vk::CommandBuffer::null(),
+            queue: Queue::Graphics,
             rendering: false,
             pass_begun: false,
         }))
     }
 
     /// Acquires `targets`' images into `images`, as [`Frames::begin`] says, and, given one for
-    /// the first, readies slot `slot`'s arena, commands and timestamps for a frame of `passes`
-    /// passes and begins recording them. `images` stays empty if the first target has no image.
-    fn start(&mut self, slot: usize, targets: &mut [Target<'_>], passes: usize) -> Result<()> {
+    /// the first, readies slot `slot`'s arena, and the commands and timestamps of the batches
+    /// planned, and begins recording them. `images` stays empty if the first target has no image.
+    fn start(&mut self, slot: usize, targets: &mut [Target<'_>]) -> Result<()> {
         for (i, target) in targets.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
@@ -493,33 +561,68 @@ impl Frames {
         }
         self.device.frame_begun(self.submitted + 1);
         self.arenas[slot].reset(&self.device)?;
-        let raw = self.device.raw();
+        let device = &self.device;
+        let raw = device.raw();
         let Slot {
-            pool,
-            commands,
-            ref commands_name,
-            ..
-        } = self.slots[slot];
-        let bindless = self.device.bindless();
-        // SAFETY: the GPU has finished the slot's previous frame, so its commands can be reset
-        // and recorded again; the sets and layout live as long as the device.
-        unsafe {
-            begin_recording(&self.device, pool, commands, commands_name)?;
-            for bind_point in [
-                vk::PipelineBindPoint::GRAPHICS,
-                vk::PipelineBindPoint::COMPUTE,
-            ] {
-                raw.cmd_bind_descriptor_sets(
-                    commands,
-                    bind_point,
-                    bindless.pipeline_layout(),
-                    0,
-                    &[bindless.set(slot)],
-                    &[],
-                );
-            }
+            pools, commands, ..
+        } = &mut self.slots[slot];
+        for &pool in pools
+            .iter()
+            .filter(|&&pool| pool != vk::CommandPool::null())
+        {
+            // SAFETY: the GPU has finished the slot's previous frame, so nothing uses the pool's
+            // commands.
+            unsafe { raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty()) }.map_err(
+                |e| vk_error("vkResetCommandPool", format_args!("frame {slot}'s pool"), e),
+            )?;
         }
-        self.timer.begin_frame(&self.device, commands, slot, passes)
+        let mut passes = [0; 2];
+        for &batch in &self.plan.of_pass {
+            passes[self.plan.batches[batch].queue.index()] += 1;
+        }
+        let bindless = device.bindless();
+        let mut taken = [0; 2];
+        self.batch_commands.clear();
+        for batch in &self.plan.batches {
+            let queue = batch.queue.index();
+            let (made, nth) = (&mut commands[queue], taken[queue]);
+            taken[queue] += 1;
+            if made.len() == nth {
+                let name = ["graphics", "compute"][queue];
+                let name = format!("frame {slot} {name} {nth}");
+                made.push(allocate_commands(device, pools[queue], name)?);
+            }
+            let (batch_commands, ref name) = made[nth];
+            // The graphics queue runs compute passes too.
+            let bind_points: &[_] = match batch.queue {
+                Queue::Graphics => &[
+                    vk::PipelineBindPoint::GRAPHICS,
+                    vk::PipelineBindPoint::COMPUTE,
+                ],
+                Queue::Compute => &[vk::PipelineBindPoint::COMPUTE],
+            };
+            // SAFETY: the command buffer's pool was just reset, and the sets and layout live as
+            // long as the device.
+            unsafe {
+                begin_commands(device, batch_commands, name)?;
+                for &bind_point in bind_points {
+                    raw.cmd_bind_descriptor_sets(
+                        batch_commands,
+                        bind_point,
+                        bindless.pipeline_layout(),
+                        0,
+                        &[bindless.set(slot)],
+                        &[],
+                    );
+                }
+            }
+            if nth == 0 {
+                let timer = &mut self.timers[queue];
+                timer.begin_frame(device, batch_commands, slot, passes[queue])?;
+            }
+            self.batch_commands.push(batch_commands);
+        }
+        Ok(())
     }
 
     /// Copies what slot `slot`'s last frame read back, once it has finished, for the frame begun
@@ -559,11 +662,16 @@ impl Frames {
     }
 
     /// The time on the GPU of the last frame whose timestamps came back, which a frame's begin
-    /// reads from the frame two before it: from its first pass's beginning to its last's end,
-    /// their barriers' waits among it. `None` before then, after a frame of no passes, and for a
-    /// GPU whose graphics queue writes no timestamps.
+    /// reads from the frame two before it: from its first pass's beginning, on either queue, to
+    /// its last's end, their barriers' and semaphores' waits among it. `None` before then, after
+    /// a frame of no passes, and for a GPU whose graphics queue writes no timestamps.
     pub fn gpu_time(&self) -> Option<Duration> {
-        self.timer.last()
+        let spans = self.timers.iter().filter_map(Timer::span);
+        let (first, last) = spans.reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))?;
+        let period = f64::from(self.device.limits().timestamp_period);
+        Some(Duration::from_nanos(
+            (last.saturating_sub(first) as f64 * period) as u64,
+        ))
     }
 
     /// The bytes of GPU memory the graphs' own images are in, as the last frame begun made them,
@@ -689,12 +797,12 @@ fn target_range(target: &Target<'_>) -> vk::ImageSubresourceRange {
     }
 }
 
-/// Empties `targets` for the next frame's, which borrow for another lifetime. Collecting a
-/// `vec::IntoIter` into a `Vec` of a type with the same layout reuses its memory.
-fn recycle(mut targets: Vec<Target<'_>>) -> Vec<Target<'static>> {
-    targets.clear();
-    targets
-        .into_iter()
+/// Empties `list` for the next use's, which borrows for another lifetime, as the next frame's
+/// targets do. Collecting a `vec::IntoIter` into a `Vec` of a type with the same layout reuses its
+/// memory.
+fn emptied<T, U>(mut list: Vec<T>) -> Vec<U> {
+    list.clear();
+    list.into_iter()
         .map(|_| unreachable!("the list was emptied"))
         .collect()
 }
@@ -727,22 +835,29 @@ impl Drop for Frames {
         self.device.frames_finished(self.submitted);
         self.device.transfers_finished(self.transfers_submitted);
         let raw = self.device.raw();
-        // SAFETY: the GPU has finished every frame and every copy, so nothing here is in use.
-        // Null handles, left by a failed `new` or by a device that doesn't upload through a
-        // transfer queue, are allowed.
+        // SAFETY: the GPU has finished every frame, on every queue, and every copy, so nothing here
+        // is in use. Null handles, left by a failed `new` or by a device that doesn't upload
+        // through a transfer queue or has no compute queue, are allowed.
         unsafe {
-            self.timer.destroy(&self.device);
+            for timer in &self.timers {
+                timer.destroy(&self.device);
+            }
             for slot in &self.slots {
                 for &semaphore in &slot.acquired {
                     raw.destroy_semaphore(semaphore, None);
                 }
-                raw.destroy_command_pool(slot.pool, None);
+                for &pool in &slot.pools {
+                    raw.destroy_command_pool(pool, None);
+                }
             }
             for transfers in &self.transfers {
                 raw.destroy_command_pool(transfers.pool, None);
             }
             raw.destroy_semaphore(self.timeline, None);
             raw.destroy_semaphore(self.transfer_timeline, None);
+            for &timeline in &self.queue_timelines {
+                raw.destroy_semaphore(timeline, None);
+            }
         }
     }
 }
@@ -763,13 +878,17 @@ pub struct Frame<'a> {
     /// The command buffer the frame's copies on the transfer queue record into, among
     /// `Frames::transfers`, once they've begun.
     transfers: Option<usize>,
+    /// The commands of the batch of the pass recorded last, and its queue.
+    commands: vk::CommandBuffer,
+    queue: Queue,
     /// Whether a pass is open, which only its drop closes: the frame records nothing of its own
     /// while one is, so a pass forgotten rather than dropped is caught at the frame's next call.
     rendering: bool,
-    /// Whether a pass has begun in the frame: a texture that comes to show an image takes it into
-    /// its slot in the frame's bindless set at once, which every pass recorded before it would
-    /// sample as the frame is submitted, before what makes the image ready, so it comes before
-    /// them all.
+    /// Whether a pass has begun in the frame. What the frame records outside its passes, its
+    /// writes and uploads, goes in its first batch, which runs before them all, so it's recorded
+    /// before them; and a texture that comes to show an image takes it into its slot in the
+    /// frame's bindless set at once, which every pass recorded before it would sample as the frame
+    /// is submitted, before what makes the image ready.
     pass_begun: bool,
 }
 
@@ -837,7 +956,27 @@ impl<'a> Frame<'a> {
         );
         self.next += 1;
         self.pass_begun = true;
+        let plan = &self.frames.plan;
+        let batch = plan.of_pass[pass.0 as usize];
+        (self.commands, self.queue) =
+            (self.frames.batch_commands[batch], plan.batches[batch].queue);
         decl
+    }
+
+    /// The commands of the frame's first batch, the graphics queue's, which what it records
+    /// outside its passes goes in, to run before them all.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, or a pass has begun in the frame: its writes and uploads
+    /// are recorded before its passes, as they run before them.
+    fn before_passes(&self) -> vk::CommandBuffer {
+        self.outside_pass();
+        assert!(
+            !self.pass_begun,
+            "a frame records its writes and uploads before its passes, which they run before"
+        );
+        self.frames.batch_commands[0]
     }
 
     /// Starts `pass`: its timestamp and its label, and the barriers its uses need after the uses
@@ -869,9 +1008,8 @@ impl<'a> Frame<'a> {
         }
         let commands = self.commands();
         let device = &self.frames.device;
-        self.frames
-            .timer
-            .begin(device, commands, self.slot, decl.label);
+        let timer = &mut self.frames.timers[self.queue.index()];
+        timer.begin(device, commands, self.slot, decl.label);
         // SAFETY: the commands are recording outside a pass.
         unsafe { device.begin_label(commands, decl.label.name()) };
         let mut barriers = std::mem::take(&mut self.frames.barriers);
@@ -902,7 +1040,7 @@ impl<'a> Frame<'a> {
         buffer_barriers.clear();
         for &(buffer, use_) in graph.buffer_uses(pass) {
             let transients = &mut self.frames.transients;
-            if let Some(barrier) = transients.follow_buffer(buffer, use_.access()) {
+            if let Some(barrier) = transients.follow_buffer(buffer, self.queue, use_.access()) {
                 buffer_barriers.push(
                     vk::BufferMemoryBarrier2::default()
                         .src_stage_mask(barrier.src_stages)
@@ -936,7 +1074,8 @@ impl<'a> Frame<'a> {
         let device = &self.frames.device;
         // SAFETY: the commands are recording outside a pass, with the pass's label open.
         unsafe { device.end_label(commands) };
-        self.frames.timer.end(device, commands, self.slot);
+        let timer = &mut self.frames.timers[self.queue.index()];
+        timer.end(device, commands, self.slot);
     }
 
     /// `image`'s image, its view and its size, for recording commands that use it: for a target,
@@ -959,8 +1098,9 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// The commands of the batch of the pass recorded last.
     fn commands(&self) -> vk::CommandBuffer {
-        self.frames.slots[self.slot].commands
+        self.commands
     }
 
     /// The index in the bindless set that shaders sample `image` through, which a pass samples.
@@ -1020,7 +1160,7 @@ impl<'a> Frame<'a> {
             .buffer(buffer)
             .size(bytes);
         let region = copy_region(0, [0, 0], size, 0);
-        let commands = self.frames.slots[self.slot].commands;
+        let commands = self.commands;
         let raw = self.frames.device.raw();
         // SAFETY: the commands are recording outside a pass, with the image in the layout copies
         // read it in; the region is the whole image and lies within the buffer, which is at least
@@ -1241,7 +1381,7 @@ impl<'a> Frame<'a> {
         finished
     }
 
-    /// Submits the frame's copies and commands, and presents its swapchains' images.
+    /// Submits the frame's copies and batches, and presents its swapchains' images.
     fn send(&mut self) -> Result<()> {
         let Frames {
             device,
@@ -1256,6 +1396,11 @@ impl<'a> Frame<'a> {
             transfer_wait,
             images,
             scratch,
+            queue_timelines,
+            timelines,
+            plan,
+            batch_commands,
+            buffers_written,
             ..
         } = &mut *self.frames;
         arenas[self.slot].flush()?;
@@ -1264,19 +1409,15 @@ impl<'a> Frame<'a> {
         // until the GPU has finished both.
         staging.clear();
         let raw = device.raw();
-        let slot = &slots[self.slot];
+        let acquired = &slots[self.slot].acquired;
         let frame = *submitted + 1;
         scratch.waits.clear();
         scratch.signals.clear();
+        scratch.commands.clear();
+        scratch.batches.clear();
         scratch.rendered.clear();
         scratch.swapchains.clear();
         scratch.images.clear();
-        scratch.signals.push(
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(*timeline)
-                .value(frame)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        );
         if let Some(i) = self.transfers {
             let transfer = &mut transfers[i];
             // SAFETY: the transfer commands are recording.
@@ -1306,19 +1447,11 @@ impl<'a> Frame<'a> {
             *transfers_submitted = number;
             device.transfer_submitted(number);
         }
-        if *transfer_wait > 0 {
-            // For what the frame takes over from the transfer queue, whose copies have finished
-            // already: the ownership transfer still needs the semaphore between its halves.
-            // Without maintenance8, which ash's headers predate, a wait for an ownership transfer's
-            // release is for all commands.
-            scratch.waits.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*transfer_timeline)
-                    .value(*transfer_wait)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
-        }
-        for (i, (target, image)) in self.targets.iter().zip(images.iter_mut()).enumerate() {
+        // The presents' barriers end the graphics queue's last batch, which signals what the
+        // presents wait on after every command, the layout changes included, so the barriers need
+        // no second scope.
+        let last = plan.last_graphics();
+        for (target, image) in self.targets.iter().zip(images.iter_mut()) {
             let (
                 Target::Swapchain(swapchain),
                 Some(Tracked {
@@ -1331,8 +1464,6 @@ impl<'a> Frame<'a> {
                 continue;
             };
             let (image, _, _) = swapchain.image(*index);
-            // The present waits on a semaphore signaled after every command, the layout change
-            // included, so the barrier needs no second scope.
             let (src_stages, src_access) = hazard.last();
             let barrier = vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(src_stages)
@@ -1344,44 +1475,142 @@ impl<'a> Frame<'a> {
             // SAFETY: the commands are recording, and the image is live.
             unsafe {
                 raw.cmd_pipeline_barrier2(
-                    slot.commands,
+                    batch_commands[last],
                     &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
                 );
             }
             *layout = vk::ImageLayout::PRESENT_SRC_KHR;
-            let rendered = swapchain.rendered(*index);
-            scratch.waits.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(slot.acquired[i])
-                    .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
-            );
-            scratch.signals.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(rendered)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
-            scratch.rendered.push(rendered);
+            scratch.rendered.push(swapchain.rendered(*index));
             scratch.swapchains.push(swapchain.raw());
             scratch.images.push(*index);
         }
-        let command_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(slot.commands)];
-        let submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&scratch.waits)
-            .command_buffer_infos(&command_infos)
-            .signal_semaphore_infos(&scratch.signals);
-        // SAFETY: the commands are recording.
-        let sent = unsafe { raw.end_command_buffer(slot.commands) }
-            .map_err(|e| {
-                let subject = format_args!("command buffer {:?}", slot.commands_name);
-                vk_error("vkEndCommandBuffer", subject, e)
-            })
-            .and_then(|()| {
-                let _zone = gg_core::zone!("submit");
-                // SAFETY: what the submission uses lives until the timeline reaches `frame`: the
-                // slot and its arena are reused only after waiting for it, and resources retire
-                // until then.
-                unsafe { device.submit(slice::from_ref(&submit), format_args!("frame {frame}")) }
+        // Each batch's waits and signals. A semaphore's wait takes in all the other queue did
+        // before it signaled, and makes it visible to all its own queue does after, through every
+        // stage.
+        let all = vk::PipelineStageFlags2::ALL_COMMANDS;
+        let first_compute = (plan.batches.iter()).position(|batch| batch.queue == Queue::Compute);
+        for (i, batch) in plan.batches.iter().enumerate() {
+            let (own, other) = (batch.queue.index(), batch.queue.other().index());
+            let (waits, signals) = (scratch.waits.len(), scratch.signals.len());
+            let first = i == 0 || Some(i) == first_compute;
+            let mut waits_on = batch.waits;
+            if Some(i) == first_compute && *buffers_written {
+                // What the frame wrote outside its passes, in its first batch, the graphics
+                // queue's, which a pass on the compute queue may read.
+                waits_on = waits_on.max(plan.batches[0].value);
+                timelines.waited[own] = timelines.waited[own].max(waits_on);
+            }
+            if waits_on > 0 {
+                let semaphore = queue_timelines[other];
+                let wait = vk::SemaphoreSubmitInfo::default().semaphore(semaphore);
+                scratch.waits.push(wait.value(waits_on).stage_mask(all));
+            }
+            if first && *transfer_wait > 0 {
+                // For what the frame takes over from the transfer queue, whose copies have
+                // finished already: the ownership transfer of a texture still needs the semaphore
+                // between its halves. Without maintenance8, which ash's headers predate, a wait
+                // for an ownership transfer's release is for all commands.
+                let wait = vk::SemaphoreSubmitInfo::default().semaphore(*transfer_timeline);
+                scratch
+                    .waits
+                    .push(wait.value(*transfer_wait).stage_mask(all));
+            }
+            if i == 0 {
+                for (&semaphore, (target, image)) in
+                    acquired.iter().zip(self.targets.iter().zip(images.iter()))
+                {
+                    if let (Target::Swapchain(_), Some(_)) = (target, image) {
+                        let stage = vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT;
+                        let wait = vk::SemaphoreSubmitInfo::default().semaphore(semaphore);
+                        scratch.waits.push(wait.stage_mask(stage));
+                    }
+                }
+            }
+            if queue_timelines[own] != vk::Semaphore::null() {
+                let signal = vk::SemaphoreSubmitInfo::default().semaphore(queue_timelines[own]);
+                scratch
+                    .signals
+                    .push(signal.value(batch.value).stage_mask(all));
+            }
+            if i == last {
+                let signal = vk::SemaphoreSubmitInfo::default().semaphore(*timeline);
+                scratch.signals.push(signal.value(frame).stage_mask(all));
+                for &rendered in &scratch.rendered {
+                    let signal = vk::SemaphoreSubmitInfo::default().semaphore(rendered);
+                    scratch.signals.push(signal.stage_mask(all));
+                }
+            }
+            let commands = vk::CommandBufferSubmitInfo::default().command_buffer(batch_commands[i]);
+            scratch.commands.push(commands);
+            scratch.batches.push(Submission {
+                waits: waits..scratch.waits.len(),
+                signals: signals..scratch.signals.len(),
+                waits_on,
             });
+        }
+        for (i, &commands) in batch_commands.iter().enumerate() {
+            // SAFETY: the commands are recording, outside a pass.
+            unsafe { raw.end_command_buffer(commands) }.map_err(|e| {
+                let subject = format_args!("frame {frame}'s batch {i}");
+                vk_error("vkEndCommandBuffer", subject, e)
+            })?;
+        }
+        // Runs of one queue's batches, each after the batches of the other's it waits for, which
+        // were planned before it, the compute queue's first where they can be, so that its work
+        // begins as soon as it can. Each queue's batches up to the frame's are submitted.
+        let mut done = [Queue::Graphics, Queue::Compute].map(|queue| {
+            let first = plan.batches.iter().find(|batch| batch.queue == queue);
+            first.map_or(timelines.made[queue.index()], |batch| batch.value - 1)
+        });
+        let mut next = [0; 2];
+        let mut left = plan.batches.len();
+        let mut submits = emptied(std::mem::take(&mut scratch.submits));
+        let mut sent = Ok(());
+        while left > 0 && sent.is_ok() {
+            let ready = [Queue::Compute, Queue::Graphics]
+                .into_iter()
+                .find(|&queue| {
+                    let (own, other) = (queue.index(), queue.other().index());
+                    submits.clear();
+                    let mut at = next[own];
+                    while let Some(i) =
+                        (at..plan.batches.len()).find(|&i| plan.batches[i].queue == queue)
+                    {
+                        let Submission {
+                            waits,
+                            signals,
+                            waits_on,
+                        } = &scratch.batches[i];
+                        if *waits_on > done[other] {
+                            break;
+                        }
+                        submits.push(
+                            vk::SubmitInfo2::default()
+                                .wait_semaphore_infos(&scratch.waits[waits.clone()])
+                                .command_buffer_infos(slice::from_ref(&scratch.commands[i]))
+                                .signal_semaphore_infos(&scratch.signals[signals.clone()]),
+                        );
+                        done[own] = plan.batches[i].value;
+                        at = i + 1;
+                    }
+                    next[own] = at;
+                    !submits.is_empty()
+                });
+            let queue = ready.expect("a frame's batches each wait for batches planned before it");
+            left -= submits.len();
+            let _zone = gg_core::zone!("submit");
+            let work = format_args!("frame {frame}");
+            // SAFETY: what the submissions use lives until the frame's timeline reaches `frame`,
+            // which follows every batch: the slot and its arena are reused only after waiting for
+            // it, and resources retire until then.
+            sent = unsafe {
+                match queue {
+                    Queue::Graphics => device.submit(&submits, work),
+                    Queue::Compute => device.submit_compute(&submits, work),
+                }
+            };
+        }
+        scratch.submits = emptied(submits);
         // The frame's copies, if any, run on regardless: the frames' drop waits for them.
         sent?;
         *submitted = frame;
@@ -1442,50 +1671,73 @@ impl Drop for Frame<'_> {
         {
             error!(code = error.code(), "{error:#}");
         }
-        self.frames.spare_targets = recycle(std::mem::take(&mut self.targets));
+        self.frames.spare_targets = emptied(std::mem::take(&mut self.targets));
     }
 }
 
+/// A command pool of `family`'s, named `name`, which its errors give, whose command buffers are
+/// each recorded for one submission at a time.
+fn command_pool(device: &Device, family: u32, name: &str) -> Result<vk::CommandPool> {
+    let pool_info = vk::CommandPoolCreateInfo::default()
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+        .queue_family_index(family);
+    // SAFETY: the device is live.
+    let pool = unsafe { device.raw().create_command_pool(&pool_info, None) }.map_err(|e| {
+        vk_error(
+            "vkCreateCommandPool",
+            format_args!("command pool {name:?}"),
+            e,
+        )
+    })?;
+    // SAFETY: the pool is live.
+    unsafe { device.set_name(pool, name) };
+    Ok(pool)
+}
+
+/// A command buffer made from `pool`, a pool of the device's, named `name`, which its errors give;
+/// the name comes back as a C string, to name the commands again as they're begun without
+/// allocating.
+fn allocate_commands(
+    device: &Device,
+    pool: vk::CommandPool,
+    name: String,
+) -> Result<(vk::CommandBuffer, CString)> {
+    let name = CString::new(name).expect("names have no nul");
+    let allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    // SAFETY: the pool is live, and the caller's to allocate from.
+    let commands =
+        unsafe { device.raw().allocate_command_buffers(&allocate_info) }.map_err(|e| {
+            let subject = format_args!("command buffer {name:?}");
+            vk_error("vkAllocateCommandBuffers", subject, e)
+        })?[0];
+    // SAFETY: the command buffer is live.
+    unsafe { device.set_c_name(commands, &name) };
+    Ok((commands, name))
+}
+
 /// A command pool of `family`'s and its one command buffer, for one submission at a time, both
-/// named `name`, which their errors give; the name comes back as a C string, to name the commands
-/// again as they're begun without allocating.
+/// named `name`, as [`command_pool`] and [`allocate_commands`] make them.
 fn command_buffer(
     device: &Device,
     family: u32,
     name: String,
 ) -> Result<(vk::CommandPool, vk::CommandBuffer, CString)> {
-    let name = CString::new(name).expect("names have no nul");
-    let pool_info = vk::CommandPoolCreateInfo::default()
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-        .queue_family_index(family);
-    let raw = device.raw();
-    // SAFETY: the device is live, and each object is made from live ones; a pool whose command
-    // buffer can't be allocated is destroyed, unused.
-    unsafe {
-        let pool = raw.create_command_pool(&pool_info, None).map_err(|e| {
-            let subject = format_args!("command pool {name:?}");
-            vk_error("vkCreateCommandPool", subject, e)
-        })?;
-        let allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let commands = match raw.allocate_command_buffers(&allocate_info) {
-            Ok(commands) => commands[0],
-            Err(e) => {
-                raw.destroy_command_pool(pool, None);
-                let subject = format_args!("command buffer {name:?}");
-                return Err(vk_error("vkAllocateCommandBuffers", subject, e));
-            }
-        };
-        device.set_c_name(pool, &name);
-        device.set_c_name(commands, &name);
-        Ok((pool, commands, name))
+    let pool = command_pool(device, family, &name)?;
+    match allocate_commands(device, pool, name) {
+        Ok((commands, name)) => Ok((pool, commands, name)),
+        Err(error) => {
+            // SAFETY: the pool is live, and nothing was made from it.
+            unsafe { device.raw().destroy_command_pool(pool, None) };
+            Err(error)
+        }
     }
 }
 
-/// Resets `pool` and begins recording `commands`, its command buffer, for one submission, naming
-/// it again for captures. Both have `name` as their debug name, which their errors give.
+/// Resets `pool` and begins recording `commands`, its command buffer, for one submission, as
+/// [`begin_commands`] does. Both have `name` as their debug name, which their errors give.
 ///
 /// # Safety
 ///
@@ -1496,21 +1748,34 @@ unsafe fn begin_recording(
     commands: vk::CommandBuffer,
     name: &CStr,
 ) -> Result<()> {
-    let raw = device.raw();
+    // SAFETY: the caller guarantees it.
+    unsafe {
+        (device
+            .raw()
+            .reset_command_pool(pool, vk::CommandPoolResetFlags::empty()))
+        .map_err(|e| {
+            let subject = format_args!("command pool {name:?}");
+            vk_error("vkResetCommandPool", subject, e)
+        })?;
+        begin_commands(device, commands, name)
+    }
+}
+
+/// Begins recording `commands`, whose pool was reset since its last recording, for one
+/// submission, naming it again for captures as `name`, which its errors give.
+///
+/// # Safety
+///
+/// `commands` must be the device's, its pool reset since the GPU last ran it.
+unsafe fn begin_commands(device: &Device, commands: vk::CommandBuffer, name: &CStr) -> Result<()> {
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     // SAFETY: the caller guarantees it.
     unsafe {
-        raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
-            .map_err(|e| {
-                let subject = format_args!("command pool {name:?}");
-                vk_error("vkResetCommandPool", subject, e)
-            })?;
-        raw.begin_command_buffer(commands, &begin_info)
-            .map_err(|e| {
-                let subject = format_args!("command buffer {name:?}");
-                vk_error("vkBeginCommandBuffer", subject, e)
-            })?;
+        (device.raw().begin_command_buffer(commands, &begin_info)).map_err(|e| {
+            let subject = format_args!("command buffer {name:?}");
+            vk_error("vkBeginCommandBuffer", subject, e)
+        })?;
         device.name_begun(commands, name);
     }
     Ok(())

@@ -4,8 +4,8 @@
 //! within a block. Each block remembers what the last use of any image in it left, so that the
 //! first use of another, in the frame or the next, waits for it; and each image what its own last
 //! use left, which its next waits for too. And its own buffers, each in memory of its own, kept for
-//! the frames after that declare one of its name no larger, each remembering what its last use
-//! left likewise.
+//! the frames after that declare one of its name no larger, each remembering what its last use on
+//! each queue left likewise, and its uses across the two, which frames plan their batches by.
 
 use std::sync::Arc;
 
@@ -13,7 +13,8 @@ use ash::vk;
 use gg_core::Result;
 use tracing::trace;
 
-use super::graph::{Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId, Kind};
+use super::batches::Crossing;
+use super::graph::{Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId, Kind, Queue};
 use crate::Device;
 use crate::buffer::Buffer;
 use crate::device::Retired;
@@ -42,9 +43,13 @@ pub(crate) struct Transients {
 struct MadeBuffer {
     name: &'static str,
     buffer: Buffer,
-    /// What its last use left, in the frame or one before: a frame's first use waits for the
-    /// frame before's last, as both run on one queue.
-    hazard: Hazard,
+    /// What its last use on each queue left, by [`Queue::index`], in the frame or one before,
+    /// which the queue's next waits for by a barrier: a frame's first use on a queue waits for the
+    /// frame before's last there. A write on one queue leaves nothing on the other for a barrier
+    /// to wait for, as a semaphore orders what comes before it there and what comes after.
+    hazards: [Hazard; 2],
+    /// Its uses on the two queues, which a use on one waits for on the other by a semaphore.
+    crossing: Crossing,
 }
 
 /// An image made for one of a graph's own.
@@ -153,7 +158,8 @@ impl Transients {
                     self.buffers.push(MadeBuffer {
                         name: decl.name,
                         buffer,
-                        hazard: Hazard::default(),
+                        hazards: [Hazard::default(); 2],
+                        crossing: Crossing::default(),
                     });
                     self.buffers.len() - 1
                 }
@@ -302,16 +308,39 @@ impl Transients {
         &self.buffers[self.buffer_of[buffer.0 as usize]].buffer
     }
 
-    /// The barrier that lets `access`, a use of the graph's `buffer`, follow what the uses so far
-    /// of the buffer left, if it needs one, which the use then leaves for its next. A write to a
-    /// buffer nothing has used needs none.
-    pub(crate) fn follow_buffer(&mut self, buffer: BufferId, access: Access) -> Option<Barrier> {
+    /// The barrier on `queue` that lets `access`, a use there of the graph's `buffer`, follow what
+    /// the uses so far of the buffer on that queue left, if it needs one, which the use then leaves
+    /// for its next. A write to a buffer nothing has used on the queue since the other queue wrote
+    /// it needs none.
+    pub(crate) fn follow_buffer(
+        &mut self,
+        buffer: BufferId,
+        queue: Queue,
+        access: Access,
+    ) -> Option<Barrier> {
         let made = &mut self.buffers[self.buffer_of[buffer.0 as usize]];
         // Buffers have no layouts, so a use's is undefined, which follows another's without a
         // transition.
         let mut layout = vk::ImageLayout::UNDEFINED;
-        let barrier = made.hazard.follow(&mut layout, access)?;
-        (!barrier.src_stages.is_empty()).then_some(barrier)
+        let barrier = made.hazards[queue.index()].follow(&mut layout, access);
+        if !access.writes.is_empty() {
+            made.hazards[queue.other().index()] = Hazard::default();
+        }
+        barrier.filter(|barrier| !barrier.src_stages.is_empty())
+    }
+
+    /// What the uses of the graph's `buffer` on the two queues left, for a frame's batches to be
+    /// planned by.
+    pub(crate) fn crossing(&self, buffer: BufferId) -> Crossing {
+        self.buffers[self.buffer_of[buffer.0 as usize]].crossing
+    }
+
+    /// Takes what a frame's uses of the graph's buffers leave on the two queues, each buffer's by
+    /// its index, once the frame has begun.
+    pub(crate) fn cross(&mut self, crossings: &[Crossing]) {
+        for (&made, &crossing) in self.buffer_of.iter().zip(crossings) {
+            self.buffers[made].crossing = crossing;
+        }
     }
 
     /// The bytes of the blocks of memory the images are in, and of the buffers.

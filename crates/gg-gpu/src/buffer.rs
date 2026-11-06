@@ -23,7 +23,10 @@ pub(crate) struct Buffer {
 }
 
 impl Buffer {
-    /// A buffer of `size` bytes, with `name` as its debug name.
+    /// A buffer of `size` bytes, with `name` as its debug name, shared by every queue the device
+    /// has, so that one reads what another wrote once it has waited for it, as frames' semaphores
+    /// have it, without handing it over: sharing can cost an image its compression, which buffers
+    /// don't have.
     pub(crate) fn new(
         device: &Arc<Device>,
         size: u64,
@@ -31,10 +34,15 @@ impl Buffer {
         memory: Memory,
         name: &str,
     ) -> Result<Self> {
-        let info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let families = device.families();
+        let info = vk::BufferCreateInfo::default().size(size).usage(usage);
+        // Sharing takes two families or more.
+        let info = if families.len() > 1 {
+            info.sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families)
+        } else {
+            info.sharing_mode(vk::SharingMode::EXCLUSIVE)
+        };
         let (raw, allocation) = device.allocator().create_buffer(&info, memory, name)?;
         let address = if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
             let info = vk::BufferDeviceAddressInfo::default().buffer(raw);

@@ -138,7 +138,8 @@ impl Lighting {
     }
 
     /// Declares in `graph` the clusters' buffer and the pass that copies the lights to its front
-    /// and bins them into it, if a light is binned.
+    /// and bins them into it, if a light is binned: on the compute queue, beside the graphics
+    /// passes declared between it and the first that reads the clusters.
     ///
     /// # Panics
     ///
@@ -153,7 +154,7 @@ impl Lighting {
         let bits = u32::try_from(bits).expect("the lights' copies take fewer than 2^32 words");
         let bytes = (u64::from(bits) + u64::from(CLUSTERS) * (2 + u64::from(words))) * 4;
         let buffer = graph.buffer("light clusters", bytes);
-        let pass = (graph.compute(label!("light clusters")))
+        let pass = (graph.compute(label!("light clusters")).on_compute_queue())
             .write_buffer(buffer)
             .add();
         Some(ClusterPlan {

@@ -1,7 +1,8 @@
 // Writes indirect draws' commands, their instances' colors and two counts in a compute pass, and
 // draws each instance as a triangle over a pixel of its own, so that a test can read back what the
 // GPU makes of the graph's own buffers, indirect draws that start from an instance their commands
-// name, and a buffer read back.
+// name, and a buffer read back; the colors of the instances drawn come from a buffer the frame
+// wrote.
 
 // A `VkDrawIndexedIndirectCommand`.
 struct Command {
@@ -18,6 +19,8 @@ struct Push {
     uint* counts;
     // Each instance's color.
     float4* colors;
+    // Reading alone: the colors of the two instances drawn.
+    float4* source;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -32,8 +35,8 @@ void write_main() {
     // The first is drawn by no command: blue would show only if the draw ignored its first
     // instance.
     push.colors[0] = float4(0.0, 0.0, 1.0, 1.0);
-    push.colors[1] = float4(1.0, 0.0, 0.0, 1.0);
-    push.colors[2] = float4(0.0, 1.0, 0.0, 1.0);
+    push.colors[1] = push.source[0];
+    push.colors[2] = push.source[1];
     push.counts[0] = 2;
     push.counts[1] = 0;
     InterlockedAdd(push.counts[1], 7);

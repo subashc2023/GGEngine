@@ -68,6 +68,7 @@ fn main() -> ExitCode {
         sampled_images_keep_their_layout,
         compute_passes_write_cubes_that_passes_sample,
         compute_passes_write_buffers_that_draws_take_commands_from,
+        compute_queue_passes_run_beside_the_graphics_queues,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
@@ -820,9 +821,17 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         let indices = frame
             .upload(&[0u32, 1, 2].map(u32::to_ne_bytes).concat())
             .expect("indices");
+        // Red, then green, the colors of the instances drawn.
+        let shown = [1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let source = frame
+            .upload(&shown.map(f32::to_ne_bytes).concat())
+            .expect("colors")
+            .address();
         let mut pass = frame.compute(written);
         pass.set_pipeline(&write);
-        let addresses = [commands, counts, colors].map(|buffer| pass.address(buffer));
+        let [to_commands, to_counts, to_colors] =
+            [commands, counts, colors].map(|b| pass.address(b));
+        let addresses = [to_commands, to_counts, to_colors, source];
         pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
         pass.dispatch([1, 1, 1]);
         drop(pass);
@@ -880,6 +889,140 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
     assert!(refused.contains("within its buffer"), "{refused}");
 
     drop((frames, image, write, draw, device, instance));
+    check(&validation);
+}
+
+/// The compute pass of [`compute_passes_write_buffers_that_draws_take_commands_from`] on the compute
+/// queue, which the RTX 4090 and AMD's GPUs have apart from graphics, and which is the graphics
+/// queue on lavapipe: beside a pass on the graphics queue that clears the image, it writes the
+/// commands and the colors, which it reads from a buffer each frame writes before its passes, two
+/// colors that change places from frame to frame; and the reads back and the draws that take what
+/// it wrote wait for it, as the next frame's pass waits for them before it writes over it, as
+/// synchronization validation sees across the queues. Four frames, so that two come after the
+/// first to begin with what another frame left in each of the graph's buffers.
+fn compute_queue_passes_run_beside_the_graphics_queues() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let spirv = spirv(
+        "indirect",
+        &[
+            ("write_main", "compute"),
+            ("vertex_main", "vertex"),
+            ("fragment_main", "fragment"),
+        ],
+    );
+    let write = ComputePipeline::new(&device, "write commands", &spirv, c"write_main").expect("a");
+    let draw = Pipeline::graphics(
+        &device,
+        &GraphicsDesc {
+            name: "draw by commands",
+            spirv: &spirv,
+            vertex: c"vertex_main",
+            fragment: Some(c"fragment_main"),
+            format: ColorImage::FORMAT,
+            blend: Blend::Opaque,
+            depth_write: false,
+            depth_bias: 0.0,
+            depth_clamp: false,
+        },
+    )
+    .expect("a pipeline");
+    let mut source = GpuBuffer::new(&device, 32, "test source").expect("a buffer");
+    let mut image = ColorImage::new(&device, 2, 1, "compute queue draws").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let color = graph.target(0);
+    let (commands, colors, counts) = (
+        graph.buffer("test commands", 40),
+        graph.buffer("test colors", 48),
+        graph.buffer("test counts", 8),
+    );
+    let cleared = graph.render(label!("clear")).clear(color, [0.0; 4]).add();
+    let written = (graph.compute(label!("write")).on_compute_queue())
+        .write_buffer(commands)
+        .write_buffer(counts)
+        .write_buffer(colors)
+        .add();
+    let read = graph.read_back(label!("read counts"), counts);
+    let drawn = (graph.render(label!("draw")).keep(color))
+        .indirect(commands)
+        .read_buffer(colors)
+        .add();
+    let (red, green) = ([1.0f32, 0.0, 0.0, 1.0], [0.0f32, 1.0, 0.0, 1.0]);
+    let mut reads = Vec::new();
+    for number in 0..4 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        reads.push(frame.buffer_read().0);
+        let shown = if number % 2 == 0 {
+            [red, green]
+        } else {
+            [green, red]
+        };
+        let bytes: Vec<u8> = (shown.as_flattened().iter())
+            .flat_map(|channel| channel.to_ne_bytes())
+            .collect();
+        frame
+            .write_buffer(&mut source, 0, &bytes)
+            .expect("a buffer written");
+        let indices = frame
+            .upload(&[0u32, 1, 2].map(u32::to_ne_bytes).concat())
+            .expect("indices");
+        drop(
+            frame
+                .render(cleared)
+                .expect("an offscreen image is always there"),
+        );
+        let mut pass = frame.compute(written);
+        pass.set_pipeline(&write);
+        let [to_commands, to_counts, to_colors] =
+            [commands, counts, colors].map(|b| pass.address(b));
+        let addresses = [to_commands, to_counts, to_colors, source.address()];
+        pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+        pass.dispatch([1, 1, 1]);
+        drop(pass);
+        frame.read_back(read).expect("a read back");
+        let mut pass = frame
+            .render(drawn)
+            .expect("an offscreen image is always there");
+        pass.set_pipeline(&draw);
+        let addresses = [0, 0, pass.address(colors)];
+        pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+        pass.draw_indexed_indirect(indices, commands, 0);
+        pass.draw_indexed_indirect(indices, commands, 20);
+        drop(pass);
+        frame.submit().expect("the frame's submission");
+    }
+    assert_eq!(reads, [0, 0, 1, 2], "the counts of the frame two before");
+    let pixels = image.read_back().expect("the image's pixels");
+    assert_eq!(pixels, [0, 255, 0, 255, 255, 0, 0, 255], "green, then red");
+
+    // A pass on the compute queue uses no images, and what a frame writes comes before its passes.
+    let refused = panics(|| {
+        let mut graph = Graph::default();
+        let target = graph.target(0);
+        let pass = graph.compute(label!("sample")).on_compute_queue();
+        let _ = pass.sample(target).add();
+    });
+    assert!(refused.contains("use buffers alone"), "{refused}");
+    let refused = panics(|| {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        drop(
+            frame
+                .render(cleared)
+                .expect("an offscreen image is always there"),
+        );
+        let _ = frame.write_buffer(&mut source, 0, &[0; 16]);
+    });
+    assert!(refused.contains("before its passes"), "{refused}");
+
+    drop((frames, image, source, write, draw, device, instance));
     check(&validation);
 }
 
