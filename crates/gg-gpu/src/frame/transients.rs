@@ -61,6 +61,9 @@ pub(crate) struct Made {
     pub(crate) view: vk::ImageView,
     /// Its slot in the bindless set, if shaders sample its kind.
     pub(crate) index: Option<u32>,
+    /// Its view as a storage image, a 2D array of its one layer, as shaders declare storage
+    /// images, and that view's storage slot in the bindless set, if compute shaders write its kind.
+    pub(crate) storage: Option<(vk::ImageView, u32)>,
     /// The block it's in, in `Transients::blocks`.
     block: usize,
     /// The layout the frame's commands so far leave it in: undefined as each frame begins.
@@ -223,7 +226,9 @@ impl Transients {
             let image = unsafe {
                 (self.device.allocator()).create_aliasing_image(allocation, &info, name)
             }?;
-            let view = match image_view(&self.device, image, kind.format(), kind.range(), name) {
+            let (format, range) = (kind.format(), kind.range());
+            let flat = vk::ImageViewType::TYPE_2D;
+            let view = match image_view(&self.device, image, flat, format, range, name) {
                 Ok(view) => view,
                 Err(error) => {
                     self.device
@@ -245,6 +250,31 @@ impl Transients {
             } else {
                 None
             };
+            let storage = if kind.storage() {
+                let layers = vk::ImageViewType::TYPE_2D_ARRAY;
+                let made = image_view(&self.device, image, layers, format, range, name).and_then(
+                    |storage| {
+                        // SAFETY: the view is of a live storage image of the device, which shaders
+                        // write only through a pass that writes it, once its barrier has put it in
+                        // the general layout; the slot is free as it's taken.
+                        let slot =
+                            unsafe { self.device.bindless().add_storage(raw, storage, name) };
+                        slot.map(|slot| (storage, slot)).inspect_err(|_| {
+                            // SAFETY: nothing has used the view, which no slot holds.
+                            unsafe { raw.destroy_image_view(storage, None) };
+                        })
+                    },
+                );
+                match made {
+                    Ok(storage) => Some(storage),
+                    Err(error) => {
+                        self.device.retire(Retired::Alias(image, view, index));
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
             self.made.push(Made {
                 name,
                 kind,
@@ -252,6 +282,7 @@ impl Transients {
                 raw: image,
                 view,
                 index,
+                storage,
                 block,
                 layout: vk::ImageLayout::UNDEFINED,
                 hazard: Hazard::default(),
@@ -266,6 +297,10 @@ impl Transients {
     /// Retires every image made, and its block, until the frames that use them have finished.
     fn retire(&mut self) {
         for made in self.made.drain(..) {
+            // Its storage view before the image it's of.
+            if let Some((view, slot)) = made.storage {
+                self.device.retire(Retired::StorageView(view, slot));
+            }
             (self.device).retire(Retired::Alias(made.raw, made.view, made.index));
         }
         for block in self.blocks.drain(..) {

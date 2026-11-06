@@ -12,8 +12,8 @@ use gg_core::Result;
 use gg_core::label;
 use gg_core::math::{Mat3, Mat4, Vec3, Vec4};
 use gg_gpu::{
-    BufferId, Compute, ComputePipeline, Device, Faces, Frame, Graph, ImageId, Pass, PassId,
-    RenderPass,
+    BufferId, Compute, ComputePass, ComputePipeline, Device, Faces, Frame, Graph, ImageId, Pass,
+    PassId, RenderPass,
 };
 
 use super::scene::SceneRun;
@@ -418,6 +418,55 @@ impl CullPlan {
     fn meshlets_at(&self, slot: usize) -> u64 {
         self.bounds.meshlets_at(self.views as u64, slot as u64)
     }
+
+    /// Whether it culls runs drawn by their meshlets, as a visibility buffer draws them.
+    pub(crate) fn by_meshlets(&self) -> bool {
+        self.bounds.meshlet_words > 0
+    }
+
+    /// `pass`, reading what the culling kept of the instances and of their meshlets, for shading
+    /// the game's view from its visibility buffer, as [`MeshPass::shade`] does.
+    pub(crate) fn shaded<'g>(&self, pass: ComputePass<'g>) -> ComputePass<'g> {
+        pass.read_buffer(self.instances).read_buffer(self.commands)
+    }
+}
+
+/// What shading the game's view from its visibility buffer reads of the frame's culling: the
+/// addresses of its runs, of its commands, and of the transforms and the parameters of what its
+/// views kept; how many instances each view keeps room for, and words of their parameters; and,
+/// for each of the view's two passes, its slot among the views and where its meshlets start among
+/// the commands, in words.
+pub(super) struct Kept {
+    pub(super) runs: u64,
+    pub(super) commands: u64,
+    pub(super) transforms: u64,
+    pub(super) params: u64,
+    pub(super) instances: u32,
+    pub(super) params_words: u32,
+    pub(super) slots: [u32; 2],
+    pub(super) meshlets: [u32; 2],
+}
+
+impl MeshPass {
+    /// What `pass`, which [`CullPlan::shaded`] declared, reads of what the culling `plan` declared
+    /// kept, as [`Kept`] says: no runs in a frame whose culling ran none, whose visibility buffer
+    /// holds nothing.
+    pub(super) fn kept(&self, plan: &CullPlan, pass: &Compute<'_, '_>) -> Kept {
+        let culling = &self.culling;
+        let views = plan.views as u64;
+        let [transforms, _, params] = culling.kept(pass.address(plan.instances), views);
+        let slots = [FIRST, plan.second()];
+        Kept {
+            runs: culling.pushed.map_or(0, |push| push.runs),
+            commands: pass.address(plan.commands),
+            transforms,
+            params,
+            instances: culling.instances,
+            params_words: culling.params_words,
+            slots: slots.map(|slot| slot as u32),
+            meshlets: slots.map(|slot| plan.meshlets_at(slot) as u32),
+        }
+    }
 }
 
 /// A view a frame culls for.
@@ -445,7 +494,7 @@ pub(crate) fn counts(read: &[u8]) -> Option<crate::DrawCounts> {
     })
 }
 
-/// A run, as `Run` in `shaders/culling.slang` has it.
+/// A run, as `Run` in `shaders/runs.slang` has it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuRun {
@@ -465,6 +514,8 @@ struct GpuRun {
     meshlet_draw: u32,
     meshlet_room: u32,
     cones: u32,
+    /// Its mesh's buffer's address, its low and high words.
+    vertices: [u32; 2],
 }
 
 /// What the gather copies of a run, as `Copy` in `shaders/gather.slang` has it.
@@ -926,7 +977,7 @@ impl MeshPass {
 
     /// Draws the instances that view `slot` of `plan` kept of the `run`th of the runs it culled,
     /// with `push`'s mesh, a draw for each of its mesh's levels, as the commands written for them
-    /// say.
+    /// say; or its meshlets they kept, into the visibility buffer if `visibility`.
     pub(super) fn draw_culled(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -934,8 +985,10 @@ impl MeshPass {
         push: Push,
         (plan, slot): (&CullPlan, usize),
         run: usize,
+        visibility: bool,
     ) {
         let culling = &self.culling;
+        let index = run as u32;
         let run = &culling.runs[run];
         let [transforms, ids, params] =
             culling.kept(pass.address(plan.instances), plan.views as u64);
@@ -955,8 +1008,15 @@ impl MeshPass {
         if run.meshlets != NO_MESHLETS {
             // Its draw's eight words, then the meshlets it keeps, which the shader reads.
             let draw = (plan.meshlets_at(slot as usize) + u64::from(run.meshlet_draw)) * 4;
+            // Which run and which of the game's view's passes, as `Push::draw` says.
+            let second = slot as usize == plan.second();
             let push = Push {
                 meshlets: pass.address(plan.commands) + draw,
+                draw: if visibility {
+                    1 + 2 * index + u32::from(second)
+                } else {
+                    0
+                },
                 ..push
             };
             pass.push_constants(bytemuck::bytes_of(&push));
@@ -1160,6 +1220,7 @@ impl Culling {
             meshlet_draw: meshlet_words,
             meshlet_room: room,
             cones: u32::from(run.faces() != Faces::Both),
+            vertices: crate::halves(mesh.vertices.address()),
         });
         let drawn = placed.map_or(0, |_| MESHLET_DRAW as u32 + 2 * room);
         *totals = Totals {

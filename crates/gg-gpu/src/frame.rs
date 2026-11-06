@@ -765,11 +765,16 @@ fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
             }),
             Target::Storage(_) => (
                 "a storage image, which passes only write and sample",
-                |use_| matches!(use_, Use::Storage | Use::Sampled | Use::ComputeSampled),
+                |use_| {
+                    matches!(
+                        use_,
+                        Use::Storage { .. } | Use::Sampled | Use::ComputeSampled
+                    )
+                },
             ),
             Target::Image(_) => (
                 "an offscreen image, which no pass writes as storage",
-                |use_| *use_ != Use::Storage,
+                |use_| !matches!(use_, Use::Storage { .. }),
             ),
         };
         let image = ImageId(i as u32);
@@ -998,7 +1003,7 @@ impl<'a> Frame<'a> {
                     .expect("a pass that records has its targets' images");
                 assert!(
                     use_.access().discards
-                        || use_ == Use::Storage
+                        || matches!(use_, Use::Storage { .. })
                         || tracked.layout != vk::ImageLayout::UNDEFINED,
                     "pass {:?} uses target {target} as {use_:?}, but no pass has drawn into it \
                      or written it since it was made, or since its swapchain's image was acquired",

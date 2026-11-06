@@ -11,8 +11,10 @@ use std::ops::Range;
 
 use ash::vk;
 
+use gg_core::Result;
+
 use super::graph::{BufferId, BufferUse, ImageDecl, ImageId, PassId, PassKind, Use};
-use super::{Frame, Target};
+use super::{Frame, Target, Upload};
 use crate::ComputePipeline;
 use crate::bindless::PUSH_CONSTANTS;
 
@@ -41,9 +43,9 @@ impl<'a> Frame<'a> {
 
 /// Dispatching compute shaders in a frame's pass, which ends when it's dropped; a pass forgotten
 /// instead stays open, which the frame's next call catches. Shaders read data through addresses
-/// pushed as push constants, write the storage images the pass writes through their levels' slots,
-/// write the buffers it writes through their addresses, and sample textures from the bindless set,
-/// the images the pass samples among them.
+/// pushed as push constants, of [`Upload`]s or the buffers the pass uses, write the storage images
+/// the pass writes through their levels' slots, write the buffers it writes through their
+/// addresses, and sample textures from the bindless set, the images the pass samples among them.
 pub struct Compute<'p, 'a> {
     frame: &'p mut Frame<'a>,
     /// Its uses, in its graph's.
@@ -56,7 +58,7 @@ pub struct Compute<'p, 'a> {
     pipeline_set: bool,
 }
 
-impl Compute<'_, '_> {
+impl<'a> Compute<'_, 'a> {
     /// The index in the bindless set that shaders sample `image` through, which the pass samples,
     /// as its graph declared, during the pass alone.
     ///
@@ -73,26 +75,40 @@ impl Compute<'_, '_> {
     }
 
     /// The index among the bindless set's storage images that shaders write and read level
-    /// `level` of `image` through, a storage image the pass writes, as its graph declared, during
-    /// the pass alone: a `RWTexture2DArray` of 16-bit floats of its layers, a cube's six faces in
-    /// Vulkan's order, +X, -X, +Y, -Y, +Z, -Z.
+    /// `level` of `image` through, an image the pass writes, as its graph declared, during the
+    /// pass alone: a `RWTexture2DArray` of 16-bit floats of its layers, a cube's six faces in
+    /// Vulkan's order, +X, -X, +Y, -Y, +Z, -Z; an image of the graph's own has one layer and one
+    /// level.
     ///
     /// # Panics
     ///
     /// If the pass doesn't write `image`, or it hasn't that level.
     pub fn storage(&self, image: ImageId, level: u32) -> u32 {
+        let written = [true, false].map(|kept| self.declared(image, Use::Storage { kept }));
         assert!(
-            self.declared(image, Use::Storage),
+            written.contains(&true),
             "a pass writes only the images it was added writing, and not image {}",
             image.0
         );
-        let ImageDecl::Target(target) = self.frame.graph.images[image.0 as usize] else {
-            unreachable!("only targets are written, as the graph checked");
-        };
-        let Target::Storage(storage) = &self.frame.targets[target] else {
-            unreachable!("only storage images are written, as the frame checked");
-        };
-        storage.storage(level)
+        match self.frame.graph.images[image.0 as usize] {
+            ImageDecl::Target(target) => {
+                let Target::Storage(storage) = &self.frame.targets[target] else {
+                    unreachable!("only storage images are written, as the frame checked");
+                };
+                storage.storage(level)
+            }
+            ImageDecl::Transient { name, .. } => {
+                assert_eq!(
+                    level, 0,
+                    "image {name:?} has a level alone, not a level {level}"
+                );
+                let made = self.frame.frames.transients.image(image);
+                let (_, slot) = made
+                    .storage
+                    .expect("only kinds that shaders write are written, as the graph checked");
+                slot
+            }
+        }
     }
 
     fn declared(&self, image: ImageId, use_: Use) -> bool {
@@ -114,6 +130,11 @@ impl Compute<'_, '_> {
             buffer.0
         );
         self.frame.buffer_parts(buffer).0
+    }
+
+    /// As [`Frame::upload`].
+    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload<'a>> {
+        self.frame.upload(bytes)
     }
 
     /// Opens a label inside the pass, named `name`, which captures show the dispatches after it

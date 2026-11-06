@@ -33,10 +33,11 @@ pub const MAX_BUFFER_READ: u64 = 256;
 /// passes again every frame; it keeps its memory, so that a frame that adds no more than the last
 /// allocates nothing.
 ///
-/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`] and [`Graph::depth`], last for
-/// a frame: each is undefined until a pass of the frame writes it, so its first use writes it
-/// whole, and passes whose uses of two of them don't overlap may find them in the same memory. The
-/// frames keep them for the frames after, which add them alike, by their names, kinds and sizes.
+/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::visibility`] and
+/// [`Graph::depth`], last for a frame: each is undefined until a pass of the frame writes it, so its
+/// first use writes it whole, and passes whose uses of two of them don't overlap may find them in
+/// the same memory. The frames keep them for the frames after, which add them alike, by their names,
+/// kinds and sizes.
 /// Its own buffers, [`Graph::buffer`], last from frame to frame: the frames keep each for the
 /// frames after that add one of its name no larger, holding what the last of them left there.
 #[derive(Default)]
@@ -87,6 +88,10 @@ pub(crate) enum Kind {
     /// unsigned integers. Vulkan requires every device to render into the format, copy from it and
     /// sample it.
     Ids,
+    /// A visibility buffer: two 32-bit unsigned integers a pixel, which a pass renders as its
+    /// color target, beside its IDs, telling what it drew there, and later passes sample, as
+    /// unsigned integers. The format is the IDs'.
+    Visibility,
     /// Depth, as 32-bit floats, which draws test and write: from 1 at the near plane to 0 far
     /// away, as the renderer's cameras project it. Later passes sample it: by comparison, through
     /// the bindless set's comparison sampler, as a shadow map's is, or a texel at a time, as the
@@ -100,7 +105,7 @@ impl Kind {
         match self {
             Self::Color => ColorImage::FORMAT.color,
             Self::Hdr => vk::Format::R16G16B16A16_SFLOAT,
-            Self::Ids => vk::Format::R32G32_UINT,
+            Self::Ids | Self::Visibility => vk::Format::R32G32_UINT,
             Self::Depth => vk::Format::D32_SFLOAT,
         }
     }
@@ -113,8 +118,16 @@ impl Kind {
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_SRC
             }
-            // Never read back: what a frame reads back is what it shows.
-            Self::Hdr => vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            // Never read back: what a frame reads back is what it shows. Compute passes write it as
+            // storage, which Vulkan requires every device to support in the format.
+            Self::Hdr => {
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::STORAGE
+            }
+            Self::Visibility => {
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+            }
             Self::Depth => {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
             }
@@ -123,7 +136,7 @@ impl Kind {
 
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
-            Self::Color | Self::Hdr | Self::Ids => COLOR_RANGE,
+            Self::Color | Self::Hdr | Self::Ids | Self::Visibility => COLOR_RANGE,
             Self::Depth => DEPTH_RANGE,
         }
     }
@@ -132,13 +145,18 @@ impl Kind {
     pub(crate) fn sampled(self) -> bool {
         self.usage().contains(vk::ImageUsageFlags::SAMPLED)
     }
+
+    /// Whether compute shaders may write it, through a storage slot in the bindless set.
+    pub(crate) fn storage(self) -> bool {
+        self.usage().contains(vk::ImageUsageFlags::STORAGE)
+    }
 }
 
 /// How a pass uses an image.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Use {
-    /// Its color target, cleared first to this color, in linear RGBA, or with `None` drawn over as
-    /// the image's last use left it.
+    /// Its color target, cleared first to this color, in linear RGBA, or, a visibility buffer, to
+    /// 0, which is all it's cleared to; or with `None` drawn over as the image's last use left it.
     Color(Option<[f32; 4]>),
     /// The IDs beside its color target, cleared first to 0, for none, unless `kept`, as the image's
     /// last use left them.
@@ -151,8 +169,10 @@ pub(crate) enum Use {
     /// Sampled by its compute shaders, through the image's slot in the bindless set.
     ComputeSampled,
     /// Written and read by its compute shaders, a level at a time, through the storage slots of a
-    /// storage image's levels, in the general layout, as its last use left it.
-    Storage,
+    /// storage image's levels, or of an image of colors of high dynamic range of the graph's own,
+    /// in the general layout: as its last use left it, if `kept`, and otherwise discarding that,
+    /// for shaders that write every texel.
+    Storage { kept: bool },
     /// Copied from, as a read back is.
     CopySource,
 }
@@ -194,12 +214,12 @@ impl Use {
                 stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
                 ..Self::Sampled.access()
             },
-            Self::Storage => Access {
+            Self::Storage { kept } => Access {
                 stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
                 reads: vk::AccessFlags2::SHADER_STORAGE_READ,
                 writes: vk::AccessFlags2::SHADER_STORAGE_WRITE,
                 layout: vk::ImageLayout::GENERAL,
-                discards: false,
+                discards: !kept,
             },
             Self::CopySource => Access {
                 stages: vk::PipelineStageFlags2::COPY,
@@ -368,8 +388,8 @@ impl Graph {
 
     /// An image of the graph's own of colors of high dynamic range, `size` pixels, named `name`:
     /// [`Format::HDR`](crate::Format::HDR)'s 16-bit floats, which keep what's brighter than 1 for
-    /// a later pass to sample and map into a target's range, as tonemapping does. Frames don't
-    /// read it back.
+    /// a later pass to sample and map into a target's range, as tonemapping does. Passes draw into
+    /// it, and compute passes write it, as storage. Frames don't read it back.
     ///
     /// # Panics
     ///
@@ -387,6 +407,19 @@ impl Graph {
     /// If a side is 0.
     pub fn ids(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
         self.transient(name, Kind::Ids, size)
+    }
+
+    /// A visibility buffer of the graph's own, `size` pixels, named `name`: two 32-bit unsigned
+    /// integers a pixel, which a pass draws into as its color target
+    /// ([`RenderPass::visibility`]), beside its IDs, telling what it drew there, through pipelines
+    /// made for [`Format::VISIBILITY`](crate::Format::VISIBILITY); and later passes sample, as
+    /// unsigned integers.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn visibility(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Visibility, size)
     }
 
     /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws
@@ -638,18 +671,24 @@ impl RenderPass<'_> {
     }
 
     /// Draws into `image` over what its last use left there, as [`clear`](Self::clear),
-    /// [`ids`](Self::ids) or [`depth`](Self::depth) would draw into it but for the clear: a target
-    /// or a color image of the graph's own, of either range, whose colors its draws blend over, an
-    /// image of IDs, or one of depth, which its draws test against. A target that no pass has drawn
-    /// into since it was made, or since its swapchain's image was acquired, holds nothing to draw
-    /// over.
+    /// [`visibility`](Self::visibility), [`ids`](Self::ids) or [`depth`](Self::depth) would draw
+    /// into it but for the clear: a target or a color image of the graph's own, of either range,
+    /// whose colors its draws blend over, a visibility buffer, an image of IDs, or one of depth,
+    /// which its draws test against. A target that no pass has drawn into since it was made, or
+    /// since its swapchain's image was acquired, holds nothing to draw over.
     pub fn keep(self, image: ImageId) -> Self {
         let use_ = match self.graph.kind(image) {
             Some(Kind::Ids) => Use::Ids { kept: true },
             Some(Kind::Depth) => Use::Depth { kept: true },
-            None | Some(Kind::Color | Kind::Hdr) => Use::Color(None),
+            None | Some(Kind::Color | Kind::Hdr | Kind::Visibility) => Use::Color(None),
         };
         self.with(image, use_)
+    }
+
+    /// Draws into `visibility`, a visibility buffer of the graph's own, as the color target,
+    /// cleared first to 0.
+    pub fn visibility(self, visibility: ImageId) -> Self {
+        self.with(visibility, Use::Color(Some([0.0; 4])))
     }
 
     /// Draws the draws' IDs into `ids`, an image of IDs of the graph's own, cleared first to 0,
@@ -698,9 +737,9 @@ impl RenderPass<'_> {
     ///
     /// If it hasn't one color target, beside at most one image of IDs and one of depth, or one
     /// image of depth alone; if it uses an image twice, as one another kind of image, or as images
-    /// of the graph's own of other sizes; if it samples or draws over one of the graph's own
-    /// images that no earlier pass wrote; or if it uses a buffer twice, or one no earlier pass
-    /// wrote.
+    /// of the graph's own of other sizes; if it clears a visibility buffer to anything but 0; if
+    /// it samples or draws over one of the graph's own images that no earlier pass wrote; or if it
+    /// uses a buffer twice, or one no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -728,11 +767,15 @@ impl RenderPass<'_> {
             );
             let kind = graph.kind(image);
             let fits = match use_ {
+                // A visibility buffer clears to 0 alone, as its integers take no color.
+                Use::Color(clear) if kind == Some(Kind::Visibility) => {
+                    clear.is_none_or(|clear| clear == [0.0; 4])
+                }
                 Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
                 Use::Ids { .. } => kind == Some(Kind::Ids),
                 Use::Depth { .. } => kind == Some(Kind::Depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
-                Use::ComputeSampled | Use::Storage | Use::CopySource => {
+                Use::ComputeSampled | Use::Storage { .. } | Use::CopySource => {
                     unreachable!("a render pass neither computes nor copies")
                 }
             };
@@ -786,16 +829,25 @@ impl ComputePass<'_> {
     }
     /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
     /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
-    /// a storage image, or a color image, an image of IDs or one of depth of the graph's own.
+    /// a storage image, or any image of the graph's own.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::ComputeSampled)
     }
 
-    /// Writes and reads `image`, a storage image among the frame's targets, through its levels'
-    /// storage slots, which [`Compute::storage`](crate::Compute::storage) gives, as its last use
-    /// left it: what no pass has written since it was made is undefined.
+    /// Writes and reads `image` through its levels' storage slots, which
+    /// [`Compute::storage`](crate::Compute::storage) gives, as its last use left it: a storage
+    /// image among the frame's targets, which is undefined until a pass has written it since it
+    /// was made, or an image of colors of high dynamic range of the graph's own, which an earlier
+    /// pass wrote.
     pub fn write(self, image: ImageId) -> Self {
-        self.with(image, Use::Storage)
+        self.with(image, Use::Storage { kept: true })
+    }
+
+    /// Writes `image`, as [`write`](Self::write) does, but discarding what it held, for shaders
+    /// that write each texel of the level they write: which an image of the graph's own takes as
+    /// its first use.
+    pub fn overwrite(self, image: ImageId) -> Self {
+        self.with(image, Use::Storage { kept: false })
     }
 
     /// Reads `buffer` from the compute shaders, as an earlier pass wrote it, through the address
@@ -826,10 +878,10 @@ impl ComputePass<'_> {
     ///
     /// # Panics
     ///
-    /// If it uses an image twice, writes one of the graph's own, which are no storage images,
-    /// samples one of a kind shaders don't sample, or one that no earlier pass wrote, or runs on
-    /// the compute queue and uses any; or if it uses a buffer twice, or reads one no earlier pass
-    /// wrote.
+    /// If it uses an image twice, writes one of the graph's own of a kind shaders don't write,
+    /// samples one of a kind shaders don't sample, keeps one or samples one that no earlier pass
+    /// wrote, or runs on the compute queue and uses any; or if it uses a buffer twice, or reads one
+    /// no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -852,8 +904,8 @@ impl ComputePass<'_> {
             let kind = graph.kind(image);
             let fits = match use_ {
                 Use::ComputeSampled => kind.is_none_or(Kind::sampled),
-                // Only a target can be a storage image, as the frame checks.
-                Use::Storage => kind.is_none(),
+                // A target is written only if it's a storage image, as the frame checks.
+                Use::Storage { .. } => kind.is_none_or(Kind::storage),
                 _ => unreachable!("a compute pass samples and writes alone"),
             };
             assert!(
@@ -1319,6 +1371,89 @@ mod tests {
             .expect("a write after the read");
         let draws = S::DRAW_INDIRECT | S::PRE_RASTERIZATION_SHADERS | S::FRAGMENT_SHADER;
         assert_eq!(again.src_stages, S::COMPUTE_SHADER | draws);
+    }
+
+    /// A visibility buffer is a pass's color target beside its IDs and depth, cleared to 0 alone,
+    /// and is drawn over by a later pass and sampled by a compute pass, which writes colors of high
+    /// dynamic range whole, as their first use, for a later pass to draw over, after the compute
+    /// shader's writes; compute passes keep only what an earlier pass wrote, and write no other
+    /// kind of the graph's own.
+    #[test]
+    fn a_visibility_buffer_is_drawn_then_computed_into_colors() {
+        let mut graph = Graph::default();
+        let size = [4, 4];
+        let (visibility, ids, depth, hdr) = (
+            graph.visibility("visibility", size),
+            graph.ids("ids", size),
+            graph.depth("depth", size),
+            graph.hdr("hdr", size),
+        );
+        let drawn = (graph.render(label()).visibility(visibility))
+            .ids(ids)
+            .depth(depth)
+            .add();
+        let again = (graph.render(label()).keep(visibility))
+            .keep(ids)
+            .keep(depth)
+            .add();
+        let shaded = graph
+            .compute(label())
+            .sample(visibility)
+            .overwrite(hdr)
+            .add();
+        let over = graph.render(label()).keep(hdr).keep(ids).keep(depth).add();
+        assert_eq!(
+            graph.uses(drawn)[0],
+            (visibility, Use::Color(Some([0.0; 4])))
+        );
+        assert_eq!(graph.uses(again)[0], (visibility, Use::Color(None)));
+        assert_eq!(
+            graph.uses(shaded),
+            [
+                (visibility, Use::ComputeSampled),
+                (hdr, Use::Storage { kept: false })
+            ]
+        );
+        assert_eq!(graph.uses(over)[0], (hdr, Use::Color(None)));
+        let found = barriers(
+            Hazard::default(),
+            &[Use::Storage { kept: false }, Use::Color(None)],
+        );
+        let first = found[0].expect("a transition");
+        assert_eq!(
+            (first.old_layout, first.new_layout),
+            (L::UNDEFINED, L::GENERAL)
+        );
+        let drawn_over = found[1].expect("a barrier after the writes");
+        assert_eq!(
+            (drawn_over.src_stages, drawn_over.src_access),
+            (S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE)
+        );
+        assert_eq!(
+            (drawn_over.old_layout, drawn_over.new_layout),
+            (L::GENERAL, L::COLOR_ATTACHMENT_OPTIMAL)
+        );
+        let refused = |build: fn(&mut Graph)| {
+            let mut graph = Graph::default();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut graph))).is_err()
+        };
+        assert!(refused(|graph| {
+            let visibility = graph.visibility("visibility", [4, 4]);
+            graph.render(label()).clear(visibility, [1.0; 4]).add();
+        }));
+        assert!(refused(|graph| {
+            let hdr = graph.hdr("hdr", [4, 4]);
+            graph.compute(label()).write(hdr).add();
+        }));
+        assert!(refused(|graph| {
+            let ids = graph.ids("ids", [4, 4]);
+            graph.compute(label()).overwrite(ids).add();
+        }));
+        assert!(!refused(|graph| {
+            let hdr = graph.hdr("hdr", [4, 4]);
+            graph.compute(label()).overwrite(hdr).add();
+            graph.compute(label()).write(hdr).add();
+        }));
     }
 
     /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,

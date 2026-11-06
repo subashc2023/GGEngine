@@ -314,15 +314,17 @@ impl Device {
         // colors, whose targets blend apart, since integers don't blend; for games' cooked
         // textures, which are compressed as BC7; for compute shaders, which pick their storage
         // images from the bindless set by an index they're pushed; for shadow maps, whose
-        // casters between the light and the near plane cast from it; and for indirect draws whose
-        // instances start where their commands say.
+        // casters between the light and the near plane cast from it; for indirect draws whose
+        // instances start where their commands say; and, with mesh shaders, for the fragment
+        // shaders behind them that read their primitives' IDs.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .independent_blend(true)
             .texture_compression_bc(true)
             .shader_storage_image_array_dynamic_indexing(true)
             .depth_clamp(true)
-            .draw_indirect_first_instance(true);
+            .draw_indirect_first_instance(true)
+            .geometry_shader(mesh_shaders);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -336,11 +338,11 @@ impl Device {
             create_info = create_info.push_next(&mut mesh_shader);
         }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones, BC texture compression, depth clamp, host image copy and
-        // mesh shaders, which `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy,
-        // independent blending, indexing storage images dynamically and indirect draws' first
-        // instance, in vk.xml's feature requirements), and the create info's pointers outlive the
-        // call.
+        // features but the bindless ones, BC texture compression, depth clamp, host image copy, and
+        // mesh shaders and geometry shaders, which `Candidate::new` checked (Vulkan 1.4 requires
+        // sampler anisotropy, independent blending, indexing storage images dynamically and
+        // indirect draws' first instance, in vk.xml's feature requirements), and the create info's
+        // pointers outlive the call.
         let raw =
             unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
                 let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);
@@ -1109,10 +1111,11 @@ impl Drop for Device {
 }
 
 /// The SPIR-V capabilities a shader may declare on the devices the engine makes: those Vulkan 1.4
-/// gives without a feature, and those of the features [`Device::new`] enables, as the Vulkan SDK
-/// 1.4.335's vk.xml lists them under `spirvcapabilities`; they change with those features. A
-/// shader that declares another needs a feature no device has enabled, which validation reports
-/// in debug builds and a driver may crash on in others.
+/// gives without a feature, and those of the features [`Device::new`] enables on every device, as
+/// the Vulkan SDK 1.4.335's vk.xml lists them under `spirvcapabilities`; they change with those
+/// features. A shader that declares another needs a feature some device hasn't enabled, which
+/// validation reports in debug builds and a driver may crash on in others: as the engine's own
+/// mesh shaders, and the fragment shaders behind them, need theirs.
 pub const SHADER_CAPABILITIES: [u32; 17] = [
     0,    // Matrix
     1,    // Shader

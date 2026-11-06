@@ -116,16 +116,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Clustered lighting** (2026-11-05)
 - **Async compute** (2026-11-05)
 - **Meshlets and packed vertices** (2026-11-06)
+- **A visibility buffer** (2026-11-06)
 
 ## Now
 
-**Phase 13, GPU-driven rendering**, as Next has it. Its milestones, in order:
+**Phase 13, GPU-driven rendering**, as Next has it. Its last milestone:
 
-- **A visibility buffer.** Models' opaque and masked materials draw into a visibility buffer, each
-  pixel the instance and triangle it shows, beside the view's depth and IDs; a compute pass then
-  shades each pixel by its material from the table, its texture coordinates' derivatives from its
-  triangle's corners. Games' opaque shaders and what blends draw forward after it, against its depth.
-  References within tolerance of the forward path's.
 - **TAA.** The view drawn jittered by a subpixel offset each frame, each pixel's motion from its
   instance's transform the frame before, and resolved against the frames before, reprojected and
   clamped to its neighborhood, before tonemapping, as an environment's antialiasing says: TAA by
@@ -220,6 +216,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A run's meshlets past 2^22 in a view, which are left out: a draw through a mesh shader takes at most that many workgroups on some devices, so a run's draw holds no more | A game keeps that many of a run's meshlets in view, as thousands of instances of a mesh of thousands of meshlets at their finest |
 | Reusing the room of removed meshes' meshlets in the renderer's table of their bounds, which grows by every mesh with meshlets a run adds | A game streams models in and out as it plays |
 | Room for each view's meshlets sized by what the frames before kept, rather than every instance's of its mesh's largest level: 66 MB of the 197 MB the 16 Bistros' graph takes | The graph's memory is measured to matter, as on a GPU of little memory |
+| Development runs cutting models into meshlets as they read them, as the cooker does, so that their models are shaded from the visibility buffer too, and gg-engine's `frames` test checks that path allocates nothing: a development run's models have no meshlets, and draw as they shade, beside it; a check outside the repository found its frames allocate nothing | A development run's shading is measured to matter, or a change to the visibility buffer's frames could allocate |
+| Games' opaque shaders drawn into the depth pyramid that culls the view's second pass: they draw after the visibility buffer's shading, so what they hide is culled by the models' depth alone, and the rest is drawn | A game's opaque draws of its own shaders hide much of what it draws |
+| Shading the visibility buffer's pixels by material, each material's together, rather than each thread its pixel's, whose textures and branches differ across a workgroup where materials meet | The shading pass is measured to lose its time to that, as with many materials on screen |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |

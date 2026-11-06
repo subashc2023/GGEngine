@@ -12,8 +12,8 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
-    Texture as GpuTexture, TextureFormat,
+    Blend, ComputePipeline, Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass,
+    Pipeline, Texture as GpuTexture, TextureFormat,
 };
 use tracing::warn;
 
@@ -25,6 +25,7 @@ use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
 
 mod cull;
 mod scene;
+mod visibility;
 
 #[cfg(test)]
 pub(crate) use cull::SPIRV as CULL_SPIRV;
@@ -33,6 +34,9 @@ pub(crate) use cull::{CullPlan, CullView, FIRST, counts};
 pub(crate) use cull::{GATHER_SPIRV, PYRAMID_SPIRV};
 pub(crate) use scene::Change as SceneChange;
 pub use scene::Scene;
+#[cfg(test)]
+pub(crate) use visibility::SPIRV as VISIBILITY_SPIRV;
+pub(crate) use visibility::Shaded;
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -666,6 +670,8 @@ pub(crate) struct MeshPass {
     scene: scene::Kept,
     /// What culls the meshlets of the meshes drawn by them.
     meshlet_table: MeshletTable,
+    /// What shades the game's view from its visibility buffer.
+    shading: ComputePipeline,
 }
 
 /// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
@@ -686,6 +692,8 @@ struct GpuShader {
     /// views draw meshes with meshlets by: through mesh shaders where the device has them, and
     /// through vertex shaders elsewhere ([`shader::Added::meshlets`]).
     meshlets: Option<(Pipeline, Option<Pipeline>)>,
+    /// What draws them into the visibility buffer, for such a shader, likewise.
+    visibility: Option<Pipeline>,
     /// Its name, which captures label its runs of draws with.
     label: CString,
     /// The size of the vertices it reads.
@@ -1107,6 +1115,45 @@ impl Geometry<'_> {
     }
 }
 
+/// What draws the meshlets of the model shader `name` into the visibility buffer, from `meshlets`'
+/// modules: through its mesh shader where the device draws through them, and through its vertex
+/// shaders elsewhere.
+fn visibility_pipeline(
+    device: &Arc<Device>,
+    name: &str,
+    meshlets: &shader::Meshlets,
+) -> Result<Pipeline> {
+    let name = format!("{name} visibility");
+    let (spirv, vertex, mesh, fragment) = if device.mesh_shaders() {
+        let mesh = Some(meshlets.visibility_mesh.as_slice());
+        let entries = (c"mesh_visibility_main", c"visibility_primitive_main");
+        (
+            meshlets.visibility_primitive.as_slice(),
+            entries.0,
+            mesh,
+            entries.1,
+        )
+    } else {
+        let entries = (c"meshlet_visibility_main", c"visibility_main");
+        (meshlets.visibility.as_slice(), entries.0, None, entries.1)
+    };
+    Pipeline::graphics(
+        device,
+        &GraphicsDesc {
+            name: &name,
+            spirv,
+            vertex,
+            mesh,
+            fragment: Some(fragment),
+            format: Format::VISIBILITY.with_ids().with_depth(),
+            blend: Blend::Opaque,
+            depth_write: true,
+            depth_bias: 0.0,
+            depth_clamp: false,
+        },
+    )
+}
+
 /// What `made`, the buffers or image of the asset `name`, of `bytes`, gave: `None` if the GPU's
 /// memory had no room, which warns the first time, `warned` keeping it, and leaves the asset to
 /// wait, to be tried again as room comes; any other error as it is.
@@ -1159,6 +1206,12 @@ impl MeshPass {
             },
             budget,
             culling: cull::Culling::new(device)?,
+            shading: ComputePipeline::new(
+                device,
+                "view shading",
+                &shader::non_uniform(visibility::SPIRV),
+                c"shade_main",
+            )?,
             scene: scene::Kept::default(),
             meshlet_table: MeshletTable {
                 table: None,
@@ -1247,11 +1300,16 @@ impl MeshPass {
                 };
                 geometry.pipelines(device, added.blend)
             });
-            let made = made.and_then(|made| Ok((made, meshlets.transpose()?)));
+            // And into the visibility buffer.
+            let visibility = (added.meshlets.as_deref())
+                .map(|meshlets| visibility_pipeline(device, &added.name, meshlets));
+            let made =
+                made.and_then(|made| Ok((made, meshlets.transpose()?, visibility.transpose()?)));
             match self.shaders.get_mut(index) {
                 Some(Some(old)) => match made {
-                    Ok(((pipeline, shadow), meshlets)) => {
-                        (old.pipeline, old.shadow, old.meshlets) = (pipeline, shadow, meshlets);
+                    Ok(((pipeline, shadow), meshlets, visibility)) => {
+                        (old.pipeline, old.shadow) = (pipeline, shadow);
+                        (old.meshlets, old.visibility) = (meshlets, visibility);
                         old.writes_depth = writes_depth;
                     }
                     Err(error) => warn!(
@@ -1262,11 +1320,12 @@ impl MeshPass {
                 },
                 Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
                 None => {
-                    let ((pipeline, shadow), meshlets) = made?;
+                    let ((pipeline, shadow), meshlets, visibility) = made?;
                     self.shaders.push(Some(GpuShader {
                         pipeline,
                         shadow,
                         meshlets,
+                        visibility,
                         // A name with a nul is labeled as far as it goes.
                         label: CString::new(added.name.split('\0').next().unwrap_or_default())
                             .expect("cut at its first nul"),
@@ -1666,17 +1725,16 @@ impl MeshPass {
     /// kept of it, a draw for each of its mesh's levels; any other is one instanced draw, or, of a
     /// mesh with levels of detail, one for each stretch of its instances in a row that draw at one
     /// level, in order. The scene's runs draw only as they're culled. A run of a mesh that isn't
-    /// drawable yet, or was removed, or with a shader that was, draws nothing. With `shadows`, it
-    /// draws their shadows into a shadow map instead, by the shadow pipelines of those whose
-    /// shaders write depth, and nothing of the rest. Returns what it drew of the runs it didn't
-    /// cull, which the culling counts of the rest.
+    /// drawable yet, or was removed, or with a shader that was, draws nothing. Each draws as `way`
+    /// says. Returns what it drew of the runs it didn't cull, which the culling counts of the rest.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one of the pass's `Meshes`, a shader isn't one of its `Shaders`, a
     /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
-    /// instances than Vulkan's 32-bit count, or the pass isn't into an image of [`Format::HDR`]
-    /// with IDs and a depth image, or, with `shadows`, into depth alone.
+    /// instances than Vulkan's 32-bit count, or the pass isn't into what `way` draws into: an
+    /// image of [`Format::HDR`], or a visibility buffer, with IDs and a depth image, or depth
+    /// alone.
     #[expect(
         clippy::too_many_arguments,
         reason = "what a pass draws by, each apart"
@@ -1690,7 +1748,7 @@ impl MeshPass {
         draws: &Draws,
         uploaded: Uploaded,
         runs: Runs<'_>,
-        shadows: bool,
+        way: Way,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
@@ -1753,13 +1811,24 @@ impl MeshPass {
                 Some((geometry, shadow)) if by_meshlets => (geometry, shadow),
                 _ => (&shader.pipeline, &shader.shadow),
             };
-            let pipeline = if shadows {
-                let Some(shadow) = shadow else {
-                    continue;
-                };
-                shadow
-            } else {
-                geometry
+            // Such a run of a model shader's draws into the visibility buffer where the view has
+            // one.
+            let visible = shader.visibility.as_ref().filter(|_| by_meshlets);
+            let pipeline = match (way, visible) {
+                (Way::Shaded { beside_visibility }, visible) => {
+                    if beside_visibility && visible.is_some() {
+                        continue;
+                    }
+                    geometry
+                }
+                (Way::Shadows, _) => {
+                    let Some(shadow) = shadow else {
+                        continue;
+                    };
+                    shadow
+                }
+                (Way::Visibility, Some(visible)) => visible,
+                (Way::Visibility, None) => continue,
             };
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
@@ -1789,13 +1858,16 @@ impl MeshPass {
                 params: 0,
                 view: view.map(|side| side as f32),
                 frame,
-                // A draw of meshlets sets it.
+                // A draw of meshlets sets them.
                 meshlets: 0,
+                draw: 0,
+                unused: 0,
             };
             pass.begin_label(&shader.label);
             match (culled, culled_run, run) {
                 (Some(culled), Some(culled_run), _) => {
-                    self.draw_culled(pass, mesh, push, culled, culled_run);
+                    let visibility = way == Way::Visibility;
+                    self.draw_culled(pass, mesh, push, culled, culled_run, visibility);
                 }
                 (_, _, Some(run)) => {
                     let instances = Instances {
@@ -1811,6 +1883,20 @@ impl MeshPass {
         }
         Ok(drawn)
     }
+}
+
+/// How a pass draws the runs it draws, as [`MeshPass::draw`] draws them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Way {
+    /// Shaded as they draw, by their shaders' pipelines, into colors of high dynamic range: every
+    /// run, or, beside a visibility buffer, all but those drawn into it, which it shades.
+    Shaded { beside_visibility: bool },
+    /// Their shadows, into a shadow map, by the shadow pipelines of those whose shaders write depth,
+    /// and nothing of the rest.
+    Shadows,
+    /// Into a visibility buffer: the culled runs drawn by their meshlets whose shaders have a
+    /// pipeline for it, as the opaque and masked model shaders do, and nothing of the rest.
+    Visibility,
 }
 
 /// Which of a frame's runs a pass draws, as [`MeshPass::draw`] draws them.
@@ -1996,6 +2082,11 @@ pub(crate) struct Push {
     /// geometry, the address of the draw as the culling wrote it, which those it kept follow; 0
     /// for any other draw.
     pub(crate) meshlets: u64,
+    /// For a draw of them into the visibility buffer, which run of the frame's culled runs it is
+    /// and in which of the game's view's passes, 1 past twice the run's index, and that pass's 1
+    /// past it, as the visibility buffer holds it, so that 0 is none: 0 for any other draw.
+    pub(crate) draw: u32,
+    pub(crate) unused: u32,
 }
 
 /// What every draw's shader may read of the frame, through [`Push::frame`]: `Frame` in

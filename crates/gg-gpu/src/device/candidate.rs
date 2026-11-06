@@ -46,7 +46,7 @@ pub(super) struct Candidate {
     pub(super) memory: vk::PhysicalDeviceMemoryProperties,
     /// Whether the driver reports each heap's budget (`VK_EXT_memory_budget`).
     pub(super) memory_budget: bool,
-    /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`).
+    /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`), with `geometryShader`.
     pub(super) mesh_shaders: bool,
     pub(super) problem: Option<String>,
 }
@@ -228,8 +228,11 @@ impl Candidate {
             // The extension requires its `meshShader` feature (vk.xml's `<feature>` among its
             // requirements), so it isn't queried: querying it under the Vulkan SDK 1.4.335's
             // validation layer crashed test runs that open dozens of devices, well after the query.
+            // A fragment shader behind a mesh shader reads the primitive's ID, which a mesh shader
+            // writes for each, through SPIR-V's Geometry capability, which `geometryShader` gives.
             mesh_shaders: properties.api_version >= REQUIRED_VERSION
-                && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME),
+                && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME)
+                && core.geometry_shader == vk::TRUE,
             problem,
         }
     }
@@ -252,7 +255,8 @@ impl Candidate {
         match wanted {
             Some(true) if !self.mesh_shaders => {
                 let message = format!(
-                    "mesh shaders were asked for, but {} has none (VK_EXT_mesh_shader)",
+                    "mesh shaders were asked for, but {} has none (VK_EXT_mesh_shader), or no \
+                     geometryShader, by which their fragments read their primitives' IDs",
                     self.name
                 );
                 Err(Error::new("gpu.no_mesh_shaders", message))

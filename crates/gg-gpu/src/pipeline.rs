@@ -37,6 +37,13 @@ impl Format {
     /// [`Graph::hdr`]: crate::Graph::hdr
     pub const HDR: Self = Self::new(Kind::Hdr.format());
 
+    /// The format of a visibility buffer ([`Graph::visibility`]), two 32-bit unsigned integers a
+    /// pixel, without IDs or depth: a pipeline into one writes them at location 0, and blends as
+    /// [`Blend::Opaque`] alone, as integers don't blend.
+    ///
+    /// [`Graph::visibility`]: crate::Graph::visibility
+    pub const VISIBILITY: Self = Self::new(Kind::Visibility.format());
+
     /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::depth`])
     /// does.
     ///
@@ -209,10 +216,15 @@ impl Pipeline {
     /// # Panics
     ///
     /// If it writes, biases or clamps depth for targets without it, it has no fragment shader but
-    /// its targets have colors, or its geometry is a mesh shader and the device draws through
-    /// none.
+    /// its targets have colors, it blends into a visibility buffer, or its geometry is a mesh
+    /// shader and the device draws through none.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
+        // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062).
+        assert!(
+            desc.blend == Blend::Opaque || desc.format.color != Format::VISIBILITY.color,
+            "a pipeline into a visibility buffer doesn't blend"
+        );
         assert!(
             desc.mesh.is_none() || device.mesh_shaders(),
             "a pipeline of a mesh shader is made only on a device that draws through them"

@@ -25,12 +25,13 @@ const SHADERS: [&str; 13] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 6] = [
+const COMPUTE: [(&str, &[&str]); 7] = [
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
     ("gather", &["gather_main"]),
     ("meshlets", &["meshlets_main"]),
     ("pyramid", &["depth_main", "reduce_main"]),
+    ("visibility", &["shade_main"]),
     (
         "prefilter",
         &[
@@ -74,6 +75,25 @@ fn main() {
         compile(&slangc, &out, name, &format!("{name}_meshlets"), entries);
         let mesh = &[("mesh_main", "mesh")];
         compile(&slangc, &out, name, &format!("{name}_mesh"), mesh);
+        // Their meshlets drawn into the visibility buffer likewise: the mesh shader alone, and the
+        // fragment shader behind it alone too, as it reads its primitive's ID, which takes a
+        // capability only devices that draw through mesh shaders enable.
+        let entries = &[
+            ("meshlet_visibility_main", "vertex"),
+            ("visibility_main", "fragment"),
+        ];
+        compile(&slangc, &out, name, &format!("{name}_visibility"), entries);
+        let mesh = &[("mesh_visibility_main", "mesh")];
+        compile(
+            &slangc,
+            &out,
+            name,
+            &format!("{name}_visibility_mesh"),
+            mesh,
+        );
+        let fragment = &[("visibility_primitive_main", "fragment")];
+        let spirv = format!("{name}_visibility_primitive");
+        compile(&slangc, &out, name, &spirv, fragment);
     }
     let shadow = &[meshlets, ("shadow_main", "fragment")];
     let spirv = "model_masked_meshlets_shadow";

@@ -42,6 +42,43 @@ pub(crate) static OPAQUE_MESH_SPIRV: &[u8] =
 pub(crate) static MASKED_MESH_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh.spv"));
 
+/// What draws the meshlets of the opaque and masked model shaders into the visibility buffer:
+/// through vertex shaders, `meshlet_visibility_main` and `visibility_main`; and through a mesh
+/// shader, `mesh_visibility_main`, alone, and the fragment shader behind it,
+/// `visibility_primitive_main`, alone, as `build.rs` says why.
+pub(crate) static OPAQUE_VISIBILITY_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_visibility.spv"));
+pub(crate) static MASKED_VISIBILITY_SPIRV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_visibility.spv"));
+pub(crate) static OPAQUE_VISIBILITY_MESH_SPIRV: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/model_opaque_visibility_mesh.spv"
+));
+pub(crate) static MASKED_VISIBILITY_MESH_SPIRV: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/model_masked_visibility_mesh.spv"
+));
+pub(crate) static OPAQUE_VISIBILITY_PRIMITIVE_SPIRV: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/model_opaque_visibility_primitive.spv"
+));
+pub(crate) static MASKED_VISIBILITY_PRIMITIVE_SPIRV: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/model_masked_visibility_primitive.spv"
+));
+
+/// The modules that draw a model shader's meshlets, as [`Meshlets`](crate::shader::Meshlets) holds
+/// them: through vertex shaders, its shadows' cut out, if they are, or empty; through a mesh
+/// shader; and into the visibility buffer each way.
+pub(crate) struct MeshletSpirv {
+    pub(crate) vertices: &'static [u8],
+    pub(crate) vertices_shadow: &'static [u8],
+    pub(crate) mesh: &'static [u8],
+    pub(crate) visibility: &'static [u8],
+    pub(crate) visibility_mesh: &'static [u8],
+    pub(crate) visibility_primitive: &'static [u8],
+}
+
 /// A vertex of a model's mesh: where it is in the mesh's space, where it samples its material's
 /// textures, a color the material's is multiplied by, in linear RGBA, the way its surface faces,
 /// a unit vector, and its tangent, the way the textures' X runs along it, a unit vector, with the

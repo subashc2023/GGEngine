@@ -316,16 +316,16 @@ impl Plan {
         [specular, irradiance, table]
     }
 
-    /// The sky's part of the frame's data for a frame that prefilters the sky as this plans, from
-    /// `pass`, the view's, which samples its light, of `sky`.
-    pub(crate) fn data(&self, pass: &Pass<'_, '_>, sky: Sky) -> SkyData {
+    /// The sky's part of the frame's data for a frame that prefilters the sky as this plans, of
+    /// `sky`, its light sampled through the indices `sampled` gives, a pass's that samples it.
+    pub(crate) fn data(&self, sampled: impl Fn(ImageId) -> u32, sky: Sky) -> SkyData {
         let [specular, irradiance, table] = self.sampled();
         SkyData {
             sky: sky.texture.index,
-            irradiance: pass.sampled(irradiance),
-            specular: pass.sampled(specular),
+            irradiance: sampled(irradiance),
+            specular: sampled(specular),
             specular_levels: self.specular_levels,
-            brdf: pass.sampled(table),
+            brdf: sampled(table),
             luminance: sky.luminance,
         }
     }

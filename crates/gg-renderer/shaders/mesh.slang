@@ -1,4 +1,4 @@
-// What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, model.slang
+// What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, shading.slang
 // and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
 // its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades
 // and the clusters its lights are binned into, and the push constants, for a shader's types of
@@ -181,6 +181,9 @@ struct Push<V, P> {
     // For a draw of the meshlets a view kept of a mesh: the draw as the culling wrote it, in its
     // first four, then each meshlet kept, its instance and its index among the mesh's.
     uint2* meshlets;
+    // For a draw of them into the visibility buffer: which run of the culling's and which of the
+    // game's view's passes it is, as `Push::draw` in src/mesh.rs says; 0 for any other draw.
+    uint draw;
 };
 
 // The color, and the instance's ID, which picks read back where it shows.

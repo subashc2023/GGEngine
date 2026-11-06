@@ -1,7 +1,9 @@
 // What cull.slang and meshlets.slang share: the runs, levels and views a frame culls for, as
-// `GpuRun`, `GpuLevel` and `GpuView` in src/mesh/cull.rs have them field for field, and the tests a
-// sphere is culled by. Each module that includes it declares its own push constants, `push`, with
-// the fields these read: `instances`, `block_count`, `counts` and `pyramid`.
+// runs.slang, and `GpuLevel` and `GpuView` in src/mesh/cull.rs, have them field for field, and the
+// tests a sphere is culled by. Each module that includes it declares its own push constants,
+// `push`, with the fields these read: `instances`, `block_count`, `counts` and `pyramid`.
+
+#include "runs.slang"
 
 // How many of a run's instances a workgroup takes: `BLOCK` in src/mesh/cull.rs.
 static const uint BLOCK = 64;
@@ -24,39 +26,6 @@ static const uint FIRST = 0;
 static const uint KEEP_ALL = 0;
 static const uint KEEP_SHOWN = 1;
 static const uint KEEP_UNHIDDEN = 2;
-
-// A run of a mesh's instances, drawn with one shader.
-struct Run {
-    // Its first instance among the frame's, and how many it has.
-    uint first;
-    uint count;
-    // The first word of its instances' parameters among the frame's, and how many each takes.
-    uint params;
-    uint params_words;
-    // The sphere round its mesh's vertices, in the mesh's own space: its center and radius, which
-    // is infinite for a mesh whose vertices the renderer can't read, which is never culled.
-    float4 sphere;
-    // Its mesh's levels' first in the frame's table, and how many there are.
-    uint levels;
-    uint level_count;
-    // Its first instance in each view's arrays, which hold room for all of its instances, and the
-    // first word of its parameters there.
-    uint output;
-    uint params_output;
-    // Its first command in each view's, one for each level.
-    uint commands;
-    // Its first block among the frame's, and how many it has.
-    uint blocks;
-    uint block_count;
-    // For a run drawn by its mesh's meshlets: its mesh's first in the table of meshlets' bounds,
-    // or `NO_MESHLETS` for a run drawn by its levels' indices; where its draw is in each view's
-    // meshlets, in words, and how many meshlets its draw has room for; and whether a meshlet's
-    // cone may cull it, as it does where the run draws its triangles' fronts alone.
-    uint meshlets;
-    uint meshlet_draw;
-    uint meshlet_room;
-    uint cones;
-};
 
 // A level of detail: its indices, how far its surface strays from the mesh's own, and its
 // meshlets among its mesh's, the first and how many, for a run drawn by them.

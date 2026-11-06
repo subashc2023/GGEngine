@@ -1275,7 +1275,7 @@ one, as the extension recommends; and spot, a point light within a cone round it
 its inner angle and fading to nothing at its outer. Each frame hands the renderer every light, from
 where its entity draws and facing as it does, ancestors carrying it, as a camera sees from where its
 entity draws, found again only as a light, its transform, its parent or its table changes, what
-carries it moves, or it draws on its way between ticks. Each lit fragment shades forward, with the
+carries it moves, or it draws on its way between ticks. Each lit point shades with the
 lights that light everywhere, directional lights and those without a range, which shaders read
 first, then with those whose reach meets its cluster of the game's view, in the frame's order, so
 that what it adds up is what every light would add. A compute pass bins them each frame, before the
@@ -1396,14 +1396,18 @@ first waits for if it wrote a buffer; the graphics queue's last batch waits for 
 queue ran, and the frame's timeline is signaled after it. A
 pass that computes dispatches compute shaders, which write storage images, 16-bit floats in linear
 RGBA, of a 2D image's one layer or a cube's six faces, a mip level at a time through slots of the
-bindless set's own for storage images, in the general layout, as their last use left them. A
-storage image is among a frame's targets, as an offscreen image is, and keeps the layout its last
-frame left it in, so that once a frame whose last use of it sampled it is submitted, frames after
-sample it through its texture slot without declaring it. A pass may draw depth alone, as a shadow
-map's does, and may draw over the colors, IDs and depth an earlier pass left, as the view's second
-pass does; later passes sample depth by comparison, as shadow maps, or a texel at a time, as the
-view's depth pyramid reads the view's. The view's images, its colors of high dynamic range, IDs,
-depth and tonemapped colors, and the shadows' maps, are the graph's own: each lasts for a frame,
+bindless set's own for storage images, in the general layout, as their last use left them, or
+discarding it, for a pass that writes every texel. A storage image is among a frame's targets, as
+an offscreen image is, and keeps the layout its last frame left it in, so that once a frame whose
+last use of it sampled it is submitted, frames after sample it through its texture slot without
+declaring it; the graph's own colors of high dynamic range are written so too, through a slot of
+their own, as the view's shading writes the view's. A pass may draw depth alone, as a shadow map's
+does, and may draw over the colors, IDs and depth an earlier pass left, as the view's second pass
+does; its color target may be a visibility buffer of the graph's own, two 32-bit integers a pixel,
+cleared to 0, beside its IDs and depth, which later passes sample as integers. Later passes sample
+depth by comparison, as shadow maps, or a texel at a time, as the view's depth pyramid reads the
+view's. The view's images, its colors of high dynamic range, IDs, visibility buffer, depth and
+tonemapped colors, and the shadows' maps, are the graph's own: each lasts for a frame,
 undefined until a pass there writes it, and is made from what the passes say of it, in a block of
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
 after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
@@ -1788,6 +1792,26 @@ first vertex, which draw nothing; their fragments shade alike. A run whose meshl
 planned no room for, as of a mesh that came to be drawable after its graph was planned, is drawn by
 its levels' indices for that frame; so is what blends, which keeps its triangles' order, and a model
 read as a development run reads it, which has no meshlets.
+
+The culled runs drawn by their meshlets with the opaque and masked model shaders draw into a
+visibility buffer rather than shading as they draw, in both of the view's passes: at each pixel, the
+run and the pass whose draw drew it, and the meshlet among those that draw kept and its triangle,
+with the instance's ID and depth beside it, a masked material cut out as it would be. Through a mesh
+shader, which writes each triangle as its primitive's ID, read behind it through SPIR-V's Geometry
+capability, so that a device draws through mesh shaders only with `geometryShader` too, which the
+engine enables with them; through vertex shaders, whose triangles' corners are each their own, the
+corners carry it. A compute pass then shades every pixel of the view's colors, a pixel a thread,
+the clear color where nothing drew: it finds the triangle again through the culling's commands and
+its run, unpacks and places its corners as the draw did, weighs them at the pixel's center, and a
+pixel across and down, by the edge functions of the corners in clip space, homogeneous in X, Y and
+W, which divide by no W, so that a corner behind the camera, which the draw clipped, weighs right
+too; and so interpolates what the draw's fragments took, picking the textures' levels by the change
+of their coordinates, and shades as they would, by the code both share. The view's pass after it
+draws the sky behind everything, then the culled runs drawn otherwise, as games' opaque shaders and
+models without meshlets, or whose frame planned no room for them, as their shaders shade them, then
+what blends and the canvas, against the buffer's depth. The depth pyramid is the first pass's depth,
+of the buffer's draws alone. `Settings::visibility_buffer` off has them shade as they draw instead,
+for tests and measurements of each way.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

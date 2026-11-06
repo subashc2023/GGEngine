@@ -53,7 +53,8 @@ impl ColorImage {
             | vk::ImageUsageFlags::TRANSFER_SRC;
         let info = image_info([width, height], format, usage);
         let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu, name)?;
-        let view = match image_view(device, raw, format, COLOR_RANGE, name) {
+        let shape = vk::ImageViewType::TYPE_2D;
+        let view = match image_view(device, raw, shape, format, COLOR_RANGE, name) {
             Ok(view) => view,
             Err(error) => {
                 device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
@@ -209,17 +210,19 @@ pub(crate) fn image_info(
         .usage(usage)
 }
 
-/// A view of `range` of `image`, of `format`, which it names `name`, as it names the image.
+/// A view of `range` of `image`, shaped as `shape`, of `format`, which it names `name`, as it names
+/// the image.
 pub(crate) fn image_view(
     device: &Device,
     image: vk::Image,
+    shape: vk::ImageViewType,
     format: vk::Format,
     range: vk::ImageSubresourceRange,
     name: &str,
 ) -> Result<vk::ImageView> {
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
+        .view_type(shape)
         .format(format)
         .subresource_range(range);
     // SAFETY: the image is live and bound to memory.

@@ -91,8 +91,9 @@ const DRAW_INDEX: u32 = 4426;
 const DIM_2D: u32 = 1;
 const DIM_CUBE: u32 = 3;
 
-/// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
-const PUSHED: [(u32, &str, Pushed); 8] = [
+/// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order, but
+/// for the word of padding that ends it.
+const PUSHED: [(u32, &str, Pushed); 9] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -133,7 +134,15 @@ const PUSHED: [(u32, &str, Pushed); 8] = [
         "the address of a draw of meshlets",
         Pushed::Meshlets,
     ),
+    (
+        offset_of!(Push, draw) as u32,
+        "which of the culled runs a draw into the visibility buffer is",
+        Pushed::Draw,
+    ),
 ];
+
+/// The bytes the engine pushes that its members take: up to the word of padding that ends it.
+const PUSHED_BYTES: usize = offset_of!(Push, unused);
 
 /// What a member of a [`Push`] is.
 #[derive(Clone, Copy)]
@@ -155,6 +164,9 @@ enum Pushed {
     /// The address of a draw of meshlets, uint2s, which the model shaders' meshlet geometry reads:
     /// 0 for any other draw.
     Meshlets,
+    /// A uint, which the model shaders' meshlets write into the visibility buffer: 0 for any other
+    /// draw.
+    Draw,
 }
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
@@ -621,9 +633,8 @@ impl Module {
             let offset = self.member_decoration(block, member, OFFSET);
             let Some(&(pushed_at, pushed, kind)) = PUSHED.get(member as usize) else {
                 breaches.push(format!(
-                    "it reads {name} from its push constants, past the {} bytes the engine \
-                     pushes",
-                    size_of::<Push>()
+                    "it reads {name} from its push constants, past the {PUSHED_BYTES} bytes the \
+                     engine pushes"
                 ));
                 continue;
             };
@@ -693,6 +704,21 @@ impl Module {
                     }
                 }
                 Pushed::Frame => self.check_frame(ty, breaches),
+                Pushed::Draw => {
+                    let uint = matches!(
+                        self.types.get(&ty),
+                        Some(Type::Int {
+                            width: 32,
+                            signed: false
+                        })
+                    );
+                    if !uint {
+                        breaches.push(format!(
+                            "its push constants' {name} isn't a uint, where the engine pushes \
+                             {pushed}"
+                        ));
+                    }
+                }
             }
         }
     }

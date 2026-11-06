@@ -1,31 +1,5 @@
-// Models' meshes, shaded as glTF's metallic-roughness materials are, by the frame's lights and its
-// sky; or, in a frame without either and for a material that's unlit, drawn unlit, as
-// KHR_materials_unlit defines it: each fragment its material's base color times its texture's,
-// sampled at the vertices' texture coordinates, times the vertices' color. Each instance is a mesh
-// with its own transform, ID and material, writing its ID where it shows. Its mesh's vertices are
-// packed, as src/packed.rs packs them, behind a header that says how they unpack; `Params` matches
-// `Params` in src/model.rs byte for byte; the material itself is in the table the frame's data
-// points at.
-//
-// Shading follows glTF 2.0's Appendix B, as Khronos's sample viewer implements it: a Lambertian
-// diffuse lobe and a GGX specular lobe, with Smith's height-correlated visibility, Schlick's
-// Fresnel, and 0.04 reflected head-on by every dielectric. A material of
-// KHR_materials_pbrSpecularGlossiness's is shaded by the same lobes, as the extension's reference
-// has it: it reflects its specular color head-on, diffuses its diffuse color less that color's
-// strongest channel, and is as rough as 1 less its glossiness. Lights fall off as
-// KHR_lights_punctual's reference does. The sky lights it from all around by its prefiltered
-// light, through the split sum, with Fdez-Agüera's roughness-dependent Fresnel and his scattering
-// many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
-// 2019), as the sample viewer's ibl.glsl and pbr.frag have it (glTF-Sample-Renderer at df3e51cb),
-// which the occlusion map darkens, as it darkens nothing else. The light that casts the frame's
-// shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
-// then the material's emission, as the view shows it, make the color.
-//
-// Each fragment shades by the lights that light everywhere, then by those binned into its cluster
-// of the game's view, as clusters.slang bins them, each in the frame's order: those a cluster
-// leaves out reach none of it, so they'd add nothing. Where it's in no cluster, as what the canvas
-// draws under its own projection may be, or the frame has none, it shades by every light, in the
-// same order.
+// Models' meshes, shaded as shading.slang says: each instance a mesh with its own transform, ID and
+// material, writing its ID where it shows. `Params` matches `Params` in src/model.rs byte for byte.
 //
 // As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
 // which blending would leave as it was, so that a pick there finds what's behind it; it writes no
@@ -35,46 +9,13 @@
 // Of those, only the masked one discards, since a shader that can discard while it writes depth
 // loses early depth testing on some GPUs; its shadows are cut out as it is, by `shadow_main`,
 // where those of an opaque material, drawn without a fragment shader, are whole.
+//
+// The meshlets a view keeps of their meshes draw into the visibility buffer too, which the view's
+// shading then shades a pixel at a time (visibility.slang): each fragment the draw and the meshlet
+// and triangle it shows, for the shading to find again, and its instance's ID, cut out as
+// `fragment_main` cuts it out.
 
-#include "mesh.slang"
-
-// A vertex as a model's mesh holds it, `PackedVertex` in src/packed.rs, read as words: its X and Y;
-// its Z and its bitangent's sign; its normal; its tangent; its texture coordinates; and its color.
-struct PackedVertex {
-    uint position_xy;
-    uint position_z_sign;
-    uint normal;
-    uint tangent;
-    uint uv;
-    uint color;
-};
-
-// What a mesh's buffer starts with, in `HEADER` vertices' room, `Header` in src/packed.rs: how its
-// vertices unpack, and where its meshlets' parts start, in words from the buffer's start.
-struct Header {
-    float3 offset;
-    float step;
-    float2 uv_offset;
-    float2 uv_scale;
-    uint meshlets;
-    uint meshlet_vertices;
-    uint triangles;
-    uint unused;
-};
-
-// `HEADER_VERTICES` in src/packed.rs.
-static const uint HEADER = 2;
-
-// A vertex unpacked.
-struct Vertex {
-    float3 position;
-    float2 uv;
-    // Linear RGBA.
-    float4 color;
-    float3 normal;
-    // Its W the sign of the bitangent, cross(normal, tangent) * W.
-    float4 tangent;
-};
+#include "shading.slang"
 
 struct Params {
     // The material's index in the frame's table.
@@ -83,74 +24,11 @@ struct Params {
 
 [[vk::push_constant]] ConstantBuffer<Push<PackedVertex, Params>> push;
 
-// The low and the high halves of `word`, each a signed 16-bit fraction of 1.
-float2 snorm_halves(uint word) {
-    int2 halves = int2(int(word << 16) >> 16, int(word) >> 16);
-    return max(float2(halves) / 32767.0, -1.0);
-}
-
-// The unit vector `word` holds folded onto an octahedron, as `octahedral` in src/packed.rs folds
-// it, unfolded.
-float3 unfolded(uint word) {
-    float2 e = snorm_halves(word);
-    float3 v = float3(e, 1.0 - abs(e.x) - abs(e.y));
-    float t = max(-v.z, 0.0);
-    v.x += v.x >= 0.0 ? -t : t;
-    v.y += v.y >= 0.0 ? -t : t;
-    return normalize(v);
-}
-
-// sRGB-encoded `c`, decoded.
-float linear(float c) {
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-
 // The mesh's vertex `index`, unpacked as its header says.
 Vertex unpacked(uint index) {
     Header header = *(Header*)push.vertices;
-    PackedVertex packed = push.vertices[HEADER + index];
-    float3 steps = float3(packed.position_xy & 0xFFFF, packed.position_xy >> 16,
-                          packed.position_z_sign & 0xFFFF);
-    float2 uv = float2(packed.uv & 0xFFFF, packed.uv >> 16);
-    float4 color = float4(packed.color & 0xFF, (packed.color >> 8) & 0xFF,
-                          (packed.color >> 16) & 0xFF, packed.color >> 24) / 255.0;
-    Vertex vertex;
-    vertex.position = header.offset + steps * header.step;
-    vertex.uv = header.uv_offset + uv * header.uv_scale;
-    vertex.color = float4(linear(color.r), linear(color.g), linear(color.b), color.a);
-    vertex.normal = unfolded(packed.normal);
-    float sign = int(packed.position_z_sign) < 0 ? -1.0 : 1.0;
-    vertex.tangent = float4(unfolded(packed.tangent), sign);
-    return vertex;
+    return unpack(header, push.vertices[HEADER + index]);
 }
-
-static const float PI = 3.14159265358979;
-// The least roughness shading takes, as Filament's: below it the specular lobe is too narrow to
-// filter, and at 0 its peak divides by 0.
-static const float LEAST_ROUGHNESS = 0.045;
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
-static const uint UNLIT = 1;
-static const uint NORMAL_MAPPED = 2;
-static const uint SPECULAR_GLOSSINESS = 4;
-// `Sampler::LinearClamp`'s index in the bindless set.
-static const uint LINEAR_CLAMP = 0;
-// The texels inside its map's edges that each cascade keeps the points it shadows to, as `MARGIN`
-// in src/shadow.rs says.
-static const float MARGIN = 8.0;
-// How far a point moves along its surface's normal, in texels of its cascade, times the sine of
-// the light's angle to the normal, before its shadow map is sampled, so that a surface doesn't
-// shadow itself: the filter's reach. Where a plane slopes from the light at an angle, its depth
-// changes by the angle's tangent a texel, so the texels the filter reads, up to 3 away, are as
-// much as 3 tangents of a texel nearer the light than the point; moved off it by `d`, the point
-// is `d` over the cosine nearer, which is enough where `d` is 3 sines of a texel (Holbert's normal
-// offset, "Saying Goodbye to Shadow Acne", GDC 2011).
-static const float NORMAL_OFFSET = 3.0;
-// How far a point moves toward the light, in texels of its cascade, before its shadow map is
-// sampled, besides: where a surface faces the light, the normal offset is 0, and its depths and
-// the point's, found by the rasterizer and the shader, are the same but for their rounding, which
-// would leave some of it in its own shadow.
-static const float LIGHT_OFFSET = 1.0;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -185,11 +63,10 @@ uint triangle_byte(Header header, uint byte) {
     return (word >> ((byte & 3) * 8)) & 0xFF;
 }
 
-// A corner of a meshlet a view kept, drawn through vertex shaders: each meshlet kept an instance of
-// the draw, of `MAX_TRIANGLES` triangles, whose `corner`th this is. The corners of a triangle past
-// the meshlet's own are all its first vertex, which draws nothing.
-[shader("vertex")]
-Varyings meshlet_vertex_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
+// The vertex at corner `corner` of the meshlet a view kept that the draw's `kept`th entry holds,
+// drawn through vertex shaders, as `meshlet_vertex_main` draws it, by its index in the mesh; and
+// its instance's place among the draw's instances.
+uint2 meshlet_corner(uint corner, uint kept) {
     uint2 entry = push.meshlets[KEPT + kept];
     Header header = *(Header*)push.vertices;
     // What draws the meshlet: `GpuMeshlet` in src/packed.rs.
@@ -202,7 +79,16 @@ Varyings meshlet_vertex_main(uint corner: SV_VulkanVertexID, uint kept: SV_Vulka
         local = triangle_byte(header, first_triangle + corner);
     }
     uint index = ((uint*)push.vertices)[header.meshlet_vertices + first_vertex + local];
-    return placed(unpacked(index), entry.x);
+    return uint2(index, entry.x);
+}
+
+// A corner of a meshlet a view kept, drawn through vertex shaders: each meshlet kept an instance of
+// the draw, of `MAX_TRIANGLES` triangles, whose `corner`th this is. The corners of a triangle past
+// the meshlet's own are all its first vertex, which draws nothing.
+[shader("vertex")]
+Varyings meshlet_vertex_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
+    uint2 vertex = meshlet_corner(corner, kept);
+    return placed(unpacked(vertex.x), vertex.y);
 }
 
 // A meshlet a view kept, drawn through a mesh shader: a workgroup each, `ACROSS` across, as many
@@ -243,221 +129,17 @@ void mesh_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex,
 Varyings placed(Vertex vertex, uint instance) {
     float4x4 transform = push.transforms[instance];
     float4 world = mul(transform, float4(vertex.position, 1.0));
-    float3x3 linear = (float3x3)transform;
-    // Normals go by the inverse of the transform, transposed, which the cofactors' matrix is up
-    // to the determinant: its columns are the cross products of the transform's columns. Scaled
-    // by the determinant's sign, so that a mirrored mesh's normals still face out; its tangents'
-    // W flips with it, as the bitangent mirrors too.
-    float3x3 columns = transpose(linear);
-    float3 a = columns[0];
-    float3 b = columns[1];
-    float3 c = columns[2];
-    float side = dot(a, cross(b, c)) < 0.0 ? -1.0 : 1.0;
-    float3 normal = vertex.normal.x * cross(b, c) + vertex.normal.y * cross(c, a)
-        + vertex.normal.z * cross(a, b);
+    Turned turned = turned(vertex, transform);
     Varyings out;
     out.position = mul(push.clip_from_world, world);
     out.world = world.xyz;
     out.uv = vertex.uv;
     out.color = vertex.color;
-    out.normal = normal * side;
-    out.tangent = float4(mul(linear, vertex.tangent.xyz), vertex.tangent.w * side);
+    out.normal = turned.normal;
+    out.tangent = turned.tangent;
     out.instance = instance;
     out.id = push.ids[instance];
     return out;
-}
-
-// What `material`'s texture `which` holds at `uv`, by its sampler: the instances of one draw can
-// carry different materials.
-float4 sampled(Material material, uint which, float2 uv) {
-    uint2 at = material.textures[which];
-    Texture2D texture = textures[NonUniformResourceIndex(at.x)];
-    return texture.Sample(samplers[NonUniformResourceIndex(at.y)], uv);
-}
-
-// `x` to the fifth power.
-float pow5(float x) {
-    float x2 = x * x;
-    return x2 * x2 * x;
-}
-
-// How much of the sky's light GGX reflects, of a material of `f0` and `roughness` seen at a cosine
-// of `n_dot_v`, by the split sum's `table`, there: once, with Fresnel's dependence on roughness,
-// and many times over.
-float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) {
-    float3 rough = max(float3(1.0 - roughness), f0) - f0;
-    float3 once = (f0 + rough * pow5(1.0 - n_dot_v)) * table.x + table.y;
-    float missed = 1.0 - (table.x + table.y);
-    float3 average = f0 + (1.0 - f0) / 21.0;
-    return once + missed * once * average / (1.0 - average * missed);
-}
-
-// The sky's light from all around reflected by a surface of `roughness`, facing `normal` and seen
-// along `view` at a cosine of `n_dot_v`, as luminance before the exposure: a surface that diffuses
-// `diffuse_color` and reflects `f0` head-on, mixed by `metallic` with a metal of `metal` color.
-float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
-                 float roughness, float3 normal, float3 view, float n_dot_v) {
-    SamplerState clamp_ = samplers[LINEAR_CLAMP];
-    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * diffuse_color;
-    float level = roughness * float(frame.specular_levels - 1);
-    float3 reflected = reflect(-view, normal);
-    float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb;
-    float2 table = textures[frame.brdf].SampleLevel(clamp_, float2(n_dot_v, roughness), 0.0).rg;
-    float3 dielectric = lerp(diffuse, specular, sky_reflectance(f0, roughness, n_dot_v, table));
-    float3 metal_light = sky_reflectance(metal, roughness, n_dot_v, table) * specular;
-    return lerp(dielectric, metal_light, metallic) * frame.sky_luminance;
-}
-
-// What the shadow map `map`, `size` texels across, holds of light at `uv`, compared with `depth`:
-// each texel near it 1 where `depth` is as near the light as the texel's or nearer, and 0 where
-// it's farther, weighted by a kernel that falls from 4 at the point to 0 three texels away, in
-// three straight pieces, read in nine samples of four texels each, which the comparison sampler
-// filters, at points the point's place in its texel picks so that their weights add up to the
-// kernel's. The kernel is Castaño's of 5 ("Shadow Mapping Summary", 2013, as The Witness filters
-// its shadows), which is continuous, so that the shadow's edge moves smoothly with the point.
-float filtered(uint map, float2 uv, float depth, float size) {
-    Texture2D texture = textures[NonUniformResourceIndex(map)];
-    SamplerComparisonState compare = comparisons[COMPARISON_SAMPLER];
-    float2 texels = uv * size;
-    // The corner between texels nearest the point, and how far the point is past the texel center
-    // before it, from 0 to 1.
-    float2 corner = floor(texels + 0.5);
-    float2 s = texels + 0.5 - corner;
-    float2 base = corner - 0.5;
-    // Each sample's weight and its place, from the texel center before the corner, across then
-    // down.
-    float3 wu = float3(4.0 - 3.0 * s.x, 7.0, 1.0 + 3.0 * s.x);
-    float3 u = float3((3.0 - 2.0 * s.x) / wu.x - 2.0, (3.0 + s.x) / 7.0, s.x / wu.z + 2.0);
-    float3 wv = float3(4.0 - 3.0 * s.y, 7.0, 1.0 + 3.0 * s.y);
-    float3 v = float3((3.0 - 2.0 * s.y) / wv.x - 2.0, (3.0 + s.y) / 7.0, s.y / wv.z + 2.0);
-    float sum = 0.0;
-    for (uint j = 0; j < 3; j++) {
-        for (uint i = 0; i < 3; i++) {
-            float2 at = (base + float2(u[i], v[j])) / size;
-            sum += wu[i] * wv[j] * texture.SampleCmpLevelZero(compare, at, depth);
-        }
-    }
-    return sum / 144.0;
-}
-
-// How much of the light that casts `shadows` reaches `world`, on a surface whose normal before its
-// normal map is `normal`, the light coming from `to_light`: from 0 in its shadow to 1 out of it.
-// The nearest cascade whose map holds the point, and the texels the filter reads round it, shadows
-// it, from the point moved off its surface by the normal offset and toward the light; past them
-// all, or past the shadows' reach, it's lit, and toward their reach, more and more so.
-float shadowed(Shadows shadows, float3 world, float3 normal, float3 to_light) {
-    float depth = dot(shadows.view_depth.xyz, world) + shadows.view_depth.w;
-    if (depth >= shadows.reach) {
-        return 1.0;
-    }
-    float3 light = mul(shadows.light_from_world, float4(world, 1.0)).xyz;
-    float3 off = mul((float3x3)shadows.light_from_world, normal);
-    float n_dot_l = dot(normal, to_light);
-    float sine = sqrt(saturate(1.0 - n_dot_l * n_dot_l));
-    float inside = 1.0 - 2.0 * MARGIN / shadows.map_size;
-    for (uint i = 0; i < CASCADES; i++) {
-        float4 cascade = shadows.cascades[i];
-        float3 n = (light - cascade.xyz) * cascade.w;
-        if (max(max(abs(n.x), abs(n.y)), abs(n.z)) >= inside) {
-            continue;
-        }
-        float texel = 2.0 / (cascade.w * shadows.map_size);
-        // The light's space's +Z is toward the light.
-        float3 moved = off * (NORMAL_OFFSET * sine) + float3(0.0, 0.0, LIGHT_OFFSET);
-        n = (light + moved * texel - cascade.xyz) * cascade.w;
-        float lit = filtered(shadows.maps[i], n.xy * float2(0.5, -0.5) + 0.5, n.z * 0.5 + 0.5,
-                             shadows.map_size);
-        float fade = saturate((depth - shadows.fade_from) / (shadows.reach - shadows.fade_from));
-        return lerp(lit, 1.0, fade);
-    }
-    return 1.0;
-}
-
-// What a fragment's lights shade: where it is, which way it faces, as its normal map has it and
-// before, where it's seen from, and its material's terms.
-struct Surface {
-    float3 world;
-    float3 normal;
-    // Before its normal map, where its shadows are sampled: the map's bumps cast none.
-    float3 surface_normal;
-    float3 view;
-    float n_dot_v;
-    // What it diffuses and reflects head-on, and its roughness squared, squared.
-    float3 diffuse_color;
-    float3 f0;
-    float alpha2;
-};
-
-// The light that the frame's `i`th light reflects toward the view from `surface`, before the
-// exposure.
-float3 reflected(Frame frame, Surface surface, uint i) {
-    Light light = frame.lights[i];
-    float3 radiance = light.color;
-    float3 to_light;
-    if (light.kind == 0) {
-        to_light = -light.direction;
-    } else {
-        float3 between = light.position - surface.world;
-        // Kept off 0 at the light itself.
-        float distance2 = max(dot(between, between), 1e-4);
-        to_light = between * rsqrt(distance2);
-        float reach = sqrt(distance2) * light.inverse_range;
-        float reach2 = reach * reach;
-        float window = saturate(1.0 - reach2 * reach2);
-        radiance *= window * window / distance2;
-        float cone = saturate(dot(light.direction, -to_light) * light.angle_scale
-            + light.angle_offset);
-        radiance *= cone * cone;
-    }
-    float3 normal = surface.normal;
-    float n_dot_l = dot(normal, to_light);
-    if (n_dot_l <= 0.0) {
-        return float3(0.0);
-    }
-    if (i == frame.shadows.light) {
-        radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
-    }
-    float3 view = surface.view;
-    float n_dot_v = surface.n_dot_v;
-    float alpha2 = surface.alpha2;
-    float3 f0 = surface.f0;
-    float3 halfway = normalize(to_light + view);
-    float n_dot_h = saturate(dot(normal, halfway));
-    float v_dot_h = saturate(dot(view, halfway));
-    float3 fresnel = f0 + (1.0 - f0) * pow5(1.0 - v_dot_h);
-    float spread = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
-    float distribution = alpha2 / (PI * spread * spread);
-    float visibility = 0.5
-        / (n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2)
-            + n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2));
-    float3 specular = fresnel * distribution * visibility;
-    float3 diffuse = (1.0 - fresnel) * surface.diffuse_color / PI;
-    return (diffuse + specular) * radiance * n_dot_l;
-}
-
-// Where a point is in no cluster.
-static const uint NO_CLUSTER = 0xFFFFFFFF;
-
-// The index of the cluster of the game's view that `world` is in, as `Clusters` has them; or
-// `NO_CLUSTER` in a frame without clusters, or for a point the view doesn't see.
-uint cluster(Clusters clusters, float3 world) {
-    if (clusters.words == 0) {
-        return NO_CLUSTER;
-    }
-    float4 p = float4(world, 1.0);
-    float w = dot(clusters.w, p);
-    float2 tile = float2(dot(clusters.x, p), dot(clusters.y, p)) / w;
-    float depth = dot(clusters.depth, p);
-    float slice = (clusters.perspective != 0 ? log2(depth) : depth) * clusters.slice_scale
-        + clusters.slice_bias;
-    // Written so that NaN, as a point behind a perspective's eye gives, is outside too.
-    bool inside = w > 0.0 && tile.x >= 0.0 && tile.y >= 0.0 && tile.x < float(clusters.across)
-        && tile.y < float(clusters.down) && slice >= 0.0;
-    if (!inside) {
-        return NO_CLUSTER;
-    }
-    uint3 at = uint3(uint2(tile), min(uint(slice), clusters.slices - 1));
-    return (at.z * clusters.down + at.y) * clusters.across + at.x;
 }
 
 [shader("fragment")]
@@ -487,95 +169,8 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
 #endif
     Targets out;
     out.id = input.id;
-    if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
-        out.color = color;
-        return out;
-    }
-    // A back face seen of a double-sided material faces the other way, its tangent space too.
-    float facing = front ? 1.0 : -1.0;
-    float3 normal = normalize(input.normal) * facing;
-    // Which way the surface faces where its shadows are sampled: the normal map's bumps cast none.
-    float3 surface_normal = normal;
-    if ((material.flags & NORMAL_MAPPED) != 0) {
-        // Kept square to the normal, which interpolation doesn't keep them.
-        float3 tangent = input.tangent.xyz * facing;
-        tangent = normalize(tangent - normal * dot(normal, tangent));
-        float3 bitangent = cross(normal, tangent) * input.tangent.w;
-        // Z from X and Y as the map holds them, which a BC5 map holds alone; then scaled, as
-        // glTF scales a normal map's X and Y.
-        float z = sqrt(saturate(1.0 - dot(mapped, mapped)));
-        float3 local = float3(mapped * material.normal_scale, z);
-        normal = normalize(tangent * local.x + bitangent * local.y + normal * local.z);
-    }
-    // What it diffuses and reflects head-on, which the frame's lights shade; and for the sky's
-    // light, a dielectric's, which it mixes with a metal's by how metallic it is.
-    float metallic = 0.0;
-    float roughness;
-    float3 diffuse_color;
-    float3 f0;
-    float3 sky_diffuse;
-    float3 sky_f0;
-    if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
-        f0 = material.specular * surface.rgb;
-        roughness = clamp(1.0 - material.glossiness * surface.a, LEAST_ROUGHNESS, 1.0);
-        diffuse_color = color.rgb * (1.0 - max(max(f0.r, f0.g), f0.b));
-        sky_diffuse = diffuse_color;
-        sky_f0 = f0;
-    } else {
-        metallic = saturate(material.metallic * surface.b);
-        roughness = clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
-        diffuse_color = color.rgb * (1.0 - metallic);
-        f0 = lerp(float3(0.04), color.rgb, metallic);
-        sky_diffuse = color.rgb;
-        sky_f0 = float3(0.04);
-    }
-    float alpha = roughness * roughness;
-    float3 view = normalize(frame.eye.xyz - input.world * frame.eye.w);
-    Surface lit;
-    lit.world = input.world;
-    lit.normal = normal;
-    lit.surface_normal = surface_normal;
-    lit.view = view;
-    lit.n_dot_v = max(dot(normal, view), 1e-4);
-    lit.diffuse_color = diffuse_color;
-    lit.f0 = f0;
-    lit.alpha2 = alpha * alpha;
-    float3 light_sum = float3(0.0);
-    Clusters clusters = frame.clusters;
-    for (uint i = 0; i < clusters.everywhere; i++) {
-        light_sum += reflected(frame, lit, i);
-    }
-    uint found = cluster(clusters, input.world);
-    if (found == NO_CLUSTER) {
-        for (uint i = clusters.everywhere; i < frame.light_count; i++) {
-            light_sum += reflected(frame, lit, i);
-        }
-    } else {
-        // Read through the lights' address, which they follow, as `Clusters` says why; past them
-        // by a pointer made once, as AMD's driver drops the address of an index past them made in
-        // the loop. A change here needs AMD's ISA of it checked again, under both slangc releases
-        // the build may use.
-        uint* at = (uint*)frame.lights + clusters.bits;
-        uint first = at[2 * found];
-        uint end = at[2 * found + 1];
-        uint words = 2 * clusters.across * clusters.down * clusters.slices + found * clusters.words;
-        for (uint word = first; word < end; word++) {
-            uint bits = at[words + word];
-            while (bits != 0) {
-                uint bit = firstbitlow(bits);
-                bits &= bits - 1;
-                light_sum += reflected(frame, lit, clusters.everywhere + word * 32 + bit);
-            }
-        }
-    }
-    float n_dot_v = lit.n_dot_v;
-    if (frame.specular_levels > 0) {
-        light_sum += sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
-                               view, n_dot_v)
-            * occlusion;
-    }
-    float3 shaded = light_sum * frame.exposure + emission;
-    out.color = float4(min(shaded, BRIGHTEST), color.a);
+    out.color = lit(frame, material, input.world, input.normal, input.tangent, front, color,
+                    surface, mapped, occlusion, emission);
     return out;
 }
 
@@ -596,3 +191,126 @@ void shadow_main(Varyings input) {
     }
 }
 #endif
+
+// What a fragment drawn into the visibility buffer takes: where its triangle shows, and for a
+// masked material, what cuts it out; its instance's ID; and, drawn through vertex shaders, the
+// meshlet and triangle it shows, as the visibility buffer holds them.
+struct Visible {
+    float4 position : SV_Position;
+#if defined(MASKED)
+    float2 uv;
+    float alpha;
+    nointerpolation uint instance;
+#endif
+    nointerpolation uint2 id;
+    nointerpolation uint triangle;
+};
+
+// `vertex` as instance `instance` places it in the view, as `placed` does, of the meshlet and
+// triangle `triangle` says.
+Visible visible(Vertex vertex, uint instance, uint triangle) {
+    float4x4 transform = push.transforms[instance];
+    float4 world = mul(transform, float4(vertex.position, 1.0));
+    Visible out;
+    out.position = mul(push.clip_from_world, world);
+#if defined(MASKED)
+    out.uv = vertex.uv;
+    out.alpha = vertex.color.a;
+    out.instance = instance;
+#endif
+    out.id = push.ids[instance];
+    out.triangle = triangle;
+    return out;
+}
+
+// A corner of a meshlet a view kept, drawn into the visibility buffer through vertex shaders, as
+// `meshlet_vertex_main` draws it, with its meshlet's place among those the draw kept, and its
+// triangle's among the meshlet's: each triangle's corners are its own, so they all carry it.
+[shader("vertex")]
+Visible meshlet_visibility_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
+    uint2 vertex = meshlet_corner(corner, kept);
+    return visible(unpacked(vertex.x), vertex.y, kept << 7 | corner / 3);
+}
+
+// What a mesh shader writes of each triangle into the visibility buffer: its meshlet's place
+// among those the draw kept, and its own among the meshlet's, as its primitive's ID, which the
+// fragments behind it read.
+struct Primitive {
+    uint triangle : SV_PrimitiveID;
+};
+
+// A meshlet a view kept, drawn into the visibility buffer through a mesh shader, as `mesh_main`
+// draws it.
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(MAX_VERTICES, 1, 1)]
+void mesh_visibility_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex,
+                          OutputVertices<Visible, MAX_VERTICES> vertices,
+                          OutputIndices<uint3, MAX_TRIANGLES> triangles,
+                          OutputPrimitives<Primitive, MAX_TRIANGLES> primitives) {
+    uint kept = group.y * ACROSS + group.x;
+    if (kept >= push.meshlets[0].y) {
+        SetMeshOutputCounts(0, 0);
+        return;
+    }
+    uint2 entry = push.meshlets[KEPT + kept];
+    Header header = *(Header*)push.vertices;
+    uint at = header.meshlets + entry.y * 4;
+    uint first_vertex = ((uint*)push.vertices)[at];
+    uint vertex_count = ((uint*)push.vertices)[at + 1];
+    uint first_triangle = ((uint*)push.vertices)[at + 2];
+    uint triangle_count = ((uint*)push.vertices)[at + 3];
+    SetMeshOutputCounts(vertex_count, triangle_count);
+    if (thread < vertex_count) {
+        uint index = ((uint*)push.vertices)[header.meshlet_vertices + first_vertex + thread];
+        vertices[thread] = visible(unpacked(index), entry.x, 0);
+    }
+    for (uint t = thread; t < triangle_count; t += MAX_VERTICES) {
+        uint byte = first_triangle + 3 * t;
+        triangles[t] = uint3(triangle_byte(header, byte), triangle_byte(header, byte + 1),
+                             triangle_byte(header, byte + 2));
+        Primitive primitive;
+        primitive.triangle = kept << 7 | t;
+        primitives[t] = primitive;
+    }
+}
+
+// What a fragment writes into the visibility buffer, and its instance's ID.
+struct Seen {
+    // Which draw drew it, `push.draw`, and the meshlet and triangle it shows.
+    uint2 visible : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
+// What a fragment of the triangle `triangle` says writes into the visibility buffer: none for a
+// masked material where it's less opaque than its cutoff, as `fragment_main` draws none.
+Seen seen(Visible input, uint triangle) {
+#if defined(MASKED)
+    // Loaded whole, as `shadow_main` says why.
+    Frame frame = loadAligned<8>(push.frame);
+    Material material = frame.materials[push.params[input.instance].material];
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.alpha;
+    if (alpha < material.cutoff) {
+        discard;
+    }
+#endif
+    Seen out;
+    out.visible = uint2(push.draw, triangle);
+    out.id = input.id;
+    return out;
+}
+
+// A fragment drawn into the visibility buffer through vertex shaders, whose corners carry their
+// triangle.
+[shader("fragment")]
+Seen visibility_main(Visible input) {
+    return seen(input, input.triangle);
+}
+
+// A fragment drawn into the visibility buffer behind a mesh shader, which writes its triangle as
+// its primitive's ID. A module of its own, as reading that takes the Geometry capability, which
+// only devices that draw through mesh shaders enable.
+[shader("fragment")]
+Seen visibility_primitive_main(Visible input, uint triangle: SV_PrimitiveID) {
+    return seen(input, triangle);
+}

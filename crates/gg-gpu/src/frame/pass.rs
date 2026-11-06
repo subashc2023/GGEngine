@@ -16,7 +16,7 @@ use std::ops::Range;
 use ash::vk;
 use gg_core::Result;
 
-use super::graph::{BufferId, BufferUse, ImageDecl, ImageId, PassId, PassKind, Use};
+use super::graph::{BufferId, BufferUse, ImageDecl, ImageId, Kind, PassId, PassKind, Use};
 use super::{Frame, Target, Upload};
 use crate::bindless::PUSH_CONSTANTS;
 use crate::{ColorImage, Device, Faces, Format, GpuBuffer, Pipeline};
@@ -98,16 +98,21 @@ impl<'a> Frame<'a> {
             };
             match use_ {
                 Use::Color(clear) => {
+                    // A visibility buffer's integers clear to 0, as the graph checked it does.
+                    let integers = graph.kind(image) == Some(Kind::Visibility);
+                    let color = if integers {
+                        vk::ClearColorValue { uint32: [0; 4] }
+                    } else {
+                        vk::ClearColorValue {
+                            float32: clear.unwrap_or_default(),
+                        }
+                    };
                     attachments[0] =
                         attachment
                             .load_op(clear.map_or(vk::AttachmentLoadOp::LOAD, |_| {
                                 vk::AttachmentLoadOp::CLEAR
                             }))
-                            .clear_value(vk::ClearValue {
-                                color: vk::ClearColorValue {
-                                    float32: clear.unwrap_or_default(),
-                                },
-                            });
+                            .clear_value(vk::ClearValue { color });
                 }
                 Use::Ids { kept } => {
                     format = format.with_ids();
@@ -125,7 +130,7 @@ impl<'a> Frame<'a> {
                             },
                         }));
                 }
-                Use::Sampled | Use::ComputeSampled | Use::Storage | Use::CopySource => {}
+                Use::Sampled | Use::ComputeSampled | Use::Storage { .. } | Use::CopySource => {}
             }
         }
         let colors =

@@ -2,9 +2,10 @@
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
 //! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
-//! lights, a directional light's shadows, in
-//! cascades fitted to the view, and its sky, which shows behind them, prefiltered on the GPU, a
-//! game's UI over them in the view's own space, and the UI over the view; the view drawn in colors
+//! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
+//! behind them, prefiltered on the GPU, opaque and masked ones drawn by their meshlets shaded from
+//! a visibility buffer, a game's UI over them in the view's own space, and the UI over the view;
+//! the view drawn in colors
 //! of high dynamic range, which a tonemapper maps into the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
@@ -42,8 +43,8 @@ use std::time::Duration;
 use gg_core::math::{Mat4, Vec4};
 use gg_core::{Error, Result, label};
 use gg_gpu::{
-    ColorImage, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId, RenderPass,
-    Surface, Swapchain, Target, Texture as GpuTexture, TextureFormat,
+    ColorImage, ComputePass, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId,
+    RenderPass, Surface, Swapchain, Target, Texture as GpuTexture, TextureFormat,
 };
 use tracing::info;
 
@@ -78,7 +79,7 @@ pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
 use cluster::{ClusterData, ClusterPlan, Lighting};
-use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs};
+use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use sky::{SkyData, SkyLight, SkyPass};
@@ -313,6 +314,10 @@ pub struct Settings<'a> {
     /// through vertex shaders, as `shaders/model.slang` says. Mesh shaders asked for that the GPU
     /// lacks keep the renderer from starting (`gpu.no_mesh_shaders`).
     pub mesh_shaders: Option<bool>,
+    /// Shade models' opaque and masked materials, where the view draws them by their meshlets,
+    /// from a visibility buffer, as `shaders/visibility.slang` says, or, for tests and
+    /// measurements of each way, as they draw, as everything else draws.
+    pub visibility_buffer: bool,
     /// The most bytes a frame copies to the GPU of the meshes and textures being streamed:
     /// [`DEFAULT_UPLOAD_BUDGET`], 16 MiB, unless a test or a measurement wants another. A frame
     /// copies parts of what's queued, in the order it was added, while its bytes are under the
@@ -367,6 +372,8 @@ pub struct Renderer {
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
+    /// As [`Settings::visibility_buffer`] says.
+    visibility_buffer: bool,
     /// The frame to capture, as [`Settings::capture`] says.
     capture: Option<NonZeroU64>,
     /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
@@ -402,10 +409,14 @@ struct ViewPasses {
     /// What it shows, tonemapped.
     color: ImageId,
     ids: ImageId,
-    /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing.
+    /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing;
+    /// into its visibility buffer, if it has one.
     first: PassId,
-    /// What draws the rest over that, if it culls.
+    /// What draws the rest over that, if it culls; into its visibility buffer, if it has one.
     second: Option<PassId>,
+    /// What shades the view from its visibility buffer, and draws the rest over that, if it has
+    /// one.
+    shaded: Option<ShadedPasses>,
     /// What tonemaps it.
     tonemap: PassId,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
@@ -414,6 +425,17 @@ struct ViewPasses {
     outline: Option<(PassId, Outline)>,
     /// What reads the view back, if the frame does.
     read_view: Option<PassId>,
+}
+
+/// The game's view's visibility buffer, in a frame's graph, which the runs its culling draws by
+/// their meshlets with the opaque and masked model shaders draw into, in the view's two passes;
+/// the compute pass that then shades the view from it; and the pass after, which draws everything
+/// else: the sky, the culled runs drawn otherwise, as their shaders shade them, what blends and the
+/// canvas.
+struct ShadedPasses {
+    visibility: ImageId,
+    shade: PassId,
+    rest: PassId,
 }
 
 /// The shadows' cascades, fitted to the view, and their shadow maps and the passes that draw them,
@@ -553,6 +575,7 @@ impl Renderer {
             instance: instance.clone(),
             device: device.clone(),
             vsync: settings.vsync,
+            visibility_buffer: settings.visibility_buffer,
             capture: settings.capture,
             failed: false,
             waited: Duration::ZERO,
@@ -791,6 +814,7 @@ impl Renderer {
         };
         let meshes = &self.meshes;
         let lighting = &self.lighting;
+        let visibility_buffer = self.visibility_buffer;
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
             // before the view samples it, and before them, the culling of the view's opaque runs
@@ -834,22 +858,58 @@ impl Renderer {
                 let maps = shadows.iter().flat_map(|shadows| shadows.maps);
                 plan.iter().flat_map(sky::Plan::sampled).chain(maps)
             };
-            let first = culled(cull.as_ref(), graph.render(label!("view")));
-            let first = binned(clusters.as_ref(), sampling(lit(), first))
-                .clear(hdr, data.clear_color)
-                .ids(ids)
-                .depth(depth)
-                .add();
+            // Where the view culls runs drawn by their meshlets, those of the opaque and masked
+            // model shaders draw into a visibility buffer alone, in both of its passes, and a
+            // compute pass then shades the view from it, before a pass that draws the rest.
+            let visibility = (cull.as_ref())
+                .filter(|cull| visibility_buffer && cull.by_meshlets())
+                .map(|_| graph.visibility("view visibility", size));
+            let first = match visibility {
+                Some(visibility) => {
+                    let first = culled(cull.as_ref(), graph.render(label!("view visibility")));
+                    first.visibility(visibility)
+                }
+                None => {
+                    let first = culled(cull.as_ref(), graph.render(label!("view")));
+                    binned(clusters.as_ref(), sampling(lit(), first)).clear(hdr, data.clear_color)
+                }
+            };
+            let first = first.ids(ids).depth(depth).add();
             // Where the view culls, its second pass, over its first: once the depth pyramid is
             // built from the first's depth, and the culling's second pass has culled against it,
-            // what that kept, and the runs it doesn't cull.
+            // what that kept, and, without a visibility buffer, the runs it doesn't cull.
             let second = cull.as_mut().map(|cull| {
                 cull.second_pass(graph, depth, size);
-                let second = cull.drawn(graph.render(label!("view second")));
-                (binned(clusters.as_ref(), sampling(lit(), second)).keep(hdr))
+                let second = match visibility {
+                    Some(visibility) => {
+                        let second = graph.render(label!("view visibility second"));
+                        cull.drawn(second).keep(visibility)
+                    }
+                    None => {
+                        let second = cull.drawn(graph.render(label!("view second")));
+                        binned(clusters.as_ref(), sampling(lit(), second)).keep(hdr)
+                    }
+                };
+                second.keep(ids).keep(depth).add()
+            });
+            let shaded = visibility.zip(cull.as_ref()).map(|(visibility, cull)| {
+                let shade = graph.compute(label!("view shading")).sample(visibility);
+                let shade = lit().fold(shade, ComputePass::sample);
+                let shade = match &clusters {
+                    Some(clusters) => shade.read_buffer(clusters.buffer),
+                    None => shade,
+                };
+                let shade = cull.shaded(shade).overwrite(hdr).add();
+                let rest = cull.drawn(graph.render(label!("view rest")));
+                let rest = (binned(clusters.as_ref(), sampling(lit(), rest)).keep(hdr))
                     .keep(ids)
                     .keep(depth)
-                    .add()
+                    .add();
+                ShadedPasses {
+                    visibility,
+                    shade,
+                    rest,
+                }
             });
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
@@ -878,6 +938,7 @@ impl Renderer {
                 ids,
                 first,
                 second,
+                shaded,
                 tonemap,
                 read_ids,
                 outline,
@@ -987,10 +1048,11 @@ impl Renderer {
                     shadows: ShadowData::default(),
                     clusters: ClusterData::default(),
                 };
-                // The casters, each cascade's from the light, which read the frame's data but for
-                // what the view alone samples.
+                // What the casters and what's drawn into the visibility buffer read of the frame's
+                // data, all but what the view alone samples.
+                let partial = frame.upload(bytemuck::bytes_of(&shared))?.address();
+                // The casters, each cascade's from the light.
                 if let Some(shadows) = &view.shadows {
-                    let address = frame.upload(bytemuck::bytes_of(&shared))?.address();
                     for (i, &cascade) in shadows.passes.iter().enumerate() {
                         let mut pass = (frame.render(cascade))
                             .expect("the graph's own images are always there");
@@ -999,33 +1061,92 @@ impl Renderer {
                         let draws = data.draws;
                         // Each cascade's slot is 1 past its index.
                         let cascade = runs(1 + i);
-                        (self.meshes).draw(
-                            &mut pass, clip, address, map, draws, uploaded, cascade, true,
-                        )?;
+                        let way = Way::Shadows;
+                        (self.meshes)
+                            .draw(&mut pass, clip, partial, map, draws, uploaded, cascade, way)?;
                     }
                 }
                 let aspect = data.viewport.aspect();
                 let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
                 let (view_lights, clusters) =
                     (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
-                let mut pass =
-                    (frame.render(view.first)).expect("the graph's own images are always there");
-                let lit = match (&plan, sky) {
-                    (Some(plan), Some((sky, ..))) => Some(plan.data(&pass, sky)),
-                    _ => held,
+                // The view's data, as the pass that shades it samples the sky's light and the
+                // shadows' maps through the indices `sampled` gives.
+                let view_data = |sampled: &dyn Fn(ImageId) -> u32| {
+                    let lit = match (&plan, sky) {
+                        (Some(plan), Some((sky, ..))) => Some(plan.data(sampled, sky)),
+                        _ => held,
+                    };
+                    let shadows = (view.shadows.as_ref())
+                        .map(|shadows| shadows.cascades.data(shadows.maps.map(sampled)));
+                    let shared = FrameData {
+                        lights: view_lights,
+                        sky: lit.unwrap_or_default(),
+                        shadows: shadows.unwrap_or_default(),
+                        clusters,
+                        ..shared
+                    };
+                    (shared, lit)
                 };
-                let shadows = (view.shadows.as_ref()).map(|shadows| {
-                    let maps = shadows.maps.map(|map| pass.sampled(map));
-                    shadows.cascades.data(maps)
-                });
-                let shared = FrameData {
-                    lights: view_lights,
-                    sky: lit.unwrap_or_default(),
-                    shadows: shadows.unwrap_or_default(),
-                    clusters,
-                    ..shared
+                let shades = view.shaded.as_ref().zip(view.cull.as_ref());
+                // Beside a visibility buffer, what's drawn into it, in the view's two passes, and
+                // its shading, which the view's data is uploaded in, then the pass the rest draws
+                // in; or else the view's first pass, which takes the culled runs it kept.
+                let (mut pass, shared, lit) = if let Some((shaded, plan)) = shades {
+                    let mut pass = (frame.render(view.first))
+                        .expect("the graph's own images are always there");
+                    let (drawn, visible) = (data.draws, Way::Visibility);
+                    let first = Runs::Culled(plan, FIRST);
+                    (self.meshes).draw(
+                        &mut pass,
+                        view_projection,
+                        partial,
+                        size,
+                        drawn,
+                        uploaded,
+                        first,
+                        visible,
+                    )?;
+                    drop(pass);
+                    self.meshes.cull_second(&mut frame, plan)?;
+                    let second = view.second.expect("a view that culls has a second pass");
+                    let mut pass =
+                        (frame.render(second)).expect("the graph's own images are always there");
+                    let second = Runs::Culled(plan, plan.second());
+                    (self.meshes).draw(
+                        &mut pass,
+                        view_projection,
+                        partial,
+                        size,
+                        drawn,
+                        uploaded,
+                        second,
+                        visible,
+                    )?;
+                    drop(pass);
+                    let mut shade = frame.compute(shaded.shade);
+                    let (shared, lit) = view_data(&|image| shade.sampled(image));
+                    let shared = shade.upload(bytemuck::bytes_of(&shared))?.address();
+                    let seen = Shaded {
+                        clip_from_world: view_projection,
+                        clear: data.clear_color,
+                        size,
+                        visibility: shaded.visibility,
+                        colors: view.hdr,
+                        frame: shared,
+                    };
+                    self.meshes.shade(&mut shade, plan, &seen)?;
+                    drop(shade);
+                    let pass = (frame.render(shaded.rest))
+                        .expect("the graph's own images are always there");
+                    (pass, shared, lit)
+                } else {
+                    let mut pass = (frame.render(view.first))
+                        .expect("the graph's own images are always there");
+                    let (shared, lit) = view_data(&|image| pass.sampled(image));
+                    let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
+                    (pass, shared, lit)
                 };
-                let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
                 // Behind everything, in place of the clear color.
                 if let Some(SkyData { sky, luminance, .. }) = lit {
                     let drawn = self.sky.as_ref().expect("made for a sky to show");
@@ -1033,6 +1154,9 @@ impl Renderer {
                     let scale = luminance * data.exposure;
                     drawn.draw(&mut pass, &data.viewpoint, aspect, sky, scale);
                 }
+                let way = Way::Shaded {
+                    beside_visibility: shades.is_some(),
+                };
                 let mut counts = (self.meshes).draw(
                     &mut pass,
                     view_projection,
@@ -1041,14 +1165,18 @@ impl Renderer {
                     data.draws,
                     uploaded,
                     runs(FIRST),
-                    false,
+                    way,
                 )?;
                 // What the first pass didn't draw, over it: after the depth pyramid, from the
-                // first's depth, and the culling's second pass, against it.
+                // first's depth, and the culling's second pass, against it, in a pass of its own;
+                // or, beside a visibility buffer, in the same pass, as its culling has run.
                 if let (Some(plan), Some(second)) = (&view.cull, view.second) {
-                    drop(pass);
-                    self.meshes.cull_second(&mut frame, plan)?;
-                    pass = (frame.render(second)).expect("the graph's own images are always there");
+                    if shades.is_none() {
+                        drop(pass);
+                        self.meshes.cull_second(&mut frame, plan)?;
+                        pass = (frame.render(second))
+                            .expect("the graph's own images are always there");
+                    }
                     let rest = Runs::CulledThenRest(plan, plan.second());
                     counts += (self.meshes).draw(
                         &mut pass,
@@ -1058,7 +1186,7 @@ impl Renderer {
                         data.draws,
                         uploaded,
                         rest,
-                        false,
+                        way,
                     )?;
                 }
                 pass.begin_label(c"canvas");
@@ -1072,7 +1200,7 @@ impl Renderer {
                     on,
                     on_canvas,
                     Runs::All,
-                    false,
+                    way,
                 )?;
                 pass.end_label();
                 drop(pass);

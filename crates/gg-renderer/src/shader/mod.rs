@@ -57,6 +57,12 @@ impl<V, P> Shader<V, P> {
     }
 }
 
+/// `spirv`, one of the engine's shaders the build compiled, its sampled images decorated as
+/// [`spirv::decorate_non_uniform`] says, for a pipeline made apart from [`Shaders`].
+pub(crate) fn non_uniform(spirv: &[u8]) -> Vec<u8> {
+    spirv::decorate_non_uniform(spirv.to_vec())
+}
+
 /// Whether a shader that blends as `blend` says writes its depth where it draws, as well as
 /// testing it: an opaque one does, so that what's behind it, drawn after it, doesn't show; one
 /// that blends doesn't, so that what's behind it still shows through it, as through its
@@ -125,11 +131,17 @@ pub(crate) struct Added {
 /// What draws a model shader's meshlets: through vertex shaders, a module of `meshlet_vertex_main`
 /// and `fragment_main`, and one of it and `shadow_main` for shadows cut out, as [`Added::shadow`]
 /// says; and through a mesh shader, a module of `mesh_main` alone, whose pipelines take the shader's
-/// own modules' fragment shaders, as [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says.
+/// own modules' fragment shaders, as [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says. And
+/// what draws them into the visibility buffer: through vertex shaders, a module of
+/// `meshlet_visibility_main` and `visibility_main`; and through a mesh shader, a module of
+/// `mesh_visibility_main` alone, and one of `visibility_primitive_main` alone.
 pub(crate) struct Meshlets {
     pub(crate) vertices: Vec<u8>,
     pub(crate) vertices_shadow: Option<Vec<u8>>,
     pub(crate) mesh: Vec<u8>,
+    pub(crate) visibility: Vec<u8>,
+    pub(crate) visibility_mesh: Vec<u8>,
+    pub(crate) visibility_primitive: Vec<u8>,
 }
 
 /// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
@@ -406,7 +418,7 @@ impl Shaders {
         name: &str,
         spirv: Vec<u8>,
         shadow: Option<Vec<u8>>,
-        meshlets: Option<[&[u8]; 3]>,
+        meshlets: Option<&model::MeshletSpirv>,
         blend: Blend,
         types: Types,
     ) -> u32 {
@@ -421,13 +433,17 @@ impl Shaders {
             params_size: types.params_size,
             blend,
             shadow: shadow.map(spirv::decorate_non_uniform),
-            meshlets: meshlets.map(|[vertices, vertices_shadow, mesh]| {
+            meshlets: meshlets.map(|meshlets| {
                 let module = |spirv: &[u8]| spirv::decorate_non_uniform(spirv.to_vec());
+                let shadow = meshlets.vertices_shadow;
                 Box::new(Meshlets {
-                    vertices: module(vertices),
+                    vertices: module(meshlets.vertices),
                     // An empty module for a shadow that isn't cut out.
-                    vertices_shadow: (!vertices_shadow.is_empty()).then(|| module(vertices_shadow)),
-                    mesh: module(mesh),
+                    vertices_shadow: (!shadow.is_empty()).then(|| module(shadow)),
+                    mesh: module(meshlets.mesh),
+                    visibility: module(meshlets.visibility),
+                    visibility_mesh: module(meshlets.visibility_mesh),
+                    visibility_primitive: module(meshlets.visibility_primitive),
                 })
             }),
         }));
@@ -447,17 +463,25 @@ impl Shaders {
         let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
         // What blends draws in its order, by its indices.
         let meshlets = match alpha {
-            AlphaMode::Opaque => {
-                Some([model::OPAQUE_MESHLETS_SPIRV, &[], model::OPAQUE_MESH_SPIRV])
-            }
-            AlphaMode::Mask { .. } => Some([
-                model::MASKED_MESHLETS_SPIRV,
-                model::MASKED_MESHLETS_SHADOW_SPIRV,
-                model::MASKED_MESH_SPIRV,
-            ]),
+            AlphaMode::Opaque => Some(model::MeshletSpirv {
+                vertices: model::OPAQUE_MESHLETS_SPIRV,
+                vertices_shadow: &[],
+                mesh: model::OPAQUE_MESH_SPIRV,
+                visibility: model::OPAQUE_VISIBILITY_SPIRV,
+                visibility_mesh: model::OPAQUE_VISIBILITY_MESH_SPIRV,
+                visibility_primitive: model::OPAQUE_VISIBILITY_PRIMITIVE_SPIRV,
+            }),
+            AlphaMode::Mask { .. } => Some(model::MeshletSpirv {
+                vertices: model::MASKED_MESHLETS_SPIRV,
+                vertices_shadow: model::MASKED_MESHLETS_SHADOW_SPIRV,
+                mesh: model::MASKED_MESH_SPIRV,
+                visibility: model::MASKED_VISIBILITY_SPIRV,
+                visibility_mesh: model::MASKED_VISIBILITY_MESH_SPIRV,
+                visibility_primitive: model::MASKED_VISIBILITY_PRIMITIVE_SPIRV,
+            }),
             AlphaMode::Blend => None,
         };
-        self.lazy(slot, name, spirv, shadow, meshlets, blend)
+        self.lazy(slot, name, spirv, shadow, meshlets.as_ref(), blend)
     }
 
     /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
@@ -500,15 +524,16 @@ impl Shaders {
     }
 
     /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, with `shadow`
-    /// to draw its shadows cut out, if they are, which draws meshes of `V` with parameters `P` and
-    /// blends as `blend` says: added the first time it's asked for, and then the same.
+    /// to draw its shadows cut out, if they are, and `meshlets` to draw meshes' meshlets, if it
+    /// does, which draws meshes of `V` with parameters `P` and blends as `blend` says: added the
+    /// first time it's asked for, and then the same.
     fn lazy<V, P>(
         &mut self,
         slot: usize,
         name: &str,
         spirv: &[u8],
         shadow: Option<&[u8]>,
-        meshlets: Option<[&[u8]; 3]>,
+        meshlets: Option<&model::MeshletSpirv>,
         blend: Blend,
     ) -> Shader<V, P> {
         let index = match self.lazy[slot] {
@@ -1011,7 +1036,7 @@ mod tests {
             &[
                 "its push constants' view isn't a float2",
                 "its frame's data, Frame, take 372 bytes, past the 360 the engine's take",
-                "it reads brightness from its push constants, past the 120 bytes",
+                "it reads brightness from its push constants, past the 124 bytes",
             ],
         );
         says(
@@ -1089,15 +1114,21 @@ mod tests {
         // by an index an instance carries; the model shaders sample the sky's light too, by the
         // frame's indices, the same across a draw.
         assert_eq!(shaders.changes.len(), 6);
-        for added in adds(&shaders) {
-            let sampled = spirv::sampled_images(&added.spirv);
+        let non_uniform = |name: &str, spirv: &[u8]| {
+            let sampled = spirv::sampled_images(spirv);
             assert!(
                 sampled.iter().any(|&(_, decorated, _)| decorated)
                     && (sampled.iter()).all(|&(_, decorated, of)| decorated || !of),
-                "{}: {sampled:?}",
-                added.name
+                "{name}: {sampled:?}"
             );
+        };
+        for added in adds(&shaders) {
+            non_uniform(&added.name, &added.spirv);
         }
+        // The shading of the view from its visibility buffer, whose pixels each take their own
+        // material.
+        let shading = super::non_uniform(crate::mesh::VISIBILITY_SPIRV);
+        non_uniform("visibility shading", &shading);
     }
 
     /// The model shaders load the frame's data whole, unoptimized as `compile` says why: reaching
@@ -1110,6 +1141,12 @@ mod tests {
             ("masked", model::MASKED_SPIRV),
             ("masked shadows", model::MASKED_SHADOW_SPIRV),
             ("blended", model::BLENDED_SPIRV),
+            ("masked visibility", model::MASKED_VISIBILITY_SPIRV),
+            (
+                "masked visibility",
+                model::MASKED_VISIBILITY_PRIMITIVE_SPIRV,
+            ),
+            ("visibility shading", crate::mesh::VISIBILITY_SPIRV),
         ];
         for (name, spirv) in shaders {
             assert_eq!(spirv::buffer_pointers_to_pointers(spirv), 0, "{name}");
@@ -1137,7 +1174,13 @@ mod tests {
     fn a_shader_compiled_again_lists_its_files_and_replaces_itself() {
         let dir = Scratch::new("compiled-again");
         let shaders_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        for file in ["model_opaque.slang", "model.slang", "mesh.slang"] {
+        let files = [
+            "model_opaque.slang",
+            "model.slang",
+            "shading.slang",
+            "mesh.slang",
+        ];
+        for file in files {
             fs::copy(shaders_dir.join(file), dir.0.join(file)).expect("a copy");
         }
         let path = dir.0.join("model_opaque.slang");
@@ -1148,11 +1191,7 @@ mod tests {
             panic!("one source");
         };
         assert_eq!((source.name(), source.path()), ("copy", path.as_path()));
-        let read = [
-            Some("model_opaque.slang"),
-            Some("model.slang"),
-            Some("mesh.slang"),
-        ];
+        let read = files.map(Some);
         assert_eq!(names(source.files()), read, "as it was added");
 
         // A change to the file it includes.
@@ -1207,9 +1246,12 @@ mod tests {
         let error = source.compile().expect_err("the include doesn't compile");
         assert_eq!(error.code(), "renderer.bad_shader");
         // The packed vertex, the first struct with a color, a word wider than its type.
-        let wider = text.replacen("uint color;", "uint color;\n    uint extra;", 1);
-        assert_ne!(wider, text, "the vertex is wider");
-        fs::write(&include, wider).expect("the include changed");
+        fs::write(&include, &text).expect("the include as it was");
+        let shading = dir.0.join("shading.slang");
+        let shading_text = fs::read_to_string(&shading).expect("the include's include");
+        let wider = shading_text.replacen("uint color;", "uint color;\n    uint extra;", 1);
+        assert_ne!(wider, shading_text, "the vertex is wider");
+        fs::write(&shading, wider).expect("the include's include changed");
         let error = source.compile().expect_err("a vertex too wide");
         assert_eq!(error.code(), "renderer.shader_mismatch");
     }

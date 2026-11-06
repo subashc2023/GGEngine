@@ -17,6 +17,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
@@ -37,6 +38,9 @@ macro_rules! run {
     };
     ($tests:ident uploading by $path:ident $(, $test:ident)+ $(,)?) => {
         $($tests.run(&format!("{} uploading by {}", stringify!($test), $path), || $test($path));)+
+    };
+    ($tests:ident by meshlets $(, $test:ident)+ $(,)?) => {
+        $($tests.run(&format!("{} by meshlets", stringify!($test)), $test);)+
     };
 }
 
@@ -113,6 +117,27 @@ fn main() -> ExitCode {
         picks_wait_through_frames_that_read_none,
         removed_assets_draw_nothing_or_their_stand_in,
     );
+    // The tests of models' shading again, their models cut into meshlets, which the view draws
+    // into its visibility buffer and shades from it, against the references they made drawn by
+    // their indices and shaded as they draw.
+    CUT_MESHLETS.store(true, Ordering::Relaxed);
+    run!(
+        tests by meshlets,
+        lights_shade_as_gltf_defines,
+        lit_spheres_match_their_reference,
+        many_lights_match_their_reference,
+        a_uniform_sky_lights_white_as_itself,
+        sky_lit_spheres_match_their_reference,
+        specular_glossiness_shades_as_its_metallic_roughness_equal,
+        a_skys_sun_lights_once,
+        surfaces_cast_no_shadows_on_themselves,
+        shadowed_models_match_their_reference,
+        models_match_their_reference,
+        mixed_textures_match_their_reference,
+        picks_answer_what_their_frame_drew,
+        the_scene_draws_as_draws_do,
+    );
+    CUT_MESHLETS.store(false, Ordering::Relaxed);
     // Through mesh shaders, where the GPU has them, and through vertex shaders, as every GPU can.
     for mesh_shaders in [true, false] {
         let settings = Settings {
@@ -233,6 +258,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         vsync: false,
         uploads,
         mesh_shaders: None,
+        visibility_buffer: true,
         upload_budget: DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: None,
@@ -427,9 +453,17 @@ fn add_model(
     vertices: &[ModelVertex],
     indices: &[u32],
 ) -> Mesh<PackedVertex> {
-    let packed = ModelMesh::pack(vertices, indices.to_vec(), Vec::new());
+    let mut packed = ModelMesh::pack(vertices, indices.to_vec(), Vec::new());
+    if CUT_MESHLETS.load(Ordering::Relaxed) {
+        cut_meshlets(&mut packed);
+    }
     meshes.add_model(name, &packed).expect("a mesh")
 }
+
+/// Whether [`add_model`] cuts each model's mesh into meshlets, as a game's package holds them,
+/// which views draw into their visibility buffers and shade from them: as `main` runs the tests of
+/// models' shading again, against the same references. The tests run one after another.
+static CUT_MESHLETS: AtomicBool = AtomicBool::new(false);
 
 fn model_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
@@ -3041,13 +3075,22 @@ fn models_match_their_reference() {
         viewpoint,
         &draws,
     );
-    // Red and green facing one way, blue and yellow mirrored, then one each.
+    // Red and green facing one way, blue and yellow mirrored, then one each: cut into meshlets,
+    // green's and yellow's, turned away, aren't drawn, as their cones cull them.
+    let turned_away = if CUT_MESHLETS.load(Ordering::Relaxed) {
+        4
+    } else {
+        0
+    };
     let drawn = DrawCounts {
         draws: 7,
         instances: 9,
-        triangles: 18,
+        triangles: 18 - turned_away,
     };
     let viewport = filling([WIDTH, HEIGHT]);
+    // Past the frame the meshes came to be drawable in, which planned no room for their meshlets
+    // and drew them by their indices.
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     assert_eq!(drew, drawn);
     check(renderer, "models", WIDTH, HEIGHT);
@@ -5414,16 +5457,18 @@ fn cut_meshlets(mesh: &mut ModelMesh) {
 /// their shadows, seen with perspective: opaque and masked, near enough for their finest level and
 /// far enough for the coarser, mirrored, stretched along one axis, which their cones don't turn
 /// with, and part past the view's side, which culls some of their meshlets. Drawn by their
-/// meshlets, through mesh shaders if `mesh_shaders` and through vertex shaders otherwise, they draw
-/// bit for bit as the same spheres of the mesh without meshlets, by their indices, the same
-/// instances at the same levels, counting fewer triangles, as the meshlets that face away from the
-/// view or lie past its sides are culled; and match their reference.
+/// meshlets, through mesh shaders if `mesh_shaders` and through vertex shaders otherwise, and
+/// shaded as they draw, they draw bit for bit as the same spheres of the mesh without meshlets, by
+/// their indices, the same instances at the same levels, counting fewer triangles, as the meshlets
+/// that face away from the view or lie past its sides are culled; and match their reference. Drawn
+/// into the visibility buffer and shaded from it, they draw the same, and match it too.
 fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
     const WIDTH: u32 = 200;
     const HEIGHT: u32 = 128;
-    let render = |meshlets: bool| {
+    let render = |meshlets: bool, visibility_buffer: bool| {
         let settings = Settings {
             mesh_shaders: Some(mesh_shaders),
+            visibility_buffer,
             ..settings(None)
         };
         let mut renderer = Renderer::headless(&settings, WIDTH, HEIGHT).expect("a renderer");
@@ -5520,8 +5565,8 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
         shut_down(renderer);
         (counts, pixels)
     };
-    let (by_indices, indexed) = render(false);
-    let (by_meshlets, cut) = render(true);
+    let (by_indices, indexed) = render(false, false);
+    let (by_meshlets, cut) = render(true, false);
     assert!(cut == indexed, "the pixels differ");
     assert_eq!(
         (by_meshlets.draws, by_meshlets.instances),
@@ -5533,6 +5578,9 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
         "{by_meshlets:?} against {by_indices:?}"
     );
     compare("meshlets", WIDTH, HEIGHT, &cut);
+    let (seen_counts, seen) = render(true, true);
+    assert_eq!(seen_counts, by_meshlets, "the same draws");
+    compare("meshlets", WIDTH, HEIGHT, &seen);
 }
 
 /// A gray floor, a sphere on it, an orange post standing on it, and a masked plate, upright,
