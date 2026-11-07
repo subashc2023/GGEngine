@@ -68,9 +68,11 @@ struct Game;
 
 impl Layer for Game {
     fn attach(&mut self, cx: &mut Context) {
-        // Watched as the game runs, in development builds, which apply its saves.
-        let loaded = cx.load_start_scene();
-        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        // Watched as the game runs, in development builds, which apply its saves. One that doesn't
+        // load ends the run with its error.
+        if let Err(error) = cx.load_start_scene() {
+            cx.fail(error);
+        }
     }
 }
 "#;
@@ -185,6 +187,12 @@ mod tests {
         assert!(manifest.contains("name = \"gg-probe\""), "{manifest}");
         assert_eq!(scene, SCENE);
         assert!(main.contains("App::new(\"probe\")"), "{main}");
+        // A start scene that doesn't load ends the run with its error, as runtime failures do,
+        // rather than panicking.
+        assert!(
+            main.contains("cx.fail(error)") && !main.contains("panic!"),
+            "{main}"
+        );
         assert_eq!(refused.as_deref(), Some("gg.new"));
         assert!(empty);
     }

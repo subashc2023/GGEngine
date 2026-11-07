@@ -268,8 +268,9 @@ pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Imported> {
 }
 
 /// Reads model `name`, as the cooker writes it, from `bytes`, its file at `path`, checking that it
-/// holds what [`gltf::read`] would give: each part after its parent, primitives whose meshes hold
-/// together, as [`ModelMesh::check`] checks them, and images that
+/// holds what [`gltf::read`] would give: each part after its parent, of a transform and a light
+/// [`gltf::takes`] and [`gltf::allowed`] take, primitives whose materials' numbers are finite and
+/// whose meshes hold together, as [`ModelMesh::check`] checks them, and images that
 /// read, each the KTX2 of BC7 that [`read_ktx2`] takes, read as far as its header, taking no more
 /// memory than [`gltf::MAX_MEMORY`], what its images decode to among it.
 ///
@@ -311,6 +312,12 @@ impl<'a> Reader<'a> {
                 rotation: Quat::from_xyzw(rx, ry, rz, rw),
                 scale: Vec3::new(sx, sy, sz),
             };
+            if !gltf::takes(&transform) {
+                return Err(format!(
+                    "its part {i} has a transform of a number that isn't finite, or of a rotation \
+                     that isn't a unit"
+                ));
+            }
             let parent = self.index()?;
             if parent.is_some_and(|parent| parent >= i) {
                 return Err(format!("its part {i} comes before its parent"));
@@ -385,7 +392,8 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// A part's light, if it has one. The error says what's wrong with it.
+    /// A part's light, if it has one, as [`gltf::allowed`] allows it. The error says what's wrong
+    /// with it.
     fn light(&mut self) -> Result<Option<Light>, String> {
         let [kind]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
         let kind = match kind {
@@ -396,7 +404,7 @@ impl<'a> Reader<'a> {
             _ => return Err(format!("has a light of kind {kind}")),
         };
         let [r, g, b, intensity, range, inner_cone, outer_cone] = self.floats()?;
-        Ok(Some(Light {
+        let light = Light {
             kind,
             color: Vec3::new(r, g, b),
             intensity,
@@ -405,7 +413,13 @@ impl<'a> Reader<'a> {
             outer_cone,
             // As glTF's, which says nothing of shadows.
             ..Light::default()
-        }))
+        };
+        if !gltf::allowed(&light) {
+            let problem = "has a light of a negative color or intensity, a cone's angles out of \
+                           order or past a quarter turn, or a number that isn't finite";
+            return Err(problem.to_owned());
+        }
+        Ok(Some(light))
     }
 
     /// A primitive. The error says what's wrong with it.
@@ -464,6 +478,20 @@ impl<'a> Reader<'a> {
             2 => AlphaMode::Blend,
             _ => return Err(format!("has a material of alpha mode {alpha}")),
         };
+        let material = Material {
+            color,
+            workflow,
+            normal_scale,
+            occlusion_strength,
+            emissive,
+            textures,
+            alpha,
+            double_sided: flag(double_sided, "double-sided")?,
+            unlit: flag(unlit, "unlitness")?,
+        };
+        if !material.is_finite() {
+            return Err("has a material of a number that isn't finite".to_owned());
+        }
         Ok(Primitive {
             name,
             positions: Vec::new(),
@@ -473,17 +501,7 @@ impl<'a> Reader<'a> {
             tangents: Vec::new(),
             indices: Vec::new(),
             mesh: Some(mesh),
-            material: Material {
-                color,
-                workflow,
-                normal_scale,
-                occlusion_strength,
-                emissive,
-                textures,
-                alpha,
-                double_sided: flag(double_sided, "double-sided")?,
-                unlit: flag(unlit, "unlitness")?,
-            },
+            material,
         })
     }
 
@@ -814,6 +832,50 @@ mod tests {
         cases.push((
             "a part drawing what it hasn't",
             edited(&|imported| imported.parts[1].primitive = Some(2)),
+        ));
+        // What glTF's reader refuses too, which reaches the world as a node's.
+        cases.push((
+            "a part turned by a rotation that isn't a unit",
+            edited(&|imported| {
+                imported.parts[0].transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
+            }),
+        ));
+        cases.push((
+            "a part moved by a NaN",
+            edited(&|imported| imported.parts[1].transform.translation.x = f32::NAN),
+        ));
+        cases.push((
+            "a part scaled infinitely",
+            edited(&|imported| imported.parts[1].transform.scale.y = f32::INFINITY),
+        ));
+        cases.push((
+            "a light of a negative intensity",
+            edited(&|imported| {
+                imported.parts[0].light.as_mut().expect("a light").intensity = -1.0;
+            }),
+        ));
+        cases.push((
+            "a spot's cone past a quarter turn",
+            edited(&|imported| {
+                imported.parts[0]
+                    .light
+                    .as_mut()
+                    .expect("a light")
+                    .outer_cone = 2.0;
+            }),
+        ));
+        cases.push((
+            "a material of an infinite color",
+            edited(&|imported| imported.primitives[0].material.color[0] = f32::INFINITY),
+        ));
+        cases.push((
+            "a material of a NaN glossiness",
+            edited(&|imported| {
+                imported.primitives[1].material.workflow = Workflow::SpecularGlossiness {
+                    specular: Vec3::ONE,
+                    glossiness: f32::NAN,
+                };
+            }),
         ));
         let mesh = |edit: fn(&mut ModelMesh)| {
             move |imported: &mut Imported| {

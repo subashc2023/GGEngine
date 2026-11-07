@@ -106,13 +106,29 @@ impl Primitive {
         matches!(self.material.alpha, AlphaMode::Blend)
     }
 
+    /// The bytes its vertices and indices take, as [`Memory`] counts them.
+    fn held(&self) -> usize {
+        size_of_val(self.positions.as_slice())
+            + size_of_val(self.uvs.as_slice())
+            + size_of_val(self.colors.as_slice())
+            + size_of_val(self.normals.as_slice())
+            + size_of_val(self.tangents.as_slice())
+            + size_of_val(self.indices.as_slice())
+    }
+
     /// Gives each triangle corners of its own, facing as the triangle does, counterclockwise its
     /// front: as glTF draws a primitive without normals, flat. A triangle of no area faces +Z,
     /// covering nothing that shows. Its tangents go, which it has none of before its normals.
-    fn make_flat(&mut self) {
+    ///
+    /// Fails, making nothing, if `memory` hasn't room for its corners' vertices beside those it has.
+    fn make_flat(&mut self, memory: &mut Memory) -> Result<()> {
         fn corners<T: Copy>(indices: &[u32], values: &[T]) -> Vec<T> {
             indices.iter().map(|&i| values[i as usize]).collect()
         }
+        // A vertex a corner, but its tangent, and its index.
+        let corner = VERTEX - size_of::<[f32; 4]>() + size_of::<u32>();
+        memory.hold(self.indices.len() * corner)?;
+        let before = self.held();
         let (positions, uvs, colors) = (
             corners(&self.indices, &self.positions),
             corners(&self.indices, &self.uvs),
@@ -131,6 +147,8 @@ impl Primitive {
         self.indices = (0..positions.len() as u32).collect();
         (self.positions, self.uvs, self.colors) = (positions, uvs, colors);
         self.tangents.clear();
+        memory.release(before);
+        Ok(())
     }
 
     /// Gives it the tangents MikkTSpace makes from its positions, normals and texture coordinates,
@@ -138,49 +156,69 @@ impl Primitive {
     /// corner, which its vertices then take, each vertex apart for each tangent of its corners,
     /// in the order its corners first reach them. A corner MikkTSpace gives none, of a triangle of
     /// no area alone, takes +X.
-    fn make_tangents(&mut self) {
+    ///
+    /// Fails, changing nothing, if `memory` hasn't room for the tangents and the vertices apart
+    /// beside those it has.
+    fn make_tangents(&mut self, memory: &mut Memory) -> Result<()> {
+        let count = self.indices.len();
+        // MikkTSpace's tangent for each corner; then each corner's index, and the vertex and
+        // tangent of each vertex apart, at most one a corner.
+        let made = count * (size_of::<[f32; 4]>() + size_of::<u32>() + PLACED);
+        memory.hold(made)?;
         let mut corners = Corners {
             primitive: self,
-            tangents: vec![[1.0, 0.0, 0.0, 1.0]; self.indices.len()],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; count],
         };
         // Its error has no values: it never fails.
         let _ = bevy_mikktspace::generate_tangents::<_, Libm>(&mut corners);
         let Corners { tangents, .. } = corners;
         let mut placed: BTreeMap<(u32, [u32; 4]), u32> = BTreeMap::new();
-        let mut welded = self.clone_empty();
-        welded.indices.reserve(self.indices.len());
-        for (&vertex, tangent) in self.indices.iter().zip(tangents) {
-            let key = (vertex, tangent.map(f32::to_bits));
-            let next = welded.positions.len() as u32;
-            let at = *placed.entry(key).or_insert(next);
-            if at == next {
-                let v = vertex as usize;
-                welded.positions.push(self.positions[v]);
-                welded.uvs.push(self.uvs[v]);
-                welded.colors.push(self.colors[v]);
-                welded.normals.push(self.normals[v]);
-                welded.tangents.push(tangent);
-            }
-            welded.indices.push(at);
-        }
-        *self = welded;
-    }
-
-    /// Its name, levels and material, with no vertices or indices.
-    fn clone_empty(&self) -> Self {
-        Self {
+        let indices: Vec<u32> = (self.indices.iter().zip(&tangents))
+            .map(|(&vertex, tangent)| {
+                let (key, next) = ((vertex, tangent.map(f32::to_bits)), placed.len() as u32);
+                *placed.entry(key).or_insert(next)
+            })
+            .collect();
+        drop(tangents);
+        let vertices = placed.len();
+        memory.hold(vertices * VERTEX)?;
+        let mut welded = Self {
             name: self.name.clone(),
-            positions: Vec::new(),
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            normals: Vec::new(),
-            tangents: Vec::new(),
-            indices: Vec::new(),
+            positions: vec![[0.0; 3]; vertices],
+            uvs: vec![[0.0; 2]; vertices],
+            colors: vec![[0.0; 4]; vertices],
+            normals: vec![[0.0; 3]; vertices],
+            tangents: vec![[0.0; 4]; vertices],
+            indices,
             mesh: self.mesh.clone(),
             material: self.material,
+        };
+        for ((vertex, tangent), at) in placed {
+            let (v, at) = (vertex as usize, at as usize);
+            welded.positions[at] = self.positions[v];
+            welded.uvs[at] = self.uvs[v];
+            welded.colors[at] = self.colors[v];
+            welded.normals[at] = self.normals[v];
+            welded.tangents[at] = tangent.map(f32::from_bits);
         }
+        let before = self.held();
+        *self = welded;
+        // Its vertices and indices before, MikkTSpace's tangents and the vertices placed, of what
+        // was held, its new indices kept.
+        memory.release(before + made - count * size_of::<u32>());
+        Ok(())
     }
 }
+
+/// The bytes a vertex of a [`Primitive`] takes: its position, texture coordinates, color, normal
+/// and tangent.
+const VERTEX: usize = size_of::<[f32; 3]>() * 2 + size_of::<[f32; 2]>() + size_of::<[f32; 4]>() * 2;
+
+/// The most bytes an entry of the `BTreeMap` that places [`Primitive::make_tangents`]' vertices
+/// takes, its share of the map's nodes included: std's nodes hold 5 to 11 entries, the root fewer,
+/// beside a header and an internal node's edges, which comes to about 2.5 times the entry, at most,
+/// once the map holds a node's worth.
+const PLACED: usize = 3 * size_of::<((u32, [u32; 4]), u32)>();
 
 /// A primitive's triangles as MikkTSpace reads them, a face each, and the tangent it gives each
 /// corner.
@@ -282,6 +320,26 @@ impl Default for Material {
 }
 
 impl Material {
+    /// Whether its numbers are all finite, as a model's material's must be.
+    pub(crate) fn is_finite(&self) -> bool {
+        let workflow = match self.workflow {
+            Workflow::MetallicRoughness {
+                metallic,
+                roughness,
+            } => metallic.is_finite() && roughness.is_finite(),
+            Workflow::SpecularGlossiness {
+                specular,
+                glossiness,
+            } => specular.is_finite() && glossiness.is_finite(),
+        };
+        let cutoff = match self.alpha {
+            AlphaMode::Mask { cutoff } => cutoff,
+            AlphaMode::Opaque | AlphaMode::Blend => 0.0,
+        };
+        let numbers = [self.normal_scale, self.occlusion_strength, cutoff].into_iter();
+        workflow && (numbers.chain(self.color).chain(self.emissive)).all(f32::is_finite)
+    }
+
     /// Its texture of `slot`, if it has one.
     pub(crate) fn texture(&self, slot: Slot) -> Option<Sampling> {
         self.textures[slot as usize]
@@ -351,11 +409,14 @@ pub(crate) fn holds(map: Option<Map>) -> &'static str {
 
 /// The most memory reading a model may take, in bytes, for what it makes of its files: buffers read
 /// from files and data URIs, images' files and what they decode to, which both are held until the
-/// loader has decoded them, primitives' vertices, indices and names, and parts.
+/// loader has decoded them, primitives' vertices, indices and names, and parts; and while it reads,
+/// the accessors it has read, and a primitive's vertices before it's drawn flat or its vertices
+/// part for MikkTSpace's tangents, with what making those takes.
 /// Past what a model that fits a GPU needs, as the Amazon Lumberyard Bistro's 2 GB of images, BC7
 /// with their levels, held as their files and as their blocks, and its 4 million triangles take
-/// about 4.5 GiB, so that a small file can't fill memory by naming its data many times, such as one
-/// PNG's bytes as many images.
+/// about 4.2 GiB at most as it's read, so that a small file can't fill memory by naming its data
+/// many times, such as one PNG's bytes as many images, nor by its primitives' vertices, as each
+/// corner of a triangle drawn flat takes a vertex of 64 bytes, though an index of a byte names it.
 pub(crate) const MAX_MEMORY: u64 = 8 << 30;
 
 /// Reads model `name`'s file at `path`, and the files it names, from `from`, the disk or the game's
@@ -442,11 +503,57 @@ pub(crate) fn read(
             ignored,
             ..Imported::default()
         },
-        held: 0,
-        memory,
+        memory: Memory {
+            model,
+            held: 0,
+            most: memory,
+        },
     };
     reader.scene()?;
     Ok(reader.imported)
+}
+
+/// What reading a model holds of what [`MAX_MEMORY`] counts, in bytes, and the most it may.
+struct Memory<'a> {
+    model: Model<'a>,
+    held: u64,
+    most: u64,
+}
+
+impl Memory<'_> {
+    /// Counts `bytes` more held, before they're allocated, failing if that's past the most reading
+    /// may take, so that it never holds more; but for what's read of a file or a data URI, counted
+    /// once it's read, so that reading takes at most one of those more: a buffer's file, read no
+    /// further than a byte past the room left, an image's, of at most [`image::MAX_FILE`], or a
+    /// data URI's bytes, fewer than the model's own file holds.
+    fn hold(&mut self, bytes: usize) -> Result<()> {
+        let held = self.held.saturating_add(bytes as u64);
+        if held > self.most {
+            return Err(self.model.unsupported(format!(
+                "takes more than {} MiB to read, of its buffers, images, vertices and nodes",
+                self.most >> 20
+            )));
+        }
+        self.held = held;
+        Ok(())
+    }
+
+    /// Counts `bytes` that [`hold`](Self::hold) counted as freed.
+    fn release(&mut self, bytes: usize) {
+        self.held = self.held.saturating_sub(bytes as u64);
+    }
+
+    /// `items`, copied once the copy is counted.
+    fn copy<T: Clone>(&mut self, items: &[T]) -> Result<Vec<T>> {
+        self.hold(size_of_val(items))?;
+        Ok(items.to_vec())
+    }
+
+    /// `len` of `item`, once they're counted.
+    fn filled<T: Clone>(&mut self, item: T, len: usize) -> Result<Vec<T>> {
+        self.hold(len * size_of::<T>())?;
+        Ok(vec![item; len])
+    }
 }
 
 /// The extensions the engine reads: materials drawn unlit, nodes' lights, materials' emission
@@ -616,9 +723,9 @@ struct Reader<'a, F> {
     /// Each buffer read, by its index: exactly its byteLength.
     buffers: BTreeMap<u32, Cow<'a, [u8]>>,
     /// Each accessor read as an attribute, by its index: its elements' components, in order, and
-    /// whether they're all finite.
+    /// whether they're all finite; which a primitive copies.
     floats: BTreeMap<u32, (Vec<f32>, bool)>,
-    /// Each accessor read as indices, by its index.
+    /// Each accessor read as indices, by its index, which a primitive copies.
     indices: BTreeMap<u32, Vec<u32>>,
     /// Each mesh read, by its index: where the primitives it draws are in `imported.primitives`.
     meshes: BTreeMap<u32, Range<usize>>,
@@ -628,25 +735,10 @@ struct Reader<'a, F> {
     /// colors, `None`, or a map of data.
     holds: BTreeMap<usize, Option<Map>>,
     imported: Imported,
-    /// The bytes held of what [`MAX_MEMORY`] counts, and the most that may be.
-    held: u64,
-    memory: u64,
+    memory: Memory<'a>,
 }
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
-    /// Counts `bytes` more held, failing once they're past the memory reading may take. Counts
-    /// follow what they count, so reading takes at most an image, a primitive or a data URI more.
-    fn hold(&mut self, bytes: usize) -> Result<()> {
-        self.held = self.held.saturating_add(bytes as u64);
-        if self.held > self.memory {
-            return Err(self.model.unsupported(format!(
-                "takes more than {} MiB to read, of its buffers, images, vertices and nodes",
-                self.memory >> 20
-            )));
-        }
-        Ok(())
-    }
-
     /// Reads the default scene into parts, from its roots down, each before its children.
     fn scene(&mut self) -> Result<()> {
         let (model, gltf) = (self.model, self.gltf);
@@ -692,6 +784,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 Some(light) => Some(self.light(light.light)?),
                 None => None,
             };
+            self.memory.hold(size_of::<Part>())?;
             let part = self.imported.parts.len();
             self.imported.parts.push(Part {
                 transform,
@@ -701,6 +794,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             });
             if primitives.len() > 1 {
                 // An entity draws one primitive, so each of the mesh's is a child of the node's.
+                self.memory.hold(primitives.len() * size_of::<Part>())?;
                 (self.imported.parts).extend(primitives.map(|primitive| Part {
                     transform: Transform::IDENTITY,
                     parent: Some(part),
@@ -708,16 +802,14 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     light: None,
                 }));
             }
-            self.hold((self.imported.parts.len() - part) * size_of::<Part>())?;
             stack.extend(node.children.iter().rev().map(|&child| (child, Some(part))));
         }
         Ok(())
     }
 
-    /// Light `index` of KHR_lights_punctual's, which a node holds, checked as the extension says:
-    /// of a type it has, not negative in intensity, of a range more than 0 if it has one, and a
-    /// spot's cone's angles from 0 to the outer, which is more than the inner and at most a quarter
-    /// turn. Its intensity and range are in its units, candela or lux, and meters, the engine's.
+    /// Light `index` of KHR_lights_punctual's, which a node holds, checked as the extension says,
+    /// of a type it has, and as [`allowed`] says. Its intensity and range are in its units, candela
+    /// or lux, and meters, the engine's.
     fn light(&self, index: u32) -> Result<Light> {
         let (model, gltf) = (self.model, self.gltf);
         let lights = gltf.extensions.lights_punctual.as_ref();
@@ -732,46 +824,38 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 )));
             }
         };
-        let intensity = light.intensity.unwrap_or(1.0);
         let spot = light.spot.as_ref();
-        let inner = spot.and_then(|spot| spot.inner_cone_angle).unwrap_or(0.0);
-        let outer = spot
-            .and_then(|spot| spot.outer_cone_angle)
-            .unwrap_or(std::f32::consts::FRAC_PI_4);
-        let valid = intensity >= 0.0
-            && light.range.is_none_or(|range| range > 0.0)
-            && (0.0..outer).contains(&inner)
-            && outer <= std::f32::consts::FRAC_PI_2;
-        if !valid
-            || light
-                .color
-                .is_some_and(|color| color.iter().any(|&c| c < 0.0))
-        {
-            return Err(model.bad(format!(
-                "has light {index} of a negative color or intensity, a range of 0 or less, or a \
-                 cone's angles out of order or past a quarter turn"
-            )));
-        }
-        Ok(Light {
+        let read = Light {
             kind,
             color: light.color.map_or(Vec3::ONE, Vec3::from_array),
-            intensity,
+            intensity: light.intensity.unwrap_or(1.0),
             range: light.range,
-            inner_cone: inner,
-            outer_cone: outer,
+            inner_cone: spot.and_then(|spot| spot.inner_cone_angle).unwrap_or(0.0),
+            outer_cone: (spot.and_then(|spot| spot.outer_cone_angle))
+                .unwrap_or(std::f32::consts::FRAC_PI_4),
             // KHR_lights_punctual says nothing of shadows.
             ..Light::default()
-        })
+        };
+        if !allowed(&read) {
+            return Err(model.bad(format!(
+                "has light {index} of a negative color or intensity, a range of 0 or less, a \
+                 cone's angles out of order or past a quarter turn, or a number that isn't finite"
+            )));
+        }
+        Ok(read)
     }
 
-    /// Node `index`'s transform: its matrix decomposed, or its translation, rotation and scale.
+    /// Node `index`'s transform: its matrix decomposed, or its translation, rotation and scale, its
+    /// rotation made unit; one [`takes`] takes, as JSON's numbers are finite, and serde_json's
+    /// `float_roundtrip`, which the workspace turns on, refuses one past an f32's range.
     fn transform(&self, index: u32, node: &json::Node) -> Result<Transform> {
         let model = self.model;
         let Some(matrix) = node.matrix else {
             let rotation = match node.rotation {
                 Some(rotation) => unit(Quat::from_array(rotation)).ok_or_else(|| {
                     model.bad(format!(
-                        "has node {index} whose rotation is 0, or too large to make unit"
+                        "has node {index} whose rotation is 0, or too near it or too large to \
+                         make unit"
                     ))
                 })?,
                 None => Quat::IDENTITY,
@@ -877,8 +961,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             Some(material) => self.material(material)?,
             None => (Material::default(), None),
         };
-        let (_, positions) = self.attribute(&what, "POSITION", position, &[3], false)?;
-        let positions = positions.as_chunks::<3>().0.to_vec();
+        // Its own copies, each counted before it's made, as primitives that share accessors or a
+        // mesh's name each have their own.
+        self.attribute(&what, "POSITION", position, &[3], false)?;
+        let positions = self.copied(position)?;
         let vertices = positions.len();
         let count = u32::try_from(vertices).map_err(|_| {
             model.bad(format!(
@@ -886,8 +972,14 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             ))
         })?;
         let indices = match primitive.indices {
-            Some(indices) => self.indices(&what, indices, count)?,
-            None if vertices.is_multiple_of(3) => (0..count).collect(),
+            Some(indices) => {
+                self.indices(&what, indices, count)?;
+                self.memory.copy(&self.indices[&indices])?
+            }
+            None if vertices.is_multiple_of(3) => {
+                self.memory.hold(vertices * size_of::<u32>())?;
+                (0..count).collect()
+            }
             None => {
                 return Err(model.bad(format!(
                     "{what} has {vertices} vertices and no indices, which isn't whole triangles"
@@ -911,32 +1003,32 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                         "{what} has no {semantic}, which its material's texture reads"
                     ))
                 })?;
-                let (_, uvs) = self.attribute(&what, &semantic, accessor, &[2], true)?;
-                let uvs = uvs.as_chunks::<2>().0.to_vec();
+                self.attribute(&what, &semantic, accessor, &[2], true)?;
+                let uvs = self.copied(accessor)?;
                 same_count(&semantic, uvs.len())?;
                 uvs
             }
-            None => vec![[0.0; 2]; vertices],
+            None => self.memory.filled([0.0; 2], vertices)?,
         };
         let colors = match primitive.attributes.get("COLOR_0") {
             Some(&accessor) => {
-                let (components, colors) =
-                    self.attribute(&what, "COLOR_0", accessor, &[3, 4], true)?;
+                let components = self.attribute(&what, "COLOR_0", accessor, &[3, 4], true)?;
                 let colors: Vec<[f32; 4]> = if components == 3 {
-                    let rgb = colors.as_chunks::<3>().0.iter();
-                    rgb.map(|&[r, g, b]| [r, g, b, 1.0]).collect()
+                    let rgb = self.floats[&accessor].0.as_chunks::<3>().0;
+                    self.memory.hold(size_of::<[f32; 4]>() * rgb.len())?;
+                    rgb.iter().map(|&[r, g, b]| [r, g, b, 1.0]).collect()
                 } else {
-                    colors.as_chunks::<4>().0.to_vec()
+                    self.copied(accessor)?
                 };
                 same_count("COLOR_0", colors.len())?;
                 colors
             }
-            None => vec![[1.0; 4]; vertices],
+            None => self.memory.filled([1.0; 4], vertices)?,
         };
         let normals = match primitive.attributes.get("NORMAL") {
             Some(&accessor) => {
-                let (_, normals) = self.attribute(&what, "NORMAL", accessor, &[3], false)?;
-                let normals = normals.as_chunks::<3>().0.to_vec();
+                self.attribute(&what, "NORMAL", accessor, &[3], false)?;
+                let normals = self.copied(accessor)?;
                 same_count("NORMAL", normals.len())?;
                 Some(normals)
             }
@@ -947,8 +1039,12 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         // glTF says to make them for.
         let tangents = match primitive.attributes.get("TANGENT") {
             Some(&accessor) => {
-                let (_, tangents, finite) = self.floats(&what, "TANGENT", accessor, &[4], false)?;
-                let tangents = finite.then(|| tangents.as_chunks::<4>().0.to_vec());
+                let (_, finite) = self.floats(&what, "TANGENT", accessor, &[4], false)?;
+                let tangents = if finite {
+                    Some(self.copied(accessor)?)
+                } else {
+                    None
+                };
                 if tangents.is_none() {
                     self.imported.ignored.push(format!(
                         "{what}'s TANGENT, which holds numbers that aren't finite: it's drawn as \
@@ -985,25 +1081,25 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 tangents
             }
             None if material.unlit => {
-                read.normals = vec![[0.0, 0.0, 1.0]; read.positions.len()];
+                read.normals = self.memory.filled([0.0, 0.0, 1.0], read.positions.len())?;
                 None
             }
             None => {
-                read.make_flat();
+                read.make_flat(&mut self.memory)?;
                 None
             }
         };
         match tangents {
             Some(tangents) => read.tangents = tangents,
             None if !material.unlit && material.texture(Slot::Normal).is_some() => {
-                read.make_tangents();
+                read.make_tangents(&mut self.memory)?;
             }
-            None => read.tangents = vec![[1.0, 0.0, 0.0, 1.0]; read.positions.len()],
+            None => {
+                let vertices = read.positions.len();
+                read.tangents = self.memory.filled([1.0, 0.0, 0.0, 1.0], vertices)?;
+            }
         }
-        // Its own, as primitives that share accessors or a mesh's name each have a copy.
-        let vertex = size_of::<gg_renderer::ModelVertex>();
-        let indices = size_of_val(read.indices.as_slice());
-        self.hold(read.positions.len() * vertex + indices + read.name.len())?;
+        self.memory.hold(read.name.len())?;
         Ok(Some(read))
     }
 
@@ -1082,6 +1178,11 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             unlit: extensions.unlit.is_some(),
             ..Material::default()
         };
+        // As the emissive factor times its strength can be past an f32's range, though each of the
+        // file's numbers is within it.
+        if !read.is_finite() {
+            return Err(model.bad(format!("material {index} has a number that isn't finite")));
+        }
         let infos = [
             (Slot::Color, color_texture),
             (Slot::Surface, surface_texture),
@@ -1192,20 +1293,20 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         }
         let (model, gltf) = (self.model, self.gltf);
         let image = model.item(&gltf.images, "image", index)?;
+        // A byte past the most an image's file holds, so that a longer one fails to decode.
+        let most = image::MAX_FILE + 1;
         let bytes = match (&image.uri, image.buffer_view) {
-            // A byte past the most an image's file holds, so that a longer one fails to decode.
-            (Some(uri), None) => {
-                let most = image::MAX_FILE + 1;
-                Cow::Owned(self.uri(&format!("image {index}"), uri, most)?)
+            (Some(uri), None) => self.uri(&format!("image {index}"), uri, most)?,
+            (None, Some(view)) => {
+                let bytes = self.view(view)?.1;
+                bytes[..bytes.len().min(most as usize)].to_vec()
             }
-            (None, Some(view)) => Cow::Borrowed(self.view(view)?.1),
             _ => {
                 return Err(model.bad(format!(
                     "image {index} has both a uri and a bufferView, or neither"
                 )));
             }
         };
-        let bytes = bytes.into_owned();
         let read = if image::is_dds(&bytes) {
             image::read_dds(bytes).map_err(|problem| {
                 model.bad(format!(
@@ -1221,7 +1322,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         };
         // Read and decoded for each image, as images that share a source each decode it, its file
         // held until it's decoded.
-        self.hold(read.pixels.len() + read.decoded_len())?;
+        self.memory.hold(read.pixels.len() + read.decoded_len())?;
         let at = self.imported.images.len();
         self.imported.images.push(read);
         self.images.insert(index, at);
@@ -1237,19 +1338,19 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         index: u32,
         components: &[usize],
         normalized: bool,
-    ) -> Result<(usize, &[f32])> {
+    ) -> Result<usize> {
         let model = self.model;
-        let (count, floats, finite) = self.floats(what, semantic, index, components, normalized)?;
+        let (count, finite) = self.floats(what, semantic, index, components, normalized)?;
         if !finite {
             return Err(model.bad(format!("accessor {index} holds a number that isn't finite")));
         }
-        Ok((count, floats))
+        Ok(count)
     }
 
-    /// Accessor `index`, which `what` reads as attribute `semantic`, once: how many components
-    /// each element has, all of them in order, and whether they're all finite. glTF allows it if
-    /// each element has a number of components in `components`, and they're floats, or, if
-    /// `normalized`, normalized unsigned bytes or shorts.
+    /// Accessor `index`, which `what` reads as attribute `semantic`, once, all its elements'
+    /// components in order into `floats`: how many components each element has, and whether
+    /// they're all finite. glTF allows it if each element has a number of components in
+    /// `components`, and they're floats, or, if `normalized`, normalized unsigned bytes or shorts.
     fn floats(
         &mut self,
         what: &str,
@@ -1257,7 +1358,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         index: u32,
         components: &[usize],
         normalized: bool,
-    ) -> Result<(usize, &[f32], bool)> {
+    ) -> Result<(usize, bool)> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
         let component = match (accessor.component_type, accessor.normalized) {
@@ -1282,6 +1383,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         };
         if !self.floats.contains_key(&index) {
             let size = component.size();
+            // Checked first, so that a count past the bytes there are fails as that, then counted.
+            self.accessor_bytes(index, accessor, count * size)?;
+            let len = accessor.count as usize * count;
+            self.memory.hold(len * size_of::<f32>())?;
             let (bytes, stride) = self.accessor_bytes(index, accessor, count * size)?;
             let elements = bytes.chunks(stride).map(|element| &element[..count * size]);
             let floats: Vec<f32> = match component {
@@ -1298,13 +1403,19 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             let finite = floats.iter().all(|float| float.is_finite());
             self.floats.insert(index, (floats, finite));
         }
-        let (floats, finite) = &self.floats[&index];
-        Ok((count, floats, *finite))
+        Ok((count, self.floats[&index].1))
     }
 
-    /// Accessor `index`, which `what` reads as its indices, once, checked to be whole triangles,
-    /// each of `vertices` vertices.
-    fn indices(&mut self, what: &str, index: u32, vertices: u32) -> Result<Vec<u32>> {
+    /// Accessor `index`'s elements of `N` components, which [`floats`](Self::floats) read, copied
+    /// once the copy is counted.
+    fn copied<const N: usize>(&mut self, index: u32) -> Result<Vec<[f32; N]>> {
+        let floats = self.floats[&index].0.as_chunks::<N>().0;
+        self.memory.copy(floats)
+    }
+
+    /// Accessor `index`, which `what` reads as its indices, once, into `indices`, checked to be
+    /// whole triangles, each of `vertices` vertices.
+    fn indices(&mut self, what: &str, index: u32, vertices: u32) -> Result<()> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
         let size = match (
@@ -1330,6 +1441,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             )));
         }
         if !self.indices.contains_key(&index) {
+            // Checked first, so that a count past the bytes there are fails as that, then counted.
+            self.accessor_bytes(index, accessor, size)?;
+            self.memory
+                .hold(accessor.count as usize * size_of::<u32>())?;
             let (bytes, stride) = self.accessor_bytes(index, accessor, size)?;
             let indices = (bytes.chunks(stride))
                 .map(|element| match element[..size] {
@@ -1347,7 +1462,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 "{what} has index {past} at {at}, past its {vertices} vertices"
             )));
         }
-        Ok(indices.clone())
+        Ok(())
     }
 
     /// The bytes of accessor `index`'s elements, of `size` bytes each, from the first's start to the
@@ -1426,7 +1541,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 // No further into a file than its byteLength, nor than a byte past the memory
                 // reading may still take.
                 (Some(uri), _) => {
-                    let room = self.memory.saturating_sub(self.held).saturating_add(1);
+                    let room =
+                        (self.memory.most.saturating_sub(self.memory.held)).saturating_add(1);
                     let most = buffer.byte_length.min(room);
                     Cow::Owned(self.uri(&format!("buffer {index}"), uri, most)?)
                 }
@@ -1439,7 +1555,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             };
             // Read for each buffer, as buffers that share a file each read it.
             if let Cow::Owned(bytes) = &bytes {
-                self.hold(bytes.len())?;
+                self.memory.hold(bytes.len())?;
             }
             let length = (usize::try_from(buffer.byte_length).ok())
                 .filter(|&length| length <= bytes.len())
@@ -1503,10 +1619,45 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     }
 }
 
-/// `rotation` scaled to unit length; `None` if it's 0, or too large to scale.
+/// `rotation` scaled to unit length; `None` if it's 0, or too near it or too large to scale to a
+/// unit, as the world takes one.
 fn unit(rotation: Quat) -> Option<Quat> {
     let length = rotation.length();
-    (length > 0.0 && length.is_finite()).then(|| rotation / length)
+    let scaled = (length > 0.0 && length.is_finite()).then(|| rotation / length);
+    scaled.filter(|unit| unit.is_normalized())
+}
+
+/// Whether `transform` is one a model's part may have, as the world takes it: of finite numbers,
+/// its rotation a unit.
+pub(crate) fn takes(transform: &Transform) -> bool {
+    let Transform {
+        translation,
+        rotation,
+        scale,
+    } = transform;
+    translation.is_finite() && scale.is_finite() && rotation.is_normalized()
+}
+
+/// Whether `light` is one a model's part may have, as KHR_lights_punctual allows it, of finite
+/// numbers: of a color and an intensity not negative, a range more than 0 if it has one, and a
+/// spot's cone's angles from 0 to the outer, which is more than the inner and at most a quarter
+/// turn.
+pub(crate) fn allowed(light: &Light) -> bool {
+    let Light {
+        color,
+        intensity,
+        range,
+        inner_cone,
+        outer_cone,
+        ..
+    } = *light;
+    color.is_finite()
+        && color.cmpge(Vec3::ZERO).all()
+        && intensity.is_finite()
+        && intensity >= 0.0
+        && range.is_none_or(|range| range.is_finite() && range > 0.0)
+        && (0.0..outer_cone).contains(&inner_cone)
+        && outer_cone <= std::f32::consts::FRAC_PI_2
 }
 
 /// The type of an attribute's components that glTF allows: floats, or unsigned bytes or shorts
@@ -2779,6 +2930,22 @@ pub(crate) mod tests {
             (bad, "rotation is 0", |g| {
                 g["nodes"][0]["rotation"] = json!([0, 0, 0, 0])
             }),
+            // A rotation so near 0 that its length, squared, loses its precision, which then
+            // isn't a unit as the world takes one.
+            (bad, "rotation is 0", |g| {
+                g["nodes"][0]["rotation"] = json!([2e-22, 0, 0, 0])
+            }),
+            // A number past an f32's range, which `float_roundtrip` refuses, where it would read
+            // as infinite; and an emissive factor within it, times a strength, past it.
+            (bad, "isn't glTF's JSON", |g| {
+                g["nodes"][0]["translation"] = json!([1e39, 0, 0]);
+            }),
+            (bad, "material 0 has a number that isn't finite", |g| {
+                g["materials"][0]["emissiveFactor"] = json!([3e38, 0, 0]);
+                g["materials"][0]["extensions"] = json!({
+                    "KHR_materials_emissive_strength": {"emissiveStrength": 2},
+                });
+            }),
             (bad, "mode 9", |g| {
                 g["meshes"][0]["primitives"][0]["mode"] = json!(9)
             }),
@@ -3033,5 +3200,68 @@ pub(crate) mod tests {
         let error = read_with(1 << 20).expect_err("four images past 1 MiB");
         assert_eq!(error.code(), "engine.unsupported_model");
         assert!(error.to_string().contains("more than 1 MiB"), "{error}");
+    }
+
+    /// What reading holds on the way counts against the memory it may take, as it's about to be
+    /// made, as well as what it holds once read: the indices as they're read, beside the
+    /// primitive's copy, and the vertices of a primitive drawn flat, or parted for MikkTSpace's
+    /// tangents, beside those they're made from, with MikkTSpace's tangent for each corner. A
+    /// primitive's file holds a byte for each of its corners, which are made each a vertex of 64
+    /// bytes, so that a gigabyte of file would otherwise take some 70 before it was counted.
+    #[test]
+    fn what_reading_holds_on_the_way_counts_against_the_memory_it_may_take() {
+        // A triangle drawn 1,000 times, by indices of a byte each: flat, for want of normals; or
+        // with normals and a normal map, without tangents.
+        let model = |normal_map: bool| {
+            let mut bin = Bin::default();
+            let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
+            let normals = bin.view(&floats(&[0., 0., 1., 0., 0., 1., 0., 0., 1.]), None);
+            let uvs = bin.view(&floats(&[0., 0., 1., 0., 0., 1.]), None);
+            let indices = bin.view(&[0, 1, 2].repeat(1_000), None);
+            let image = bin.view(&png(), None);
+            let accessor = |view, kind, count, component| json!({"bufferView": view, "type": kind, "count": count, "componentType": component});
+            let mut gltf = json!({
+                "asset": {"version": "2.0"},
+                "scenes": [{"nodes": [0]}],
+                "nodes": [{"mesh": 0}],
+                "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 3}]}],
+                "accessors": [
+                    accessor(positions, "VEC3", 3, FLOAT),
+                    accessor(normals, "VEC3", 3, FLOAT),
+                    accessor(uvs, "VEC2", 3, FLOAT),
+                    accessor(indices, "SCALAR", 3_000, UNSIGNED_BYTE),
+                ],
+                "buffers": [{"byteLength": bin.bytes.len()}],
+                "bufferViews": bin.views,
+            });
+            if normal_map {
+                let primitive = &mut gltf["meshes"][0]["primitives"][0];
+                primitive["attributes"] = json!({"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2});
+                primitive["material"] = json!(0);
+                gltf["materials"] = json!([{"normalTexture": {"index": 0}}]);
+                gltf["textures"] = json!([{"source": 0}]);
+                gltf["images"] = json!([{"bufferView": image}]);
+            }
+            glb(&gltf.to_string(), &bin.bytes)
+        };
+        // What a model holds once read: its parts, its primitives' vertices, indices and names,
+        // and its images' files and what they decode to.
+        let held = |imported: &Imported| {
+            let primitives = (imported.primitives.iter())
+                .map(|primitive| primitive.held() + primitive.name.len());
+            let images =
+                (imported.images.iter()).map(|image| image.pixels.len() + image.decoded_len());
+            (size_of_val(imported.parts.as_slice()) + primitives.chain(images).sum::<usize>())
+                as u64
+        };
+        for normal_map in [false, true] {
+            let model = model(normal_map);
+            let read_with =
+                |memory| read("m", Path::new("m.glb"), |_, _| Ok(model.clone()), memory);
+            let imported = read_with(MAX_MEMORY).expect("a model");
+            assert_eq!(imported.primitives[0].indices.len(), 3_000);
+            let error = read_with(held(&imported)).expect_err("past what it holds once read");
+            assert_eq!(error.code(), "engine.unsupported_model", "{error}");
+        }
     }
 }

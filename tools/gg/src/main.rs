@@ -426,9 +426,17 @@ impl Parsed {
         }
     }
 
-    /// Takes flag `name`'s value as a number of seconds, or `default`'s if it wasn't given.
+    /// Takes flag `name`'s value as a number of seconds to wait, more than 0, or `default`'s if it
+    /// wasn't given.
+    ///
+    /// Fails with `gg.args` for 0, which would give up before anything could answer.
     fn seconds(&mut self, name: &str, default: u64) -> Result<Duration, Failure> {
-        self.number(name, default).map(Duration::from_secs)
+        match self.number(name, default)? {
+            0 => Err(bad(format!(
+                "`{name}` takes a number of seconds more than 0"
+            ))),
+            seconds => Ok(Duration::from_secs(seconds)),
+        }
     }
 
     fn take(&mut self, name: &str) -> Option<Option<String>> {
@@ -557,7 +565,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 release: parsed.switch("--release"),
                 patches: !parsed.switch("--no-patch"),
                 hang: parsed.seconds("--hang", 10)?,
-                snapshot: parsed.seconds("--snapshot", 5)?,
+                // 0 for none, which turns restarts off.
+                snapshot: Duration::from_secs(parsed.number("--snapshot", 5)?),
                 peers: parsed.number("--peers", 1)?,
                 embedded: parsed.switch("--embedded"),
                 args: std::mem::take(&mut parsed.rest),
@@ -621,8 +630,9 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             let name = parsed.positional(1, 1, "new <NAME>")?.remove(0);
             if new::project(&name).check().is_err() {
                 return Err(bad(format!(
-                    "`gg new` takes a package's name, of ASCII letters, digits, `-` and `_`, not \
-                     starting with a digit, not `{name}`"
+                    "`gg new` takes a package's name, of ASCII letters, digits, `-` and `_`, \
+                     starting with a letter or `_`, and not one Windows keeps for a device, as \
+                     `con`, not `{name}`"
                 )));
             }
             Command::New(name)
@@ -1074,6 +1084,12 @@ mod tests {
             &["run", "a", "--snapshot", "often"],
             &["run", "a", "--peers", "3"],
             &["run", "a", "--peers", "0"],
+            // Waits of no time, which would take a game for hung at its first ping, kill a check
+            // as it starts, and give up on an answer before it could come.
+            &["run", "a", "--hang", "0"],
+            &["check", "a", "--timeout", "0"],
+            &["status", "--timeout", "0"],
+            &["mcp", "--timeout=0"],
             &["run", "a", "--peers", "2", "--", "--host", "0.0.0.0:7700"],
             &["run", "a", "--peers", "2", "--", "--record=run.recording"],
             &["snapshot", "a", "b"],
@@ -1120,6 +1136,8 @@ mod tests {
             &["ship", "a", "--", "--headless"],
             &["new"],
             &["new", "2probe"],
+            &["new", "-probe"],
+            &["new", "aux"],
             &["new", "a", "b"],
             &["new", "probe", "--project", "../../games/shards"],
         ] {

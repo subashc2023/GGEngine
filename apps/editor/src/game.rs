@@ -1608,7 +1608,7 @@ impl Game {
             && self.talker.is_some()
             && let Some(input) = forwarded(event, origin)
         {
-            self.input.push(input);
+            self.queue(input);
         }
         if let Some(at) = self.view.picking.take() {
             self.view.asked = self.ask_pick(at, origin);
@@ -1637,15 +1637,27 @@ impl Game {
             return;
         }
         if !through {
-            self.input.push(InputEvent::Focused(false));
+            self.queue(InputEvent::Focused(false));
             return;
         }
         if let (Some(at), Some(view)) = (cursor, view) {
             let [x, y] = in_view(at, view.origin);
             let [width, height] = view.size.map(f64::from);
             if (0.0..width).contains(&x) && (0.0..height).contains(&y) {
-                self.input.push(InputEvent::Cursor([x, y]));
+                self.queue(InputEvent::Cursor([x, y]));
             }
+        }
+    }
+
+    /// Queues `input` for the game's next `input`, a move of the cursor taking the place of one
+    /// queued just before it: so that while an `input` waits for its answer, as while a script has
+    /// stopped the game, what's queued grows with presses, as a key's, rather than with every move
+    /// of the mouse. The game gets what's queued then in one frame, as a game's window gets what
+    /// its OS queued while its frames waited.
+    fn queue(&mut self, input: InputEvent) {
+        match (self.input.last_mut(), input) {
+            (Some(InputEvent::Cursor(last)), InputEvent::Cursor(at)) => *last = at,
+            (_, input) => self.input.push(input),
         }
     }
 }
@@ -3557,6 +3569,36 @@ mod tests {
         assert_eq!(sent, [], "the agent's grid");
         let sent = answer(None, Some(xz), [None, agent], 6);
         assert_eq!(sent, [], "the agent's grid stays");
+    }
+
+    /// While the game hasn't answered the last `input`, as while a script has stopped it, the
+    /// cursor's moves queued take each other's places, the presses between them kept in order, so
+    /// that what goes once it answers grows with the presses alone.
+    #[test]
+    fn the_cursors_moves_queued_for_the_game_take_each_others_places() {
+        let (mut game, _ends) = serving();
+        game.inputting = true;
+        let at = |i: u32| [101.0 + f64::from(i % 400), 60.0];
+        let w = Event::Key {
+            key: Key::KeyW,
+            pressed: true,
+            repeat: false,
+        };
+        for i in 0..1_000 {
+            if i == 500 {
+                let _ = game.route(&w, &reading(at(i)), Some(VIEW));
+            }
+            let [x, y] = at(i);
+            let moved = Event::CursorMoved { x, y };
+            let _ = game.route(&moved, &reading(at(i)), Some(VIEW));
+        }
+        let w_down = InputEvent::Key {
+            key: "KeyW".to_owned(),
+            pressed: true,
+            repeat: false,
+        };
+        let in_game = |[x, y]: [f64; 2]| InputEvent::Cursor(in_view([x, y], VIEW.origin));
+        assert_eq!(game.input, [in_game(at(499)), w_down, in_game(at(999))]);
     }
 
     #[test]

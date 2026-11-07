@@ -515,8 +515,8 @@ impl Bake {
 
     /// The font [`bytes`](Self::bytes) wrote into `bytes`, its shaping made again from its file.
     /// The error says what doesn't hold together: a field of no texels or wider or taller than
-    /// [`MAX_TEXTURE_SIZE`], texels other than its size's, glyphs out of order, a number that isn't
-    /// finite, bytes left over, or a file that doesn't shape.
+    /// [`MAX_TEXTURE_SIZE`], fewer than 1 unit per em, texels other than its size's, glyphs out of
+    /// order, a number that isn't finite, bytes left over, or a file that doesn't shape.
     fn read(bytes: &[u8]) -> std::result::Result<Self, String> {
         let mut read = Reading { bytes, at: 0 };
         let size = [read.u32()?, read.u32()?];
@@ -527,6 +527,11 @@ impl Bake {
             return Err(format!("its field is {} by {} texels", size[0], size[1]));
         }
         let units_per_em = read.float()?;
+        // As a font's file gives them, a whole number from 1, which shaped text's positions are
+        // divided by.
+        if units_per_em < 1.0 {
+            return Err(format!("it has {units_per_em} units per em"));
+        }
         let lines = Lines {
             ascent: read.float()?,
             descent: read.float()?,
@@ -1168,8 +1173,8 @@ mod tests {
     }
 
     /// A baked font reads back from what a game's package holds of it, its field, glyphs, metrics
-    /// and file alike, its shaping made again from its file; what's cut short or has bytes past
-    /// its field is refused.
+    /// and file alike, its shaping made again from its file; what's cut short, has bytes past its
+    /// field or has fewer than 1 unit per em, which text's positions are divided by, is refused.
     #[test]
     fn a_baked_font_reads_back_from_its_bytes() {
         let bake = bake_inter();
@@ -1183,6 +1188,16 @@ mod tests {
         assert_eq!(read.baked.bytes, bake.baked.bytes);
         assert_eq!(read.bytes(), bytes);
         assert!(Bake::read(&bytes[..bytes.len() - 1]).is_err(), "cut short");
+        // Its units per em, after the field's width and height.
+        for units in [0.0_f32, -2048.0, 0.5] {
+            let mut unitless = bytes.clone();
+            unitless[8..12].copy_from_slice(&units.to_le_bytes());
+            let error = Bake::read(&unitless).err();
+            assert!(
+                error.is_some_and(|error| error.contains("units per em")),
+                "{units}"
+            );
+        }
         let mut longer = bytes;
         longer.push(0);
         assert!(Bake::read(&longer).is_err(), "a byte past its field");

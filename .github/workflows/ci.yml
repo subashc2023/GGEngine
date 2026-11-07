@@ -78,6 +78,10 @@ jobs:
       - name: Check gg-engine without dev
         if: matrix.once
         run: cargo clippy -p gg-engine --all-targets --locked -- -D warnings
+      # Its unit tests without `dev`, which `cargo test --workspace` turns on for every crate.
+      - name: Test gg-engine without dev
+        if: matrix.once
+        run: cargo test -p gg-engine --lib --locked
       # The docs, private items' included, without a warning: on one runner too, as they're alike
       # on every platform but in code built for one alone.
       - name: Check the docs

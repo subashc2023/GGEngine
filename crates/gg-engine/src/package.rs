@@ -8,7 +8,7 @@
 //! The format, every number little-endian:
 //!
 //! ```text
-//! header   32 bytes: "GGPK", the version (2), the number of entries, the string table's length,
+//! header   32 bytes: "GGPK", the version (4), the number of entries, the string table's length,
 //!          then the asset root's path and the start scene's, each from the project's directory,
 //!          as its manifest gives them, and each its start and length in the string table, the
 //!          start's 0 long for none
@@ -129,8 +129,9 @@ impl Package {
     ///
     /// Fails with `package.unreadable` if the file can't be opened or read, and with `package.bad`
     /// if it isn't a package of this version, or its table doesn't hold together: an entry past
-    /// the file's end, a path that isn't UTF-8, paths out of order or twice, an ID twice, or a
-    /// kind or a codec this engine doesn't know.
+    /// the file's end, a path that isn't UTF-8, or that isn't inside the asset root on every OS, as
+    /// [`Writer::add`] refuses, paths out of order or twice, an ID twice, or a kind or a codec this
+    /// engine doesn't know.
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let unreadable = |error: io::Error| {
             let message = format!("can't read the package {}", path.display());
@@ -188,11 +189,6 @@ impl Package {
             0 => None,
             len => Some(string(u32_at(&header, 24), len).map_err(bad)?),
         };
-        // As a manifest's check keeps them, inside the project's directory.
-        let inside = |path: &str| {
-            !(path.split('/'))
-                .any(|part| matches!(part, "" | "." | "..") || part.contains([':', '\\']))
-        };
         if !(&*assets == "." || inside(&assets))
             || start.as_deref().is_some_and(|start| !inside(start))
         {
@@ -208,6 +204,9 @@ impl Package {
             let offset = u64_at(row, 8);
             let len = u64_at(row, 16);
             let path = string(u32_at(row, 24), u64::from(u16_at(row, 28))).map_err(bad)?;
+            if !inside(&path) {
+                return Err(bad(format!("`{path}` isn't a path inside the asset root")));
+            }
             let kind = Kind::of(row[30])
                 .ok_or_else(|| bad(format!("`{path}` is of a kind it doesn't know")))?;
             if row[31] != 0 {
@@ -382,6 +381,13 @@ impl Files {
     }
 }
 
+/// Whether `path`, `/` between its parts, is inside the directory it's from, as a manifest's check
+/// keeps its paths on every OS: none of its parts empty, `.` or `..`, nor holding `:`, a drive's
+/// on Windows, or `\`, a separator there.
+fn inside(path: &str) -> bool {
+    !(path.split('/')).any(|part| matches!(part, "" | "." | "..") || part.contains([':', '\\']))
+}
+
 /// `path`, relative, `/` between its parts, joined to `dir` a part at a time, so that its separators
 /// are the OS's: `dir` itself for `.`, as gg-api joins a manifest's paths.
 pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
@@ -478,8 +484,9 @@ impl Writer {
     /// Adds the entry at `path` from the asset root, `/` between its parts, of `kind`, holding
     /// `data`, with the ID `id` names, if it has one.
     ///
-    /// Fails with `package.bad` for a path it has, a path longer than 65,535 bytes or of an empty
-    /// part, `.` or `..`, or an ID another entry has.
+    /// Fails with `package.bad` for a path it has, a path longer than 65,535 bytes or that isn't
+    /// inside the asset root on every OS, of an empty part, `.` or `..`, or holding `:` or `\`, or
+    /// an ID another entry has.
     pub fn add(&mut self, path: &str, id: Option<u64>, kind: Kind, data: Vec<u8>) -> Result<()> {
         let bad = |problem: &str| {
             Error::new(
@@ -490,8 +497,10 @@ impl Writer {
         if path.len() > usize::from(u16::MAX) {
             return Err(bad("its path is longer than 65,535 bytes"));
         }
-        if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
-            return Err(bad("its path has an empty part, `.` or `..`"));
+        if !inside(path) {
+            return Err(bad(
+                "its path has an empty part, `.` or `..`, or holds `:` or `\\`",
+            ));
         }
         let id = id.unwrap_or(0);
         if id != 0 && self.entries.values().any(|&(other, ..)| other == id) {
@@ -645,7 +654,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// A writer refuses a path twice, an ID twice and paths with empty parts, `.` or `..`.
+    /// A writer refuses a path twice, an ID twice and paths with empty parts, `.` or `..`, or
+    /// holding `\` or `:`, which Windows reads as a separator and a drive's.
     #[test]
     fn a_writer_refuses_what_wouldnt_read_back() {
         let mut writer = Writer::new(".", None);
@@ -657,6 +667,8 @@ mod tests {
             ("b.png", Some(1)),
             ("c//d.png", None),
             ("../e.png", None),
+            (r"..\f.png", None),
+            ("C:g.png", None),
         ] {
             let error = writer.add(path, id, Kind::File, Vec::new()).unwrap_err();
             assert_eq!(error.code(), "package.bad", "{path}");
@@ -664,8 +676,8 @@ mod tests {
     }
 
     /// A file that isn't a package, or whose table doesn't hold together, or whose asset root or
-    /// start scene a manifest couldn't have, is refused with `package.bad`, and one that isn't
-    /// there with `package.unreadable`.
+    /// start scene a manifest couldn't have, or an entry's path outside the root, is refused with
+    /// `package.bad`, and one that isn't there with `package.unreadable`.
     #[test]
     fn a_package_that_doesnt_hold_together_is_refused() {
         let mut writer = Writer::new("assets", None);
@@ -700,6 +712,14 @@ mod tests {
         let mut codec = good.clone();
         codec[HEADER + 31] = 1;
         cases.push(("codec", codec));
+        // The first entry's path, in the string table, up a folder, through Windows' separator, or
+        // to a drive, each still before the second's.
+        let at = (good.windows(5).position(|bytes| bytes == b"a.png")).unwrap();
+        for path in [b"../ab", br"a\png", b"a:png"] {
+            let mut outside = good.clone();
+            outside[at..at + 5].copy_from_slice(path);
+            cases.push(("an entry outside the root", outside));
+        }
         for (case, bytes) in cases {
             std::fs::write(&path, bytes).unwrap();
             let error = Package::open(&path).unwrap_err();

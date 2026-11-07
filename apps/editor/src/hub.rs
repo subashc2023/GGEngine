@@ -1003,7 +1003,9 @@ mod tests {
     #[test]
     fn gg_news_output_says_what_it_made() {
         assert_eq!(new_project("my_game"), Ok(()));
-        assert!(new_project("2fast").is_err() && new_project("a b").is_err());
+        for refused in ["2fast", "a b", "-fast", "nul"] {
+            assert!(new_project(refused).is_err(), "{refused}");
+        }
         let output = |code: i32, stdout: &str, stderr: &str| Output {
             status: exit_status(code),
             stdout: stdout.as_bytes().to_vec(),

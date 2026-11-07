@@ -69,11 +69,13 @@ impl Project {
         })
     }
 
-    /// Checks the project's fields: `game` a package's name, ASCII letters, digits, `-` and `_`,
-    /// not starting with a digit; each path relative, its parts named, neither `.` nor `..`, with
-    /// `/` between them, but `assets`, which may be `.`; `scenes` at least one folder, each once
-    /// and inside `assets`; `start` a `.ron` file inside one of them; and every string printable
-    /// ASCII without `"` or `\`.
+    /// Checks the project's fields: `game` a package's name as Cargo takes it, ASCII letters,
+    /// digits, `-` and `_`, starting with a letter or `_`, and one a folder may have on every OS,
+    /// not a name Windows keeps for a device, as `gg new` makes the game's folder of that name in
+    /// the workspace, every member of which Cargo reads; each path relative, its parts named,
+    /// neither `.` nor `..`, with `/` between them, but `assets`, which may be `.`; `scenes` at
+    /// least one folder, each once and inside `assets`; `start` a `.ron` file inside one of them;
+    /// and every string printable ASCII without `"` or `\`.
     ///
     /// Fails with `project.bad`, naming the field.
     pub fn check(&self) -> Result<(), Failure> {
@@ -91,10 +93,12 @@ impl Project {
             }
         }
         let named = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-        if !(self.game.starts_with(|c: char| !c.is_ascii_digit()) && self.game.chars().all(named)) {
+        let first = |c: char| c.is_ascii_alphabetic() || c == '_';
+        if !(self.game.starts_with(first) && self.game.chars().all(named)) || device(&self.game) {
             return bad(format!(
                 "`game` is `{}`, which isn't a package's name: ASCII letters, digits, `-` and `_`, \
-                 not starting with a digit",
+                 starting with a letter or `_`, and not a name Windows keeps for a device, as \
+                 `con` or `nul`",
                 self.game
             ));
         }
@@ -203,6 +207,17 @@ pub(crate) fn is_relative(path: &str) -> bool {
     !path.contains(refused) && path.split('/').all(named)
 }
 
+/// Whether `name` is one Windows keeps for a device, whatever its case, as `CON` or `com1`, which
+/// names no file or folder there.
+fn device(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let numbered = |prefix: &str| {
+        (name.strip_prefix(prefix))
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    };
+    matches!(name.as_str(), "con" | "prn" | "aux" | "nul") || numbered("com") || numbered("lpt")
+}
+
 /// Whether `path` is inside directory `dir`, both relative paths: every path is inside `.`.
 fn inside(path: &str, dir: &str) -> bool {
     dir == "." || (path.strip_prefix(dir)).is_some_and(|rest| rest.starts_with('/'))
@@ -262,7 +277,7 @@ mod tests {
             change(&mut project);
             project
         };
-        let cases: [(Change, &str); 11] = [
+        let cases: [(Change, &str); 15] = [
             (|p| p.start = "/scenes/arena.ron".to_owned(), "start"),
             (|p| p.start = "C:/scenes/arena.ron".to_owned(), "start"),
             (|p| p.start = "scenes/../arena.ron".to_owned(), "start"),
@@ -274,6 +289,12 @@ mod tests {
             (|p| p.scenes.push("scenes".to_owned()), "scenes"),
             (|p| p.game = "2shards".to_owned(), "game"),
             (|p| p.game = "sh ards".to_owned(), "game"),
+            // Which Cargo refuses, and every command in the workspace with it, as the folder `gg
+            // new` makes of it is a member; and names a folder can't have on Windows.
+            (|p| p.game = "-shards".to_owned(), "game"),
+            (|p| p.game = "nul".to_owned(), "game"),
+            (|p| p.game = "Con".to_owned(), "game"),
+            (|p| p.game = "COM1".to_owned(), "game"),
         ];
         for (change, field) in cases {
             let project = changed(change);
@@ -281,6 +302,14 @@ mod tests {
                 assert_eq!(failure.code, "project.bad", "{project:?}");
                 assert!(failure.message.contains(field), "{project:?}: {failure:?}");
             }
+        }
+        // Names that start as a device's do, or that start with `_`, are a game's.
+        for game in ["console", "com10", "lpt", "_nul"] {
+            let project = Project {
+                game: game.to_owned(),
+                ..shards()
+            };
+            assert_eq!(project.check(), Ok(()), "{game}");
         }
         // Strings that would need escapes, which reach a project only through ron's.
         for (from, to, field) in [
