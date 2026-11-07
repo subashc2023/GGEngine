@@ -301,13 +301,19 @@ impl Types {
             (index.0..len).try_for_each(|i| self.check_defaults(TypeIndex(i)))
         });
         if let Err(error) = described {
-            for entry in self.entries.drain(index.0 as usize..) {
-                self.by_name.remove(&entry.info.name);
-                self.by_type.remove(&entry.type_id);
-            }
+            self.truncate(index.0 as usize);
             return Err(error);
         }
         Ok(Type::Named(index))
+    }
+
+    /// Forgets the types described since there were `len`, as a description refused once it's
+    /// made is forgotten, with those described for it.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        for entry in self.entries.drain(len..) {
+            self.by_name.remove(&entry.info.name);
+            self.by_type.remove(&entry.type_id);
+        }
     }
 
     /// Checks the defaults that `index`'s fields, and its variants', give against their bounds,

@@ -11,6 +11,7 @@ use std::{iter, mem};
 use gg_core::{Error, Result};
 
 use super::declared::{self, Declared, Kind, is_identifier};
+use super::scene::WORDS;
 use super::{Component, Entity, World, hash};
 use crate::reflect::{self, Ident, Meta, Reflect, Shape, Type, TypeIndex, TypeInfo, Types, Value};
 
@@ -63,11 +64,11 @@ enum NewColumn {
 impl Components {
     /// `T`'s id, which it gets once it's described, the first time it's asked for.
     ///
-    /// Fails with `ecs.registered_late` once the world has loaded mods; as describing it does, such
-    /// as with `reflect.name_taken` or `reflect.bad_default`; with `reflect.unnamed` if it
-    /// describes itself as something other than a struct or an enum; and with `ecs.bad_exclusive`
-    /// if it names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`]
-    /// says.
+    /// Fails, leaving the types described as they were, with `ecs.registered_late` once the world
+    /// has loaded mods; as describing it does, such as with `reflect.name_taken` or
+    /// `reflect.bad_default`; with `reflect.unnamed` if it describes itself as something other
+    /// than a struct or an enum; and with `ecs.bad_exclusive` if it names an exclusive field that
+    /// isn't a `bool` of its own, as [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
         if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {
             return Ok(id);
@@ -86,6 +87,28 @@ impl Components {
                 ),
             ));
         }
+        // Forgotten if it's refused, with the types described for it, so that a type refused
+        // leaves its name free, as a script's does.
+        let before = self.types.iter().len();
+        let index = (self.describe::<T>()).inspect_err(|_| self.types.truncate(before))?;
+        let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
+        let name = self.types.info(index).name.clone();
+        self.infos.push(Info {
+            key: hash::type_key(&name),
+            name: name.clone(),
+            index,
+            exclusive: T::exclusive(),
+            new_column: NewColumn::Rust(|| Box::new(Vec::<T>::new())),
+        });
+        self.ids.insert(TypeId::of::<T>(), id);
+        self.by_name.insert(name, id);
+        self.revision = super::next_serial();
+        Ok(id)
+    }
+
+    /// Describes `T`, and returns its description, if it's one a component type registers with, as
+    /// [`register`](Self::register) says; refused, it may leave what it described.
+    fn describe<T: Component>(&mut self) -> Result<TypeIndex> {
         let index = match T::describe(&mut self.types)? {
             Type::Named(index) => index,
             other => {
@@ -99,8 +122,7 @@ impl Components {
                 ));
             }
         };
-        let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
-        let name = self.types.info(index).name.clone();
+        let name = &self.types.info(index).name;
         // Another type's description, as one that passes everything to a field might give: two
         // component types would share a name, whichever registered first.
         let (owner, rust) = self.types.rust_type(index);
@@ -114,8 +136,7 @@ impl Components {
                 ),
             ));
         }
-        let exclusive = T::exclusive();
-        if let Some(field) = exclusive {
+        if let Some(field) = T::exclusive() {
             let fields = match &self.types.info(index).shape {
                 Shape::Struct {
                     fields,
@@ -135,17 +156,7 @@ impl Components {
                 ));
             }
         }
-        self.infos.push(Info {
-            key: hash::type_key(&name),
-            name: name.clone(),
-            index,
-            exclusive,
-            new_column: NewColumn::Rust(|| Box::new(Vec::<T>::new())),
-        });
-        self.ids.insert(TypeId::of::<T>(), id);
-        self.by_name.insert(name, id);
-        self.revision = super::next_serial();
-        Ok(id)
+        Ok(index)
     }
 
     /// Declares a component type that a script declares, which no Rust type is: a struct named
@@ -154,8 +165,9 @@ impl Components {
     /// so that a type refused leaves its name free.
     ///
     /// Fails with `reflect.name_taken` if a type has `name` already; `reflect.bad_name` for a name,
-    /// the type's or a field's, that isn't an identifier, or a field's given twice; and
-    /// `reflect.bad_default` for a default its kind refuses, or a number that isn't finite.
+    /// the type's or a field's, that isn't an identifier, or is one of RON's words, which no scene
+    /// could save, or a field's given twice; and `reflect.bad_default` for a default its kind
+    /// refuses, or a number that isn't finite.
     pub fn declare(
         &mut self,
         name: &str,
@@ -310,6 +322,15 @@ fn described(
         return Err(Error::new(
             "reflect.bad_name",
             format!("`{bad}` isn't an identifier: a letter or `_`, then letters, digits or `_`"),
+        ));
+    }
+    if let Some(word) = names.clone().find(|name| WORDS.contains(name)) {
+        return Err(Error::new(
+            "reflect.bad_name",
+            format!(
+                "`{word}` is one of RON's words, `true`, `false`, `Some`, `None`, `inf` and \
+                 `NaN`, which a scene writes no name as, so that no scene could save the type"
+            ),
         ));
     }
     for (i, (field, ..)) in fields.iter().enumerate() {

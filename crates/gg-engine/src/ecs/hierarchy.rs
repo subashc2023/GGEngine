@@ -243,17 +243,33 @@ impl World {
     /// Where `entity`, which is alive, is as the latest tick left it, as drawing places it: its
     /// parent's matrix and rotation times its transform's, from its root down; `None` at the
     /// origin, unturned, at its own size, as a root without a transform is, and what it carries
-    /// without one.
+    /// without one. Its lineage is walked, however deep it goes, rather than recursed, which a
+    /// chain some thousands deep would overflow the stack with: kept on the stack to the depths
+    /// games nest to, so that it allocates nothing, as a sound that follows an entity reads it each
+    /// frame, and in a list past them.
     fn placed(&self, entity: Entity) -> Option<(Mat4, Quat)> {
-        let parent = self
-            .parent_of(entity.index)
-            .and_then(|parent| self.placed(parent));
-        let own = self.get::<Transform>(entity);
-        let own = own.map(|own| (own.matrix(), own.rotation));
-        match (parent, own) {
-            (Some(parent), Some(own)) => Some((parent.0 * own.0, parent.1 * own.1)),
-            (parent, own) => own.or(parent),
+        const NEAR: usize = 32;
+        let (mut near, mut far) = ([NONE; NEAR], Vec::new());
+        let lineage = iter::successors(Some(entity.index), |&at| {
+            some(self.meta[at as usize].links.parent)
+        });
+        let mut depth = 0;
+        for slot in lineage {
+            match near.get_mut(depth) {
+                Some(kept) => *kept = slot,
+                None => far.push(slot),
+            }
+            depth += 1;
         }
+        let down = far.iter().rev().chain(near[..depth.min(NEAR)].iter().rev());
+        down.fold(None, |parent, &slot| {
+            let own = self.get::<Transform>(self.entity_at(slot));
+            let own = own.map(|own| (own.matrix(), own.rotation));
+            match (parent, own) {
+                (Some(parent), Some(own)) => Some((parent.0 * own.0, parent.1 * own.1)),
+                (parent, own) => own.or(parent),
+            }
+        })
     }
 
     /// Removes `entity`, its components and its descendants, children before their parents.
@@ -735,5 +751,34 @@ pub(super) mod tests {
         world.despawn(root).expect("alive");
         let error = world.pose(child).expect_err("despawned");
         assert_eq!(error.code(), "ecs.no_entity");
+    }
+
+    /// An entity's pose is found however deep it is, as code or a scene may nest one, and so is its
+    /// subtree despawned: by walks along its lineage, never a call for each level, which a chain
+    /// some thousands deep would overflow the stack with.
+    #[test]
+    fn a_pose_is_found_however_deep_its_entity_is() {
+        use gg_core::math::Vec3;
+
+        let mut world = World::default();
+        let step = Transform {
+            translation: Vec3::X,
+            ..Transform::IDENTITY
+        };
+        // Each made the parent of the root before, so that no reparent walks the chain.
+        let deepest = world.spawn(step);
+        let mut root = deepest;
+        for _ in 1..100_000 {
+            let parent = world.spawn(step);
+            world.set_parent(root, Some(parent)).expect("no cycle");
+            root = parent;
+        }
+        let pose = world.pose(deepest).expect("alive");
+        assert_eq!(
+            pose.matrix.w_axis.truncate(),
+            Vec3::new(100_000.0, 0.0, 0.0)
+        );
+        world.despawn(root).expect("alive");
+        assert!(!world.contains(deepest));
     }
 }

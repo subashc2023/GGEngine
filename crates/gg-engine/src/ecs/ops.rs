@@ -1968,11 +1968,14 @@ pub(super) mod tests {
     #[test]
     fn a_components_exclusive_field_is_a_bool_of_its_own() {
         let mut world = World::default();
+        let described = world.types().iter().len();
         for registered in [world.register::<Unlit>(), world.register::<Dimmed>()] {
             let error = registered.expect_err("refused");
             assert_eq!(error.code(), "ecs.bad_exclusive", "{error}");
         }
         assert_eq!(world.component_types().count(), 1, "`Parent` alone");
+        // Nor are their descriptions kept, which would take their names.
+        assert_eq!(world.types().iter().len(), described);
         world.register::<Lamp>().expect("registered");
     }
 }

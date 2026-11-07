@@ -336,6 +336,12 @@ mod tests {
         );
         let twice = vec![number("speed", 0.0), number("speed", 1.0)];
         assert_eq!(refused("Spin", twice), "reflect.bad_name");
+        // Nor one of RON's words, a type's or a field's, which no scene could save it by.
+        assert_eq!(refused("None", vec![]), "reflect.bad_name");
+        assert_eq!(
+            refused("Spin", vec![number("inf", 0.0)]),
+            "reflect.bad_name"
+        );
         assert_eq!(
             refused("Spin", vec![number("speed", f64::NAN)]),
             "reflect.bad_default"

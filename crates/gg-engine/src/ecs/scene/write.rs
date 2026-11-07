@@ -16,7 +16,7 @@ use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Shape, Type, Types, Value};
 
 /// RON's words, which no name a scene writes is, so that a name never reads as a value.
-const WORDS: [&str; 10] = [
+pub(in crate::ecs) const WORDS: [&str; 10] = [
     "true", "false", "Some", "None", "inf", "inff32", "inff64", "NaN", "NaNf32", "NaNf64",
 ];
 

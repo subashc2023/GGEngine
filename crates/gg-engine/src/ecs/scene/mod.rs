@@ -23,6 +23,7 @@ use crate::assets::Asset;
 use crate::package::Files;
 use crate::reflect::{Meta, Show};
 use read::Loaded;
+pub(super) use write::WORDS;
 pub(crate) use write::{float, quote};
 
 /// The most levels a scene's values nest: a component's value is the first, and each value in a
