@@ -118,16 +118,9 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Meshlets and packed vertices** (2026-11-06)
 - **A visibility buffer** (2026-11-06)
 - **TAA** (2026-11-06)
+- **Phase 13, GPU-driven rendering** (2026-11-06)
 
 ## Now
-
-**Phase 13, GPU-driven rendering**, as Next has it: its milestones are done, as Done has them.
-
-Phase 13 closes once the showcase's 16 Bistros, `bistro_grid.ron`, from its package, run headless
-at 1,280 by 720 on the RTX 4090 in 4.17 ms a frame or less at the 95th percentile, 240 frames a
-second, the refresh of the display here, with `update_ms` and `render_ms` as one Bistro's,
-`bistro.ron`'s; an Apple Silicon Mac's waits for one, with the rest that Deferred lists for when
-one is at hand.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -153,16 +146,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 and 12 are done, as Done has it, but for what Deferred holds.
-
-13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
-    pyramid); async compute, which the graph schedules on a queue of its own where the device has
-    one, culling and light culling beside the shadows' passes; indirect draws; meshlets, which the
-    cooker builds, drawn through mesh shaders where supported and vertex shaders elsewhere;
-    vertices the cooker packs into 8- and 16-bit fields; a visibility buffer; clustered lighting;
-    TAA. *Done when* CPU frame time stays flat as the instance count grows, and a cooked Amazon
-    Lumberyard Bistro with many instances meets a frame-time target set in this phase on the
-    RTX 4090; on an Apple Silicon Mac once one is at hand.
+Phases 11 to 13 are done, as Done has it, but for what Deferred holds.
 
 Later: 3D physics, animation (sprite flipbooks and tweens, then skeletal), particles, linked
 prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
@@ -296,7 +280,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | A layer's mirrored and unmirrored draws of one culling mesh, interleaved, draw a run each, since a run culls one way: the scene sorts the world's by how they wind, keeping them to two | A layer draws a culling mesh many times, some mirrored |
-| Drawing a culled run's levels in one call, through `multiDrawIndirect` where the device has it: the CPU records an indirect draw for each run and level of its mesh, up to eight, whatever its instances, in each of the view's two passes and each cascade's | A profile shows recording them |
+| Drawing a pass's culled runs a draw for each pipeline, whose count the culling writes, as Vulkan's `*IndirectCount` draws take it, each draw reading its mesh, instances and parameters from a record the culling writes rather than from push constants, as games' shaders would then too: the CPU records a draw for each run, of its meshlets or of each of its levels, up to eight, whatever its instances, in each pass that draws it. In the 16 Bistros, recording them in eight passes a frame takes about 0.55 ms of the RTX 4090's render thread's 0.95, which is about as long a frame as the GPU's 1.0 ms | A game's distinct meshes make the render thread outlast the GPU's frame |
 | Counting the shadows' cascades' draws, instances and triangles: what the culling reads back is the view's alone | An agent tunes the shadows' cost by them |
 | Culling what blends and the canvas, which draw from the CPU, on its levels, whatever the view sees | A game draws many blending instances outside its view |
 | A sphere round the vertices of a mesh a layer adds without levels, from where its vertex type keeps its position: such a mesh is never culled, as `Meshes::add` can't read its positions | A game draws many of its own meshes outside its view |
