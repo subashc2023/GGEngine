@@ -15,8 +15,8 @@ use crate::frame::graph::Kind;
 use crate::{Device, vk_error};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for: its color
-/// target's, its IDs', if it has them, and its depth's, if it has it, as a [`Graph`]'s passes
-/// declare them; or its depth's alone.
+/// target's, its IDs', if it has them, its motion's beside those, if it has it, and its depth's, if
+/// it has it, as a [`Graph`]'s passes declare them; or its depth's alone.
 ///
 /// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +25,8 @@ pub struct Format {
     pub(crate) color: vk::Format,
     /// `UNDEFINED` for a pass without IDs.
     pub(crate) ids: vk::Format,
+    /// `UNDEFINED` for a pass without motion.
+    pub(crate) motion: vk::Format,
     /// `UNDEFINED` for a pass without depth.
     pub(crate) depth: vk::Format,
 }
@@ -55,6 +57,7 @@ impl Format {
         Self {
             color,
             ids: vk::Format::UNDEFINED,
+            motion: vk::Format::UNDEFINED,
             depth: vk::Format::UNDEFINED,
         }
     }
@@ -64,6 +67,16 @@ impl Format {
     pub const fn with_ids(self) -> Self {
         Self {
             ids: Kind::Ids.format(),
+            ..self
+        }
+    }
+
+    /// This format with motion's: what a pass into a target of this format with IDs and motion
+    /// beside it ([`RenderPass::motion`](crate::RenderPass::motion)) renders into, as a third color
+    /// target, which a pipeline that writes depth writes at location 2, as 16-bit floats in RGBA.
+    pub const fn with_motion(self) -> Self {
+        Self {
+            motion: Kind::Motion.format(),
             ..self
         }
     }
@@ -83,6 +96,10 @@ impl Format {
 
     fn has_ids(self) -> bool {
         self.ids != vk::Format::UNDEFINED
+    }
+
+    fn has_motion(self) -> bool {
+        self.motion != vk::Format::UNDEFINED
     }
 
     fn has_depth(self) -> bool {
@@ -181,7 +198,9 @@ pub struct GraphicsDesc<'a> {
     pub fragment: Option<&'a CStr>,
     /// The formats of the targets it draws into. Where they have IDs, its fragment shader writes
     /// them at location 1, as two 32-bit unsigned integers, which replace what's there wherever it
-    /// draws, however its color blends.
+    /// draws, however its color blends. Where they have motion, a pipeline that writes depth
+    /// writes it at location 2, a float4 that replaces what's there, as the motion belongs to what
+    /// owns the depth; one that doesn't leaves it as it was.
     pub format: Format,
     pub blend: Blend,
     /// Whether it writes its depth where it draws, for later draws to test against. Only a
@@ -216,10 +235,14 @@ impl Pipeline {
     /// # Panics
     ///
     /// If it writes, biases or clamps depth for targets without it, it has no fragment shader but
-    /// its targets have colors, it blends into a visibility buffer, or its geometry is a mesh
-    /// shader and the device draws through none.
+    /// its targets have colors, it blends into a visibility buffer, its targets have motion but
+    /// no IDs, or its geometry is a mesh shader and the device draws through none.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
+        assert!(
+            desc.format.has_ids() || !desc.format.has_motion(),
+            "a pipeline draws motion only beside IDs, its third color target"
+        );
         // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062).
         assert!(
             desc.blend == Blend::Opaque || desc.format.color != Format::VISIBILITY.color,
@@ -287,10 +310,19 @@ impl Pipeline {
         // state differs from a blended color's, which takes independent blending.
         let ids = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
-        let attachments = [attachment, ids];
-        // The color target's, then the IDs', of those it has.
+        // Written where depth is, unblended, and left alone by a pipeline that writes none.
+        let motion = vk::PipelineColorBlendAttachmentState::default().color_write_mask(
+            if desc.depth_write {
+                vk::ColorComponentFlags::RGBA
+            } else {
+                vk::ColorComponentFlags::empty()
+            },
+        );
+        let attachments = [attachment, ids, motion];
+        // The color target's, then the IDs', then the motion's, of those it has.
         let first = usize::from(!desc.format.has_color());
-        let targets = 1 + usize::from(desc.format.has_ids());
+        let targets =
+            1 + usize::from(desc.format.has_ids()) + usize::from(desc.format.has_motion());
         let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(&attachments[first..targets]);
         // Or equal, so that what draws later at one depth goes over what drew there before, as 2D
@@ -306,7 +338,7 @@ impl Pipeline {
             vk::DynamicState::FRONT_FACE,
         ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [desc.format.color, desc.format.ids];
+        let formats = [desc.format.color, desc.format.ids, desc.format.motion];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats[first..targets])
             .depth_attachment_format(desc.format.depth);

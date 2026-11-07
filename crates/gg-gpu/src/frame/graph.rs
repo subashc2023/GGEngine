@@ -33,11 +33,11 @@ pub const MAX_BUFFER_READ: u64 = 256;
 /// passes again every frame; it keeps its memory, so that a frame that adds no more than the last
 /// allocates nothing.
 ///
-/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::visibility`] and
-/// [`Graph::depth`], last for a frame: each is undefined until a pass of the frame writes it, so its
-/// first use writes it whole, and passes whose uses of two of them don't overlap may find them in
-/// the same memory. The frames keep them for the frames after, which add them alike, by their names,
-/// kinds and sizes.
+/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
+/// [`Graph::visibility`] and [`Graph::depth`], last for a frame: each is undefined until a pass of
+/// the frame writes it, so its first use writes it whole, and passes whose uses of two of them
+/// don't overlap may find them in the same memory. The frames keep them for the frames after,
+/// which add them alike, by their names, kinds and sizes.
 /// Its own buffers, [`Graph::buffer`], last from frame to frame: the frames keep each for the
 /// frames after that add one of its name no larger, holding what the last of them left there.
 #[derive(Default)]
@@ -88,6 +88,12 @@ pub(crate) enum Kind {
     /// unsigned integers. Vulkan requires every device to render into the format, copy from it and
     /// sample it.
     Ids,
+    /// Motion beside a pass's colors and IDs, as 16-bit floats in RGBA, the format of [`Hdr`]'s,
+    /// which passes render, the pipelines that write depth writing it, compute passes write as
+    /// storage, and later passes sample.
+    ///
+    /// [`Hdr`]: Self::Hdr
+    Motion,
     /// A visibility buffer: two 32-bit unsigned integers a pixel, which a pass renders as its
     /// color target, beside its IDs, telling what it drew there, and later passes sample, as
     /// unsigned integers. The format is the IDs'.
@@ -104,7 +110,7 @@ impl Kind {
     pub(crate) const fn format(self) -> vk::Format {
         match self {
             Self::Color => ColorImage::FORMAT.color,
-            Self::Hdr => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Hdr | Self::Motion => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids | Self::Visibility => vk::Format::R32G32_UINT,
             Self::Depth => vk::Format::D32_SFLOAT,
         }
@@ -120,7 +126,7 @@ impl Kind {
             }
             // Never read back: what a frame reads back is what it shows. Compute passes write it as
             // storage, which Vulkan requires every device to support in the format.
-            Self::Hdr => {
+            Self::Hdr | Self::Motion => {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::STORAGE
@@ -136,7 +142,7 @@ impl Kind {
 
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
-            Self::Color | Self::Hdr | Self::Ids | Self::Visibility => COLOR_RANGE,
+            Self::Color | Self::Hdr | Self::Ids | Self::Motion | Self::Visibility => COLOR_RANGE,
             Self::Depth => DEPTH_RANGE,
         }
     }
@@ -161,6 +167,9 @@ pub(crate) enum Use {
     /// The IDs beside its color target, cleared first to 0, for none, unless `kept`, as the image's
     /// last use left them.
     Ids { kept: bool },
+    /// The motion beside its color target and IDs, cleared first to 0, unless `kept`, as the
+    /// image's last use left it.
+    Motion { kept: bool },
     /// The depth its draws test and write, cleared first to 0, as far away as depth goes, unless
     /// `kept`, as the image's last use left it.
     Depth { kept: bool },
@@ -188,9 +197,11 @@ impl Use {
             discards,
         };
         match self {
-            Self::Color(Some(_)) | Self::Ids { kept: false } => color(vk::AccessFlags2::NONE, true),
+            Self::Color(Some(_)) | Self::Ids { kept: false } | Self::Motion { kept: false } => {
+                color(vk::AccessFlags2::NONE, true)
+            }
             // Blending reads what's there, as loading what's kept does.
-            Self::Color(None) | Self::Ids { kept: true } => {
+            Self::Color(None) | Self::Ids { kept: true } | Self::Motion { kept: true } => {
                 color(vk::AccessFlags2::COLOR_ATTACHMENT_READ, false)
             }
             // A clear or a load writes or reads at the early fragment tests, and a store writes at
@@ -233,7 +244,10 @@ impl Use {
 
     /// Whether it's one of a render pass's attachments.
     fn attaches(self) -> bool {
-        matches!(self, Self::Color(_) | Self::Ids { .. } | Self::Depth { .. })
+        matches!(
+            self,
+            Self::Color(_) | Self::Ids { .. } | Self::Motion { .. } | Self::Depth { .. }
+        )
     }
 }
 
@@ -407,6 +421,18 @@ impl Graph {
     /// If a side is 0.
     pub fn ids(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
         self.transient(name, Kind::Ids, size)
+    }
+
+    /// An image of the graph's own of motion, `size` pixels, named `name`, 16-bit floats in RGBA,
+    /// which a pass renders beside its colors and IDs ([`RenderPass::motion`]), the pipelines
+    /// made for a format [`with_motion`](crate::Format::with_motion) that write depth writing it,
+    /// compute passes write as storage, and later passes sample.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn motion(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Motion, size)
     }
 
     /// A visibility buffer of the graph's own, `size` pixels, named `name`: two 32-bit unsigned
@@ -671,14 +697,16 @@ impl RenderPass<'_> {
     }
 
     /// Draws into `image` over what its last use left there, as [`clear`](Self::clear),
-    /// [`visibility`](Self::visibility), [`ids`](Self::ids) or [`depth`](Self::depth) would draw
-    /// into it but for the clear: a target or a color image of the graph's own, of either range,
-    /// whose colors its draws blend over, a visibility buffer, an image of IDs, or one of depth,
-    /// which its draws test against. A target that no pass has drawn into since it was made, or
-    /// since its swapchain's image was acquired, holds nothing to draw over.
+    /// [`visibility`](Self::visibility), [`ids`](Self::ids), [`motion`](Self::motion) or
+    /// [`depth`](Self::depth) would draw into it but for the clear: a target or a color image of
+    /// the graph's own, of either range, whose colors its draws blend over, a visibility buffer,
+    /// an image of IDs or of motion, or one of depth, which its draws test against. A target that
+    /// no pass has drawn into since it was made, or since its swapchain's image was acquired,
+    /// holds nothing to draw over.
     pub fn keep(self, image: ImageId) -> Self {
         let use_ = match self.graph.kind(image) {
             Some(Kind::Ids) => Use::Ids { kept: true },
+            Some(Kind::Motion) => Use::Motion { kept: true },
             Some(Kind::Depth) => Use::Depth { kept: true },
             None | Some(Kind::Color | Kind::Hdr | Kind::Visibility) => Use::Color(None),
         };
@@ -695,6 +723,13 @@ impl RenderPass<'_> {
     /// which pipelines made for a format [`with_ids`](crate::Format::with_ids) write.
     pub fn ids(self, ids: ImageId) -> Self {
         self.with(ids, Use::Ids { kept: false })
+    }
+
+    /// Draws the draws' motion into `motion`, an image of motion of the graph's own, beside their
+    /// IDs, cleared first to 0, which pipelines made for a format
+    /// [`with_motion`](crate::Format::with_motion) write where they write depth.
+    pub fn motion(self, motion: ImageId) -> Self {
+        self.with(motion, Use::Motion { kept: false })
     }
 
     /// Tests the draws against `depth`, an image of depth of the graph's own, and writes theirs
@@ -735,11 +770,11 @@ impl RenderPass<'_> {
     ///
     /// # Panics
     ///
-    /// If it hasn't one color target, beside at most one image of IDs and one of depth, or one
-    /// image of depth alone; if it uses an image twice, as one another kind of image, or as images
-    /// of the graph's own of other sizes; if it clears a visibility buffer to anything but 0; if
-    /// it samples or draws over one of the graph's own images that no earlier pass wrote; or if it
-    /// uses a buffer twice, or one no earlier pass wrote.
+    /// If it hasn't one color target, beside at most one image of IDs, one of motion beside those,
+    /// and one of depth, or one image of depth alone; if it uses an image twice, as one another
+    /// kind of image, or as images of the graph's own of other sizes; if it clears a visibility
+    /// buffer to anything but 0; if it samples or draws over one of the graph's own images that no
+    /// earlier pass wrote; or if it uses a buffer twice, or one no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -748,15 +783,19 @@ impl RenderPass<'_> {
         } = self;
         let uses = &graph.uses[start.0..];
         let count = |is: fn(&Use) -> bool| uses.iter().filter(|(_, use_)| is(use_)).count();
-        let (colors, ids, depths) = (
+        let (colors, ids, motions, depths) = (
             count(|use_| matches!(use_, Use::Color(_))),
             count(|use_| matches!(use_, Use::Ids { .. })),
+            count(|use_| matches!(use_, Use::Motion { .. })),
             count(|use_| matches!(use_, Use::Depth { .. })),
         );
+        // Motion is the third color attachment, so it's only beside IDs.
         assert!(
-            (colors == 1 && ids <= 1 && depths <= 1) || (colors, ids, depths) == (0, 0, 1),
-            "pass {label:?} draws into one color target, beside at most one image of IDs and one of \
-             depth, or into one image of depth alone; it has {uses:?}"
+            (colors == 1 && ids <= 1 && motions <= ids && depths <= 1)
+                || (colors, ids, motions, depths) == (0, 0, 0, 1),
+            "pass {label:?} draws into one color target, beside at most one image of IDs, one of \
+             motion beside those, and one of depth, or into one image of depth alone; it has \
+             {uses:?}"
         );
         let mut size = None;
         for (i, &(image, use_)) in uses.iter().enumerate() {
@@ -773,6 +812,7 @@ impl RenderPass<'_> {
                 }
                 Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
                 Use::Ids { .. } => kind == Some(Kind::Ids),
+                Use::Motion { .. } => kind == Some(Kind::Motion),
                 Use::Depth { .. } => kind == Some(Kind::Depth),
                 Use::Sampled => kind.is_none_or(Kind::sampled),
                 Use::ComputeSampled | Use::Storage { .. } | Use::CopySource => {

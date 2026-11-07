@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
-use gg_renderer::{Circle, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
+use gg_renderer::{Antialiasing, Circle, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
 
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
@@ -444,6 +444,73 @@ impl Reflect for Tonemapper {
     /// By its index, which is its variant's in its description.
     fn digest(&self, to: &mut Digest<'_>) {
         self.index().digest(to);
+    }
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// A way of antialiasing's variant name, by a match that names each, as [`tonemapper_name`] does.
+fn antialiasing_name(antialiasing: Antialiasing) -> &'static str {
+    match antialiasing {
+        Antialiasing::Taa => "Taa",
+        Antialiasing::None => "None",
+    }
+}
+
+/// An enum of unit variants, one for each way of antialiasing.
+impl Reflect for Antialiasing {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let variants = Antialiasing::ALL.map(|antialiasing| reflect::Variant {
+            name: antialiasing_name(antialiasing).into(),
+            fields: Vec::new(),
+            tuple: false,
+        });
+        let doc = "How the view is antialiased: temporal antialiasing, each frame drawn a fraction \
+                   of a pixel off and resolved against those before it; or none, each pixel what's \
+                   at its center.";
+        types.add::<Self>("Antialiasing".into(), doc.into(), |_| {
+            Ok(Shape::Enum(variants.into()))
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Variant(antialiasing_name(*self).into(), Vec::new())
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        let (name, given) = reflect::variant(value)?;
+        let found = (Antialiasing::ALL.into_iter()).find(|&a| antialiasing_name(a) == name);
+        let Some(antialiasing) = found else {
+            return Err(reflect::no_variant(
+                name,
+                &Antialiasing::ALL.map(antialiasing_name),
+            ));
+        };
+        reflect::pick(given, [])?;
+        Ok(antialiasing)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, _: u32) -> Option<&dyn Reflect> {
+        None
+    }
+
+    fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
+        None
+    }
+
+    /// By its index, which is its variant's in its description.
+    fn digest(&self, to: &mut Digest<'_>) {
+        let index = Antialiasing::ALL.iter().position(|way| way == self);
+        (index.expect("every way is among them") as u32).digest(to);
     }
 
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}

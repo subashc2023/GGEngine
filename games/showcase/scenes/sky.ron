@@ -28,6 +28,7 @@
             Environment: (
                 exposure: 15.0,
                 tonemapper: PbrNeutral,
+                antialiasing: Taa,
                 sky: Some("93955ed372497870"),
                 sky_luminance: 30000.0,
             ),

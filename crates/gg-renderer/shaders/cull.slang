@@ -43,12 +43,14 @@ struct Push {
     Level* levels;
     // The views this dispatch culls for, by the group's Y.
     View* views;
-    // The frame's instances, of every run, as `gather.slang` gathered them.
+    // The frame's instances, of every run, as `gather.slang` gathered them, each one's transform
+    // the frame before `instances` past its own.
     float4x4* transforms;
     uint2* ids;
     uint* params;
     // The arrays of the instances each view keeps, `instances` and `params_words` long, one view's
-    // after another's, each run's at its `output`.
+    // after another's, each run's at its `output`; and past the views' transforms, those the frame
+    // before of what the game's view's passes keep, where their `View::previous` says.
     float4x4* kept_transforms;
     uint2* kept_ids;
     uint* kept_params;
@@ -287,6 +289,10 @@ void write_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
         }
         uint from = run.first + i;
         push.kept_transforms[kept + run.output + place] = push.transforms[from];
+        if (view.previous != NO_PREVIOUS) {
+            push.kept_transforms[view.previous * push.instances + run.output + place] =
+                push.transforms[push.instances + from];
+        }
         push.kept_ids[kept + run.output + place] = push.ids[from];
         for (uint w = 0; w < run.params_words; w++) {
             push.kept_params[kept_params + run.params_output + place * run.params_words + w] =

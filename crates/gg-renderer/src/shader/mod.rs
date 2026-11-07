@@ -197,19 +197,30 @@ impl Shaders {
     /// that it keeps to this contract:
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
-    ///   shader that returns a struct of two outputs, and nothing else: the color, a
+    ///   shader that returns a struct of two outputs, or three, and nothing else: the color, a
     ///   `float4 : SV_Target0`, in linear RGBA, which may be brighter than 1, as the view's colors
-    ///   are of high dynamic range; and the draw's ID, a `uint2 : SV_Target1`, which the view
-    ///   keeps where the draw shows, for [picks](crate::Pick) to read back: its instance's, which
-    ///   the vertex shader reads from `ids[instance]` and hands on `nointerpolation`, or 0 where
-    ///   it draws no entity. A shader that blends should discard
-    ///   what's fully transparent, after it samples, as the engine's do: blending it changes no
-    ///   pixel, but its ID would hide what's behind it from picks.
+    ///   are of high dynamic range; the draw's ID, a `uint2 : SV_Target1`, which the view keeps
+    ///   where the draw shows, for [picks](crate::Pick) to read back: its instance's, which the
+    ///   vertex shader reads from `ids[instance]` and hands on `nointerpolation`, or 0 where it
+    ///   draws no entity; and, if it likes, the motion, a `float4 : SV_Target2`, how far the point
+    ///   it draws moved in the world since the frame before, in its XYZ, and 0 in its W: where it
+    ///   is, `mul(transforms[instance], float4(position, 1.0))`, less where it was,
+    ///   `mul(transforms[instance + previous], float4(position, 1.0))`, as `previous` below says,
+    ///   which the vertex shader hands on, interpolated, as the difference of two points placed by
+    ///   one mesh's transforms is. The view keeps the motion of what's opaque where it shows, which
+    ///   its antialiasing ([`Antialiasing::Taa`](crate::Antialiasing::Taa)) takes each pixel's
+    ///   history from where its point was by: a shader that writes depth and returns none moves
+    ///   what it draws with the camera alone, as though it stood still, as the engine has its
+    ///   fragment shader return zeros there; that of one that blends goes unused, as what's behind
+    ///   it keeps its own. A shader that blends should discard what's fully transparent, after it
+    ///   samples, as the engine's do: blending it changes no pixel, but its ID would hide what's
+    ///   behind it from picks.
     /// - Each run of consecutive draws of one mesh with it is one instanced draw, whose instances
     ///   are the draws. Its push constants are `struct { float4x4 clip_from_world; V* vertices;
-    ///   float4x4* transforms; uint2* ids; P* params; float2 view; Frame* frame; }`, the only 112
-    ///   bytes set. The first is the camera's view and projection, from the world to Vulkan's clip
-    ///   space; the second, the address of the mesh's vertices; the third, of the instances'
+    ///   float4x4* transforms; uint2* ids; P* params; float2 view; Frame* frame; uint2* meshlets;
+    ///   uint draw; uint previous; }`, 128 bytes. The first is the camera's view and projection,
+    ///   from the world to Vulkan's clip space, which antialiasing moves a fraction of a pixel
+    ///   each frame; the second, the address of the mesh's vertices; the third, of the instances'
     ///   transforms, each from the mesh's own space to the world's, for `mul(clip_from_world,
     ///   mul(transforms[instance], float4(position, 1.0)))`; the fourth, of the instances' IDs,
     ///   each the low and high halves of a 64-bit number; the fifth, of the instances' parameters,
@@ -231,9 +242,14 @@ impl Shaders {
     ///   a frame without them; and which of the lights reach each cluster of the view, the view
     ///   cut into tiles and those along its depth, `Clusters` as `shaders/mesh.slang` declares it,
     ///   its `words` 0 in a frame without them, where each fragment shades by every light; or a
-    ///   struct of as many of its first fields: the engine adds fields at its end. A shader that
-    ///   takes no parameters leaves out the fifth, and so those after it. A shader may end the
-    ///   struct after the last of them it reads, and one that reads none has none.
+    ///   struct of as many of its first fields: the engine adds fields at its end. The eighth and
+    ///   the ninth are the engine's own model shaders', 0 for any other; the tenth, how many
+    ///   transforms past each instance's its transform the frame before is, which the motion is
+    ///   from: those of the world's opaque meshes, in the game's view, and 0 for the rest, which
+    ///   the engine knows none of, as a layer's draws, made each frame, so that they read their
+    ///   own and stand still. A shader that takes no parameters leaves out the fifth, and so those
+    ///   after it. A shader may end the struct after the last of them it reads, and one that reads
+    ///   none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -410,9 +426,10 @@ impl Shaders {
         }
     }
 
-    /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, and `shadow`, what
-    /// draws its shadows if they're cut out, as [`Added::shadow`] says, each with its sampled
-    /// images decorated as [`spirv::decorate_non_uniform`] says, and gives the index of its handle.
+    /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, as [`prepared`] has
+    /// it, and `shadow`, what draws its shadows if they're cut out, as [`Added::shadow`] says,
+    /// with its sampled images decorated as [`spirv::decorate_non_uniform`] says, and gives the
+    /// index of its handle.
     fn push(
         &mut self,
         name: &str,
@@ -428,7 +445,7 @@ impl Shaders {
             index,
             replacement: false,
             name: name.to_owned(),
-            spirv: spirv::decorate_non_uniform(spirv),
+            spirv: prepared(spirv, blend),
             vertex_size: types.vertex_size,
             params_size: types.params_size,
             blend,
@@ -617,9 +634,21 @@ impl ShaderSource {
         check(&self.name, &self.path, &spirv, &self.types)?;
         Ok(Compiled {
             source: self.clone(),
-            spirv: spirv::decorate_non_uniform(spirv),
+            spirv: prepared(spirv, self.blend),
             files,
         })
+    }
+}
+
+/// `spirv`, a shader that blends as `blend` says, as a renderer makes its pipelines: its sampled
+/// images decorated as [`spirv::decorate_non_uniform`] says, and, if it writes depth, its fragment
+/// shader returning no motion where it returns none, as [`spirv::return_no_motion`] says.
+fn prepared(spirv: Vec<u8>, blend: Blend) -> Vec<u8> {
+    let spirv = spirv::decorate_non_uniform(spirv);
+    if writes_depth(blend) {
+        spirv::return_no_motion(spirv)
+    } else {
+        spirv
     }
 }
 
@@ -628,7 +657,7 @@ impl ShaderSource {
 #[derive(Debug)]
 pub struct Compiled {
     source: ShaderSource,
-    /// Decorated as [`spirv::decorate_non_uniform`] says.
+    /// As [`prepared`] has it.
     spirv: Vec<u8>,
     files: Vec<PathBuf>,
 }
@@ -1000,7 +1029,53 @@ mod tests {
         // Given parameters it doesn't read, and reading no push constants at all.
         keeps_to_it::<[f32; 7], [f32; 4]>(&mut shaders, "vertex_color.slang");
         keeps_to_it::<[f32; 3], ()>(&mut shaders, "no_push_constants.slang");
-        assert_eq!(shaders.sources().len(), 6);
+        keeps_to_it::<[f32; 3], [f32; 4]>(&mut shaders, "moving.slang");
+        assert_eq!(shaders.sources().len(), 7);
+    }
+
+    /// A shader that writes depth and returns no motion returns zeros there, as one that does
+    /// keeps its own and one that blends goes without, and each still keeps to the contract.
+    #[test]
+    fn shaders_that_write_depth_return_motion() {
+        let mut shaders = Shaders::default();
+        let (flat, moving) = (fixture("flat_color.slang"), fixture("moving.slang"));
+        let added = [
+            ("opaque", &flat, Blend::Opaque),
+            ("blended", &flat, Blend::Alpha),
+            ("moving", &moving, Blend::Opaque),
+        ];
+        for (name, path, blend) in added {
+            (shaders.add::<[f32; 3], [f32; 4]>(name, path, blend)).expect("a shader");
+        }
+        let types = Types::of::<[f32; 3], [f32; 4]>();
+        let locations: Vec<(&str, Vec<u32>)> = (adds(&shaders).into_iter().skip(1))
+            .map(|added| {
+                let breaches = spirv::breaches(&added.spirv, &types);
+                assert!(breaches.is_empty(), "{}: {breaches:?}", added.name);
+                (added.name.as_str(), spirv::fragment_locations(&added.spirv))
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                ("opaque", vec![0, 1, 2]),
+                ("blended", vec![0, 1]),
+                ("moving", vec![0, 1, 2]),
+            ]
+        );
+        // One that returns its own motion is as slangc compiled it.
+        let compiled = |path| {
+            compile(Path::new(SLANGC), "again", path)
+                .expect("compiles")
+                .0
+        };
+        let as_added = |name: &str| {
+            let added = adds(&shaders).into_iter().find(|added| added.name == name);
+            added.expect("added").spirv.clone()
+        };
+        let moving_spirv = spirv::decorate_non_uniform(compiled(&moving));
+        assert_eq!(as_added("moving"), moving_spirv);
+        assert_eq!(spirv::return_no_motion(moving_spirv.clone()), moving_spirv);
     }
 
     #[test]
@@ -1036,7 +1111,7 @@ mod tests {
             &[
                 "its push constants' view isn't a float2",
                 "its frame's data, Frame, take 372 bytes, past the 360 the engine's take",
-                "it reads brightness from its push constants, past the 124 bytes",
+                "it reads brightness from its push constants, past the 128 bytes",
             ],
         );
         says(
@@ -1079,7 +1154,8 @@ mod tests {
             refusal::<Vertex, Color>("outputs.slang"),
             &[
                 "its fragment stage returns its color, color, as what isn't a float4",
-                "its fragment stage writes glow at location 2",
+                "its fragment stage returns its motion, motion, as what isn't a float4",
+                "its fragment stage writes glow at location 3",
             ],
         );
         says(

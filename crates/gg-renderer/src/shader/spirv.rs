@@ -32,6 +32,9 @@ const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
 const OP_TYPE_STRUCT: u32 = 30;
 const OP_TYPE_POINTER: u32 = 32;
 const OP_CONSTANT: u32 = 43;
+const OP_CONSTANT_NULL: u32 = 46;
+const OP_FUNCTION: u32 = 54;
+const OP_FUNCTION_END: u32 = 56;
 const OP_VARIABLE: u32 = 59;
 const OP_STORE: u32 = 62;
 const OP_COPY_MEMORY: u32 = 63;
@@ -39,6 +42,7 @@ const OP_COPY_MEMORY_SIZED: u32 = 64;
 const OP_DECORATE: u32 = 71;
 const OP_MEMBER_DECORATE: u32 = 72;
 const OP_SAMPLED_IMAGE: u32 = 86;
+const OP_RETURN: u32 = 253;
 const OP_ATOMIC_STORE: u32 = 228;
 const OP_ATOMIC_FLAG_CLEAR: u32 = 319;
 
@@ -93,7 +97,7 @@ const DIM_CUBE: u32 = 3;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order, but
 /// for the word of padding that ends it.
-const PUSHED: [(u32, &str, Pushed); 9] = [
+const PUSHED: [(u32, &str, Pushed); 10] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -139,10 +143,15 @@ const PUSHED: [(u32, &str, Pushed); 9] = [
         "which of the culled runs a draw into the visibility buffer is",
         Pushed::Draw,
     ),
+    (
+        offset_of!(Push, previous) as u32,
+        "how many transforms past each instance's its transform the frame before is",
+        Pushed::Previous,
+    ),
 ];
 
-/// The bytes the engine pushes that its members take: up to the word of padding that ends it.
-const PUSHED_BYTES: usize = offset_of!(Push, unused);
+/// The bytes the engine pushes.
+const PUSHED_BYTES: usize = size_of::<Push>();
 
 /// What a member of a [`Push`] is.
 #[derive(Clone, Copy)]
@@ -167,6 +176,8 @@ enum Pushed {
     /// A uint, which the model shaders' meshlets write into the visibility buffer: 0 for any other
     /// draw.
     Draw,
+    /// A uint, how many transforms past each instance's its transform the frame before is.
+    Previous,
 }
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
@@ -704,7 +715,7 @@ impl Module {
                     }
                 }
                 Pushed::Frame => self.check_frame(ty, breaches),
-                Pushed::Draw => {
+                Pushed::Draw | Pushed::Previous => {
                     let uint = matches!(
                         self.types.get(&ty),
                         Some(Type::Int {
@@ -911,6 +922,11 @@ impl Module {
 
     fn check_fragment_outputs(&self, outputs: &[&Variable], breaches: &mut Vec<String>) {
         let (mut color, mut id) = (false, false);
+        let float4 = |ty: Option<u32>| {
+            ty.and_then(|ty| self.types.get(&ty)).is_some_and(|ty| {
+                matches!(ty, &Type::Vector { component, count: 4 } if self.is_float(component))
+            })
+        };
         for output in outputs {
             let name = self.interface_name(output.id);
             // ", color," of a field it returns, or nothing of what it returns whole.
@@ -920,13 +936,16 @@ impl Module {
             match (self.decoration(output.id, BUILT_IN), location) {
                 (None, Some(0)) => {
                     color = true;
-                    let float4 = ty.and_then(|ty| self.types.get(&ty)).is_some_and(|ty| {
-                        matches!(ty, &Type::Vector { component, count: 4 }
-                            if self.is_float(component))
-                    });
-                    if !float4 {
+                    if !float4(ty) {
                         breaches.push(format!(
                             "its fragment stage returns its color{named} as what isn't a float4"
+                        ));
+                    }
+                }
+                (None, Some(2)) => {
+                    if !float4(ty) {
+                        breaches.push(format!(
+                            "its fragment stage returns its motion{named} as what isn't a float4"
                         ));
                     }
                 }
@@ -947,8 +966,9 @@ impl Module {
                     let what = name.unwrap_or_else(|| "its color".to_owned());
                     let at = location.map_or_else(String::new, |at| format!(" at location {at}"));
                     breaches.push(format!(
-                        "its fragment stage writes {what}{at}, where the engine draws into two \
-                         targets: the color at location 0, and the ID at location 1"
+                        "its fragment stage writes {what}{at}, where the engine draws into three \
+                         targets: the color at location 0, the ID at location 1, and the motion \
+                         at location 2"
                     ));
                 }
                 (Some(FRAG_DEPTH), _) => breaches.push(
@@ -963,7 +983,7 @@ impl Module {
                 ),
                 (Some(built_in), _) => breaches.push(format!(
                     "its fragment stage writes built-in {built_in}{named} where it returns only \
-                     its color and its ID"
+                     its color, its ID and its motion"
                 )),
             }
         }
@@ -1099,6 +1119,125 @@ pub(super) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     };
     words.splice(end..end, decorations);
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+/// `spirv`, a shader that writes depth slangc compiled, its fragment shader, `fragment_main`,
+/// returning zeros at location 2, as the motion of what it draws, if it returns nothing there. The
+/// pipelines of shaders that write depth write the view's motion, the motion of what owns the
+/// depth: one whose fragment shader returned none would leave there what drew behind it, whose
+/// motion its pixels would then be taken back by, where zeros move them with the camera alone. The
+/// motion is a float4, the type of the color at location 0, which the contract has a float4, whose
+/// output's pointer type the motion's takes too. SPIR-V it can't read, or whose fragment shader
+/// returns something at location 2 already, or nothing at location 0, stays as it is.
+pub(super) fn return_no_motion(spirv: Vec<u8>) -> Vec<u8> {
+    let Some(words) = words(&spirv) else {
+        return spirv;
+    };
+    // The fragment shader's entry point, where it is, its function and its interface; each
+    // location decorated, with where its decoration ends; each output's pointer type, and each
+    // pointer's pointee; where the first function starts, and the entry point's function returns.
+    let mut entry = None;
+    let mut locations = HashMap::new();
+    let (mut outputs, mut pointees) = (HashMap::new(), HashMap::new());
+    let mut first_function = None;
+    let (mut returns, mut in_entry) = (Vec::new(), false);
+    for instruction in instructions(&words) {
+        let Some((at, opcode, operands)) = instruction else {
+            return spirv;
+        };
+        match (opcode, operands) {
+            (OP_ENTRY_POINT, &[FRAGMENT, function, ref named @ ..]) => {
+                let Some((name, taken)) = string(named) else {
+                    return spirv;
+                };
+                if name == "fragment_main" {
+                    entry = Some((at, function, named[taken..].to_vec()));
+                }
+            }
+            (OP_DECORATE, &[id, LOCATION, location]) => {
+                locations.insert(id, (location, at + 1 + operands.len()));
+            }
+            (OP_TYPE_POINTER, &[id, OUTPUT, pointee]) => {
+                pointees.insert(id, pointee);
+            }
+            (OP_VARIABLE, &[ty, id, OUTPUT, ..]) => {
+                outputs.insert(id, ty);
+            }
+            (OP_FUNCTION, &[_, id, ..]) => {
+                first_function.get_or_insert(at);
+                in_entry = entry
+                    .as_ref()
+                    .is_some_and(|&(_, function, _)| function == id);
+            }
+            (OP_FUNCTION_END, _) => in_entry = false,
+            (OP_RETURN, _) if in_entry => returns.push(at),
+            _ => {}
+        }
+    }
+    let (Some((entry_at, _, interface)), Some(first_function)) = (entry, first_function) else {
+        return spirv;
+    };
+    let output = |location| {
+        let at = |id: &&u32| locations.get(*id).map(|&(at, _)| at) == Some(location);
+        (interface.iter())
+            .filter(|id| outputs.contains_key(*id))
+            .find(at)
+            .copied()
+    };
+    let Some(color) = output(0).filter(|_| output(2).is_none()) else {
+        return spirv;
+    };
+    let pointer = outputs[&color];
+    let Some(&float4) = pointees.get(&pointer) else {
+        return spirv;
+    };
+    let (_, decorated) = locations[&color];
+    // Two new IDs: the zeros, and the motion's variable.
+    let (zeros, motion) = (words[3], words[3] + 1);
+    let mut patched = Vec::with_capacity(words.len() + 16);
+    patched.extend_from_slice(&words[..5]);
+    patched[3] = motion + 1;
+    for instruction in instructions(&words) {
+        let (at, opcode, operands) = instruction.expect("read once already");
+        let end = at + 1 + operands.len();
+        if at == first_function {
+            patched.extend([(3 << 16) | OP_CONSTANT_NULL, float4, zeros]);
+            patched.extend([(4 << 16) | OP_VARIABLE, pointer, motion, OUTPUT]);
+        }
+        if returns.contains(&at) {
+            patched.extend([(3 << 16) | OP_STORE, motion, zeros]);
+        }
+        if at == entry_at {
+            // Its interface lists every global variable it uses, the motion's among them.
+            patched.push((((end - at + 1) as u32) << 16) | opcode);
+            patched.extend_from_slice(operands);
+            patched.push(motion);
+        } else {
+            patched.extend_from_slice(&words[at..end]);
+        }
+        if end == decorated {
+            patched.extend([(4 << 16) | OP_DECORATE, motion, LOCATION, 2]);
+        }
+    }
+    patched.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+/// The locations of what `spirv`'s fragment shaders return, in order.
+#[cfg(test)]
+pub(super) fn fragment_locations(spirv: &[u8]) -> Vec<u32> {
+    let module = Module::read(spirv).expect("SPIR-V");
+    let outputs: HashSet<u32> = (module.variables.iter())
+        .filter(|variable| variable.storage == OUTPUT)
+        .map(|variable| variable.id)
+        .collect();
+    let fragments = (module.entry_points.iter()).filter(|entry| entry.model == FRAGMENT);
+    let mut locations: Vec<u32> = fragments
+        .flat_map(|entry| entry.interface.iter())
+        .filter(|id| outputs.contains(id))
+        .filter_map(|&id| module.decoration(id, LOCATION))
+        .collect();
+    locations.sort_unstable();
+    locations
 }
 
 /// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform, and

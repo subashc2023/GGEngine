@@ -1,5 +1,7 @@
 // Models' meshes, shaded as shading.slang says: each instance a mesh with its own transform, ID and
-// material, writing its ID where it shows. `Params` matches `Params` in src/model.rs byte for byte.
+// material, writing its ID where it shows, and how far each point moved in the world since the
+// frame before, by its instance's transform then, which the view's antialiasing follows it by.
+// `Params` matches `Params` in src/model.rs byte for byte.
 //
 // As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
 // which blending would leave as it was, so that a pick there finds what's behind it; it writes no
@@ -32,8 +34,9 @@ Vertex unpacked(uint index) {
 
 struct Varyings {
     float4 position : SV_Position;
-    // Where it is in the world.
+    // Where it is in the world, and how far it moved there since the frame before.
     float3 world;
+    float3 moved;
     float2 uv;
     float4 color;
     float3 normal;
@@ -125,14 +128,17 @@ void mesh_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex,
     }
 }
 
-// `vertex` as instance `instance` places it in the world and the view sees it.
+// `vertex` as instance `instance` places it in the world and the view sees it, and as its transform
+// the frame before placed it.
 Varyings placed(Vertex vertex, uint instance) {
     float4x4 transform = push.transforms[instance];
     float4 world = mul(transform, float4(vertex.position, 1.0));
+    float4 was = mul(push.transforms[instance + push.previous], float4(vertex.position, 1.0));
     Turned turned = turned(vertex, transform);
     Varyings out;
     out.position = mul(push.clip_from_world, world);
     out.world = world.xyz;
+    out.moved = world.xyz - was.xyz;
     out.uv = vertex.uv;
     out.color = vertex.color;
     out.normal = turned.normal;
@@ -142,8 +148,16 @@ Varyings placed(Vertex vertex, uint instance) {
     return out;
 }
 
+// The color, the instance's ID, and how far its point moved in the world since the frame before,
+// which the view keeps where what's opaque shows, as games' shaders may return it.
+struct Shaded {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+    float4 motion : SV_Target2;
+};
+
 [shader("fragment")]
-Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
+Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
     Material material = frame.materials[push.params[input.instance].material];
     // Every texture sampled before any branch or discard, which would leave the derivatives that
@@ -167,10 +181,11 @@ Targets fragment_main(Varyings input, bool front: SV_IsFrontFace) {
 #if defined(OPAQUE) || defined(MASKED)
     color.a = 1.0;
 #endif
-    Targets out;
+    Shaded out;
     out.id = input.id;
     out.color = lit(frame, material, input.world, input.normal, input.tangent, front, color,
                     surface, mapped, occlusion, emission);
+    out.motion = float4(input.moved, 0.0);
     return out;
 }
 

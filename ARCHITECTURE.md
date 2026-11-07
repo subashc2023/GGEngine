@@ -1252,17 +1252,18 @@ tonemapper maps the view's colors into the range it shows: Khronos PBR Neutral b
 shows base colors up to about 0.76 as they are, less the 0.04 a dielectric reflects whatever its
 color, and rolls brighter light off toward white; ACES, as Stephen Hill fitted it; AgX; or none,
 each channel clamped, which a world without an environment gets, so that a 2D game's sprites show
-as they're colored. The clear color, which a sky takes the place of, is tonemapped with what's
-drawn, as the sky is. Its exposure, in EV100, scales light: lit
-shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades, which keeps a
-sunny day's light within 16-bit floats, and a world without an environment is exposed as the
-default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and unlit materials,
-draws its colors as they are. Every draw's shader can read the frame's data through an address, the
-last of its push constants: where the view sees from, the time, the simulation's as the world
-draws, which stops with it and draws alike in a replay, and the exposure; the frame's lights, how
-many and where; the address of the table of models' materials; where shading sees from, the
-camera's position, or for an orthographic projection, which sees along one way, the way back
-toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
+as they're colored. Its antialiasing is temporal, as below, by default, or none, which a world
+without an environment gets too, each pixel what's at its center. The clear color, which a sky
+takes the place of, is tonemapped with what's drawn, as the sky is. Its exposure, in EV100, scales
+light: lit shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades,
+which keeps a sunny day's light within 16-bit floats, and a world without an environment is
+exposed as the default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and
+unlit materials, draws its colors as they are. Every draw's shader can read the frame's data
+through an address among its push constants: where the view sees from, the time, the simulation's
+as the world draws, which stops with it and draws alike in a replay, and the exposure; the frame's
+lights, how many and where; the address of the table of models' materials; where shading sees
+from, the camera's position, or for an orthographic projection, which sees along one way, the way
+back toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
 through the bindless set's sampler that compares; and the clusters the lights are binned into.
 Fields are added at its end, so that games' shaders that read the fields before them keep to the
@@ -1404,10 +1405,12 @@ declaring it; the graph's own colors of high dynamic range are written so too, t
 their own, as the view's shading writes the view's. A pass may draw depth alone, as a shadow map's
 does, and may draw over the colors, IDs and depth an earlier pass left, as the view's second pass
 does; its color target may be a visibility buffer of the graph's own, two 32-bit integers a pixel,
-cleared to 0, beside its IDs and depth, which later passes sample as integers. Later passes sample
+cleared to 0, beside its IDs and depth, which later passes sample as integers. Beside its IDs, a
+pass may draw motion, 16-bit floats in RGBA, a third color target, which the pipelines that write
+depth write and the rest leave as it is, and compute passes write as storage. Later passes sample
 depth by comparison, as shadow maps, or a texel at a time, as the view's depth pyramid reads the
-view's. The view's images, its colors of high dynamic range, IDs, visibility buffer, depth and
-tonemapped colors, and the shadows' maps, are the graph's own: each lasts for a frame,
+view's. The view's images, its colors of high dynamic range, IDs, motion, visibility buffer, depth
+and tonemapped colors, and the shadows' maps, are the graph's own: each lasts for a frame,
 undefined until a pass there writes it, and is made from what the passes say of it, in a block of
 memory that the graph's own images whose uses in a frame don't overlap share, kept for the frames
 after that declare it alike, by its name, kind and size; a pass that's an image's last use doesn't
@@ -1499,7 +1502,9 @@ draw gives it: a mesh draws only with a shader for its own vertex type, and with
 shader's type. Each frame copies the draws' transforms, IDs and parameters into the frame's own
 memory, where the shader reads them through their addresses too, so that a layer's draws take
 parameters as large as their shader needs, though an entity's `MeshDraw` holds 64 bytes of them at
-most; and the shader writes each draw's ID beside its color. A shader is added with how it blends
+most; and the shader writes each draw's ID beside its color, and, if it likes, how far what it
+draws moved in the world since the frame before, as antialiasing, below, takes it. A shader is
+added with how it blends
 too, since Vulkan bakes blending into its pipeline: opaque, which writes its depth as well as
 testing it, or by the alpha it returns, straight or premultiplied, which only tests it, so that
 what's behind it shows through.
@@ -1718,7 +1723,8 @@ size would draw what it holds and start another.
 The world's opaque meshes stay on the GPU from frame to frame, in the renderer's scene, which the
 engine changes as the world does, rather than drawing them every frame: each entity with a
 `Transform` and a `MeshDraw` whose shader writes depth is an instance in the scene's slot of its
-entity's own, its transform, ID and parameters a record in a table in the GPU's own memory, set as
+entity's own, its transform, where the frame before drew it, its ID and parameters a record in a
+table in the GPU's own memory, set as
 the entity joins a table, its mesh changes, drawing places it again, or it draws on its way between
 ticks, and once more as it stops, and taken away as it goes, which, as rows changed, the engine
 looks over the instances held for. A frame writes the records that changed into the table, each
@@ -1812,6 +1818,36 @@ models without meshlets, or whose frame planned no room for them, as their shade
 what blends and the canvas, against the buffer's depth. The depth pyramid is the first pass's depth,
 of the buffer's draws alone. `Settings::visibility_buffer` off has them shade as they draw instead,
 for tests and measurements of each way.
+
+A view that its environment antialiases, as by default, is antialiased temporally: each frame draws
+it a fraction of a pixel off, by the next of eight offsets, the Halton sequence of bases 2 and 3,
+everything in it but the canvas, culled as it's drawn; and a compute pass then resolves each pixel
+of its colors, before they're tonemapped, against what the frame before resolved where the pixel's
+point showed then, clipped to what this frame drew round it, so that over the frames an edge
+averages what's drawn across its pixels, and what's uncovered or lit otherwise doesn't linger.
+Beside its IDs, each frame draws how far what's opaque in the view moved in the world since the
+frame before, its motion, every frame, antialiased or not, as the IDs are: the pipelines that write
+depth write it, as the motion belongs to what owns the depth, and what blends takes that of what's
+behind it. A model's motion is by its instance's transform the frame before: the scene's records
+keep, beside each transform, the one the first change of the frame it changed in found, which the
+gather takes in that frame alone, and the culling keeps it beside the instances the view's passes
+keep, which their draws reach `previous` transforms on, as their push constants say, and the
+visibility buffer's shading likewise. A game's shader returns its own if it likes, as
+`Shaders::add` says; the engine has one that writes depth and returns none return zeros, which a
+layer's own draws, made each frame, whose transforms the frame before it doesn't know, take too, so
+that what they draw moves with the camera alone. The resolve finds each pixel's point from the
+view's depth, and where it was, less its motion, as the frame before's camera saw it, from the
+nearest of the 3 by 3 pixels round it, so that an edge that moves over what's behind it takes its
+own motion; samples the history there by a Catmull-Rom filter; clips it to a box of this frame's
+pixels round it, their mean give or take their deviation within their least and most, in YCoCg,
+weighing colors by 1 over 1 plus their luminance, so that a lone bright pixel doesn't flicker; and
+blends a tenth of this frame's in. Its history is one of two images of the view's size, each frame
+resolving into the one the frame before didn't, against the other, which a frame at another size,
+or after one that resolved no view, starts afresh. The canvas draws after the resolve, in a pass of
+its own over the view's resolved colors, which the resolve then writes apart from its history, so
+that a game's UI stays sharp and out of the history. The view's IDs are drawn off by the frame's
+offset too, so that a pick at an edge, and the editor's outline of the pick, can move a pixel from
+frame to frame.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

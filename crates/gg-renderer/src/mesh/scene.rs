@@ -110,14 +110,18 @@ struct Member {
 }
 
 /// An instance's record, as `Record` in `shaders/gather.slang` has it: its transform,
-/// column-major, its ID's low and high halves, and its parameters, up to
-/// [`MeshDraw::MAX_PARAMS`] bytes, the rest zeros.
+/// column-major; the transform the frame it changed in found it at, its own for an instance new to
+/// its slot; its ID's low and high halves; the number of the frame its transform last changed in,
+/// its low and high words, which the gather takes the transform before from only in that frame,
+/// and the transform after; and its parameters, up to [`MeshDraw::MAX_PARAMS`] bytes, the rest
+/// zeros.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct Record {
     transform: [f32; 16],
+    previous: [f32; 16],
     id: [u32; 2],
-    unused: [u32; 2],
+    changed: [u32; 2],
     params: [u32; MeshDraw::MAX_PARAMS / 4],
 }
 
@@ -191,10 +195,13 @@ fn faces_of(faces: u8) -> Faces {
 }
 
 impl Kept {
-    /// Takes `changes`, in order, into what it keeps, and orders its instances again if any came,
-    /// went or moved to another batch or ID: in a merge of those that came, sorted, into those that
-    /// stayed, so that ordering them again costs the instances once and what came as it's sorted.
-    pub(crate) fn apply(&mut self, changes: &mut Vec<Change>) {
+    /// Takes `changes`, in order, into what it keeps, as frame `frame`'s, the next to begin, and
+    /// orders its instances again if any came, went or moved to another batch or ID: in a merge of
+    /// those that came, sorted, into those that stayed, so that ordering them again costs the
+    /// instances once and what came as it's sorted. An instance set again keeps the transform the
+    /// first of the frame's changes found it at, which the frame before drew it at, a frame that
+    /// doesn't begin taking its changes on to the next, of the same number.
+    pub(crate) fn apply(&mut self, changes: &mut Vec<Change>, frame: u64) {
         if changes.is_empty() {
             return;
         }
@@ -230,6 +237,17 @@ impl Kept {
                         id,
                         slot,
                     };
+                    // Where the frame before drew it: as the record held it before the frame's
+                    // first change, if the slot held its entity, or else where it is now.
+                    let held = self.records[at];
+                    let changed = halves(frame);
+                    let previous = match self.slots[at] {
+                        Some(held_member) if held_member.id == id && held.changed == changed => {
+                            held.previous
+                        }
+                        Some(held_member) if held_member.id == id => held.transform,
+                        _ => transform.to_cols_array(),
+                    };
                     if self.slots[at] != Some(member) {
                         self.removed |= self.slots[at].is_some();
                         self.slots[at] = Some(member);
@@ -240,8 +258,9 @@ impl Kept {
                         .copy_from_slice(draw.params());
                     self.records[at] = Record {
                         transform: transform.to_cols_array(),
+                        previous,
                         id: halves(id),
-                        unused: [0; 2],
+                        changed,
                         params,
                     };
                     if !self.dirty[at] {
@@ -407,7 +426,7 @@ mod tests {
         scene.set(7, Mat4::IDENTITY, &a, 20);
         scene.set(2, mirror, &culls, 5);
         scene.set(3, Mat4::IDENTITY, &culls, 6);
-        kept.apply(&mut scene.changes);
+        kept.apply(&mut scene.changes, 1);
         let (both, ccw, cw) = (Faces::Both, Faces::CounterClockwise, Faces::Clockwise);
         let want = vec![
             (0, 0, both, vec![7, 0]),
@@ -420,14 +439,14 @@ mod tests {
         // Moved, its record alone changes.
         kept.reordered = false;
         scene.set(7, Mat4::from_translation(Vec3::X), &a, 20);
-        kept.apply(&mut scene.changes);
+        kept.apply(&mut scene.changes, 2);
         assert!(!kept.reordered);
         assert_eq!(kept.records[7].transform[12], 1.0);
 
         scene.remove(0);
         scene.set(5, Mat4::IDENTITY, &a, 1);
         scene.set(4, Mat4::IDENTITY, &a, 40);
-        kept.apply(&mut scene.changes);
+        kept.apply(&mut scene.changes, 3);
         let want = vec![
             (0, 0, both, vec![5, 7, 4]),
             (0, 0, ccw, vec![3]),
@@ -437,7 +456,42 @@ mod tests {
 
         scene.clear();
         scene.set(1, Mat4::IDENTITY, &b, 3);
-        kept.apply(&mut scene.changes);
+        kept.apply(&mut scene.changes, 4);
         assert_eq!(runs(&kept), vec![(1, 1, both, vec![1])]);
+    }
+
+    /// A record keeps the transform the frame before drew its instance at, from the first of a
+    /// frame's changes, and the frame it changed in; an instance new to its slot, another entity's
+    /// before, starts where it is.
+    #[test]
+    fn records_keep_where_the_frame_before_drew_them() {
+        let a = draw(0);
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let mut scene = Scene::default();
+        let mut kept = Kept::default();
+        let record = |kept: &Kept| {
+            let record = kept.records[3];
+            (record.transform[12], record.previous[12], record.changed)
+        };
+        scene.set(3, at(1.0), &a, 9);
+        kept.apply(&mut scene.changes, 5);
+        assert_eq!(record(&kept), (1.0, 1.0, [5, 0]));
+
+        // Moved in a frame, then again in it, as a frame that didn't begin leaves its changes.
+        scene.set(3, at(2.0), &a, 9);
+        kept.apply(&mut scene.changes, 6);
+        scene.set(3, at(3.0), &a, 9);
+        kept.apply(&mut scene.changes, 6);
+        assert_eq!(record(&kept), (3.0, 1.0, [6, 0]));
+
+        // In the next frame, from where that one left it.
+        scene.set(3, at(4.0), &a, 9);
+        kept.apply(&mut scene.changes, 7);
+        assert_eq!(record(&kept), (4.0, 3.0, [7, 0]));
+
+        // Another entity in the slot starts where it is.
+        scene.set(3, at(8.0), &a, 10);
+        kept.apply(&mut scene.changes, 1 << 32 | 8);
+        assert_eq!(record(&kept), (8.0, 8.0, [8, 1]));
     }
 }

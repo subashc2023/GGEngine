@@ -12,14 +12,14 @@
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
-use gg_core::math::Vec3;
+use gg_core::math::{Vec2, Vec3};
 use gg_core::{Result, label};
 use gg_gpu::{
     Blend, ComputePipeline, Device, Format, Frame, Graph, GraphicsDesc, ImageId, Pass, PassId,
     Pipeline, StorageImage, Target,
 };
 
-use crate::{Light, LightKind, Texture, Viewpoint};
+use crate::{Light, LightKind, Texture, Viewpoint, taa};
 
 static PREFILTER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.spv"));
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.spv"));
@@ -157,8 +157,9 @@ impl SkyPass {
                     vertex: c"vertex_main",
                     mesh: None,
                     fragment: Some(c"fragment_main"),
-                    format: Format::HDR.with_ids().with_depth(),
-                    // Drawn first, at depth 0, which the cleared depth passes, writing none.
+                    format: Format::HDR.with_ids().with_motion().with_depth(),
+                    // Drawn first, at depth 0, which the cleared depth passes, writing none, nor
+                    // any motion.
                     blend: Blend::Opaque,
                     depth_write: false,
                     depth_bias: 0.0,
@@ -259,24 +260,26 @@ impl SkyPass {
     }
 
     /// Draws the sky behind everything the pass draws after it, over the whole of its target, as
-    /// `viewpoint` sees it in a view `aspect` times as wide as it's tall: its texture, `sky`, times
-    /// `scale`.
+    /// `viewpoint` sees it in a view `aspect` times as wide as it's tall, drawn `jitter` off, in
+    /// its normalized coordinates, as antialiasing draws it: its texture, `sky`, times `scale`.
     ///
     /// # Panics
     ///
-    /// If the pass isn't into an image of [`Format::HDR`] with IDs and a depth image.
+    /// If the pass isn't into an image of [`Format::HDR`] with IDs, motion and a depth image.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
         viewpoint: &Viewpoint,
         aspect: f32,
+        jitter: Vec2,
         sky: u32,
         scale: f32,
     ) {
         pass.begin_label(c"sky");
         pass.set_pipeline(&self.draw);
         let push = DrawPush {
-            world_from_clip: viewpoint.ways_from_clip(aspect),
+            // Back from where the offset drew each pixel's way.
+            world_from_clip: viewpoint.ways_from_clip(aspect) * taa::jitter(-jitter),
             sky,
             scale,
         };

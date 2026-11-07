@@ -27,6 +27,8 @@ struct Shading {
     params_words: u32,
     slots: [u32; 2],
     meshlets: [u32; 2],
+    previous: [u32; 2],
+    unused: [u32; 2],
 }
 
 /// What the shading pushes: `ShadePush` in `shaders/visibility.slang`, field for field.
@@ -41,6 +43,8 @@ struct ShadePush {
     params: u64,
     visibility: u32,
     target: u32,
+    motion: u32,
+    unused: u32,
 }
 
 /// The game's view, as its shading from its visibility buffer takes it.
@@ -52,9 +56,10 @@ pub(crate) struct Shaded {
     /// Its size in pixels.
     pub(crate) size: [u32; 2],
     /// Its visibility buffer, which the shading's pass samples, and its colors of high dynamic
-    /// range, which it overwrites.
+    /// range and its motion, which it overwrites.
     pub(crate) visibility: ImageId,
     pub(crate) colors: ImageId,
+    pub(crate) motion: ImageId,
     /// The address of the frame's data, a [`FrameData`](super::FrameData), as the view's draws
     /// read it.
     pub(crate) frame: u64,
@@ -62,9 +67,10 @@ pub(crate) struct Shaded {
 
 impl MeshPass {
     /// Records the shading of `view` from its visibility buffer into `pass`, which samples it,
-    /// overwrites its colors, and reads what `plan`'s culling kept, as [`CullPlan::shaded`]
-    /// declared it: each pixel of its colors as the model shader's fragment would have shaded it,
-    /// where a run's meshlets drew, and its clear color elsewhere.
+    /// overwrites its colors and its motion, and reads what `plan`'s culling kept, as
+    /// [`CullPlan::shaded`] declared it: each pixel of its colors, and of its motion, as the model
+    /// shader's fragment would have written it, where a run's meshlets drew, and its clear color,
+    /// and no motion, elsewhere.
     pub(crate) fn shade(
         &self,
         pass: &mut Compute<'_, '_>,
@@ -80,6 +86,8 @@ impl MeshPass {
             params_words: kept.params_words,
             slots: kept.slots,
             meshlets: kept.meshlets,
+            previous: kept.previous,
+            unused: [0; 2],
         };
         let push = ShadePush {
             shading: pass.upload(bytemuck::bytes_of(&shading))?.address(),
@@ -90,6 +98,8 @@ impl MeshPass {
             params: kept.params,
             visibility: pass.sampled(view.visibility),
             target: pass.storage(view.colors, 0),
+            motion: pass.storage(view.motion, 0),
+            unused: 0,
         };
         pass.set_pipeline(&self.shading);
         pass.push_constants(bytemuck::bytes_of(&push));

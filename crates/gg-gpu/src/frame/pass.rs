@@ -75,7 +75,7 @@ impl<'a> Frame<'a> {
             Some(color) => Format::new(self.format_of(color)),
             None => Format::new(vk::Format::UNDEFINED),
         };
-        let mut attachments = [vk::RenderingAttachmentInfo::default(); 2];
+        let mut attachments = [vk::RenderingAttachmentInfo::default(); 3];
         let mut depth_attachment = None;
         for &(image, use_) in uses {
             let (_, view, _) = self.parts(image);
@@ -120,6 +120,12 @@ impl<'a> Frame<'a> {
                         color: vk::ClearColorValue { uint32: [0; 4] },
                     });
                 }
+                Use::Motion { kept } => {
+                    format = format.with_motion();
+                    attachments[2] = attachment.load_op(load(kept)).clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue { float32: [0.0; 4] },
+                    });
+                }
                 Use::Depth { kept } => {
                     format = format.with_depth();
                     depth_attachment =
@@ -133,8 +139,10 @@ impl<'a> Frame<'a> {
                 Use::Sampled | Use::ComputeSampled | Use::Storage { .. } | Use::CopySource => {}
             }
         }
-        let colors =
-            usize::from(color.is_some()) + usize::from(format.ids != vk::Format::UNDEFINED);
+        // Motion is only beside IDs, as the graph checked, so the attachments are in order.
+        let colors = usize::from(color.is_some())
+            + usize::from(format.ids != vk::Format::UNDEFINED)
+            + usize::from(format.motion != vk::Format::UNDEFINED);
         let attachments = &attachments[..colors];
         let mut rendering = vk::RenderingInfo::default()
             .render_area(extent.into())
@@ -213,8 +221,8 @@ impl<'a> Pass<'_, 'a> {
         [self.extent.width, self.extent.height]
     }
 
-    /// The formats of its color target, its IDs and its depth, of those it has, which the
-    /// pipelines it draws with must be made for.
+    /// The formats of its color target, its IDs, its motion and its depth, of those it has, which
+    /// the pipelines it draws with must be made for.
     pub fn format(&self) -> Format {
         self.format
     }
@@ -292,14 +300,14 @@ impl<'a> Pass<'_, 'a> {
         assert_eq!(
             pipeline.format(),
             self.format,
-            "a pipeline is made for the formats of the pass it draws in: its target's, its IDs' and \
-             its depth image's"
+            "a pipeline is made for the formats of the pass it draws in: its target's, its IDs', \
+             its motion's and its depth image's"
         );
         self.pipeline_set = true;
         self.mesh_pipeline = pipeline.mesh();
-        // SAFETY: the commands are recording inside a pass whose formats, its target's, its IDs'
-        // and its depth image's, are the pipeline's, and the pipeline retires until the frame has
-        // finished.
+        // SAFETY: the commands are recording inside a pass whose formats, its target's, its IDs',
+        // its motion's and its depth image's, are the pipeline's, and the pipeline retires until
+        // the frame has finished.
         unsafe {
             self.frame.frames.device.raw().cmd_bind_pipeline(
                 self.commands(),

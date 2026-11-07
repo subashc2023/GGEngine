@@ -1,5 +1,5 @@
-// flat_color.slang returning a float3 color, and writing a third target the view doesn't have,
-// both of which the contract refuses.
+// flat_color.slang returning a float3 color, a float3 motion, and writing a fourth target the view
+// doesn't have, all of which the contract refuses.
 
 struct Vertex {
     float3 position;
@@ -37,7 +37,8 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
 struct Targets {
     float3 color : SV_Target0;
     uint2 id : SV_Target1;
-    float4 glow : SV_Target2;
+    float3 motion : SV_Target2;
+    float4 glow : SV_Target3;
 };
 
 [shader("fragment")]
@@ -46,6 +47,7 @@ Targets fragment_main(Varyings input) {
     Targets out;
     out.color = color.rgb;
     out.id = input.id;
+    out.motion = float3(0.0);
     out.glow = color;
     return out;
 }

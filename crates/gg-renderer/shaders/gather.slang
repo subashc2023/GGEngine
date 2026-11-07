@@ -1,8 +1,9 @@
 // Gathers the instances of a frame's opaque runs into the arrays `cull.slang` culls them from, each
 // run's after the run's before: those of the frame's draws from where the frame copied them, and
 // those of the scene, which the GPU keeps from frame to frame, from its table of records, in the
-// order the scene keeps them in. `Copy`, `Record` and `Push` match `GpuCopy`, `Record` in
-// src/mesh/scene.rs and `GatherPush` in src/mesh/cull.rs field for field.
+// order the scene keeps them in; and each one's transform the frame before, past the transforms,
+// which the frame's draws, made each frame, give as their own. `Copy`, `Record` and `Push` match
+// `GpuCopy`, `Record` in src/mesh/scene.rs and `GatherPush` in src/mesh/cull.rs field for field.
 //
 // Each array is reached as a pointer the push constants hold, indexed, as `cull.slang` says why.
 
@@ -27,11 +28,13 @@ struct Copy {
     uint source_params;
 };
 
-// An instance of the scene, in its slot of the table.
+// An instance of the scene, in its slot of the table: its transform, and the one the frame its
+// transform last changed in found it at, which that frame's number, its low and high words, says.
 struct Record {
     float4x4 transform;
+    float4x4 previous;
     uint2 id;
-    uint2 unused;
+    uint2 changed;
     uint params[RECORD_WORDS];
 };
 
@@ -44,13 +47,18 @@ struct Push {
     // The scene's table of records, by slot, and its order.
     Record* scene;
     uint* order;
-    // Where they go: what `cull.slang` reads.
+    // Where they go: what `cull.slang` reads, each instance's transform the frame before
+    // `instances` past its own.
     float4x4* transforms;
     uint2* ids;
     uint* params;
     uint copy_count;
     // How many workgroups were dispatched across, each taking every that many copies in turn.
     uint groups;
+    // The frame's number, its low and high words.
+    uint2 frame;
+    uint instances;
+    uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -70,13 +78,19 @@ void gather_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
             // a pushed one indexed, none kept across the loop.
             Record record = push.scene[push.order[copy.source + i]];
             push.transforms[to] = record.transform;
+            // Where the frame before drew it: the transform the frame its transform last changed
+            // in found it at, if that's this one, and otherwise where it is.
+            bool changed = all(record.changed == push.frame);
+            push.transforms[push.instances + to] = changed ? record.previous : record.transform;
             push.ids[to] = record.id;
             for (uint w = 0; w < copy.params_words; w++) {
                 push.params[to_params + w] = record.params[w];
             }
         } else {
             uint from = copy.source + i;
-            push.transforms[to] = push.frame_transforms[from];
+            float4x4 transform = push.frame_transforms[from];
+            push.transforms[to] = transform;
+            push.transforms[push.instances + to] = transform;
             push.ids[to] = push.frame_ids[from];
             uint from_params = copy.source_params + i * copy.params_words;
             for (uint w = 0; w < copy.params_words; w++) {

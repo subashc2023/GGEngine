@@ -5,7 +5,8 @@
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
 //! text, written and shaped again each frame, a sprite and that text on the view's canvas, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
-//! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
+//! camera of the world's that a pivot the ticks turn carries round, under the default environment,
+//! which antialiases the view against the frames before, run through the engine's main
 //! loop headless, without the tool API, whose development runs' watchers of the assets' files
 //! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
 //! first frames have run, by which every image its attach added has decoded off the main thread
@@ -44,9 +45,9 @@ use std::time::Duration;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Event, Font, Key, Layer, Mesh, MeshDraw, Model, MouseButton, Pick,
-    Projection, Shader, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform,
-    World,
+    Component, Context, Entity, Environment, Event, Font, Key, Layer, Mesh, MeshDraw, Model,
+    MouseButton, Pick, Projection, Shader, Source, Sprite, SpriteSheet, Text, TextStyle, Texture,
+    Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -314,6 +315,9 @@ impl Layer for Scene {
         ));
         world.set_parent(camera, Some(pivot)).expect("both alive");
         self.pivot = Some(pivot);
+        // The default environment's, which antialiases the view, resolving it against the frames
+        // before.
+        world.spawn(Environment::default());
         // The pair, and a copy mirrored, which culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
         let mirrored = Transform {

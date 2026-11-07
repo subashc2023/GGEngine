@@ -25,12 +25,13 @@ const SHADERS: [&str; 13] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 7] = [
+const COMPUTE: [(&str, &[&str]); 8] = [
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
     ("gather", &["gather_main"]),
     ("meshlets", &["meshlets_main"]),
     ("pyramid", &["depth_main", "reduce_main"]),
+    ("taa", &["resolve_main"]),
     ("visibility", &["shade_main"]),
     (
         "prefilter",

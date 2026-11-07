@@ -17,9 +17,9 @@ use gg_api::asset::AssetId;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Circle, Draws, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps, ModelParams,
-    ModelVertex, Outline, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture,
-    Textures, Tonemapper, Viewpoint, Viewport,
+    Antialiasing, Blend, Circle, Draws, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps,
+    ModelParams, ModelVertex, Outline, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming,
+    Texels, Texture, Textures, Tonemapper, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
@@ -3197,9 +3197,9 @@ impl Context {
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
-    /// [`view`](Self::view) gives from then on: the world's environment's tonemapper, exposure and
-    /// sky, or none, the default's and none, and its lights, as the world was last drawn, and the
-    /// time it was drawn at; its
+    /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
+    /// antialiasing, exposure and sky, or none, none, the default's and none, and its lights, as
+    /// the world was last drawn, and the time it was drawn at; its
     /// draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
@@ -3217,9 +3217,11 @@ impl Context {
     /// reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
-        // A world without an environment isn't tonemapped, and its light is exposed as the
-        // default environment's is.
+        // A world without an environment isn't tonemapped or antialiased, and its light is exposed
+        // as the default environment's is.
         frame.tonemapper = (self.environment).map_or(Tonemapper::None, |seen| seen.tonemapper);
+        frame.antialiasing =
+            (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing);
         frame.exposure = self.environment.unwrap_or_default().light_scale();
         frame.sky = self.environment.and_then(|seen| seen.sky());
         frame.lights.clear();

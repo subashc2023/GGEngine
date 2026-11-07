@@ -22,12 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
-    Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
-    Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
-    PackedVertex, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene,
-    Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
-    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
+    AlphaMode, Antialiasing, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid,
+    GridLines, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map,
+    Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh,
+    ModelVertex, Outline, PackedVertex, Pick, Pixels, Projection, RenderData, Renderer, Sampled,
+    Sampler, Scene, Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures,
+    Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -116,6 +116,9 @@ fn main() -> ExitCode {
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
         removed_assets_draw_nothing_or_their_stand_in,
+        antialiasing_smooths_edges_frame_by_frame,
+        antialiasing_follows_what_moves,
+        antialiasing_leaves_no_trail,
     );
     // The tests of models' shading again, their models cut into meshlets, which the view draws
     // into its visibility buffer and shades from it, against the references they made drawn by
@@ -325,9 +328,9 @@ struct Stores {
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
-    /// draws nothing on its canvas, picks and outlines nothing and isn't tonemapped, at time 0
-    /// with an exposure of 1 and the stores' lights and sky, with the uploads of what's been added,
-    /// and what's changed in the scene, since the last frame's.
+    /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased or tonemapped,
+    /// at time 0 with an exposure of 1 and the stores' lights and sky, with the uploads of what's
+    /// been added, and what's changed in the scene, since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -350,6 +353,7 @@ impl Stores {
         RenderData {
             clear_color: CLEAR,
             tonemapper: Tonemapper::None,
+            antialiasing: Antialiasing::None,
             exposure: 1.0,
             time: 0.0,
             lights,
@@ -5678,6 +5682,383 @@ fn shadowed_models_match_their_reference() {
 
 /// What the last frame drew in the view of `draws` in `viewport` from `viewpoint`, which comes back
 /// as the frame two later begins: renders them twice more, as they were.
+/// The light the antialiasing tests' models are lit by, from the upper left, in front.
+fn front_light() -> Light {
+    Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::new(1.0, -1.0, -1.0).normalize(),
+        color: Vec3::splat(4.0),
+        range: None,
+        shadow_distance: None,
+    }
+}
+
+/// What the antialiasing tests see from: 4 in front of the origin, a quarter of a turn across,
+/// about 19 pixels a unit at the origin in a view 64 pixels a side; as far again as `moved`.
+fn seeing_from(moved: Vec3) -> Viewpoint {
+    Viewpoint {
+        position: Vec3::new(0.0, 0.0, 4.0) + moved,
+        projection: Projection::Perspective {
+            fov: PI / 4.0,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    }
+}
+
+/// The linear light of an sRGB-encoded channel, as a frame reads back.
+fn decoded(channel: u8) -> f32 {
+    let encoded = f32::from(channel) / 255.0;
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        math::libm::powf((encoded + 0.055) / 1.055, 2.4)
+    }
+}
+
+/// How far apart `a` and `b`, frames read back, are in linear light: the mean over every channel of
+/// every pixel.
+fn linear_distance(a: &[u8], b: &[u8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "frames of a size");
+    let sum: f32 = (a.iter().zip(b))
+        .map(|(&a, &b)| (decoded(a) - decoded(b)).abs())
+        .sum();
+    sum / a.len() as f32
+}
+
+/// `pixels`, a frame read back `size` pixels a side, averaged down `by` times each way in linear
+/// light, as a view of that many samples a pixel shows it.
+fn averaged_down(pixels: &[u8], size: u32, by: u32) -> Vec<u8> {
+    let small = size / by;
+    let mut averaged = Vec::with_capacity((small * small * 4) as usize);
+    for y in 0..small {
+        for x in 0..small {
+            for channel in 0..4 {
+                let mut sum = 0.0;
+                for dy in 0..by {
+                    for dx in 0..by {
+                        let at = ((y * by + dy) * size + x * by + dx) * 4 + channel;
+                        sum += decoded(pixels[at as usize]);
+                    }
+                }
+                averaged.push(encoded(sum / (by * by) as f32));
+            }
+        }
+    }
+    averaged
+}
+
+/// `frames`, each read back `size` pixels a side, side by side, as a reference holds frames in a
+/// row.
+fn side_by_side(frames: &[&[u8]], size: u32) -> Vec<u8> {
+    let row = (size * 4) as usize;
+    (0..size as usize)
+        .flat_map(|y| {
+            frames
+                .iter()
+                .flat_map(move |frame| &frame[y * row..(y + 1) * row])
+        })
+        .copied()
+        .collect()
+}
+
+/// A view antialiased frame after frame, against its reference of frames 1, 2, 4 and 16 side by
+/// side: a lit sphere, a model's, and a square of a game's opaque shader, turned so that their
+/// edges cross the pixels at every angle, with a square on the canvas, at the bottom left, over
+/// them. By the sixteenth, their edges average what's drawn across their pixels: it's nearer the
+/// view drawn at 4 times the size, without antialiasing, and averaged down than the view drawn
+/// without it is; and the canvas, drawn after the view resolves, shows as it does without it.
+fn antialiasing_smooths_edges_frame_by_frame() {
+    const SIZE: u32 = 64;
+    const LARGER: u32 = 4;
+    const SHOWN: [usize; 4] = [1, 2, 4, 16];
+    // `frames` frames of the view, `scale` times the size, antialiased as `antialiasing` says.
+    let render = |scale: u32, antialiasing: Antialiasing, frames: usize| {
+        let size = SIZE * scale;
+        let mut renderer = renderer(size, size);
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let square = square(&mut stores.meshes);
+        let sphere = sphere(&mut stores.meshes, 0.6, 24, 48);
+        let material = stores.materials.add(&Material {
+            color: Vec4::new(0.9, 0.45, 0.2, 1.0),
+            workflow: metallic(0.0, 0.5),
+            ..Material::default()
+        });
+        let ball =
+            MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
+        let mut draws = Draws::default();
+        let turned = Mat4::from_scale_rotation_translation(
+            Vec3::splat(1.3),
+            Quat::from_rotation_z(0.35),
+            Vec3::new(-0.5, 0.35, 0.0),
+        );
+        draws.push(square, flat, turned, Vec4::new(0.85, 0.85, 0.95, 1.0));
+        draws.push_draw(Mat4::from_translation(Vec3::new(0.45, -0.3, 0.6)), &ball, 0);
+        // 12 pixels a side at the view's own size, 8 from its bottom left.
+        let mut canvas = Draws::default();
+        let placed = Mat4::from_scale(Vec3::new(scale as f32, scale as f32, 1.0))
+            * Mat4::from_translation(Vec3::new(14.0, 14.0, 0.0))
+            * Mat4::from_scale(Vec3::new(12.0, 12.0, 1.0));
+        let green = Sprite {
+            color: Vec4::new(0.1, 0.8, 0.2, 1.0),
+            ..Sprite::default()
+        };
+        canvas.push_sprite(placed, green);
+        stores.lights = vec![front_light()];
+        let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let mut drawn = Vec::new();
+        for _ in 0..frames {
+            let data = RenderData {
+                antialiasing,
+                canvas: &canvas,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+            drawn.push(frame_pixels(&mut renderer));
+        }
+        shut_down(renderer);
+        drawn
+    };
+    let antialiased = render(1, Antialiasing::Taa, 16);
+    let shown = SHOWN.map(|frame| antialiased[frame - 1].as_slice());
+    compare(
+        "antialiased",
+        SIZE * SHOWN.len() as u32,
+        SIZE,
+        &side_by_side(&shown, SIZE),
+    );
+    let aliased = render(1, Antialiasing::None, 1).remove(0);
+    let larger = render(LARGER, Antialiasing::None, 1).remove(0);
+    let truth = averaged_down(&larger, SIZE * LARGER, LARGER);
+    let last = &antialiased[15];
+    let (resolved, drawn) = (
+        linear_distance(last, &truth),
+        linear_distance(&aliased, &truth),
+    );
+    assert!(
+        resolved < 0.6 * drawn,
+        "the 16th frame is {resolved} from the view averaged down, and the view without \
+         antialiasing {drawn}"
+    );
+    let canvas = |frame: &[u8]| region(frame, SIZE, [8, SIZE - 20], [12, 12]);
+    assert!(
+        canvas(last) == canvas(&aliased),
+        "the canvas shows as it does without antialiasing"
+    );
+}
+
+/// What a model or a game's shader draws, as the antialiasing tests draw it.
+#[derive(Clone, Copy, Debug)]
+enum Moved {
+    /// A sphere of the model shader drawn by its indices.
+    Indices,
+    /// The sphere cut into meshlets, drawn into the visibility buffer and shaded from it.
+    Meshlets,
+    /// A square of a game's shader that returns its motion, `moving.slang`.
+    Game,
+}
+
+impl Moved {
+    /// What `self` draws with, added to `stores`: a sphere 0.8 across, or a square 1.3 across,
+    /// turned so that its edges cross the pixels aslant.
+    fn draw(self, stores: &mut Stores) -> (MeshDraw, Mat4) {
+        let draw = match self {
+            Self::Indices | Self::Meshlets => {
+                let (vertices, indices) = sphere_of(0.8, 24, 48);
+                let mut packed = ModelMesh::pack(&vertices, indices, Vec::new());
+                if matches!(self, Self::Meshlets) {
+                    cut_meshlets(&mut packed);
+                }
+                let mesh = stores.meshes.add_model("sphere", &packed).expect("a mesh");
+                let material = stores.materials.add(&Material {
+                    color: Vec4::new(0.9, 0.45, 0.2, 1.0),
+                    workflow: metallic(0.0, 0.5),
+                    ..Material::default()
+                });
+                MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+            }
+            Self::Game => {
+                let moving = (stores.shaders)
+                    .add::<[f32; 3], Vec4>("moving", &shader("moving.slang"), Blend::Opaque)
+                    .expect("a shader");
+                let square = square(&mut stores.meshes);
+                MeshDraw::new(square, moving, Vec4::new(0.85, 0.85, 0.95, 1.0))
+            }
+        };
+        let shape = match self {
+            Self::Indices | Self::Meshlets => Mat4::IDENTITY,
+            Self::Game => Mat4::from_scale_rotation_translation(
+                Vec3::splat(1.3),
+                Quat::from_rotation_z(0.35),
+                Vec3::ZERO,
+            ),
+        };
+        (draw, shape)
+    }
+}
+
+/// What the camera moves with, antialiased: an instance of the scene, moved each frame as far as
+/// the camera, so that it shows where it did, resolves as though neither moved, as its motion takes
+/// each pixel's history back from where it showed the frame before: after as many frames, within
+/// 0.0015 on average, in linear light, of the view of it standing still, which rounding alone keeps
+/// it from, where moving it with the camera alone, as though it stood still in the world, leaves it
+/// 0.004 or more apart. For the model shader drawn by its indices, and by its meshlets into the
+/// visibility buffer, and a game's shader that returns its motion.
+fn antialiasing_follows_what_moves() {
+    const SIZE: u32 = 64;
+    const FRAMES: u32 = 20;
+    let step = Vec3::new(0.21, 0.13, -0.05);
+    let render = |moved: Moved, moving: bool| {
+        let mut renderer = renderer(SIZE, SIZE);
+        let mut stores = Stores::default();
+        let (draw, shape) = moved.draw(&mut stores);
+        stores.lights = vec![front_light()];
+        // Where the frame's camera and instance are, from where they start: still, where the
+        // moving ones end.
+        let at = |frame: u32| step * if moving { frame } else { FRAMES - 1 } as f32;
+        let placed = |frame| Mat4::from_translation(at(frame)) * shape;
+        let mut draws = Draws::default();
+        draws.draw_scene();
+        let viewport = filling([SIZE, SIZE]);
+        stores.scene.set(0, placed(0), &draw, 1);
+        settle(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            seeing_from(at(0)),
+            &draws,
+        );
+        for frame in 0..FRAMES {
+            stores.scene.set(0, placed(frame), &draw, 1);
+            let data = RenderData {
+                antialiasing: Antialiasing::Taa,
+                ..stores.data(viewport, seeing_from(at(frame)), &draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        pixels
+    };
+    for moved in [Moved::Indices, Moved::Meshlets, Moved::Game] {
+        let (moving, still) = (render(moved, true), render(moved, false));
+        let apart = linear_distance(&moving, &still);
+        assert!(
+            apart < 0.0015,
+            "{moved:?}: the view moving is {apart} from the view standing still"
+        );
+    }
+}
+
+/// A plate of the scene that crosses a view standing still, antialiased, against its reference of
+/// frames 4, 8, 12 and 16 side by side: where it was leaves no trail, every pixel two or more from
+/// where it is now showing the clear color, as its history there, of the plate, is clipped to
+/// what's round it; and no pixel of any frame is darker or brighter than the clear color and the
+/// plate's own, as a filter's undershoot at an edge would be.
+fn antialiasing_leaves_no_trail() {
+    const SIZE: u32 = 64;
+    const FRAMES: usize = 16;
+    const SHOWN: [usize; 4] = [4, 8, 12, 16];
+    let render = |antialiasing: Antialiasing, frames: std::ops::Range<usize>| {
+        let mut renderer = renderer(SIZE, SIZE);
+        let mut stores = Stores::default();
+        let plate = model_square(&mut stores.meshes);
+        let material = stores.materials.add(&Material {
+            color: Vec4::new(0.95, 0.9, 0.6, 1.0),
+            workflow: metallic(0.0, 0.7),
+            ..Material::default()
+        });
+        // Unlit, without lights, so that it's one color wherever it is.
+        let draw = MeshDraw::with_material(plate, material, &stores.materials, &mut stores.shaders);
+        let placed = |frame: usize| {
+            let at = Vec3::new(-1.6 + 0.15 * frame as f32, 0.1, 0.0);
+            Mat4::from_scale_rotation_translation(Vec3::ONE, Quat::from_rotation_z(0.2), at)
+        };
+        let mut draws = Draws::default();
+        draws.draw_scene();
+        let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+        stores.scene.set(0, placed(frames.start), &draw, 1);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let mut drawn = Vec::new();
+        for frame in frames {
+            stores.scene.set(0, placed(frame), &draw, 1);
+            let data = RenderData {
+                antialiasing,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+            drawn.push(frame_pixels(&mut renderer));
+        }
+        shut_down(renderer);
+        drawn
+    };
+    let antialiased = render(Antialiasing::Taa, 1..FRAMES + 1);
+    let shown = SHOWN.map(|frame| antialiased[frame - 1].as_slice());
+    compare(
+        "antialiased_motion",
+        SIZE * SHOWN.len() as u32,
+        SIZE,
+        &side_by_side(&shown, SIZE),
+    );
+    // Where the plate is in the last frame, and where it was in the fourth, drawn without
+    // antialiasing.
+    let now = render(Antialiasing::None, FRAMES..FRAMES + 1).remove(0);
+    let then = render(Antialiasing::None, 4..5).remove(0);
+    let last = &antialiased[FRAMES - 1];
+    let clear = |frame: &[u8], [x, y]: [i32; 2]| {
+        let inside = (0..SIZE as i32).contains(&x) && (0..SIZE as i32).contains(&y);
+        !inside || close(pixel_at(frame, SIZE, [x as u32, y as u32]), CLEARED)
+    };
+    let (mut left, mut trailing) = (0, Vec::new());
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            // Two or more from where the plate is now.
+            let away = (-2..=2).all(|dy| (-2..=2).all(|dx| clear(&now, [x + dx, y + dy])));
+            if !away || clear(&then, [x, y]) {
+                continue;
+            }
+            left += 1;
+            if !clear(last, [x, y]) {
+                trailing.push([x, y]);
+            }
+        }
+    }
+    assert!(left > 100, "the plate left {left} pixels");
+    assert!(trailing.is_empty(), "the plate trails at {trailing:?}");
+    // The plate's color, lit, where nothing of the clear color is round it, and the clear color:
+    // each channel's least and most.
+    let inside = (0..SIZE * SIZE)
+        .map(|i| [i % SIZE, i / SIZE])
+        .find(|&[x, y]| {
+            let at = |dx: i32, dy: i32| [x as i32 + dx, y as i32 + dy];
+            (-3..=3).all(|dy| (-3..=3).all(|dx| !clear(&now, at(dx, dy))))
+        });
+    let plate = pixel_at(
+        &now,
+        SIZE,
+        inside.expect("the plate shows, 7 pixels across"),
+    );
+    let bounds: [(u8, u8); 4] =
+        std::array::from_fn(|c| (plate[c].min(CLEARED[c]), plate[c].max(CLEARED[c])));
+    for (i, frame) in antialiased.iter().enumerate() {
+        let outside = (frame.as_chunks::<4>().0.iter()).position(|pixel| {
+            (pixel.iter().zip(bounds)).any(|(&v, (least, most))| {
+                v < least.saturating_sub(2) || v > most.saturating_add(2)
+            })
+        });
+        assert!(
+            outside.is_none(),
+            "frame {}'s pixel {outside:?} is outside the clear color's and the plate's {bounds:?}",
+            i + 1
+        );
+    }
+}
+
 fn drawn_again(
     renderer: &mut Renderer,
     stores: &mut Stores,

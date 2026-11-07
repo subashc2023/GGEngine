@@ -73,7 +73,15 @@ struct View {
     uint meshlets;
     // Where it sees from, and 1, under perspective; or the way it looks, and 0, without.
     float4 eye;
+    // For the game's view's passes, where the transforms the frame before of the instances it
+    // keeps go among the kept transforms' arrays, past every view's, by index; `NO_PREVIOUS` for a
+    // cascade's, which keeps none.
+    uint previous;
+    uint unused[3];
 };
+
+// What a view that keeps no transforms of the frame before has for `View::previous`.
+static const uint NO_PREVIOUS = 0xFFFFFFFF;
 
 // Where the codes of the view in slot `slot` start in the scratch: each instance's level, and its
 // place among those of its level in its block, as `level | place << 8`, or `CULLED`, at its run's

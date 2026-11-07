@@ -1085,7 +1085,7 @@ impl Geometry<'_> {
                 vertex: self.entry,
                 mesh: self.mesh,
                 fragment: Some(c"fragment_main"),
-                format: Format::HDR.with_ids().with_depth(),
+                format: Format::HDR.with_ids().with_motion().with_depth(),
                 blend,
                 depth_write: writes_depth,
                 depth_bias: 0.0,
@@ -1225,12 +1225,12 @@ impl MeshPass {
     /// it removes. A shader that has a pipeline already, compiled again, gets a new one in place of
     /// the old, which retires until the GPU is done with it; one whose new pipeline can't be made
     /// warns, and keeps the old; one removed stays removed. Then takes the changes to the scene,
-    /// which the next frame that begins writes to the GPU.
+    /// as frame `frame`'s, the next to begin, which writes them to the GPU.
     ///
     /// # Panics
     ///
     /// If they were taken from another `Shaders` than the pass's shaders before them.
-    pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads) -> Result<()> {
+    pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads, frame: u64) -> Result<()> {
         let _zone = gg_core::zone!();
         for change in uploads.shaders.drain(..) {
             let added = match change {
@@ -1336,7 +1336,7 @@ impl MeshPass {
                 }
             }
         }
-        self.scene.apply(&mut uploads.scene);
+        self.scene.apply(&mut uploads.scene, frame);
         Ok(())
     }
 
@@ -1858,10 +1858,11 @@ impl MeshPass {
                 params: 0,
                 view: view.map(|side| side as f32),
                 frame,
-                // A draw of meshlets sets them.
+                // A draw of meshlets sets them, and a culled draw of the game's view its instances'
+                // transforms the frame before.
                 meshlets: 0,
                 draw: 0,
-                unused: 0,
+                previous: 0,
             };
             pass.begin_label(&shader.label);
             match (culled, culled_run, run) {
@@ -2086,7 +2087,12 @@ pub(crate) struct Push {
     /// and in which of the game's view's passes, 1 past twice the run's index, and that pass's 1
     /// past it, as the visibility buffer holds it, so that 0 is none: 0 for any other draw.
     pub(crate) draw: u32,
-    pub(crate) unused: u32,
+    /// How many transforms past each instance's, in the array `transforms` points into, its
+    /// transform the frame before is, which the game's view moves what it draws by: for the view's
+    /// culled draws, where the culling kept those, and 0 for the rest, which the renderer knows no
+    /// transform the frame before of, as a layer's draws, made each frame, so that they read their
+    /// own and move with the camera alone.
+    pub(crate) previous: u32,
 }
 
 /// What every draw's shader may read of the frame, through [`Push::frame`]: `Frame` in

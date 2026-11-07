@@ -21,7 +21,7 @@ use super::{
     GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, PlacedMeshlets, Push, Uploaded,
 };
 use crate::shadow::CASCADES;
-use crate::{Draws, MeshDraw};
+use crate::{Draws, MeshDraw, halves};
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
 pub(crate) static GATHER_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gather.spv"));
@@ -185,11 +185,23 @@ impl Culling {
     }
 
     /// The addresses of the arrays of the instances `views` views keep, in the graph's buffer at
-    /// `buffer`: their transforms, IDs and parameters, each array's one view's after another's.
-    fn kept(&self, buffer: u64, views: u64) -> [u64; 3] {
-        let ids = buffer + views * u64::from(self.instances) * TRANSFORM;
+    /// `buffer`: their transforms, past which `previous` arrays of transforms the frame before
+    /// follow, then their IDs and parameters, each array's one view's after another's.
+    fn kept(&self, buffer: u64, views: u64, previous: u64) -> [u64; 3] {
+        let ids = buffer + (views + previous) * u64::from(self.instances) * TRANSFORM;
         [buffer, ids, ids + views * u64::from(self.instances) * ID]
     }
+}
+
+/// How many arrays of transforms the frame before the culling keeps past its views': the game's
+/// view's first pass's, then its second's, as [`previous_of`] places them.
+const PREVIOUS: u64 = 2;
+
+/// Where the transforms the frame before of what the game's view's pass in slot `slot` keeps are,
+/// among `views` views' kept transforms' arrays, by index: past every view's, the first pass's
+/// then the second's.
+fn previous_of(slot: usize, views: usize) -> u32 {
+    (views + usize::from(slot != FIRST)) as u32
 }
 
 /// The most a frame's culling takes: of the runs it may cull, how many there are, their
@@ -298,8 +310,12 @@ impl CullPlan {
     pub(crate) fn new(graph: &mut Graph, bounds: Bounds, cascades: bool) -> Self {
         let views = if cascades { MAX_VIEWS } else { 2 };
         let count = views as u64;
-        let gathered = graph.buffer("gathered instances", bounds.kept_bytes());
-        let instances = graph.buffer("culled instances", count * bounds.kept_bytes());
+        // Each instance's transform the frame before, of what's gathered and of what the game's
+        // view's passes keep.
+        let previous = bounds.instances * TRANSFORM;
+        let gathered = graph.buffer("gathered instances", bounds.kept_bytes() + previous);
+        let kept = count * bounds.kept_bytes() + PREVIOUS * previous;
+        let instances = graph.buffer("culled instances", kept);
         let commands_bytes = bounds.commands_bytes() + bounds.meshlet_words * 4;
         let commands = graph.buffer("culled draws", count * commands_bytes);
         let scratch = graph.buffer(
@@ -434,8 +450,9 @@ impl CullPlan {
 /// What shading the game's view from its visibility buffer reads of the frame's culling: the
 /// addresses of its runs, of its commands, and of the transforms and the parameters of what its
 /// views kept; how many instances each view keeps room for, and words of their parameters; and,
-/// for each of the view's two passes, its slot among the views and where its meshlets start among
-/// the commands, in words.
+/// for each of the view's two passes, its slot among the views, where its meshlets start among the
+/// commands, in words, and where the transforms the frame before of what it keeps are among the
+/// kept transforms' arrays, by index.
 pub(super) struct Kept {
     pub(super) runs: u64,
     pub(super) commands: u64,
@@ -445,6 +462,7 @@ pub(super) struct Kept {
     pub(super) params_words: u32,
     pub(super) slots: [u32; 2],
     pub(super) meshlets: [u32; 2],
+    pub(super) previous: [u32; 2],
 }
 
 impl MeshPass {
@@ -454,7 +472,7 @@ impl MeshPass {
     pub(super) fn kept(&self, plan: &CullPlan, pass: &Compute<'_, '_>) -> Kept {
         let culling = &self.culling;
         let views = plan.views as u64;
-        let [transforms, _, params] = culling.kept(pass.address(plan.instances), views);
+        let [transforms, _, params] = culling.kept(pass.address(plan.instances), views, PREVIOUS);
         let slots = [FIRST, plan.second()];
         Kept {
             runs: culling.pushed.map_or(0, |push| push.runs),
@@ -465,6 +483,7 @@ impl MeshPass {
             params_words: culling.params_words,
             slots: slots.map(|slot| slot as u32),
             meshlets: slots.map(|slot| plan.meshlets_at(slot) as u32),
+            previous: slots.map(|slot| previous_of(slot, plan.views)),
         }
     }
 }
@@ -545,6 +564,10 @@ struct GatherPush {
     params: u64,
     copy_count: u32,
     groups: u32,
+    /// The frame's number, its low and high words, which a record's last change is compared with.
+    frame: [u32; 2],
+    instances: u32,
+    unused: u32,
 }
 
 /// A level of detail, as `Level` in `shaders/culling.slang` has it.
@@ -576,7 +599,15 @@ struct GpuView {
     pyramid_levels: u32,
     meshlets: u32,
     eye: Vec4,
+    /// For the game's view's passes, where the transforms the frame before of what it keeps go, as
+    /// [`previous_of`] places them; [`NO_PREVIOUS`] for a cascade's.
+    previous: u32,
+    unused: [u32; 3],
 }
+
+/// What a view that keeps no transforms of the frame before has for [`GpuView::previous`]:
+/// `NO_PREVIOUS` in `shaders/culling.slang`.
+const NO_PREVIOUS: u32 = u32::MAX;
 
 impl GpuView {
     /// `view`, in slot `slot` of `plan`'s, keeping as `keep` says.
@@ -599,6 +630,11 @@ impl GpuView {
             pyramid_levels: pyramid(view.size).0 as u32,
             meshlets: plan.meshlets_at(slot) as u32,
             eye: eye(clip),
+            previous: match keep {
+                Keep::All => NO_PREVIOUS,
+                Keep::Shown | Keep::Unhidden => previous_of(slot, plan.views),
+            },
+            unused: [0; 3],
         }
     }
 }
@@ -815,15 +851,17 @@ impl MeshPass {
         let second = GpuView::new(&seen, plan, plan.second(), Keep::Unhidden);
         culling.views.push(second);
         let [kept_transforms, kept_ids, kept_params] =
-            culling.kept(frame.address(plan.instances), plan.views as u64);
-        // Laid out as one view's kept instances are, each run's at its `output`.
-        let [transforms, ids, params] = culling.kept(frame.address(plan.gathered), 1);
+            culling.kept(frame.address(plan.instances), plan.views as u64, PREVIOUS);
+        // Laid out as one view's kept instances are, each run's at its `output`, with each one's
+        // transform the frame before.
+        let [transforms, ids, params] = culling.kept(frame.address(plan.gathered), 1, 1);
         let (commands, scratch, counts) = (
             frame.address(plan.commands),
             frame.address(plan.scratch),
             frame.address(plan.counts),
         );
         let [scene, order] = self.scene.addresses();
+        let number = frame.number();
         let mut address = |bytes: &[u8]| -> Result<u64> { Ok(frame.upload(bytes)?.address()) };
         let groups = block_count.min(MOST_GROUPS) as u32;
         let gather = GatherPush {
@@ -838,6 +876,9 @@ impl MeshPass {
             params,
             copy_count: block_count as u32,
             groups,
+            frame: halves(number),
+            instances,
+            unused: 0,
         };
         let push = CullPush {
             runs: address(bytemuck::cast_slice(&culling.runs))?,
@@ -991,7 +1032,14 @@ impl MeshPass {
         let index = run as u32;
         let run = &culling.runs[run];
         let [transforms, ids, params] =
-            culling.kept(pass.address(plan.instances), plan.views as u64);
+            culling.kept(pass.address(plan.instances), plan.views as u64, PREVIOUS);
+        // The game's view's passes keep their instances' transforms the frame before, past every
+        // view's, as many transforms on as `previous`; a cascade's draws read their own.
+        let previous = if slot == FIRST || slot == plan.second() {
+            (previous_of(slot, plan.views) - slot as u32) * culling.instances
+        } else {
+            0
+        };
         let slot = slot as u64;
         let first = slot * u64::from(culling.instances) + u64::from(run.output);
         let params = if run.params_words == 0 {
@@ -1003,6 +1051,7 @@ impl MeshPass {
             transforms: transforms + first * TRANSFORM,
             ids: ids + first * ID,
             params,
+            previous,
             ..push
         };
         if run.meshlets != NO_MESHLETS {

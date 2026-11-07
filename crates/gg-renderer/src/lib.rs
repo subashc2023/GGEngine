@@ -5,8 +5,8 @@
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
 //! behind them, prefiltered on the GPU, opaque and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, a game's UI over them in the view's own space, and the UI over the view;
-//! the view drawn in colors
-//! of high dynamic range, which a tonemapper maps into the range it shows; picks, which read back
+//! the view drawn in colors of high dynamic range, antialiased against the frames before it, which
+//! a tonemapper maps into the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
@@ -28,6 +28,7 @@ mod shader;
 mod shadow;
 mod sky;
 mod sprite;
+mod taa;
 mod text;
 mod texture;
 mod tonemap;
@@ -40,7 +41,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gg_core::math::{Mat4, Vec4};
+use gg_core::math::{Mat4, Vec2, Vec4};
 use gg_core::{Error, Result, label};
 use gg_gpu::{
     ColorImage, ComputePass, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId,
@@ -69,6 +70,7 @@ pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sky::Sky;
 pub use sprite::{Sprite, SpriteSheet};
+pub use taa::Antialiasing;
 pub use text::Glyph;
 pub use texture::{Map, Mipmaps, Texels, Texture, Textures};
 #[doc(hidden)]
@@ -83,6 +85,7 @@ use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use sky::{SkyData, SkyLight, SkyPass};
+use taa::TaaPass;
 use tonemap::TonemapPass;
 use ui::UiPass;
 use view::{OutlinePass, ViewPass};
@@ -227,6 +230,12 @@ pub struct RenderData<'a> {
     /// How the view's colors, drawn in high dynamic range, map into the range it shows, 0 to 1:
     /// [`Tonemapper::None`] clamps them, so that what's in that range shows as it was drawn.
     pub tonemapper: Tonemapper,
+    /// How the view is antialiased, before it's tonemapped: [`Antialiasing::Taa`] resolves each
+    /// frame against those before it, as it says, from the frame before when it resolved the view
+    /// at its size, and from this frame's alone otherwise, as when it didn't render the view; what
+    /// the canvas draws, after it, isn't. [`Antialiasing::None`] draws what each pixel's center
+    /// shows.
+    pub antialiasing: Antialiasing,
     /// What lit shading multiplies light by, which shaders read from the frame's data, as
     /// [`Shaders::add`] describes: light in physical units, as lux and candela, times this, is what
     /// the tonemapper maps. What isn't lit, as sprites, text and unlit materials, draws its colors
@@ -350,6 +359,10 @@ pub struct Renderer {
     view: ViewPass,
     tonemap: TonemapPass,
     outline: OutlinePass,
+    /// What resolves the view, antialiased, against the frames before, and what it resolves into
+    /// and against, apart from its pipeline, as frames take them as targets while they record it.
+    taa: TaaPass,
+    history: taa::History,
     /// Made by the first frame with a sky to show.
     sky: Option<SkyPass>,
     /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
@@ -409,6 +422,8 @@ struct ViewPasses {
     /// What it shows, tonemapped.
     color: ImageId,
     ids: ImageId,
+    /// How far what's opaque in it moved in the world since the frame before.
+    motion: ImageId,
     /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing;
     /// into its visibility buffer, if it has one.
     first: PassId,
@@ -417,6 +432,9 @@ struct ViewPasses {
     /// What shades the view from its visibility buffer, and draws the rest over that, if it has
     /// one.
     shaded: Option<ShadedPasses>,
+    /// What resolves it, antialiased, if it's antialiased, and then draws its canvas, if it has
+    /// one; without antialiasing, the view's last pass draws the canvas.
+    taa: Option<(taa::Plan, Option<PassId>)>,
     /// What tonemaps it.
     tonemap: PassId,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
@@ -564,6 +582,8 @@ impl Renderer {
             view: ViewPass::new(device, format)?,
             tonemap: TonemapPass::new(device)?,
             outline: OutlinePass::new(device)?,
+            taa: TaaPass::new(device)?,
+            history: taa::History::default(),
             sky: None,
             sky_light: SkyLight::default(),
             graph: Graph::default(),
@@ -736,13 +756,16 @@ impl Renderer {
             self.ui.queue(window.textures);
         }
         self.ui.queue(ui.textures);
+        // The frame about to begin; one with nothing to render into begins none, and the next is
+        // of the same number.
+        let number = self.frames.submitted() + 1;
         // Before the frame begins, which a failure would then present unrendered.
-        self.meshes.add_shaders(data.uploads)?;
+        self.meshes.add_shaders(data.uploads, number)?;
         // Every frame, whether it renders or draws anything, so that a viewpoint that can't
         // project always panics. A view without an area draws nothing, so its aspect ratio doesn't
         // matter.
         let [width, height] = data.viewport.size;
-        let view_projection = data.viewpoint.view_projection(data.viewport.aspect());
+        let unjittered = data.viewpoint.view_projection(data.viewport.aspect());
         // A view without an area renders nothing; nor does one that shows pixels, which go into a
         // texture of their own size, made again as that changes.
         let has_view = width > 0 && height > 0;
@@ -766,6 +789,16 @@ impl Renderer {
             })
         });
         let renders_view = has_view && pixels.is_none();
+        // An antialiased view is drawn off by the frame's offset, everything in it but its
+        // canvas, and culled as it's drawn.
+        let antialiased = renders_view && data.antialiasing == Antialiasing::Taa;
+        let (jitter, view_projection) = if antialiased {
+            self.history.prepare(&self.device, data.viewport.size)?;
+            let jitter = taa::normalized(self.taa.offset(), data.viewport.size);
+            (jitter, taa::jitter(jitter) * unjittered)
+        } else {
+            (Vec2::ZERO, unjittered)
+        };
         if let Output::Offscreen(image, size) = &mut self.output
             && image.size() != *size
         {
@@ -796,13 +829,17 @@ impl Renderer {
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
+        // The antialiased view's images it resolves into and against are the targets after the
+        // windows'.
+        let resolved = 1 + windows_drawn;
+        let resolves = if antialiased { 2 } else { 0 };
         // First, the sky's prefiltering, if this frame prefilters it: the first to render the view
         // since its texture came to show the image it shows, or since a directional light came to
-        // stand for its sun or ceased to. Its images are the targets after the windows'. A frame
-        // that doesn't takes the light from those before.
+        // stand for its sun or ceased to. Its images are the targets after those. A frame that
+        // doesn't takes the light from those before.
         let plan = match sky {
             Some((sky, sky_size, shown, cutoff)) if !self.sky_light.holds(sky, shown, cutoff) => {
-                let first = 1 + windows_drawn;
+                let first = resolved + resolves;
                 let sky_light = &mut self.sky_light;
                 Some(sky_light.plan(&self.device, graph, first, sky, sky_size, cutoff)?)
             }
@@ -814,6 +851,7 @@ impl Renderer {
         };
         let meshes = &self.meshes;
         let lighting = &self.lighting;
+        let taa = &self.taa;
         let visibility_buffer = self.visibility_buffer;
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
@@ -851,6 +889,9 @@ impl Renderer {
             let clusters = lighting.plan(graph);
             let hdr = graph.hdr("view colors", size);
             let ids = graph.ids("view ids", size);
+            // Drawn every frame, antialiased or not, as the IDs are, for the reason
+            // ARCHITECTURE.md's Rendering gives: so that one pipeline draws each shader.
+            let motion = graph.motion("view motion", size);
             let depth = graph.depth("view depth", size);
             // What the draws light by, as the frame that prefilters it leaves it, and the shadows
             // they're in.
@@ -867,14 +908,15 @@ impl Renderer {
             let first = match visibility {
                 Some(visibility) => {
                     let first = culled(cull.as_ref(), graph.render(label!("view visibility")));
-                    first.visibility(visibility)
+                    first.visibility(visibility).ids(ids)
                 }
                 None => {
                     let first = culled(cull.as_ref(), graph.render(label!("view")));
-                    binned(clusters.as_ref(), sampling(lit(), first)).clear(hdr, data.clear_color)
+                    let first = binned(clusters.as_ref(), sampling(lit(), first));
+                    first.clear(hdr, data.clear_color).ids(ids).motion(motion)
                 }
             };
-            let first = first.ids(ids).depth(depth).add();
+            let first = first.depth(depth).add();
             // Where the view culls, its second pass, over its first: once the depth pyramid is
             // built from the first's depth, and the culling's second pass has culled against it,
             // what that kept, and, without a visibility buffer, the runs it doesn't cull.
@@ -887,7 +929,8 @@ impl Renderer {
                     }
                     None => {
                         let second = cull.drawn(graph.render(label!("view second")));
-                        binned(clusters.as_ref(), sampling(lit(), second)).keep(hdr)
+                        let second = binned(clusters.as_ref(), sampling(lit(), second));
+                        second.keep(hdr).keep(motion)
                     }
                 };
                 second.keep(ids).keep(depth).add()
@@ -899,10 +942,11 @@ impl Renderer {
                     Some(clusters) => shade.read_buffer(clusters.buffer),
                     None => shade,
                 };
-                let shade = cull.shaded(shade).overwrite(hdr).add();
+                let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
                 let rest = cull.drawn(graph.render(label!("view rest")));
                 let rest = (binned(clusters.as_ref(), sampling(lit(), rest)).keep(hdr))
                     .keep(ids)
+                    .keep(motion)
                     .keep(depth)
                     .add();
                 ShadedPasses {
@@ -911,12 +955,29 @@ impl Renderer {
                     rest,
                 }
             });
+            // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
+            // against the frames before into one of the antialiasing's images; then the canvas, if
+            // there is one, which isn't antialiased, is drawn in a pass of its own over the view's
+            // resolved colors, which the resolve writes apart, as the next frame resolves against
+            // what the resolve alone wrote.
+            let taa = antialiased.then(|| {
+                let apart = !data.canvas.is_empty();
+                let drawn = [hdr, depth, motion];
+                let plan = taa.plan(graph, resolved, number, size, drawn, apart);
+                let canvas = apart.then(|| {
+                    let canvas = graph.render(label!("canvas"));
+                    let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
+                    (canvas.keep(plan.shown()).keep(ids).keep(motion).keep(depth)).add()
+                });
+                (plan, canvas)
+            });
+            let shown = taa.as_ref().map_or(hdr, |(plan, _)| plan.shown());
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
             let tonemap = (graph.render(label!("tonemap")))
                 .clear(color, data.clear_color)
-                .sample(hdr)
+                .sample(shown)
                 .add();
             // Into the view's image, from the IDs the picks read, so that wherever the view shows,
             // and as it's read back, it shows outlined.
@@ -936,9 +997,11 @@ impl Renderer {
                 hdr,
                 color,
                 ids,
+                motion,
                 first,
                 second,
                 shaded,
+                taa,
                 tonemap,
                 read_ids,
                 outline,
@@ -965,9 +1028,11 @@ impl Renderer {
         let others = (self.window_keys.iter().zip(&mut self.windows))
             .filter(|(key, _)| has_ui(key))
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
+        let history = antialiased.then(|| self.history.targets());
         let lit = (plan.is_some()).then(|| self.sky_light.targets());
         let targets = iter::once(target)
             .chain(others)
+            .chain(history.into_iter().flatten())
             .chain(lit.into_iter().flatten());
         let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
             return Ok(false);
@@ -983,7 +1048,7 @@ impl Renderer {
                 self.drawn += culled;
             }
         }
-        let number = frame.number();
+        debug_assert_eq!(number, frame.number(), "the frame begun is the one planned");
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
         if let Some(plan) = &plan {
@@ -1133,6 +1198,7 @@ impl Renderer {
                         size,
                         visibility: shaded.visibility,
                         colors: view.hdr,
+                        motion: view.motion,
                         frame: shared,
                     };
                     self.meshes.shade(&mut shade, plan, &seen)?;
@@ -1152,7 +1218,7 @@ impl Renderer {
                     let drawn = self.sky.as_ref().expect("made for a sky to show");
                     let aspect = data.viewport.aspect();
                     let scale = luminance * data.exposure;
-                    drawn.draw(&mut pass, &data.viewpoint, aspect, sky, scale);
+                    drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, sky, scale);
                 }
                 let way = Way::Shaded {
                     beside_visibility: shades.is_some(),
@@ -1189,29 +1255,48 @@ impl Renderer {
                         way,
                     )?;
                 }
-                pass.begin_label(c"canvas");
-                let canvas = canvas_projection(size);
-                let on = data.canvas;
-                counts += (self.meshes).draw(
-                    &mut pass,
-                    canvas,
-                    shared,
-                    size,
-                    on,
-                    on_canvas,
-                    Runs::All,
-                    way,
-                )?;
-                pass.end_label();
-                drop(pass);
+                // The canvas, over the view's last pass's; or, antialiased, over what the view
+                // resolved, in its own pass, if it has one.
+                let meshes = &self.meshes;
+                let draw_canvas = |pass: &mut gg_gpu::Pass<'_, '_>| {
+                    pass.begin_label(c"canvas");
+                    let canvas = canvas_projection(size);
+                    let on = data.canvas;
+                    let drawn =
+                        meshes.draw(pass, canvas, shared, size, on, on_canvas, Runs::All, way);
+                    pass.end_label();
+                    drawn
+                };
+                let shown = match &view.taa {
+                    Some((plan, canvas)) => {
+                        drop(pass);
+                        let drawn = taa::Drawn {
+                            unjittered,
+                            clip_from_world: view_projection,
+                            jitter,
+                        };
+                        self.taa.resolve(&mut frame, plan, drawn)?;
+                        if let Some(canvas) = *canvas {
+                            let mut pass = (frame.render(canvas))
+                                .expect("the graph's own images are always there");
+                            counts += draw_canvas(&mut pass)?;
+                        }
+                        plan.shown()
+                    }
+                    None => {
+                        counts += draw_canvas(&mut pass)?;
+                        drop(pass);
+                        view.hdr
+                    }
+                };
                 if let Some(read) = view.read_ids {
                     let picked = self.picks.take(frame.number(), Some(size));
                     frame.read_ids(read, picked)?;
                 }
                 let mut pass =
                     (frame.render(view.tonemap)).expect("the graph's own images are always there");
-                let hdr = pass.sampled(view.hdr);
-                self.tonemap.draw(&mut pass, hdr, data.tonemapper);
+                let shown = pass.sampled(shown);
+                self.tonemap.draw(&mut pass, shown, data.tonemapper);
                 drop(pass);
                 if let Some((outlined, outline)) = view.outline {
                     let mut pass =

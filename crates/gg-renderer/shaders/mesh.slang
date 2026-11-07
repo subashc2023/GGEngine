@@ -184,6 +184,9 @@ struct Push<V, P> {
     // For a draw of them into the visibility buffer: which run of the culling's and which of the
     // game's view's passes it is, as `Push::draw` in src/mesh.rs says; 0 for any other draw.
     uint draw;
+    // How many transforms past each instance's its transform the frame before is: 0 where the
+    // engine has none, which reads the instance's own.
+    uint previous;
 };
 
 // The color, and the instance's ID, which picks read back where it shows.

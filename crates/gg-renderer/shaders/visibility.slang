@@ -10,7 +10,9 @@
 // which divides by no corner's W, so that a corner behind the camera, which the draw clipped, weighs
 // right too. They interpolate what the draw's fragments took, and the change of the texture
 // coordinates a pixel across and down picks the levels of the material's textures, as the change
-// between a quad's fragments does for theirs.
+// between a quad's fragments does for theirs. They weigh the corners as the instance's transform
+// the frame before placed them too, for how far the pixel's point moved in the world since, which
+// the view's motion takes, as model.slang's fragments write it; 0 where nothing drew.
 //
 // `ShadePush` and `Shading` match `ShadePush` and `Shading` in src/mesh/visibility.rs, field for
 // field. A change here needs AMD's ISA of it checked again, under both slangc releases the build
@@ -34,10 +36,13 @@ struct Shading {
     // parameters.
     uint instances;
     uint params_words;
-    // For each of the game's view's two passes, its slot among the culling's views, and where its
-    // meshlets start among the culling's commands, in words.
+    // For each of the game's view's two passes, its slot among the culling's views, where its
+    // meshlets start among the culling's commands, in words, and where the transforms the frame
+    // before of the instances it keeps are among the kept transforms' arrays.
     uint2 slots;
     uint2 meshlets;
+    uint2 previous;
+    uint2 unused;
 };
 
 struct ShadePush {
@@ -48,13 +53,16 @@ struct ShadePush {
     // run's draw of them, eight words, then the meshlets it kept, as meshlets.slang keeps them.
     uint* commands;
     // What each of the culling's views keeps of the instances, as cull.slang writes it: their
-    // transforms, and the words of their parameters, the first of which is the material's index.
+    // transforms, those the frame before of the game's view's passes', and the words of their
+    // parameters, the first of which is the material's index.
     float4x4* transforms;
     uint* params;
-    // The visibility buffer, a texture of the bindless set's, and the view's colors, a storage
-    // image of it.
+    // The visibility buffer, a texture of the bindless set's, and the view's colors and motion,
+    // storage images of it.
     uint visibility;
     uint target;
+    uint motion;
+    uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<ShadePush> push;
 
@@ -99,6 +107,7 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     uint2 seen = visibilities[push.visibility].Load(int3(pixel.xy, 0));
     if (seen.x == 0) {
         storage[push.target][at] = shading.clear;
+        storage[push.motion][at] = float4(0.0);
         return;
     }
     uint drawn = seen.x - 1;
@@ -112,6 +121,8 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     uint place = push.commands[entry];
     uint meshlet = push.commands[entry + 1];
     float4x4 transform = push.transforms[slot * shading.instances + run.output + place];
+    uint before = second ? shading.previous.y : shading.previous.x;
+    float4x4 previous = push.transforms[before * shading.instances + run.output + place];
     uint params = slot * shading.params_words + run.params_output + place * run.params_words;
     Frame frame = *push.frame;
     Material material = frame.materials[push.params[params]];
@@ -151,6 +162,10 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     // run that draws its fronts alone shows nothing else.
     bool front = run.cones != 0 || dot(ha, ea) < 0.0;
     float3 world = weight.x * a.world + weight.y * b.world + weight.z * c.world;
+    float3 was = weight.x * mul(previous, float4(a.vertex.position, 1.0)).xyz
+        + weight.y * mul(previous, float4(b.vertex.position, 1.0)).xyz
+        + weight.z * mul(previous, float4(c.vertex.position, 1.0)).xyz;
+    storage[push.motion][at] = float4(world - was, 0.0);
     float2 uv = weight.x * a.vertex.uv + weight.y * b.vertex.uv + weight.z * c.vertex.uv;
     float2 uv_across = weight_across.x * a.vertex.uv + weight_across.y * b.vertex.uv
         + weight_across.z * c.vertex.uv;

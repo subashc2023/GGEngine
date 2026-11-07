@@ -1,5 +1,5 @@
 // flat_color.slang reading the view's size as two integers, where the engine pushes two floats,
-// the frame's data as more than the engine's, and a push constant past the 124 bytes the engine
+// the frame's data as more than the engine's, and a push constant past the 128 bytes the engine
 // pushes, which the contract refuses: nothing sets them.
 
 struct Vertex {
@@ -30,6 +30,7 @@ struct Push {
     Frame* frame;
     uint2* meshlets;
     uint draw;
+    uint previous;
     float brightness;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -60,7 +61,7 @@ Targets fragment_main(Varyings input) {
     Targets out;
     float wide = float(push.view.x);
     out.color = push.params[input.instance].color * push.brightness * wide * push.frame->tint
-        * push.frame->shade * push.frame->glow * push.frame->haze[18];
+        * push.frame->shade * push.frame->glow * push.frame->haze[18] * float(push.previous);
     out.id = input.id;
     return out;
 }

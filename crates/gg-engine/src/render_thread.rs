@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 use gg_renderer::{
-    DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer, Streaming,
-    Tonemapper, Uploads, Viewpoint, Viewport,
+    Antialiasing, DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer,
+    Streaming, Tonemapper, Uploads, Viewpoint, Viewport,
 };
 
 #[cfg(feature = "dev")]
@@ -43,6 +43,7 @@ impl Drawn {
 pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) tonemapper: Tonemapper,
+    pub(crate) antialiasing: Antialiasing,
     /// What lit shading multiplies light by, as [`RenderData::exposure`] has it.
     pub(crate) exposure: f32,
     /// The world's lights as it was drawn, which keep their memory.
@@ -130,6 +131,7 @@ impl Default for Extracted {
         Self {
             clear_color: [0.0; 4],
             tonemapper: Tonemapper::None,
+            antialiasing: Antialiasing::None,
             exposure: 1.0,
             lights: Vec::new(),
             sky: None,
@@ -229,6 +231,7 @@ impl Render for Renderer {
         let data = RenderData {
             clear_color: frame.clear_color,
             tonemapper: frame.tonemapper,
+            antialiasing: frame.antialiasing,
             exposure: frame.exposure,
             time: frame.time,
             lights: &frame.lights,

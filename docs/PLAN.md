@@ -117,16 +117,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Async compute** (2026-11-05)
 - **Meshlets and packed vertices** (2026-11-06)
 - **A visibility buffer** (2026-11-06)
+- **TAA** (2026-11-06)
 
 ## Now
 
-**Phase 13, GPU-driven rendering**, as Next has it. Its last milestone:
-
-- **TAA.** The view drawn jittered by a subpixel offset each frame, each pixel's motion from its
-  instance's transform the frame before, and resolved against the frames before, reprojected and
-  clamped to its neighborhood, before tonemapping, as an environment's antialiasing says: TAA by
-  default, and none in a world without an environment, so that 2D games and today's references draw
-  as they do. Its own references on lavapipe, of frames in a row.
+**Phase 13, GPU-driven rendering**, as Next has it: its milestones are done, as Done has them.
 
 Phase 13 closes once the showcase's 16 Bistros, `bistro_grid.ron`, from its package, run headless
 at 1,280 by 720 on the RTX 4090 in 4.17 ms a frame or less at the 95th percentile, 240 frames a
@@ -219,6 +214,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Development runs cutting models into meshlets as they read them, as the cooker does, so that their models are shaded from the visibility buffer too, and gg-engine's `frames` test checks that path allocates nothing: a development run's models have no meshlets, and draw as they shade, beside it; a check outside the repository found its frames allocate nothing | A development run's shading is measured to matter, or a change to the visibility buffer's frames could allocate |
 | Games' opaque shaders drawn into the depth pyramid that culls the view's second pass: they draw after the visibility buffer's shading, so what they hide is culled by the models' depth alone, and the rest is drawn | A game's opaque draws of its own shaders hide much of what it draws |
 | Shading the visibility buffer's pixels by material, each material's together, rather than each thread its pixel's, whose textures and branches differ across a workgroup where materials meet | The shading pass is measured to lose its time to that, as with many materials on screen |
+| The view's IDs drawn without TAA's offset for picks and the outline, as by drawing the outlined entity's IDs again without it: they're drawn off by the frame's offset, so that the editor's outline of the pick, and a pick at an edge, can move a pixel from frame to frame | The outline's shimmer bothers someone, or a pick at an edge misses |
+| Motion for a layer's own draws, made each frame, which move with the camera alone under TAA, as the renderer knows no transform the frame before of theirs: an identity that lasts from frame to frame, as the scene's slots give its instances | A layer's own draws move fast enough to smear |
+| Starting TAA's history afresh at a camera's cut, as a game's switch of cameras or a teleport: what the frame before resolved is clipped to what this frame drew, which keeps it from showing as a ghost, but leaves the cut's first frames softer | A game cuts between cameras, and the cut's first frames show blurred |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
