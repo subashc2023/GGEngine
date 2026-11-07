@@ -41,8 +41,10 @@ struct Varyings {
     float4 color;
     float3 normal;
     float4 tangent;
-    // -1 where the instance's transform mirrors it, 1 elsewhere.
-    nointerpolation float side;
+    // In x, -1 where the instance's transform mirrors it, 1 elsewhere. A vector, as Debian 13's
+    // validation layer (1.4.309) warns of an output the next stage doesn't read, as the masked
+    // shadows' `shadow_main` doesn't read this, unless it's a vector.
+    nointerpolation float2 side;
     nointerpolation uint instance;
     nointerpolation uint2 id;
 };
@@ -145,7 +147,7 @@ Varyings placed(Vertex vertex, uint instance) {
     out.color = vertex.color;
     out.normal = turned.normal;
     out.tangent = turned.tangent;
-    out.side = turned.side;
+    out.side = float2(turned.side, 0.0);
     out.instance = instance;
     out.id = push.ids[instance];
     return out;
@@ -188,7 +190,7 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     out.id = input.id;
     // Vulkan's front winds counterclockwise as seen, whichever faces the run draws, which a
     // transform that mirrors shows of its mesh's backs.
-    bool shows_front = front != (input.side < 0.0);
+    bool shows_front = front != (input.side.x < 0.0);
     out.color = lit(frame, material, input.world, input.normal, input.tangent, shows_front, color,
                     surface, mapped, occlusion, emission);
     out.motion = float4(input.moved, 0.0);
