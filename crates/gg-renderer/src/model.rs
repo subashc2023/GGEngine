@@ -421,7 +421,8 @@ mod tests {
         let mut meshes = Meshes::default();
         let mut shaders = Shaders::default();
         let mut materials = Materials::default();
-        let packed = crate::ModelMesh::pack(&[corner(); 3], vec![0, 1, 2], Vec::new());
+        let packed = crate::ModelMesh::pack("a", &[corner(); 3], vec![0, 1, 2], Vec::new());
+        let packed = packed.unwrap();
         let mesh = meshes.add_model("a", &packed).unwrap();
         let mut draw = |alpha, double_sided| {
             let material = Material {

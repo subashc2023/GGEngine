@@ -1,13 +1,46 @@
 //! Ctrl+C, which ends a headless run or a server between frames, as it ends at `--frames`, rather
 //! than the process at once: through the console's handler on Windows, and `SIGINT`'s on Unix. A
 //! second before the run has ended ends the process, as the OS would.
+//!
+//! And, under `--supervised`, stdin's end, which ends any run but a replay so, windowed too: the
+//! supervisor that holds stdin, such as `gg run`, closes it as it ends, however it ends, being
+//! killed too, so that no game it ran, which it may embed out of sight, outlives it.
 
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use tracing::warn;
 
 /// Set once Ctrl+C has been pressed.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Set once stdin has ended, under `--supervised`.
+static ORPHANED: AtomicBool = AtomicBool::new(false);
+
+/// Has a thread of its own read stdin to its end, then set [`orphaned`] and call `wake`, which
+/// wakes a loop that waits for events; warns `engine.supervised` if the thread can't start.
+pub(crate) fn watch_stdin(wake: impl FnOnce() + Send + 'static) {
+    let watching = thread::Builder::new()
+        .name("gg-stdin".to_owned())
+        .spawn(move || {
+            // A supervisor writes nothing, and a read that breaks is as good as the end.
+            let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+            ORPHANED.store(true, Ordering::Relaxed);
+            wake();
+        });
+    if let Err(error) = watching {
+        warn!(
+            code = "engine.supervised",
+            "Can't watch stdin, so the run outlives its supervisor: {error}"
+        );
+    }
+}
+
+/// Whether stdin has ended since [`watch_stdin`].
+pub(crate) fn orphaned() -> bool {
+    ORPHANED.load(Ordering::Relaxed)
+}
 
 /// Has Ctrl+C set [`interrupted`] from now on, rather than end the process; warns
 /// `engine.interrupt` if the OS won't have it.

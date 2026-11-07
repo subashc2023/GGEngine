@@ -19,12 +19,18 @@ impl World {
     /// type registers the first time an entity has one too, so this is for those that tools should
     /// list before then.
     ///
-    /// Fails with `reflect.name_taken` if another type has its name; with `reflect.unnamed` if it
+    /// Fails with `ecs.registered_late` once the world has loaded mods, as [`Mods`](crate::Mods)
+    /// says; with `reflect.name_taken` if another type has its name; with `reflect.unnamed` if it
     /// describes itself as something other than a struct or an enum; with `reflect.bad_default` if
     /// a field's default is outside its bounds, or opaque; and with `ecs.bad_exclusive` if it
     /// names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<()> {
         self.components.register::<T>().map(drop)
+    }
+
+    /// Refuses, from now on, a Rust type that hasn't registered, as mods load in the world.
+    pub(crate) fn mods_loaded(&mut self) {
+        self.components.mods_loaded = true;
     }
 
     /// The descriptions of the component types, and of the types of their fields.
@@ -159,19 +165,7 @@ impl World {
         let name = self.name_of(entity);
         let about = |error: Error| about(error, "set", name, component, path);
         let (id, at) = self.find(entity, component).map_err(about)?;
-        if Some(id) == self.components.get(TypeId::of::<Parent>()) {
-            return Err(about(Error::new(
-                "reflect.read_only",
-                "the world keeps it, so that the hierarchy stays whole; `World::set_parent` \
-                 changes it",
-            )));
-        }
-        if Some(id) == self.components.get(TypeId::of::<ModelNode>()) {
-            return Err(about(Error::new(
-                "reflect.read_only",
-                "the world keeps it, as it spawns a model's nodes under the model's root",
-            )));
-        }
+        self.settable(id).map_err(about)?;
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
@@ -207,6 +201,25 @@ impl World {
             self.fit_nodes(entity, None);
         }
         Ok(old)
+    }
+
+    /// Fails with `reflect.read_only` if component type `id` is one the world keeps, [`Parent`] or
+    /// [`ModelNode`], which nothing sets by name, as [`set_field`](Self::set_field) says.
+    fn settable(&self, id: ComponentId) -> Result<()> {
+        if Some(id) == self.components.get(TypeId::of::<Parent>()) {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world keeps it, so that the hierarchy stays whole; `World::set_parent` \
+                 changes it",
+            ));
+        }
+        if Some(id) == self.components.get(TypeId::of::<ModelNode>()) {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world keeps it, as it spawns a model's nodes under the model's root",
+            ));
+        }
+        Ok(())
     }
 
     /// The id of component type `name`.
@@ -346,13 +359,28 @@ impl World {
         Ok(column.part(row, index).expect(FIELD))
     }
 
-    pub(crate) fn field_at_mut(
+    /// Field `index` of `entity`'s component `id`, of a struct with named fields, to be set to
+    /// `value`, which is refused as [`set_field`](Self::set_field) refuses a value: without
+    /// allocating, unless it's refused, as a script sets one at its ticks. `value` is `None` for an
+    /// entity or none, which no bounds apply to, set as an `Option<Entity>` without the `Value` of
+    /// one, which would allocate.
+    ///
+    /// Fails as [`field_at`](Self::field_at) does; with `reflect.read_only` for `Parent` and
+    /// `ModelNode`; and with `reflect.out_of_range` for a number outside its field's bounds, which
+    /// it's outside of if it isn't finite.
+    pub(crate) fn field_to_set(
         &mut self,
         entity: Entity,
         id: ComponentId,
         index: u32,
+        value: Option<&Value>,
     ) -> Result<&mut dyn Reflect> {
+        self.settable(id)?;
         let (table, row) = self.row_of(entity, id)?;
+        if let Some(value) = value {
+            let field = &self.fields_of(id)[index as usize];
+            reflect::check(self.components.types(), &field.ty, &field.meta, value)?;
+        }
         let tick = self.change_tick;
         let table = &mut self.tables[table];
         let column = table.row_mut(table.position(id).expect(HAS), row, tick);

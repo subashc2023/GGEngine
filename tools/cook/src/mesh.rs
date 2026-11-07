@@ -753,7 +753,7 @@ mod tests {
                 error: lod.error,
             })
             .collect();
-        let mut packed = ModelMesh::pack(&vertices, mesh.indices, levels);
+        let mut packed = ModelMesh::pack("cut", &vertices, mesh.indices, levels).expect("a mesh");
         cut(&mut packed);
         packed
     }

@@ -431,8 +431,11 @@ impl<R: Render> RenderThread<R> {
     ///
     /// If it's away already; or if the render thread ended in a panic, which this resumes.
     pub(crate) fn hand(&mut self, fill: impl FnOnce(&mut Extracted)) {
-        let mut trip = (self.home.take()).expect("the renderer is handed over once a frame");
-        fill(&mut trip.frame);
+        let home = (self.home.as_mut()).expect("the renderer is handed over once a frame");
+        // Filled in while it's back, so that a panic filling it leaves it back, to drop as ever,
+        // rather than dropped with the frame while dropping this waits for it to come back.
+        fill(&mut home.frame);
+        let trip = (self.home.take()).expect("filling the frame leaves the renderer back");
         let to = (self.to.as_ref()).expect("the render thread runs until it stops");
         if let Err(mpsc::SendError(trip)) = to.send(trip) {
             self.home = Some(trip);
@@ -685,6 +688,34 @@ mod tests {
         let dropped = render.renderer().dropped.0.clone();
         drop(render);
         assert_eq!(*dropped.lock().unwrap(), Some(thread::current().id()));
+    }
+
+    /// A panic filling a frame in resumes before the frame's handed over, leaving the renderer
+    /// back: to hand over again, and to drop on the thread that drops it, rather than dropped with
+    /// the frame while dropping waits for it to come back.
+    #[test]
+    fn a_panic_filling_a_frame_in_leaves_the_renderer_back() {
+        let (done, finished) = mpsc::sync_channel(1);
+        // On a thread of its own, so that a drop waiting for a renderer that never comes back
+        // fails the test rather than hangs it.
+        thread::spawn(move || {
+            let fake = Fake::default();
+            let dropped = fake.dropped.0.clone();
+            let mut render = RenderThread::start(fake).unwrap();
+            let filling = AssertUnwindSafe(|| render.hand(|_| panic!("filling panics")));
+            let panic = panic::catch_unwind(filling).expect_err("the panic resumes");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"filling panics"));
+            hand(&mut render, 0);
+            assert_eq!(render.take().expect("frame 0").drawn.draws, 0);
+            drop(render);
+            let here = Some(thread::current().id());
+            done.send(*dropped.lock().unwrap() == here).unwrap();
+        });
+        assert_eq!(
+            finished.recv_timeout(DEADLINE),
+            Ok(true),
+            "the renderer came back, to hand over again and to drop on the thread that dropped it"
+        );
     }
 
     #[test]

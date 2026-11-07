@@ -2,12 +2,12 @@
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
 //! connections, and each has a thread that reads its requests, answering `hello`, `ping`, `logs`
 //! and `note` itself, `logs` from the events the log keeps, passing the rest on to the main loop,
-//! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
-//! so that a `patch` applies between ticks, a `play`, a `stop` or a `scene` holds from the frame's
-//! ticks, and a `look` reaches the frame; a `step` once its ticks have run; a `capture` once a
-//! frame that rendered brings its view back, whose PNG a thread of its own writes; a `pick` once
-//! the frame that read it brings its answer back; and a `snapshot` once a thread of its own has
-//! written the copy of the world the main thread took.
+//! and, once its `hello` is granted, one that writes its answers. The main loop answers them as a
+//! frame starts, before its ticks, so that a `patch` applies between ticks, a `play`, a `stop` or a
+//! `scene` holds from the frame's ticks, and a `look` reaches the frame; a `step` once its ticks
+//! have run; a `capture` once a frame that rendered brings its view back, whose PNG a thread of its
+//! own writes; a `pick` once the frame that read it brings its answer back; and a `snapshot` once a
+//! thread of its own has written the copy of the world the main thread took.
 //!
 //! A capture of the game's own view rides with a bare frame, which draws without the look, as the
 //! game would on its own; isn't published to a view's memory; and leaves the picks to the next
@@ -18,11 +18,11 @@ use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
-use std::io::{BufReader, Write as _};
+use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::mem;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -83,8 +83,12 @@ const MOST_STEPS: u64 = 10_000;
 /// The most entities or assets a page of `entities` or `assets` lists.
 const MOST_LISTED: usize = 10_000;
 
-/// How long a connection has to say hello before it's dropped.
+/// How long a connection has to say hello, its whole `hello` come, before it's dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most connections saying hello at once, past which more are refused as they come: any local
+/// process may open connections that never say it, each holding a thread until it's dropped.
+const MOST_SAYING_HELLO: usize = 8;
 
 /// The longest a `logs` waits for an event to come, or a `debug` for a script to stop, in
 /// milliseconds.
@@ -1525,7 +1529,8 @@ fn engine_projection(given: gg_api::Projection) -> Projection {
 }
 
 /// Accepts connections on `listener`, serving each on threads of its own, as [`connection`] does,
-/// until the process ends.
+/// until the process ends; but while [`MOST_SAYING_HELLO`] are saying hello, it closes each that
+/// comes, warning `api.too_many_hellos` as it starts to, once until one is served again.
 fn accept(
     listener: &TcpListener,
     token: &str,
@@ -1533,6 +1538,8 @@ fn accept(
     to_main: &Sender<Incoming>,
     shared: &Arc<Shared>,
 ) {
+    let saying_hello = Arc::new(AtomicUsize::new(0));
+    let mut refusing = false;
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
@@ -1543,30 +1550,65 @@ fn accept(
                 continue;
             }
         };
+        // This thread alone adds to the count, so it can't pass the most between the two.
+        if saying_hello.load(Ordering::Relaxed) >= MOST_SAYING_HELLO {
+            if !mem::replace(&mut refusing, true) {
+                warn!(
+                    code = "api.too_many_hellos",
+                    most = MOST_SAYING_HELLO,
+                    "Refusing connections while {MOST_SAYING_HELLO} are saying hello, as one that \
+                     never says it holds a thread until it's dropped"
+                );
+            }
+            continue;
+        }
+        refusing = false;
+        saying_hello.fetch_add(1, Ordering::Relaxed);
+        let place = SayingHello(saying_hello.clone());
         let (token, welcome) = (token.to_owned(), welcome.to_owned());
         let (to_main, shared) = (to_main.clone(), shared.clone());
         let serving = thread::Builder::new()
             .name("gg-api-read".to_owned())
-            .spawn(move || connection(stream, &token, &welcome, &to_main, &shared));
+            .spawn(move || connection(stream, &token, &welcome, &to_main, &shared, place));
         if let Err(error) = serving {
             debug!(code = "api.accept", "Can't serve a connection: {error}");
         }
     }
 }
 
-/// Serves connection `stream`: its first request must be `hello` with `token`, which it answers
-/// with `welcome`; then it answers `ping`, `logs`, `note` and `debug` itself, and passes the rest on
-/// to the main loop through `to_main`, waking it, each answer going back through a thread that
-/// writes them as they come. A line that isn't a request ends it.
+/// A connection's place among those saying hello, which [`MOST_SAYING_HELLO`] caps, given up as it
+/// drops.
+struct SayingHello(Arc<AtomicUsize>);
+
+impl Drop for SayingHello {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Serves connection `stream`, which holds `place` among those saying hello until it has: its first
+/// request must be `hello` with `token`, as [`hello`] reads it within [`HELLO_TIMEOUT`], which it
+/// answers with `welcome`; then it answers `ping`, `logs`, `note` and `debug` itself, and passes the
+/// rest on to the main loop through `to_main`, waking it, each answer going back through a thread
+/// that writes them as they come, which starts once the `hello` has been granted. A line that isn't
+/// a request ends it.
 fn connection(
     stream: TcpStream,
     token: &str,
     welcome: &str,
     to_main: &Sender<Incoming>,
     shared: &Shared,
+    place: SayingHello,
 ) {
     let _ = stream.set_nodelay(true);
-    let Ok(writing) = stream.try_clone() else {
+    let mut reader = BufReader::new(stream);
+    let Some((id, client, grant)) = hello(&mut reader, token, Instant::now() + HELLO_TIMEOUT)
+    else {
+        return;
+    };
+    drop(place);
+    let _ = reader.get_ref().set_read_timeout(None);
+    let Ok(writing) = reader.get_ref().try_clone() else {
         return;
     };
     let (to, answers) = mpsc::channel::<String>();
@@ -1576,35 +1618,8 @@ fn connection(
     if writer.is_err() {
         return;
     }
-    let mut reader = BufReader::new(stream);
-    let _ = reader.get_ref().set_read_timeout(Some(HELLO_TIMEOUT));
-    let Some(hello) = next_request(&mut reader) else {
-        return;
-    };
-    let reply = Reply {
-        id: hello.id,
-        to: to.clone(),
-    };
-    let given = (hello.method == "hello")
-        .then(|| serde_json::from_value::<Hello>(hello.params).ok())
-        .flatten();
-    let Some(Hello { client, grant, .. }) = given.filter(|hello| same_token(&hello.token, token))
-    else {
-        let message = "a connection's first request is `hello`, with the session file's token";
-        reply.send(Err(Failure::new("api.unauthorized", message)));
-        return;
-    };
-    let grant = match grant.map(Grant::parse) {
-        None => Grant::all(),
-        Some(Ok(grant)) => grant,
-        Some(Err(error)) => {
-            reply.send(Err(Failure::new(error.code(), format!("{error:#}"))));
-            return;
-        }
-    };
-    let client: Arc<str> = client.as_deref().unwrap_or(UNNAMED).into();
+    let reply = Reply { id, to: to.clone() };
     reply.send(Ok(welcome.to_owned()));
-    let _ = reader.get_ref().set_read_timeout(None);
     while let Some(request) = next_request(&mut reader) {
         let reply = Reply {
             id: request.id,
@@ -1916,11 +1931,98 @@ fn is_code(code: &str) -> bool {
     code.contains('.') && code.split('.').all(name)
 }
 
+/// The ID, the client and the grant of the `hello` that `reader`, a new connection's, reads by
+/// `deadline`, as [`read_hello`] does, if it gives `token`. A first request that isn't such a
+/// `hello`, or one whose grant names a capability there's none of, is answered with the failure,
+/// and `None` returned.
+fn hello(
+    reader: &mut BufReader<TcpStream>,
+    token: &str,
+    deadline: Instant,
+) -> Option<(u64, Arc<str>, Grant)> {
+    let hello = read_hello(reader, deadline)?;
+    let given = (hello.method == "hello")
+        .then(|| serde_json::from_value::<Hello>(hello.params).ok())
+        .flatten();
+    let granted = match given.filter(|given| same_token(&given.token, token)) {
+        None => {
+            let message = "a connection's first request is `hello`, with the session file's token";
+            Err(Failure::new("api.unauthorized", message))
+        }
+        Some(Hello { client, grant, .. }) => match grant.map(Grant::parse) {
+            None => Ok((client, Grant::all())),
+            Some(Ok(grant)) => Ok((client, grant)),
+            Some(Err(error)) => Err(Failure::new(error.code(), format!("{error:#}"))),
+        },
+    };
+    match granted {
+        Ok((client, grant)) => Some((hello.id, client.as_deref().unwrap_or(UNNAMED).into(), grant)),
+        Err(failure) => {
+            // Here, as no thread writes the connection's answers until its `hello` is granted. It's
+            // the first line, which the hello's bound keeps to tens of KiB even escaped, within
+            // what the loopback's buffers take, so it's written without the client reading; and
+            // within a timeout, should they not take it, so that a client that never reads can't
+            // keep its place among those saying hello.
+            let line = gg_api::answer_line(hello.id, Err(&failure));
+            let _ = reader.get_ref().set_write_timeout(Some(HELLO_TIMEOUT));
+            let _ = reader.get_ref().write_all(line.as_bytes());
+            None
+        }
+    }
+}
+
+/// The `hello` that `reader`, a new connection's, reads: its first line, of at most
+/// [`gg_api::MAX_HELLO`] bytes, its line break aside, whole by `deadline`, each read waiting only
+/// for the time left, so that a client sending a byte at a time can't hold the connection longer.
+/// `None` if it doesn't come so, the connection ends or breaks first, or it isn't a request; a line
+/// too long is refused once it's seen to be, the rest unread.
+fn read_hello(reader: &mut BufReader<TcpStream>, deadline: Instant) -> Option<Request> {
+    let mut line = Vec::new();
+    loop {
+        // A timeout of zero is refused, as it would wait for good.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        reader.get_ref().set_read_timeout(Some(left)).ok()?;
+        let read = match reader.fill_buf() {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if read.is_empty() {
+            return None;
+        }
+        let (taken, whole) = match read.iter().position(|&byte| byte == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (read.len(), false),
+        };
+        if line.len() + taken - usize::from(whole) > gg_api::MAX_HELLO {
+            debug!(
+                code = "api.bad_request",
+                "A tool's hello is longer than {} bytes, so its connection closes",
+                gg_api::MAX_HELLO
+            );
+            return None;
+        }
+        line.extend_from_slice(&read[..taken]);
+        reader.consume(taken);
+        if whole {
+            return request(&line);
+        }
+    }
+}
+
 /// The next request `reader` reads: `None` once the connection ends or breaks, or at a line that
 /// isn't a request.
 fn next_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
     let line = gg_api::read_line(reader).ok()??;
-    serde_json::from_str(&line)
+    request(line.as_bytes())
+}
+
+/// The request `line` is, which may end in its line break; `None` if it isn't one.
+fn request(line: &[u8]) -> Option<Request> {
+    serde_json::from_slice(line)
         .inspect_err(|error| {
             debug!(
                 code = "api.bad_request",
@@ -2320,6 +2422,7 @@ fn entity_id(text: &str) -> Result<EntityId, Failure> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
     use std::time::Instant;
 
     use gg_api::{Client, LogEvents, Session};
@@ -2595,6 +2698,110 @@ mod tests {
         }
         let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
         assert_eq!(pulse.frames, 0);
+    }
+
+    /// Whether `stream`'s connection has been closed by the game, rather than waiting for more:
+    /// its read ends, or is reset, well before the game would drop a connection that never says
+    /// hello.
+    fn closed(stream: &mut TcpStream) -> bool {
+        stream
+            .set_read_timeout(Some(HELLO_TIMEOUT / 2))
+            .expect("a timeout");
+        match stream.read(&mut [0]) {
+            Ok(read) => read == 0,
+            Err(error) => matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ),
+        }
+    }
+
+    /// A `hello` as long as [`gg_api::MAX_HELLO`] is welcomed, and one longer is refused once it's
+    /// past it, without the game waiting for the rest.
+    #[test]
+    fn a_hello_longer_than_its_bound_is_refused_unread() {
+        let (_api, session) = started("Api Long Hello");
+        let hello = |client: &str| {
+            let params = json!({"token": session.token, "client": client});
+            json!({"id": 7, "method": "hello", "params": params}).to_string()
+        };
+        let longest = hello(&"a".repeat(gg_api::MAX_HELLO - hello("").len()));
+        assert_eq!(longest.len(), gg_api::MAX_HELLO);
+        let mut stream = TcpStream::connect(session.address).expect("it connects");
+        stream.set_read_timeout(Some(DEADLINE)).expect("a timeout");
+        stream
+            .write_all(format!("{longest}\n").as_bytes())
+            .expect("written");
+        let answer = gg_api::read_line(&mut BufReader::new(&stream)).expect("an answer");
+        let answer: gg_api::Answer = serde_json::from_str(&answer.expect("a line")).expect("JSON");
+        assert_eq!((answer.id, answer.error), (7, None));
+        let mut stream = TcpStream::connect(session.address).expect("it connects");
+        stream
+            .write_all(&[b' '; gg_api::MAX_HELLO + 1])
+            .expect("written");
+        assert!(closed(&mut stream), "the game waited for the rest");
+    }
+
+    /// A `hello` that comes a byte at a time is cut off at its deadline, though each byte comes well
+    /// within the time left, rather than read for as long as bytes keep coming.
+    #[test]
+    fn a_hello_dripped_a_byte_at_a_time_is_cut_off_at_its_deadline() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("it listens");
+        let address = listener.local_addr().expect("its address");
+        let mut client = TcpStream::connect(address).expect("it connects");
+        client.set_nodelay(true).expect("no delay");
+        let (served, _) = listener.accept().expect("accepted");
+        let token = "0".repeat(32);
+        let hello =
+            format!("{{\"id\":0,\"method\":\"hello\",\"params\":{{\"token\":\"{token}\"}}}}\n");
+        // 80 bytes, which take 1.6 s to come whole.
+        let dripping = thread::spawn(move || {
+            for byte in hello.bytes() {
+                if client.write_all(&[byte]).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut reader = BufReader::new(served);
+        let deadline = Duration::from_millis(250);
+        let start = Instant::now();
+        let read = read_hello(&mut reader, start + deadline);
+        let took = start.elapsed();
+        // Which ends the client's writes.
+        drop(reader);
+        dripping.join().expect("the client didn't panic");
+        assert_eq!(read, None);
+        assert!(
+            took >= deadline && took < Duration::from_secs(1),
+            "{took:?}"
+        );
+    }
+
+    /// While [`MOST_SAYING_HELLO`] connections are saying hello, the game closes the next unread, a
+    /// client's too, until one of them has gone.
+    #[test]
+    fn connections_past_the_most_saying_hello_are_refused() {
+        let (_api, session) = started("Api Hellos");
+        let connect = || TcpStream::connect(session.address).expect("it connects");
+        let mut saying: Vec<TcpStream> = (0..MOST_SAYING_HELLO).map(|_| connect()).collect();
+        assert!(
+            closed(&mut connect()),
+            "a connection past the most was served"
+        );
+        let refused = Client::connect(&session, "test", DEADLINE).err();
+        assert!(refused.is_some(), "a client past the most was welcomed");
+        drop(saying.pop());
+        // Once the game has seen that one go.
+        let start = Instant::now();
+        let client = loop {
+            if let Ok(client) = Client::connect(&session, "test", DEADLINE) {
+                break client;
+            }
+            assert!(start.elapsed() < DEADLINE, "no client was welcomed");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(client.welcome().app, "Api Hellos");
     }
 
     /// Each request needs its own capability, or `read` or `write` of the world, of the one type it

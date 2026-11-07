@@ -87,6 +87,7 @@ impl Clone for World {
             self.tables.clear();
             self.by_signature.clear();
         }
+        self.components.mods_loaded = components.mods_loaded;
         // The map of tables by their types follows from the tables, so it's `source`'s already if
         // they have the same types in the same order; copying it would allocate each key.
         let ours = self.tables.iter().map(|table| table.components());

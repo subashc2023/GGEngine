@@ -1139,7 +1139,9 @@ impl Context {
     /// scale, a light the extension doesn't allow, a URI that's neither a data URI nor a relative
     /// path, or that has a `..`, or an image that isn't a PNG, a JPEG or a DDS of BC7 as far as its
     /// header, and,
-    /// though glTF allows them, integers written as floats, such as `1.0`; and with
+    /// though glTF allows them, integers written as floats, such as `1.0`, and a primitive whose
+    /// positions span more than its packed vertices reach with what an f32 holds, as -f32::MAX
+    /// beside 0 do; and with
     /// `renderer.too_many_textures` if the renderer hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
         let zone = gg_core::zone!();
@@ -4858,7 +4860,7 @@ mod tests {
                     error: 0.5,
                 },
             ];
-            let mut mesh = crate::model::model_mesh(primitive);
+            let mut mesh = crate::model::model_mesh("m", primitive).expect("a mesh");
             mesh.lods.levels = levels;
             primitive.mesh = Some(mesh);
         }

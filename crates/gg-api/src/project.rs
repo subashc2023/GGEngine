@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -187,10 +187,20 @@ fn relative(field: &str, path: &str) -> Result<(), Failure> {
 }
 
 /// Whether `path` is a path inside a directory, relative to it: its parts named, neither `.` nor
-/// `..`, nor a drive's, with `/` between them.
+/// `..`, with `/` between them, each one [`Component::Normal`] as the OS reads it; and without `\`,
+/// `:` or a control character on any OS, since Windows reads `\` as a separator and `:` as a drive's,
+/// so that a path written on one OS, as a fetch list on Linux, stays inside the directory on every
+/// other.
 pub(crate) fn is_relative(path: &str) -> bool {
-    let part = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(':');
-    path.split('/').all(part)
+    let named = |part: &str| {
+        let mut components = Path::new(part).components();
+        matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        )
+    };
+    let refused = |c: char| c.is_control() || c == '\\' || c == ':';
+    !path.contains(refused) && path.split('/').all(named)
 }
 
 /// Whether `path` is inside directory `dir`, both relative paths: every path is inside `.`.
@@ -199,7 +209,9 @@ fn inside(path: &str, dir: &str) -> bool {
 }
 
 /// `path`, relative, joined to `dir` a part at a time, so that its separators are the OS's: `dir`
-/// itself for `.`.
+/// itself for `.`. A path that [`is_relative`] passes, as a manifest's and a fetch list's checks
+/// keep theirs, joins only parts that are each one named component, which no join takes outside
+/// `dir`.
 pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
     let parts = path.split('/').filter(|&part| part != ".");
     parts.fold(dir.to_owned(), |under, part| under.join(part))
@@ -281,6 +293,40 @@ mod tests {
         }
         let syntax = refused("(\n    game: shards,\n)\n");
         assert!(syntax.message.starts_with("2:"), "{syntax:?}");
+    }
+
+    /// A path is inside its directory only if each part is one named part on every OS, wherever
+    /// the manifest or fetch list that holds it was written: none of `\`, which Windows reads as a
+    /// separator, a drive, NUL or another control character; and `under` keeps it there.
+    #[test]
+    fn a_relative_path_stays_inside_its_directory_on_every_os() {
+        for path in [
+            "models",
+            "models/sponza/textures/a b.png",
+            "games/x-y_z/scene.ron",
+        ] {
+            assert!(is_relative(path), "{path:?}");
+            let dir = Path::new("project");
+            assert!(under(dir, path).starts_with(dir), "{path:?}");
+        }
+        for path in [
+            r"..\x",
+            r"\x",
+            r"a\..\..\b",
+            r"models\x.gltf",
+            "C:x",
+            "C:/x",
+            "/x",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "",
+            "a\0b",
+            "a\u{1b}b",
+            "a/b\n",
+        ] {
+            assert!(!is_relative(path), "{path:?}");
+        }
     }
 
     #[test]

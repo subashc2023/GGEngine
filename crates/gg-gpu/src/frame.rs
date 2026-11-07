@@ -144,7 +144,9 @@ pub struct Frames {
     /// that one forgotten instead is caught as the next begins.
     recording: bool,
     /// Whether a frame failed after acquiring an image, or to submit or present, which can leave
-    /// the semaphores its acquires signaled with no wait pending: no frame begins after that.
+    /// the semaphores its acquires signaled with no wait pending: no frame begins after that. A
+    /// failed submit can leave batches of the frame's running too, which the frame timeline never
+    /// counts, so the drop waits for the device whole after one.
     failed: bool,
 }
 
@@ -834,7 +836,10 @@ impl Drop for Frames {
                 Ok(())
             }
         });
-        if waited.is_err() {
+        // After a frame that failed, the device is waited for whole too: a failed submit may follow
+        // others of the frame's batches, which run on past the last frame submitted, as the frame
+        // timeline's signal is in its last batch.
+        if self.failed || waited.is_err() {
             let _ = self.device.wait_idle();
         }
         self.device.frames_finished(self.submitted);

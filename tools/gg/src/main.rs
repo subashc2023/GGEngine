@@ -75,7 +75,8 @@ Build and run:
       `--embedded`, for the tool that started gg, such as the editor, the game is given
       `--embedded`, running offscreen for the tool, which shows its view, and the run ends cleanly,
       stopping the game, once gg's stdin closes (`closed`), as the tool ends, a build under way
-      finishing first. A second `run` of PACKAGE while one runs is refused (`gg.running`).
+      finishing first. Each game gets `--supervised` and a stdin gg holds, so it ends as gg does,
+      however gg ends. A second `run` of PACKAGE while one runs is refused (`gg.running`).
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.

@@ -222,14 +222,14 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
                 error: lod.error,
             })
             .collect();
-        let mut packed = cook::pack(primitive, levels);
+        let mut packed = cook::pack(path, primitive, levels)?;
         // What blends draws its triangles in their order, through its indices.
         if !blends {
             mesh::cut(&mut packed);
         }
         primitive.mesh = Some(packed);
     }
-    Ok(cook::model_bytes(&model, &images))
+    cook::model_bytes(path, &model, &images)
 }
 
 /// A package as [`cook()`] makes it, and what it holds so far.
@@ -649,6 +649,40 @@ Targets fragment_main(Varyings input) {
         let project = PROJECT.replace("\"scenes", "\"tests");
         let files = [("project.ron", &*project), ("tests/main.ron", SCENE)];
         refused("nostart", &files, "cook.no_start");
+    }
+
+    /// A model that a run refuses, a triangle whose vertices span more than packed vertices reach
+    /// with what an f32 holds, -f32::MAX beside 0, is refused as a run refuses it, naming its
+    /// mesh, and no package is written.
+    #[test]
+    fn a_model_a_run_refuses_is_refused() {
+        let floats =
+            |floats: &[f32]| -> Vec<u8> { floats.iter().flat_map(|f| f.to_le_bytes()).collect() };
+        let bin = floats(&[-f32::MAX, 0., 0., 0., 0., 0., 0., 1., 0.]);
+        let gltf = r#"{
+    "asset": {"version": "2.0"},
+    "scenes": [{"nodes": [0]}],
+    "nodes": [{"mesh": 0}],
+    "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+    "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"}],
+    "buffers": [{"uri": "far.bin", "byteLength": 36}],
+    "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}]
+}"#;
+        let files = [
+            ("project.ron", PROJECT),
+            ("scenes/main.ron", SCENE),
+            ("far.gltf", gltf),
+        ];
+        let fixture = Fixture::new("far", &files);
+        fixture.write("far.bin", &bin);
+        let out = fixture.0.join("game.ggpk");
+        let error = cook(&fixture.0, &out).expect_err("a model a run refuses");
+        assert_eq!(error.code(), "engine.bad_model", "{error:#}");
+        assert!(
+            error.to_string().contains("mesh \"far.gltf 0/0\""),
+            "{error:#}"
+        );
+        assert!(!out.exists());
     }
 
     /// Checks that a project of `files`, beside its manifest and start scene unless they're among

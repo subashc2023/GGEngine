@@ -46,6 +46,10 @@ const MEMORY: usize = 64 << 20;
 /// game's entities through a component of its own that rides on one of the game's, as
 /// `gg.declare`'s `on` names it.
 ///
+/// A game registers its component types before it loads mods, since a mod may declare any name
+/// that's free: once a world has loaded mods, whatever's installed, it refuses a Rust type's
+/// registration, `ecs.registered_late`, and so a spawn of a type that hasn't registered panics.
+///
 /// Each mod's VM holds at most 64 MiB, past which an allocation fails as an error does, at the same
 /// allocation on every platform for runs that went alike; its calls in a tick share one budget of a
 /// million of Luau's interrupts, past which they fail until the next tick; and it prints at most 32
@@ -146,6 +150,7 @@ impl Set {
     /// Loads the mods `texts` hold, in the order of their names, in `world`, as [`Mods::load`]
     /// says.
     fn load(&mut self, world: &mut World, texts: Vec<ModText>) {
+        world.mods_loaded();
         let mut read = Vec::new();
         for text in texts {
             match manifest(&text.manifest) {
@@ -516,6 +521,42 @@ mod tests {
             .expect("set");
         mods.run(cx.world_mut());
         assert_eq!(counts(&cx), [3, 4, 2]);
+    }
+
+    /// Once a world has loaded mods, a Rust type that hasn't registered is refused, as is an
+    /// insert of it, whether or not a mod declared its name, in the world and in its copies, while
+    /// those that registered before go on as ever.
+    #[test]
+    fn a_type_that_registers_after_mods_load_is_refused_whatever_is_installed() {
+        /// A type the game registers late, whose name a mod declares.
+        #[derive(Clone, Component)]
+        struct Late {
+            at: u32,
+        }
+        let dir = Scratch::new("mods-late");
+        for installed in [false, true] {
+            if installed {
+                let taking = "return gg.declare(\"Late\", { at = 1 })";
+                install(&dir.0, "taking", "Modded", "\"read\"", taking);
+            }
+            let (mut cx, counters) = modded(&dir.0, 1);
+            let before = cx.world().clone();
+            let _mods = Mods::load(&mut cx, Grant::all());
+            assert_eq!(names(&cx).len(), usize::from(installed));
+            let world = cx.world_mut();
+            let late = |world: &mut World| world.register::<Late>().map_err(|e| e.code());
+            assert_eq!(late(world), Err("ecs.registered_late"), "{installed}");
+            let inserted = world.insert(counters[0], Late { at: 2 });
+            assert_eq!(inserted.map_err(|e| e.code()), Err("ecs.registered_late"));
+            let counter = Counter { count: 5, mark: 0 };
+            world
+                .insert(counters[0], counter)
+                .expect("registered before");
+            // A copy taken before into the world's memory, of the same types without a mod's.
+            let mut copy = before.clone();
+            copy.clone_from(cx.world());
+            assert_eq!(late(&mut copy), Err("ecs.registered_late"), "{installed}");
+        }
     }
 
     /// A lockstep joiner's mods, taking its host's, run those in their place; the same mods, as

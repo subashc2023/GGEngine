@@ -312,7 +312,11 @@ makes; anyone else's game depends on the engine from its own repository.
   place, each loads as the run starts, in the order of their names. A game takes mods by loading
   them through `Mods` in a layer's `load`, with the most it grants any, and runs them where that
   layer's tick chooses, as it runs its own scripts: a mod that asks for more, or whose manifest or
-  a script doesn't load, is refused, warning, and the game runs on without it. A mod's scripts are
+  a script doesn't load, is refused, warning, and the game runs on without it. A game registers
+  its component types before it loads mods, since a mod may declare any name that's free: once a
+  world has loaded mods, whatever's installed, it refuses a Rust type that registers
+  (`ecs.registered_late`), so that a game that registers one late fails as it first runs, not
+  where a player's mod has taken its name. A mod's scripts are
   scripts as a game's are, run in a VM of the mod's own and kept to its capabilities, `read` and
   `write` of the whole world or of the component types they name, as `read:Shard` or
   `write:Sprite`, which `gg.component` and an entity's fields check, its own components, which no
@@ -414,9 +418,10 @@ in the editor is out of an agent's reach.
   stopped if it was, or playing a copy with the world as edited held, as its snapshot keeps both.
   A game that comes to its own end, as its window closes, ends the supervision, as one that never
   serves does; so does the end of the tool a run embeds the game in (`--embedded`), as the editor
-  ends, which closes gg's stdin. One `gg run` runs a game at a time; a second is refused. It runs
-  headless checks, talks to running games, all with machine-readable results, and makes new games.
-  Inside a game's
+  ends, which closes gg's stdin. Its games end as gg does, however gg ends, killed too: each is
+  given `--supervised`, which ends a run as its stdin, which gg holds, closes. One `gg run` runs a
+  game at a time; a second is refused. It runs headless checks, talks to running games, all with
+  machine-readable results, and makes new games. Inside a game's
   [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
   project's directory, builds the project's game, and reaches the project's games alone, those whose
   session files name its manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a
@@ -1794,10 +1799,12 @@ the draw is one for the run, of all its levels' meshlets. A device that draws th
 (`VK_EXT_mesh_shader`), as the RTX 4090 and lavapipe do, draws a workgroup of the model's mesh
 shader for each meshlet kept; any other, as the AMD iGPU here and KosmicKrisp, an instance of a
 vertex shader's draw for each, of 124 triangles, the corners of those past the meshlet's own its
-first vertex, which draw nothing; their fragments shade alike. A run whose meshlets the frame
-planned no room for, as of a mesh that came to be drawable after its graph was planned, is drawn by
-its levels' indices for that frame; so is what blends, which keeps its triangles' order, and a model
-read as a development run reads it, which has no meshlets.
+first vertex, which draw nothing; their fragments shade alike. A frame plans each view room for
+32 MiB of meshlets at most, one run's at its largest, so that a few runs of many instances, as of
+foliage, can't ask more of the GPU than it can make, which would end the renderer. A run whose
+meshlets the frame planned no room for, as of a mesh that came to be drawable after its graph was
+planned, or past that most, is drawn by its levels' indices for that frame; so is what blends, which
+keeps its triangles' order, and a model read as a development run reads it, which has no meshlets.
 
 The culled runs drawn by their meshlets with the opaque and masked model shaders draw into a
 visibility buffer rather than shading as they draw, in both of the view's passes: at each pixel, the

@@ -231,6 +231,12 @@ pub use project::{Project, UNBUILT};
 /// connection: a request's or an answer's, such as a page of entities.
 pub const MAX_LINE: usize = 16 << 20;
 
+/// The most bytes a connection's first line, its `hello`, may have, its line break aside, past which
+/// the game closes the connection unanswered, the rest unread. The request's own fields, with the
+/// largest `id`, take under 100, the token 32, and a grant of every capability by name under 100,
+/// which leaves over 3.8 KiB for the client's name and the component types a grant names.
+pub const MAX_HELLO: usize = 4 << 10;
+
 /// Where a running game serves the API, which its development build writes as a file of JSON in
 /// the `sessions` directory beside its executable as the API starts, and removes as the run ends;
 /// one that a crash or a kill leaves behind names an address that refuses connections. Only the

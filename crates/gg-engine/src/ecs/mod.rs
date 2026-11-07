@@ -515,11 +515,8 @@ impl World {
 
     /// Gives `entity` `component`, in place of the one of its type it has.
     ///
-    /// Fails with `ecs.no_entity` if it isn't alive.
-    ///
-    /// # Panics
-    ///
-    /// If `T` fails to [`register`](Self::register).
+    /// Fails with `ecs.no_entity` if it isn't alive, and as [`register`](Self::register) does if
+    /// `T` hasn't registered.
     pub fn insert<T: Writable>(&mut self, entity: Entity, component: T) -> Result<()> {
         self.put(entity, component)
     }
@@ -527,7 +524,7 @@ impl World {
     /// As [`insert`](Self::insert), for any component, such as the [`Parent`] the world keeps.
     fn put<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
         let at = self.locate(entity)?;
-        let id = self.components.id::<T>();
+        let id = self.components.register::<T>()?;
         let (row, tick) = (at.row as usize, self.change_tick);
         if let Some(value) = self.tables[at.table as usize].get_mut::<T>(id, row, tick) {
             *value = component;

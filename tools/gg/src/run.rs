@@ -140,6 +140,9 @@ pub(crate) fn event(event: &Value) {
 /// and the run ends cleanly once gg's stdin closes, as the tool ends, stopping its games, though a
 /// build under way finishes first, as one does as the run ends however it ends.
 ///
+/// Each game is given `--supervised`, and a stdin gg holds, which closes as gg ends, however it
+/// ends, being killed too, ending the game then; one still running as the run fails is killed.
+///
 /// Fails as [`check_game`] does, with `gg.running` if another `gg run` of the package runs, as
 /// [`lock`] says, `gg.build` if it doesn't build, `gg.cargo` if cargo can't say what the package
 /// is, and `gg.run` if it can't be copied, started or waited for, or no port is free for the
@@ -165,6 +168,7 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     remove_leftovers(&exe, pid);
     let peers = peers_args(run.peers)?.into_iter().enumerate();
     let peers = peers.map(|(peer, mut args)| {
+        args.insert(0, "--supervised".to_owned());
         if run.embedded {
             args.insert(0, "--embedded".to_owned());
         }
@@ -323,8 +327,11 @@ struct Peer {
 }
 
 /// A game's process under `gg run`, and what's known of it: the snapshot it started from, its
-/// session once it serves, its frames and when they last moved, and its snapshots.
+/// session once it serves, its frames and when they last moved, and its snapshots. Its process is
+/// killed as it drops, if it hasn't ended, as on an error that ends the run.
 struct Game {
+    /// Its process, whose stdin it holds, which closes as gg ends, however it ends, ending a game
+    /// given `--supervised`.
     child: Child,
     pid: u32,
     restored: Option<Snapshotted>,
@@ -451,7 +458,7 @@ impl Supervisor<'_> {
         command
             .args(&self.run.args)
             .args(&them.args)
-            .stdin(Stdio::null());
+            .stdin(Stdio::piped());
         if let Some(from) = &from {
             command.arg("--restore").arg(&from.path);
         }
@@ -708,6 +715,17 @@ impl Game {
     }
 }
 
+impl Drop for Game {
+    /// Kills its process and waits for it, so that a run that fails while games run, as when the
+    /// joiner can't start after the host has, leaves none behind. One the run has waited for, as it
+    /// waits for each before dropping it otherwise, is left alone: std signals no process it has
+    /// reaped.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// What happened to a game under `gg run`, of which [`next`] says what follows.
 enum Happened {
     /// Its process came to its own end, as its window closed, a `quit` asked or its frames ran out:
@@ -948,11 +966,18 @@ pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
         check.project.as_ref().map(Scope::dir),
     )?;
     let frames = check.frames.to_string();
-    // Its console says what its JSON log does, which is read below.
+    // Its console says what its JSON log does, which is read below. Its stdin, which `child` holds,
+    // closes as gg ends, however it ends, ending the game then.
     let mut child = Command::new(&exe)
-        .args(["--headless", "--frames", &frames, "--no-api"])
+        .args([
+            "--headless",
+            "--frames",
+            &frames,
+            "--no-api",
+            "--supervised",
+        ])
         .args(&check.args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1083,6 +1108,41 @@ mod tests {
         let copy = running_copy(Path::new("target/debug/gg-shards.exe"), 42, 1);
         assert_eq!(copy, Path::new("target/debug/gg-shards-running-42-1.exe"));
         assert_eq!(snapshot_name("shards", 42, 1), "shards-42-1.snapshot");
+    }
+
+    /// A game dropped, as a run that fails drops those running, kills its process, which its stdin's
+    /// closing alone, as it drops, wouldn't end.
+    #[test]
+    fn a_game_dropped_kills_its_process() {
+        // A process that runs for a minute, whatever its stdin, its output ending as it does.
+        #[cfg(windows)]
+        let mut command = Command::new("ping");
+        #[cfg(windows)]
+        command.args(["-n", "60", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let mut command = Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("60");
+        let command = command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = command.spawn().expect("it starts");
+        let mut output = child.stdout.take().expect("piped");
+        let (pid, now) = (child.id(), Instant::now());
+        drop(Game {
+            child,
+            pid,
+            restored: None,
+            session: None,
+            client: None,
+            frames: 0,
+            moved: now,
+            pinged: now,
+            waiting: None,
+            snapped: now,
+            snapshotted: false,
+            snapshotting: None,
+        });
+        let _ = io::copy(&mut output, &mut io::sink());
+        assert!(now.elapsed() < Duration::from_secs(30), "it ran on");
     }
 
     /// A run came to its own end if its log has `engine.perf`, which a crash leaves out.

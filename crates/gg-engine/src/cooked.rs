@@ -57,11 +57,13 @@ use crate::{Light, LightKind, Transform};
 const NONE: u32 = u32::MAX;
 
 /// Model `imported`, as the cooker writes it into a game's package, its images given as `images`,
-/// their KTX2 in its images' order, in place of those `imported` has.
+/// their KTX2 in its images' order, in place of those `imported` has, and each primitive's mesh as
+/// the cooker made it.
 ///
 /// # Panics
 ///
-/// If `images` aren't as many as `imported`'s, or a count or a length is past 32 bits.
+/// If `images` aren't as many as `imported`'s, a primitive hasn't its mesh, or a count or a length
+/// is past 32 bits.
 pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     assert_eq!(
         imported.images.len(),
@@ -127,14 +129,8 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     count(&mut bytes, imported.primitives.len());
     for primitive in &imported.primitives {
         string(&mut bytes, &primitive.name);
-        let packed;
-        let mesh = match &primitive.mesh {
-            Some(mesh) => mesh,
-            None => {
-                packed = crate::model::model_mesh(primitive);
-                &packed
-            }
-        };
+        let mesh =
+            (primitive.mesh.as_ref()).expect("a cooked model's primitives have their meshes");
         let words = |bytes: &mut Vec<u8>, words: &[u32]| {
             for word in words {
                 bytes.extend_from_slice(&word.to_le_bytes());
@@ -675,7 +671,8 @@ mod tests {
                 error: 0.5,
             },
         ];
-        let mut mesh = ModelMesh::pack(&vertices, vec![0, 1, 2, 2, 1, 3, 0, 1, 2], levels);
+        let indices = vec![0, 1, 2, 2, 1, 3, 0, 1, 2];
+        let mut mesh = ModelMesh::pack("square", &vertices, indices, levels).expect("a mesh");
         // A meshlet for each level: both triangles, then one.
         let meshlet = |vertices, vertex_count, triangles, triangle_count| Meshlet {
             vertices,

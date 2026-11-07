@@ -13,6 +13,9 @@ pub(crate) struct Args {
     /// Whether the run is embedded in the tool that started it, such as the editor: offscreen, in
     /// real time, its view published to the tool through the tool API, as it asks.
     pub(crate) embedded: bool,
+    /// Whether the run ends once stdin ends, as it does as the supervisor that holds it, such as
+    /// `gg run`, ends, however it ends.
+    pub(crate) supervised: bool,
     pub(crate) frames: Option<u64>,
     /// The frame captured through RenderDoc, counting from 1.
     pub(crate) capture: Option<NonZeroU64>,
@@ -110,6 +113,9 @@ Options:
   --embedded        Run without a window, rendering offscreen in real time for the tool that
                     started the run, such as the editor, which the tool API's `view` publishes the
                     view to and its `input` forwards input from: a frame once it has taken the last
+  --supervised      End the run, as the tool API's `quit` does, once stdin ends, as it does as the
+                    supervisor that holds it, such as `gg run`, ends, however it ends; a replay
+                    ends at its recording's end alone
   --frames <N>      Exit after N frames
   --capture <N>     Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
@@ -168,6 +174,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     let mut parsed = Args {
         headless: false,
         embedded: false,
+        supervised: false,
         frames: None,
         capture: None,
         gpu: None,
@@ -215,6 +222,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "-h" | "--help" => return Ok(None),
             "--headless" => parsed.headless = true,
             "--embedded" => parsed.embedded = true,
+            "--supervised" => parsed.supervised = true,
             "--validation" => parsed.validation = true,
             "--no-validation" => parsed.validation = false,
             "--vsync" => parsed.vsync = true,
@@ -507,6 +515,16 @@ mod tests {
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
         assert_eq!(restore, Some(PathBuf::from("b.snapshot")));
+        // A run ends as its supervisor does, which gives every game it runs `--supervised`, a
+        // replay too, which ends at its end alone.
+        assert!(!parse_strs(&[]).unwrap().unwrap().supervised);
+        for args in [
+            &["--supervised"][..],
+            &["--headless", "--supervised"],
+            &["--replay", "run.recording", "--supervised"],
+        ] {
+            assert!(parse_strs(args).unwrap().unwrap().supervised, "{args:?}");
+        }
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
         assert_eq!(host.net, Some(Net::Host("0.0.0.0:7700".to_owned())));
         let join = parse_strs(&["--join=127.0.0.1:7700", "--restore", "a.snapshot"]);
@@ -596,6 +614,7 @@ mod tests {
             &["--threads", "0"],
             &["--threads", "x"],
             &["--headless=yes"],
+            &["--supervised=yes"],
             &["--dump", "attach"],
             &["--replay", "run.recording", "--dump", "-1"],
             &["--replay", "run.recording", "--dump", "first"],

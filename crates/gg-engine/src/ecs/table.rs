@@ -35,6 +35,8 @@ pub struct Components {
     /// What names the types as they are, which each change to them changes, to a number no
     /// other world's types have had.
     revision: u64,
+    /// Whether the world has loaded mods, past which no Rust type registers.
+    pub(super) mods_loaded: bool,
 }
 
 #[derive(Clone)]
@@ -61,13 +63,28 @@ enum NewColumn {
 impl Components {
     /// `T`'s id, which it gets once it's described, the first time it's asked for.
     ///
-    /// Fails as describing it does, such as with `reflect.name_taken` or `reflect.bad_default`;
-    /// with `reflect.unnamed` if it describes itself as something other than a struct or an enum;
-    /// and with `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own,
-    /// as [`Component::exclusive`] says.
+    /// Fails with `ecs.registered_late` once the world has loaded mods; as describing it does, such
+    /// as with `reflect.name_taken` or `reflect.bad_default`; with `reflect.unnamed` if it
+    /// describes itself as something other than a struct or an enum; and with `ecs.bad_exclusive`
+    /// if it names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`]
+    /// says.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
         if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {
             return Ok(id);
+        }
+        // A mod may have declared its name, or a field's type's, which would then be the mod's:
+        // refused whatever's installed, so that the game fails as it first runs, not as a player
+        // installs a mod that takes the name.
+        if self.mods_loaded {
+            return Err(Error::new(
+                "ecs.registered_late",
+                format!(
+                    "`{}` registers after the world loaded mods, whose scripts may declare any \
+                     name: a game registers its component types (`World::register`) before it \
+                     loads mods (`Mods::load`)",
+                    type_name::<T>()
+                ),
+            ));
         }
         let index = match T::describe(&mut self.types)? {
             Type::Named(index) => index,

@@ -67,10 +67,13 @@ pub fn texels(model: &Imported, image: usize) -> Texels {
     crate::model::texels(&model.primitives, image)
 }
 
-/// `primitive`'s vertices, as glTF has them, packed as a run packs them, with its indices, of
-/// `levels` among them, as a game's package holds them; without meshlets, which the cooker cuts.
-pub fn pack(primitive: &Primitive, levels: Vec<Lod>) -> ModelMesh {
-    crate::model::pack(primitive, levels)
+/// `primitive`'s vertices, model `name`'s, as glTF has them, packed as a run packs them, with its
+/// indices, of `levels` among them, as a game's package holds them; without meshlets, which the
+/// cooker cuts.
+///
+/// Fails as `add_model` does for vertices that don't pack, with `engine.bad_model`.
+pub fn pack(name: &str, primitive: &Primitive, levels: Vec<Lod>) -> Result<ModelMesh> {
+    crate::model::pack(name, primitive, levels)
 }
 
 /// `image`'s RGBA8, then the rest of its full chain of mip levels, smallest last, made as `texels`
@@ -87,15 +90,23 @@ pub fn levels(image: &Image, texels: Texels) -> Vec<u8> {
     pixels
 }
 
-/// `model` as a game's package holds it, cooked, as a run from the package reads it in place of
-/// its files: its images given as `images`, each one's KTX2, in their order, in place of those
-/// `model` has.
+/// `model`, model `name`, as a game's package holds it, cooked, as a run from the package reads it
+/// in place of its files: its images given as `images`, each one's KTX2, in their order, in place
+/// of those `model` has, and each primitive's mesh as [`pack`] packed it and the cooker cut it.
+///
+/// Fails as `add_model` does for a mesh that doesn't hold together, as a run checks each it adds,
+/// with `engine.bad_model`, so that a package holds none that a run refuses.
 ///
 /// # Panics
 ///
-/// If `images` aren't as many as `model`'s.
-pub fn model_bytes(model: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
-    crate::cooked::encode(model, images)
+/// If `images` aren't as many as `model`'s, or a primitive hasn't its mesh.
+pub fn model_bytes(name: &str, model: &Imported, images: &[Vec<u8>]) -> Result<Vec<u8>> {
+    for primitive in &model.primitives {
+        let mesh =
+            (primitive.mesh.as_ref()).expect("a cooked model's primitives have their meshes");
+        crate::model::check_mesh(name, primitive, mesh)?;
+    }
+    Ok(crate::cooked::encode(model, images))
 }
 
 /// Model `name`'s cooked `bytes`, read back as a run from a game's package reads them, its images

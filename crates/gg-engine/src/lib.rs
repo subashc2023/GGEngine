@@ -588,6 +588,7 @@ fn run_args(
     debug!(
         headless = args.headless,
         embedded = args.embedded,
+        supervised = args.supervised,
         frames = args.frames,
         capture = args.capture.map(|frame| frame.get()),
         gpu = args.gpu.as_deref(),
@@ -651,6 +652,9 @@ fn run_args(
         // A server renders nothing, and serves no tool API, whose tools look at a run's frames.
         if matches!(args.net, Some(args::Net::Serve(_))) {
             interrupt::watch();
+            if args.supervised {
+                interrupt::watch_stdin(|| {});
+            }
             return main_loop::run_server(&mut app, &args, snapshot);
         }
         // Before the renderer starts, so that tools find a run that hangs as it starts.
@@ -682,6 +686,10 @@ fn run_args(
             // An embedded run's tool ends it.
             if args.headless {
                 interrupt::watch();
+            }
+            // Their frames go on without events, so they need no waking.
+            if args.supervised {
+                interrupt::watch_stdin(|| {});
             }
             run_headless(&mut app, &args, api, snapshot)
         } else {

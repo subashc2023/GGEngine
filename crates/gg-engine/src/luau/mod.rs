@@ -100,11 +100,13 @@ const REMOVED: [&str; 7] = [
 /// that runs for each entity that has it, given the entity and the tick's length in seconds. It
 /// reaches components' fields, Rust's and scripts', by handles, `gg.component("Shard").angle`, and
 /// its own's, `Spin.speed`, which an entity reads and writes as `entity[Shard.angle]`: a number,
-/// a bool, a vector, a quaternion as a vector, or an entity. It keeps its state in its components,
-/// as a game keeps its in the world, since no snapshot, reload or peer joining keeps what its
-/// chunk's locals hold: once its chunk has run, every table the chunk keeps, its globals among
-/// them, is frozen, and a script is refused, `script.state`, whose functions assign a local of its
-/// chunk, as its compiled bytecode shows, or whose chunk keeps a coroutine or a buffer.
+/// a bool, a vector, a quaternion as a vector, or an entity. A write that [`World::set_field`]
+/// would refuse, such as of a number outside the field's bounds, fails as an error does. It keeps
+/// its state in its components, as a game keeps its in the world, since no snapshot, reload or peer
+/// joining keeps what its chunk's locals hold: once its chunk has run, every table the chunk keeps,
+/// its globals among them, is frozen, and a script is refused, `script.state`, whose functions
+/// assign a local of its chunk, as its compiled bytecode shows, or whose chunk keeps a coroutine or
+/// a buffer.
 ///
 /// ```lua
 /// local Shard = gg.component("Shard")
@@ -135,7 +137,9 @@ const REMOVED: [&str; 7] = [
 ///
 /// Each call into a script, a tick or its chunk as it loads, takes at most a million of Luau's
 /// interrupts, which come at each call and each turn of a loop, past which it fails, alike on every
-/// platform, so that a loop that never ends fails rather than hanging the game.
+/// platform, so that a loop that never ends fails rather than hanging the game. No script code runs
+/// outside such a call: the engine checks what a chunk returns and keeps without calling its
+/// metamethods.
 ///
 /// A development build that serves the tool API debugs the scripts through it, as gg-api's `debug`
 /// says: breakpoints, by a script's path and a line, a pause and steps. A script stops inside its
@@ -274,10 +278,11 @@ enum Interrupt {
 }
 
 /// Counts an interrupt against the budget of the call into a script that runs, which fails past it,
-/// and, in a development build, stops there if a pause is asked, as [`Scripts`] says.
+/// and, in a development build, stops there if a pause is asked, as [`Scripts`] says. Script code
+/// that runs outside any call into a script, where it would have no budget, fails at once.
 fn interrupted() -> Interrupt {
     if !SHARED.is_set() {
-        return Interrupt::Go;
+        return Interrupt::Over;
     }
     SHARED.with(|shared| {
         let left = shared.budget.get();
@@ -294,9 +299,15 @@ fn interrupted() -> Interrupt {
 }
 
 /// The error of a call into a script that ran past its budget at `line` of `script`, or, a mod's,
-/// past its mod's for the tick.
+/// past its mod's for the tick; or of script code that ran there outside any call into a script.
 fn over_budget(script: &str, line: u32) -> String {
-    let held = SHARED.is_set() && SHARED.with(|shared| shared.held.is_some());
+    if !SHARED.is_set() {
+        return format!(
+            "{script}:{line}: script code ran outside a call into a script, where alone it has a \
+             budget of Luau's interrupts"
+        );
+    }
+    let held = SHARED.with(|shared| shared.held.is_some());
     let what = if held {
         "the mod's calls this tick ran past their budget"
     } else {
@@ -971,7 +982,9 @@ impl Host {
         let Lua_::Table(returned) = returned else {
             return Err(returns(path, &component));
         };
-        if !returned.equals(&table).map_err(|error| bad(path, &error))? {
+        // By identity: `equals` would call the tables' `__eq`, the script's code, outside any call
+        // into it.
+        if !ptr::eq(returned.to_pointer(), table.to_pointer()) {
             return Err(returns(path, &component));
         }
         let tick = match table.raw_get::<Lua_>("tick") {
@@ -1650,11 +1663,8 @@ fn write(_: &Lua, (entity, key, value): (LightUserData, Lua_, Lua_)) -> mlua::Re
             )));
         }
         let mut world = shared.world.borrow_mut();
-        let id = missing(field)?;
-        let set = match world.field_at_mut(entity, id, field.index) {
-            Ok(reached) => set(reached, field.ty, &value),
-            Err(error) => Err(error),
-        };
+        let at = (entity, missing(field)?, field.index);
+        let set = set(&mut world, at, field.ty, &value);
         set.map_err(|error| reaching(&world, entity, field, &error))
     })
 }
@@ -1734,8 +1744,14 @@ fn to_lua(field: &dyn Reflect, ty: Field) -> Lua_ {
     }
 }
 
-/// Sets `field`, which holds `ty`, to `value`, a script's: without allocating, but to fail.
-fn set(field: &mut dyn Reflect, ty: Field, value: &Lua_) -> Result<()> {
+/// Sets field `index` of `entity`'s component `id`, which holds `ty`, to `value`, a script's,
+/// refused as [`World::field_to_set`] says: without allocating, but to fail.
+fn set(
+    world: &mut World,
+    (entity, id, index): (Entity, ComponentId, u32),
+    ty: Field,
+    value: &Lua_,
+) -> Result<()> {
     let wrong = |expected: &str| {
         Error::new(
             "reflect.wrong_kind",
@@ -1751,7 +1767,7 @@ fn set(field: &mut dyn Reflect, ty: Field, value: &Lua_) -> Result<()> {
         Lua_::Vector(v) => Ok(v),
         _ => Err(wrong("a vector")),
     };
-    let entity = || match *value {
+    let to_entity = || match *value {
         Lua_::LightUserData(data) => {
             Entity::from_bits(bits(data)).ok_or_else(|| wrong("an entity"))
         }
@@ -1761,9 +1777,9 @@ fn set(field: &mut dyn Reflect, ty: Field, value: &Lua_) -> Result<()> {
         Field::MaybeEntity => {
             let held = match value {
                 Lua_::Nil => None,
-                _ => Some(entity()?),
+                _ => Some(to_entity()?),
             };
-            let any: &mut dyn Any = field;
+            let any: &mut dyn Any = world.field_to_set(entity, id, index, None)?;
             *any.downcast_mut::<Option<Entity>>()
                 .expect("an option of an entity") = held;
             return Ok(());
@@ -1797,8 +1813,9 @@ fn set(field: &mut dyn Reflect, ty: Field, value: &Lua_) -> Result<()> {
         Field::Vec3 => Value::Vec3(vector().map(|v| Vec3::new(v.x(), v.y(), v.z()))?),
         Field::Vec4 => Value::Vec4(vector().map(|v| Vec4::new(v.x(), v.y(), v.z(), v.w()))?),
         Field::Quat => Value::Quat(quat_of(vector()?)),
-        Field::Entity => Value::Entity(entity()?),
+        Field::Entity => Value::Entity(to_entity()?),
     };
+    let field = world.field_to_set(entity, id, index, Some(&value))?;
     field.set_value(&value)
 }
 
@@ -2479,6 +2496,94 @@ return Spin
             default(cx.world(), "Looped", "n"),
             Some(Value::F64(100_000.0))
         );
+    }
+
+    /// No script code runs outside a call into a script, where alone its budget holds: a chunk is
+    /// told from what it returns by identity, its tables' `__eq`, which never returns, uncalled, and
+    /// a script's function called outside any call into a script fails at its first interrupt.
+    #[test]
+    fn no_script_code_runs_outside_a_call_into_a_script() {
+        let eq = "local mt = { __eq = function() while true do end end }\n\
+            local X = setmetatable(gg.declare(\"X\", {}), mt)\n\
+            return setmetatable({}, mt)\n";
+        let eq = refused("eq", eq);
+        assert_eq!(eq.code(), "script.bad");
+        assert!(eq.to_string().contains("returns other than `X`"), "{eq}");
+        let turns = "local Turns = gg.declare(\"Turns\", {})\n\
+            function Turns.tick(entity, dt)\n\
+                for i = 1, 2 do end\n\
+            end\n\
+            return Turns\n";
+        let dir = Scratch::new("luau-outside");
+        let (_cx, host) = loaded(&dir, &[("scripts/turns.luau", turns)]);
+        let tick = host.host.borrow().scripts[0].tick.clone().expect("a tick");
+        let outside = tick.call::<()>(()).expect_err("it has no budget");
+        let message = outside.to_string();
+        assert!(
+            message.contains("scripts/turns.luau:3: script code ran outside a call into a script"),
+            "{message}"
+        );
+    }
+
+    /// A script's write is refused as `World::set_field` refuses one, with its code, the field left
+    /// as it was: of a number outside its field's bounds, a collider's density below 0, or that
+    /// isn't finite there; and of `Parent`, which the world keeps, and of whose field, a tuple
+    /// struct's, no script finds a handle anyway.
+    #[test]
+    fn a_script_s_write_is_refused_as_a_field_set_by_name_is() {
+        let dir = Scratch::new("luau-checked");
+        let script = "local Box = gg.component(\"BoxCollider2D\")\n\
+            local Dense = gg.declare(\"Dense\", {\n\
+                to = 1,\n\
+                parentless = next(gg.component(\"Parent\")) == nil,\n\
+            })\n\
+            function Dense.tick(entity, dt)\n\
+                entity[Box.density] = entity[Dense.to]\n\
+            end\n\
+            return Dense\n";
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/dense.luau", script)]);
+        let world = cx.world_mut();
+        let parentless = default(world, "Dense", "parentless");
+        assert_eq!(parentless, Some(Value::Bool(true)));
+        let dense = world.spawn(crate::BoxCollider2D::default());
+        world.add_default(dense, "Dense").expect("added");
+        let collider = world.component_named("BoxCollider2D").expect("registered");
+        let mut fields = world.fields_of(collider).iter();
+        let density = fields.position(|field| field.name == "density");
+        let density = u32::try_from(density.expect("a density")).expect("few fields");
+        for to in [-1.0, f64::NAN] {
+            let world = cx.world_mut();
+            world
+                .set_field(dense, "Dense", "to", &Value::F64(to))
+                .expect("set");
+            host.run(world);
+            let kept = world
+                .get::<crate::BoxCollider2D>(dense)
+                .expect("a collider");
+            assert_eq!(kept.density, 1.0);
+            let by_name =
+                world.set_field(dense, "BoxCollider2D", "density", &Value::F32(to as f32));
+            let scripted = set(
+                world,
+                (dense, collider, density),
+                Field::F32,
+                &Lua_::Number(to),
+            );
+            let codes = [scripted, by_name.map(drop)].map(|refused| refused.expect_err("refused"));
+            assert_eq!(codes[0].code(), "reflect.out_of_range", "{:?}", codes[0]);
+            assert_eq!(codes[0].code(), codes[1].code());
+        }
+        let world = cx.world_mut();
+        let [parent, child] = [(); 2].map(|()| world.spawn(()));
+        world.set_parent(child, Some(parent)).expect("parented");
+        let id = world.component_named("Parent").expect("registered");
+        let by_name = world.set_field(child, "Parent", "0", &Value::Entity(dense));
+        let other = Lua_::LightUserData(handle(dense.to_bits()));
+        let scripted = set(world, (child, id, 0), Field::Entity, &other);
+        let codes = [scripted, by_name.map(drop)].map(|refused| refused.expect_err("refused"));
+        assert_eq!(codes[0].code(), "reflect.read_only", "{:?}", codes[0]);
+        assert_eq!(codes[0].code(), codes[1].code());
+        assert_eq!(world.parent(child).expect("alive"), Some(parent));
     }
 
     #[test]

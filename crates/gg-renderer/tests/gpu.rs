@@ -85,6 +85,7 @@ fn main() -> ExitCode {
         tonemappers_match_their_reference,
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
+        back_faces_flip_their_normal_maps,
         lit_spheres_match_their_reference,
         many_lights_match_their_reference,
         a_uniform_sky_lights_white_as_itself,
@@ -127,6 +128,7 @@ fn main() -> ExitCode {
     run!(
         tests by meshlets,
         lights_shade_as_gltf_defines,
+        back_faces_flip_their_normal_maps,
         lit_spheres_match_their_reference,
         many_lights_match_their_reference,
         a_uniform_sky_lights_white_as_itself,
@@ -457,7 +459,8 @@ fn add_model(
     vertices: &[ModelVertex],
     indices: &[u32],
 ) -> Mesh<PackedVertex> {
-    let mut packed = ModelMesh::pack(vertices, indices.to_vec(), Vec::new());
+    let packed = ModelMesh::pack(name, vertices, indices.to_vec(), Vec::new());
+    let mut packed = packed.expect("a mesh");
     if CUT_MESHLETS.load(Ordering::Relaxed) {
         cut_meshlets(&mut packed);
     }
@@ -4023,6 +4026,82 @@ fn lights_shade_as_gltf_defines() {
     shut_down(renderer);
 }
 
+/// Three squares, each a model's, of a double-sided material, normal-mapped, seen without
+/// perspective and lit from above and in front: the back of one turned a half turn about Y, its map
+/// tilted toward its texture's +Y, shows as the front of one whose map tilts as far toward -Y, as
+/// glTF flips a back face's whole tangent space, its bitangent too; and not as the front of one
+/// whose map tilts toward +Y, which faces the light more.
+fn back_faces_flip_their_normal_maps() {
+    const SIDE: u32 = 16;
+    const WIDTH: u32 = 3 * SIDE;
+    let mut renderer = renderer(WIDTH, SIDE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let square = model_square(&mut stores.meshes);
+    // Levels of 4 by 4 texels, Y of -127/255 and 127/255, as a normal map holds them: about 30°.
+    let mut map = |name, y: u8| {
+        let pixels = [[128, y, 255, 255]; 16];
+        let texels = Texels::Map(Map::Normal);
+        let added = stores
+            .textures
+            .add(name, [4, 4], pixels.as_flattened(), texels);
+        Sampled::of(added.expect("a map"))
+    };
+    let (down, up) = (map("tilted down", 64), map("tilted up", 191));
+    let at = |i: f32| Mat4::from_translation(Vec3::new(i - 1.0, 0.0, 0.0));
+    let squares = [
+        (down, at(0.0)),
+        (up, at(1.0) * Mat4::from_rotation_y(PI)),
+        (up, at(2.0)),
+    ];
+    let mut draws = Draws::default();
+    for (normals, transform) in squares {
+        let material = stores.materials.add(&Material {
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            workflow: metallic(0.0, 1.0),
+            double_sided: true,
+            normal_texture: Some(normals),
+            ..Material::default()
+        });
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(transform, &draw, 0);
+    }
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::new(0.0, -1.0, -1.0).normalize(),
+        color: Vec3::splat(PI),
+        range: None,
+        shadow_distance: None,
+    }];
+    let viewport = filling([WIDTH, SIDE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // Past the frame the mesh came to be drawable in, which planned no room for its meshlets and
+    // drew it by its indices.
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let frame = frame_pixels(&mut renderer);
+    let [down, back, up] =
+        [0, 1, 2].map(|i| pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]));
+    assert!(
+        close(back, down),
+        "the back shows {back:?}, not {down:?}, as the front tilted down does"
+    );
+    assert!(
+        !close(back, up),
+        "the back shows {back:?}, as the front tilted up does"
+    );
+    shut_down(renderer);
+}
+
 /// A sphere of `radius` about the origin, a model's, of `rings` rings from pole to pole and
 /// `segments` around, its normals out and its tangents along its lines of latitude, eastward.
 fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<PackedVertex> {
@@ -5502,7 +5581,7 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
                 error: 0.03,
             },
         ];
-        let mut ball = ModelMesh::pack(&vertices, indices, levels);
+        let mut ball = ModelMesh::pack("ball", &vertices, indices, levels).expect("a mesh");
         if meshlets {
             cut_meshlets(&mut ball);
         }
@@ -5870,7 +5949,8 @@ impl Moved {
         let draw = match self {
             Self::Indices | Self::Meshlets => {
                 let (vertices, indices) = sphere_of(0.8, 24, 48);
-                let mut packed = ModelMesh::pack(&vertices, indices, Vec::new());
+                let packed = ModelMesh::pack("sphere", &vertices, indices, Vec::new());
+                let mut packed = packed.expect("a mesh");
                 if matches!(self, Self::Meshlets) {
                     cut_meshlets(&mut packed);
                 }

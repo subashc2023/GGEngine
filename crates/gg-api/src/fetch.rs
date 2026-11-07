@@ -96,9 +96,11 @@ impl Fetch {
 
     /// Checks the list: each source's `from` an `https://` URL of printable ASCII, without
     /// spaces, `"`, `\` or a `/` at its end; its `into` and its files' paths relative, their parts
-    /// named, neither `.` nor `..`, with `/` between them; each file's SHA-256 64 lowercase hex
-    /// digits; no file's path into the project twice; and each of `ids` an asset ID, as gg-api's
-    /// [`AssetId`] reads one, of a texture, a model or a font of `files`, no two the same.
+    /// named, neither `.` nor `..`, with `/` between them, without `\`, `:` or a control character,
+    /// so that they stay inside the project's directory on every OS; each file's SHA-256 64
+    /// lowercase hex digits; no file's path into the project twice; and each of `ids` an asset ID,
+    /// as gg-api's [`AssetId`] reads one, of a texture, a model or a font of `files`, no two the
+    /// same.
     ///
     /// Fails with `fetch.bad`, naming what's wrong.
     pub fn check(&self) -> Result<(), Failure> {
@@ -118,14 +120,16 @@ impl Fetch {
             if !is_relative(into) {
                 return bad(format!(
                     "`into` is `{into}`, which isn't a path inside the project's directory: its \
-                     parts named, neither `.` nor `..`, with `/` between them"
+                     parts named, neither `.` nor `..`, with `/` between them, without `\\`, `:` \
+                     or a control character"
                 ));
             }
             for (name, sha256) in &source.files {
                 if !is_relative(name) {
                     return bad(format!(
                         "`files` names `{name}`, which isn't a path inside `{into}`: its parts \
-                         named, neither `.` nor `..`, with `/` between them"
+                         named, neither `.` nor `..`, with `/` between them, without `\\`, `:` \
+                         or a control character"
                     ));
                 }
                 let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
@@ -230,6 +234,9 @@ mod tests {
             (good.0, "/x", good.2, good.3, "into"),
             (good.0, "C:/x", good.2, good.3, "into"),
             (good.0, good.1, "a/../z.bin", good.3, "z.bin"),
+            // `..\..\x.bat` and `models\..\..\x`, which Windows reads as paths outside it.
+            (good.0, good.1, r"..\\..\\x.bat", good.3, "x.bat"),
+            (good.0, r"models\\..\\..\\x", good.2, good.3, "into"),
             (good.0, good.1, good.2, &HASH[1..], "SHA-256"),
             (good.0, good.1, good.2, &HASH.to_uppercase(), "SHA-256"),
         ];

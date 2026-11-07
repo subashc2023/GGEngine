@@ -50,12 +50,28 @@ const _: () = assert!(MESHLET_ACROSS <= 65_535 && MOST_MESHLETS / MESHLET_ACROSS
 /// `VkDrawMeshTasksIndirectCommandEXT` and how many it kept.
 const MESHLET_DRAW: u64 = 8;
 
-/// The words a run of `count` instances of a mesh whose meshlets are `placed` takes in each view's
-/// meshlets: its draw, and room for every meshlet of its largest level, of every instance, up to
-/// [`MOST_MESHLETS`].
-fn meshlet_words(placed: &PlacedMeshlets, count: u64) -> u64 {
-    MESHLET_DRAW + 2 * (count * u64::from(placed.most)).min(MOST_MESHLETS)
+/// How many meshlets a run of `count` instances of a mesh whose meshlets are `placed` has room for
+/// in each view: every meshlet of its largest level, of every instance, up to [`MOST_MESHLETS`].
+fn meshlet_room(placed: &PlacedMeshlets, count: u64) -> u64 {
+    (count * u64::from(placed.most)).min(MOST_MESHLETS)
 }
+
+/// The words a run of `count` instances of a mesh whose meshlets are `placed` takes in each view's
+/// meshlets: its draw, and its [`meshlet_room`].
+fn meshlet_words(placed: &PlacedMeshlets, count: u64) -> u64 {
+    MESHLET_DRAW + 2 * meshlet_room(placed, count)
+}
+
+/// The most words of meshlets a frame plans in each view, past which the runs that would be drawn
+/// by their meshlets are drawn by their levels' indices instead, without their meshlets culled or a
+/// visibility buffer: room for one run's draw at its most, so that any run alone is drawn by its
+/// meshlets, which with its draw is 32 MiB a view, 192 MiB in the six a frame with shadows culls for.
+/// Room is planned for every meshlet of every instance, not for what's kept, so without a ceiling
+/// the room of a few runs of many instances, as of foliage, outgrows what the GPU can make, and a
+/// frame that can't make its buffers ends the renderer. Raising it costs 8 bytes a meshlet in each
+/// view whether it's kept or not, and the graph rounds the buffer of commands it shares up to a
+/// power of two: room for a second such run would take the six views' 256 MiB to 512 MiB.
+const MOST_MESHLET_WORDS: u64 = MESHLET_DRAW + 2 * MOST_MESHLETS;
 
 /// A copy's `source_params` for one from the scene: `SCENE` in `shaders/gather.slang`.
 const SCENE: u32 = u32::MAX;
@@ -133,7 +149,8 @@ pub(crate) struct Culling {
     meshlets_pushed: Option<MeshletPush>,
     /// The words of each view's meshlets the frame plans, which a run drawn by its meshlets past
     /// them is drawn by its levels' indices instead, as of a mesh that came to be drawable after
-    /// the frame planned its graph.
+    /// the frame planned its graph, or of runs whose meshlets together take more than
+    /// [`MOST_MESHLET_WORDS`].
     meshlet_budget: u64,
 }
 
@@ -214,11 +231,25 @@ pub(crate) struct Bounds {
     blocks: u64,
     params_words: u64,
     /// The words of each view's meshlets, as [`meshlet_words`] counts them for each run drawn by
-    /// them.
+    /// them, up to [`MOST_MESHLET_WORDS`].
     meshlet_words: u64,
 }
 
 impl Bounds {
+    /// Adds a run of `count` instances whose shader takes `params_words` words of parameters for
+    /// each, drawn by its mesh's meshlets, `placed`, if it's drawn by them, as far as
+    /// [`MOST_MESHLET_WORDS`] holds them.
+    fn add(&mut self, count: u64, params_words: u64, placed: Option<&PlacedMeshlets>) {
+        self.runs += 1;
+        self.instances += count;
+        self.blocks += count.div_ceil(BLOCK);
+        self.params_words += count * params_words;
+        if let Some(placed) = placed {
+            let words = self.meshlet_words + meshlet_words(placed, count);
+            self.meshlet_words = words.min(MOST_MESHLET_WORDS);
+        }
+    }
+
     /// Each view's room for the instances it keeps: their transforms, IDs and parameters.
     fn kept_bytes(&self) -> u64 {
         self.instances * (TRANSFORM + ID) + self.params_words * 4
@@ -734,7 +765,8 @@ fn planes(clip_from_world: &Mat4, clamped: bool) -> [Vec4; 6] {
 impl MeshPass {
     /// The most a frame's culling of `draws` and the scene takes, of their runs whose shaders are
     /// opaque, by the shaders the pass has, whatever their meshes, and the meshlets of those drawn
-    /// by them, of the meshes drawable as it's asked; `None` if no run's shader is opaque.
+    /// by them, of the meshes drawable as it's asked, as [`Bounds::add`] counts them; `None` if no
+    /// run's shader is opaque.
     pub(crate) fn cull_bounds(&self, draws: &Draws) -> Option<Bounds> {
         let mut bounds = Bounds::default();
         let frame = (draws.runs.iter()).map(|run| (run.mesh, run.shader, run.instances.len()));
@@ -745,16 +777,10 @@ impl MeshPass {
                 continue;
             };
             if shader.writes_depth {
-                let count = count as u64;
-                bounds.runs += 1;
-                bounds.instances += count;
-                bounds.blocks += count.div_ceil(BLOCK);
-                bounds.params_words += count * (shader.params_size / 4) as u64;
                 let mesh = self.meshes.get(mesh as usize).and_then(Held::ready);
                 let placed = mesh.and_then(|mesh| mesh.meshlets.as_ref());
-                if let (Some(placed), Some(_)) = (placed, &shader.meshlets) {
-                    bounds.meshlet_words += meshlet_words(placed, count);
-                }
+                let placed = placed.filter(|_| shader.meshlets.is_some());
+                bounds.add(count as u64, (shader.params_size / 4) as u64, placed);
             }
         }
         (bounds.runs > 0).then_some(bounds)
@@ -1104,6 +1130,28 @@ struct Totals {
     meshlet_words: u32,
 }
 
+impl Totals {
+    /// Takes the words of each view's meshlets the draw of a run of `count` instances of a mesh
+    /// whose meshlets are `placed` takes, if they're within the `budget` the frame planned, and
+    /// returns where its draw starts among them and how many meshlets it has room for; or takes
+    /// nothing past it, as the run is then drawn by its levels' indices.
+    fn take_meshlets(
+        &mut self,
+        placed: &PlacedMeshlets,
+        count: u32,
+        budget: u64,
+    ) -> Option<(u32, u32)> {
+        let words = meshlet_words(placed, u64::from(count));
+        let taken = u64::from(self.meshlet_words) + words;
+        if taken > budget {
+            return None;
+        }
+        // Within the budget, which is within `MOST_MESHLET_WORDS`.
+        let draw = std::mem::replace(&mut self.meshlet_words, taken as u32);
+        Some((draw, meshlet_room(placed, u64::from(count)) as u32))
+    }
+}
+
 /// A run that may be culled: its mesh and shader, and the faces it draws.
 trait Culled {
     fn mesh(&self) -> u32;
@@ -1196,13 +1244,12 @@ impl Culling {
         let GpuMesh { lods, .. } = mesh;
         let count =
             u32::try_from(count).expect("a run's instances fit the 32-bit count Vulkan takes");
-        // Drawn by its meshlets where the frame planned room for them.
+        // Drawn by its meshlets where the frame planned room for them: its draw's start among each
+        // view's meshlets, and how many it has room for.
         let placed = (mesh.meshlets.as_ref()).filter(|_| shader.meshlets.is_some());
-        let words = placed.map(|placed| meshlet_words(placed, u64::from(count)));
-        let placed = placed.filter(|_| {
-            let words = words.unwrap_or_default();
-            u64::from(totals.meshlet_words) + words <= self.meshlet_budget
-        });
+        let drawn =
+            placed.and_then(|placed| totals.take_meshlets(placed, count, self.meshlet_budget));
+        let placed = placed.filter(|_| drawn.is_some());
         let words = (shader.params_size / 4) as u32;
         let (first_block, block_count) = (self.blocks.len(), count.div_ceil(BLOCK as u32));
         let run_index = self.runs.len() as u32;
@@ -1248,9 +1295,8 @@ impl Culling {
                     meshlet_count,
                 }
             }));
-        let room = placed.map_or(0, |placed| {
-            (u64::from(count) * u64::from(placed.most)).min(MOST_MESHLETS) as u32
-        });
+        // A run drawn by its levels' indices reads neither.
+        let (meshlet_draw, room) = drawn.unwrap_or((meshlet_words, 0));
         // Gathered as one view's are kept: each run's at its `output`.
         self.runs.push(GpuRun {
             first: instances,
@@ -1266,17 +1312,17 @@ impl Culling {
             blocks: first_block as u32,
             block_count,
             meshlets: placed.map_or(NO_MESHLETS, |placed| placed.first),
-            meshlet_draw: meshlet_words,
+            meshlet_draw,
             meshlet_room: room,
             cones: u32::from(run.faces() != Faces::Both),
             vertices: crate::halves(mesh.vertices.address()),
         });
-        let drawn = placed.map_or(0, |_| MESHLET_DRAW as u32 + 2 * room);
+        // Its meshlets' words were taken above.
         *totals = Totals {
             instances: instances + count,
             params_words: params_words + count * words,
             commands: commands + lods.levels.len() as u32,
-            meshlet_words: meshlet_words + drawn,
+            meshlet_words,
         };
         Some(run_index)
     }
@@ -1362,6 +1408,41 @@ mod tests {
             orthographic.truncate().distance(ahead) < 1e-5,
             "{orthographic}"
         );
+    }
+
+    /// A frame plans room in each view for the meshlets of its runs drawn by them up to
+    /// [`MOST_MESHLET_WORDS`], however many such runs it has; and its culling draws by their
+    /// meshlets the runs whose draws fit what it planned, in turn, and those past it by their
+    /// levels' indices, taking no room for them.
+    #[test]
+    fn runs_past_a_views_room_for_meshlets_are_drawn_by_their_indices() {
+        let placed = |most| PlacedMeshlets {
+            first: 0,
+            levels: vec![[0, most]],
+            most,
+        };
+        let (small, large) = (placed(2), placed(64));
+        // Each a draw and 2 words for each of 3 instances' 2 meshlets.
+        let small_words = MESHLET_DRAW + 2 * 6;
+        let mut bounds = Bounds::default();
+        bounds.add(3, 1, Some(&small));
+        bounds.add(3, 1, Some(&small));
+        bounds.add(5, 1, None);
+        assert_eq!(bounds.meshlet_words, 2 * small_words, "each run's own");
+        // Instances enough of the large mesh for the most meshlets a draw takes.
+        let many = (MOST_MESHLETS / 64) as u32;
+        let runs = [(&small, 3), (&large, many), (&small, 3), (&large, many)];
+        let mut bounds = Bounds::default();
+        for &(placed, count) in &runs {
+            bounds.add(u64::from(count), 1, Some(placed));
+        }
+        assert_eq!(bounds.meshlet_words, MOST_MESHLET_WORDS);
+        let mut totals = Totals::default();
+        let drawn =
+            runs.map(|(placed, count)| totals.take_meshlets(placed, count, bounds.meshlet_words));
+        let first = small_words as u32;
+        assert_eq!(drawn, [Some((0, 6)), None, Some((first, 6)), None]);
+        assert_eq!(u64::from(totals.meshlet_words), 2 * small_words);
     }
 
     /// The counts read back come apart into the draws, the instances and the 64-bit triangles.

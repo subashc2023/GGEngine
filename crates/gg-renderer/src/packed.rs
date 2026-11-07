@@ -158,16 +158,27 @@ pub struct ModelMesh {
 }
 
 impl ModelMesh {
-    /// `vertices` packed, with `indices`, of `levels` among them, or of one level, all of them,
-    /// if none is given; with the sphere round them as they unpack, which views cull it by, and
-    /// without meshlets, which the cooker cuts. It isn't checked: [`Meshes::add_model`] checks it.
+    /// `vertices` packed, mesh `name`'s, with `indices`, of `levels` among them, or of one level,
+    /// all of them, if none is given; with the sphere round them as they unpack, which views cull
+    /// it by, and without meshlets, which the cooker cuts. It isn't checked otherwise:
+    /// [`Meshes::add_model`] checks it.
     ///
     /// A coordinate that isn't finite packs as the least of its axis's that is, and a normal or
     /// tangent that isn't a finite vector of some length as +Z or +X: no mesh the engine reads has
     /// them, and such a vertex draws nothing sensible either way.
     ///
+    /// Fails with `renderer.bad_mesh` for vertices that its grid can't reach with what an f32
+    /// holds, so that a vertex would unpack to a coordinate that isn't finite: as one at -f32::MAX
+    /// beside one at 0 would, from an offset of -2^128, or one at f32::MAX beside one at 0, at
+    /// 2^128.
+    ///
     /// [`Meshes::add_model`]: crate::Meshes::add_model
-    pub fn pack(vertices: &[ModelVertex], indices: Vec<u32>, levels: Vec<Lod>) -> Self {
+    pub fn pack(
+        name: &str,
+        vertices: &[ModelVertex],
+        indices: Vec<u32>,
+        levels: Vec<Lod>,
+    ) -> Result<Self> {
         let (offset, step) = grid(bounds(vertices.iter().map(|v| v.position.to_array())));
         let (uv_offset, uv_scale) = uv_box(bounds(vertices.iter().map(|v| v.uv.to_array())));
         let packing = Packing {
@@ -212,8 +223,21 @@ impl ModelMesh {
             },
             meshlets: Meshlets::default(),
         };
-        (mesh.lods.center, mesh.lods.radius) = sphere(&mesh.positions());
-        mesh
+        // Checked as they unpack rather than by the grid alone, whose offset and step can be finite
+        // while a vertex unpacks past what an f32 holds.
+        let positions = mesh.positions();
+        if let Some(i) = positions.iter().position(|position| !position.is_finite()) {
+            return Err(bad_mesh(
+                name,
+                format!(
+                    "has vertex {i} at {}, which unpacks to {} from {:?}: its vertices span more \
+                     than packed vertices reach with what an f32 holds",
+                    vertices[i].position, positions[i], mesh.packing
+                ),
+            ));
+        }
+        (mesh.lods.center, mesh.lods.radius) = sphere(&positions);
+        Ok(mesh)
     }
 
     /// Its vertices' positions, unpacked as the model shaders unpack them.
@@ -547,7 +571,7 @@ mod tests {
             Vec3::new(0.3, 1.7, 10.1),
         ];
         let vertices: Vec<_> = points.iter().map(|&p| vertex(p)).collect();
-        let mesh = ModelMesh::pack(&vertices, vec![0, 1, 2, 1, 3, 2], vec![]);
+        let mesh = ModelMesh::pack("square", &vertices, vec![0, 1, 2, 1, 3, 2], vec![]).unwrap();
         let step = mesh.packing.step;
         assert_eq!(step.to_bits() & 0x007f_ffff, 0, "a power of two: {step}");
         assert!(
@@ -593,7 +617,7 @@ mod tests {
         let right = [edge[0], edge[1], Vec3::new(2.5, 0.25, 0.0)];
         let pack = |points: [Vec3; 3]| {
             let vertices: Vec<_> = points.iter().map(|&p| vertex(p)).collect();
-            ModelMesh::pack(&vertices, vec![0, 1, 2], vec![])
+            ModelMesh::pack("half", &vertices, vec![0, 1, 2], vec![]).unwrap()
         };
         let (left, right) = (pack(left), pack(right));
         assert_eq!(left.packing.step, right.packing.step);
@@ -627,7 +651,8 @@ mod tests {
         corner.uv = Vec2::new(-2.0, 0.75);
         let mut other = vertex(Vec3::ONE);
         other.uv = Vec2::new(3.0, 0.25);
-        let mesh = ModelMesh::pack(&[corner, other, other], vec![0, 1, 2], vec![]);
+        let mesh = ModelMesh::pack("corner", &[corner, other, other], vec![0, 1, 2], vec![]);
+        let mesh = mesh.unwrap();
         let packed = mesh.vertices[0];
         assert_eq!(packed.sign, -1);
         assert_eq!(mesh.vertices[1].sign, 1);
@@ -649,7 +674,7 @@ mod tests {
     #[test]
     fn a_buffer_holds_its_header_then_its_vertices_then_its_meshlets() {
         let vertices: Vec<_> = (0..3).map(|i| vertex(Vec3::splat(i as f32))).collect();
-        let mut mesh = ModelMesh::pack(&vertices, vec![0, 1, 2], vec![]);
+        let mut mesh = ModelMesh::pack("one meshlet", &vertices, vec![0, 1, 2], vec![]).unwrap();
         let plain = mesh.bytes();
         assert_eq!(
             plain.len(),
@@ -695,7 +720,7 @@ mod tests {
     #[test]
     fn meshlets_that_dont_hold_together_are_refused() {
         let vertices: Vec<_> = (0..3).map(|i| vertex(Vec3::splat(i as f32))).collect();
-        let mut good = ModelMesh::pack(&vertices, vec![0, 1, 2], vec![]);
+        let mut good = ModelMesh::pack("good", &vertices, vec![0, 1, 2], vec![]).unwrap();
         good.meshlets = Meshlets {
             meshlets: vec![Meshlet {
                 vertices: 0,
@@ -757,10 +782,28 @@ mod tests {
         odd.normal = Vec3::NAN;
         odd.color = Vec4::NAN;
         let far = vertex(Vec3::new(-3e38, 3e38, 2.0));
-        let mesh = ModelMesh::pack(&[odd, far, vertex(Vec3::ZERO)], vec![0, 1, 2], vec![]);
+        let vertices = [odd, far, vertex(Vec3::ZERO)];
+        let mesh = ModelMesh::pack("odd", &vertices, vec![0, 1, 2], vec![]).unwrap();
         assert!(mesh.packing.step.is_finite() && mesh.packing.offset.is_finite());
         assert!(mesh.lods.radius.is_finite(), "{:?}", mesh.lods);
         assert_eq!(mesh.vertices[0].color, [0; 4]);
         assert!(mesh.check("odd").is_ok());
+    }
+
+    /// Vertices farther apart than the grid reaches with what an f32 holds are refused, rather
+    /// than packed to unpack where a coordinate isn't finite: from an offset of -2^128, or at
+    /// 2^128 from an offset of 0.
+    #[test]
+    fn vertices_past_what_the_grid_reaches_are_refused() {
+        for far in [-f32::MAX, f32::MAX] {
+            let vertices = [vertex(Vec3::new(far, 0.0, 0.0)), vertex(Vec3::ZERO)];
+            let packed = ModelMesh::pack("far", &vertices, vec![0, 1, 1], vec![]);
+            let error = packed.expect_err("past the grid");
+            assert_eq!(error.code(), "renderer.bad_mesh", "{far}");
+            assert!(
+                error.to_string().contains("\"far\" has vertex 0"),
+                "{error}"
+            );
+        }
     }
 }

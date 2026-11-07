@@ -379,7 +379,8 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         // Kept square to the normal, which interpolation doesn't keep them.
         float3 along = tangent.xyz * facing;
         along = normalize(along - normal * dot(normal, along));
-        float3 bitangent = cross(normal, along) * tangent.w;
+        // Flipped with them, as glTF flips all three, which their cross product alone isn't.
+        float3 bitangent = cross(normal, along) * tangent.w * facing;
         // Z from X and Y as the map holds them, which a BC5 map holds alone; then scaled, as
         // glTF scales a normal map's X and Y.
         float z = sqrt(saturate(1.0 - dot(mapped, mapped)));

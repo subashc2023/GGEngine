@@ -117,8 +117,9 @@ pub(crate) struct Stores<'a> {
 /// spawns, and what it's made of, its images' textures in the model's order.
 ///
 /// Fails, adding nothing, with `renderer.too_many_textures` if the textures haven't room for its
-/// images; an image whose pixels don't decode warns as the loader decodes it, and its texture keeps
-/// its stand-in.
+/// images, and as [`model_meshes`] does for a primitive whose mesh doesn't pack or hold together;
+/// an image whose pixels don't decode warns as the loader decodes it, and its texture keeps its
+/// stand-in.
 pub(crate) fn add(
     name: &str,
     path: &Path,
@@ -141,6 +142,7 @@ pub(crate) fn add(
     // Checked first, so that a model adds all of itself or nothing: what `read` gave can't fail to
     // add otherwise.
     room(name, images.len(), textures)?;
+    let packed = model_meshes(name, &primitives)?;
     shaders.add_model_shaders();
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
@@ -151,11 +153,10 @@ pub(crate) fn add(
             (texture, texels)
         })
         .collect();
-    let meshes: Vec<_> = (primitives.iter())
-        .map(|primitive| {
-            let name = format!("{name} {}", primitive.name);
-            let mesh = meshes.add_model(&name, &model_mesh(primitive));
-            mesh.expect("a primitive is whole triangles of its own vertices, in its levels")
+    let meshes: Vec<_> = (packed.into_iter())
+        .map(|(name, mesh)| {
+            let mesh = meshes.add_model(&name, &mesh);
+            mesh.expect("a mesh checked as the renderer checks it")
         })
         .collect();
     let added = (primitives.iter())
@@ -195,8 +196,9 @@ pub(crate) type Reread = (Nodes, Vec<&'static str>, Vec<(usize, Texture)>);
 ///
 /// Fails, replacing nothing, with `asset.model_changed` unless `whole` if it has other numbers of
 /// primitives or images, which a model's handles don't hold, and either way if an image holds
-/// other than it held, as colors where it held a normal map, which its texture keeps; and with
-/// `renderer.too_many_textures` if the textures haven't room for the images added.
+/// other than it held, as colors where it held a normal map, which its texture keeps; with
+/// `renderer.too_many_textures` if the textures haven't room for the images added; and as
+/// [`model_meshes`] does for a primitive whose mesh doesn't pack or hold together.
 #[cfg(feature = "dev")]
 pub(crate) fn reload(
     name: &str,
@@ -255,6 +257,8 @@ pub(crate) fn reload(
         return Err(Error::new("asset.model_changed", message));
     }
     room(name, counts.1.saturating_sub(made.images.len()), textures)?;
+    // Read again from its files, as a development run does, each has one level.
+    let packed = model_meshes(name, &primitives)?;
     let read = primitives.iter().map(|primitive| primitive.material);
     let changed = [
         (parts != was.parts, "nodes"),
@@ -281,19 +285,16 @@ pub(crate) fn reload(
             }
         }
     }
-    for (i, primitive) in primitives.iter().enumerate() {
-        let name = format!("{name} {}", primitive.name);
-        // Read again from its files, as a development run does, it has one level.
-        let mesh = model_mesh(primitive);
+    for (i, (name, mesh)) in packed.into_iter().enumerate() {
         match made.meshes.get(i) {
             Some(&made_mesh) => {
                 let replaced = meshes.replace_model(&name, made_mesh, &mesh);
-                replaced.expect("a primitive is whole triangles of its own vertices");
+                replaced.expect("a mesh checked as the renderer checks it");
             }
             None => {
                 let added = meshes.add_model(&name, &mesh);
                 made.meshes
-                    .push(added.expect("whole triangles of its own vertices"));
+                    .push(added.expect("a mesh checked as the renderer checks it"));
             }
         }
     }
@@ -340,19 +341,74 @@ fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshD
         .collect()
 }
 
-/// `primitive`'s mesh, as the cooker made it, or else packed as glTF has it, of one level, all its
-/// indices, which a development run draws whole.
-pub(crate) fn model_mesh(primitive: &Primitive) -> ModelMesh {
+/// Each of `primitives`' meshes, model `name`'s, as [`model_mesh`] gives it, with the name the
+/// renderer knows it by, checked as the renderer checks one it adds: so that a model adds, or
+/// replaces, all of itself or nothing.
+///
+/// Fails with `engine.bad_model`, naming the model and the mesh, as `model_mesh` and
+/// [`check_mesh`] do.
+fn model_meshes(name: &str, primitives: &[Primitive]) -> Result<Vec<(String, ModelMesh)>> {
+    (primitives.iter())
+        .map(|primitive| {
+            let mesh = model_mesh(name, primitive)?;
+            check_mesh(name, primitive, &mesh)?;
+            Ok((mesh_name(name, primitive), mesh))
+        })
+        .collect()
+}
+
+/// `primitive`'s mesh, model `name`'s, as the cooker made it, or else packed as glTF has it, of
+/// one level, all its indices, which a development run draws whole.
+///
+/// Fails as [`pack`] does.
+pub(crate) fn model_mesh(name: &str, primitive: &Primitive) -> Result<ModelMesh> {
     match &primitive.mesh {
-        Some(mesh) => mesh.clone(),
-        None => pack(primitive, Vec::new()),
+        Some(mesh) => Ok(mesh.clone()),
+        None => pack(name, primitive, Vec::new()),
     }
 }
 
-/// `primitive`'s vertices, as glTF has them, packed, with its indices, of `levels` among them, or
-/// of one level, all of them, for none.
-pub(crate) fn pack(primitive: &Primitive, levels: Vec<gg_renderer::Lod>) -> ModelMesh {
-    ModelMesh::pack(&vertices(primitive), primitive.indices.clone(), levels)
+/// `primitive`'s vertices, model `name`'s, as glTF has them, packed, with its indices, of `levels`
+/// among them, or of one level, all of them, for none.
+///
+/// Fails with `engine.bad_model`, naming the model and the mesh, for vertices that don't pack, as
+/// [`ModelMesh::pack`] says: those that span more than packed vertices reach with what an f32
+/// holds.
+pub(crate) fn pack(
+    name: &str,
+    primitive: &Primitive,
+    levels: Vec<gg_renderer::Lod>,
+) -> Result<ModelMesh> {
+    let mesh = mesh_name(name, primitive);
+    let packed = ModelMesh::pack(
+        &mesh,
+        &vertices(primitive),
+        primitive.indices.clone(),
+        levels,
+    );
+    packed.map_err(|error| refused(name, &error))
+}
+
+/// Checks `mesh`, `primitive`'s of model `name`, as the renderer checks one it adds, as
+/// [`ModelMesh::check`] says.
+///
+/// Fails with `engine.bad_model`, naming the model and the mesh, for one that doesn't hold
+/// together.
+pub(crate) fn check_mesh(name: &str, primitive: &Primitive, mesh: &ModelMesh) -> Result<()> {
+    let checked = mesh.check(&mesh_name(name, primitive));
+    checked.map_err(|error| refused(name, &error))
+}
+
+/// The name the renderer knows `primitive`'s mesh, of model `name`, by.
+fn mesh_name(name: &str, primitive: &Primitive) -> String {
+    format!("{name} {}", primitive.name)
+}
+
+/// The `engine.bad_model` of model `name`, whose mesh the renderer refuses, as its `error` says,
+/// which names the mesh.
+fn refused(name: &str, error: &Error) -> Error {
+    let message = format!("model {name:?} has a mesh the renderer can't draw: {error}");
+    Error::new("engine.bad_model", message)
 }
 
 /// The vertices of `primitive`, as glTF has them, to pack.
@@ -533,7 +589,6 @@ pub(crate) mod tests {
         }
 
         /// How many meshes, textures, shaders and materials there are.
-        #[cfg(feature = "dev")]
         fn counts(&self) -> (u32, u32, u32, u32) {
             (
                 self.meshes.count(),
@@ -769,5 +824,37 @@ pub(crate) mod tests {
         let error = add(&mut textures).expect_err("no room");
         assert_eq!(error.code(), "renderer.too_many_textures");
         assert!(error.to_string().contains("\"m\" has 2 images"), "{error}");
+    }
+
+    /// A model whose second primitive's vertices span more than packed vertices reach with what an
+    /// f32 holds, -f32::MAX beside 0, is refused, naming it and its mesh, rather than panicking,
+    /// adding nothing, not even its first primitive's mesh or its images; and, in development
+    /// builds, read again so, it replaces nothing.
+    #[test]
+    fn a_model_whose_mesh_doesnt_pack_is_refused() {
+        let mut far = imported();
+        far.primitives[1].positions[0] = [-f32::MAX, 0.0, 0.0];
+        let refused = |error: Error| {
+            assert_eq!(error.code(), "engine.bad_model", "{error}");
+            let message = error.to_string();
+            assert!(message.contains("model \"m\""), "{message}");
+            assert!(message.contains("mesh \"m pair/1\""), "{message}");
+        };
+        let mut owned = Owned::default();
+        let counts = owned.counts();
+        let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
+        refused(add("m", path, far.clone(), owned.stores(), loader).expect_err("refused"));
+        assert_eq!(owned.counts(), counts, "nothing added");
+        #[cfg(feature = "dev")]
+        {
+            let added = add("m", path, imported(), owned.stores(), loader);
+            let (was, mut made) = added.expect("a model");
+            let counts = owned.counts();
+            for whole in [false, true] {
+                let reloaded = reload("m", far.clone(), &mut made, &was, whole, owned.stores());
+                refused(reloaded.expect_err("refused"));
+                assert_eq!(owned.counts(), counts, "nothing added");
+            }
+        }
     }
 }

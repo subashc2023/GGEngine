@@ -35,6 +35,7 @@ use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock, Under};
 #[cfg(feature = "dev")]
 use crate::egui_context;
+use crate::interrupt;
 use crate::layer::Stack;
 use crate::main_loop::{
     Clock, MainUi, Ran, Stepper, hand_off, run_frame, settings, start, take_back,
@@ -53,8 +54,9 @@ use crate::viewports::{self, Viewports, WindowInput};
 use crate::windows_frame::Frame;
 use crate::{App, Context, Event, event};
 
-/// Runs `app` in a window until it closes, `api` serving tools as each frame starts, and between
-/// frames while the window is minimized, woken by each request.
+/// Runs `app` in a window until it closes, or, under `--supervised`, stdin ends, `api` serving
+/// tools as each frame starts, and between frames while the window is minimized, woken by each
+/// request.
 pub(crate) fn run(
     app: &mut App,
     args: &Args,
@@ -73,6 +75,13 @@ pub(crate) fn run(
         // Only once the loop has ended, as the run does.
         let _ = proxy.send_event(());
     });
+    if args.supervised {
+        // Frames look for stdin's end, but none runs while the window is minimized.
+        let proxy = event_loop.create_proxy();
+        interrupt::watch_stdin(move || {
+            let _ = proxy.send_event(());
+        });
+    }
     #[cfg(feature = "dev")]
     let layout = dock::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
@@ -283,6 +292,11 @@ impl Handler<'_> {
         }
         if self.cx.exiting() {
             debug!("A layer asked the run to end");
+            event_loop.exit();
+            return;
+        }
+        if interrupt::orphaned() {
+            info!("Ending the run, as stdin has ended with its supervisor");
             event_loop.exit();
             return;
         }
@@ -703,17 +717,22 @@ impl ApplicationHandler for Handler<'_> {
         self.request_frame(event_loop);
     }
 
-    /// A request has come to the tool API: frames answer requests as they start, but while the
-    /// window is minimized, and no frames run, it's answered here, unless it needs a frame.
+    /// A request has come to the tool API, or stdin has ended under `--supervised`: frames answer
+    /// requests and look for stdin's end as they start, but while the window is minimized, and no
+    /// frames run, it's done here, a request answered unless it needs a frame.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
-        if self.minimized
-            && api::serve_paused(
-                &mut self.api,
-                &mut self.cx,
-                &mut self.app.stack,
-                &mut self.stepper,
-            )
-        {
+        if !self.minimized {
+            return;
+        }
+        if interrupt::orphaned() {
+            info!("Ending the run, as stdin has ended with its supervisor");
+            event_loop.exit();
+        } else if api::serve_paused(
+            &mut self.api,
+            &mut self.cx,
+            &mut self.app.stack,
+            &mut self.stepper,
+        ) {
             debug!("A tool asked the run to end");
             event_loop.exit();
         }

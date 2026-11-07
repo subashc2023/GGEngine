@@ -30,8 +30,9 @@ use crate::{App, BUILD};
 /// render on the render thread, as a windowed run's do, the last as the run ends. `api` serves
 /// tools as each frame starts; while it has paused or stopped the simulation with nothing asked of
 /// the frames, each waits up to a tick's time for a request, rather than spinning. The run starts
-/// as [`start`] says, and ends at `--frames`, or at Ctrl+C. A server's client (`--connect`) steps
-/// its simulation in real time, its frames a tick apart, as its server's go.
+/// as [`start`] says, and ends at `--frames`, at Ctrl+C, or, under `--supervised`, as stdin ends. A
+/// server's client (`--connect`) steps its simulation in real time, its frames a tick apart, as its
+/// server's go.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
 /// with no UI, playing sound as one does, and its view fills its image, at the size the client
@@ -96,6 +97,10 @@ pub(crate) fn run_headless(
             }
             if interrupt::interrupted() {
                 info!("Ending the run, as Ctrl+C asks");
+                break;
+            }
+            if interrupt::orphaned() {
+                info!("Ending the run, as stdin has ended with its supervisor");
                 break;
             }
             // One point is one pixel, as on a display without scaling.
@@ -203,9 +208,10 @@ pub(crate) fn run_headless(
 
 /// Runs a server (`--serve`): without a window, a GPU or the tool API, which looks at a run's
 /// frames, its frames a tick apart, each taking what its clients sent and running the ticks owed in
-/// real time, as [`Stack::net_turn`] and [`Stepper::step`] say, until `--frames` frames, Ctrl+C or
-/// a layer's [`Context::exit`]. The layers load their assets, which nothing draws, and their ticks
-/// run, but not their updates, whose drawing nothing would take. The run starts as [`start`] says.
+/// real time, as [`Stack::net_turn`] and [`Stepper::step`] say, until `--frames` frames, Ctrl+C,
+/// stdin's end under `--supervised` or a layer's [`Context::exit`]. The layers load their assets,
+/// which nothing draws, and their ticks run, but not their updates, whose drawing nothing would
+/// take. The run starts as [`start`] says.
 pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>) -> Result<Ran> {
     let mut cx = Context::of_run(None, app, false);
     let mut clock = Clock::default();
@@ -226,6 +232,10 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
         }
         if interrupt::interrupted() {
             info!("Ending the run, as Ctrl+C asks");
+            break;
+        }
+        if interrupt::orphaned() {
+            info!("Ending the run, as stdin has ended with its supervisor");
             break;
         }
         let dt = clock.start_frame();
