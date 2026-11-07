@@ -158,9 +158,10 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     float3 weight_across = across / (across.x + across.y + across.z) - weight;
     float3 weight_down = down / (down.x + down.y + down.z) - weight;
     // A triangle winds counterclockwise as seen, Vulkan's front, where its corners' determinant is
-    // negative, as the view's Y points down; whatever their W, as clipping keeps how they wind. A
-    // run that draws its fronts alone shows nothing else.
-    bool front = run.cones != 0 || dot(ha, ea) < 0.0;
+    // negative, as the view's Y points down; whatever their W, as clipping keeps how they wind. It
+    // shows its mesh's front so, or, of an instance whose transform mirrors it, its back. A run
+    // that draws its fronts alone shows nothing else.
+    bool front = run.cones != 0 || ((dot(ha, ea) < 0.0) != (a.turned.side < 0.0));
     float3 world = weight.x * a.world + weight.y * b.world + weight.z * c.world;
     float3 was = weight.x * mul(previous, float4(a.vertex.position, 1.0)).xyz
         + weight.y * mul(previous, float4(b.vertex.position, 1.0)).xyz

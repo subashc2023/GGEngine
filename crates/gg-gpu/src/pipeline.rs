@@ -148,7 +148,8 @@ impl Blend {
 /// Which of a mesh's triangles draw, by the way their corners wind as they show on screen.
 /// Vulkan tells it in framebuffer coordinates, whose Y points down, and flips the sign of the
 /// area it measures there, so its counterclockwise is as seen; the renderer's cameras show the
-/// world upright.
+/// world upright. Whichever draw, a fragment shader's front face, `SV_IsFrontFace`, is a triangle
+/// that winds counterclockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Faces {
     /// All of them: what a pass starts drawing.
@@ -167,7 +168,7 @@ impl Faces {
         match self {
             Self::Both => (vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE),
             Self::CounterClockwise => (vk::CullModeFlags::BACK, vk::FrontFace::COUNTER_CLOCKWISE),
-            Self::Clockwise => (vk::CullModeFlags::BACK, vk::FrontFace::CLOCKWISE),
+            Self::Clockwise => (vk::CullModeFlags::FRONT, vk::FrontFace::COUNTER_CLOCKWISE),
         }
     }
 }

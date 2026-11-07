@@ -6,8 +6,8 @@
 //!
 //! A sky's sun lights once: in a frame with a directional light, which stands for it, casting
 //! shadows where the sky's light can't, the sky's light keeps each of its texels to [`SUN`]'s
-//! luminance, so that the sun lights through the directional light alone; in one without, the sky
-//! lights by all of it.
+//! luminance, or as little as half it, as [`cutoff`] rounds it, so that the sun lights through the
+//! directional light alone; in one without, the sky lights by all of it.
 
 use std::sync::Arc;
 
@@ -55,8 +55,11 @@ const GROUP: u32 = 8;
 const SUN: f32 = 1.0e7;
 
 /// The luminance, in `sky`'s texels' units, that the sky's light keeps each of its texels to, in a
-/// frame with `lights`: [`SUN`]'s, if a directional light shines, standing for the sky's sun, so
-/// that the sun lights through it alone; and none, `f32::MAX`, if none does.
+/// frame with `lights`: [`SUN`]'s, or as little as half it, if a directional light shines,
+/// standing for the sky's sun, so that the sun lights through it alone; and none, `f32::MAX`, if
+/// none does. [`SUN`]'s in those units is rounded down to a power of two, so that a luminance that
+/// changes, as a day's does, has the light prefiltered again only as that crosses one, rather
+/// than in every frame it changes.
 pub(crate) fn cutoff(sky: Sky, lights: &[Light]) -> f32 {
     let shines = |light: &Light| {
         light.kind == LightKind::Directional
@@ -64,7 +67,9 @@ pub(crate) fn cutoff(sky: Sky, lights: &[Light]) -> f32 {
             && light.direction.try_normalize().is_some()
     };
     if sky.luminance > 0.0 && lights.iter().any(shines) {
-        SUN / sky.luminance
+        // Its mantissa cleared: a positive float, as this is, normal or infinite, down to a
+        // power of two.
+        f32::from_bits((SUN / sky.luminance).to_bits() & 0xFF80_0000)
     } else {
         f32::MAX
     }
@@ -72,9 +77,10 @@ pub(crate) fn cutoff(sky: Sky, lights: &[Light]) -> f32 {
 
 /// The sky a frame shows, as [`RenderData::sky`](crate::RenderData::sky) gives it. Its sun lights
 /// once: in a frame with a directional light that shines, which stands for it, the sky's light
-/// keeps each of its texels to 10⁷ candela per square meter, leaving out the sun's disk, some
-/// 1.6 × 10⁹ at noon, and lighting by the rest, as it shows; and lights by all of it in a frame
-/// without.
+/// keeps each of its texels to 10⁷ candela per square meter, or as little as half that, as many of
+/// its texture's units as the power of two at or below 10⁷ over its luminance, leaving out the
+/// sun's disk, some 1.6 × 10⁹ at noon, and lighting by the rest, as it shows; and lights by all of
+/// it in a frame without.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sky {
     /// Its image of the world around, equirectangular: its center column the way toward +X, a
@@ -469,5 +475,41 @@ impl SkyLight {
         self.from = Some((sky.texture.index, shown, plan.cutoff.to_bits()));
         self.tabled |= plan.table.is_some();
         self.cube = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Under a sun, the sky's light keeps its texels to 10⁷ candela per square meter or as little
+    /// as half that, alike for every luminance between two powers of two of 10⁷ over it, so that a
+    /// luminance that changes, as a day's does, is prefiltered again only as it crosses one; and
+    /// without a sun, to nothing.
+    #[test]
+    fn a_suns_cutoff_changes_only_as_the_luminance_crosses_a_power_of_two() {
+        let sky = |luminance| Sky {
+            texture: Texture { index: 1 },
+            luminance,
+        };
+        let sun = Light {
+            kind: LightKind::Directional,
+            position: Vec3::ZERO,
+            direction: Vec3::NEG_Y,
+            color: Vec3::ONE,
+            range: None,
+            shadow_distance: None,
+        };
+        let cutoff_at = |luminance| cutoff(sky(luminance), &[sun]);
+        // 10⁷ over each is between 256 and 512.
+        for luminance in [20_000.0, 27_000.0, 30_000.0, 39_000.0] {
+            assert_eq!(cutoff_at(luminance), 256.0, "{luminance}");
+        }
+        assert_eq!(cutoff_at(40_000.0), 128.0);
+        for luminance in [0.3, 1.0, 7.0e4, 1.0e6, 3.0e9] {
+            let kept = cutoff_at(luminance) * luminance;
+            assert!(kept <= SUN && kept > SUN / 2.0, "{luminance}: {kept}");
+        }
+        assert_eq!(cutoff(sky(30_000.0), &[]), f32::MAX);
     }
 }

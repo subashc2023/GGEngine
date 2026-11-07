@@ -65,6 +65,19 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
+// The largest a half float holds, short of infinity, which the view's colors are.
+static const float BRIGHTEST = 65504.0;
+
+// `color`, as the view's colors hold it, as light: none where it's no number, and the largest a
+// half float holds where it's more, which there is infinite, as a shader's floats can be, and as
+// one past that largest is written where the GPU rounds to the nearest. Told by its bits, which a
+// driver may not fold away, as it may `isnan` where it assumes, as Vulkan lets it, that no float
+// is NaN or infinite.
+float3 finite(float3 color) {
+    bool3 nan = (asuint(color) & 0x7FFFFFFF) > 0x7F800000;
+    return clamp(select(nan, float3(0.0), color), 0.0, BRIGHTEST);
+}
+
 float luminance(float3 color) {
     return dot(color, float3(0.2126, 0.7152, 0.0722));
 }
@@ -134,6 +147,7 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     Texture2D colors = textures[resolve.colors];
     Texture2D depths = textures[resolve.depth];
     float4 drawn = colors.Load(int3(at, 0));
+    drawn.rgb = finite(drawn.rgb);
     // The 3 by 3 pixels round it: their mean and deviation, and their least and most, weighed; and
     // the nearest of them, whose depth is the most, as depth runs from 1 at the near plane.
     float3 sum = float3(0.0);
@@ -145,7 +159,7 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             int2 p = clamp(at + int2(x, y), int2(0, 0), last);
-            float3 c = weighed(colors.Load(int3(p, 0)).rgb);
+            float3 c = weighed(finite(colors.Load(int3(p, 0)).rgb));
             sum += c;
             squares += c * c;
             least = min(least, c);
@@ -185,7 +199,8 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
             }
         }
     }
-    float4 color = float4(unweighed(resolved), drawn.a);
+    // Within a half float: unweighing a saturated color near the weighing's limit can pass it.
+    float4 color = float4(finite(unweighed(resolved)), drawn.a);
     uint3 to = uint3(pixel.xy, 0);
     storage[resolve.target][to] = color;
     if (resolve.writes_resolved != 0) {

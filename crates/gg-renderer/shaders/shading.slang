@@ -104,10 +104,11 @@ Vertex unpack(Header header, PackedVertex packed) {
     return vertex;
 }
 
-// A vertex's normal and tangent, in the world.
+// A vertex's normal and tangent, in the world, and -1 where its transform mirrors it, 1 elsewhere.
 struct Turned {
     float3 normal;
     float4 tangent;
+    float side;
 };
 
 // `vertex`'s normal and tangent, as `transform` turns them into the world: the normal not of unit
@@ -128,6 +129,7 @@ Turned turned(Vertex vertex, float4x4 transform) {
     Turned out;
     out.normal = normal * side;
     out.tangent = float4(mul(linear, vertex.tangent.xyz), vertex.tangent.w * side);
+    out.side = side;
     return out;
 }
 
@@ -301,10 +303,12 @@ float3 reflected(Frame frame, Surface surface, uint i) {
         // Kept off 0 at the light itself.
         float distance2 = max(dot(between, between), 1e-4);
         to_light = between * rsqrt(distance2);
+        // The inverse square, eased to 0 at the range by the window KHR_lights_punctual's README
+        // recommends, max(min(1 - (distance / range)^4, 1), 0), not squared.
         float reach = sqrt(distance2) * light.inverse_range;
         float reach2 = reach * reach;
         float window = saturate(1.0 - reach2 * reach2);
-        radiance *= window * window / distance2;
+        radiance *= window / distance2;
         float cone = saturate(dot(light.direction, -to_light) * light.angle_scale
             + light.angle_offset);
         radiance *= cone * cone;
@@ -361,9 +365,11 @@ uint cluster(Clusters clusters, float3 world) {
 }
 
 // The color of a point of `material`, as the frame lights it, or unlit: where it is in the world,
-// `world`, its `normal` and `tangent` as interpolated, whether its triangle shows its front, and
-// what its maps hold there: its base `color`, its vertices' and its factor's in, its `surface`'s
-// map, its normal map's X and Y, from -1 to 1, its occlusion and its emission.
+// `world`, its `normal` and `tangent` as interpolated, whether its triangle shows its front, the
+// side its corners wind counterclockwise from in its mesh, which a transform that mirrors shows
+// winding the other way, and what its maps hold there: its base `color`, its vertices' and its
+// factor's in, its `surface`'s map, its normal map's X and Y, from -1 to 1, its occlusion and its
+// emission.
 float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
            bool front, float4 color, float4 surface, float2 mapped, float occlusion,
            float3 emission) {

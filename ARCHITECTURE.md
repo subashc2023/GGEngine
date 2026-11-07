@@ -1249,7 +1249,10 @@ over it and the menus show over it. The view draws in colors of high dynamic ran
 in linear RGBA, which games' pipelines are made for, with the image of IDs beside them, below, and
 the depth image, of 32-bit floats, which every draw into the view tests; a tonemap pass then maps
 the colors into the view's 8-bit sRGB image, which the frame shows, captures read and the outline
-draws over, whatever the window presents. Depth runs reversed, from 1 at the near plane to 0 far
+draws over, whatever the window presents. What reads the colors, the tonemap and antialiasing,
+takes one that's no number as none, and an infinite one as a half float's largest, 65,504: a
+shader's float can be infinite, and a GPU that rounds to the nearest writes a color past that
+largest as infinite. Depth runs reversed, from 1 at the near plane to 0 far
 away, which keeps a float's precision where it's needed and lets perspective see infinitely far;
 each frame clears it to 0, and a draw shows where it's as near as what's drawn there or nearer, so
 that at one depth the later goes over, as 2D draws at one z stack.
@@ -1348,13 +1351,17 @@ specular takes, a level for each step of roughness, from none at its first to 1 
 texels; and, once, the split sum's table, of 128 by 128, of GGX's reflectance as F0's scale and bias
 by the cosine of the view's angle and the roughness. Those images keep that light until the sky
 shows another image, as a reload does, or a directional light comes to stand for its sun or ceases
-to. A view whose sky's texture shows its stand-in shows no sky, and is lit by none; a frame that
+to, or, while one stands for it, the sky's luminance changes what the cube keeps its points to, as
+below. A view whose sky's texture shows its stand-in shows no sky, and is lit by none; a frame that
 renders no view prefilters nothing.
 
 A sky's sun lights once. In a frame with a directional light that shines, which stands for the sun,
 casting shadows where the sky's light can't, the cube keeps each point of the sky to 10⁷ candela
-per square meter, about a hundredth of the noon sun's disk and past any cloud, in its own hue, so
-that the sun's disk lights through the light alone; the view still draws the sky whole. A frame
+per square meter, or as little as half that, about a hundredth of the noon sun's disk and past any
+cloud, in its own hue, so that the sun's disk lights through the light alone; the view still draws
+the sky whole. In the texture's own units, that's the power of two at or below 10⁷ over the sky's
+luminance, so that a luminance that changes, as a day's does, has the sky prefiltered again only
+as it crosses one, rather than in every frame it changes. A frame
 without one lights by the whole sky. The light should shine from where the sky shows its sun, its
 way and illuminance found from the sky's texels past that, as the showcase's Sponza's are; a sun low
 in its sky, dimmed through more air, can fall short of it, and then lights twice.
@@ -1524,7 +1531,8 @@ the model shaders read one layout. A vertex's position is 16-bit steps from an o
 least power of two that spans the mesh's longest side in 65,534 and the offset a multiple of it,
 so that meshes of sizes within a factor of two put their vertices on one grid, and an edge two of
 them share keeps its ends together; its normal and tangent are each folded onto an octahedron as
-two signed 16-bit numbers, and its bitangent's sign sits beside its position; its texture
+two signed 16-bit numbers, a tangent along its normal, which leaves shading no tangent space,
+square to it instead, and its bitangent's sign sits beside its position; its texture
 coordinates are 16-bit fractions of the mesh's box of them, and its color bytes, sRGB-encoded but
 for its alpha. The mesh's buffer starts with what unpacks them, which the shaders read as they read
 a vertex, and the sphere round a model's mesh, which views cull it by, holds its vertices as they

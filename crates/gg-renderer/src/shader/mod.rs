@@ -269,6 +269,8 @@ impl Shaders {
     ///   operations.
     /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
     ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
+    ///   `P` is a whole number of 4-byte words even for a shader that reads no parameters, as
+    ///   each draw's parameters go after the last draw's, which other shaders read by words.
     ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
     ///   `float4`, `float4`, `float3x3` and `float4x4`; not `Vec3A` or `Mat3A`, whose columns
     ///   take 16 bytes to `float3`'s 12. The engine builds glam without SIMD, so each of them is
@@ -1098,6 +1100,12 @@ mod tests {
         says(
             refusal::<Vertex, ()>("flat_color.slang"),
             &["it reads parameters through params, but it's added without them"],
+        );
+        // Parameters it doesn't read, of part of a word, which would put every later draw's off
+        // their words.
+        says(
+            refusal::<[f32; 7], [u16; 3]>("vertex_color.slang"),
+            &["its type of parameters, [u16; 3], takes 6 bytes, not a whole number of 4-byte"],
         );
         says(
             refusal::<Vertex, Color>("push_reordered.slang"),

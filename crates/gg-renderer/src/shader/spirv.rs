@@ -14,6 +14,20 @@ use crate::mesh::{FrameData, Push};
 /// SPIR-V's magic number, which opens a module.
 const MAGIC: u32 = 0x0723_0203;
 
+/// The most a module's bound, one past its every ID, may be: SPIR-V's universal limit, which
+/// spirv-val holds modules to, and which keeps the IDs [`return_no_motion`] adds within a word.
+const MOST_BOUND: u32 = 4_194_303;
+
+/// How deep the check follows types nested in types, as structs in structs or arrays of arrays:
+/// far past any type laid out as a Rust type is, and short of the stack a type that holds itself,
+/// which SPIR-V that isn't valid can declare, would take.
+const MOST_NESTED: u32 = 64;
+
+/// The most steps the check takes through a type, a step for each type it meets, each element of
+/// an array among them: past any vertex's, parameters' or frame's data's, and short of the time
+/// and memory an array of billions of fields would take.
+const MOST_STEPS: u32 = 1 << 20;
+
 // The opcodes read.
 const OP_NAME: u32 = 5;
 const OP_MEMBER_NAME: u32 = 6;
@@ -229,6 +243,15 @@ pub(super) fn breaches(spirv: &[u8], types: &Types) -> Vec<String> {
     module.check_interfaces(&mut breaches);
     module.check_capabilities(&mut breaches);
     module.check_writes(&mut breaches);
+    // Whether or not it reads them: each draw's parameters follow the last's, so a size of part
+    // of a word would leave every later draw's off the words shaders read them by.
+    let (size, rust) = types.params();
+    if size % 4 != 0 {
+        breaches.push(format!(
+            "its type of parameters, {rust}, takes {size} bytes, not a whole number of 4-byte \
+             words: each draw's go after the last's, which shaders read by words"
+        ));
+    }
     breaches
 }
 
@@ -292,6 +315,26 @@ impl Image {
 struct Scalar {
     at: u32,
     float: bool,
+}
+
+/// What [`Module::scalars`] gathers of a type: its 32-bit scalars, and the steps taken, which it
+/// counts against [`MOST_STEPS`].
+struct Laid {
+    /// Whether an address of what's in a buffer is two of its scalars, of 64 bits together, as the
+    /// frame's data has them.
+    addresses: bool,
+    scalars: Vec<Scalar>,
+    steps: u32,
+}
+
+impl Laid {
+    fn new(addresses: bool) -> Self {
+        Self {
+            addresses,
+            scalars: Vec::new(),
+            steps: 0,
+        }
+    }
 }
 
 struct EntryPoint {
@@ -505,25 +548,37 @@ impl Module {
     }
 
     /// The 32-bit scalars `ty` is made of, from byte `at`, where a matrix's columns are
-    /// `matrix_stride` bytes apart, as a struct says of its members; or what in it isn't one. If
-    /// `addresses`, as the frame's data has them, an address of what's in a buffer is two of its
-    /// scalars, of 64 bits together.
+    /// `matrix_stride` bytes apart, as a struct says of its members, `depth` types deep, gathered
+    /// into `laid`; or what in it isn't one, or takes the check past [`MOST_NESTED`] or
+    /// [`MOST_STEPS`], or lays out a field past what 32-bit offsets reach.
     fn scalars(
         &self,
         ty: u32,
         at: u32,
         matrix_stride: Option<u32>,
-        addresses: bool,
-        scalars: &mut Vec<Scalar>,
+        depth: u32,
+        laid: &mut Laid,
     ) -> Result<(), String> {
+        laid.steps += 1;
+        if laid.steps > MOST_STEPS {
+            return Err(format!(
+                "more than {MOST_STEPS} fields, past what the check reads"
+            ));
+        }
+        if depth > MOST_NESTED {
+            return Err(format!(
+                "types nested more than {MOST_NESTED} deep, as one that holds itself is"
+            ));
+        }
+        let depth = depth + 1;
         match self.types.get(&ty) {
-            Some(Type::Int { width: 32, .. }) => scalars.push(Scalar { at, float: false }),
-            Some(Type::Float { width: 32 }) => scalars.push(Scalar { at, float: true }),
+            Some(Type::Int { width: 32, .. }) => laid.scalars.push(Scalar { at, float: false }),
+            Some(Type::Float { width: 32 }) => laid.scalars.push(Scalar { at, float: true }),
             Some(Type::Int { width, .. }) => return Err(format!("a {width}-bit integer")),
             Some(Type::Float { width }) => return Err(format!("a {width}-bit float")),
             Some(&Type::Vector { component, count }) => {
                 for i in 0..count {
-                    self.scalars(component, at + 4 * i, None, addresses, scalars)?;
+                    self.scalars(component, past(at, i, 4)?, None, depth, laid)?;
                 }
             }
             Some(&Type::Matrix { column, count }) => {
@@ -531,20 +586,25 @@ impl Module {
                     Some(&Type::Vector { count, .. }) => count,
                     _ => return Err("a matrix of what isn't vectors".to_owned()),
                 };
+                let stride = match matrix_stride {
+                    Some(stride) => stride,
+                    None => past(0, rows, 4)?,
+                };
                 for i in 0..count {
-                    let stride = matrix_stride.unwrap_or(4 * rows);
-                    self.scalars(column, at + i * stride, None, addresses, scalars)?;
+                    self.scalars(column, past(at, i, stride)?, None, depth, laid)?;
                 }
             }
             Some(&Type::Array { element, length }) => {
                 let Some(&length) = self.constants.get(&length) else {
                     return Err("an array of a length given as the pipeline's made".to_owned());
                 };
-                let mut one = Vec::new();
-                self.scalars(element, 0, None, addresses, &mut one)?;
-                let stride = (self.decoration(ty, ARRAY_STRIDE)).unwrap_or(4 * one.len() as u32);
+                // The first element, at `at`, gives the stride where no decoration does.
+                let mut stride = self.decoration(ty, ARRAY_STRIDE);
                 for i in 0..length {
-                    self.scalars(element, at + i * stride, None, addresses, scalars)?;
+                    let first = laid.scalars.len();
+                    let at = past(at, i, stride.unwrap_or(0))?;
+                    self.scalars(element, at, None, depth, laid)?;
+                    stride.get_or_insert(4 * (laid.scalars.len() - first) as u32);
                 }
             }
             Some(Type::Struct { members }) => {
@@ -554,18 +614,18 @@ impl Module {
                         return Err(format!("{name}, laid out nowhere"));
                     };
                     let stride = self.member_decoration(ty, member, MATRIX_STRIDE);
-                    self.scalars(member_type, at + offset, stride, addresses, scalars)?;
+                    self.scalars(member_type, past(at, 1, offset)?, stride, depth, laid)?;
                 }
             }
             Some(Type::RuntimeArray { .. }) => {
                 return Err("an array without a length, which no Rust type is".to_owned());
             }
             Some(&Type::Pointer { storage, .. })
-                if addresses && storage == PHYSICAL_STORAGE_BUFFER =>
+                if laid.addresses && storage == PHYSICAL_STORAGE_BUFFER =>
             {
-                scalars.push(Scalar { at, float: false });
-                scalars.push(Scalar {
-                    at: at + 4,
+                laid.scalars.push(Scalar { at, float: false });
+                laid.scalars.push(Scalar {
+                    at: past(at, 1, 4)?,
                     float: false,
                 });
             }
@@ -580,20 +640,21 @@ impl Module {
     /// among them if `addresses`, as [`scalars`](Self::scalars) says; or why it isn't, as what it
     /// holds.
     fn packed_size(&self, ty: u32, addresses: bool) -> Result<u32, String> {
-        let mut scalars = Vec::new();
-        self.scalars(ty, 0, None, addresses, &mut scalars)
+        let mut laid = Laid::new(addresses);
+        self.scalars(ty, 0, None, 0, &mut laid)
             .map_err(|what| format!("hold {what}"))?;
-        packed(&scalars)
+        packed(&laid.scalars)
     }
 
     /// Whether `ty`, where a struct lays out its columns `matrix_stride` bytes apart, is 16
     /// floats back to back: a float4x4, as slangc lays one out.
     fn is_float4x4(&self, ty: u32, matrix_stride: Option<u32>) -> bool {
-        let mut scalars = Vec::new();
-        self.scalars(ty, 0, matrix_stride, false, &mut scalars)
-            .is_ok()
+        let mut laid = Laid::new(false);
+        let laid_out = self.scalars(ty, 0, matrix_stride, 0, &mut laid).is_ok();
+        let scalars = &laid.scalars;
+        laid_out
             && scalars.len() == 16
-            && packed(&scalars) == Ok(64)
+            && packed(scalars) == Ok(64)
             && scalars.iter().all(|scalar| scalar.float)
     }
 
@@ -847,11 +908,16 @@ impl Module {
         if variable.storage == UNIFORM {
             return "a constant buffer";
         }
+        // An array's elements, as deep as the check follows them: of one that holds itself, they
+        // would go on for good.
         let mut ty = pointee;
-        while let Some(&(Type::Array { element, .. } | Type::RuntimeArray { element })) =
-            ty.and_then(|ty| self.types.get(&ty))
-        {
-            ty = Some(element);
+        for _ in 0..MOST_NESTED {
+            match ty.and_then(|ty| self.types.get(&ty)) {
+                Some(&(Type::Array { element, .. } | Type::RuntimeArray { element })) => {
+                    ty = Some(element);
+                }
+                _ => break,
+            }
         }
         match ty.and_then(|ty| self.types.get(&ty)) {
             Some(Type::Image(image)) if image.usage == 2 => "a storage image",
@@ -1042,13 +1108,22 @@ fn packed(scalars: &[Scalar]) -> Result<u32, String> {
     Ok(4 * scalars.len() as u32)
 }
 
-/// `spirv` as words, if it's a whole number of them that opens as a SPIR-V module does.
+/// Byte `at` and `count` more of `size` bytes past it, if 32-bit offsets reach that far; or what
+/// a field laid out there is, for a breach to name.
+fn past(at: u32, count: u32, size: u32) -> Result<u32, String> {
+    (count.checked_mul(size))
+        .and_then(|bytes| at.checked_add(bytes))
+        .ok_or_else(|| "fields past 4 GiB".to_owned())
+}
+
+/// `spirv` as words, if it's a whole number of them that opens as a SPIR-V module does, with a
+/// bound within [`MOST_BOUND`].
 fn words(spirv: &[u8]) -> Option<Vec<u32>> {
     let (words, []) = spirv.as_chunks::<4>() else {
         return None;
     };
     let words: Vec<u32> = words.iter().map(|&word| u32::from_le_bytes(word)).collect();
-    (words.len() >= 5 && words[0] == MAGIC).then_some(words)
+    (words.len() >= 5 && words[0] == MAGIC && words[3] <= MOST_BOUND).then_some(words)
 }
 
 /// The instructions of `words`, a module's, after its header, each a word of its length and its
@@ -1381,11 +1456,96 @@ mod tests {
     #[test]
     fn what_isnt_spirv_breaks_the_contract_rather_than_passing() {
         let types = Types::of::<[f32; 3], ()>();
-        for bytes in [&b"not SPIR-V but words"[..], &[], &MAGIC.to_le_bytes()] {
+        // A header whose bound is past SPIR-V's limit, as no module's is.
+        let unbounded = [MAGIC, 0x0001_0500, 0, MOST_BOUND + 1, 0];
+        let unbounded: Vec<u8> = unbounded
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        for bytes in [
+            &b"not SPIR-V but words"[..],
+            &[],
+            &MAGIC.to_le_bytes(),
+            &unbounded,
+        ] {
             assert_eq!(
                 breaches(bytes, &types),
                 ["it isn't SPIR-V the engine can read"]
             );
         }
+    }
+
+    /// Types that hold themselves, or that lay out more fields than the check reads, or fields
+    /// past what 32-bit offsets reach, as SPIR-V that isn't valid can declare them, break the
+    /// contract rather than taking the check's stack, time or memory: as a shader's parameters,
+    /// and as the arrays of a resource it binds.
+    #[test]
+    fn types_without_end_break_the_contract_rather_than_hanging() {
+        let types = Types::of::<[f32; 3], [f32; 4]>();
+        let module = |instructions: &[Vec<u32>]| {
+            let mut words = vec![MAGIC, 0x0001_0500, 0, 64, 0];
+            for instruction in instructions {
+                let (opcode, operands) = instruction.split_first().expect("an opcode");
+                words.push(((1 + operands.len() as u32) << 16) | opcode);
+                words.extend_from_slice(operands);
+            }
+            words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        // Push constants, struct 12, whose fifth member, at the parameters' place, is the address
+        // of type 10, which `types` declare; besides a float, 1, and a uint constant, 3, of
+        // `length`.
+        let params = offset_of!(Push, params) as u32;
+        let breaches_of = |length: u32, types_: &[Vec<u32>]| {
+            let mut instructions = vec![
+                vec![OP_TYPE_FLOAT, 1, 32],
+                vec![OP_TYPE_INT, 2, 32, 0],
+                vec![OP_CONSTANT, 2, 3, length],
+                vec![OP_TYPE_POINTER, 11, PHYSICAL_STORAGE_BUFFER, 10],
+                vec![OP_TYPE_STRUCT, 12, 11, 11, 11, 11, 11],
+                vec![OP_MEMBER_DECORATE, 12, 4, OFFSET, params],
+                vec![OP_TYPE_POINTER, 13, PUSH_CONSTANT, 12],
+                vec![OP_VARIABLE, 13, 14, PUSH_CONSTANT],
+            ];
+            instructions.extend_from_slice(types_);
+            breaches(&module(&instructions), &types)
+        };
+        let says = |breaches: Vec<String>, way: &str| {
+            let said = breaches.iter().any(|breach| breach.contains(way));
+            assert!(said, "doesn't say {way:?}: {breaches:#?}");
+        };
+        let nested = "its parameters, %10, hold types nested more than 64 deep";
+        let holds_itself = [
+            vec![OP_TYPE_STRUCT, 10, 10],
+            vec![OP_MEMBER_DECORATE, 10, 0, OFFSET, 0],
+        ];
+        says(breaches_of(3, &holds_itself), nested);
+        says(breaches_of(3, &[vec![OP_TYPE_ARRAY, 10, 10, 3]]), nested);
+        // 2^32 - 1 floats, and three 2 GiB apart.
+        says(
+            breaches_of(u32::MAX, &[vec![OP_TYPE_ARRAY, 10, 1, 3]]),
+            "its parameters, %10, hold more than 1048576 fields",
+        );
+        let apart = [
+            vec![OP_TYPE_ARRAY, 10, 1, 3],
+            vec![OP_DECORATE, 10, ARRAY_STRIDE, 1 << 31],
+        ];
+        says(
+            breaches_of(3, &apart),
+            "its parameters, %10, hold fields past 4 GiB",
+        );
+        // Parameters of a float, and a resource of an array that's its own element.
+        let resource = [
+            vec![OP_TYPE_FLOAT, 10, 32],
+            vec![OP_TYPE_ARRAY, 20, 20, 3],
+            vec![OP_TYPE_POINTER, 21, UNIFORM_CONSTANT, 20],
+            vec![OP_VARIABLE, 21, 22, UNIFORM_CONSTANT],
+        ];
+        says(
+            breaches_of(3, &resource),
+            "it binds a resource, %22, outside the descriptor sets",
+        );
     }
 }

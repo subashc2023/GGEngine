@@ -165,7 +165,8 @@ impl ModelMesh {
     ///
     /// A coordinate that isn't finite packs as the least of its axis's that is, and a normal or
     /// tangent that isn't a finite vector of some length as +Z or +X: no mesh the engine reads has
-    /// them, and such a vertex draws nothing sensible either way.
+    /// them, and such a vertex draws nothing sensible either way. A tangent along its normal packs
+    /// as a vector square to it, which the model shaders' tangent space needs.
     ///
     /// Fails with `renderer.bad_mesh` for vertices that its grid can't reach with what an f32
     /// holds, so that a vertex would unpack to a coordinate that isn't finite: as one at -f32::MAX
@@ -192,11 +193,13 @@ impl ModelMesh {
                 let position = vertex.position.to_array();
                 let uv = vertex.uv.to_array();
                 let color = vertex.color.to_array();
+                let (normal, tangent) =
+                    normal_and_tangent(vertex.normal, vertex.tangent.truncate());
                 PackedVertex {
                     position: [0, 1, 2].map(|i| quantize(position[i], offset[i], step)),
                     sign: if vertex.tangent.w < 0.0 { -1 } else { 1 },
-                    normal: octahedral(vertex.normal, Vec3::Z),
-                    tangent: octahedral(vertex.tangent.truncate(), Vec3::X),
+                    normal: octahedral(normal),
+                    tangent: octahedral(tangent),
                     uv: [0, 1].map(|i| quantize(uv[i], uv_offset[i], uv_scale[i])),
                     color: [0, 1, 2, 3]
                         .map(|i| unorm8(if i < 3 { srgb(color[i]) } else { color[i] })),
@@ -501,10 +504,25 @@ fn quantize(value: f32, offset: f32, step: f32) -> u16 {
     steps.round().clamp(0.0, 65_535.0) as u16
 }
 
+/// The unit normal and tangent a vertex of `normal` and `tangent` packs: its normal, or +Z for one
+/// that isn't a finite vector of some length; and its tangent, or +X for one that isn't, or a
+/// vector square to the normal for one along it, within about a twentieth of a degree, as a tool
+/// can leave one where texture coordinates have no area. The model shaders keep the tangent's part
+/// square to the normal, which such a tangent, packed, would leave none of, to normalize; packed,
+/// each is within a few thousandths of a degree of what it was.
+fn normal_and_tangent(normal: Vec3, tangent: Vec3) -> (Vec3, Vec3) {
+    let normal = normal.try_normalize().unwrap_or(Vec3::Z);
+    let tangent = tangent.try_normalize().unwrap_or(Vec3::X);
+    if normal.cross(tangent).length() < 1e-3 {
+        (normal, normal.any_orthonormal_vector())
+    } else {
+        (normal, tangent)
+    }
+}
+
 /// Unit vector `v`, folded onto an octahedron and unfolded onto a square, as [`PackedVertex`]
-/// says, or `otherwise` for one that isn't a finite vector of some length.
-fn octahedral(v: Vec3, otherwise: Vec3) -> [i16; 2] {
-    let v = v.try_normalize().unwrap_or(otherwise);
+/// says.
+fn octahedral(v: Vec3) -> [i16; 2] {
     let p = v / (v.x.abs() + v.y.abs() + v.z.abs());
     let sign = |c: f32| if c >= 0.0 { 1.0 } else { -1.0 };
     let folded = if p.z < 0.0 {
@@ -637,14 +655,16 @@ mod tests {
         ];
         for normal in normals {
             let normal = normal.normalize();
-            let back = unfolded(octahedral(normal, Vec3::Z));
+            let back = unfolded(octahedral(normal));
             let (a, b) = (normal.as_dvec3(), back.as_dvec3());
             let radians = libm::atan2(a.cross(b).length(), a.dot(b));
             let degrees = radians * 180.0 / std::f64::consts::PI;
             assert!(degrees < 5e-3, "{normal} {back} {degrees}");
         }
-        assert_eq!(unfolded(octahedral(Vec3::NAN, Vec3::Z)), Vec3::Z);
-        assert_eq!(unfolded(octahedral(Vec3::ZERO, Vec3::X)), Vec3::X);
+        // What isn't a finite vector of some length packs as +Z for a normal, and +X for a tangent.
+        let (normal, tangent) = normal_and_tangent(Vec3::NAN, Vec3::ZERO);
+        let unpacked = [normal, tangent].map(|v| unfolded(octahedral(v)));
+        assert_eq!(unpacked, [Vec3::Z, Vec3::X]);
         let mut corner = vertex(Vec3::ZERO);
         corner.tangent = Vec4::new(0.0, 1.0, 0.0, -1.0);
         corner.color = Vec4::new(1.0, 0.5, 0.0, 0.25);
@@ -667,6 +687,38 @@ mod tests {
             (uv - corner.uv).abs().max_element() <= uv_scale.max_element(),
             "{uv}"
         );
+    }
+
+    /// A tangent along its normal, either way, nearly, or as +X stands in for one along a normal of
+    /// +X, packs square to the normal: unpacked, its part square to the normal, which the model
+    /// shaders normalize, is about as long as it is. One that's off its normal packs as it was.
+    #[test]
+    fn tangents_along_their_normals_pack_square_to_them() {
+        let unpacked = |normal: Vec3, tangent: Vec3| {
+            let mut corner = vertex(Vec3::ZERO);
+            corner.normal = normal;
+            corner.tangent = tangent.extend(1.0);
+            let corners = [corner; 3];
+            let mesh = ModelMesh::pack("along", &corners, vec![0, 1, 2], vec![]).unwrap();
+            let packed = mesh.vertices[0];
+            (unfolded(packed.normal), unfolded(packed.tangent))
+        };
+        let tilted = Vec3::new(0.3, -0.5, 0.81).normalize();
+        let along = [
+            (tilted, tilted),
+            (Vec3::Y, Vec3::NEG_Y),
+            (Vec3::Z, Vec3::new(1e-5, 0.0, 1.0)),
+            (Vec3::X, Vec3::ZERO),
+        ];
+        for (normal, tangent) in along {
+            let (n, t) = unpacked(normal, tangent);
+            let square = (t - n * n.dot(t)).length();
+            assert!(square > 0.99, "{normal} {tangent}: {square}");
+            assert!(n.dot(normal) > 0.9999, "{normal}: {n}");
+        }
+        let off = Vec3::new(0.2, 0.0, 1.0).normalize();
+        let (_, t) = unpacked(Vec3::Z, off);
+        assert!(t.dot(off) > 0.9999, "{off}: {t}");
     }
 
     /// A buffer holds its header, its vertices after it at their place, and its meshlets' parts

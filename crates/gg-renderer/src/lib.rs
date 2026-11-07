@@ -835,8 +835,9 @@ impl Renderer {
         let resolves = if antialiased { 2 } else { 0 };
         // First, the sky's prefiltering, if this frame prefilters it: the first to render the view
         // since its texture came to show the image it shows, or since a directional light came to
-        // stand for its sun or ceased to. Its images are the targets after those. A frame that
-        // doesn't takes the light from those before.
+        // stand for its sun or ceased to, or, while one stands for it, its luminance crossed a
+        // power of two that changes what its light keeps texels to. Its images are the targets
+        // after those. A frame that doesn't takes the light from those before.
         let plan = match sky {
             Some((sky, sky_size, shown, cutoff)) if !self.sky_light.holds(sky, shown, cutoff) => {
                 let first = resolved + resolves;

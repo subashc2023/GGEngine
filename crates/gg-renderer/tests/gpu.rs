@@ -83,6 +83,7 @@ fn main() -> ExitCode {
         the_canvas_matches_its_reference,
         outlines_match_their_reference,
         tonemappers_match_their_reference,
+        colors_past_a_half_float_show_as_its_brightest,
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         back_faces_flip_their_normal_maps,
@@ -3751,6 +3752,62 @@ fn tonemappers_match_their_reference() {
     compare("tonemappers", WIDTH, HEIGHT * 4, &rows);
 }
 
+/// Squares of a game's shader past the most a half float holds: red, which the view's colors hold
+/// as that most or as infinite, as the GPU rounds it; and red, and white, infinite, as a shader's
+/// floats can be. Mapped by PBR Neutral, which rolls a color that bright off to white, they show
+/// white, without antialiasing and with it, frame after frame, rather than as no number, black, or
+/// cyan where red alone is infinite.
+fn colors_past_a_half_float_show_as_its_brightest() {
+    const WIDTH: u32 = 48;
+    const HEIGHT: u32 = 16;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // 2 units from the view's bottom to its top, and 6 across: a unit is 8 pixels both ways.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let mut draws = Draws::default();
+    let colors = [
+        Vec3::new(1.0e6, 0.0, 0.0),
+        Vec3::new(f32::INFINITY, 0.0, 0.0),
+        Vec3::INFINITY,
+    ];
+    for (x, color) in [-2.0, 0.0, 2.0].into_iter().zip(colors) {
+        let at = Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        draws.push(square, flat, at, color.extend(1.0));
+    }
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    for antialiasing in [Antialiasing::None, Antialiasing::Taa] {
+        for frame in 0..4 {
+            let data = RenderData {
+                tonemapper: Tonemapper::PbrNeutral,
+                antialiasing,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+            let pixels = frame_pixels(&mut renderer);
+            for middle in [[8, 8], [24, 8], [40, 8]] {
+                let got = pixel_at(&pixels, WIDTH, middle);
+                assert!(
+                    close(got, [255; 4]),
+                    "{antialiasing:?}, frame {frame}: {got:?} at {middle:?}, not white"
+                );
+            }
+        }
+    }
+    shut_down(renderer);
+}
+
 /// A square that covers a view, with a shader that shows the frame's data as colors: where the
 /// camera is, left of it, and the time and the exposure, right of it.
 fn shaders_read_the_frames_data() {
@@ -3800,7 +3857,7 @@ fn shaders_read_the_frames_data() {
 /// white, leaving a metal of 0.5, whose `f0` is 0.5, showing 0.125; and one normal-mapped toward
 /// +X by BC7, of X, Y and Z, as a model's DDS image holds a normal map. Then a point light of 4π
 /// candela 2 units over the first square lights it as the directional light did; with a range of
-/// 2.5, by the window KHR_lights_punctual recommends, `(1 - (2 / 2.5)^4)^2`; and a spot over it
+/// 2.5, by the window KHR_lights_punctual recommends, `1 - (2 / 2.5)^4`; and a spot over it
 /// lights it alike within its inner cone, and nothing outside its outer.
 fn lights_shade_as_gltf_defines() {
     const SIDE: u32 = 16;
@@ -3991,7 +4048,7 @@ fn lights_shade_as_gltf_defines() {
         ..sun
     };
     let reach2 = (2.0_f32 / 2.5) * (2.0 / 2.5);
-    let window = (1.0 - reach2 * reach2) * (1.0 - reach2 * reach2);
+    let window = 1.0 - reach2 * reach2;
     let spot = Light {
         kind: LightKind::Spot {
             inner: 0.1,
@@ -4026,14 +4083,15 @@ fn lights_shade_as_gltf_defines() {
     shut_down(renderer);
 }
 
-/// Three squares, each a model's, of a double-sided material, normal-mapped, seen without
-/// perspective and lit from above and in front: the back of one turned a half turn about Y, its map
-/// tilted toward its texture's +Y, shows as the front of one whose map tilts as far toward -Y, as
-/// glTF flips a back face's whole tangent space, its bitangent too; and not as the front of one
-/// whose map tilts toward +Y, which faces the light more.
+/// Five squares, each a model's, normal-mapped, seen without perspective and lit from above and in
+/// front, the first four of a double-sided material: the back of one turned a half turn about Y,
+/// its map tilted toward its texture's +Y, shows as the front of one whose map tilts as far toward
+/// -Y, as glTF flips a back face's whole tangent space, its bitangent too; and not as the front of
+/// one whose map tilts toward +Y, which faces the light more. The front of one mirrored across X,
+/// whose corners wind the other way as seen, shows as it does unmirrored, double-sided or not.
 fn back_faces_flip_their_normal_maps() {
     const SIDE: u32 = 16;
-    const WIDTH: u32 = 3 * SIDE;
+    const WIDTH: u32 = 5 * SIDE;
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
@@ -4056,18 +4114,21 @@ fn back_faces_flip_their_normal_maps() {
         Sampled::of(added.expect("a map"))
     };
     let (down, up) = (map("tilted down", 64), map("tilted up", 191));
-    let at = |i: f32| Mat4::from_translation(Vec3::new(i - 1.0, 0.0, 0.0));
+    let at = |i: f32| Mat4::from_translation(Vec3::new(i - 2.0, 0.0, 0.0));
+    let mirrored = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
     let squares = [
-        (down, at(0.0)),
-        (up, at(1.0) * Mat4::from_rotation_y(PI)),
-        (up, at(2.0)),
+        (down, true, at(0.0)),
+        (up, true, at(1.0) * Mat4::from_rotation_y(PI)),
+        (up, true, at(2.0)),
+        (down, true, at(3.0) * mirrored),
+        (down, false, at(4.0) * mirrored),
     ];
     let mut draws = Draws::default();
-    for (normals, transform) in squares {
+    for (normals, double_sided, transform) in squares {
         let material = stores.materials.add(&Material {
             color: Vec4::new(0.5, 0.5, 0.5, 1.0),
             workflow: metallic(0.0, 1.0),
-            double_sided: true,
+            double_sided,
             normal_texture: Some(normals),
             ..Material::default()
         });
@@ -4089,8 +4150,8 @@ fn back_faces_flip_their_normal_maps() {
     // drew it by its indices.
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let frame = frame_pixels(&mut renderer);
-    let [down, back, up] =
-        [0, 1, 2].map(|i| pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]));
+    let [down, back, up, mirrored, mirrored_one_side] =
+        [0, 1, 2, 3, 4].map(|i| pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]));
     assert!(
         close(back, down),
         "the back shows {back:?}, not {down:?}, as the front tilted down does"
@@ -4099,6 +4160,12 @@ fn back_faces_flip_their_normal_maps() {
         !close(back, up),
         "the back shows {back:?}, as the front tilted up does"
     );
+    for (sided, shown) in [("double", mirrored), ("single", mirrored_one_side)] {
+        assert!(
+            close(shown, down),
+            "the {sided}-sided front mirrored shows {shown:?}, not {down:?}, as it does unmirrored"
+        );
+    }
     shut_down(renderer);
 }
 
