@@ -57,12 +57,15 @@
 //! ```
 //!
 //! A tick's inputs that come again, as those the world gave and the packets sent before it, are
-//! the same, and the first whole is kept. Values are written as recordings write them, entities by
-//! their IDs and textures by their names, and read into values only at their tick, against the
-//! world then. The joiner names its textures as its host does, whatever ID files its own disk
-//! holds: as its host's world gives them, and as the host's `n` lines give the names of those it
-//! adds after, before the inputs that may name them. A peer's ticks allocate, for their inputs'
-//! text, the hash's lines and the packets, as recorded ticks do.
+//! the same, and the first whole is kept. A line or a packet that names a tick no run reaches,
+//! [`TICKS`] or past, or the other's inputs for a tick [`AHEAD`] or more past the first it hasn't
+//! had whole, loses the other, as inputs that far past a server's next tick lose their client.
+//! Values are written as recordings write them, entities by their IDs and textures by their names,
+//! and read into values only at their tick, against the world then. The joiner names its textures
+//! as its host does, whatever ID files its own disk holds: as its host's world gives them, and as
+//! the host's `n` lines give the names of those it adds after, before the inputs that may name
+//! them. A peer's ticks allocate, for their inputs' text, the hash's lines and the packets, as
+//! recorded ticks do.
 //!
 //! A server that owns the world, and its clients, are [`server`]'s and [`client`]'s, over links as
 //! a session's peers have, a [`Session`] each as a peer's is.
@@ -125,6 +128,16 @@ const MAX_LINE: usize = 16 << 20;
 /// The most bytes the host's world may have as it comes, its lines together, past which the joiner
 /// drops the connection.
 const MAX_WORLD: usize = 1 << 30;
+
+/// The ticks a line or a packet may name are fewer than this: some 70,000 years of them, past any
+/// run, and far enough from `u64::MAX` that the ticks counted on from one can't overflow.
+const TICKS: u64 = 1 << 47;
+
+/// The most ticks past the first whose inputs a peer, or a server, hasn't had whole from the
+/// other, that the other's inputs may be for, a second's, past which the other is lost, so that
+/// the inputs kept for later are few: a peer runs no more than its delay and [`PREDICTED`] ticks
+/// past the other, and a client no more than half a second past its server's latest state.
+const AHEAD: u64 = 64;
 
 /// How long a joiner waits between tries at connecting to its host.
 const RETRY: Duration = Duration::from_millis(250);
@@ -753,11 +766,7 @@ impl Lockstep {
                 let world = rest.split_once(' ').and_then(|(tick, rest)| {
                     let (patches, port) = rest.split_once(' ')?;
                     let patches = patches.parse::<usize>().ok()?;
-                    Some((
-                        tick.parse::<u64>().ok()?,
-                        patches,
-                        port.parse::<u16>().ok()?,
-                    ))
+                    Some((tick_of(tick)?, patches, port.parse::<u16>().ok()?))
                 });
                 match world {
                     Some((tick, patches, port)) => {
@@ -783,15 +792,15 @@ impl Lockstep {
                 }
             }
             // Gathered whatever the joiner's world, so that its lines aren't read as others.
-            "parted" if !self.hosts() => match rest.parse::<u64>() {
-                Ok(tick) => self.parting = Some((tick, String::new())),
-                Err(_) => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+            "parted" if !self.hosts() => match tick_of(rest) {
+                Some(tick) => self.parting = Some((tick, String::new())),
+                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
             },
             // Sent against a world the joiner no longer has, as the host's comes.
             _ if !joined => {}
             "c" | "e" | "s" => {
                 let mut parts = rest.splitn(if kind == "c" { 3 } else { 2 }, ' ');
-                let tick = parts.next().and_then(|tick| tick.parse::<u64>().ok());
+                let tick = parts.next().and_then(tick_of);
                 let layer = if kind == "c" {
                     parts.next().and_then(|layer| layer.parse::<usize>().ok())
                 } else {
@@ -799,7 +808,7 @@ impl Lockstep {
                 };
                 let value = parts.next().map(str::to_owned);
                 match (tick, layer, value) {
-                    (Some(tick), Some(layer), Some(value)) => {
+                    (Some(tick), Some(layer), Some(value)) if self.near(tick) => {
                         let inputs = self.theirs.entry(tick).or_default();
                         // Come again, as in the world after its packets.
                         if !inputs.whole {
@@ -813,12 +822,12 @@ impl Lockstep {
                     _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
                 }
             }
-            "t" => match rest.parse::<u64>() {
-                Ok(tick) => {
+            "t" => match tick_of(rest).filter(|&tick| self.near(tick)) {
+                Some(tick) => {
                     self.theirs.entry(tick).or_default().whole = true;
                     self.came_whole();
                 }
-                Err(_) => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
             },
             "h" => {
                 let hash = rest.split_once(' ').and_then(|(tick, hash)| {
@@ -828,7 +837,7 @@ impl Lockstep {
                         content: hex(content)?,
                         layout: hex(layout)?,
                     };
-                    Some((tick.parse::<u64>().ok()?, hash))
+                    Some((tick_of(tick)?, hash))
                 });
                 match hash {
                     Some((tick, hash)) => {
@@ -841,10 +850,10 @@ impl Lockstep {
             #[cfg(feature = "dev")]
             "p" if !self.hosts() => {
                 let due = rest.split_once(' ').and_then(|(number, tick)| {
-                    Some((number.parse::<usize>().ok()?, tick.parse::<u64>().ok()?))
+                    Some((number.parse::<usize>().ok()?, tick_of(tick)?))
                 });
                 match due {
-                    Some((number, tick)) if number > 0 => {
+                    Some((number, tick)) if number > 0 && self.near(tick) => {
                         let inputs = self.theirs.entry(tick).or_default();
                         if !inputs.whole {
                             inputs.patches.push(number);
@@ -1441,6 +1450,11 @@ impl Lockstep {
             .extend(predicted.map(|predicted| predicted.start));
     }
 
+    /// Whether the other peer's inputs may be for tick `tick`, as [`AHEAD`] says.
+    fn near(&self, tick: u64) -> bool {
+        tick < self.whole + AHEAD
+    }
+
     /// Moves on past the ticks whose inputs from the other peer have come whole, as their last
     /// line or their packet has.
     fn came_whole(&mut self) {
@@ -1467,20 +1481,23 @@ impl Lockstep {
     }
 
     /// Reads `packet`'s lines, as [`read_packet`](Self::read_packet) takes them, failing at one
-    /// that isn't one.
+    /// that isn't one, or at a tick's inputs past those the other peer may send, as [`AHEAD`]
+    /// says, those before taken.
     fn read_ticks(&mut self, packet: &[u8]) -> Option<()> {
         let mut lines = std::str::from_utf8(packet).ok()?.lines();
         let (since, acked) = lines.next()?.strip_prefix("a ")?.split_once(' ')?;
-        let (since, acked) = (since.parse::<u64>().ok()?, acked.parse::<u64>().ok()?);
+        let (since, acked) = (tick_of(since)?, tick_of(acked)?);
         // Sent before the peers' worlds were last made the same.
         if since != self.since {
             return Some(());
         }
         self.acked = self.acked.max(acked);
         let (whole, theirs) = (self.whole, &mut self.theirs);
+        let mut near = true;
         read_batches(lines, |tick, commands| {
+            near &= tick < whole + AHEAD;
             // Come before, or whole on the stream; what came of them there is the same.
-            if tick >= whole {
+            if tick >= whole && near {
                 let inputs = theirs.entry(tick).or_default();
                 if !inputs.whole {
                     *inputs = Inputs {
@@ -1490,7 +1507,8 @@ impl Lockstep {
                     };
                 }
             }
-        })
+        })?;
+        near.then_some(())
     }
 
     /// Sends the other peer this peer's packets, once there is one and it has said where its
@@ -1898,6 +1916,12 @@ fn listen(address: &str, what: &str) -> Result<(Receiver<TcpStream>, SocketAddr)
     Ok((find, at))
 }
 
+/// The tick `text` names, as a line or a packet names one; `None` if it isn't a number fewer than
+/// [`TICKS`].
+fn tick_of(text: &str) -> Option<u64> {
+    text.parse().ok().filter(|&tick| tick < TICKS)
+}
+
 /// Reads a packet's inputs, `lines`, as a peer's and a client's packets carry them: each tick's
 /// commands, `c` lines of its tick, then the `t` that says they're whole, which gives the tick and
 /// its commands, each with its layer's index, to `each`; `None` at a line that isn't one, those
@@ -1910,7 +1934,7 @@ fn read_batches(
     for line in lines {
         let (kind, rest) = line.split_once(' ')?;
         let mut parts = rest.splitn(3, ' ');
-        let tick = parts.next()?.parse::<u64>().ok()?;
+        let tick = tick_of(parts.next()?)?;
         match kind {
             "c" => {
                 let layer = parts.next()?.parse::<usize>().ok()?;
@@ -3243,5 +3267,22 @@ mod tests {
         );
         let stood_in = codes.iter().filter(|code| *code == "asset.stand_in");
         assert_eq!(stood_in.count(), 1, "{codes:?}");
+    }
+
+    /// A peer keeps the other's inputs within a second of ticks past the first it hasn't had whole:
+    /// a packet holding inputs past them, as one from elsewhere at the other's address may, or a
+    /// tick no run reaches, isn't one, which loses the other, those before taken.
+    #[test]
+    fn a_peer_keeps_the_other_s_inputs_to_a_second() {
+        let net = Net::Join("127.0.0.1:1".to_owned());
+        let mut peer = Lockstep::start(&net, "Tested", &[]).expect("started");
+        assert!(peer.read_ticks(b"a 0 0\nt 0\nt 63\n").is_some());
+        peer.came_whole();
+        assert_eq!(peer.whole, 1);
+        for far in ["a 0 0\nt 2\nt 65\n", "a 0 18446744073709551615\n"] {
+            assert!(peer.read_ticks(far.as_bytes()).is_none(), "{far}");
+        }
+        let kept: Vec<u64> = peer.theirs.keys().copied().collect();
+        assert_eq!(kept, [0, 2, 63]);
     }
 }

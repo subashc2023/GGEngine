@@ -751,8 +751,11 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   So glam is built without SIMD and with libm's functions, for the whole build
   ([Cargo.toml](Cargo.toml)), and clippy refuses std's float methods whose precision is the
   platform's ([clippy.toml](clippy.toml)), for `gg_core::math`'s. Luau's math is held to the same:
-  its functions whose precision is the platform's are libm's, and a script that uses `^`, which
-  calls the platform's `pow` past any hook, is refused. A recorded run hashes the world once its
+  its functions whose precision is the platform's are libm's, a script that uses `^`, which
+  calls the platform's `pow` past any hook, is refused, and its libraries' functions that make an
+  integer of a number, by a C cast that platforms make otherwise past the integer's range, fail at
+  such a number, as `string.format` does at a float it would write as NaN or infinity, which C
+  libraries write each their own way. A recorded run hashes the world once its
   layers attach and after every tick, so that its replay, on another machine or after a change,
   finds the first tick where it goes another way. `World::difference` names the entity and field
   where two worlds part in one process; across two machines, `--dump` writes the world there a

@@ -26,7 +26,8 @@ use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::{
-    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, REFUSED, Turn, connect, hello, write_inputs,
+    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, REFUSED, Turn, connect, hello, tick_of,
+    write_inputs,
 };
 use crate::args::Conditions;
 use crate::layer::Commands;
@@ -70,9 +71,10 @@ pub(crate) struct Client {
     pub(super) random: u64,
     link: Option<Link>,
     /// When the hello went, until the server's world came, and the time between, the way to the
-    /// server and back.
+    /// server and back; and when the world came.
     hello: Option<Instant>,
     trip: Duration,
+    came: Instant,
     /// The server's world as it comes: the tick it's at, and its lines so far.
     coming: Option<(u64, String)>,
     /// The client's player, as the server's world gave it.
@@ -156,6 +158,7 @@ impl Client {
             link: None,
             hello: None,
             trip: Duration::ZERO,
+            came: Instant::now(),
             coming: None,
             player: None,
             since: 0,
@@ -287,7 +290,7 @@ impl Client {
             }
             "world" => {
                 let mut words = rest.split(' ');
-                let mut number = || words.next()?.parse::<u64>().ok();
+                let mut number = || words.next().and_then(tick_of);
                 let world = (number(), number(), number());
                 match world {
                     (Some(tick), Some(player), Some(port)) => {
@@ -300,6 +303,7 @@ impl Client {
                             .hello
                             .take()
                             .map_or(Duration::ZERO, |hello| now - hello);
+                        self.came = now;
                         self.player = Some(player);
                         if let Some(link) = &mut self.link {
                             link.packets_from(port);
@@ -409,13 +413,29 @@ impl Client {
     }
 
     /// Takes `packet`, a part of a state, which the client gathers while it's of a state after a
-    /// tick later than the latest whole, at `now`, reading a state once it's whole. `None` for a
-    /// packet that isn't one.
+    /// tick later than the latest whole, and the server can have run by `now`, reading a state
+    /// once it's whole. `None` for a packet that isn't one.
     fn read_packet(&mut self, packet: &[u8], now: Instant) -> Option<()> {
         let split = packet.iter().position(|&byte| byte == b'\n')?;
         let header = header(std::str::from_utf8(&packet[..split]).ok()?)?;
         let latest = self.texts.last_key_value().map(|(&tick, _)| tick);
         if header.tick < self.since || latest.is_some_and(|latest| header.tick <= latest) {
+            return Some(());
+        }
+        // Past the ticks the server can have run, which go on in real time from its world's, as its
+        // clock has it, a 256th faster than this one's at most, since no sooner than the way there
+        // and back before its world came, and half a second's more: a packet from elsewhere, which
+        // the server's address alone vouches for, which would hold back the server's states until
+        // their ticks passed its.
+        let ran = now.saturating_duration_since(self.came) + self.trip;
+        let ran = (ran.as_secs_f64() / Tick::DT.as_secs_f64()) as u64;
+        if header.tick > self.since + ran + ran / 256 + WINDOW {
+            warn!(
+                code = "net.bad_state",
+                tick = header.tick,
+                "Dropped a state after tick {}, which the server can't have run yet",
+                header.tick
+            );
             return Some(());
         }
         let parts = self.parts.entry(header.tick);
@@ -731,6 +751,28 @@ mod tests {
     fn x_of(drawn: &[(EntityId, Transform)], id: EntityId) -> f32 {
         let found = drawn.iter().find(|&&(of, _)| of == id);
         found.expect("drawn").1.translation.x
+    }
+
+    /// A state after a tick the server can't have run yet, as a packet from elsewhere may name,
+    /// however far on, is dropped, and the server's own after it are taken.
+    #[test]
+    fn a_state_the_server_cant_have_run_yet_is_dropped() {
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        let now = Instant::now();
+        (client.since, client.came) = (100, now);
+        let state = |tick: u64| {
+            let text = "gg-snapshot 2\n";
+            let bytes = zstd::bulk::compress(text.as_bytes(), 3).expect("compressed");
+            let line = format!("s {tick} - 0 0 0 0 0 1 {}\n", text.len());
+            [line.as_bytes(), &bytes].concat()
+        };
+        for forged in [100 + 10_000, u64::MAX] {
+            assert_eq!(client.read_packet(&state(forged), now), Some(()));
+        }
+        assert!(client.texts.is_empty());
+        assert!(!client.ready(101), "not joined");
+        client.read_packet(&state(101), now).expect("a state");
+        assert_eq!(client.texts.keys().copied().collect::<Vec<_>>(), [101]);
     }
 
     /// The other players' entities draw between the two states [`INTERPOLATION`] ticks behind the

@@ -303,7 +303,6 @@ impl World {
     /// What names the world's types as they are, as [`Components::revision`] says.
     ///
     /// [`Components::revision`]: super::table::Components::revision
-    #[cfg(feature = "dev")]
     pub(crate) fn types_revision(&self) -> u64 {
         self.components.revision()
     }

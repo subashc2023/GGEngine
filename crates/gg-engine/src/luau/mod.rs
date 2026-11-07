@@ -127,8 +127,14 @@ const REMOVED: [&str; 7] = [
 /// whose precision is the platform's are libm's, which the compiler is told aren't builtins: it
 /// would call the C library's in their place. A script that uses `^`, which calls the platform's
 /// `pow` past any hook, or that sets how it compiles, with `--!optimize` or `--!native`, is
-/// refused. `math.random`, whose state the VM holds outside the world and seeds from the clock,
-/// isn't there, nor are `os`, `debug`, `collectgarbage`, `gcinfo`, `getfenv`, `setfenv`,
+/// refused. The library functions that make an integer of a number, by a C cast that's undefined
+/// past the integer's range, where platforms differ, as `string.sub`'s positions, `bit32`'s and
+/// `buffer`'s arguments are, fail as an error does at a number past that range or that isn't
+/// finite, before they run, as does `string.format` at a number its conversion would cast so, or
+/// write as a float that isn't finite, which C libraries write each their own way; but for the
+/// iterators that `ipairs` and `utf8.codes` return, which a script that calls one itself gives a
+/// number unchecked. `math.random`, whose state the VM holds outside the world and seeds from the
+/// clock, isn't there, nor are `os`, `debug`, `collectgarbage`, `gcinfo`, `getfenv`, `setfenv`,
 /// `loadstring`, `newproxy`, `require` and `vector.angle`. And an entity is light userdata, its 64
 /// bits, which tables hash and compare by them rather than by an address, and whose metatable is
 /// frozen. The VM collects its garbage at set points, after a chunk runs and after the ticks once
@@ -157,8 +163,9 @@ struct Host {
     shared: Shared,
     /// In the order of their components' names.
     scripts: Vec<Loaded>,
-    /// The world whose component types the handles name, by its serial.
-    serial: Option<u64>,
+    /// The world whose component types the handles name, by its serial, and those types, by their
+    /// revision, which a script's reload in another VM moves on, as it declares its type again.
+    resolved: Option<(u64, u64)>,
     /// The memory the VM may hold, if it's held to a limit, as a mod's is.
     limit: Option<usize>,
     /// What the VM may hold before the next set point collects its garbage.
@@ -630,7 +637,7 @@ impl Host {
             },
             lua,
             scripts: Vec::new(),
-            serial: None,
+            resolved: None,
             limit,
             goal: 0,
         };
@@ -690,6 +697,7 @@ impl Host {
         math.raw_set("log", log)?;
         let vector: Table = globals.raw_get("vector")?;
         vector.raw_remove("angle")?;
+        hooks::check_integers(&lua)?;
 
         let entities = lua.create_table()?;
         entities.raw_set("__index", lua.create_function(read)?)?;
@@ -796,8 +804,15 @@ impl Host {
         if self.scripts.is_empty() {
             return;
         }
-        if self.serial != Some(world.serial()) {
-            self.migrate(world);
+        match self.resolved {
+            // Its types changed in place, as another VM's script reloads, whose fields may be
+            // elsewhere now, or gone.
+            Some((serial, revision)) if serial == world.serial() => {
+                if revision != world.types_revision() {
+                    self.resolve(world);
+                }
+            }
+            _ => self.migrate(world),
         }
         let dt = Tick::DT.as_secs_f64();
         let mut list = world.take_list();
@@ -1052,7 +1067,7 @@ impl Host {
                 .filter(|&id| world.declared(id).is_some());
             script.on_id = (script.on.as_deref()).and_then(|on| world.component_named(on));
         }
-        self.serial = Some(world.serial());
+        self.resolved = Some((world.serial(), world.types_revision()));
     }
 }
 
@@ -1119,13 +1134,15 @@ fn lent<R>(shared: &Shared, world: &mut World, f: impl FnOnce() -> R) -> R {
 }
 
 /// The compiler of scripts: at optimization level 1, whatever a script asks, with libm's math in
-/// place of the builtins the C library's would be, and Luau's full debug information, the names of
-/// locals and upvalues among it, which the debugger shows, as [`Scripts`] says.
+/// place of the builtins the C library's would be, the library functions whose integer arguments
+/// are checked called as they're checked, and Luau's full debug information, the names of locals
+/// and upvalues among it, which the debugger shows, as [`Scripts`] says.
 fn compiler() -> Compiler {
+    let libm = LIBM.map(|name| format!("math.{name}"));
     Compiler::new()
         .set_optimization_level(1)
         .set_debug_level(2)
-        .set_disabled_builtins(LIBM.map(|name| format!("math.{name}")))
+        .set_disabled_builtins(libm.into_iter().chain(hooks::not_builtins()))
 }
 
 /// Checks that `text` compiles, as a script loads it, as [`compiled`] says.
@@ -2108,6 +2125,55 @@ return Spin
         assert_eq!(log, Some(Value::F64(libm::log(10.0) / libm::log(3.0))));
     }
 
+    /// The library functions that make an integer of a number fail at one past the integer's range,
+    /// or that isn't finite, which platforms cast otherwise, called as functions or as methods, and
+    /// `string.format` at one its conversion would cast so or write as a float that isn't finite;
+    /// within the range they work as Luau's own, `table.insert`'s value however large.
+    #[test]
+    fn library_functions_refuse_numbers_that_platforms_make_other_integers_of() {
+        let dir = Scratch::new("luau-integers");
+        let script = "return gg.declare(\"Checked\", {\n\
+            sub = string.sub(\"abcd\", 2, -2) == \"bc\" and (\"abcd\"):sub(3) == \"cd\",\n\
+            band = bit32.band(1099511627781, 7),\n\
+            format = string.format(\"%d %x %5.1f %s\", -3, 255, 2.3, 1e300)\n\
+                == \"-3 ff   2.3 \" .. tostring(1e300),\n\
+            insert = (function() local t = {} table.insert(t, 1e300) return t[1] end)(),\n\
+            unpack = select(2, unpack({ 7, 8, 9 }, 1, 3)),\n\
+            buffer = buffer.readu8(buffer.fromstring(\"\\5\"), 0),\n\
+        })\n";
+        let (cx, _host) = loaded(&dir, &[("scripts/checked.luau", script)]);
+        let world = cx.world();
+        let checked = |name| default(world, "Checked", name);
+        assert_eq!(checked("sub"), Some(Value::Bool(true)));
+        assert_eq!(checked("band"), Some(Value::F64(5.0)));
+        assert_eq!(checked("format"), Some(Value::Bool(true)));
+        assert_eq!(checked("insert"), Some(Value::F64(1e300)));
+        assert_eq!(checked("unpack"), Some(Value::F64(8.0)));
+        assert_eq!(checked("buffer"), Some(Value::F64(5.0)));
+        for (name, call) in [
+            ("sub", "string.sub(\"abc\", 1e10)"),
+            ("method", "(\"abc\"):sub(0/0)"),
+            ("char", "string.char(65, 1/0)"),
+            ("band", "bit32.band(1, 1e19)"),
+            ("insert", "table.insert({}, 1e10, 1)"),
+            ("select", "select(-1e10, 1, 2)"),
+            ("buffer", "buffer.readu8(buffer.create(1), 0/0)"),
+            ("write", "buffer.writeu32(buffer.create(4), 0, 1e19)"),
+            ("ldexp", "math.ldexp(1, 1e10)"),
+            ("format-d", "string.format(\"%d\", 1e19)"),
+            ("format-c", "string.format(\"%%%c\", -1e10)"),
+            ("format-f", "string.format(\"%5.1f\", 0/0)"),
+        ] {
+            let text = format!("local _ = {call}\nreturn gg.declare(\"Refused\", {{}})");
+            let message = refused(&format!("integer-{name}"), &text).to_string();
+            let why = ["every platform casts it to", "C libraries write"];
+            assert!(
+                why.iter().any(|why| message.contains(why)),
+                "{name}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn a_script_that_raises_to_a_power_or_sets_how_it_compiles_is_refused() {
         let pow = refused("pow", "local x = 2\nlocal y = x ^ 3");
@@ -2230,6 +2296,39 @@ return Spin
         assert_eq!(refused(cx.apply_edit(unknown)), "script.unknown");
         host.run(cx.world_mut());
         assert_eq!(steps(&cx), 1055);
+    }
+
+    /// A reload that moves its type's fields reaches the handles of them that every other VM holds,
+    /// another layer's or a mod's, as it reaches its own: each finds its field where it is now, and
+    /// one of a field gone fails as an error does.
+    #[test]
+    fn a_reload_reaches_the_handles_other_vms_hold_of_its_fields() {
+        let dir = Scratch::new("luau-reload-elsewhere");
+        let first = stepper(1, "by = 1");
+        let (mut cx, mut steps) = loaded(&dir, &[("scripts/step.luau", &first)]);
+        let path = dir.0.join("scripts/copy.luau");
+        fs::write(&path, COPY).expect("written");
+        let mut copies = Scripts::new().expect("Luau starts");
+        copies.load(&mut cx, &path).expect("the script loads");
+        let world = cx.world_mut();
+        let mover = world.spawn(Mover::new());
+        world.add_default(mover, "Step").expect("added");
+        world.add_default(mover, "Copy").expect("added");
+        let by = Value::F64(5.0);
+        world.set_field(mover, "Step", "by", &by).expect("set");
+        let speed = |cx: &Context| cx.world().get::<Mover>(mover).expect("a mover").speed;
+        // `after` sorts first, where `by` was, which holds an entity now.
+        reload(&mut cx, stepper(1, "after = gg.entity, by = 2")).expect("reloaded");
+        steps.run(cx.world_mut());
+        copies.run(cx.world_mut());
+        assert_eq!(speed(&cx), 5.0);
+        reload(&mut cx, stepper(1, "after = gg.entity")).expect("reloaded");
+        cx.world_mut()
+            .get_mut::<Mover>(mover)
+            .expect("a mover")
+            .speed = 1.0;
+        copies.run(cx.world_mut());
+        assert_eq!(speed(&cx), 1.0, "its field gone");
     }
 
     /// A world from before a reload that changed the fields, as `stop` brings back, holds them as

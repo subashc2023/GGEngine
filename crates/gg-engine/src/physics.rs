@@ -3,6 +3,7 @@
 //! snapshots copy and snapshot files hold; and the colliders' outlines, drawn where their entities
 //! draw.
 
+use std::collections::HashSet;
 use std::f32::consts::TAU;
 
 use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4, libm};
@@ -291,7 +292,9 @@ struct SavedLinked {
 /// Saved through rapier's own serialization, written as RON, so that a world restored in another
 /// process steps on as the one saved would have: its contacts' warm starts, its islands' sleep and
 /// its handles as they were, which bodies made again from their components would lose. A rapier of
-/// another version may not read it, which leaves physics out, to be made again from the entities.
+/// another version may not read it, which leaves physics out, to be made again from the entities,
+/// as does text whose bodies name a rigid body or a collider that its rapier's state doesn't hold
+/// as theirs (`physics.load`).
 impl Saved for Physics2D {
     const NAME: &'static str = "Physics2D";
 
@@ -347,11 +350,37 @@ impl Saved for Physics2D {
                 angle: body.angle,
             });
         }
+        // What a step reaches by the links' handles, which text from elsewhere, a host's or a
+        // server's, may name otherwise than rapier's sets hold: each body there and linked once,
+        // its colliders on it, and each entity linked once.
+        let refused = |linked: &Linked, what: &str| {
+            let who = world.id(linked.entity);
+            let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
+            Error::new("physics.load", format!("{who}'s body {what}"))
+        };
+        let rapier = &saved.rapier;
+        let mut bodies = HashSet::with_capacity(linked.len());
+        for linked in &linked {
+            if rapier.bodies.get(linked.body).is_none() || !bodies.insert(linked.body) {
+                let what = "names no rigid body of rapier's, or another body's";
+                return Err(refused(linked, what));
+            }
+            let on = |collider: &ColliderHandle| {
+                rapier.colliders.get(*collider).and_then(Collider::parent) == Some(linked.body)
+            };
+            if !linked.colliders.iter().flatten().all(on) {
+                let what = "names a collider that isn't on its rigid body";
+                return Err(refused(linked, what));
+            }
+        }
         let mut by_slot = Vec::new();
         for (index, linked) in (0..).zip(&linked) {
             if linked.entity != Entity::DEAD {
                 if by_slot.len() <= linked.entity.slot() {
                     by_slot.resize(linked.entity.slot() + 1, NONE);
+                }
+                if by_slot[linked.entity.slot()] != NONE {
+                    return Err(refused(linked, "is its second"));
                 }
                 by_slot[linked.entity.slot()] = index;
             }
@@ -903,6 +932,34 @@ mod tests {
         step(&mut world, 60);
         step(&mut loaded, 60);
         assert_eq!(loaded.hash(), world.hash(), "stepped on");
+    }
+
+    /// Saved text whose bodies name what its rapier's state doesn't hold as theirs, as text from a
+    /// host or a server may, is refused (`physics.load`), rather than stepped into a panic: a rigid
+    /// body there's none of, another body's, a collider on another body, and an entity's second.
+    #[test]
+    fn saved_bodies_naming_what_rapier_holds_not_are_refused() {
+        let mut world = World::seeded(7);
+        pile(&mut world);
+        step(&mut world, 4);
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let text = physics.save(&world).expect("saved");
+        Physics2D::load(&text, &world).expect("its own text loads");
+        let changes: [fn(&mut SavedPhysics<Rapier>); 4] = [
+            |saved| saved.linked[0].body = RigidBodyHandle::invalid(),
+            |saved| saved.linked[1].body = saved.linked[0].body,
+            |saved| saved.linked[0].colliders = saved.linked[1].colliders,
+            |saved| saved.linked[1].entity = saved.linked[0].entity,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut saved: SavedPhysics<Rapier> = ron::from_str(&text).expect("read");
+            change(&mut saved);
+            let changed = ron::to_string(&saved).expect("written");
+            let refused = Physics2D::load(&changed, &world)
+                .err()
+                .map(|error| error.code());
+            assert_eq!(refused, Some("physics.load"), "change {i}");
+        }
     }
 
     /// The world's hash after physics has stepped a pile of boxes and balls for four seconds, which

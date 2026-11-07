@@ -60,7 +60,9 @@ use std::time::Instant;
 use gg_core::Result;
 use tracing::{info, warn};
 
-use super::{Link, MAX_PACKET, Merged, Turn, engine, listen, port_of, read_batches};
+use super::{
+    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Turn, engine, listen, port_of, read_batches, tick_of,
+};
 use crate::World;
 use crate::args::Conditions;
 use crate::layer::Commands;
@@ -187,7 +189,7 @@ impl Server {
             let (lines, packets, closed) = client.link.take(buffer, *conditions, random, now);
             let mut lost = Ok(());
             for line in &lines {
-                lost = lost.and_then(|()| client.read(line, ours));
+                lost = lost.and_then(|()| client.read(line, ours, next));
             }
             for packet in &packets {
                 if lost.is_ok() && client.link.joined && client.read_packet(packet, next).is_none()
@@ -393,9 +395,16 @@ impl Server {
 
 impl Remote {
     /// Takes `line`, from the client, of the protocol, app, engine and layers `ours` are: its
-    /// hello, or that it has joined. Fails with `None` for a hello refused, which it logs, and
-    /// with why for any other line.
-    fn read(&mut self, line: &str, ours: [&str; 4]) -> std::result::Result<(), Option<String>> {
+    /// hello, that it has joined, or a line of a tick's inputs, the next tick to run being `next`.
+    /// Fails with `None` for a hello refused, which it logs, and with why for any other line, and
+    /// for a tick's lines past [`MAX_LINE`] bytes together, or inputs past those it may send, as
+    /// [`AHEAD`] says.
+    fn read(
+        &mut self,
+        line: &str,
+        ours: [&str; 4],
+        next: u64,
+    ) -> std::result::Result<(), Option<String>> {
         let (kind, rest) = line.split_once([' ', '\t']).unwrap_or((line, ""));
         match kind {
             "hello" if !self.hello => match port_of(line, ours, "the server") {
@@ -418,19 +427,27 @@ impl Remote {
             }
             // A tick's inputs too many bytes for a packet, which come on the stream instead.
             "c" | "t" if self.link.joined => {
+                if self.stream.len() + line.len() >= MAX_LINE {
+                    return Err(Some(format!(
+                        "the client sent a tick's inputs of more than {MAX_LINE} bytes"
+                    )));
+                }
                 self.stream.push_str(line);
                 self.stream.push('\n');
                 if kind == "t" {
                     let stream = mem::take(&mut self.stream);
                     let (inputs, applied) = (&mut self.inputs, self.next);
+                    let mut near = true;
                     let read = read_batches(stream.lines(), |tick, commands| {
-                        if tick >= applied {
+                        near &= tick < next + AHEAD;
+                        if tick >= applied && near {
                             inputs.entry(tick).or_insert(commands);
                         }
                     });
-                    if read.is_none() {
+                    if read.is_none() || !near {
                         return Err(Some(format!(
-                            "the client sent inputs that aren't: {stream}"
+                            "the client sent inputs that aren't, or for a tick too far on: \
+                             {stream}"
                         )));
                     }
                 }
@@ -445,16 +462,17 @@ impl Remote {
     /// Takes `packet`, from the client, once it has joined, the next tick to run being `next`: the
     /// latest state it has, and its inputs for each tick that haven't come. The ticks before the
     /// first it holds that the server hasn't applied had none, as before the tick it went on from
-    /// once its world came. `None` for a packet that isn't one.
+    /// once its world came. `None` for a packet that isn't one, or that holds inputs past those
+    /// the client may send, as [`AHEAD`] says, those before taken.
     fn read_packet(&mut self, packet: &[u8], next: u64) -> Option<()> {
         let mut lines = std::str::from_utf8(packet).ok()?.lines();
         let (have, first) = lines.next()?.strip_prefix("i ")?.split_once(' ')?;
         let have = match have {
             "-" => None,
-            have => Some(have.parse::<u64>().ok()?),
+            have => Some(tick_of(have)?),
         };
         self.have = self.have.max(have);
-        let first = first.parse::<u64>().ok()?;
+        let first = tick_of(first).filter(|&first| first < next + AHEAD)?;
         if first > self.next {
             self.next = first;
             self.inputs = self.inputs.split_off(&first);
@@ -466,8 +484,10 @@ impl Remote {
             lead,
             ..
         } = self;
+        let mut near = true;
         read_batches(lines, |tick, commands| {
-            if tick < *applied {
+            near &= tick < next + AHEAD;
+            if tick < *applied || !near {
                 return;
             }
             inputs.entry(tick).or_insert(commands);
@@ -475,7 +495,8 @@ impl Remote {
                 *newest = Some(tick);
                 *lead = tick as i64 - next as i64;
             }
-        })
+        })?;
+        near.then_some(())
     }
 }
 
@@ -584,6 +605,55 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// A client's inputs are kept within a second of ticks past the server's next, and a tick's
+    /// lines on the stream within a line's bytes: the client is lost at inputs past them, as from a
+    /// client that sends inputs for ticks however far on, or the lines of a tick without end, or a
+    /// packet from elsewhere at the client's address, and at a tick no run reaches.
+    #[test]
+    fn a_client_s_inputs_are_kept_to_a_second_and_a_line() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listening");
+        let at = listener.local_addr().expect("an address");
+        let _other = TcpStream::connect(at).expect("connected");
+        let (stream, _) = listener.accept().expect("accepted");
+        let mut link = Link::new(stream).expect("a link");
+        link.joined = true;
+        let mut client = Remote {
+            link,
+            hello: true,
+            player: Some(0),
+            owed: false,
+            inputs: BTreeMap::new(),
+            next: 10,
+            stream: String::new(),
+            newest: None,
+            lead: 0,
+            have: None,
+        };
+        let next = 10;
+        let packet = |text: &str| text.as_bytes().to_vec();
+        assert!(
+            client
+                .read_packet(&packet("i - 10\nt 10\nt 73\n"), next)
+                .is_some()
+        );
+        assert_eq!(client.inputs.keys().copied().collect::<Vec<_>>(), [10, 73]);
+        for far in [
+            "i - 10\nt 74\n",
+            "i - 74\n",
+            "i - 10\nt 9223372036854775808\n",
+        ] {
+            assert!(client.read_packet(&packet(far), next).is_none(), "{far}");
+        }
+        assert_eq!(client.inputs.len(), 2);
+        let ours = [""; 4];
+        assert!(client.read("t 11", ours, next).is_ok());
+        assert!(client.read("t 74", ours, next).is_err());
+        client.stream.clear();
+        let half = format!("c 12 0 String(\"{}\")", "x".repeat(MAX_LINE / 2));
+        assert!(client.read(&half, ours, next).is_ok());
+        assert!(client.read(&half, ours, next).is_err());
     }
 
     /// A server and three clients over a slow link, which grows slower: each client starts from the
