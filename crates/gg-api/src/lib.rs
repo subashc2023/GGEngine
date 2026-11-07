@@ -171,12 +171,15 @@
 //!   `api.bad_params` for a script's path that's empty, a line of 0, or a wait of more than 10,000.
 //!
 //! The methods but `hello`, `ping`, `logs`, `note` and `debug` are answered by the game's main
-//! thread, as a frame starts. While the window is minimized, and no frames run, it answers them
-//! between frames, but `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while
-//! a file dialog or the window menu Windows runs is open, holding the main thread, or a script has
-//! stopped, they wait. The connection's own thread answers `hello`, `ping`, `logs`, `note` and
-//! `debug` as it reads them, so that a `logs` or a `debug` that waits holds up the connection's
-//! later requests: follow the logs, or wait for a script to stop, on a connection of their own.
+//! thread, as a frame starts, those that came before it did, the rest as the next starts. While the
+//! window is minimized, and no frames run, it answers them between frames, but `step`, `capture` and
+//! `pick`, which need frames, fail with `api.paused`; while a file dialog or the window menu Windows
+//! runs is open, holding the main thread, or a script has stopped, they wait. The connection's own
+//! thread answers `hello`, `ping`, `logs`, `note` and `debug` as it reads them, so that a `logs` or
+//! a `debug` that waits holds up the connection's later requests: follow the logs, or wait for a
+//! script to stop, on a connection of their own. A connection has at most [`MOST_IN_FLIGHT`]
+//! requests in flight, the game reading no more of it until it has written an answer, so that a
+//! `ping` sent behind as many that wait for the main thread waits too.
 //!
 //! A connection is kept to what its `hello` grants, [`Hello::grant`], every capability without it:
 //! a request its grant doesn't cover fails with `api.ungranted`, naming the capability it needs.
@@ -184,8 +187,9 @@
 //! `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the type
 //! each set, add and remove names, and `write` for any other operation, as `undo` and `redo` need;
 //! `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and `pick`
-//! need `view`; `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and
-//! a `capture` or a `snapshot` given a path needs `files` too.
+//! need `view`, a `pick` answering its entity's name only with `read` of `Name` too; `input`,
+//! `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and a `capture` or a
+//! `snapshot` given a path needs `files` too.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -230,6 +234,13 @@ pub use project::{Project, UNBUILT};
 /// The most bytes a line may have, its line break aside, past which the side reading it drops the
 /// connection: a request's or an answer's, such as a page of entities.
 pub const MAX_LINE: usize = 16 << 20;
+
+/// The most requests a connection has in flight, read by the game and not yet answered on the wire,
+/// past which the game reads no more of it until an answer is written: a client that sends faster
+/// than it reads its answers, or than they're answered, is held back by the connection, as TCP holds
+/// back a writer, rather than the game holding its requests and answers in memory. [`Client`]
+/// has one at a time.
+pub const MOST_IN_FLIGHT: usize = 16;
 
 /// The most bytes a connection's first line, its `hello`, may have, its line break aside, past which
 /// the game closes the connection unanswered, the rest unread. The request's own fields, with the
@@ -763,7 +774,7 @@ pub struct Pick {
 /// What `pick` answers: the entity the view shows at the pixel, by its ID, and its name, as it's
 /// answered, or for a model's node the model's root, which tools change in its place; both `None`
 /// outside the view or where no entity draws, and the name for an entity gone by the answer, whose
-/// ID is kept.
+/// ID is kept, or for a connection not granted `read` of `Name`, which `view` alone isn't.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picked {
     pub id: Option<String>,

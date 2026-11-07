@@ -351,7 +351,9 @@ in the editor is out of an agent's reach.
   the token, which the game compares in constant time, so that only processes that can read the
   file reach the game: the user's own, as the file is the user's alone from before it holds the
   token: on Unix of mode 0600, and on Windows of a protected DACL that allows its owner alone. A
-  thread of the API's reads each connection and answers its pings itself,
+  thread of the API's reads each connection, at most 16 requests ahead of the answers written to it,
+  so that a client that sends faster than it reads or than the game answers is held back by the
+  connection rather than filling the game's memory, and answers its pings itself,
   from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
   one whose frames have paused for the user, as for a minimized window or a file dialog; and its
   reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
@@ -360,8 +362,9 @@ in the editor is out of an agent's reach.
   none across a restart that the new run kept; its notes, so that one comes through while frames
   pause; and its requests to debug scripts, through what the debugger shares with the main thread,
   so that they're answered while a script has stopped and the main thread waits there. The main
-  loop answers the rest as each frame starts,
-  before its ticks: a step once its ticks have run, a capture once the render thread has read the
+  loop answers the rest as each frame starts, those that came before it did, so that clients that
+  keep sending can't keep it from going on, before its ticks: a step once its ticks have run, a
+  capture once the render thread has read the
   frame's view back, without the UI, which a thread of the API's writes as a PNG, from the first
   frame with no image decoding and nothing streaming, so that an agent sees no stand-ins, or after
   10 s, saying it still streamed (`streaming`), and a snapshot
@@ -397,9 +400,10 @@ in the editor is out of an agent's reach.
   that what a client draws over a frame matches it. A capture shows the view as it's shown, the look
   among it, or, asked to, as the game shows it on its own, from a bare frame, which draws without
   the look, isn't shared and leaves the picks asked to the next frame, so that none reads a view a
-  client isn't shown. A pick answers which entity the view shows at a pixel, and its name, once the
-  frame that read it comes back. A connection is kept to the capabilities it's granted: `read` and
-  `write` of the world, whole or of the component types they name, as a mod's scripts are kept;
+  client isn't shown. A pick answers which entity the view shows at a pixel, and its name to a
+  connection granted to read names, once the frame that read it comes back. A connection is kept
+  to the capabilities it's granted: `read` and `write` of the world, whole or of the component
+  types they name, as a mod's scripts are kept;
   and the API's own, `play`, which plays, stops, pauses and steps, `input`, `view`, which captures,
   shares the view, picks and sets the look, `scene`, `snapshot`, `debug`, `patch`, `files`, which
   writes a capture or a snapshot where a request names, `note` and `quit`. The session file's

@@ -1,9 +1,10 @@
 //! The API's server: it listens on the machine's loopback, at a port the OS picks, which the session
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
-//! connections, and each has a thread that reads its requests, answering `hello`, `ping`, `logs`
-//! and `note` itself, `logs` from the events the log keeps, passing the rest on to the main loop,
-//! and, once its `hello` is granted, one that writes its answers. The main loop answers them as a
-//! frame starts, before its ticks, so that a `patch` applies between ticks, a `play`, a `stop` or a
+//! connections, and each has a thread that reads its requests, at most [`gg_api::MOST_IN_FLIGHT`]
+//! ahead of the answers written, answering `hello`, `ping`, `logs` and `note` itself, `logs` from
+//! the events the log keeps, passing the rest on to the main loop, and, once its `hello` is granted,
+//! one that writes its answers. The main loop answers those that came before a frame started as it
+//! starts, before its ticks, so that a `patch` applies between ticks, a `play`, a `stop` or a
 //! `scene` holds from the frame's ticks, and a `look` reaches the frame; a `step` once its ticks
 //! have run; a `capture` once a frame that rendered brings its view back, whose PNG a thread of its
 //! own writes; a `pick` once the frame that read it brings its answer back; and a `snapshot` once a
@@ -24,7 +25,7 @@ use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -116,8 +117,10 @@ pub(crate) struct Api {
     /// Where captures without a path go, and how their names start.
     captures: PathBuf,
     stem: String,
-    /// The requests the connections' threads pass on, for the main loop to answer.
+    /// The requests the connections' threads pass on, for the main loop to answer, and how many it
+    /// has received.
     incoming: Receiver<Incoming>,
+    received: u64,
     /// A request taken while waiting for one, answered first at the next turn.
     held: Option<Incoming>,
     shared: Arc<Shared>,
@@ -138,9 +141,8 @@ pub(crate) struct Api {
     /// The look as the clients set it, each part `None` where it's the game's own, and the run's
     /// number; its `seen` is filled in as it's answered.
     look: Looked,
-    /// `pick`s waiting for their answers: each at a pixel of the view, with the ticket the frame
-    /// that asked it gave, once one has.
-    picks: Vec<([f64; 2], Option<crate::Pick>, Reply)>,
+    /// `pick`s waiting for their answers.
+    picks: Vec<Picking>,
     /// The captures written without a path, which number their files.
     numbered: u64,
     /// The memory a `view` asked for the view to be published to, or `None` to stop, until the
@@ -173,6 +175,16 @@ struct Listing {
     take: usize,
 }
 
+/// A `pick` waiting for its answer: at a pixel of the view, with the ticket the frame that asked it
+/// gave, once one has; and whether it answers its entity's name, as it does to a connection granted
+/// `read` of `Name`.
+struct Picking {
+    at: [f64; 2],
+    ticket: Option<crate::Pick>,
+    named: bool,
+    reply: Reply,
+}
+
 /// A `capture` waiting for its frame: where its answer goes, where its PNG goes, whether it's of
 /// the game's own view, which a bare frame shows, and when it came, which it waits from, as
 /// [`CAPTURE_WAIT`] says.
@@ -194,6 +206,9 @@ enum Offer {
 struct Shared {
     /// The frames that have started, which `ping` answers.
     frames: AtomicU64,
+    /// The requests the connections' threads have passed on to the main loop, each counted once
+    /// it's sent, which a frame answers those of that came before it started.
+    passed: AtomicU64,
     /// What wakes the main loop as a request comes, so that it answers while frames pause.
     waker: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// The events of the run's log that `logs` reads, and the number drawn at random that tells
@@ -204,10 +219,12 @@ struct Shared {
     debugger: Arc<Debugger>,
 }
 
-/// A request for the main loop to answer, the client of its connection, and where its answer goes.
+/// A request for the main loop to answer, the client of its connection, whether that's granted
+/// `read` of `Name`, which a `pick` answers, and where its answer goes.
 struct Incoming {
     call: Call,
     client: Arc<str>,
+    names: bool,
     reply: Reply,
 }
 
@@ -267,17 +284,21 @@ enum Call {
 }
 
 /// Where a request's answer goes: its connection's writer, which drops it once the connection has
-/// gone.
+/// gone; and the request's place among those its connection has in flight.
 struct Reply {
     id: u64,
-    to: Sender<String>,
+    to: Sender<Answer>,
+    flight: Flight,
 }
+
+/// An answer's line, for its connection's writer, with its request's place among those in flight,
+/// which goes once the line is written.
+type Answer = (String, Flight);
 
 impl Reply {
     fn send(self, answer: Result<String, Failure>) {
-        let _ = self
-            .to
-            .send(gg_api::answer_line(self.id, answer.as_deref()));
+        let line = gg_api::answer_line(self.id, answer.as_deref());
+        let _ = self.to.send((line, self.flight));
     }
 
     fn result(self, result: &impl Serialize) {
@@ -369,6 +390,7 @@ impl Api {
         let (to_main, incoming) = mpsc::channel();
         let shared = Arc::new(Shared {
             frames: AtomicU64::new(0),
+            passed: AtomicU64::new(0),
             waker: Mutex::new(None),
             events,
             run,
@@ -417,6 +439,7 @@ impl Api {
             captures: crate::beside_exe("captures"),
             stem,
             incoming,
+            received: 0,
             held: None,
             shared,
             steps: Vec::new(),
@@ -463,8 +486,9 @@ impl Api {
         self.shared.debugger.clone()
     }
 
-    /// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
-    /// layers are `stack`'s and whose simulation `stepper` steps: first the `step`s whose ticks have
+    /// As a frame starts, before its ticks, answers the requests that had come as it started, from
+    /// `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, so that clients that
+    /// keep sending them can't keep the frame from going on: first the `step`s whose ticks have
     /// run, then the rest in the order they came, `look`s setting the look the frame draws with,
     /// `capture`s and `pick`s once a frame has rendered the view, as
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
@@ -488,11 +512,8 @@ impl Api {
             return quit;
         }
         let origin = cx.view().map_or([0, 0], |view| view.origin).map(f64::from);
-        let unasked = self
-            .picks
-            .iter_mut()
-            .filter(|(_, ticket, _)| ticket.is_none());
-        for (at, ticket, _) in unasked.take(MOST_PICKS) {
+        let unasked = (self.picks.iter_mut()).filter(|picking| picking.ticket.is_none());
+        for Picking { at, ticket, .. } in unasked.take(MOST_PICKS) {
             *ticket = cx.pick([origin[0] + at[0], origin[1] + at[1]]);
             if ticket.is_none() {
                 break;
@@ -566,11 +587,13 @@ impl Api {
             }
         }
         let mut quit = false;
+        let came = self.shared.passed.load(Ordering::Acquire);
         while let Some(Incoming {
             call,
             client,
+            names,
             reply,
-        }) = (self.held.take()).or_else(|| self.incoming.try_recv().ok())
+        }) = self.next(came)
         {
             let world = cx.world();
             match call {
@@ -668,7 +691,12 @@ impl Api {
                     self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
                     reply.result(&self.look);
                 }
-                Call::Pick(at) => self.picks.push((at, None, reply)),
+                Call::Pick(at) => self.picks.push(Picking {
+                    at,
+                    ticket: None,
+                    named: names,
+                    reply,
+                }),
                 Call::Entities { with, skip, take } => {
                     reply.send(list(world, with.as_deref(), skip, take));
                 }
@@ -1030,14 +1058,21 @@ impl Api {
                 .map(|&(_, id)| id)
         };
         let world = cx.world();
-        let back = (self.picks).extract_if(.., |(_, ticket, _)| answered(*ticket).is_some());
-        for (_, ticket, reply) in back {
+        let back = (self.picks).extract_if(.., |picking| answered(picking.ticket).is_some());
+        for Picking {
+            ticket,
+            named,
+            reply,
+            ..
+        } in back
+        {
             let shown = answered(ticket).flatten();
             // A model's node is its root's, which tools pick and change in its place.
             let entity = shown.and_then(|id| world.entity(id));
             let entity = entity.map(|entity| world.node_root(entity));
             let id = entity.map_or(shown, |entity| world.id(entity));
-            let name = entity.and_then(|entity| world.get::<Name>(entity));
+            let name = entity.filter(|_| named);
+            let name = name.and_then(|entity| world.get::<Name>(entity));
             reply.result(&Picked {
                 id: id.map(|id| id.to_string()),
                 name: name.map(|name| name.0.clone()),
@@ -1086,7 +1121,23 @@ impl Api {
     pub(crate) fn wait(&mut self, timeout: Duration) {
         if self.held.is_none() {
             self.held = self.incoming.recv_timeout(timeout).ok();
+            self.received += u64::from(self.held.is_some());
         }
+    }
+
+    /// The next request to answer: the one held, if any, then those of the first `came` the
+    /// connections' threads passed on that haven't been received; `None` once they have.
+    fn next(&mut self, came: u64) -> Option<Incoming> {
+        if let Some(held) = self.held.take() {
+            return Some(held);
+        }
+        // Each counted is sent before it's counted, so it's there to receive.
+        if self.received >= came {
+            return None;
+        }
+        let incoming = self.incoming.try_recv().ok()?;
+        self.received += 1;
+        Some(incoming)
     }
 }
 
@@ -1586,12 +1637,46 @@ impl Drop for SayingHello {
     }
 }
 
+/// How many requests a connection has in flight, read and not yet answered on the wire, which
+/// [`gg_api::MOST_IN_FLIGHT`] caps.
+#[derive(Default)]
+struct InFlight {
+    count: Mutex<usize>,
+    /// Notified as a request lands, its place given up.
+    landed: Condvar,
+}
+
+impl InFlight {
+    /// A place among those in flight, once one is free.
+    fn take(self: &Arc<Self>) -> Flight {
+        let mut count = self.count.lock().expect("no thread panics holding it");
+        while *count >= gg_api::MOST_IN_FLIGHT {
+            count = (self.landed.wait(count)).expect("no thread panics holding it");
+        }
+        *count += 1;
+        Flight(self.clone())
+    }
+}
+
+/// A request's place among those its connection has in flight, given up as it drops: once its
+/// answer is written, or as it goes unanswered, as when the connection has gone.
+struct Flight(Arc<InFlight>);
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        *self.0.count.lock().expect("no thread panics holding it") -= 1;
+        self.0.landed.notify_one();
+    }
+}
+
 /// Serves connection `stream`, which holds `place` among those saying hello until it has: its first
 /// request must be `hello` with `token`, as [`hello`] reads it within [`HELLO_TIMEOUT`], which it
 /// answers with `welcome`; then it answers `ping`, `logs`, `note` and `debug` itself, and passes the
 /// rest on to the main loop through `to_main`, waking it, each answer going back through a thread
-/// that writes them as they come, which starts once the `hello` has been granted. A line that isn't
-/// a request ends it.
+/// that writes them as they come, which starts once the `hello` has been granted. It reads a request
+/// only while fewer than [`gg_api::MOST_IN_FLIGHT`] are in flight, so that a client that sends
+/// faster than it reads, or than the game answers, is held back by the connection, rather than its
+/// requests and answers growing without bound in the game. A line that isn't a request ends it.
 fn connection(
     stream: TcpStream,
     token: &str,
@@ -1611,19 +1696,30 @@ fn connection(
     let Ok(writing) = reader.get_ref().try_clone() else {
         return;
     };
-    let (to, answers) = mpsc::channel::<String>();
+    let (to, answers) = mpsc::channel::<Answer>();
     let writer = thread::Builder::new()
         .name("gg-api-write".to_owned())
         .spawn(move || write_answers(writing, &answers));
     if writer.is_err() {
         return;
     }
-    let reply = Reply { id, to: to.clone() };
+    let in_flight = Arc::new(InFlight::default());
+    let reply = Reply {
+        id,
+        to: to.clone(),
+        flight: in_flight.take(),
+    };
     reply.send(Ok(welcome.to_owned()));
-    while let Some(request) = next_request(&mut reader) {
+    let names = grant.reads("Name");
+    loop {
+        let flight = in_flight.take();
+        let Some(request) = next_request(&mut reader) else {
+            break;
+        };
         let reply = Reply {
             id: request.id,
             to: to.clone(),
+            flight,
         };
         let own = match request.method.as_str() {
             "logs" => Some(Capability::Read(None)),
@@ -1667,6 +1763,7 @@ fn connection(
                 let incoming = Incoming {
                     call,
                     client,
+                    names,
                     reply,
                 };
                 if let Err(mpsc::SendError(incoming)) = to_main.send(incoming) {
@@ -1676,6 +1773,7 @@ fn connection(
                         .send(Err(Failure::new("api.closed", message)));
                     return;
                 }
+                shared.passed.fetch_add(1, Ordering::Release);
                 if let Some(wake) = shared
                     .waker
                     .lock()
@@ -2032,10 +2130,10 @@ fn request(line: &[u8]) -> Option<Request> {
         .ok()
 }
 
-/// Writes the lines `answers` brings to `stream`, until the connection breaks or nothing more can
-/// come.
-fn write_answers(mut stream: TcpStream, answers: &Receiver<String>) {
-    for line in answers {
+/// Writes the lines `answers` brings to `stream`, each request's place in flight going once its
+/// line is written, until the connection breaks or nothing more can come.
+fn write_answers(mut stream: TcpStream, answers: &Receiver<Answer>) {
+    for (line, _flight) in answers {
         if stream.write_all(line.as_bytes()).is_err() {
             return;
         }
@@ -2422,7 +2520,9 @@ fn entity_id(text: &str) -> Result<EntityId, Failure> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::Read as _;
+    use std::rc::Rc;
     use std::time::Instant;
 
     use gg_api::{Client, LogEvents, Session};
@@ -2459,6 +2559,30 @@ mod tests {
         let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
         let text = fs::read(file).expect("the session file");
         (api, serde_json::from_slice(&text).expect("a session"))
+    }
+
+    /// Where the answer to request `id` goes: `to`, whose other end the test reads, with a place in
+    /// flight of a connection of its own.
+    fn reply(id: u64, to: &Sender<Answer>) -> Reply {
+        Reply {
+            id,
+            to: to.clone(),
+            flight: Arc::new(InFlight::default()).take(),
+        }
+    }
+
+    /// A connection to `session`'s API, written and read as raw lines, once it has said hello.
+    fn said_hello(session: &Session) -> (TcpStream, BufReader<TcpStream>) {
+        let stream = TcpStream::connect(session.address).expect("it connects");
+        stream.set_read_timeout(Some(DEADLINE)).expect("a timeout");
+        let hello = json!({"id": 0, "method": "hello", "params": {"token": session.token}});
+        (&stream)
+            .write_all(format!("{hello}\n").as_bytes())
+            .expect("written");
+        let mut reader = BufReader::new(stream.try_clone().expect("a clone"));
+        let welcome = gg_api::read_line(&mut reader).expect("an answer");
+        assert!(welcome.is_some_and(|line| line.contains("\"result\"")));
+        (stream, reader)
     }
 
     /// Runs `client` on a thread of its own, connected to `session`'s API, while this thread serves
@@ -2802,6 +2926,101 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(client.welcome().app, "Api Hellos");
+    }
+
+    /// A client that sends requests faster than they're answered, here with no frame to answer
+    /// them, is held back by its connection once it has [`gg_api::MOST_IN_FLIGHT`] in flight: the
+    /// game reads no more, and the client's writes stop once the loopback's buffers are full,
+    /// rather than the game reading on, holding what it reads.
+    #[test]
+    fn a_client_that_sends_faster_than_its_answers_go_is_held_back() {
+        let (_api, session) = started("Api In Flight");
+        let (mut stream, _) = said_hello(&session);
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("a timeout");
+        // 64 MiB of them, far more than the loopback's buffers hold, a chunk at a time, so that each
+        // write waits only for the game to read on.
+        let status = "{\"id\":1,\"method\":\"status\"}\n";
+        let chunk = status.repeat((64 << 10) / status.len());
+        let mut sent = 0;
+        let held = loop {
+            if sent >= 64 << 20 {
+                break None;
+            }
+            if let Err(error) = stream.write_all(chunk.as_bytes()) {
+                break Some(error.kind());
+            }
+            sent += chunk.len();
+        };
+        let held = held.is_some_and(|kind| {
+            matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        });
+        assert!(
+            held,
+            "the game read {sent} bytes of requests it didn't answer"
+        );
+    }
+
+    /// Hands each event it gets to `events`, and until it has had `most`, has its client send
+    /// another `input`, waiting for the game to pass it on to the main loop, as `wakes` says.
+    struct Sending {
+        stream: TcpStream,
+        wakes: Receiver<()>,
+        events: Rc<Cell<usize>>,
+        most: usize,
+    }
+
+    impl crate::Layer for Sending {
+        fn event(&mut self, _: &mut Context, _: &Event<'_>) -> std::ops::ControlFlow<()> {
+            self.events.set(self.events.get() + 1);
+            if self.events.get() < self.most {
+                let input =
+                    json!({"id": 1, "method": "input", "params": {"events": ["cursor_left"]}});
+                (self.stream)
+                    .write_all(format!("{input}\n").as_bytes())
+                    .expect("written");
+                self.wakes.recv_timeout(DEADLINE).expect("passed on");
+            }
+            std::ops::ControlFlow::Continue(())
+        }
+    }
+
+    /// A frame answers the requests that came before it started, and those that come as it does
+    /// wait for the next, so that a client that keeps sending can't keep the frame from going on.
+    #[test]
+    fn a_frame_answers_the_requests_that_came_before_it_started() {
+        let (mut api, session) = started("Api Frames Go On");
+        let (passed, wakes) = mpsc::channel();
+        api.set_waker(Box::new(move || {
+            let _ = passed.send(());
+        }));
+        let (mut stream, mut answers) = said_hello(&session);
+        let input = json!({"id": 1, "method": "input", "params": {"events": ["cursor_left"]}});
+        stream
+            .write_all(format!("{input}\n").as_bytes())
+            .expect("written");
+        wakes.recv_timeout(DEADLINE).expect("passed on");
+        let events = Rc::new(Cell::new(0));
+        let mut stack = Stack::default();
+        stack.push_layer(Sending {
+            stream: stream.try_clone().expect("a clone"),
+            wakes,
+            events: events.clone(),
+            most: 3,
+        });
+        let mut cx = Context::seeded(13);
+        let mut stepper = Stepper::default();
+        for frame in 1..=3 {
+            api.serve(&mut cx, &mut stack, &mut stepper);
+            assert_eq!(
+                events.get(),
+                frame,
+                "the frame answered those that came after it started"
+            );
+            let answer = gg_api::read_line(&mut answers).expect("an answer");
+            assert_eq!(answer.as_deref(), Some("{\"id\":1,\"result\":{}}"));
+        }
     }
 
     /// Each request needs its own capability, or `read` or `write` of the world, of the one type it
@@ -3920,14 +4139,14 @@ mod tests {
         let cx = Context::seeded(2).root(dir.0.clone());
         let (to, answers) = mpsc::channel();
         api.listing.push(Listing {
-            reply: Reply { id: 7, to },
+            reply: reply(7, &to),
             look: u64::MAX,
             kind: None,
             skip: 0,
             take: 10,
         });
         api.frames_paused(&cx);
-        let answer = answers.try_recv().expect("answered");
+        let (answer, _) = answers.try_recv().expect("answered");
         assert!(answer.contains("\"a.png\""), "{answer}");
         assert!(api.listing.is_empty());
     }
@@ -4356,21 +4575,25 @@ mod tests {
         let (to, answers) = mpsc::channel();
         for (id, own) in [(1, true), (2, false)] {
             api.asked.push(Capturing {
-                reply: Reply { id, to: to.clone() },
+                reply: reply(id, &to),
                 path: Some(dir.0.join(format!("{id}.png"))),
                 own,
                 since: Instant::now(),
             });
         }
-        let reply = Reply { id: 3, to };
-        api.picks.push(([0.0, 0.0], None, reply));
+        api.picks.push(Picking {
+            at: [0.0, 0.0],
+            ticket: None,
+            named: true,
+            reply: reply(3, &to),
+        });
         // Each frame: whether it's bare, rides with captures, is published, is paced for and has
         // asked the pick.
         let mut frames = Vec::new();
         for _ in 0..4 {
             api.serve(&mut cx, &mut Stack::default(), &mut stepper);
             let bare = cx.look.bare;
-            let asked = api.picks[0].1.is_some();
+            let asked = api.picks[0].ticket.is_some();
             api.frame_back(&mut frame, &cx, stepper.ticks);
             let skip = frame.publish.as_ref().expect("published").skip;
             frames.push((bare, frame.capture, !skip, api.handing().is_some(), asked));
@@ -4395,7 +4618,7 @@ mod tests {
         assert_eq!(frames, expected);
         let mut widths = [0; 2];
         for _ in 0..2 {
-            let line = answers.recv_timeout(DEADLINE).expect("an answer");
+            let (line, _) = answers.recv_timeout(DEADLINE).expect("an answer");
             let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
             let id = answer["id"].as_u64().expect("its ID") as usize;
             widths[id - 1] = answer["result"]["width"]
@@ -4429,7 +4652,7 @@ mod tests {
             .expect("a time that long ago");
         for (id, since) in [(1, long_ago), (2, Instant::now())] {
             api.asked.push(Capturing {
-                reply: Reply { id, to: to.clone() },
+                reply: reply(id, &to),
                 path: Some(dir.0.join(format!("{id}.png"))),
                 own: false,
                 since,
@@ -4438,7 +4661,7 @@ mod tests {
         // The answer that comes next: its capture's ID, and whether it says what it shows was
         // still on its way.
         let answer = |timeout| {
-            let line = answers.recv_timeout(timeout).ok()?;
+            let (line, _) = answers.recv_timeout(timeout).ok()?;
             let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
             let id = answer["id"].as_u64().expect("its ID");
             Some((id, answer["result"]["streaming"].as_bool()))
@@ -4472,7 +4695,8 @@ mod tests {
 
     /// A client's pick is answered with the entity drawn at its pixel of the view, about as the
     /// frames that read it come back, named as it's answered; none where nothing is, or outside
-    /// the view; and an entity gone by the answer by its ID alone.
+    /// the view; and an entity gone by the answer by its ID alone, as is any to a client granted
+    /// `view` without `read` of `Name`.
     #[test]
     fn a_pick_is_answered_with_the_entity_drawn_there() {
         let (mut api, session) = started("Api Picks");
@@ -4491,11 +4715,20 @@ mod tests {
         let mut frame = Extracted::default();
         cx.extract(&mut frame, view);
         let mut stepper = Stepper::default();
-        let client = |mut client: Client| {
-            let mut pick = |at: [f64; 2]| {
+        let granted = session.clone();
+        let client = move |mut client: Client| {
+            let pick = |client: &mut Client, at: [f64; 2]| {
                 (client.call_as::<Picked>("pick", json!({ "at": at }))).expect("an answer")
             };
-            [[3.5, 4.0], [60.0, 4.0], [80.0, 4.0], [-1.0, 4.0]].map(&mut pick)
+            let ats = [[3.5, 4.0], [60.0, 4.0], [80.0, 4.0], [-1.0, 4.0]];
+            let picked = ats.map(|at| pick(&mut client, at));
+            let names = [&["view"][..], &["view", "read:Name"]].map(|grant| {
+                let grant = Some(grant.iter().map(|&name| name.to_owned()).collect());
+                let connected = Client::connect_granted(&granted, "test", grant, DEADLINE);
+                let mut client = connected.expect("it connects");
+                pick(&mut client, [3.5, 4.0]).name
+            });
+            (picked, names)
         };
         // As the renderer answers: the hero is drawn at the view's columns up to 50, the ghost's
         // pixels from 70, and nothing between.
@@ -4514,7 +4747,7 @@ mod tests {
                 (pick.tag, id)
             }));
         };
-        let picked = serving(
+        let (picked, names) = serving(
             &mut api,
             &mut cx,
             &mut Stack::default(),
@@ -4531,6 +4764,11 @@ mod tests {
             (None, None),
         ];
         assert_eq!(picked, expected);
+        assert_eq!(
+            names,
+            [None, Some("Hero".to_owned())],
+            "`view`, then `read:Name` too"
+        );
         assert!(api.picks.is_empty());
     }
 

@@ -229,7 +229,8 @@ impl Reader {
         let from = self.memory.slot(self.front);
         // SAFETY: the slot lies within the memory, which lives as long as `self`, and holds at
         // least the frame's bytes, as `take` checked; the game writes another slot, as the triple
-        // buffer has it, and one that breaks that can only tear the pixels copied, plain bytes.
+        // buffer has it, and one that breaks that can only tear the pixels copied, plain bytes, or,
+        // elsewhere than on Windows, end the client by shrinking the memory, as [`Memory`] says.
         unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), into.as_mut_ptr(), into.len()) };
     }
 
@@ -243,12 +244,16 @@ impl Reader {
 pub struct Writer {
     /// Shared with the [`Pacer`]s it gives.
     memory: Arc<Memory>,
-    /// The slot it writes.
-    back: u64,
+    /// The slot it writes, which it picks as it first publishes, as [`open`](Self::open) says.
+    back: Option<u64>,
 }
 
 impl Writer {
-    /// Opens the memory a client made and named `name`, as [`Reader::name`] gives it.
+    /// Opens the memory a client made and named `name`, as [`Reader::name`] gives it. The slot it
+    /// writes is the one neither the client's nor the latest as it first publishes, rather than as
+    /// it opens, so that it writes neither of theirs though another writer of the memory published
+    /// meanwhile, as a game's frame in flight does after a client asks for the view again, so long
+    /// as that one has published its last by then.
     ///
     /// Fails with `InvalidInput` for a name that isn't a view's, with `InvalidData` for memory that
     /// isn't laid out as a view's, or is laid out as another version of a view's, which it names,
@@ -277,33 +282,16 @@ impl Writer {
             && (capacity.checked_mul(SLOTS))
                 .and_then(|slots| slots.checked_add(SLOTS_AT as u64))
                 .is_some_and(|len| len <= memory.len as u64);
-        let slots = || {
-            let latest = header.latest.load(Ordering::Acquire) & !NEW;
-            (latest, header.front.load(Ordering::Acquire))
-        };
-        // A client taking a frame swaps the latest for the slot it reads, then says which it reads
-        // now: for that moment, the two are the same.
-        let mut read = slots();
-        for _ in 0..1000 {
-            if read.0 != read.1 {
-                break;
-            }
-            std::thread::yield_now();
-            read = slots();
-        }
-        let (latest, front) = read;
-        if !laid_out || latest >= SLOTS || front >= SLOTS || latest == front {
+        if !laid_out || spare(header).is_none() {
             let message = format!("the memory {name:?} isn't laid out as a view's");
             return Err(io::Error::new(io::ErrorKind::InvalidData, message));
         }
         // Checked against its length, and never read from the header again, which the client
         // could write over.
         memory.capacity = capacity as usize;
-        // The slot neither the latest nor the client's: the slots are 0, 1 and 2.
-        let back = SLOTS - latest - front;
         Ok(Self {
             memory: Arc::new(memory),
-            back,
+            back: None,
         })
     }
 
@@ -345,10 +333,19 @@ impl Writer {
             let message = format!("a {width}x{height} frame doesn't fit in {capacity} bytes");
             return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
         }
-        let slot = self.memory.slot(self.back);
+        let mixed = || {
+            let message = "the view's slots don't hold together, as a client that wrote over them";
+            io::Error::new(io::ErrorKind::InvalidData, message)
+        };
+        let back = match self.back {
+            Some(back) => back,
+            None => spare(header).ok_or_else(mixed)?,
+        };
+        let slot = self.memory.slot(back);
         // SAFETY: the slot lies within the memory, which lives as long as `self` and the slice,
         // and holds the frame's bytes, as checked; the client reads another slot, as the triple
-        // buffer has it, and one that breaks that can only tear the pixels it reads.
+        // buffer has it, and one that breaks that can only tear the pixels it reads, or, elsewhere
+        // than on Windows, end the game by shrinking the memory, as [`Memory`] says.
         let pixels = unsafe { std::slice::from_raw_parts_mut(slot.as_ptr(), bytes(size)) };
         fill(pixels);
         // Wrapping, as a client that wrote over the header could have it at the most.
@@ -362,7 +359,7 @@ impl Writer {
             viewpoint,
             look,
         };
-        let written = &header.slots[self.back as usize];
+        let written = &header.slots[back as usize];
         written.size.store(pack(size), Ordering::Relaxed);
         written.number.store(number, Ordering::Relaxed);
         written.ticks.store(ticks, Ordering::Relaxed);
@@ -372,15 +369,36 @@ impl Writer {
             word.store(packed, Ordering::Relaxed);
         }
         written.look.store(look, Ordering::Relaxed);
-        let back = header.latest.swap(self.back | NEW, Ordering::AcqRel) & !NEW;
+        let latest = header.latest.swap(back | NEW, Ordering::AcqRel) & !NEW;
         header.published.store(number, Ordering::Release);
-        if back >= SLOTS || back == self.back {
-            let message = "the view's slots don't hold together, as a client that wrote over them";
-            return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+        if latest >= SLOTS || latest == back {
+            return Err(mixed());
         }
-        self.back = back;
+        self.back = Some(latest);
         Ok(frame)
     }
+}
+
+/// The slot neither the latest frame's nor the client's in the memory whose header is `header`:
+/// `None` if those don't hold together, as when a client wrote over them.
+fn spare(header: &Header) -> Option<u64> {
+    let slots = || {
+        let latest = header.latest.load(Ordering::Acquire) & !NEW;
+        (latest, header.front.load(Ordering::Acquire))
+    };
+    // A client taking a frame swaps the latest for the slot it reads, then says which it reads
+    // now: for that moment, the two are the same.
+    let mut read = slots();
+    for _ in 0..1000 {
+        if read.0 != read.1 {
+            break;
+        }
+        std::thread::yield_now();
+        read = slots();
+    }
+    let (latest, front) = read;
+    // The slots are 0, 1 and 2.
+    (latest < SLOTS && front < SLOTS && latest != front).then(|| SLOTS - latest - front)
 }
 
 /// What a game reads of the memory to pace its frames by the client's taking them, from a thread
@@ -483,6 +501,10 @@ fn is_name(name: &str) -> bool {
 static MADE: AtomicU32 = AtomicU32::new(0);
 
 /// Memory shared with another process, mapped into this one, by its name.
+///
+/// Elsewhere than on Windows, whose mapping keeps its size, a process that shrinks the POSIX object
+/// once it's mapped, as any of the user's own can, has a read or write past its new end fault with
+/// `SIGBUS`, which ends this one: a crash, not a read of anything else, as DEFECTS.md says.
 struct Memory {
     name: String,
     base: NonNull<u8>,
@@ -842,6 +864,32 @@ mod tests {
         let mut pixel = [0; 4];
         reader.read(&mut pixel);
         assert_eq!(pixel, [1; 4], "the frame taken stays as it was");
+        assert_eq!(reader.take().map(|frame| frame.number), Some(3));
+        reader.read(&mut pixel);
+        assert_eq!(pixel, [3; 4]);
+    }
+
+    /// As a game's frame in flight publishes after a client has asked for the view again, which
+    /// opened a writer of its own meanwhile.
+    #[test]
+    fn a_writer_opened_while_another_publishes_writes_the_slot_neither_end_has() {
+        let mut reader = Reader::create(1, 1).expect("memory for a view");
+        let mut first = Writer::open(reader.name()).expect("the memory");
+        first
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(1))
+            .expect("a frame");
+        let mut again = Writer::open(reader.name()).expect("the memory again");
+        first
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(2))
+            .expect("the frame in flight");
+        drop(first);
+        assert_eq!(reader.take().map(|frame| frame.number), Some(2));
+        again
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(3))
+            .expect("a frame");
+        let mut pixel = [0; 4];
+        reader.read(&mut pixel);
+        assert_eq!(pixel, [2; 4], "the frame taken stays as it was");
         assert_eq!(reader.take().map(|frame| frame.number), Some(3));
         reader.read(&mut pixel);
         assert_eq!(pixel, [3; 4]);

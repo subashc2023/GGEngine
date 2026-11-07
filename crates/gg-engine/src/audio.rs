@@ -4,7 +4,7 @@
 //! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
 //! ARCHITECTURE.md's Audio says.
 
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
@@ -389,6 +389,8 @@ struct Stream {
     decoding: Decoding,
     /// How many frames the track holds, as its file says.
     frames: usize,
+    /// Whether the decoder has panicked, after which the stream decodes no more.
+    panicked: bool,
 }
 
 impl Stream {
@@ -398,7 +400,33 @@ impl Stream {
         let decoding = Decoding::new(bytes)?;
         let frames = decoding.frames.ok_or(FromFileError::UnknownDuration)?;
         let frames = usize::try_from(frames).map_err(|_| FromFileError::UnknownDuration)?;
-        Ok(Self { decoding, frames })
+        Ok(Self {
+            decoding,
+            frames,
+            panicked: false,
+        })
+    }
+
+    /// Does `decode` to it, on kira's thread, which catches no panic: one of symphonia's on what's
+    /// past the file's first packet, which [`read_music`] checked, is the file's doing, as a sound's
+    /// is, so it fails as what doesn't decode does, which stops the play and `audio.music_failed`
+    /// tells of, rather than ending the thread, which would leave the play silent for good. Once
+    /// one has panicked, it fails at once. gg-core's panic hook still logs the panic.
+    fn caught<T>(
+        &mut self,
+        decode: impl FnOnce(&mut Self) -> Result<T, FromFileError>,
+    ) -> Result<T, FromFileError> {
+        let panicked = || {
+            let message = "its decoder panicked on it";
+            FromFileError::IoError(io::Error::new(io::ErrorKind::InvalidData, message))
+        };
+        if self.panicked {
+            return Err(panicked());
+        }
+        panic::catch_unwind(AssertUnwindSafe(|| decode(self))).unwrap_or_else(|_| {
+            self.panicked = true;
+            Err(panicked())
+        })
     }
 }
 
@@ -414,22 +442,24 @@ impl Decoder for Stream {
     }
 
     fn decode(&mut self) -> Result<Vec<Frame>, FromFileError> {
-        match self.decoding.decode()? {
+        self.caught(|stream| match stream.decoding.decode()? {
             Some(buffer) => frames(&buffer),
             None => Ok(Vec::new()),
-        }
+        })
     }
 
     fn seek(&mut self, index: usize) -> Result<usize, FromFileError> {
-        let to = SeekTo::Timestamp {
-            ts: Timestamp::new(index as i64),
-            track_id: self.decoding.track,
-        };
-        let seeked = self.decoding.reader.seek(SeekMode::Accurate, to)?;
-        // As the codec would otherwise run on from what it decoded before the seek.
-        self.decoding.codec.reset();
-        let at = usize::try_from(seeked.actual_ts.get()).unwrap_or(0);
-        Ok(at.min(self.frames))
+        self.caught(|stream| {
+            let to = SeekTo::Timestamp {
+                ts: Timestamp::new(index as i64),
+                track_id: stream.decoding.track,
+            };
+            let seeked = stream.decoding.reader.seek(SeekMode::Accurate, to)?;
+            // As the codec would otherwise run on from what it decoded before the seek.
+            stream.decoding.codec.reset();
+            let at = usize::try_from(seeked.actual_ts.get()).unwrap_or(0);
+            Ok(at.min(stream.frames))
+        })
     }
 }
 
@@ -917,7 +947,12 @@ fn heard(listener: Option<&Mat4>, at: Option<Vec3>) -> (Panning, Decibels) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use gg_renderer::Projection;
+    use symphonia::core::codecs::CodecInfo;
+    use symphonia::core::codecs::audio::{AudioCodecParameters, FinalizeResult};
+    use symphonia::core::packet::PacketRef;
 
     use super::*;
     use crate::Transform;
@@ -1121,6 +1156,62 @@ pub(crate) mod tests {
             passes.push((start, frames));
         }
         assert!(passes[0] == passes[1], "the second pass decodes otherwise");
+    }
+
+    /// A codec that decodes as the one it wraps does, counting each packet, but panics at those
+    /// past the first, as symphonia's can at a malformed one.
+    struct Panicking(Box<dyn AudioDecoder>, Arc<AtomicU32>);
+
+    impl AudioDecoder for Panicking {
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+
+        fn codec_info(&self) -> &CodecInfo {
+            self.0.codec_info()
+        }
+
+        fn codec_params(&self) -> &AudioCodecParameters {
+            self.0.codec_params()
+        }
+
+        fn decode_ref(
+            &mut self,
+            packet: &PacketRef<'_>,
+        ) -> symphonia::core::errors::Result<GenericAudioBufferRef<'_>> {
+            let decoded = self.1.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(decoded, 0, "a packet malformed past the first");
+            self.0.decode_ref(packet)
+        }
+
+        fn finalize(&mut self) -> FinalizeResult {
+            self.0.finalize()
+        }
+
+        fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
+            self.0.last_decoded()
+        }
+    }
+
+    /// Music whose decoder panics past its first packet, which reading it checked, fails as what
+    /// doesn't decode does, on kira's thread, which then stops its play and tells of it, rather than
+    /// the panic ending the thread; and from then on fails at once, without decoding again.
+    #[test]
+    fn music_whose_decoder_panics_as_it_plays_fails() {
+        let bytes = include_bytes!("../tests/audio/tone.ogg");
+        let stream = Stream::new(bytes.as_slice().into()).expect("Ogg Vorbis");
+        let decoded = Arc::new(AtomicU32::new(0));
+        let codec = Box::new(Panicking(stream.decoding.codec, decoded.clone()));
+        let decoding = Decoding {
+            codec,
+            ..stream.decoding
+        };
+        let mut stream = Stream { decoding, ..stream };
+        stream.decode().expect("the first packet");
+        let error = stream.decode().expect_err("the packet past it");
+        assert!(error.to_string().contains("panicked"), "{error}");
+        assert!(stream.decode().is_err() && stream.seek(0).is_err());
+        assert_eq!(decoded.load(Ordering::Relaxed), 2, "decoded again");
     }
 
     /// The music one layer had play last plays, until another or none: playing it again starts
