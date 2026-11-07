@@ -101,13 +101,14 @@ nu-ansi-term = "0.50.3"
 png = "0.18.1"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
-# 2D physics. enhanced-determinism, so that a step gives the same bits on every platform: its own
-# glam's scalar math and libm's functions, simba's libm, ordered maps in place of hashed ones, and
-# zeros of one sign; its solver's SIMD stays four lanes wide, which keeps that, where eight
-# wouldn't. Its glam is 0.33, not the engine's, so vectors cross between them as numbers.
-# serde-serialize, so that snapshot files hold its bodies and contacts, which a restored world
-# steps on from as the world saved would have.
+# 2D and 3D physics. enhanced-determinism, so that a step gives the same bits on every platform: its
+# own glam's scalar math and libm's functions, simba's libm, ordered maps in place of hashed ones,
+# and zeros of one sign; its solver's SIMD stays four lanes wide, which keeps that, where eight
+# wouldn't. Its glam is 0.33, not the engine's, so vectors and rotations cross between them as
+# numbers. serde-serialize, so that snapshot files hold its bodies and contacts, which a restored
+# world steps on from as the world saved would have.
 rapier2d = { version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
+rapier3d = { version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 # The job system's pool and `join`, with the thread that ticks as a thread of the pool: `join` from
 # one keeps its job on the stack, where a call from outside the pool allocates through its queue.

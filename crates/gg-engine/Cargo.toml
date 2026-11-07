@@ -23,6 +23,7 @@ ktx2.workspace = true
 mlua.workspace = true
 png.workspace = true
 rapier2d.workspace = true
+rapier3d.workspace = true
 rayon-core.workspace = true
 rfd = { workspace = true, optional = true }
 ron.workspace = true

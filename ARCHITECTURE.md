@@ -111,7 +111,7 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   place of the one open as a close of the editor goes, asking before unsaved edits go.
   [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a game's package without the game's code, its start
-  scene, its Luau scripts and 2D physics, as the showcase's package runs, and shows how a game
+  scene, its Luau scripts and physics, as the showcase's package runs, and shows how a game
   builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs, and which
   builds a game as it ships, `gg ship`, as [Builds](#builds) says, and fetches a project's files
@@ -904,7 +904,7 @@ such as a value nested deeper than a scene's may, isn't saved.
 have the rest.
 
 A world holds resources beside its entities, a value of each type, for the rest of the simulation,
-such as 2D physics' bodies and contacts. Snapshots copy them, so that a restored world steps as the
+such as physics' bodies and contacts. Snapshots copy them, so that a restored world steps as the
 one it was taken from did, and snapshot files hold those whose types implement `Saved`, as physics'
 does through rapier's own serialization, while a restored run keeps those its layers made as they
 loaded of the other types; no scene, hash, recording or dump holds them, so a resource holds what
@@ -1222,20 +1222,27 @@ and scenes, physics and the editor share these axes.
 
 ## Physics
 
-2D physics is rapier2d's, in gg-engine's `physics` module, and games reach it through components: an
-entity with a `Transform` and a `RigidBody2D` is a body, moving in the XY plane, and a
-`BoxCollider2D` or a `CircleCollider2D` beside it, or both, is the shape it collides as, in its
-entity's space, so that it turns and scales with it; `step_physics` is a system a layer's tick runs.
-rapier2d is built with `enhanced-determinism`, so that a step gives the same bits on every platform.
-Physics' state, rapier's bodies, colliders and contacts and what sleeps, is the world's `Physics2D`
-resource, which snapshots copy, as [ECS](#ecs) describes: bodies made again from their components
-alone wouldn't step as the world did. A body under a parent isn't moved, since its transform is in
-its parent's space (`physics.child_body`).
+Physics is rapier's, rapier2d's in 2D and rapier3d's in 3D, in gg-engine's `physics` module, and
+games reach it through components. An entity with a `Transform` and a `RigidBody2D` is a body
+moving in the XY plane, and a `BoxCollider2D` or a `CircleCollider2D` beside it, or both, is the
+shape it collides as; one with a `RigidBody3D` moves in space, its translation and rotation whole,
+and collides as whichever of a `BoxCollider3D`, a `SphereCollider3D` and a `CapsuleCollider3D` it
+has. Colliders are in their entity's space, so that they turn and scale with it: a box by its
+scale along each axis, a circle or a sphere by the largest, and a capsule, upright along its Y as a
+character stands, by its scale along Y for its height and the larger along X and Z for its radius.
+`step_physics` is a system a layer's tick runs, stepping 2D physics, then 3D. rapier is built with
+`enhanced-determinism`, so that a step gives the same bits on every platform. Physics' state,
+rapier's bodies, colliders and contacts and what sleeps, is the world's `Physics2D` and `Physics3D`
+resources, each given to a world as it first steps with a body of its kind, which snapshots copy,
+as [ECS](#ecs) describes: bodies made again from their components alone wouldn't step as the world
+did. A body under a parent isn't moved, since its transform is in its parent's space
+(`physics.child_body`).
 
 `Context::set_colliders_shown` outlines the world's colliders where their entities draw, in lines,
-which draw over the rest of the view but where an opaque mesh is nearer, as [Rendering](#rendering)
-says, rather than nudged toward the camera: so they show from behind a sprite as from in front of
-it, since sprites test depth without writing it.
+a sphere by its rings about its three axes and a capsule by its rings, its side's lines and its
+caps' arcs, which draw over the rest of the view but where an opaque mesh is nearer, as
+[Rendering](#rendering) says, rather than nudged toward the camera: so they show from behind a
+sprite as from in front of it, since sprites test depth without writing it.
 
 ## Rendering
 
@@ -1972,7 +1979,7 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
-| Physics | `rapier2d`, with `enhanced-determinism`, for 2D, its state a resource of the world; see [Physics](#physics) |
+| Physics | `rapier2d` and `rapier3d`, with `enhanced-determinism`, for 2D and 3D, their state resources of the world; see [Physics](#physics) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |

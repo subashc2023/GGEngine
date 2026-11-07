@@ -122,7 +122,7 @@ look at before committing them. The sandbox's and the demo's world hashes, at ea
 run, are references too, which CI checks on every platform: a change to their simulations, to what
 the hash reads, or to glam, libm, rapier2d or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
 test -p sandbox -p shards` rewrites them alone, with those of the demo's live recording,
-`games/shards/tests/references/live.recording`. gg-engine's `physics.rs` holds another, edited by
+`games/shards/tests/references/live.recording`. gg-engine's `physics/` holds two more, edited by
 hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
 new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
 

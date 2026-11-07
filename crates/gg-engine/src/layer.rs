@@ -54,7 +54,10 @@ use crate::net::{Outside, Session, Turn};
 use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
 use crate::perf::Perf;
-use crate::physics::{self, CircleCollider2D, Physics2D};
+use crate::physics::{
+    self, BoxCollider3D, CapsuleCollider3D, CircleCollider2D, Physics2D, Physics3D, RigidBody3D,
+    SphereCollider3D,
+};
 use crate::placed::Placed;
 use crate::recording::Recorder;
 use crate::recording::text::Text;
@@ -578,11 +581,16 @@ impl Context {
             world.register::<BoxCollider2D>()?;
             world.register::<Circle>()?;
             world.register::<CircleCollider2D>()?;
+            world.register::<RigidBody3D>()?;
+            world.register::<BoxCollider3D>()?;
+            world.register::<SphereCollider3D>()?;
+            world.register::<CapsuleCollider3D>()?;
             world.register::<ModelRoot>()?;
             world.register::<ModelNode>()?;
             world.register::<font::Text>()?;
             world.register::<Owner>()?;
-            world.register_saved::<Physics2D>()
+            world.register_saved::<Physics2D>()?;
+            world.register_saved::<Physics3D>()
         });
         registered.expect("the engine's components describe themselves");
         let mut textures = Textures::default();
@@ -2976,11 +2984,12 @@ impl Context {
     }
 
     /// Has the world's colliders' outlines draw each frame from then on, or not: each
-    /// [`BoxCollider2D`] and [`CircleCollider2D`] whose entity has a [`Transform`], as physics
-    /// shapes it, 2 points wide in light green, where its entity draws, over everything else the
-    /// view draws but a nearer opaque mesh, as lines are; with its entity's ID, so that a
-    /// [pick](Self::pick) of an outline finds its entity. A collider's outline draws whether
-    /// physics moves its entity or not, as it doesn't without a [`RigidBody2D`] or under a parent.
+    /// [`BoxCollider2D`], [`CircleCollider2D`], [`BoxCollider3D`], [`SphereCollider3D`] and
+    /// [`CapsuleCollider3D`] whose entity has a [`Transform`], as physics shapes it, 2 points wide
+    /// in light green, where its entity draws, over everything else the view draws but a nearer
+    /// opaque mesh, as lines are; with its entity's ID, so that a [pick](Self::pick) of an outline
+    /// finds its entity. A collider's outline draws whether physics moves its entity or not, as it
+    /// doesn't without a [`RigidBody2D`] or a [`RigidBody3D`], or under a parent.
     pub fn set_colliders_shown(&mut self, shown: bool) {
         self.colliders = shown;
     }

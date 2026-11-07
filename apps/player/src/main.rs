@@ -1,5 +1,5 @@
 //! The reference player: runs a game's package, which `tools/cook` writes, without the game's code,
-//! its start scene and its Luau scripts, which act at its ticks, and its 2D physics, as the
+//! its start scene and its Luau scripts, which act at its ticks, and its physics, as the
 //! showcase's package runs; and the reference for how a game builds a player of its own. It runs
 //! from the package `--package` names, or else `<executable>.ggpk` beside its executable,
 //! `gg-player.ggpk` as it's built.
@@ -18,7 +18,7 @@ fn main() -> ExitCode {
 
 /// The player's layer: as it loads, a VM loads every Luau script the package holds, in the order of
 /// their paths; as it attaches, the package's start scene loads; and at each tick the scripts run,
-/// then 2D physics steps. It has no panels, nor components of a game's own: a scene that names a
+/// then physics steps. It has no panels, nor components of a game's own: a scene that names a
 /// component no script declares doesn't load. Anything that fails ends the run, with its error,
 /// through [`Context::fail`].
 #[derive(Default)]

@@ -5,8 +5,8 @@
 //! data to `gg-renderer` on a thread of its own, a frame behind, and the job system, which a tick's
 //! systems split a query's rows across;
 //! reflection, which describes the components' types so that tools reach them by name, and the
-//! Inspector, which edits them; scripts, components that act at ticks; 2D physics, through rapier,
-//! whose state is a resource of the world; scenes and prefabs, the world's entities as canonical
+//! Inspector, which edits them; scripts, components that act at ticks; 2D and 3D physics, through
+//! rapier, whose state is a resource of the world; scenes and prefabs, the world's entities as canonical
 //! text; operations, the authoring changes made to the world, each with its inverse, and their
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
@@ -210,7 +210,8 @@ pub use name::Name;
 pub use owner::Owner;
 pub use perf::PerfPanel;
 pub use physics::{
-    BodyType, BoxCollider2D, CircleCollider2D, Physics2D, RigidBody2D, step_physics,
+    BodyType, BoxCollider2D, BoxCollider3D, CapsuleCollider3D, CircleCollider2D, Physics2D,
+    Physics3D, RigidBody2D, RigidBody3D, SphereCollider3D, step_physics,
 };
 use recording::Recorder;
 #[doc(hidden)]

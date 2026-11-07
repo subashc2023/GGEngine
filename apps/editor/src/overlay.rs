@@ -42,7 +42,7 @@ pub struct Toolbar {
     /// neither the grid nor the gizmo: while the game plays, whether it's Play rather than
     /// Simulate.
     pub world_camera: bool,
-    /// Whether the game's 2D colliders' outlines show, over the rest of the view but a nearer
+    /// Whether the game's colliders' outlines show, over the rest of the view but a nearer
     /// opaque mesh, through either camera.
     pub colliders: bool,
 }
@@ -176,7 +176,7 @@ impl Toolbar {
                 }
                 if icon_button(ui, Icon::Colliders, self.colliders)
                     .on_hover_text(
-                        "Colliders: outlines each 2D collider where its entity draws, as physics \
+                        "Colliders: outlines each collider where its entity draws, as physics \
                          shapes it, whether the game plays or not",
                     )
                     .clicked()

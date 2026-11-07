@@ -27,6 +27,7 @@ deny = [
     { crate = "gilrs-core", wrappers = ["gilrs"], reason = "gg-engine owns the window and input" },
     { crate = "rayon-core", wrappers = ["gg-engine"], reason = "gg-engine's jobs module is the way into the pool" },
     { crate = "rapier2d", wrappers = ["gg-engine"], reason = "gg-engine's physics module is the way into rapier" },
+    { crate = "rapier3d", wrappers = ["gg-engine"], reason = "gg-engine's physics module is the way into rapier" },
     { crate = "fdsm", wrappers = ["gg-engine"], reason = "gg-engine's font module bakes fonts' fields" },
     { crate = "harfrust", wrappers = ["gg-engine", "epaint"], reason = "gg-engine's font module shapes games' text, and egui's its own" },
     { crate = "skrifa", wrappers = ["gg-engine", "epaint"], reason = "gg-engine's font module reads games' fonts, and egui its own" },

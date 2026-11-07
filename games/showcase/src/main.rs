@@ -10,14 +10,16 @@
 //! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
 //! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); the
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
-//! shows behind them (`sky.ron`); models casting a sun's shadows (`shadows.ron`); and, once `cargo
+//! shows behind them (`sky.ron`); models casting a sun's shadows (`shadows.ron`); 3D physics,
+//! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
+//! swept about within walls (`physics3d.ron`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and Amazon
 //! Lumberyard Bistro, its materials of specular and glossiness, its images DDS files of BC7, lit by
 //! its own sun and 96 point lights under that sky (`bistro.ron`), and 16 of it, 4 by 4, each with
 //! its own lights, its 16 suns' light exposed 4 stops down, from the same street of one of the
 //! four in the middle (`bistro_grid.ron`). Its
 //! Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`,
-//! turn and bob what they're on at each tick, and 2D physics steps, so that each scene moves as it
+//! turn and bob what they're on at each tick, and physics steps, so that each scene moves as it
 //! plays, in the editor from its Play, and in the reference player, which runs the game's package
 //! without its code.
 
@@ -50,7 +52,7 @@ const SCRIPTS: [&str; 2] = ["scripts/bob.luau", "scripts/spin.luau"];
 
 /// The game's layer: it loads the scripts as it loads, which declares their components, so that
 /// its scenes, the Inspector's Add Component and the tool API know them before any entity has one;
-/// loads the start scene as it attaches; and at each tick runs the scripts and steps 2D physics. A
+/// loads the start scene as it attaches; and at each tick runs the scripts and steps physics. A
 /// script or the start scene that doesn't load ends the run with its error, through
 /// [`Context::fail`].
 struct Showcase {

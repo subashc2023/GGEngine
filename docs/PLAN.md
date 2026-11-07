@@ -119,8 +119,32 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A visibility buffer** (2026-11-06)
 - **TAA** (2026-11-06)
 - **Phase 13, GPU-driven rendering** (2026-11-06)
+- **3D physics** (2026-11-07)
 
 ## Now
+
+**Phase 14, 3D gameplay**, as Next has it. Its milestones after 3D physics, in order:
+
+- **Characters and queries.** A `CharacterController3D` beside a `CapsuleCollider3D`: rapier's
+  kinematic character controller moving its body each tick by what a game asks of it, sliding along
+  walls, climbing slopes up to a limit and steps up to a height, kept on the ground going down, and
+  saying whether it stands on something, its state the world's, so that replays and peers move it
+  alike. Raycasts and shape casts against the world's colliders, from code and scripts, giving the
+  entity hit, where, and the normal there; and static colliders of a model's triangles, so that a
+  character walks a level, as a showcase scene's does through Sponza, driven by an agent through the
+  tool API's input.
+- **Flipbooks and tweens.** A sprite animated through a sheet's cells at a rate, looping or once,
+  and tweens: a component's field eased from one value to another over a time, set from code,
+  scripts and scenes and stepped at the ticks, so that recordings and peers see them alike.
+- **Skeletal animation.** glTF's skins and animations: a model's joints its nodes' entities, which
+  its clips move at the ticks, sampled, blended and cross-faded as a component on its root says; the
+  joints' matrices handed to the renderer, which skins a mesh's vertices in a compute pass before
+  the view draws, culling it by bounds its clips reach. The showcase gets an animated character, a
+  skinned glTF under a free license.
+- **A networked 3D demo.** A small 3D game in `games/`, a project of its own: its players
+  characters among physics' bodies, the keys or a pad moving them and the mouse looking about, its
+  cursor grabbed, animated as they move, its sounds placed in 3D by where they are from the
+  listener. Done when Phase 14's *Done when* holds.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -148,8 +172,14 @@ Each phase ends in something you can run and check.
 
 Phases 11 to 13 are done, as Done has it, but for what Deferred holds.
 
-Later: 3D physics, animation (sprite flipbooks and tweens, then skeletal), particles, linked
-prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
+14. **3D gameplay.** 3D physics, through rapier3d, deterministic as 2D's is; characters that walk a
+    level, and queries of what's where; animation, sprites' flipbooks and fields' tweens, then
+    glTF's skins and animations, skinned on the GPU; proven by a small networked 3D demo. *Done
+    when* the demo plays alone, between lockstep and rollback peers and through a server, its
+    characters animated and moving under 3D physics, the world's hash at each tick of its seeded
+    run the same on every platform CI runs, and its live recording replays.
+
+Later: particles, linked prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
 
 ## Deferred
@@ -294,7 +324,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
-| Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |
+| Circle colliders' outlines, and the rings of spheres' and capsules', of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many such colliders, or a large one shows its sides |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one |
 | Keeping the view's depth past its passes, to sample: each frame clears it, and its last pass doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
 | Rendering the view's IDs only in frames that pick or outline: every frame renders them, for the reason [Rendering](../ARCHITECTURE.md#rendering) gives | A profile shows them |
@@ -483,10 +513,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
-| Colliders other than boxes and circles, such as capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
+| Colliders other than 2D's boxes and circles and 3D's boxes, spheres and capsules, such as polygons and convex hulls, but the triangle meshes Phase 14's characters bring; joints; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
+| A 3D body's rotation locked about some axes alone, as one that turns about Y but never tips: `RigidBody3D::fixed_rotation` locks all three, and what sets its rotation turns it | A game's body tips about some axes but not others |
+| Continuous collision detection, rapier's CCD, for a body fast enough to pass through a thin collider within a tick: each step tests where the bodies are at its end | A game's fast bodies pass through what they should hit, as bullets would |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
-| Telling the colliders physics doesn't simulate from those it does: one without a `RigidBody2D`, or under a parent, outlines as the rest do | Someone wonders why an outlined collider doesn't collide |
-| Gravity from a scene or a setting: `Physics2D::gravity` is code's, Earth's by default | A game sets its own |
+| Telling the colliders physics doesn't simulate from those it does: one without a `RigidBody2D` or a `RigidBody3D`, or under a parent, outlines as the rest do | Someone wonders why an outlined collider doesn't collide |
+| Gravity from a scene or a setting: `Physics2D::gravity` and `Physics3D::gravity` are code's, Earth's by default | A game sets its own |
 | Physics steps that allocate nothing: rapier allocates as contacts come and go, and the `ticks` test steps no physics | A game's ticks must allocate nothing with physics |
 | Physics' state in the world's hash, `--dump` and `World::difference`, which read entities alone, as they read no resource: a step that goes another way inside rapier shows in the bodies' transforms a tick later | A replay goes another way inside physics unseen for long |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
@@ -546,6 +578,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The last of a run's events through the API: `Exited cleanly` is logged once the API has stopped, so its file alone has it | A tool needs to know through the API how a run ended |
 
 ## Open questions
+
+- What does Phase 14's demo play? Recommendation: a game of its own rather than Shards made 3D,
+  which stays the 2D reference its recordings check: two players as characters on a walled field,
+  pushing physics' balls and crates into each other's goals, which uses each of the phase's
+  milestones and stays small. Decide before its milestone starts.
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the

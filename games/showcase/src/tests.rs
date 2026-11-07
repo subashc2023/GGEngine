@@ -33,8 +33,8 @@ fn every_asset_has_its_id_file_beside_it() {
     let project = Project::read(dir()).expect("the project reads");
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
     assert!(
-        found.assets.len() >= 12,
-        "5 textures, a sky's among them, 6 models and a font"
+        found.assets.len() >= 15,
+        "5 textures, a sky's among them, 9 models and a font"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 14, "{scenes:?}");
+    assert_eq!(scenes.len(), 15, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");

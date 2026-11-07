@@ -1,13 +1,10 @@
 //! 2D physics: bodies that rapier moves at the world's ticks, in the XY plane, as their entities'
-//! components describe them; the world's resource that holds rapier's bodies and contacts, which
-//! snapshots copy and snapshot files hold; and the colliders' outlines, drawn where their entities
-//! draw.
+//! components describe them, and the world's resource that holds rapier's bodies and contacts,
+//! which snapshots copy and snapshot files hold.
 
 use std::collections::HashSet;
-use std::f32::consts::TAU;
 
-use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4, libm};
-use gg_renderer::{Draws, Line, Shaders};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3, libm};
 use rapier2d::prelude::{
     BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle, ColliderSet,
     ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
@@ -15,31 +12,18 @@ use rapier2d::prelude::{
     SoftBodySet, Vector,
 };
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
+use super::{BodyType, Link, Links, Outline};
 use crate::draw::Poses;
 use crate::recording::text;
 use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
 
-/// How a [`RigidBody2D`] moves.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
-pub enum BodyType {
-    /// By its velocity, which gravity and what it hits change.
-    #[default]
-    Dynamic,
-    /// By its velocity alone, which nothing it hits changes, pushing what's dynamic aside, as a
-    /// moving platform does.
-    Kinematic,
-    /// Not at all: it stays where its transform puts it, as a floor or a wall does.
-    Static,
-}
-
-/// A body that 2D physics moves, at each tick a layer runs [`step_physics`] in: in the XY plane,
-/// its entity's [`Transform`] across and up and turned about Z, and the velocities here, which
-/// each step reads and writes back. It collides as its entity's [`BoxCollider2D`] and
-/// [`CircleCollider2D`], whichever it has, which give a dynamic body its mass too, both together
-/// where it has both. A body under a parent isn't moved, since its transform is in its parent's
-/// space (`physics.child_body`).
+/// A body that 2D physics moves, at each tick a layer runs [`step_physics`](crate::step_physics)
+/// in: in the XY plane, its entity's [`Transform`] across and up and turned about Z, and the
+/// velocities here, which each step reads and writes back. It collides as its entity's
+/// [`BoxCollider2D`] and [`CircleCollider2D`], whichever it has, which give a dynamic body its mass
+/// too, both together where it has both. A body under a parent isn't moved, since its transform is
+/// in its parent's space (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody2D {
     /// How it moves: dynamic, by its velocity, which gravity and what it hits change; kinematic, by
@@ -150,10 +134,11 @@ impl CircleCollider2D {
     }
 }
 
-/// The world's 2D physics, a [`Resource`](crate::Resource) that [`step_physics`] gives a world the
-/// first time it steps one without it, or that a game inserts first, with its gravity: rapier's
-/// bodies, colliders and contacts, which each step carries on from, and each body's entity, so that
-/// a snapshot restored steps as its world did. A world cleared, or whose entities a scene replaced,
+/// The world's 2D physics, a [`Resource`](crate::Resource) that
+/// [`step_physics`](crate::step_physics) gives a world the first time it steps one with a
+/// [`RigidBody2D`] and without it, or that a game inserts first, with its gravity: rapier's bodies,
+/// colliders and contacts, which each step carries on from, and each body's entity, so that a
+/// snapshot restored steps as its world did. A world cleared, or whose entities a scene replaced,
 /// keeps it, its bodies going at the next step, as their entities have.
 pub struct Physics2D {
     /// Which way everything dynamic falls, and how much faster it goes each second, in units a
@@ -162,19 +147,8 @@ pub struct Physics2D {
     rapier: Rapier,
     /// rapier's workspace, which a copy makes anew, since no step carries anything in it over.
     pipeline: PhysicsPipeline,
-    /// A body for each entity with a `RigidBody2D` and a `Transform`, but those under a parent, in
-    /// the order they came.
-    linked: Vec<Linked>,
-    /// Each body's index in `linked`, by its entity's slot; `NONE` for none.
-    by_slot: Vec<u32>,
-    /// The entities with bodies, as a step finds them, in memory kept from one step to the next.
-    found: Vec<Entity>,
-    /// The bodies under a parent, which aren't moved, warned of once each as they're found there.
-    children: Vec<Entity>,
+    links: Links<Linked>,
 }
-
-/// No body, in [`Physics2D::by_slot`].
-const NONE: u32 = u32::MAX;
 
 /// What rapier keeps from one step to the next.
 #[derive(Clone, Serialize, Deserialize)]
@@ -210,6 +184,12 @@ struct Linked {
     angle: f32,
 }
 
+impl Link for Linked {
+    fn entity(&self) -> Entity {
+        self.entity
+    }
+}
+
 impl Default for Physics2D {
     fn default() -> Self {
         Self {
@@ -230,10 +210,7 @@ impl Default for Physics2D {
                 },
             },
             pipeline: PhysicsPipeline::new(),
-            linked: Vec::new(),
-            by_slot: Vec::new(),
-            found: Vec::new(),
-            children: Vec::new(),
+            links: Links::default(),
         }
     }
 }
@@ -244,10 +221,7 @@ impl Clone for Physics2D {
             gravity: self.gravity,
             rapier: self.rapier.clone(),
             pipeline: PhysicsPipeline::new(),
-            linked: self.linked.clone(),
-            by_slot: self.by_slot.clone(),
-            found: Vec::new(),
-            children: self.children.clone(),
+            links: self.links.clone(),
         }
     }
 
@@ -256,9 +230,7 @@ impl Clone for Physics2D {
     fn clone_from(&mut self, source: &Self) {
         self.gravity = source.gravity;
         self.rapier.clone_from(&source.rapier);
-        self.linked.clone_from(&source.linked);
-        self.by_slot.clone_from(&source.by_slot);
-        self.children.clone_from(&source.children);
+        self.links.clone_from(&source.links);
     }
 }
 
@@ -305,7 +277,7 @@ impl Saved for Physics2D {
             text::write(&mut out, &component.to_value(), world);
             out
         };
-        let linked = self.linked.iter().map(|linked| SavedLinked {
+        let linked = self.links.linked.iter().map(|linked| SavedLinked {
             entity: id(linked.entity),
             body: linked.body,
             colliders: linked.colliders,
@@ -319,7 +291,7 @@ impl Saved for Physics2D {
             gravity: self.gravity.to_array(),
             rapier: &self.rapier,
             linked: linked.collect(),
-            children: self.children.iter().map(|&child| id(child)).collect(),
+            children: self.links.children.iter().map(|&child| id(child)).collect(),
         };
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
@@ -353,8 +325,8 @@ impl Saved for Physics2D {
         // What a step reaches by the links' handles, which text from elsewhere, a host's or a
         // server's, may name otherwise than rapier's sets hold: each body there and linked once,
         // its colliders on it, and each entity linked once.
-        let refused = |linked: &Linked, what: &str| {
-            let who = world.id(linked.entity);
+        let refused = |entity: Entity, what: &str| {
+            let who = world.id(entity);
             let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
             Error::new("physics.load", format!("{who}'s body {what}"))
         };
@@ -363,52 +335,35 @@ impl Saved for Physics2D {
         for linked in &linked {
             if rapier.bodies.get(linked.body).is_none() || !bodies.insert(linked.body) {
                 let what = "names no rigid body of rapier's, or another body's";
-                return Err(refused(linked, what));
+                return Err(refused(linked.entity, what));
             }
             let on = |collider: &ColliderHandle| {
                 rapier.colliders.get(*collider).and_then(Collider::parent) == Some(linked.body)
             };
             if !linked.colliders.iter().flatten().all(on) {
                 let what = "names a collider that isn't on its rigid body";
-                return Err(refused(linked, what));
+                return Err(refused(linked.entity, what));
             }
         }
-        let mut by_slot = Vec::new();
-        for (index, linked) in (0..).zip(&linked) {
-            if linked.entity != Entity::DEAD {
-                if by_slot.len() <= linked.entity.slot() {
-                    by_slot.resize(linked.entity.slot() + 1, NONE);
-                }
-                if by_slot[linked.entity.slot()] != NONE {
-                    return Err(refused(linked, "is its second"));
-                }
-                by_slot[linked.entity.slot()] = index;
-            }
-        }
+        let children = saved.children.into_iter().map(entity).collect();
+        let links = Links::new(linked, children);
+        let links = links.map_err(|twice| refused(twice, "is its second"))?;
         Ok(Self {
             gravity: Vec2::from_array(saved.gravity),
             rapier: saved.rapier,
             pipeline: PhysicsPipeline::new(),
-            linked,
-            by_slot,
-            found: Vec::new(),
-            children: saved.children.into_iter().map(entity).collect(),
+            links,
         })
     }
 }
 
-/// Steps `world`'s 2D physics a tick, [`Tick::DT`], as a system a layer's tick runs, after what
-/// sets its bodies' velocities, such as scripts: it takes in what changed since its last step,
-/// making a body for each entity that has come to have a [`RigidBody2D`] and a [`Transform`], in
-/// the order queries find them, and taking out each whose entity has gone or lost either; and takes
-/// a change to a body's components that the last step didn't make, a game's or an edit's, as where
-/// the body is, how fast it goes, how it moves or its collider. Then it moves the bodies, and writes
-/// where each went and how fast into its components: its translation across and up, its z as it
-/// was; its rotation turned about Z as far as the body turned, so that what turns it otherwise
-/// stays; and its velocities. A world without a [`Physics2D`] is given one first.
-pub fn step_physics(world: &mut World) {
-    let _zone = gg_core::zone!();
+/// Steps `world`'s 2D physics a tick, as [`step_physics`](crate::step_physics) describes, giving it
+/// a [`Physics2D`] first if it has a [`RigidBody2D`] and none.
+pub(super) fn step(world: &mut World) {
     if world.resource::<Physics2D>().is_none() {
+        if world.query::<&RigidBody2D>().next().is_none() {
+            return;
+        }
         world.insert_resource(Physics2D::default());
     }
     world.resource_scope(|world, physics: &mut Physics2D| physics.step(world));
@@ -417,7 +372,14 @@ pub fn step_physics(world: &mut World) {
 impl Physics2D {
     fn step(&mut self, world: &mut World) {
         self.unlink_gone(world);
-        self.link(world);
+        let rapier = &mut self.rapier;
+        self.links
+            .find::<RigidBody2D>(world, "RigidBody2D", |links, entity| {
+                match links.get_mut(entity) {
+                    Some(linked) => take_changes(rapier, linked, world),
+                    None => links.push(make_body(rapier, world, entity)),
+                }
+            });
         let Rapier {
             bodies,
             colliders,
@@ -451,9 +413,8 @@ impl Physics2D {
     /// Takes out each body whose entity has gone, lost its `RigidBody2D` or its `Transform`, or
     /// come under a parent; the rest keep their order.
     fn unlink_gone(&mut self, world: &World) {
-        let before = self.linked.len();
         let rapier = &mut self.rapier;
-        self.linked.retain(|linked| {
+        self.links.retain(|linked| {
             let entity = linked.entity;
             let has = world.get::<RigidBody2D>(entity).is_some()
                 && world.get::<Transform>(entity).is_some();
@@ -471,142 +432,11 @@ impl Physics2D {
             );
             false
         });
-        if self.linked.len() != before {
-            self.by_slot.fill(NONE);
-            for (index, linked) in (0..).zip(&self.linked) {
-                self.by_slot[linked.entity.slot()] = index;
-            }
-        }
-    }
-
-    /// Makes a body for each entity with a `RigidBody2D` and a `Transform` that has none, but those
-    /// under a parent, which it warns of once each; and takes in what changed of each other's.
-    fn link(&mut self, world: &World) {
-        let mut found = std::mem::take(&mut self.found);
-        found.clear();
-        let bodies = world.query::<(Entity, &RigidBody2D, &Transform)>();
-        found.extend(bodies.map(|(entity, ..)| entity));
-        self.children.retain(|&child| {
-            let body = world.get::<RigidBody2D>(child).is_some();
-            body && matches!(world.parent(child), Ok(Some(_)))
-        });
-        for &entity in &found {
-            if matches!(world.parent(entity), Ok(Some(_))) {
-                if !self.children.contains(&entity) {
-                    let id = world.id(entity).expect("found alive");
-                    warn!(
-                        code = "physics.child_body",
-                        entity = %id,
-                        "Entity {id}'s RigidBody2D isn't moved: it's under a parent, whose space \
-                         its transform is in"
-                    );
-                    self.children.push(entity);
-                }
-                continue;
-            }
-            let index = self.by_slot.get(entity.slot()).copied().unwrap_or(NONE);
-            match self.linked.get_mut(index as usize) {
-                Some(linked) if linked.entity == entity => {
-                    Self::take_changes(&mut self.rapier, linked, world);
-                }
-                _ => self.make_body(world, entity),
-            }
-        }
-        self.found = found;
-    }
-
-    /// Makes `entity`'s body, as its components say.
-    fn make_body(&mut self, world: &World, entity: Entity) {
-        let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
-        let transform = *world.get::<Transform>(entity).expect("found with one");
-        let box_collider = world.get::<BoxCollider2D>(entity).copied();
-        let circle_collider = world.get::<CircleCollider2D>(entity).copied();
-        let mut built = RigidBodyBuilder::new(body_type(rigid_body.body_type))
-            .translation(vector(transform.translation.truncate()))
-            .rotation(angle(transform.rotation))
-            .linvel(vector(rigid_body.velocity))
-            .angvel(rigid_body.angular_velocity);
-        if rigid_body.fixed_rotation {
-            built = built.lock_rotations();
-        }
-        let rapier = &mut self.rapier;
-        let body = rapier.bodies.insert(built);
-        // As rapier gives it back, which may be another float than the one it was given.
-        let angle = rapier.bodies[body].rotation().angle();
-        let mut colliders = [None; 2];
-        let made = [
-            box_collider.map(|made| made.collider(transform.scale)),
-            circle_collider.map(|made| made.collider(transform.scale)),
-        ];
-        for (handle, made) in colliders.iter_mut().zip(made) {
-            replace(rapier, handle, made, body);
-        }
-        let index = u32::try_from(self.linked.len()).expect("fewer than 2^32 bodies");
-        if self.by_slot.len() <= entity.slot() {
-            self.by_slot.resize(entity.slot() + 1, NONE);
-        }
-        self.by_slot[entity.slot()] = index;
-        self.linked.push(Linked {
-            entity,
-            body,
-            colliders,
-            rigid_body,
-            transform,
-            box_collider,
-            circle_collider,
-            angle,
-        });
-    }
-
-    /// Takes in what changed of `linked`'s components since the last step left them, which the
-    /// last step didn't make, into its body: waking it, so that it moves from there.
-    fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
-        let entity = linked.entity;
-        let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
-        let transform = *world.get::<Transform>(entity).expect("found with one");
-        let box_collider = world.get::<BoxCollider2D>(entity).copied();
-        let circle_collider = world.get::<CircleCollider2D>(entity).copied();
-        let body = &mut rapier.bodies[linked.body];
-        let was = linked.rigid_body;
-        if rigid_body.body_type != was.body_type {
-            body.set_body_type(body_type(rigid_body.body_type), true);
-        }
-        if rigid_body.fixed_rotation != was.fixed_rotation {
-            body.lock_rotations(rigid_body.fixed_rotation, true);
-        }
-        if rigid_body.velocity != was.velocity {
-            body.set_linvel(vector(rigid_body.velocity), true);
-        }
-        if rigid_body.angular_velocity != was.angular_velocity {
-            body.set_angvel(rigid_body.angular_velocity, true);
-        }
-        let at = transform.translation.truncate();
-        if at != linked.transform.translation.truncate() {
-            body.set_translation(vector(at), true);
-        }
-        if transform.rotation != linked.transform.rotation {
-            body.set_rotation(Rotation::new(angle(transform.rotation)), true);
-            linked.angle = body.rotation().angle();
-        }
-        let rescaled = transform.scale.truncate() != linked.transform.scale.truncate();
-        let [boxed, round] = &mut linked.colliders;
-        if box_collider != linked.box_collider || rescaled {
-            let made = box_collider.map(|made| made.collider(transform.scale));
-            replace(rapier, boxed, made, linked.body);
-        }
-        if circle_collider != linked.circle_collider || rescaled {
-            let made = circle_collider.map(|made| made.collider(transform.scale));
-            replace(rapier, round, made, linked.body);
-        }
-        linked.rigid_body = rigid_body;
-        linked.transform = transform;
-        linked.box_collider = box_collider;
-        linked.circle_collider = circle_collider;
     }
 
     /// Writes where each body that moves went, and how fast it goes, into its entity's components.
     fn write_back(&mut self, world: &mut World) {
-        for linked in &mut self.linked {
+        for linked in &mut self.links.linked {
             let body = &self.rapier.bodies[linked.body];
             if body.body_type() == RigidBodyType::Fixed {
                 continue;
@@ -631,6 +461,89 @@ impl Physics2D {
             linked.rigid_body = *rigid_body;
         }
     }
+}
+
+/// Makes `entity`'s body in `rapier`, as its components say, and gives back its link.
+fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
+    let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
+    let transform = *world.get::<Transform>(entity).expect("found with one");
+    let box_collider = world.get::<BoxCollider2D>(entity).copied();
+    let circle_collider = world.get::<CircleCollider2D>(entity).copied();
+    let mut built = RigidBodyBuilder::new(body_type(rigid_body.body_type))
+        .translation(vector(transform.translation.truncate()))
+        .rotation(angle(transform.rotation))
+        .linvel(vector(rigid_body.velocity))
+        .angvel(rigid_body.angular_velocity);
+    if rigid_body.fixed_rotation {
+        built = built.lock_rotations();
+    }
+    let body = rapier.bodies.insert(built);
+    // As rapier gives it back, which may be another float than the one it was given.
+    let angle = rapier.bodies[body].rotation().angle();
+    let mut colliders = [None; 2];
+    let made = [
+        box_collider.map(|made| made.collider(transform.scale)),
+        circle_collider.map(|made| made.collider(transform.scale)),
+    ];
+    for (handle, made) in colliders.iter_mut().zip(made) {
+        replace(rapier, handle, made, body);
+    }
+    Linked {
+        entity,
+        body,
+        colliders,
+        rigid_body,
+        transform,
+        box_collider,
+        circle_collider,
+        angle,
+    }
+}
+
+/// Takes in what changed of `linked`'s components since the last step left them, which the last
+/// step didn't make, into its body: waking it, so that it moves from there.
+fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
+    let entity = linked.entity;
+    let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
+    let transform = *world.get::<Transform>(entity).expect("found with one");
+    let box_collider = world.get::<BoxCollider2D>(entity).copied();
+    let circle_collider = world.get::<CircleCollider2D>(entity).copied();
+    let body = &mut rapier.bodies[linked.body];
+    let was = linked.rigid_body;
+    if rigid_body.body_type != was.body_type {
+        body.set_body_type(body_type(rigid_body.body_type), true);
+    }
+    if rigid_body.fixed_rotation != was.fixed_rotation {
+        body.lock_rotations(rigid_body.fixed_rotation, true);
+    }
+    if rigid_body.velocity != was.velocity {
+        body.set_linvel(vector(rigid_body.velocity), true);
+    }
+    if rigid_body.angular_velocity != was.angular_velocity {
+        body.set_angvel(rigid_body.angular_velocity, true);
+    }
+    let at = transform.translation.truncate();
+    if at != linked.transform.translation.truncate() {
+        body.set_translation(vector(at), true);
+    }
+    if transform.rotation != linked.transform.rotation {
+        body.set_rotation(Rotation::new(angle(transform.rotation)), true);
+        linked.angle = body.rotation().angle();
+    }
+    let rescaled = transform.scale.truncate() != linked.transform.scale.truncate();
+    let [boxed, round] = &mut linked.colliders;
+    if box_collider != linked.box_collider || rescaled {
+        let made = box_collider.map(|made| made.collider(transform.scale));
+        replace(rapier, boxed, made, linked.body);
+    }
+    if circle_collider != linked.circle_collider || rescaled {
+        let made = circle_collider.map(|made| made.collider(transform.scale));
+        replace(rapier, round, made, linked.body);
+    }
+    linked.rigid_body = rigid_body;
+    linked.transform = transform;
+    linked.box_collider = box_collider;
+    linked.circle_collider = circle_collider;
 }
 
 /// rapier's kind of body for `body_type`: kinematic by its velocity, as Box2D's kinematic bodies go.
@@ -666,60 +579,6 @@ fn replace(
     });
 }
 
-/// The color colliders' outlines draw in, linear: a light green, as physics debuggers draw them,
-/// apart from the grid's darker green axis.
-const OUTLINE: Vec4 = Vec4::new(0.3, 1.0, 0.3, 1.0);
-
-/// How wide colliders' outlines draw, in points: pixels of a window at a scale of 1.
-const OUTLINE_WIDTH: f32 = 2.0;
-
-/// How many lines a circle's outline draws with: round to within a pixel up to some 800 pixels
-/// across.
-const SEGMENTS: usize = 64;
-
-/// Draws into `draws` the outline of each [`BoxCollider2D`] and [`CircleCollider2D`] in `world`
-/// whose entity has a [`Transform`], 2 points wide in a window of `scale` pixels a point, where
-/// [`outlines`] has it, with the entity's ID, so that a pick of an outline finds its entity. Lines
-/// draw with the engine's line shader, which `shaders` adds the first time any do.
-pub(crate) fn draw_colliders(
-    world: &World,
-    poses: &Poses<'_>,
-    scale: f32,
-    draws: &mut Draws,
-    shaders: &mut Shaders,
-) {
-    let _zone = gg_core::zone!();
-    let width = OUTLINE_WIDTH * scale;
-    // A circle a unit in radius, around the origin, from +X counterclockwise and back.
-    let ring: [Vec3; SEGMENTS + 1] = std::array::from_fn(|i| {
-        let (sin, cos) = libm::sincosf(TAU * i as f32 / SEGMENTS as f32);
-        Vec3::new(cos, sin, 0.0)
-    });
-    outlines(world, poses, |outline, id| match outline {
-        Outline::Box(placed) => draws.push_rect(shaders, placed, OUTLINE, width, id),
-        Outline::Circle(placed) => {
-            for ends in ring.windows(2) {
-                let line = Line {
-                    from: ends[0],
-                    to: ends[1],
-                    color: OUTLINE,
-                    width,
-                };
-                draws.push_line(shaders, placed, line, id);
-            }
-        }
-    });
-}
-
-/// A collider's outline, as the matrix its shape draws by.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Outline {
-    /// The square a unit across around the origin, in its XY plane.
-    Box(Mat4),
-    /// The circle a unit in radius around the origin, in its XY plane.
-    Circle(Mat4),
-}
-
 /// Gives `each` the outline of each [`BoxCollider2D`] and [`CircleCollider2D`] in `world` whose
 /// entity has a [`Transform`], with the entity's ID, by table, then row: where its entity draws
 /// this frame as `poses` has it, between ticks and carried by its ancestors, as physics shapes it,
@@ -727,7 +586,7 @@ enum Outline {
 /// scaled, as large as its radius scaled by the larger of those scales. It outlines a collider
 /// whether physics moves its entity or not, as it doesn't without a [`RigidBody2D`] or under a
 /// parent, so that what's being made shows as it's made.
-fn outlines(world: &World, poses: &Poses<'_>, mut each: impl FnMut(Outline, u64)) {
+pub(super) fn outlines(world: &World, poses: &Poses<'_>, each: &mut impl FnMut(Outline, u64)) {
     let (Some(transform), boxed, round) = (
         world.component::<Transform>(),
         world.component::<BoxCollider2D>(),
@@ -749,7 +608,7 @@ fn outlines(world: &World, poses: &Poses<'_>, mut each: impl FnMut(Outline, u64)
                 let placed = matrix
                     * Mat4::from_translation(offset.extend(0.0))
                     * Mat4::from_scale(size.extend(1.0));
-                each(Outline::Box(placed), id);
+                each(Outline::Rect(placed), id);
             }
             if let Some(circles) = circles {
                 let CircleCollider2D { offset, radius, .. } = circles[row];
@@ -781,13 +640,10 @@ fn vector(v: Vec2) -> Vector {
 
 #[cfg(test)]
 mod tests {
-    use gg_renderer::{Circle, Sprite, Viewport};
-
     use super::*;
-    use crate::Context;
     use crate::interpolation::Past;
     use crate::placed::Placed;
-    use crate::render_thread::Extracted;
+    use crate::step_physics;
 
     /// A floor 10 units wide and a unit tall, its top at y 0.5, static.
     fn floor(world: &mut World) -> Entity {
@@ -1101,10 +957,10 @@ mod tests {
         let placed = Placed::of(&world, &past, 1.0);
         let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
         let mut found = Vec::new();
-        outlines(&world, &poses, |outline, id| found.push((outline, id)));
+        outlines(&world, &poses, &mut |outline, id| found.push((outline, id)));
         let id = |entity| world.id(entity).expect("alive").get();
         let [
-            (Outline::Box(boxy), first),
+            (Outline::Rect(boxy), first),
             (Outline::Circle(ring), second),
             (Outline::Circle(carried), third),
         ] = found[..]
@@ -1136,58 +992,6 @@ mod tests {
         assert!((reach - 0.75).abs() < 1e-5, "{reach}");
     }
 
-    /// Lines and squares' outlines a layer draws go over the world's entities, though it draws them
-    /// before the world, with no entity's ID, and the colliders' outlines over them while they're
-    /// shown, 2 points wide in a window at a scale of 1, with their entities' IDs; and not while
-    /// they're hidden. A circle a layer draws goes before the world's entities, as its sprites do,
-    /// with no entity's ID either.
-    #[test]
-    fn lines_and_outlines_draw_over_the_world() {
-        let mut cx = Context::seeded(3);
-        let sprite = (
-            Transform::IDENTITY,
-            Sprite::default(),
-            BoxCollider2D::default(),
-        );
-        let entity = cx.world_mut().spawn(sprite);
-        let id = cx.world().id(entity).expect("alive").get();
-        let line = Line {
-            from: Vec3::ZERO,
-            to: Vec3::X,
-            color: Vec4::ONE,
-            width: 3.0,
-        };
-        let square = Mat4::from_translation(Vec3::Y);
-        let viewport = Viewport {
-            origin: [0, 0],
-            size: [64, 64],
-        };
-        let mut frame = Extracted::default();
-        assert!(!cx.colliders_shown(), "hidden at first");
-        for shown in [false, true] {
-            cx.set_colliders_shown(shown);
-            // The circle first on both sides, since the engine's shaders take their indices in the
-            // order they're first asked for.
-            cx.draw_circle(Mat4::IDENTITY, Circle::default());
-            cx.draw_line(line.from, line.to, line.color, line.width);
-            cx.draw_rect(square, line.color, 1.0);
-            cx.draw_world(1.0, 0.0);
-            cx.extract(&mut frame, viewport);
-            let mut shaders = Shaders::default();
-            let mut want = Draws::default();
-            want.push_circle(&mut shaders, Mat4::IDENTITY, Circle::default());
-            want.draw_scene();
-            let drawn = (Mat4::IDENTITY, Sprite::default(), id);
-            want.extend_sprites(std::iter::once(drawn));
-            want.push_line(&mut shaders, Mat4::IDENTITY, line, 0);
-            want.push_rect(&mut shaders, square, line.color, 1.0, 0);
-            if shown {
-                want.push_rect(&mut shaders, Mat4::IDENTITY, OUTLINE, 2.0, id);
-            }
-            assert_eq!(frame.draws, want, "shown: {shown}");
-        }
-    }
-
     /// A body goes as its entity does, or as it loses its `RigidBody2D`: what rested on it falls,
     /// and its entity stays as it was. A world cleared keeps its physics, without bodies.
     #[test]
@@ -1205,7 +1009,7 @@ mod tests {
         assert!(transform(&world, dropped).translation.y < resting - 0.5);
         assert_eq!(transform(&world, stripped), held);
         let physics = world.resource::<Physics2D>().expect("stepped");
-        assert_eq!(physics.linked.len(), 1);
+        assert_eq!(physics.links.linked.len(), 1);
         assert_eq!(physics.rapier.bodies.len(), 1);
         world.clear();
         step(&mut world, 1);
@@ -1225,13 +1029,13 @@ mod tests {
         step(&mut world, 10);
         assert_eq!(transform(&world, child), held);
         let physics = world.resource::<Physics2D>().expect("stepped");
-        assert_eq!(physics.children, [child], "warned once");
-        assert!(physics.linked.is_empty());
+        assert_eq!(physics.links.children, [child], "warned once");
+        assert!(physics.links.linked.is_empty());
         world.set_parent(child, None).expect("a root");
         step(&mut world, 10);
         assert!(transform(&world, child).translation.y < held.translation.y);
         let physics = world.resource::<Physics2D>().expect("stepped");
-        assert!(physics.children.is_empty());
+        assert!(physics.links.children.is_empty());
     }
 
     /// A kinematic body goes by its velocity alone, gravity aside, and pushes a dynamic box in its
