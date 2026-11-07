@@ -43,7 +43,8 @@ pub(crate) enum Retired {
 /// it, and how far frames and copies have got.
 #[derive(Default)]
 struct Retirement {
-    /// Whether a [`Frames`](crate::Frames) has numbered the device's frames.
+    /// Whether a [`Frames`](crate::Frames) has claimed the device's frames: one does, or one that
+    /// began a frame did.
     claimed: bool,
     /// The last frame that began recording.
     begun: u64,
@@ -696,8 +697,8 @@ impl Device {
     ///
     /// # Panics
     ///
-    /// If one has before: frame numbers would repeat, and resources retired by them would be
-    /// destroyed while the GPU may still use them.
+    /// If one does, or one did that began a frame: frame numbers would repeat, and resources
+    /// retired by them would be destroyed while the GPU may still use them.
     pub(crate) fn claim_frames(&self) {
         let mut retirement = self.lock_retirement();
         assert!(
@@ -705,6 +706,13 @@ impl Device {
             "a device has one Frames for its whole life"
         );
         retirement.claimed = true;
+    }
+
+    /// Notes that the [`Frames`](crate::Frames) that claimed the device's frames is gone: one that
+    /// began none, as one whose making failed, numbered none, so another may claim them.
+    pub(crate) fn release_frames(&self) {
+        let mut retirement = self.lock_retirement();
+        retirement.claimed &= retirement.begun > 0;
     }
 
     /// Notes that `frame` began recording, so resources retired from now on may be used in it.

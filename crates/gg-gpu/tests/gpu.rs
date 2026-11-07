@@ -85,6 +85,7 @@ fn main() -> ExitCode {
         textures_come_to_show_images_before_the_frames_passes,
         forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
+        frames_that_began_none_leave_the_device_to_another,
         refused_texture_slots_leak_nothing,
         passes_refuse_what_the_device_cant_draw,
         pipeline_caches_load_what_this_gpu_saved_whole,
@@ -1217,8 +1218,8 @@ fn depth_clears_in_every_pass() {
 /// that. A depth as near as the map's or nearer reads 1, and a farther one 0: half the bias nearer
 /// than the sloped triangle reads 1, as it wouldn't without the bias, or with its sign wrong.
 /// Synchronization validation sees the pass that samples wait for the depth, and the next frame's
-/// depth wait for the sampling. A pipeline without a fragment shader draws depth alone, and one
-/// clamps or biases depth only where its targets have it.
+/// depth wait for the sampling. A pipeline without a fragment shader draws depth alone, one clamps
+/// or biases depth only where its targets have it, and one draws IDs only beside a color target.
 fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
     let instance = instance();
     let validation = instance.validation();
@@ -1274,6 +1275,11 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
         drop(Pipeline::graphics(&device, &clamped));
     });
     assert!(flat.contains("only for targets that have it"), "{flat}");
+    let ids_alone = panics(|| {
+        let ids = Format::DEPTH.with_ids();
+        drop(Pipeline::graphics(&device, &desc(ids, None, 0.0, false)));
+    });
+    assert!(ids_alone.contains("IDs only beside a color"), "{ids_alone}");
 
     // Each of the triangles over its viewport, its corners' depths, as one that covers it, and a
     // point of it to compare there: a texel's center, which the filter takes alone.
@@ -2268,6 +2274,33 @@ fn another_devices_objects_are_refused() {
     drop((frames, others_frames, image, others_image));
     drop((others_texture, others_buffer, placed, own_stand_in));
     drop((device, other, instance));
+    check(&validation);
+}
+
+/// A device has one `Frames` at a time, and once one has begun a frame, no other, whose frame
+/// numbers would repeat; one dropped before it began any, as one whose making fails is, leaves the
+/// device to another.
+fn frames_that_began_none_leave_the_device_to_another() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = device(&instance);
+    let mut image = ColorImage::new(&device, 4, 4, "claim test target").expect("an image");
+    let refused = |message: String| assert!(message.contains("one Frames"), "{message}");
+    let first = Frames::new(&device).expect("frames");
+    refused(panics(|| drop(Frames::new(&device))));
+    drop(first);
+    let mut frames = Frames::new(&device).expect("frames again, as the first began none");
+    let (graph, passes) = clearing(1, [0.0, 0.0, 0.0, 1.0]);
+    let mut frame = frames
+        .begin([Target::Image(&mut image)], &graph)
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    drop(frame.render(passes[0]));
+    frame.submit().expect("the frame's submission");
+    drop(frames);
+    refused(panics(|| drop(Frames::new(&device))));
+
+    drop((image, device, instance));
     check(&validation);
 }
 

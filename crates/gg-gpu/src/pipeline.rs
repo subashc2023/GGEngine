@@ -235,10 +235,17 @@ impl Pipeline {
     /// # Panics
     ///
     /// If it writes, biases or clamps depth for targets without it, it has no fragment shader but
-    /// its targets have colors, it blends into a visibility buffer, its targets have motion but
-    /// no IDs, or its geometry is a mesh shader and the device draws through none.
+    /// its targets have colors, it blends into a visibility buffer, its targets have IDs but no
+    /// color or motion but no IDs, or its geometry is a mesh shader and the device draws through
+    /// none.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
+        // No pass draws IDs without a color target, and the targets below take their locations
+        // from the color's: without it, the IDs would be at location 0, which shaders write at 1.
+        assert!(
+            desc.format.has_color() || !desc.format.has_ids(),
+            "a pipeline draws IDs only beside a color target, its first"
+        );
         assert!(
             desc.format.has_ids() || !desc.format.has_motion(),
             "a pipeline draws motion only beside IDs, its third color target"

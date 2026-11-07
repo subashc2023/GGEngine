@@ -451,9 +451,10 @@ impl<'a> Frame<'a> {
             self.frames.transfer_wait = self.frames.transfer_wait.max(released);
         }
         image.written = true;
-        // SAFETY: the view is of a live sampled image in the shader-read-only layout, as its
-        // last copy, or the acquire just recorded, leaves it before any pass of this frame; the
-        // slot of the frame being recorded is this one's, whose set's last frame has finished.
+        // SAFETY: the view is of a live sampled image, which retires by frames, so it lives until
+        // this frame has finished, and is in the shader-read-only layout, as its last copy, or the
+        // acquire just recorded, leaves it before any pass of this frame; the slot of the frame
+        // being recorded is this one's, whose set's last frame has finished.
         unsafe {
             device
                 .bindless()
@@ -480,8 +481,9 @@ impl<'a> Frame<'a> {
         device.check_made("the stand-in", stand_in.device());
         let stood_in = stand_in.image_shown("a stand-in");
         // SAFETY: the stand-in's view is of a live sampled image, which frames write before any
-        // shader samples it, as for the texture it's of; the slot of the frame being recorded is
-        // this one's, whose set's last frame has finished.
+        // shader samples it, as for the texture it's of, and which retires by frames, so it lives
+        // until this frame has finished; the slot of the frame being recorded is this one's, whose
+        // set's last frame has finished.
         unsafe {
             device
                 .bindless()

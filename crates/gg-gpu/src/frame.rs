@@ -19,6 +19,7 @@ mod transients;
 mod upload;
 
 use std::ffi::{CStr, CString};
+use std::mem::ManuallyDrop;
 use std::ops::Range;
 use std::slice;
 use std::sync::Arc;
@@ -72,8 +73,9 @@ pub enum Target<'a> {
     Storage(&'a mut StorageImage),
 }
 
-/// The resources of the frames in flight, and the timeline semaphore that paces them. A device
-/// has one for its whole life; its resources retire by its frames.
+/// The resources of the frames in flight, and the timeline semaphore that paces them. A device's
+/// resources retire by its frames, so it has one `Frames` at a time, and once one has begun a
+/// frame, no other for its whole life.
 pub struct Frames {
     device: Arc<Device>,
     /// Reaches N when the Nth frame has finished on the GPU, on every queue.
@@ -270,25 +272,21 @@ impl Frames {
     ///
     /// # Panics
     ///
-    /// If the device has had a `Frames` before, whose frame numbers this one's would repeat.
+    /// If the device has a `Frames`, or had one that began a frame, whose frame numbers this
+    /// one's would repeat.
     pub fn new(device: &Arc<Device>) -> Result<Self> {
-        device.claim_frames();
-        // Before anything that `Frames`' drop would destroy, as a failure here would leave it.
+        // Before the claim, as they hold nothing of the device's until a frame is timed, so that
+        // neither a failure here nor a refused claim leaves anything to destroy.
         let timers = [
             Timer::new(device, Queue::Graphics)?,
             Timer::new(device, Queue::Compute)?,
         ];
-        let raw = device.raw();
-        let mut timeline_info =
-            vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
-        let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
-        // SAFETY: the device is live, with timeline semaphores enabled.
-        let timeline = unsafe { raw.create_semaphore(&info, None) }
-            .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"frame timeline\"", e))?;
-        // From here on, dropping `frames` destroys what has been made so far.
+        device.claim_frames();
+        // From here on, dropping `frames` destroys what has been made so far, and gives up the
+        // claim, as it began no frame.
         let mut frames = Self {
             device: device.clone(),
-            timeline,
+            timeline: vk::Semaphore::null(),
             submitted: 0,
             slots: Vec::new(),
             queue_timelines: [vk::Semaphore::null(); 2],
@@ -325,8 +323,15 @@ impl Frames {
             recording: false,
             failed: false,
         };
+        let raw = device.raw();
+        let mut timeline_info =
+            vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+        let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
+        // SAFETY: the device is live, with timeline semaphores enabled.
+        frames.timeline = unsafe { raw.create_semaphore(&info, None) }
+            .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"frame timeline\"", e))?;
         // SAFETY: the semaphore is live.
-        unsafe { device.set_name(timeline, "frame timeline") };
+        unsafe { device.set_name(frames.timeline, "frame timeline") };
         let transfer_family = device.transfer_family();
         if transfer_family.is_some() {
             // SAFETY: as above.
@@ -805,13 +810,19 @@ fn target_range(target: &Target<'_>) -> vk::ImageSubresourceRange {
 }
 
 /// Empties `list` for the next use's, which borrows for another lifetime, as the next frame's
-/// targets do. Collecting a `vec::IntoIter` into a `Vec` of a type with the same layout reuses its
-/// memory.
+/// targets do, keeping its memory, so that frames don't allocate: `T` and `U` are one type but for
+/// their lifetimes. Not by collecting it, whose reuse of the memory std doesn't promise.
 fn emptied<T, U>(mut list: Vec<T>) -> Vec<U> {
+    const {
+        assert!(size_of::<T>() == size_of::<U>() && align_of::<T>() == align_of::<U>());
+    }
     list.clear();
-    list.into_iter()
-        .map(|_| unreachable!("the list was emptied"))
-        .collect()
+    let mut list = ManuallyDrop::new(list);
+    // SAFETY: the memory is the global allocator's, made by a `Vec` for `capacity` values of a
+    // type as large and as aligned as `U`, as `from_raw_parts` requires, or, without capacity, a
+    // pointer as aligned as `U` that isn't null, which it requires then; it holds none; the old
+    // `Vec` is never dropped, so the new one alone frees it.
+    unsafe { Vec::from_raw_parts(list.as_mut_ptr().cast::<U>(), 0, list.capacity()) }
 }
 
 impl Drop for Frames {
@@ -823,8 +834,14 @@ impl Drop for Frames {
                 "A frame was forgotten rather than submitted or dropped, so its images were never presented"
             );
         }
-        // The copies run apart from the frames, so both are waited for, but a wait can fail.
-        let waited = self.wait(self.submitted).and_then(|()| {
+        // The copies run apart from the frames, so both are waited for, but a wait can fail. Frames
+        // that submitted none may have failed to make their timeline.
+        let frames_waited = if self.submitted > 0 {
+            self.wait(self.submitted)
+        } else {
+            Ok(())
+        };
+        let waited = frames_waited.and_then(|()| {
             if self.transfers_submitted > 0 {
                 wait_on(
                     &self.device,
@@ -869,6 +886,8 @@ impl Drop for Frames {
                 raw.destroy_semaphore(timeline, None);
             }
         }
+        // Last, as another `Frames` may then claim the device's frames: if these began none.
+        self.device.release_frames();
     }
 }
 
@@ -1789,4 +1808,24 @@ unsafe fn begin_commands(device: &Device, commands: vk::CommandBuffer, name: &CS
         device.name_begun(commands, name);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A list emptied for a use of another lifetime keeps its memory, as frames keep their lists
+    /// of targets and submissions; one never filled stays without memory.
+    #[test]
+    fn emptied_lists_keep_their_memory() {
+        let borrowed = String::from("a target");
+        let mut list: Vec<&str> = Vec::with_capacity(3);
+        list.push(&borrowed);
+        let (memory, capacity) = (list.as_ptr().addr(), list.capacity());
+        let next: Vec<&'static str> = emptied(list);
+        assert!(next.is_empty());
+        assert_eq!((next.as_ptr().addr(), next.capacity()), (memory, capacity));
+        let never_filled: Vec<&'static str> = emptied(Vec::<&str>::new());
+        assert_eq!(never_filled.capacity(), 0);
+    }
 }

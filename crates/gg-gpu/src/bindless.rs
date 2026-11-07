@@ -593,7 +593,9 @@ impl Bindless {
     ///
     /// `device` must be the sets', `view` as for [`Bindless::write`], and `recording` the slot of
     /// the frame being recorded, whose set no submitted frame that the GPU may still run uses:
-    /// the frame that last used it has finished.
+    /// the frame that last used it has finished. `view` must also live until the frame being
+    /// recorded has finished, as a view that retires by frames does: each other set takes it as
+    /// its next frame begins, having waited only for frames before this one.
     pub(crate) unsafe fn rewrite(
         &self,
         device: &ash::Device,
@@ -617,9 +619,10 @@ impl Bindless {
     pub(crate) unsafe fn apply(&self, device: &ash::Device, slot: usize) {
         let mut state = self.lock();
         for (index, view) in state.rewrites.take(slot) {
-            // SAFETY: the caller guarantees the device and the set, and the view was live when it
-            // was queued and retires by frames, so it lives until the frame that last used the
-            // set before this one, which may hold it, has finished: now; the lock is held.
+            // SAFETY: the caller guarantees the device and the set; the lock is held. The view was
+            // queued by a frame begun since the set's last, on another set, and lives until that
+            // frame has finished, as `rewrite` requires; the frame beginning has waited only for
+            // the set's last, and destroyed only what no later frame may use, so the view is live.
             unsafe { write_slot(device, self.sets[slot], index, view) };
         }
     }
