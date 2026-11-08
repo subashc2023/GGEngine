@@ -387,7 +387,8 @@ impl World {
     /// `value`, which is refused as [`set_field`](Self::set_field) refuses a value: without
     /// allocating, unless it's refused, as a script sets one at its ticks. `value` is `None` for an
     /// entity or none, which no bounds apply to, set as an `Option<Entity>` without the `Value` of
-    /// one, which would allocate.
+    /// one, which would allocate; and a value of an option's inner type, for an option's field,
+    /// stands for some of it, checked as the option's would be, for the same reason.
     ///
     /// Fails as [`field_at`](Self::field_at) does; with `reflect.read_only` for `Parent`,
     /// `ModelNode` and `PrefabRoot`; and with `reflect.out_of_range` for a number outside its
@@ -403,7 +404,11 @@ impl World {
         let (table, row) = self.row_of(entity, id)?;
         if let Some(value) = value {
             let field = &self.fields_of(id)[index as usize];
-            reflect::check(self.components.types(), &field.ty, &field.meta, value)?;
+            let ty = match (&field.ty, value) {
+                (Type::Option(inner), value) if !matches!(value, Value::Option(_)) => &**inner,
+                (ty, _) => ty,
+            };
+            reflect::check(self.components.types(), ty, &field.meta, value)?;
         }
         let tick = self.change_tick;
         let table = &mut self.tables[table];

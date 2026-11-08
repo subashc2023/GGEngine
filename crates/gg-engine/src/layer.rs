@@ -49,6 +49,7 @@ use crate::interpolation::Past;
 use crate::light::{self, Light};
 use crate::loader::Loader;
 use crate::model::{self, Made, Nodes};
+use crate::navigation::{self, NavAgent, NavMeshVolume};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
 use crate::net::{Outside, Session, Turn};
@@ -332,6 +333,8 @@ pub struct Context {
     uis: game_ui::Uis,
     /// Whether the world's colliders' outlines draw, over the rest.
     colliders: bool,
+    /// Whether the world's navmesh and its agents' paths draw, over the rest.
+    navmesh: bool,
     /// What to outline in the view this frame, if anything.
     outline: Option<Outline>,
     /// Where the game's view was as the last frame handed it off, while it had an area.
@@ -600,6 +603,8 @@ impl Context {
             world.register::<CharacterController3D>()?;
             world.register::<Joint2D>()?;
             world.register::<Joint3D>()?;
+            world.register::<NavMeshVolume>()?;
+            world.register::<NavAgent>()?;
             world.register::<Flipbook>()?;
             world.register::<ParticleEmitter>()?;
             world.register::<Tweens>()?;
@@ -646,6 +651,7 @@ impl Context {
             canvas: canvas::Drawn::default(),
             uis: game_ui::Uis::default(),
             colliders: false,
+            navmesh: false,
             outline: None,
             view: None,
             shown: None,
@@ -3502,6 +3508,23 @@ impl Context {
         self.colliders = shown;
     }
 
+    /// Whether the world's navmesh and its agents' paths draw, as
+    /// [`set_navmesh_shown`](Self::set_navmesh_shown) says: not at first.
+    pub fn navmesh_shown(&self) -> bool {
+        self.navmesh
+    }
+
+    /// Has the world's navmesh and its agents' paths draw each frame from then on, or not, as the
+    /// last [`step_navigation`](crate::step_navigation) left them: each of the navmesh's polygons
+    /// outlined in sky blue along its cells' floors, with its [`NavMeshVolume`]'s entity's ID, and
+    /// each [`NavAgent`]'s path in amber from where its entity draws through the corners it has
+    /// left, its destination marked, with the agent's ID, so that a [pick](Self::pick) of a line
+    /// finds its entity; 2 points wide, a little above the floors, over everything else the view
+    /// draws but a nearer opaque mesh, as lines are.
+    pub fn set_navmesh_shown(&mut self, shown: bool) {
+        self.navmesh = shown;
+    }
+
     /// The world: its entities and their components, as the frame's ticks left it. After the
     /// layers' updates each frame, the engine draws those with a [`Transform`] and a [`Sprite`], a
     /// [`Circle`], a [`Text`](crate::Text) or a [`MeshDraw`], after what the layers drew
@@ -3699,11 +3722,18 @@ impl Context {
         draw::draw_world(
             world, past, placed, alpha, ticks, draws, shaders, fonts, scratch,
         );
-        if self.colliders_drawn()
+        let (colliders, navmesh) = (self.colliders_drawn(), self.navmesh_drawn());
+        if (colliders || navmesh)
             && let Some(poses) = Poses::new(world, past, placed, alpha)
         {
             let scale = self.scale() as f32;
-            physics::draw_colliders(world, &poses, scale, &mut self.over, &mut self.shaders);
+            let (over, shaders) = (&mut self.over, &mut self.shaders);
+            if colliders {
+                physics::draw_colliders(world, &poses, scale, over, shaders);
+            }
+            if navmesh {
+                navigation::draw_navigation(world, &poses, scale, over, shaders);
+            }
         }
         // What changes after, until the next frame draws, is marked past what this one saw.
         self.world.advance();
@@ -3719,6 +3749,11 @@ impl Context {
             return shown;
         }
         self.colliders
+    }
+
+    /// Whether the frame draws the navmesh and the agents' paths, as the layers set.
+    fn navmesh_drawn(&self) -> bool {
+        self.navmesh
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which

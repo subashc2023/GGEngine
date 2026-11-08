@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 29, "{scenes:?}");
+    assert_eq!(scenes.len(), 30, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -818,4 +818,46 @@ fn a_mood_cross_fades_its_fox_to_its_next_clip() {
     assert_eq!(fading[1], ("Walk".to_owned(), 2.0 / 32.0), "{fading:?}");
     run(&mut showcase, world, 31);
     assert_eq!(plays(world), [("Walk".to_owned(), 1.0)]);
+}
+
+/// The navigation scene bakes its navmesh, and its agents walk their tours, each sent on by Tour to
+/// its stops in turn as it arrives at each, the platform up the ramp among them, round each other.
+#[test]
+fn the_navigation_scenes_agents_walk_their_tours() {
+    use gg_engine::{NavAgent, Navigation};
+
+    let (mut cx, mut showcase) = loaded();
+    let scene = dir().join("scenes").join("navigation.ron");
+    cx.load_scene_file(&scene).expect("the scene loads");
+    let world = cx.world_mut();
+    let touring: Vec<gg_engine::Entity> = world.entities(Some("Tour")).expect("declared").collect();
+    assert_eq!(touring.len(), 12);
+    let next = |world: &World, agent| match world.get_field(agent, "Tour", "next") {
+        Ok(Value::F64(next)) => next,
+        other => panic!("{other:?}"),
+    };
+    let mut stops = vec![0; touring.len()];
+    let mut was: Vec<f64> = touring.iter().map(|&agent| next(world, agent)).collect();
+    let mut highest = f32::NEG_INFINITY;
+    for number in 0..1920 {
+        showcase.tick(world, Tick { number });
+        for (i, &agent) in touring.iter().enumerate() {
+            let now = next(world, agent);
+            if now != was[i] {
+                stops[i] += 1;
+                was[i] = now;
+            }
+            let at = world.get::<Transform>(agent).expect("placed").translation;
+            highest = highest.max(at.y);
+        }
+    }
+    assert!(world.resource::<Navigation>().is_some(), "baked");
+    let walked = touring.iter().filter(|&&agent| {
+        let agent = world.get::<NavAgent>(agent).expect("an agent");
+        !agent.corners.is_empty()
+    });
+    assert_eq!(walked.count(), touring.len(), "each has a path");
+    // Its first stop set off for, then at least two more reached in thirty seconds.
+    assert!(stops.iter().all(|&set| set >= 3), "{stops:?}");
+    assert!(highest > 1.9, "up on the platform: {highest}");
 }

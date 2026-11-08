@@ -51,7 +51,9 @@
 //! swings to either side within its limits, a piston its motor drives along a prismatic joint
 //! between its limits and a ball on a rope, and continuous collision, balls fired at a thin plate
 //! that turns, those that have it stopping at it where some of the others pass through
-//! (`joints.ron`); and, once `cargo
+//! (`joints.ron`); a navmesh baked from a small maze's colliders, a step and a ramp up to a
+//! platform among them, and a dozen agents walking its paths to stops in turn, round each other,
+//! the navmesh and their paths in lines (`navigation.ron`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and walked through
 //! by a character that the keys or a pad move, a camera following it, Sponza's triangles what it
 //! collides with, among crates and balls it pushes (`walk.ron`), and Amazon
@@ -66,13 +68,13 @@
 //! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
 //! so often, a tween easing it back, `scripts/moods.luau` cross-fades its fox to its next clip
 //! every few seconds through `gg.play`, `scripts/pace.luau` walks its fox round, setting its state
-//! machine's speed and pulling its trigger through `gg.set_param`, and `scripts/swing.luau` turns
-//! its joint's motor around every few seconds through the joint's fields; and animation and
-//! physics step, so that each scene moves as it plays, in the editor from its Play, and in the
-//! reference player, which runs the game's package without its code, and so without the keys'
-//! walking and its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the
-//! plasma, the look, the state labels, the tether and the launches, which its code registers and
-//! runs.
+//! machine's speed and pulling its trigger through `gg.set_param`, `scripts/swing.luau` turns its
+//! joint's motor around every few seconds through the joint's fields, and `scripts/tour.luau`
+//! sends its agent to its stops in turn by its destination; and animation, navigation and physics
+//! step, so that each scene moves as it plays, in the editor from its Play, and in the reference
+//! player, which runs the game's package without its code, and so without the keys' walking and
+//! its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the plasma, the
+//! look, the state labels, the tether and the launches, which its code registers and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -92,7 +94,7 @@ use gg_engine::{
     Context, Curve, Ease, Entity, Error, Event, Font, GameUi, Joint3D, Key, Layer, Mesh, MeshDraw,
     MouseButton, Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, RigidBody3D,
     Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween,
-    UiEvent, World, step_animation, step_physics,
+    UiEvent, World, step_animation, step_navigation, step_physics,
 };
 
 #[cfg(test)]
@@ -111,7 +113,7 @@ fn app() -> App {
 }
 
 /// The game's scripts, by their paths from its directory: each declares the component it is.
-const SCRIPTS: [&str; 8] = [
+const SCRIPTS: [&str; 9] = [
     "scripts/bob.luau",
     "scripts/follow.luau",
     "scripts/moods.luau",
@@ -119,6 +121,7 @@ const SCRIPTS: [&str; 8] = [
     "scripts/pulse.luau",
     "scripts/spin.luau",
     "scripts/swing.luau",
+    "scripts/tour.luau",
     "scripts/walk.luau",
 ];
 
@@ -392,12 +395,13 @@ fn register(world: &mut World) {
 
 /// The game's layer: it loads the scripts as it loads, which declares their components, and
 /// registers its own, so that its scenes, the Inspector's Add Component and the tool API know them
-/// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
-/// it attaches; and at each tick applies what the keys, the mouse and the HUD's button did to its
-/// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters'
-/// emitters, counts the HUDs' ticks, fires the launches' bodies, steps animation and then physics,
-/// places the tethers, gives the plasmas their draws and writes the state labels' text. As it
-/// updates, it
+/// before any entity has one, loads its sounds, music, font and shader, and has the navmesh and
+/// agents' paths show, of the scenes that have them; loads the start scene as it attaches; and at
+/// each tick applies what the keys, the mouse and the HUD's button did to its scenes' walkers,
+/// looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters' emitters, counts
+/// the HUDs' and menus' ticks, fires the launches' bodies, steps animation, navigation and then
+/// physics, places the tethers, gives the plasmas their draws and writes the state labels' text. As
+/// it updates, it
 /// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
 /// and draws the HUD while a HUD is. A script, an asset or the
 /// start scene that doesn't load ends the run with its error, through [`Context::fail`].
@@ -648,6 +652,8 @@ impl Layer for Showcase {
             }
         }
         register(cx.world_mut());
+        // Only a scene with a navmesh volume, `navigation.ron`, has any to show.
+        cx.set_navmesh_shown(true);
         match Assets::load(cx, root) {
             Ok(assets) => self.assets = Some(assets),
             Err(error) => cx.fail(error),
@@ -686,6 +692,7 @@ impl Layer for Showcase {
         }
         Self::launch(world);
         step_animation(world);
+        step_navigation(world);
         step_physics(world);
         self.tether(world);
         self.shade(world);

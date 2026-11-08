@@ -588,43 +588,60 @@ mod tests {
         assert_eq!(counted.count, 10);
     }
 
-    /// A mod's script casts through the world's colliders only if its mod may read the whole world,
-    /// as where each collider is tells of every entity with one: one granted a type's reads alone
-    /// fails at its cast, warning, and the game goes on.
+    /// A mod's script casts through the world's colliders, and finds paths over its navmesh, only if
+    /// its mod may read the whole world, as where each collider is tells of every entity with one:
+    /// one granted a type's reads alone fails at its cast or its path, warning, and the game goes
+    /// on.
     #[test]
-    fn a_mod_casts_only_reading_the_whole_world() {
+    fn a_mod_casts_and_finds_paths_only_reading_the_whole_world() {
         let logged = crate::testing::logged();
         let dir = Scratch::new("mods-casts");
-        let casting = |name: &str| {
+        let reading = |name: &str, reads: &str| {
             format!(
                 "local Counter = gg.component(\"Counter\")\n\
                  local {name} = gg.declare(\"{name}\", {{}}, {{ on = \"Counter\" }})\n\
                  function {name}.tick(entity, dt)\n\
-                     local hit = gg.cast_ray(vector.create(0, 5, 0), vector.create(0, -1, 0))\n\
+                     {reads}\n\
                      entity[Counter.count] = entity[Counter.count] + 1\n\
                  end\n\
                  return {name}\n"
             )
         };
+        let cast = "local hit = gg.cast_ray(vector.create(0, 5, 0), vector.create(0, -1, 0))";
+        let path = "local path = gg.find_path(vector.create(0, 1, 0), vector.create(3, 1, 0))";
         let writing = "\"write:Counter\"";
         install(
             &dir.0,
             "a-reader",
             "Modded",
             &format!("\"read\", {writing}"),
-            &casting("Reader"),
+            &reading("Reader", &format!("{cast}\n{path}")),
         );
         let narrow = format!("\"read:Counter\", {writing}");
-        install(&dir.0, "b-narrow", "Modded", &narrow, &casting("Narrow"));
+        install(
+            &dir.0,
+            "b-narrow",
+            "Modded",
+            &narrow,
+            &reading("Narrow", cast),
+        );
+        install(
+            &dir.0,
+            "c-pathless",
+            "Modded",
+            &narrow,
+            &reading("Pathless", path),
+        );
         let (mut cx, counters) = modded(&dir.0, 1);
         let limits = Grant::parse(["read", "write:Counter"]).expect("a grant");
         let mut mods = Mods::load(&mut cx, limits);
-        assert_eq!(names(&cx), ["a-reader", "b-narrow"]);
+        assert_eq!(names(&cx), ["a-reader", "b-narrow", "c-pathless"]);
         mods.run(cx.world_mut());
         let counted = cx.world().get::<Counter>(counters[0]).expect("a counter");
         assert_eq!(counted.count, 1, "the reader's tick alone ran through");
         let codes: Vec<String> = logged.codes.try_iter().collect();
-        assert!(codes.iter().any(|code| code == "script.error"), "{codes:?}");
+        let failed = codes.iter().filter(|code| *code == "script.error");
+        assert_eq!(failed.count(), 2, "{codes:?}");
     }
 
     /// A mod's script tweens a field only if its mod may write `Tweens`, which hold the tween, as

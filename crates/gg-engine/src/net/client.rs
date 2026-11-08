@@ -515,6 +515,10 @@ impl Client {
             );
             return None;
         }
+        // The navmesh, which no state holds, kept up to date in the copy, so that the copy holds
+        // the resources the client's world does: a world taken back to one holding other types'
+        // copies them all, and a navmesh dropped there would be baked again at the next tick.
+        crate::navigation::refresh(&mut self.world);
         let hash = self.world.hash();
         if hash == state.hash {
             self.desynced = false;
@@ -812,5 +816,68 @@ mod tests {
         let mut held = client(past);
         let drawn = held.interpolate(Tick::DT);
         assert_eq!((x_of(drawn, a), x_of(drawn, b)), (4.0, 9.0));
+    }
+
+    /// A correction takes the client's world back to the server's latest state, read into its copy,
+    /// keeping the navmesh: the copy brings its own up to date as it reads each state, which no
+    /// state holds, so that the world taken back to it holds the same resources, and no tick after
+    /// bakes it again.
+    #[test]
+    fn a_correction_keeps_the_navmesh() {
+        use crate::navigation::navmesh_of;
+        use crate::{BodyType, BoxCollider3D, NavMeshVolume, RigidBody3D, step_navigation};
+
+        let mut server = World::seeded(3);
+        let floor = Transform {
+            translation: Vec3::new(0.0, -0.5, 0.0),
+            scale: Vec3::new(10.0, 1.0, 10.0),
+            ..Transform::IDENTITY
+        };
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        server.spawn((floor, fixed, BoxCollider3D::default()));
+        let volume = NavMeshVolume {
+            size: Vec3::new(12.0, 4.0, 12.0),
+            ..NavMeshVolume::default()
+        };
+        server.spawn((Transform::IDENTITY, volume));
+        step_navigation(&mut server);
+        let mut text = String::new();
+        server.save_whole(&mut text).expect("saved");
+        // The client's world, from the server's, as it joined.
+        let mut ours = World::seeded(4);
+        for registered in [
+            ours.register::<Transform>(),
+            ours.register::<RigidBody3D>(),
+            ours.register::<BoxCollider3D>(),
+            ours.register::<NavMeshVolume>(),
+        ] {
+            registered.expect("registered");
+        }
+        ours.load_whole((1..).zip(text.lines()), true)
+            .expect("loaded");
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        client.restored(0, &ours);
+        step_navigation(&mut ours);
+        client.texts.insert(1, text.clone());
+        client.state = Some(Header {
+            tick: 1,
+            base: None,
+            next: 2,
+            lead: 0,
+            hash: server.hash(),
+            part: 0,
+            parts: 1,
+            size: text.len(),
+        });
+        let from = client.settle(2, &ours).expect("a correction");
+        ours.rewind(client.start_of(from));
+        let kept = navmesh_of(&ours);
+        assert!(kept.is_some(), "the copy held it");
+        assert_eq!(kept, navmesh_of(&client.world), "shared with the copy");
+        step_navigation(&mut ours);
+        assert_eq!(navmesh_of(&ours), kept, "not baked again");
     }
 }

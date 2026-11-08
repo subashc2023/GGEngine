@@ -204,7 +204,7 @@ impl Default for CapsuleCollider3D {
 
 impl CapsuleCollider3D {
     /// Its radius for an entity of `scale`, and how far its segment reaches each way of its middle.
-    fn shape(&self, scale: Vec3) -> (f32, f32) {
+    pub(crate) fn shape(&self, scale: Vec3) -> (f32, f32) {
         let scale = scale.abs();
         let radius = self.radius * scale.x.max(scale.z);
         // Compared rather than `max`ed, whose zero's sign std leaves to the platform.

@@ -133,6 +133,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Animation state machines** (2026-11-08)
 - **Joints and continuous collision** (2026-11-08)
 - **A game's UI** (2026-11-08)
+- **Navigation** (2026-11-08)
 
 ## Now
 
@@ -580,6 +581,18 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A joint's frames turned apart: a rotation in each body's space, so a fixed or prismatic joint holds bodies turned otherwise than alike and a revolute's 0 is elsewhere | A game welds or hinges bodies turned apart |
 | A spherical joint's limits and motors (cone and twist), and joints' softness (rapier's spring coefficients) | A ragdoll's shoulders, or a joint that should give |
 | A joint to a point in the world, without a static body to name | Scenes tire of hook entities |
+| Off-mesh links: jumps, drops and ladders between a navmesh's polygons | A game's agents must cross a gap or climb |
+| Areas with costs, as roads, water and hazards, and filters an agent takes them by | A game wants paths that prefer or avoid kinds of ground |
+| Tiled or streamed navmeshes, baked and baked again by tile | A level is too large to bake whole, or baking it again whole as a static body moves shows as a hitch |
+| Dynamic obstacles carved into the navmesh, as doors and moving crates: only static bodies bake, and agents avoid only agents | A game's agents must path round things that move |
+| Crowds beyond ORCA: a corridor of polygons kept and pulled again as an agent drifts, as Detour's `dtPathCorridor`, formations, queuing at bottlenecks | Crowds jam at doorways, or pushed agents get stuck |
+| 2D navigation | A 2D game needs paths |
+| A navmesh part of the tool API's look, and a switch in the editor, showing the navmesh of a game whose layers don't | An agent or the editor needs to see a game's navmesh without changing its code |
+| Recast's regions, contours and merged convex polygons in place of rectangles of cells | Walls across the grid's axes cut a navmesh into many strips, or paths bend visibly at rectangles' corners |
+| More than one navmesh, one for each agent's size: volumes past the first are warned of (`navigation.volumes`) | A game has agents of different sizes |
+| Partial paths, to the nearest point reachable, where no path joins | A game wants agents to get as near as they can |
+| A spatial grid for agents' neighbors in place of every pair compared | A game has some hundreds of agents |
+| Agents turning to face where they go, which game code does | Games keep writing the same facing code |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
 | Telling the colliders physics doesn't simulate from those it does: one without a `RigidBody2D` or a `RigidBody3D`, or under a parent, outlines as the rest do | Someone wonders why an outlined collider doesn't collide |
 | Gravity from a scene or a setting: `Physics2D::gravity` and `Physics3D::gravity` are code's, Earth's by default | A game sets its own |

@@ -3,9 +3,12 @@
 //! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
 //! own entities and spawn others in their place among them, and a Luau script that moves its
 //! entities and counts its ticks in its own component, sprites' flipbooks and tweens of their
-//! fields, looping and going back and forth, and skinned foxes' state machines, blending a walk and
-//! a run along a speed that the layer sets for some and a Luau script for the rest, and cutting
-//! from a walk to a hop at a trigger and back; before the job system's threads start,
+//! fields, looping and going back and forth, skinned foxes' state machines, blending a walk and a
+//! run along a speed that the layer sets for some and a Luau script for the rest, and cutting from
+//! a walk to a hop at a trigger and back, and agents walking to and fro over a navmesh, each
+//! planning a path round a wall's end at each end of its way, turning its corners as each comes in
+//! sight, and steering round the others coming the other way; before the job system's threads
+//! start,
 //! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
 //! allocates the first time it does; and ticks that despawn entities and spawn others in their
 //! place, as a game's bullets and particles come and go.
@@ -30,10 +33,11 @@ use std::{fs, process, thread};
 use gg_engine::math::{Quat, Vec3};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    AnimationParam, AnimationState, AnimationStates, BlendPoint, Component, Context, Curve, Entity,
-    Flipbook, Layer, Model, ParamCondition, ParamTest, ParamValue, Playback, Script, Scripts,
-    Sprite, StateMotion, StateTransition, Tick, Transform, Tween, World, run_scripts,
-    step_animation,
+    AnimationParam, AnimationState, AnimationStates, BlendPoint, BodyType, BoxCollider3D,
+    Component, Context, Curve, Entity, Flipbook, Layer, Model, NavAgent, NavMeshVolume,
+    ParamCondition, ParamTest, ParamValue, Playback, RigidBody3D, Script, Scripts, Sprite,
+    StateMotion, StateTransition, Tick, Transform, Tween, World, run_scripts, step_animation,
+    step_navigation,
 };
 
 use crate::common::Counted;
@@ -97,6 +101,26 @@ const DRIFTERS: u32 = 256;
 
 /// The sprites that flipbooks play and tweens ease.
 const ANIMATED: u32 = 256;
+
+/// The agents walking to and fro, half from each end.
+const WALKERS: u32 = 24;
+
+/// A static box of `size` around `at`, which the navmesh is baked from.
+fn solid(world: &mut World, at: Vec3, size: Vec3) {
+    let placed = Transform {
+        translation: at,
+        ..Transform::default()
+    };
+    let body = RigidBody3D {
+        body_type: BodyType::Static,
+        ..RigidBody3D::default()
+    };
+    let boxed = BoxCollider3D {
+        size,
+        ..BoxCollider3D::default()
+    };
+    world.spawn((placed, body, boxed));
+}
 
 /// Moves its entities along x, and counts its ticks in its own component.
 const DRIFT: &str = r#"
@@ -223,8 +247,9 @@ fn on_a_worker() -> bool {
 /// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
 /// job system's threads, and whose heavy ones it turns back on the ticks' thread alone;
 /// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs;
-/// `ANIMATED` sprites, whose animation it steps; and the Fox, `BLENDING` and `CUTTING` times, the
-/// first half of the blending ones and the cutting ones driven by its tick.
+/// `ANIMATED` sprites, whose animation it steps; the Fox, `BLENDING` and `CUTTING` times, the first
+/// half of the blending ones and the cutting ones driven by its tick; and `WALKERS` agents on a
+/// floor between pillars, which its navigation steps, each sent back the way it came as it arrives.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
@@ -232,6 +257,10 @@ struct Movers {
     fox: Option<Model>,
     blending: Vec<Entity>,
     cutting: Vec<Entity>,
+    /// How many times an agent has been sent back the way it came, and the most corners of a path
+    /// one walked.
+    turned: u64,
+    corners: usize,
 }
 
 impl Layer for Movers {
@@ -314,6 +343,32 @@ impl Layer for Movers {
                 self.cutting.push(root);
             }
         }
+        solid(world, Vec3::new(0.0, -0.5, 0.0), Vec3::new(14.0, 1.0, 14.0));
+        for (x, z) in [(-5.5, -5.5), (5.5, -5.5), (-5.5, 5.5), (5.5, 5.5)] {
+            solid(world, Vec3::new(x, 1.0, z), Vec3::new(1.5, 2.0, 1.5));
+        }
+        // Between the ends, a gap past each of its own, so that every path turns its corners.
+        solid(world, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.4, 2.0, 8.0));
+        let volume = NavMeshVolume {
+            size: Vec3::new(16.0, 4.0, 16.0),
+            ..NavMeshVolume::default()
+        };
+        world.spawn((Transform::default(), volume));
+        for i in 0..WALKERS {
+            let z = (i / 2) as f32 * 0.4 - 2.2;
+            let (from, to) = if i % 2 == 0 { (-3.0, 3.0) } else { (3.0, -3.0) };
+            let placed = Transform {
+                translation: Vec3::new(from, 0.0, z),
+                ..Transform::default()
+            };
+            let agent = NavAgent {
+                destination: Some(Vec3::new(to, 0.0, z)),
+                speed: 4.0,
+                radius: 0.3,
+                ..NavAgent::default()
+            };
+            world.spawn((placed, agent));
+        }
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -347,6 +402,14 @@ impl Layer for Movers {
         }
         self.scripts.run(world);
         step_animation(world);
+        for agent in world.query_mut::<&mut NavAgent>() {
+            if let (true, Some(to)) = (agent.arrived, agent.destination) {
+                agent.destination = Some(Vec3::new(-to.x, to.y, to.z));
+                self.turned += 1;
+            }
+            self.corners = self.corners.max(agent.corners.len());
+        }
+        step_navigation(world);
     }
 }
 
@@ -468,6 +531,8 @@ fn main() {
         fox: None,
         blending: Vec::new(),
         cutting: Vec::new(),
+        turned: 0,
+        corners: 0,
     };
     movers.load(&mut cx);
     movers.attach(&mut cx);
@@ -485,10 +550,22 @@ fn main() {
             "four threads"
         };
         ON_WORKERS.store(0, Ordering::Relaxed);
+        let turned = movers.turned;
+        movers.corners = 0;
         let counted = allocations(|| ticks(&mut movers, &mut cx, &mut number, COUNTED));
         assert_eq!(
             counted.allocations, 0,
             "{COUNTED} ticks on {on} allocated {counted}"
+        );
+        // So that the count covers paths planned at the ticks it counts, round the wall's ends.
+        assert!(
+            movers.turned > turned,
+            "no agent was sent back in the {COUNTED} ticks on {on}"
+        );
+        assert!(
+            movers.corners >= 3,
+            "the paths of the {COUNTED} ticks on {on} had at most {} corners",
+            movers.corners
         );
         let on_workers = ON_WORKERS.load(Ordering::Relaxed);
         if threads > 1 {

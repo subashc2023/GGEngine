@@ -152,6 +152,19 @@ file, under Workflow.
 |---|---|---|
 | The cooker cooks each image a model names twice: with its model, with its full chain of levels, and again as a texture of its own, of one level, as it takes every PNG and JPEG under the asset root, which no run loads unless a layer or a scene names it alone. Sponza's 69 images, once fetched, add 50 MB to the showcase's package of 141 MB, and part of its cook's 37 s | Leave out an image that a model names unless a scene names it, or the project says the game's code adds it alone, which the cooker can't see | A package's size or its cook's time matters, as a shipped game's does |
 
+## Navigation
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| The navmesh's fingerprint is made again at every tick and every `World::find_path` or `gg.find_path`, over every static body, tens of µs a thousand bodies, which is why a search takes the world mutably | Skip it while the world's changes show no static body's nor the volume's since | Scripts search many paths a tick in scenes of thousands of static bodies |
+| A bake runs on the tick's thread: about 1 ms for Foxball's arena, 8 to 13 ms for the showcase's maze in a debug build | Bake off the main thread and take the new navmesh at a tick peers agree on | Static bodies move during play, or levels are large |
+| A bake plans every agent's path again, not only those whose paths it changed | Plan again only agents whose corridors cross polygons that changed | Bakes come often among many agents |
+| Agents keep no corridor: they plan again only as their destination or the navmesh changes, while they have no path, or over a corner on another floor, so one pushed far off its path heads for its next corner and may stick behind a wall | Keep the corridor of polygons and pull it again from where the agent is | Agents visibly stall in crowds |
+| ORCA's nudge to the right bends an agent's line by about a degree whenever neighbors are within reach | Nudge only where the velocity obstacle is head on | Someone notices the sidestep |
+| Dense crowds crossing through each other clear slowly: 52 to 64 of 100 agents swapping sides of Foxball's arena arrived in 17 s | Crowds beyond ORCA, or ORCA's lines for the navmesh's edges, as RVO2's obstacles | A game's crowds cross through each other |
+| An agent whose destination no path reaches searches again every tick, and a failed A* takes every polygon reachable from its start | Search again only as the navmesh or the agent's polygon changes, or every so many ticks | Many agents are sent where they can't reach |
+| An agent's corners hold room for 16: a longer path grows them once, and a world copied afresh drops that room until its next plan | Bound the corners kept and plan again at the last, as Detour bounds its straight path | Paths of more than 16 corners in a game that measures its allocations |
+
 ## A game's UI
 
 | Defect | Fix | Worth it when |

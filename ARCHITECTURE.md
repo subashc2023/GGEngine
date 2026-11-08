@@ -1545,6 +1545,90 @@ keeps what it has warned of as a resource. A tick that enters no state, nor brin
 clip that left at a weight of 0, allocates nothing; one that does allocates the names of the plays
 it adds, but where a play that leaves at the tick, as each a cut leaves does, gives up its room.
 
+## Navigation
+
+Navigation is gg-engine's `navigation` module, our own rather than a crate's, as none promises the
+same bits on every platform: a navmesh baked from the world's static 3D colliders, paths over it,
+and agents that walk them round each other, stepped by `step_navigation`, a system a layer's tick
+runs after what sets the agents' destinations, such as scripts, and before physics, which moves
+the characters the agents steer. Its state is the agents' components and the world's `Navigation`
+resource, which holds the navmesh.
+
+An entity's `NavMeshVolume` says what bakes and for what agent: the static bodies' colliders, as
+physics has them, inside a box in its entity's space, the bake taking the box that bounds it along
+the world's axes; the agent's radius, height, climb and slope; and the heightfield's cells. The
+bake follows Recast's pipeline as far as the erosion: each collider's triangles are clipped to the
+heightfield's columns, a box's, a sphere's and a capsule's as convex solids, a span from their
+lowest point in a column to their highest, so that a wall standing in a floor leaves no floor
+inside it, and a mesh collider's triangle by triangle, as surfaces; spans that touch merge, their
+top walkable as the higher one's, or as either's where the tops are within a step; the walkable
+tops with too little headroom go, and those a step above a walkable one join it; each open span is
+joined to the one beside it an agent steps onto with room to stand; and the walkable area is eroded
+by the agent's radius, by a chamfer's distance from where a span lacks a neighbor. Recast's
+regions, contours and polygons give way to rectangles of cells, each the best anchored at the first
+cell left in order by Z, then X, then floor, by its area times its shorter side, holding only cells
+joined to their neighbors, each keeping its own floor, which keeps them correct across slopes,
+steps and floors over floors; where they meet are portals. That costs more polygons than Recast
+makes where walls cross the grid's axes, as their staircases of cells cut strips, and paths that
+bend at a rectangle's corner where a larger polygon would let them run straight. The world bakes
+one navmesh, from the volume of the least ID (`navigation.volumes`); a volume of more than 2^22
+columns or 65,533 levels isn't baked (`navigation.too_large`), nor one without a size
+(`navigation.bad_volume`). It bakes deterministically, each body's colliders in the order of their
+entities' IDs, so that the same entities and assets bake the same navmesh, and bakes again as a
+fingerprint of what it's baked from changes: the volume's entity, where it is and its fields, and
+each static body's transform and colliders, a mesh collider by the hash of its model's triangles,
+summed by entity, so that the order queries find them in counts for nothing. Each bake logs
+`Navmesh baked`, with its polygons and milliseconds. Every step and every search brings the
+navmesh up to date first, so that what a path is planned on is what the world's static colliders
+give then, whatever the world was loaded from: a world copied shares its navmesh; snapshot files
+don't hold it, so a world restored from one bakes it again as it first steps or searches, under
+the same fingerprint, so that its agents' paths, planned on it, hold, and one loaded whole over a
+world that kept another's navmesh bakes its own, which tests step and search both ways to the
+same bits. A client's copy of the server's world brings its own up to date as it reads each state,
+so that the world taken back to it as the client corrects keeps its navmesh rather than baking it
+again.
+
+`World::find_path` finds the shortest path over the navmesh between two points, each on it where
+it is, as an agent's middle is above its floor, or snapped to its nearest point within the agent's
+height: A* over the polygons, each entered at the point of its portal that makes the way from where
+its parent was entered to the end shortest, rather than Detour's portal middle, whose costs stray
+across long rectangles; then the funnel algorithm pulls the path taut to the corners where it turns,
+points on the navmesh. It takes the world mutably, to bring the navmesh up to date, at the cost of
+a fingerprint of the static bodies a search. Scripts find paths with `gg.find_path`, an array of
+vectors or nil.
+
+A `NavAgent` walks to its destination, which code, scripts and tools set, none to stand: it plans
+its path as its destination or the navmesh's fingerprint changes, which `planned` mixes, so that a
+re-bake plans every path again and a restored world none, and again each tick while it has a
+destination and no path, as one that started off the navmesh, falling, does until it lands; heads
+for its next corner, past each it comes within its radius of, standing on its floor, or from which
+the next is in sight over the navmesh, a walk along the heightfield's columns from floor to floor
+that ends on the corner's own, so that one pushed aside doesn't go back for a corner it no longer
+needs and none takes a floor over or under its way for its own; plans again where it comes over a
+corner on another floor; and slows to stop within its stopping distance of its destination, on
+its floor, coming back to it where it's pushed off. Its corners, the corner it heads for, whether
+it's arrived and the velocity it chose are its component's, so that snapshots, replays, peers and
+the hash see them. The velocity goes, across, to its entity's `CharacterController3D`, which slides
+it along walls and up steps and slopes, or else its `RigidBody3D`'s, or else to its transform,
+which walks along the navmesh, kept to it, sliding along its edge to the mesh's nearest point.
+Agents steer round each other by ORCA (van den Berg, Guy, Lin and Manocha, 2011), as RVO2 does,
+among their ten nearest within reach on the same floor, by their entities' IDs, every pair
+compared, which bounds a crowd at some hundreds: each neighbor's velocity obstacle bounds a
+half-plane, each agent taking half of what a pair must change, and a small linear program picks the
+velocity nearest the one preferred; walls are the navmesh's and physics' business. Where ORCA's
+perfect symmetry would leave two agents face to face, every agent nudges what it prefers a degree
+to its right, as RVO2's examples perturb at random, which peers couldn't agree on, and agents in
+one place part, each the way the order of their IDs gives. A tick computes in plain `f32`
+arithmetic and square roots, libm's cosine and sine where it needs them, comparisons rather than
+`min` and `max`, whose zeros' signs are the platform's, and orders by entities' IDs, so that a
+reference hash in `navigation/` checks every bit on every platform. A path search and avoidance
+work in what the resource keeps, and corners in their vector, which holds room for 16, so that
+steady ticks allocate nothing, which the `ticks` test checks with paths round a wall.
+
+`Context::set_navmesh_shown` draws the navmesh's polygons, outlined along their cells' floors, and
+each agent's path from where it draws through its corners left, in lines, as colliders' outlines
+draw, picked as the volume's entity and the agent's.
+
 ## Rendering
 
 Each frame the engine extracts that frame's render data, as plain data, which the render thread
@@ -2363,6 +2447,7 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
 | Physics | `rapier2d` and `rapier3d`, with `enhanced-determinism`, for 2D and 3D, their state resources of the world; see [Physics](#physics) |
+| Navigation | Our own; see [Navigation](#navigation) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |

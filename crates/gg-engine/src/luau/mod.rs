@@ -103,7 +103,8 @@ const REMOVED: [&str; 7] = [
 /// that runs for each entity that has it, given the entity and the tick's length in seconds. It
 /// reaches components' fields, Rust's and scripts', by handles, `gg.component("Shard").angle`, and
 /// its own's, `Spin.speed`, which an entity reads and writes as `entity[Shard.angle]`: a number,
-/// a bool, a vector, a quaternion as a vector, or an entity. A write that [`World::set_field`]
+/// a bool, a vector, a quaternion as a vector, or an entity, nil for an entity or a vector a field
+/// may hold none of. A write that [`World::set_field`]
 /// would refuse, such as of a number outside the field's bounds, fails as an error does. It keeps
 /// its state in its components, as a game keeps its in the world, since no snapshot, reload or peer
 /// joining keeps what its chunk's locals hold: once its chunk has run, every table the chunk keeps,
@@ -132,6 +133,10 @@ const REMOVED: [&str; 7] = [
 /// as `gg.cast_sphere(radius, from, toward, distance, exclude)`: each gives the entity hit, where,
 /// the surface's normal there and how far, or nil, without end for a distance of nil, through the
 /// colliders of `exclude` if it's given. A mod's scripts cast only if it may read the whole world.
+/// `gg.find_path(from, to)` gives the corners of the shortest path over the world's navmesh, as
+/// [`World::find_path`] does, as an array of vectors, or nil where none joins them, and an agent's
+/// destination, a vector or nil, steers it, as `entity[NavAgent.destination] = to` does; a mod's
+/// scripts find paths only if it may read the whole world.
 ///
 /// `gg.tween(entity, field, to, seconds, options)` eases the field whose handle is `field` from
 /// what it holds to `to` over `seconds`, as [`World::tween`] does, in place of a tween of that
@@ -403,13 +408,17 @@ enum Field {
     Bool,
     F32,
     F64,
-    Int { signed: bool },
+    Int {
+        signed: bool,
+    },
     Vec2,
     Vec3,
     Vec4,
     Quat,
     Entity,
     MaybeEntity,
+    /// A vector or none, as a [`NavAgent`](crate::NavAgent)'s destination is: nil for none.
+    MaybeVec3,
 }
 
 impl Field {
@@ -426,6 +435,7 @@ impl Field {
             Type::Quat => Self::Quat,
             Type::Entity => Self::Entity,
             Type::Option(inner) if **inner == Type::Entity => Self::MaybeEntity,
+            Type::Option(inner) if **inner == Type::Vec3 => Self::MaybeVec3,
             _ => return None,
         })
     }
@@ -773,6 +783,7 @@ impl Host {
         gg.raw_set("cast_sphere", lua.create_function(cast_sphere)?)?;
         gg.raw_set("cast_box", lua.create_function(cast_box)?)?;
         gg.raw_set("cast_capsule", lua.create_function(cast_capsule)?)?;
+        gg.raw_set("find_path", lua.create_function(find_path)?)?;
         gg.raw_set("tween", lua.create_function(tween)?)?;
         gg.raw_set("play", lua.create_function(play)?)?;
         gg.raw_set("set_param", lua.create_function(set_param)?)?;
@@ -1792,6 +1803,12 @@ fn to_lua(field: &dyn Reflect, ty: Field) -> Lua_ {
             Lua_::LightUserData(handle(entity.to_bits()))
         });
     }
+    if ty == Field::MaybeVec3 {
+        let any: &dyn Any = field;
+        let held = any.downcast_ref::<Option<Vec3>>();
+        let held = held.expect("an option of a vector");
+        return held.map_or(Lua_::Nil, |v| Lua_::Vector(vector3_of(v)));
+    }
     match field.to_value() {
         Value::Bool(b) => Lua_::Boolean(b),
         Value::Int(n) => Lua_::Number(n as f64),
@@ -1845,6 +1862,17 @@ fn set(
             let any: &mut dyn Any = world.field_to_set(entity, id, index, None)?;
             *any.downcast_mut::<Option<Entity>>()
                 .expect("an option of an entity") = held;
+            return Ok(());
+        }
+        Field::MaybeVec3 => {
+            let held = match value {
+                Lua_::Nil => None,
+                _ => Some(vec3_of(vector()?)),
+            };
+            let checked = held.map(Value::Vec3);
+            let any: &mut dyn Any = world.field_to_set(entity, id, index, checked.as_ref())?;
+            *any.downcast_mut::<Option<Vec3>>()
+                .expect("an option of a vector") = held;
             return Ok(());
         }
         Field::Bool => match *value {
@@ -1971,6 +1999,30 @@ fn cast(
 /// as a game's state machines name many times over, few enough that searching them in turn costs
 /// little, and that a script's names, which past them it may give without end, hold little.
 const PARAMS: usize = 64;
+
+/// `gg.find_path(from, to)`: the corners of the shortest path over the world's navmesh from `from`
+/// to `to`, as [`World::find_path`] says, as an array of vectors, or nil where no path joins them;
+/// for a mod's script only if its mod may read the whole world, as the navmesh tells where every
+/// static collider is.
+fn find_path(lua: &Lua, (from, to): (Vector, Vector)) -> mlua::Result<Lua_> {
+    shared(|shared| {
+        if let Some(held) = &shared.held
+            && !held.grant.has(&Capability::Read(None))
+        {
+            let what = "a path, which reads where every static collider is,";
+            return Err(mlua::Error::runtime(ungranted("read", what)));
+        }
+        let mut world = shared.world.borrow_mut();
+        let Some(corners) = world.find_path(vec3_of(from), vec3_of(to)) else {
+            return Ok(Lua_::Nil);
+        };
+        let path = lua.create_table_with_capacity(corners.len(), 0)?;
+        for (i, corner) in (1..).zip(corners) {
+            path.raw_set(i, Lua_::Vector(vector3_of(corner)))?;
+        }
+        Ok(Lua_::Table(path))
+    })
+}
 
 /// What a script gives `gg.tween`: the entity, the handle of its field, where the field goes, in
 /// how many seconds, and the table of the rest, if any.
@@ -3307,6 +3359,77 @@ return Drive
             turning.abs_diff_eq(Vec3::Y, 0.02),
             "a radian a second about Y: {turning}"
         );
+    }
+
+    /// Sends its agent across the floor, and finds a path there, keeping its corners' count and its
+    /// end's X, whether its agent had a destination, and whether a path off the floor is found; the
+    /// next tick, its agent's destination there, stops it.
+    const STEER: &str = r#"
+local NavAgent = gg.component("NavAgent")
+local Steer = gg.declare("Steer", { corners = -1, last = 0, had = true, missed = false })
+
+function Steer.tick(entity, dt)
+    entity[Steer.had] = entity[NavAgent.destination] ~= nil
+    if entity[Steer.had] then
+        entity[NavAgent.destination] = nil
+        return
+    end
+    entity[NavAgent.destination] = vector.create(3, 0, 0)
+    local path = gg.find_path(vector.create(-3, 1, 0), vector.create(3, 1, 0))
+    entity[Steer.corners] = #path
+    entity[Steer.last] = path[#path].x
+    entity[Steer.missed] = gg.find_path(vector.create(-3, 1, 0), vector.create(30, 1, 0)) == nil
+end
+
+return Steer
+"#;
+
+    /// A script steers an agent by its destination, a vector or nil, and finds paths over the
+    /// world's navmesh, as code does: an array of corners, the last the end, or nil off it.
+    #[test]
+    fn a_script_steers_an_agent_and_finds_paths() {
+        use crate::{
+            BodyType, BoxCollider3D, NavAgent, NavMeshVolume, RigidBody3D, Transform,
+            step_navigation,
+        };
+
+        let dir = Scratch::new("luau-paths");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/steer.luau", STEER)]);
+        let world = cx.world_mut();
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let floor = Transform {
+            translation: Vec3::new(0.0, -0.5, 0.0),
+            scale: Vec3::new(10.0, 1.0, 10.0),
+            ..Transform::IDENTITY
+        };
+        world.spawn((floor, fixed, BoxCollider3D::default()));
+        let volume = NavMeshVolume {
+            size: Vec3::new(12.0, 4.0, 12.0),
+            ..NavMeshVolume::default()
+        };
+        world.spawn((Transform::IDENTITY, volume));
+        step_navigation(world);
+        let agent = world.spawn((Transform::IDENTITY, NavAgent::default()));
+        world.add_default(agent, "Steer").expect("added");
+        host.run(cx.world_mut());
+        let world = cx.world();
+        let field = |name| world.get_field(agent, "Steer", name).expect("a field");
+        assert_eq!(field("had"), Value::Bool(false));
+        assert_eq!(field("corners"), Value::F64(1.0));
+        assert_eq!(field("last"), Value::F64(3.0));
+        assert_eq!(field("missed"), Value::Bool(true));
+        let destination =
+            |world: &World| world.get::<NavAgent>(agent).expect("an agent").destination;
+        assert_eq!(destination(world), Some(Vec3::new(3.0, 0.0, 0.0)));
+        host.run(cx.world_mut());
+        assert_eq!(
+            cx.world().get_field(agent, "Steer", "had").ok(),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(destination(cx.world()), None);
     }
 
     /// Starts its entity's tweens at its first tick: its scale, eased in; its own size, looping
