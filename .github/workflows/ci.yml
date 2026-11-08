@@ -80,7 +80,7 @@ jobs:
       # out: on one runner, as what `dev` leaves out is alike on every platform.
       - name: Check the shipping configuration
         if: matrix.once
-        run: cargo clippy -p player -p shards -p showcase --no-default-features --all-targets --locked -- -D warnings
+        run: cargo clippy -p player -p shards -p foxball -p showcase --no-default-features --all-targets --locked -- -D warnings
       # gg-engine without `dev`, its tests included, which the workspace's builds never compile: on
       # one runner too, apart from the player, as its tests' dev-dependencies would merge into it.
       - name: Check gg-engine without dev
@@ -178,6 +178,40 @@ jobs:
           target/debug/gg-shards --replay games/shards/tests/references/live.recording --sync-test
           grep -q '"code":"sync_test.matched","ticks":120,' target/debug/logs/sandbox-*.jsonl
           test "$(grep -h '"code":"sync_test.matched"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
+      # The 3D demo, as the steps above run Shards: two lockstep peers, two rollback peers over a
+      # slow link, the host rolling back, and a server and two clients over one, each correcting
+      # toward its states, each run exiting 0 and no `net.desync` in any log; and its ticks run again
+      # as a SyncTest, headless and replaying its live recording, which walks, turns, kicks and edits.
+      - name: Run the 3D demo networked, and as a SyncTest
+        if: matrix.container
+        run: |
+          cargo build -p foxball --locked
+          fox=target/debug/gg-foxball
+          logs="target/debug/logs/foxball-*.jsonl"
+          $fox --headless --frames 600 --host 127.0.0.1:7710 &
+          host=$!
+          $fox --headless --frames 300 --join 127.0.0.1:7710
+          wait $host
+          $fox --headless --frames 600 --host 127.0.0.1:7711 --rollback --link 100,20,5 &
+          host=$!
+          $fox --headless --frames 300 --join 127.0.0.1:7711 --rollback --link 100,20,5
+          wait $host
+          $fox --serve 127.0.0.1:7712 --link 100,20,5 &
+          server=$!
+          $fox --headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5 &
+          client=$!
+          $fox --headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5
+          wait $client
+          kill -INT $server
+          wait $server
+          $fox --headless --frames 300 --sync-test
+          $fox --replay games/foxball/tests/references/live.recording --sync-test
+          test "$(grep -h '"message":"The joiner joined the lockstep session"' $logs | wc -l)" = 2
+          grep -q '"code":"net.rollback","rollbacks":[1-9]' $logs
+          test "$(grep -h '"message":"Joined the server"' $logs | wc -l)" = 2
+          test "$(grep -h '"code":"net.corrected","corrections":[1-9]' $logs | wc -l)" = 2
+          test "$(grep -h '"code":"sync_test.matched"' $logs | wc -l)" = 2
+          ! grep -q '"code":"net.desync"' $logs
       # Whether the editor runs, its view a panel that the UI draws among its own, exiting 0.
       - name: Run the editor headless
         if: matrix.container

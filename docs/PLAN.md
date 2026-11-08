@@ -123,18 +123,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Characters and queries** (2026-11-07)
 - **Flipbooks and tweens** (2026-11-07)
 - **Skeletal animation** (2026-11-08)
+- **A networked 3D demo** (2026-11-08)
+- **Phase 14, 3D gameplay** (2026-11-08)
 
 ## Now
 
-**Phase 14, 3D gameplay**, as Next has it. Its last milestone:
-
-- **A networked 3D demo.** A small 3D game in `games/`, a project of its own: its players
-  characters among physics' bodies, the keys or a pad moving them and the mouse looking about, its
-  cursor grabbed, animated as they move, its sounds placed in 3D by where they are from the
-  listener. Done when Phase 14's *Done when* holds. The engine's part of its looking and hearing is
-  in, as `listen.ron` shows: the mouse's raw motion with the cursor grabbed, the editor grabbing its
-  own for its game, and sounds heard by their direction and distance through a camera with
-  perspective.
+The next phase is the user's to choose, as Open questions has it.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -160,14 +154,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 13 are done, as Done has it, but for what Deferred holds.
-
-14. **3D gameplay.** 3D physics, through rapier3d, deterministic as 2D's is; characters that walk a
-    level, and queries of what's where; animation, sprites' flipbooks and fields' tweens, then
-    glTF's skins and animations, skinned on the GPU; proven by a small networked 3D demo. *Done
-    when* the demo plays alone, between lockstep and rollback peers and through a server, its
-    characters animated and moving under 3D physics, the world's hash at each tick of its seeded
-    run the same on every platform CI runs, and its live recording replays.
+Phases 11 to 14 are done, as Done has it, but for what Deferred holds.
 
 Later: particles, linked prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -335,7 +322,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sharing a skinned model's bind pose and weights between its instances: each instance's entity draws a copy of its model's mesh, its vertices and weights twice over, and the frame's moved vertices again | A crowd's memory is measured to matter |
 | Skinned meshes cut into meshlets and drawn into the visibility buffer, their meshlets' bounds made again each frame from their joints: they draw by their indices, shaded as they draw | Skinned characters are measured to cost the view, as a crowd would |
 | Skinned vertices carried past the reach their clips give, as code that poses joints itself, inverse kinematics or a ragdoll, carries them: they clamp to its box, which views cull by | A game poses joints past its clips |
-| Root motion, events at a clip's times, masks that blend a clip into some joints alone, additive clips, and graphs or state machines of clips: an `Animator` plays whole clips, each at a weight, which code and scripts set | The networked 3D demo, or a game after it, needs one |
+| Root motion, events at a clip's times, masks that blend a clip into some joints alone, additive clips, and graphs or state machines of clips: an `Animator` plays whole clips, each at a weight, which code and scripts set; Foxball sets Survey's, Walk's and Run's itself each tick | A game needs one, as a fox whose feet slide as it runs faster than its clip |
+| Where frames draw an entity between ticks, for layers: `Context` gives none, so Foxball's view eases toward its fox as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
+| Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
+| Foxball shipped and run as it ships in CI, as Shards is: its tests cook its package and replay its live recording from it | A change could break its shipping alone |
+| A menu in Foxball, and a fox that plays a side for a player alone: alone, player 1's fox stands where it starts | Someone plays it alone and misses a match |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |
@@ -581,10 +572,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- What does Phase 14's demo play? Recommendation: a game of its own rather than Shards made 3D,
-  which stays the 2D reference its recordings check: two players as characters on a walled field,
-  pushing physics' balls and crates into each other's goals, which uses each of the phase's
-  milestones and stays small. Decide before its milestone starts.
+- Which phase comes after Phase 14? Recommendation: particles and linked prefabs, what a game made
+  here reaches for next, as Foxball would for its kicks and goals and its arena's repeated walls,
+  before the upscalers and ray tracing, which change how a game looks rather than what it can do.
+  Decide before the next phase starts.
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the

@@ -1,0 +1,8 @@
+(
+    game: "foxball",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/arena.ron",
+)

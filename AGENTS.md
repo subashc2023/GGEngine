@@ -25,6 +25,7 @@ apps/             executables
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
 games/shards/     the first demo, a project: two players, alone, as peers or as a server's clients
+games/foxball/    the 3D demo, networked as Shards is: two foxes, a ball and two goals
 games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
 docs/PLAN.md      the roadmap (see Workflow)
@@ -108,7 +109,7 @@ A change is done when all seven pass:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
-cargo clippy -p player -p shards -p showcase --no-default-features --all-targets -- -D warnings
+cargo clippy -p player -p shards -p foxball -p showcase --no-default-features --all-targets -- -D warnings
 cargo clippy -p gg-engine --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo test --workspace
@@ -118,13 +119,12 @@ The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos vali
 Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and
 `vulkan-validationlayers`. When a test's image differs from its reference, the test says where it
 wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the references, which you
-look at before committing them. The sandbox's and the demo's world hashes, at each tick of a seeded
+look at before committing them. The sandbox's and the demos' world hashes, at each tick of a seeded
 run, are references too, which CI checks on every platform: a change to their simulations, to what
-the hash reads, or to glam, libm, rapier2d or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
-test -p sandbox -p shards` rewrites them alone, with those of the demo's live recording,
-`games/shards/tests/references/live.recording`. gg-engine's `physics/` holds three more and its
-`animation/` two, edited by hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
-new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
+the hash reads, or to glam, libm, rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
+test -p sandbox -p shards -p foxball` rewrites them and the demos' live recordings' alone.
+gg-engine's `physics/` holds three more and its `animation/` two, edited by hand. A difference on
+some platforms alone is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
 and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate, and the

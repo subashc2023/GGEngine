@@ -126,7 +126,9 @@ Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code
 `games/shards`, is a demo of two players, alone or networked in lockstep, as
 [Networking](#networking) describes, which the v0.1 loop is tested on. The second, in
 `games/showcase`, is a scene for each of what the engine draws and simulates, opened from the
-editor's Scenes panel, which grows as the engine does. Executables are
+editor's Scenes panel, which grows as the engine does. The third, in `games/foxball`, is the 3D
+demo, networked as Shards is: two foxes, skinned characters that rapier3d walks, knocking a ball
+into goals, looked about with the grabbed mouse and heard in 3D. Executables are
 named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game settings by executable
 name, and a generic name can match one.
 
