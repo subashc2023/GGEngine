@@ -24,9 +24,9 @@ use mlua::{
 use tracing::{info, warn};
 
 use crate::ecs::{ComponentId, Kind};
-use crate::grant::Grant;
+use crate::grant::{Capability, Grant};
 use crate::reflect::{Ident, Reflect, Type, Value, list};
-use crate::{Context, Entity, Tick, World};
+use crate::{Cast, Context, Entity, Hit3D, Shape3D, Tick, World};
 
 mod bytecode;
 #[cfg(feature = "dev")]
@@ -121,6 +121,14 @@ const REMOVED: [&str; 7] = [
 ///
 /// `gg.declare`'s third argument, `{ on = "Shard" }`, has the component ride on another: each
 /// entity with a `Shard` is given its own, at its defaults, as the scripts run, before its tick.
+///
+/// `gg.quat` makes and multiplies rotations, and turns a vector by one (`gg.quat.rotate(q, v)`).
+/// `gg.cast_ray(from, toward, distance, exclude)` casts through the world's 3D colliders, as
+/// [`World::cast_ray`] does, and `gg.cast_sphere`, `gg.cast_box` and `gg.cast_capsule` sweep a
+/// shape so, as [`World::cast_shape`] does, their sizes and a box's or a capsule's rotation first,
+/// as `gg.cast_sphere(radius, from, toward, distance, exclude)`: each gives the entity hit, where,
+/// the surface's normal there and how far, or nil, without end for a distance of nil, through the
+/// colliders of `exclude` if it's given. A mod's scripts cast only if it may read the whole world.
 ///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
@@ -728,8 +736,16 @@ impl Host {
             Ok(vector_of(quat_of(a) * quat_of(b)))
         })?;
         quat.raw_set("mul", mul)?;
+        let rotate = lua.create_function(|_, (q, v): (Vector, Vector)| {
+            Ok(vector3_of(quat_of(q) * vec3_of(v)))
+        })?;
+        quat.raw_set("rotate", rotate)?;
         quat.set_readonly(true);
         gg.raw_set("quat", quat)?;
+        gg.raw_set("cast_ray", lua.create_function(cast_ray)?)?;
+        gg.raw_set("cast_sphere", lua.create_function(cast_sphere)?)?;
+        gg.raw_set("cast_box", lua.create_function(cast_box)?)?;
+        gg.raw_set("cast_capsule", lua.create_function(cast_capsule)?)?;
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
@@ -1836,6 +1852,101 @@ fn set(
     field.set_value(&value)
 }
 
+/// The end of each cast's arguments, as a script gives them: where it starts, which way it goes,
+/// how far, none without end, and an entity whose colliders it passes through, if any but
+/// `gg.entity`.
+type CastArgs = (Vector, Vector, Option<f64>, Option<LightUserData>);
+
+/// What a cast gives a script: the entity it hit, where, the way the surface faces there and how
+/// far along the cast, or nil for each, as it hit nothing.
+type CastHit = (Lua_, Lua_, Lua_, Lua_);
+
+/// `gg.cast_ray(from, toward, distance, exclude)`: what a ray hits first of the world's 3D
+/// colliders, as [`World::cast_ray`] says.
+fn cast_ray(_: &Lua, args: CastArgs) -> mlua::Result<CastHit> {
+    cast(args, |world, cast| world.cast_ray(cast))
+}
+
+/// `gg.cast_sphere(radius, from, toward, distance, exclude)`: what a sphere swept along a line hits
+/// first, as [`World::cast_shape`] says.
+fn cast_sphere(_: &Lua, (radius, args): (f64, CastArgs)) -> mlua::Result<CastHit> {
+    let shape = Shape3D::Sphere {
+        radius: radius as f32,
+    };
+    cast(args, |world, cast| {
+        world.cast_shape(shape, Quat::IDENTITY, cast)
+    })
+}
+
+/// `gg.cast_box(size, rotation, from, toward, distance, exclude)`: what a box, turned, swept along
+/// a line hits first, as [`World::cast_shape`] says.
+fn cast_box(_: &Lua, (size, rotation, args): (Vector, Vector, CastArgs)) -> mlua::Result<CastHit> {
+    let shape = Shape3D::Box {
+        size: vec3_of(size),
+    };
+    cast(args, |world, cast| {
+        world.cast_shape(shape, quat_of(rotation), cast)
+    })
+}
+
+/// `gg.cast_capsule(height, radius, rotation, from, toward, distance, exclude)`: what a capsule,
+/// upright along its Y and turned, swept along a line hits first, as [`World::cast_shape`] says.
+fn cast_capsule(
+    _: &Lua,
+    (height, radius, rotation, args): (f64, f64, Vector, CastArgs),
+) -> mlua::Result<CastHit> {
+    let shape = Shape3D::Capsule {
+        height: height as f32,
+        radius: radius as f32,
+    };
+    cast(args, |world, cast| {
+        world.cast_shape(shape, quat_of(rotation), cast)
+    })
+}
+
+/// What `run` hits of the world scripts reach with the cast `args` give, for a script: a mod's
+/// only if it may read the whole world, as where each collider is tells of every entity with one.
+fn cast(
+    (from, toward, distance, exclude): CastArgs,
+    run: impl FnOnce(&World, Cast) -> Option<Hit3D>,
+) -> mlua::Result<CastHit> {
+    shared(|shared| {
+        if let Some(held) = &shared.held
+            && !held.grant.has(&Capability::Read(None))
+        {
+            let what = "a cast, which reads where every collider is,";
+            return Err(mlua::Error::runtime(ungranted("read", what)));
+        }
+        let mut cast = Cast::new(vec3_of(from), vec3_of(toward));
+        if let Some(distance) = distance {
+            cast = cast.within(distance as f32);
+        }
+        if let Some(exclude) = exclude.filter(|&data| bits(data) != 0) {
+            cast = cast.excluding(entity_of(exclude)?);
+        }
+        let world = shared.world.borrow();
+        Ok(match run(&world, cast) {
+            Some(hit) => (
+                Lua_::LightUserData(handle(hit.entity.to_bits())),
+                Lua_::Vector(vector3_of(hit.point)),
+                Lua_::Vector(vector3_of(hit.normal)),
+                Lua_::Number(f64::from(hit.distance)),
+            ),
+            None => (Lua_::Nil, Lua_::Nil, Lua_::Nil, Lua_::Nil),
+        })
+    })
+}
+
+/// `v`'s X, Y and Z, as a script's vector holds a point or a direction.
+fn vec3_of(v: Vector) -> Vec3 {
+    Vec3::new(v.x(), v.y(), v.z())
+}
+
+/// `v` as a script holds a point or a direction, its W 0.
+fn vector3_of(v: Vec3) -> Vector {
+    Vector::new(v.x, v.y, v.z, 0.0)
+}
+
 /// `q` as a script holds it, a vector: `x`, `y`, `z` and `w`.
 fn vector_of(q: Quat) -> Vector {
     Vector::new(q.x, q.y, q.z, q.w)
@@ -2848,5 +2959,83 @@ return Spin
             return gg.declare(\"Matched\", {})";
         let error = refused("pattern", text);
         assert!(error.to_string().contains("ran past its budget"), "{error}");
+    }
+
+    /// Casts a ray, a sphere and a box down, and a ray past what the first hit, keeping what each
+    /// found in its own fields.
+    const LOOK: &str = r#"
+local Look = gg.declare("Look", {
+    hit = gg.entity,
+    point = vector.create(0, 0, 0),
+    normal = vector.create(0, 0, 0),
+    distance = -1,
+    through = gg.entity,
+    ball = -1,
+    boxed = -1,
+    missed = true,
+})
+
+local down = vector.create(0, -1, 0)
+
+function Look.tick(entity, dt)
+    local from = vector.create(0.25, 5, -0.25)
+    local hit, point, normal, distance = gg.cast_ray(from, down)
+    entity[Look.hit] = hit
+    entity[Look.point] = point
+    entity[Look.normal] = normal
+    entity[Look.distance] = distance
+    entity[Look.through] = gg.cast_ray(from, down, 10, hit)
+    local _, _, _, ball = gg.cast_sphere(0.5, from, down)
+    entity[Look.ball] = ball
+    local _, _, _, boxed = gg.cast_box(vector.create(1, 1, 1), gg.quat.identity, from, down, nil, gg.entity)
+    entity[Look.boxed] = boxed
+    entity[Look.missed] = gg.cast_capsule(2, 0.5, gg.quat.identity, from, down, 2) == nil
+end
+
+return Look
+"#;
+
+    /// A script casts through the world's 3D colliders, as code does: what a ray hits first, its
+    /// entity, where, the surface's normal and how far; past an entity it names; and a sphere, a
+    /// box and a capsule swept down, nil where it hits nothing within its distance.
+    #[test]
+    fn a_script_casts_through_the_world_s_colliders() {
+        use crate::{BodyType, BoxCollider3D, RigidBody3D, Transform, step_physics};
+
+        let dir = Scratch::new("luau-casts");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/look.luau", LOOK)]);
+        let world = cx.world_mut();
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let at = |translation, scale| Transform {
+            translation,
+            scale,
+            ..Transform::IDENTITY
+        };
+        let floor_at = at(Vec3::ZERO, Vec3::new(10.0, 1.0, 10.0));
+        let floor = world.spawn((floor_at, fixed, BoxCollider3D::default()));
+        let boxed_at = at(Vec3::new(0.0, 1.0, 0.0), Vec3::ONE);
+        let boxed = world.spawn((boxed_at, fixed, BoxCollider3D::default()));
+        step_physics(world);
+        let looker = world.spawn(());
+        world.add_default(looker, "Look").expect("added");
+        host.run(cx.world_mut());
+        let world = cx.world();
+        let field = |name| world.get_field(looker, "Look", name).expect("a field");
+        let some = |entity| Value::Option(Some(Box::new(Value::Entity(entity))));
+        assert_eq!(field("hit"), some(boxed));
+        assert_eq!(field("point"), Value::Vec3(Vec3::new(0.25, 1.5, -0.25)));
+        assert_eq!(field("normal"), Value::Vec3(Vec3::Y));
+        assert_eq!(field("distance"), Value::F64(3.5));
+        assert_eq!(field("through"), some(floor));
+        let near = |name, want: f64| match field(name) {
+            Value::F64(got) => assert!((got - want).abs() < 1e-3, "{name}: {got}, not {want}"),
+            other => panic!("{name}: {other:?}"),
+        };
+        near("ball", 3.0);
+        near("boxed", 3.0);
+        assert_eq!(field("missed"), Value::Bool(true));
     }
 }

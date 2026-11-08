@@ -1,22 +1,34 @@
 //! 3D physics: bodies that rapier moves at the world's ticks, as their entities' components
-//! describe them, and the world's resource that holds rapier's bodies and contacts, which
-//! snapshots copy and snapshot files hold.
+//! describe them, characters that its character controller moves ([`character`]), casts through
+//! their colliders ([`query`]), and the world's resource that holds rapier's bodies and contacts,
+//! which snapshots copy and snapshot files hold.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+use rapier3d::control::CharacterCollision;
 use rapier3d::prelude::{
     BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle, ColliderSet,
-    ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
-    PhysicsPipeline, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType,
-    Rotation, SoftBodySet, Vector,
+    ImpulseJointSet, IntegrationParameters, IslandManager, MassProperties, MultibodyJointSet,
+    NarrowPhase, PhysicsPipeline, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    RigidBodyType, Rotation, SoftBodySet, TriMeshFlags, Vector,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::{BodyType, Link, Links, Outline};
 use crate::draw::Poses;
+use crate::model::{ModelRoot, Surface};
 use crate::recording::text;
 use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
+
+mod character;
+mod query;
+
+use character::Character;
+pub use character::CharacterController3D;
+pub use query::{Cast, Hit3D, Shape3D};
 
 /// A body that 3D physics moves, at each tick a layer runs [`step_physics`](crate::step_physics)
 /// in: its entity's [`Transform`]'s translation and rotation, and the velocities here, which each
@@ -206,6 +218,89 @@ impl CapsuleCollider3D {
     }
 }
 
+/// The triangles a [`RigidBody3D`] on the same entity collides as: those of the model its entity's
+/// [`ModelRoot`] names, each of the model's nodes' where the node is in the model, in the entity's
+/// space, so that they turn with it and scale along each axis as it does, as a level's floors and
+/// walls do. Triangles hold no volume, so it gives a body no mass, and suits static and kinematic
+/// bodies; a dynamic one takes its mass from its other colliders. One whose entity has no
+/// `ModelRoot`, or whose model has no triangles, as a model that didn't load, collides as nothing,
+/// warned of as it's made (`physics.no_surface`). Its outline isn't drawn, as its model shows where
+/// it is.
+///
+/// A world saved whole holds its triangles whole, as rapier serializes them, at a cost DEFECTS.md
+/// weighs.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct MeshCollider3D {
+    /// How much it holds back what slides along it: 0 not at all, as ice.
+    #[reflect(min = 0.0, default = 0.5)]
+    pub friction: f32,
+    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub restitution: f32,
+}
+
+impl Default for MeshCollider3D {
+    fn default() -> Self {
+        Self {
+            friction: 0.5,
+            restitution: 0.0,
+        }
+    }
+}
+
+impl MeshCollider3D {
+    /// The collider it makes for `entity`, of `scale`, in `world`, with the surfaces of the model it
+    /// made it of, which a model read again replaces: none where the entity has no model, or its
+    /// model no triangles, which it warns of.
+    fn collider(
+        &self,
+        world: &World,
+        entity: Entity,
+        scale: Vec3,
+    ) -> (Option<Collider>, Option<Arc<Vec<Surface>>>) {
+        let nodes = model_of(world, entity).and_then(|model| world.assets().nodes(model));
+        let made = nodes.and_then(|nodes| {
+            let (vertices, indices) = nodes.triangles();
+            let vertices = vertices.into_iter().map(|at| vector(at * scale)).collect();
+            // Without topology or pseudo-normals, which would double what it holds and what a world
+            // saved whole writes of it.
+            let shape =
+                ColliderBuilder::trimesh_with_flags(vertices, indices, TriMeshFlags::empty());
+            let shape = shape.ok()?.mass_properties(MassProperties::default());
+            Some(
+                shape
+                    .friction(self.friction)
+                    .restitution(self.restitution)
+                    .build(),
+            )
+        });
+        if made.is_none() {
+            let id = world.id(entity).expect("found alive");
+            let why = match model_of(world, entity) {
+                Some(_) => "its model has no triangles",
+                None => "it has no ModelRoot",
+            };
+            warn!(
+                code = "physics.no_surface",
+                entity = %id,
+                "Entity {id}'s MeshCollider3D collides as nothing: {why}"
+            );
+        }
+        (made, nodes.map(|nodes| Arc::clone(&nodes.surfaces)))
+    }
+}
+
+/// The model `entity`'s [`ModelRoot`] names, if it has one.
+fn model_of(world: &World, entity: Entity) -> Option<crate::Model> {
+    world.get::<ModelRoot>(entity).map(|root| root.0)
+}
+
+/// The surfaces of the model `entity`'s [`ModelRoot`] names, as the world's assets hold them now.
+fn surfaces(world: &World, entity: Entity) -> Option<Arc<Vec<Surface>>> {
+    let nodes = world.assets().nodes(model_of(world, entity)?)?;
+    Some(Arc::clone(&nodes.surfaces))
+}
+
 /// A collider of `shape` around `offset`, of what a collider's component gives it.
 fn built(
     shape: ColliderBuilder,
@@ -230,12 +325,19 @@ fn built(
 /// keeps it, its bodies going at the next step, as their entities have.
 pub struct Physics3D {
     /// Which way everything dynamic falls, and how much faster it goes each second, in units a
-    /// second: down along -Y at 9.81 by default, Earth's, as though a unit were a meter.
+    /// second: down along -Y at 9.81 by default, Earth's, as though a unit were a meter; and the
+    /// characters, as much as each's [`CharacterController3D::gravity`] says.
     pub gravity: Vec3,
     rapier: Rapier,
     /// rapier's workspace, which a copy makes anew, since no step carries anything in it over.
     pipeline: PhysicsPipeline,
     links: Links<Linked>,
+    characters: Links<Character>,
+    /// The entities with a `CharacterController3D` that aren't characters, as they lack a
+    /// `CapsuleCollider3D` or have a `RigidBody3D`, warned of once each.
+    unmoved: Vec<Entity>,
+    /// What a character hit as it moved, a workspace as `pipeline` is.
+    hits: Vec<CharacterCollision>,
 }
 
 /// What rapier keeps from one step to the next.
@@ -260,14 +362,18 @@ struct Rapier {
 struct Linked {
     entity: Entity,
     body: RigidBodyHandle,
-    /// The colliders of its entity's `BoxCollider3D`, `SphereCollider3D` and `CapsuleCollider3D`,
-    /// in that order, of those it has.
-    colliders: [Option<ColliderHandle>; 3],
+    /// The colliders of its entity's `BoxCollider3D`, `SphereCollider3D`, `CapsuleCollider3D` and
+    /// `MeshCollider3D`, in that order, of those it has.
+    colliders: [Option<ColliderHandle>; 4],
     rigid_body: RigidBody3D,
     transform: Transform,
     box_collider: Option<BoxCollider3D>,
     sphere_collider: Option<SphereCollider3D>,
     capsule_collider: Option<CapsuleCollider3D>,
+    mesh_collider: Option<MeshCollider3D>,
+    /// The surfaces of the model its mesh collider was made of, which a model read again
+    /// replaces, its collider made again then.
+    surfaces: Option<Arc<Vec<Surface>>>,
 }
 
 impl Link for Linked {
@@ -297,6 +403,9 @@ impl Default for Physics3D {
             },
             pipeline: PhysicsPipeline::new(),
             links: Links::default(),
+            characters: Links::default(),
+            unmoved: Vec::new(),
+            hits: Vec::new(),
         }
     }
 }
@@ -308,27 +417,36 @@ impl Clone for Physics3D {
             rapier: self.rapier.clone(),
             pipeline: PhysicsPipeline::new(),
             links: self.links.clone(),
+            characters: self.characters.clone(),
+            unmoved: self.unmoved.clone(),
+            hits: Vec::new(),
         }
     }
 
     /// Copies `source` into the memory this one holds, as far as rapier's types copy so, keeping
-    /// its own workspace.
+    /// its own workspaces.
     fn clone_from(&mut self, source: &Self) {
         self.gravity = source.gravity;
         self.rapier.clone_from(&source.rapier);
         self.links.clone_from(&source.links);
+        self.characters.clone_from(&source.characters);
+        self.unmoved.clone_from(&source.unmoved);
     }
 }
 
 /// What a snapshot file holds of [`Physics3D`], `R` its rapier's state, as its own or borrowed: its
-/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body,
-/// with its entity by its ID; and the bodies under a parent warned of, by their entities' IDs.
+/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body
+/// and each character, with its entity by its ID; and the bodies under a parent and the entities
+/// with a character's controller that aren't characters warned of, by their entities' IDs.
 #[derive(Serialize, Deserialize)]
 struct SavedPhysics<R> {
     gravity: [f32; 3],
     rapier: R,
     linked: Vec<SavedLinked>,
     children: Vec<Option<u64>>,
+    characters: Vec<SavedCharacter>,
+    character_children: Vec<Option<u64>>,
+    unmoved: Vec<Option<u64>>,
 }
 
 /// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
@@ -339,12 +457,24 @@ struct SavedPhysics<R> {
 struct SavedLinked {
     entity: Option<u64>,
     body: RigidBodyHandle,
-    colliders: [Option<ColliderHandle>; 3],
+    colliders: [Option<ColliderHandle>; 4],
     rigid_body: String,
     transform: String,
     box_collider: Option<String>,
     sphere_collider: Option<String>,
     capsule_collider: Option<String>,
+    mesh_collider: Option<String>,
+}
+
+/// A character as a snapshot file holds it, as [`SavedLinked`] holds a body.
+#[derive(Serialize, Deserialize)]
+struct SavedCharacter {
+    entity: Option<u64>,
+    body: RigidBodyHandle,
+    collider: ColliderHandle,
+    controller: String,
+    transform: String,
+    capsule: String,
 }
 
 /// Saved through rapier's own serialization, written as RON, so that a world restored in another
@@ -372,12 +502,29 @@ impl Saved for Physics3D {
             box_collider: linked.box_collider.as_ref().map(|it| value(it)),
             sphere_collider: linked.sphere_collider.as_ref().map(|it| value(it)),
             capsule_collider: linked.capsule_collider.as_ref().map(|it| value(it)),
+            mesh_collider: linked.mesh_collider.as_ref().map(|it| value(it)),
         });
+        let characters = self
+            .characters
+            .linked
+            .iter()
+            .map(|character| SavedCharacter {
+                entity: id(character.entity),
+                body: character.body,
+                collider: character.collider,
+                controller: value(&character.controller),
+                transform: value(&character.transform),
+                capsule: value(&character.capsule),
+            });
+        let ids = |entities: &[Entity]| entities.iter().map(|&entity| id(entity)).collect();
         let saved = SavedPhysics {
             gravity: self.gravity.to_array(),
             rapier: &self.rapier,
             linked: linked.collect(),
-            children: self.links.children.iter().map(|&child| id(child)).collect(),
+            children: ids(&self.links.children),
+            characters: characters.collect(),
+            character_children: ids(&self.characters.children),
+            unmoved: ids(&self.unmoved),
         };
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
@@ -396,8 +543,14 @@ impl Saved for Physics3D {
         }
         let mut linked = Vec::with_capacity(saved.linked.len());
         for body in saved.linked {
+            let entity = entity(body.entity);
+            let mesh_collider = collider(world, body.mesh_collider)?;
+            let alive = entity != Entity::DEAD;
+            let made_of = mesh_collider
+                .filter(|_| alive)
+                .and_then(|_| surfaces(world, entity));
             linked.push(Linked {
-                entity: entity(body.entity),
+                entity,
                 body: body.body,
                 colliders: body.colliders,
                 rigid_body: world.component_from_text(&body.rigid_body)?,
@@ -405,48 +558,82 @@ impl Saved for Physics3D {
                 box_collider: collider(world, body.box_collider)?,
                 sphere_collider: collider(world, body.sphere_collider)?,
                 capsule_collider: collider(world, body.capsule_collider)?,
+                mesh_collider,
+                surfaces: made_of,
+            });
+        }
+        let mut characters = Vec::with_capacity(saved.characters.len());
+        for character in saved.characters {
+            characters.push(Character {
+                entity: entity(character.entity),
+                body: character.body,
+                collider: character.collider,
+                controller: world.component_from_text(&character.controller)?,
+                transform: world.component_from_text(&character.transform)?,
+                capsule: world.component_from_text(&character.capsule)?,
             });
         }
         // What a step reaches by the links' handles, which text from elsewhere, a host's or a
         // server's, may name otherwise than rapier's sets hold: each body there and linked once,
-        // its colliders on it, and each entity linked once.
+        // naming its entity as its link does, which casts find it by, its colliders on it, and
+        // each entity linked once.
         let refused = |entity: Entity, what: &str| {
             let who = world.id(entity);
             let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
             Error::new("physics.load", format!("{who}'s body {what}"))
         };
         let rapier = &saved.rapier;
-        let mut bodies = HashSet::with_capacity(linked.len());
-        for linked in &linked {
-            if rapier.bodies.get(linked.body).is_none() || !bodies.insert(linked.body) {
+        let bodies_of = (linked.iter().map(|it| (it.entity, it.body, it.colliders))).chain(
+            characters.iter().map(|it| {
+                let colliders = [Some(it.collider), None, None, None];
+                (it.entity, it.body, colliders)
+            }),
+        );
+        let mut bodies = HashSet::with_capacity(linked.len() + characters.len());
+        let mut entities = HashSet::with_capacity(linked.len() + characters.len());
+        for (entity, body, colliders) in bodies_of {
+            let Some(rigid_body) = rapier.bodies.get(body).filter(|_| bodies.insert(body)) else {
                 let what = "names no rigid body of rapier's, or another body's";
-                return Err(refused(linked.entity, what));
+                return Err(refused(entity, what));
+            };
+            let alive = entity != Entity::DEAD;
+            if alive && rigid_body.user_data != u128::from(entity.to_bits()) {
+                return Err(refused(entity, "names another entity in rapier's state"));
+            }
+            if alive && !entities.insert(entity) {
+                return Err(refused(entity, "is its second"));
             }
             let on = |collider: &ColliderHandle| {
-                rapier.colliders.get(*collider).and_then(Collider::parent) == Some(linked.body)
+                rapier.colliders.get(*collider).and_then(Collider::parent) == Some(body)
             };
-            if !linked.colliders.iter().flatten().all(on) {
+            if !colliders.iter().flatten().all(on) {
                 let what = "names a collider that isn't on its rigid body";
-                return Err(refused(linked.entity, what));
+                return Err(refused(entity, what));
             }
         }
-        let children = saved.children.into_iter().map(entity).collect();
-        let links = Links::new(linked, children);
+        let entities = |ids: Vec<Option<u64>>| ids.into_iter().map(entity).collect();
+        let links = Links::new(linked, entities(saved.children));
         let links = links.map_err(|twice| refused(twice, "is its second"))?;
+        let characters = Links::new(characters, entities(saved.character_children));
+        let characters = characters.map_err(|twice| refused(twice, "is its second"))?;
         Ok(Self {
             gravity: Vec3::from_array(saved.gravity),
             rapier: saved.rapier,
             pipeline: PhysicsPipeline::new(),
             links,
+            characters,
+            unmoved: entities(saved.unmoved),
+            hits: Vec::new(),
         })
     }
 }
 
 /// Steps `world`'s 3D physics a tick, as [`step_physics`](crate::step_physics) describes, giving it
-/// a [`Physics3D`] first if it has a [`RigidBody3D`] and none.
+/// a [`Physics3D`] first if it has a [`RigidBody3D`] or a [`CharacterController3D`] and none.
 pub(super) fn step(world: &mut World) {
     if world.resource::<Physics3D>().is_none() {
-        if world.query::<&RigidBody3D>().next().is_none() {
+        let bodies = world.query::<&RigidBody3D>().next().is_some();
+        if !bodies && world.query::<&CharacterController3D>().next().is_none() {
             return;
         }
         world.insert_resource(Physics3D::default());
@@ -455,8 +642,11 @@ pub(super) fn step(world: &mut World) {
 }
 
 impl Physics3D {
+    /// Takes in what changed, moves the characters as far as what they move into lets them, then
+    /// steps rapier, which carries the characters there, and writes back where everything went.
     fn step(&mut self, world: &mut World) {
         self.unlink_gone(world);
+        self.unlink_gone_characters(world);
         let rapier = &mut self.rapier;
         self.links
             .find::<RigidBody3D>(world, "RigidBody3D", |links, entity| {
@@ -465,6 +655,8 @@ impl Physics3D {
                     None => links.push(make_body(rapier, world, entity)),
                 }
             });
+        self.find_characters(world);
+        self.move_characters(world);
         let Rapier {
             bodies,
             colliders,
@@ -493,6 +685,7 @@ impl Physics3D {
             &(),
         );
         self.write_back(world);
+        self.write_back_characters(world);
     }
 
     /// Takes out each body whose entity has gone, lost its `RigidBody3D` or its `Transform`, or
@@ -506,15 +699,7 @@ impl Physics3D {
             if has && matches!(world.parent(entity), Ok(None)) {
                 return true;
             }
-            rapier.bodies.remove(
-                linked.body,
-                &mut rapier.islands,
-                &mut rapier.colliders,
-                &mut rapier.impulse_joints,
-                &mut rapier.multibody_joints,
-                &mut rapier.soft_bodies,
-                true,
-            );
+            remove_body(rapier, linked.body);
             false
         });
     }
@@ -550,6 +735,30 @@ impl Physics3D {
             }
         }
     }
+
+    /// The body of `entity`, a body's or a character's, if it has one.
+    fn body_of(&self, entity: Entity) -> Option<RigidBodyHandle> {
+        let body = self.links.get(entity).map(|linked| linked.body);
+        body.or_else(|| self.characters.get(entity).map(|character| character.body))
+    }
+}
+
+/// Takes `body` out of `rapier`, with its colliders.
+fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
+    rapier.bodies.remove(
+        body,
+        &mut rapier.islands,
+        &mut rapier.colliders,
+        &mut rapier.impulse_joints,
+        &mut rapier.multibody_joints,
+        &mut rapier.soft_bodies,
+        true,
+    );
+}
+
+/// What the body of `entity` holds as its user data, which casts find the entity they hit by.
+fn user_data(entity: Entity) -> u128 {
+    u128::from(entity.to_bits())
 }
 
 /// Makes `entity`'s body in `rapier`, as its components say, and gives back its link.
@@ -560,7 +769,8 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     let mut built = RigidBodyBuilder::new(body_type(rigid_body.body_type))
         .pose(at)
         .linvel(vector(rigid_body.velocity))
-        .angvel(vector(rigid_body.angular_velocity));
+        .angvel(vector(rigid_body.angular_velocity))
+        .user_data(user_data(entity));
     if rigid_body.fixed_rotation {
         built = built.lock_rotations();
     }
@@ -568,11 +778,16 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     let box_collider = world.get::<BoxCollider3D>(entity).copied();
     let sphere_collider = world.get::<SphereCollider3D>(entity).copied();
     let capsule_collider = world.get::<CapsuleCollider3D>(entity).copied();
-    let mut colliders = [None; 3];
+    let mesh_collider = world.get::<MeshCollider3D>(entity).copied();
+    let (meshed, surfaces) = mesh_collider.map_or((None, None), |mesh| {
+        mesh.collider(world, entity, transform.scale)
+    });
+    let mut colliders = [None; 4];
     let made = [
         box_collider.map(|made| made.collider(transform.scale)),
         sphere_collider.map(|made| made.collider(transform.scale)),
         capsule_collider.map(|made| made.collider(transform.scale)),
+        meshed,
     ];
     for (handle, made) in colliders.iter_mut().zip(made) {
         replace(rapier, handle, made, body);
@@ -586,11 +801,14 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
         box_collider,
         sphere_collider,
         capsule_collider,
+        mesh_collider,
+        surfaces,
     }
 }
 
 /// Takes in what changed of `linked`'s components since the last step left them, which the last
-/// step didn't make, into its body: waking it, so that it moves from there.
+/// step didn't make, into its body: waking it, so that it moves from there. Its mesh collider is
+/// made again as its model is read again too.
 fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let entity = linked.entity;
     let rigid_body = *world.get::<RigidBody3D>(entity).expect("found with one");
@@ -618,8 +836,9 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let box_collider = world.get::<BoxCollider3D>(entity).copied();
     let sphere_collider = world.get::<SphereCollider3D>(entity).copied();
     let capsule_collider = world.get::<CapsuleCollider3D>(entity).copied();
+    let mesh_collider = world.get::<MeshCollider3D>(entity).copied();
     let rescaled = transform.scale != linked.transform.scale;
-    let [boxed, round, capsuled] = &mut linked.colliders;
+    let [boxed, round, capsuled, meshed] = &mut linked.colliders;
     if box_collider != linked.box_collider || rescaled {
         let made = box_collider.map(|made| made.collider(transform.scale));
         replace(rapier, boxed, made, linked.body);
@@ -632,11 +851,24 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
         let made = capsule_collider.map(|made| made.collider(transform.scale));
         replace(rapier, capsuled, made, linked.body);
     }
+    let now = mesh_collider.and_then(|_| surfaces(world, entity));
+    let remodeled = match (&now, &linked.surfaces) {
+        (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
+        (now, was) => now.is_some() != was.is_some(),
+    };
+    if mesh_collider != linked.mesh_collider || rescaled || remodeled {
+        let (made, surfaces) = mesh_collider.map_or((None, None), |mesh| {
+            mesh.collider(world, entity, transform.scale)
+        });
+        replace(rapier, meshed, made, linked.body);
+        linked.surfaces = surfaces;
+    }
     linked.rigid_body = rigid_body;
     linked.transform = transform;
     linked.box_collider = box_collider;
     linked.sphere_collider = sphere_collider;
     linked.capsule_collider = capsule_collider;
+    linked.mesh_collider = mesh_collider;
 }
 
 /// rapier's kind of body for `body_type`: kinematic by its velocity, as Box2D's kinematic bodies go.
@@ -753,7 +985,7 @@ mod tests {
     use crate::step_physics;
 
     /// A floor 10 units across and deep and a unit tall, its top at y 0.5, static.
-    fn floor(world: &mut World) -> Entity {
+    pub(super) fn floor(world: &mut World) -> Entity {
         let at = Transform {
             scale: Vec3::new(10.0, 1.0, 10.0),
             ..Transform::IDENTITY
@@ -766,7 +998,7 @@ mod tests {
     }
 
     /// A dynamic unit box at `at`, turned by `rotation`.
-    fn crate_at(world: &mut World, at: Vec3, rotation: Quat) -> Entity {
+    pub(super) fn crate_at(world: &mut World, at: Vec3, rotation: Quat) -> Entity {
         let at = Transform {
             translation: at,
             rotation,
@@ -776,13 +1008,13 @@ mod tests {
     }
 
     /// Steps `world`'s physics `ticks` times.
-    fn step(world: &mut World, ticks: u32) {
+    pub(super) fn step(world: &mut World, ticks: u32) {
         for _ in 0..ticks {
             step_physics(world);
         }
     }
 
-    fn transform(world: &World, entity: Entity) -> Transform {
+    pub(super) fn transform(world: &World, entity: Entity) -> Transform {
         *world.get::<Transform>(entity).expect("alive, with one")
     }
 
@@ -1256,5 +1488,139 @@ mod tests {
         assert!((radius - 1.0).abs() < 1e-6 && (half - 0.5).abs() < 1e-6);
         let along = capsule.transform_vector3(Vec3::Y);
         assert!(near(along, turned * Vec3::Y), "{along}");
+    }
+
+    /// A context whose world has the level's model, a floor at y 0, and a static root of it at
+    /// `at` with a `MeshCollider3D`.
+    fn level_at(at: Transform) -> (crate::Context, Entity) {
+        let mut cx = crate::Context::seeded(7);
+        let (model, _) = crate::model::tests::added(&mut cx, "level", crate::model::tests::level());
+        let world = cx.world_mut();
+        let root = model.spawn(world, at);
+        let body = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        world.insert(root, body).expect("alive");
+        world
+            .insert(root, MeshCollider3D::default())
+            .expect("alive");
+        (cx, root)
+    }
+
+    /// A box dropped onto a model's triangles rests on them, a character walks on them, and a ray
+    /// down hits them, giving the model's root; scaled, they're where its scale puts them.
+    #[test]
+    fn bodies_and_characters_stand_on_a_models_triangles() {
+        let (mut cx, root) = level_at(Transform::IDENTITY);
+        let world = cx.world_mut();
+        let dropped = crate_at(world, Vec3::new(1.0, 3.0, -2.0), Quat::IDENTITY);
+        let walker = super::character::tests::character(world, Vec3::new(-3.0, 3.0, 0.0));
+        step(world, 120);
+        let rested = transform(world, dropped).translation;
+        assert!((rested.y - 0.5).abs() < 0.02, "{rested}");
+        let grounded = world
+            .get::<CharacterController3D>(walker)
+            .expect("alive")
+            .grounded;
+        assert!(grounded, "standing on the triangles");
+        let down = Cast::new(Vec3::new(4.0, 2.0, 4.0), Vec3::NEG_Y);
+        let hit = world.cast_ray(down).expect("the floor");
+        assert_eq!(hit.entity, root);
+        assert!(
+            hit.normal.abs_diff_eq(Vec3::Y, 1e-5) && hit.point.y.abs() < 1e-5,
+            "{hit:?}"
+        );
+        let (mut cx, _) = level_at(Transform {
+            translation: Vec3::new(0.0, 1.0, 0.0),
+            scale: Vec3::new(0.25, 2.0, 0.25),
+            ..Transform::IDENTITY
+        });
+        let world = cx.world_mut();
+        step(world, 1);
+        let narrow = world.cast_ray(Cast::new(Vec3::new(3.0, 5.0, 0.0), Vec3::NEG_Y));
+        assert_eq!(narrow, None, "past its scaled edge, 2.5 from its middle");
+        let hit = world.cast_ray(Cast::new(Vec3::new(2.0, 5.0, 0.0), Vec3::NEG_Y));
+        assert!((hit.expect("within it").point.y - 1.0).abs() < 1e-5);
+    }
+
+    /// A mesh collider whose entity has no model collides as nothing, which it warns of, and what
+    /// falls onto it falls through; one whose model is read again takes its new triangles.
+    #[test]
+    fn mesh_colliders_follow_their_models() {
+        let (mut cx, root) = level_at(Transform::IDENTITY);
+        let world = cx.world_mut();
+        let body = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let modelless = world.spawn((Transform::IDENTITY, body, MeshCollider3D::default()));
+        step(world, 1);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        let collider = |entity| {
+            let linked = physics
+                .links
+                .linked
+                .iter()
+                .find(|linked| linked.entity == entity);
+            linked.expect("linked").colliders[3]
+        };
+        assert!(collider(root).is_some() && collider(modelless).is_none());
+        let dropped = crate_at(world, Vec3::new(30.0, 1.0, 0.0), Quat::IDENTITY);
+        world
+            .get_mut::<Transform>(modelless)
+            .expect("alive")
+            .translation
+            .x = 30.0;
+        step(world, 32);
+        assert!(transform(world, dropped).translation.y < 0.0, "through it");
+        // The model read again, as a development run reads it as its file changes, its floor a
+        // unit higher.
+        #[cfg(feature = "dev")]
+        {
+            let ModelRoot(model) = *world.get::<ModelRoot>(root).expect("a root");
+            let raised = crate::model::tests::surface(
+                vec![[-10.0, 1.0, -10.0], [-10.0, 1.0, 10.0], [10.0, 1.0, 10.0]],
+                vec![0, 1, 2],
+                Transform::IDENTITY,
+            );
+            let mut other = crate::Context::seeded(1);
+            let (read, _) = crate::model::tests::added(&mut other, "raised", raised);
+            let nodes = other.world().assets().nodes(read).expect("added").clone();
+            world.assets_mut().set_nodes(model, nodes);
+            step(world, 1);
+            let hit = world.cast_ray(Cast::new(Vec3::new(-5.0, 5.0, 5.0), Vec3::NEG_Y));
+            assert!(
+                (hit.expect("the floor").point.y - 1.0).abs() < 1e-5,
+                "{hit:?}"
+            );
+        }
+    }
+
+    /// A world standing on a model's triangles, its physics saved to text, which holds them whole,
+    /// and loaded, steps as it did, bit for bit.
+    #[test]
+    fn a_mesh_collider_saved_steps_as_it_did() {
+        let (mut cx, _) = level_at(Transform::IDENTITY);
+        let world = cx.world_mut();
+        for i in 0..4u8 {
+            let i = f32::from(i);
+            crate_at(
+                world,
+                Vec3::new(i - 1.5, 1.0 + i, 0.5 * i),
+                Quat::from_rotation_x(i),
+            );
+        }
+        super::character::tests::character(world, Vec3::new(-3.0, 1.6, 2.0));
+        step(world, 40);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        let text = physics.save(world).expect("saved");
+        assert!(text.contains("TriMesh"), "the triangles whole");
+        let loaded = Physics3D::load(&text, world).expect("loaded");
+        let mut copy = world.clone();
+        copy.insert_resource(loaded);
+        step(world, 60);
+        step(&mut copy, 60);
+        assert_eq!(copy.hash(), world.hash());
     }
 }

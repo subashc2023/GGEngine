@@ -1226,17 +1226,43 @@ Physics is rapier's, rapier2d's in 2D and rapier3d's in 3D, in gg-engine's `phys
 games reach it through components. An entity with a `Transform` and a `RigidBody2D` is a body
 moving in the XY plane, and a `BoxCollider2D` or a `CircleCollider2D` beside it, or both, is the
 shape it collides as; one with a `RigidBody3D` moves in space, its translation and rotation whole,
-and collides as whichever of a `BoxCollider3D`, a `SphereCollider3D` and a `CapsuleCollider3D` it
-has. Colliders are in their entity's space, so that they turn and scale with it: a box by its
-scale along each axis, a circle or a sphere by the largest, and a capsule, upright along its Y as a
-character stands, by its scale along Y for its height and the larger along X and Z for its radius.
-`step_physics` is a system a layer's tick runs, stepping 2D physics, then 3D. rapier is built with
-`enhanced-determinism`, so that a step gives the same bits on every platform. Physics' state,
-rapier's bodies, colliders and contacts and what sleeps, is the world's `Physics2D` and `Physics3D`
-resources, each given to a world as it first steps with a body of its kind, which snapshots copy,
-as [ECS](#ecs) describes: bodies made again from their components alone wouldn't step as the world
-did. A body under a parent isn't moved, since its transform is in its parent's space
-(`physics.child_body`).
+and collides as whichever of a `BoxCollider3D`, a `SphereCollider3D`, a `CapsuleCollider3D` and a
+`MeshCollider3D` it has. Colliders are in their entity's space, so that they turn and scale with
+it: a box by its scale along each axis, a circle or a sphere by the largest, and a capsule, upright
+along its Y as a character stands, by its scale along Y for its height and the larger along X and
+Z for its radius. A mesh collider is the triangles of the model its entity's `ModelRoot` names,
+each node's where the node is in the model, scaled along each axis, as a level's floors and walls
+are, for static and kinematic bodies, as triangles hold no volume to give a body mass. Its
+triangles are the model's meshes as packed, which a run from glTF and one from its package unpack
+alike, their vertices those their triangles use alone on both sides, ordered by where they are
+rather than as the cooker leaves them, so that both runs collide alike; every model keeps its
+meshes' surfaces so for physics, and a model read again, as its file changes, has its colliders
+made again. `step_physics` is a system a layer's tick runs, stepping 2D physics, then 3D. rapier is
+built with `enhanced-determinism`, so that a step gives the same bits on every platform. Physics'
+state, rapier's bodies, colliders and contacts and what sleeps, is the world's `Physics2D` and
+`Physics3D` resources, each given to a world as it first steps with a body of its kind, which
+snapshots copy, as [ECS](#ecs) describes: bodies made again from their components alone wouldn't
+step as the world did. A snapshot file holds them through rapier's own serialization, which writes
+a mesh collider's triangles whole, at a cost [DEFECTS.md](docs/DEFECTS.md) weighs. A body under a
+parent isn't moved, since its transform is in its parent's space (`physics.child_body`).
+
+A character is an entity with a `CharacterController3D` and a `CapsuleCollider3D`, which rapier's
+kinematic character controller moves at each step as fast as the controller's `velocity` says,
+which its game sets, as from its player's input: sliding along what it moves into, climbing slopes
+up to a limit and steps up to a height, kept to the ground going down, and pushing what's dynamic,
+against the colliders as the last step left them; gravity pulls its velocity down while it's off
+the ground, and the ground and what's above it stop it, `grounded` saying whether it stands. Its
+body is kinematic, moved to where the controller took it as rapier steps, so that the rest of
+physics meets it there. Its state is the controller's and the world's, as a body's is, so that
+replays, snapshots and peers move it alike. An entity with a `RigidBody3D` is a body, its
+controller doing nothing, as is one without a capsule, each warned of once
+(`physics.not_character`).
+
+`World::cast_ray` and `World::cast_shape` cast a ray, or a box, a sphere or a capsule swept along a
+line, through the 3D colliders, from code and from scripts, as `gg.cast_ray` and the like: what's
+hit first, its entity, where, the surface's normal there and how far, passing through an entity's
+own colliders if it's asked to. They see the colliders where the last step left them, as each
+body's rapier holds its entity, which a snapshot file checks.
 
 `Context::set_colliders_shown` outlines the world's colliders where their entities draw, in lines,
 a sphere by its rings about its three axes and a capsule by its rings, its side's lines and its

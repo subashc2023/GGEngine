@@ -210,8 +210,9 @@ pub use name::Name;
 pub use owner::Owner;
 pub use perf::PerfPanel;
 pub use physics::{
-    BodyType, BoxCollider2D, BoxCollider3D, CapsuleCollider3D, CircleCollider2D, Physics2D,
-    Physics3D, RigidBody2D, RigidBody3D, SphereCollider3D, step_physics,
+    BodyType, BoxCollider2D, BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D,
+    CircleCollider2D, Hit3D, MeshCollider3D, Physics2D, Physics3D, RigidBody2D, RigidBody3D,
+    Shape3D, SphereCollider3D, step_physics,
 };
 use recording::Recorder;
 #[doc(hidden)]

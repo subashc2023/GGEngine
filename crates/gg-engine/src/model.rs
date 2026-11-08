@@ -4,8 +4,9 @@
 //! under the same handles.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use gg_core::math::{Vec2, Vec3, Vec4};
+use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     AlphaMode, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
@@ -79,11 +80,99 @@ impl Component for ModelNode {}
 
 /// What a model's root spawns under it, as [`Assets`](crate::assets::Assets) keeps it for the
 /// worlds: the scene's nodes, and a part for each primitive of a mesh with more than one, in
-/// pre-order, each after its parent; and each primitive's draw, with its material.
+/// pre-order, each after its parent; each primitive's draw, with its material; and each
+/// primitive's surface, which physics collides with as a
+/// [`MeshCollider3D`](crate::MeshCollider3D) says, shared by every copy, so that physics tells the
+/// model read again, as its file changes, from the one it made a collider of.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Nodes {
     pub(crate) parts: Vec<Part>,
     pub(crate) draws: Vec<MeshDraw>,
+    pub(crate) surfaces: Arc<Vec<Surface>>,
+}
+
+/// A primitive's triangles as physics collides with them: level 0's, its whole mesh's, and its
+/// vertices' positions as packed, which unpack as the renderer's do, so that a run from glTF and
+/// one from its package, whose meshes the cooker optimized, give physics the same surface.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Surface {
+    offset: Vec3,
+    step: f32,
+    positions: Vec<[u16; 3]>,
+    /// Three for each triangle, of `positions`.
+    indices: Vec<u32>,
+}
+
+impl Surface {
+    /// The surface of `mesh`, which holds together, as the renderer checks it.
+    fn of(mesh: &ModelMesh) -> Self {
+        let whole = mesh.lods.levels.first().map_or(0..0, |level| {
+            level.start as usize..(level.start + level.count) as usize
+        });
+        Self {
+            offset: mesh.packing.offset,
+            step: mesh.packing.step,
+            positions: mesh.vertices.iter().map(|vertex| vertex.position).collect(),
+            indices: mesh.indices[whole].to_vec(),
+        }
+    }
+
+    /// Where vertex `index` is, as [`ModelMesh::positions`] unpacks it.
+    fn position(&self, index: u32) -> Vec3 {
+        let packed = self.positions[index as usize];
+        self.offset + Vec3::from_array(packed.map(f32::from)) * self.step
+    }
+}
+
+impl Nodes {
+    /// The model's triangles, in its own space, as physics collides with them: each primitive's
+    /// surface where its part puts it, a triangle whose corners aren't three apart, which covers
+    /// nothing, or that another is too, left out; each turned to start at its least corner by
+    /// their coordinates' bits, keeping the way round they go, and in the order of their corners'
+    /// bits, of vertices in the order of their bits, none twice. So that the triangles depend on
+    /// where they are alone, not on the order their mesh holds them in, which the cooker changes
+    /// as it optimizes the mesh.
+    pub(crate) fn triangles(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let mut placed: Vec<Mat4> = Vec::with_capacity(self.parts.len());
+        let mut corners: Vec<[Vec3; 3]> = Vec::new();
+        for part in &self.parts {
+            let own = part.transform.matrix();
+            let matrix = part.parent.map_or(own, |parent| placed[parent] * own);
+            placed.push(matrix);
+            let surface = part
+                .primitive
+                .and_then(|primitive| self.surfaces.get(primitive));
+            let Some(surface) = surface else {
+                continue;
+            };
+            let at = |index: u32| matrix.transform_point3(surface.position(index));
+            for &triangle in surface.indices.as_chunks::<3>().0 {
+                corners.push(triangle.map(at));
+            }
+        }
+        canonical(corners)
+    }
+}
+
+/// `corners` as [`Nodes::triangles`] gives them: canonical vertices, and triangles of them.
+fn canonical(mut corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let bits = |point: Vec3| point.to_array().map(f32::to_bits);
+    corners.retain(|&[a, b, c]| bits(a) != bits(b) && bits(b) != bits(c) && bits(c) != bits(a));
+    for triangle in &mut corners {
+        let least = (0..3).min_by_key(|&corner| bits(triangle[corner]));
+        triangle.rotate_left(least.expect("three corners"));
+    }
+    corners.sort_unstable_by_key(|triangle| triangle.map(bits));
+    corners.dedup_by_key(|triangle| triangle.map(bits));
+    let mut vertices: Vec<Vec3> = corners.iter().flatten().copied().collect();
+    vertices.sort_unstable_by_key(|&point| bits(point));
+    vertices.dedup_by_key(|point| bits(*point));
+    let index = |point: Vec3| {
+        let found = vertices.binary_search_by_key(&bits(point), |&vertex| bits(vertex));
+        u32::try_from(found.expect("each corner among the vertices")).expect("fewer than 2^32")
+    };
+    let indices = corners.iter().map(|triangle| triangle.map(index)).collect();
+    (vertices, indices)
 }
 
 /// What a model is made of on the renderer, which a reload replaces under the same handles, and a
@@ -143,6 +232,7 @@ pub(crate) fn add(
     // add otherwise.
     room(name, images.len(), textures)?;
     let packed = model_meshes(name, &primitives)?;
+    let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
     shaders.add_model_shaders();
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
@@ -174,7 +264,12 @@ pub(crate) fn add(
             .collect(),
     };
     let draws = draws(&made, materials, shaders);
-    Ok((Nodes { parts, draws }, made))
+    let nodes = Nodes {
+        parts,
+        draws,
+        surfaces,
+    };
+    Ok((nodes, made))
 }
 
 /// What [`reload`] gives: what the model's root spawns, what changed of the model, and the textures
@@ -259,6 +354,7 @@ pub(crate) fn reload(
     room(name, counts.1.saturating_sub(made.images.len()), textures)?;
     // Read again from its files, as a development run does, each has one level.
     let packed = model_meshes(name, &primitives)?;
+    let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
     let read = primitives.iter().map(|primitive| primitive.material);
     let changed = [
         (parts != was.parts, "nodes"),
@@ -314,7 +410,12 @@ pub(crate) fn reload(
         .map(|primitive| primitive.material)
         .collect();
     let draws = draws(made, materials, shaders);
-    Ok((Nodes { parts, draws }, changed, added))
+    let nodes = Nodes {
+        parts,
+        draws,
+        surfaces,
+    };
+    Ok((nodes, changed, added))
 }
 
 /// Fails with `renderer.too_many_textures` if `textures` hasn't room for `images` more of model
@@ -369,7 +470,10 @@ pub(crate) fn model_mesh(name: &str, primitive: &Primitive) -> Result<ModelMesh>
 }
 
 /// `primitive`'s vertices, model `name`'s, as glTF has them, packed, with its indices, of `levels`
-/// among them, or of one level, all of them, for none.
+/// among them, or of one level, all of them, for none: those its triangles use alone, in their
+/// order, as the cooker keeps them, so that a run from glTF packs them on the grid a run from its
+/// package does, which physics' surfaces need, rather than on one that vertices no triangle uses
+/// stretch, as those of an accessor that several primitives share do.
 ///
 /// Fails with `engine.bad_model`, naming the model and the mesh, for vertices that don't pack, as
 /// [`ModelMesh::pack`] says: those that span more than packed vertices reach with what an f32
@@ -380,13 +484,34 @@ pub(crate) fn pack(
     levels: Vec<gg_renderer::Lod>,
 ) -> Result<ModelMesh> {
     let mesh = mesh_name(name, primitive);
-    let packed = ModelMesh::pack(
-        &mesh,
-        &vertices(primitive),
-        primitive.indices.clone(),
-        levels,
-    );
+    let (vertices, indices) = used(primitive);
+    let packed = ModelMesh::pack(&mesh, &vertices, indices, levels);
     packed.map_err(|error| refused(name, &error))
+}
+
+/// `primitive`'s vertices that its triangles use, in their order, and its indices of them; all of
+/// them where they use each, or where it has no triangles, as a mesh of none packs as it did.
+fn used(primitive: &Primitive) -> (Vec<ModelVertex>, Vec<u32>) {
+    let all = vertices(primitive);
+    let mut uses = vec![false; all.len()];
+    for &index in &primitive.indices {
+        uses[index as usize] = true;
+    }
+    if primitive.indices.is_empty() || uses.iter().all(|&used| used) {
+        return (all, primitive.indices.clone());
+    }
+    let mut moved = vec![u32::MAX; all.len()];
+    let mut kept = Vec::new();
+    for ((vertex, used), to) in all.into_iter().zip(uses).zip(&mut moved) {
+        if used {
+            *to = u32::try_from(kept.len()).expect("fewer than 2^32 vertices");
+            kept.push(vertex);
+        }
+    }
+    let indices = (primitive.indices.iter())
+        .map(|&index| moved[index as usize])
+        .collect();
+    (kept, indices)
 }
 
 /// Checks `mesh`, `primitive`'s of model `name`, as the renderer checks one it adds, as
@@ -596,6 +721,107 @@ pub(crate) mod tests {
                 self.shaders.count(),
                 self.materials.count(),
             )
+        }
+    }
+
+    /// A model of one node, of no texture, its primitive of `positions` and `indices`, at `at`.
+    pub(crate) fn surface(positions: Vec<[f32; 3]>, indices: Vec<u32>, at: Transform) -> Imported {
+        let count = positions.len();
+        let primitive = gltf::Primitive {
+            name: "surface/0".to_owned(),
+            positions,
+            uvs: vec![[0.0; 2]; count],
+            colors: vec![[1.0; 4]; count],
+            normals: vec![[0.0, 1.0, 0.0]; count],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; count],
+            indices,
+            mesh: None,
+            material: gltf::Material::default(),
+        };
+        let part = gltf::Part {
+            transform: at,
+            parent: None,
+            primitive: Some(0),
+            light: None,
+        };
+        Imported {
+            parts: vec![part],
+            primitives: vec![primitive],
+            images: Vec::new(),
+            ignored: Vec::new(),
+        }
+    }
+
+    /// A level's floor: a square 20 units across in the XZ plane, at y 0, facing up, of two
+    /// triangles.
+    pub(crate) fn level() -> Imported {
+        let corners = vec![
+            [-10.0, 0.0, -10.0],
+            [-10.0, 0.0, 10.0],
+            [10.0, 0.0, 10.0],
+            [10.0, 0.0, -10.0],
+        ];
+        surface(corners, vec![0, 1, 2, 0, 2, 3], Transform::IDENTITY)
+    }
+
+    /// A model's triangles are where its nodes put its primitives' surfaces, whatever order its
+    /// mesh holds them in: a mesh as the cooker leaves it, its vertices merged and reordered, its
+    /// triangles reordered and turned, a coarser level after them, and without a vertex no triangle
+    /// used, which the run from glTF packs without too, gives the same triangles; a triangle
+    /// covering nothing, or another's twin, is left out.
+    #[test]
+    fn a_models_triangles_are_where_its_surfaces_are_whatever_their_order() {
+        let at = Transform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_y(0.5),
+            scale: Vec3::new(2.0, 1.0, 1.0),
+        };
+        // Off the grid that the vertex no triangle uses would stretch, so that they'd pack apart.
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+            [1.1, 0.0, 0.9],
+            [0.0, 0.3, 0.9],
+        ];
+        // A vertex no triangle uses, far off, and a corner twice; a triangle covering nothing,
+        // and one twice.
+        let mut read = corners.to_vec();
+        read.extend([[50.0, -50.0, 50.0], corners[2]]);
+        let indices = vec![0, 1, 2, 0, 5, 3, 0, 0, 1, 2, 0, 1];
+        let mut cx = Context::seeded(1);
+        let (from_gltf, _) = added(&mut cx, "read", surface(read, indices, at));
+        // As the cooker leaves it: the corners in another order, the triangles in another, each
+        // turned, and a level of one triangle after them.
+        let moved = vec![corners[3], corners[2], corners[1], corners[0]];
+        let mut cooked = surface(moved, vec![2, 1, 3, 1, 0, 3, 3, 2, 1], at);
+        let level = |start, count, error| gg_renderer::Lod {
+            start,
+            count,
+            error,
+        };
+        let levels = vec![level(0, 6, 0.0), level(6, 3, 0.5)];
+        let mesh = pack("cooked", &cooked.primitives[0], levels).expect("packs");
+        let primitive = &mut cooked.primitives[0];
+        primitive.mesh = Some(mesh);
+        // A package's primitive holds its mesh alone.
+        primitive.positions.clear();
+        primitive.uvs.clear();
+        primitive.colors.clear();
+        primitive.normals.clear();
+        primitive.tangents.clear();
+        primitive.indices.clear();
+        let (from_package, _) = added(&mut cx, "cooked", cooked);
+        let assets = cx.world().assets();
+        let triangles = |model| assets.nodes(model).expect("added").triangles();
+        let (vertices, indices) = triangles(from_gltf);
+        assert_eq!((vertices.len(), indices.len()), (4, 2));
+        assert_eq!(triangles(from_package), (vertices.clone(), indices));
+        // Each where its node puts it, within half a step of the grid it packs on.
+        let matrix = at.matrix();
+        for corner in corners {
+            let placed = matrix.transform_point3(Vec3::from(corner));
+            let near = vertices.iter().any(|vertex| vertex.distance(placed) < 1e-4);
+            assert!(near, "{placed} among {vertices:?}");
         }
     }
 

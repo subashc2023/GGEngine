@@ -1,7 +1,8 @@
 //! Physics, through rapier: bodies that it moves at the world's ticks, as their entities'
-//! components describe them, in the XY plane ([`dim2`]) or in space ([`dim3`]); the world's
-//! resources that hold rapier's bodies and contacts, which snapshots copy and snapshot files hold;
-//! and the colliders' outlines, drawn where their entities draw.
+//! components describe them, in the XY plane ([`dim2`]) or in space ([`dim3`]), with characters
+//! and casts through the colliders in space; the world's resources that hold rapier's bodies and
+//! contacts, which snapshots copy and snapshot files hold; and the colliders' outlines, drawn where
+//! their entities draw.
 
 use std::f32::consts::TAU;
 
@@ -16,7 +17,10 @@ mod dim2;
 mod dim3;
 
 pub use dim2::{BoxCollider2D, CircleCollider2D, Physics2D, RigidBody2D};
-pub use dim3::{BoxCollider3D, CapsuleCollider3D, Physics3D, RigidBody3D, SphereCollider3D};
+pub use dim3::{
+    BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D, Hit3D, MeshCollider3D,
+    Physics3D, RigidBody3D, Shape3D, SphereCollider3D,
+};
 
 /// How a [`RigidBody2D`] or a [`RigidBody3D`] moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
@@ -177,6 +181,13 @@ impl<L: Link> Links<L> {
     }
 
     /// The link to `entity`'s body, if it has one.
+    fn get(&self, entity: Entity) -> Option<&L> {
+        let index = self.by_slot.get(entity.slot()).copied().unwrap_or(NONE);
+        let link = self.linked.get(index as usize);
+        link.filter(|link| link.entity() == entity)
+    }
+
+    /// The link to `entity`'s body, if it has one, to change.
     fn get_mut(&mut self, entity: Entity) -> Option<&mut L> {
         let index = self.by_slot.get(entity.slot()).copied().unwrap_or(NONE);
         let link = self.linked.get_mut(index as usize);

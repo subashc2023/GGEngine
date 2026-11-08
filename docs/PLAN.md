@@ -120,19 +120,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **TAA** (2026-11-06)
 - **Phase 13, GPU-driven rendering** (2026-11-06)
 - **3D physics** (2026-11-07)
+- **Characters and queries** (2026-11-07)
 
 ## Now
 
-**Phase 14, 3D gameplay**, as Next has it. Its milestones after 3D physics, in order:
+**Phase 14, 3D gameplay**, as Next has it. Its milestones after characters and queries, in order:
 
-- **Characters and queries.** A `CharacterController3D` beside a `CapsuleCollider3D`: rapier's
-  kinematic character controller moving its body each tick by what a game asks of it, sliding along
-  walls, climbing slopes up to a limit and steps up to a height, kept on the ground going down, and
-  saying whether it stands on something, its state the world's, so that replays and peers move it
-  alike. Raycasts and shape casts against the world's colliders, from code and scripts, giving the
-  entity hit, where, and the normal there; and static colliders of a model's triangles, so that a
-  character walks a level, as a showcase scene's does through Sponza, driven by an agent through the
-  tool API's input.
 - **Flipbooks and tweens.** A sprite animated through a sheet's cells at a rate, looping or once,
   and tweens: a component's field eased from one value to another over a time, set from code,
   scripts and scenes and stepped at the ticks, so that recordings and peers see them alike.
@@ -513,7 +506,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
-| Colliders other than 2D's boxes and circles and 3D's boxes, spheres and capsules, such as polygons and convex hulls, but the triangle meshes Phase 14's characters bring; joints; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
+| Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; joints; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
+| Mesh colliders' outlines: `MeshCollider3D` outlines nothing, as its model shows where it is, and Sponza's would draw some 790,000 lines | Someone needs to see a mesh collider apart from its model, as one of another model's |
+| Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; a character's rotation turned by its controller, toward where it goes; and a character's own collision filter, as one that passes through other characters | Each with its first game use; the platforms with the 3D demo's level, if it moves |
+| Casts that give every hit along their way, rather than the first; overlap queries, what's within a shape or at a point; casts that pass through colliders by component or group rather than an entity's; and casts in 2D | Each with its first game use |
 | A 3D body's rotation locked about some axes alone, as one that turns about Y but never tips: `RigidBody3D::fixed_rotation` locks all three, and what sets its rotation turns it | A game's body tips about some axes but not others |
 | Continuous collision detection, rapier's CCD, for a body fast enough to pass through a thin collider within a tick: each step tests where the bodies are at its end | A game's fast bodies pass through what they should hit, as bullets would |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |

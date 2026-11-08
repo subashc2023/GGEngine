@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 15, "{scenes:?}");
+    assert_eq!(scenes.len(), 16, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -183,4 +183,111 @@ fn the_scripts_turn_and_bob_what_theyre_on() {
         .get_field(bobbed, "Bob", "time")
         .expect("its time");
     assert_eq!(time, Value::F64(2.0));
+}
+
+/// Walk walks its character the way the keys say, forward along its -Z, turning about Y, and
+/// jumps as the jump key is pressed, once, if it stands; Follow keeps its camera behind and above
+/// the character, looking the way it faces, and nearer where a wall comes between them.
+#[test]
+fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
+    use gg_engine::{
+        BodyType, BoxCollider3D, CapsuleCollider3D, CharacterController3D, RigidBody3D,
+    };
+
+    let (mut cx, mut showcase) = loaded();
+    let world = cx.world_mut();
+    let fixed = RigidBody3D {
+        body_type: BodyType::Static,
+        ..RigidBody3D::default()
+    };
+    let floor = Transform {
+        translation: Vec3::new(0.0, -0.5, 0.0),
+        scale: Vec3::new(40.0, 1.0, 40.0),
+        ..Transform::IDENTITY
+    };
+    world.spawn((floor, fixed, BoxCollider3D::default()));
+    let at = Transform {
+        translation: Vec3::new(0.0, 1.02, 0.0),
+        ..Transform::IDENTITY
+    };
+    let moved = (
+        at,
+        CharacterController3D::default(),
+        CapsuleCollider3D::default(),
+    );
+    let walker = world.spawn(moved);
+    world
+        .add_default(walker, "Walk")
+        .expect("its script loaded");
+    let camera = world.spawn(Transform::IDENTITY);
+    world
+        .add_default(camera, "Follow")
+        .expect("its script loaded");
+    let target = Value::Option(Some(Box::new(Value::Entity(walker))));
+    world
+        .set_field(camera, "Follow", "target", &target)
+        .expect("an entity");
+    let mut ticks = (0..).map(|number| Tick { number });
+    let mut run = |showcase: &mut Showcase, world: &mut World, count: usize| {
+        for tick in ticks.by_ref().take(count) {
+            showcase.tick(world, tick);
+        }
+    };
+    let transform = |world: &World, entity| *world.get::<Transform>(entity).expect("placed");
+    let controller = |world: &World| {
+        *world
+            .get::<CharacterController3D>(walker)
+            .expect("a character")
+    };
+    run(&mut showcase, cx.world_mut(), 16);
+    let start = transform(cx.world(), walker).translation;
+    // A second forward, at 4 units a second.
+    let heading = Vec2::new(0.0, 1.0);
+    showcase.commands.push(Command::Walk { heading });
+    run(&mut showcase, cx.world_mut(), 64);
+    let walked = transform(cx.world(), walker).translation;
+    assert!(
+        walked.z < start.z - 3.7 && (walked.x - start.x).abs() < 0.01,
+        "{walked}"
+    );
+    // The camera 5 behind, along +Z, and 2 above, as the last tick found the walker.
+    let followed = transform(cx.world(), camera);
+    let want = Vec3::new(walked.x, walked.y + 2.0, walked.z + 5.0);
+    assert!(followed.translation.distance(want) < 0.1, "{followed:?}");
+    // Half a second turning right, still, then a jump.
+    let heading = Vec2::new(1.0, 0.0);
+    showcase.commands.push(Command::Walk { heading });
+    run(&mut showcase, cx.world_mut(), 32);
+    let turned = transform(cx.world(), walker).rotation;
+    assert!(
+        turned.angle_between(Quat::from_rotation_y(-1.25)) < 1e-3,
+        "{turned}"
+    );
+    let heading = Vec2::ZERO;
+    showcase.commands.push(Command::Walk { heading });
+    showcase.commands.push(Command::Jump);
+    run(&mut showcase, cx.world_mut(), 8);
+    let jumped = controller(cx.world());
+    assert!(!jumped.grounded && jumped.velocity.y > 2.0, "{jumped:?}");
+    let jump = cx
+        .world()
+        .get_field(walker, "Walk", "jump")
+        .expect("a field");
+    assert_eq!(jump, Value::Bool(false), "taken");
+    run(&mut showcase, cx.world_mut(), 96);
+    assert!(controller(cx.world()).grounded, "landed");
+    // A wall 2 behind it, the way the camera is: the camera comes in front of it.
+    let behind = transform(cx.world(), walker).rotation * Vec3::Z;
+    let wall = Transform {
+        translation: transform(cx.world(), walker).translation + behind * 2.0,
+        rotation: transform(cx.world(), walker).rotation,
+        scale: Vec3::new(6.0, 8.0, 0.5),
+    };
+    cx.world_mut()
+        .spawn((wall, fixed, BoxCollider3D::default()));
+    run(&mut showcase, cx.world_mut(), 2);
+    let near = transform(cx.world(), camera).translation;
+    let walker_at = transform(cx.world(), walker).translation;
+    let off = near - walker_at - Vec3::Y * 2.0;
+    assert!(off.length() < 1.75, "in front of the wall: {off}");
 }
