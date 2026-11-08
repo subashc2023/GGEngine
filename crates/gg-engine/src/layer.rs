@@ -69,9 +69,9 @@ use crate::skins::Skins;
 use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::sync_test::SyncTest;
 use crate::{
-    Animator, App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model,
-    ModelNode, ModelRoot, Name, Owner, ParticleEmitter, Prefab, PrefabRoot, RigidBody2D, Transform,
-    Tweens, Ui, World,
+    AnimationStates, Animator, App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input,
+    MeshDraw, Model, ModelNode, ModelRoot, Name, Owner, ParticleEmitter, Prefab, PrefabRoot,
+    RigidBody2D, Transform, Tweens, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -599,6 +599,7 @@ impl Context {
             world.register::<ParticleEmitter>()?;
             world.register::<Tweens>()?;
             world.register::<Animator>()?;
+            world.register::<AnimationStates>()?;
             world.register::<ModelRoot>()?;
             world.register::<ModelNode>()?;
             world.register::<font::Text>()?;

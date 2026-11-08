@@ -1,0 +1,253 @@
+(
+    entities: {
+        "2f8a6c1d9e3b7054": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 1.0, 2.4),
+            ),
+        ),
+        "48e2c7a1f9d63b05": (
+            Name: ("Label: Pace"),
+            Text: (
+                text: "A script sets its speed as it goes round, and pulls the look trigger once a round",
+                font: None,
+                size: 0.2,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 0.05, 3.4),
+                rotation: (-0.707107, 0.0, 0.0, 0.707107),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5a7e1c93b2d04f68": (
+            AnimationStates: (
+                params: [
+                    (
+                        name: "speed",
+                        value: Float(0.0),
+                    ),
+                    (
+                        name: "look",
+                        value: Trigger(false),
+                    ),
+                ],
+                states: [
+                    (
+                        name: "Idle",
+                        motion: Clip("Survey"),
+                        speed: 1.0,
+                        playback: Loop,
+                    ),
+                    (
+                        name: "Move",
+                        motion: Blend(
+                            param: "speed",
+                            points: [
+                                (
+                                    clip: "Walk",
+                                    at: 1.6,
+                                ),
+                                (
+                                    clip: "Run",
+                                    at: 5.0,
+                                ),
+                            ],
+                        ),
+                        speed: 1.0,
+                        playback: Loop,
+                    ),
+                    (
+                        name: "Look",
+                        motion: Clip("Survey"),
+                        speed: 1.5,
+                        playback: Once,
+                    ),
+                ],
+                transitions: [
+                    (
+                        from: None,
+                        to: "Look",
+                        conditions: [
+                            (
+                                param: "look",
+                                test: True,
+                            ),
+                        ],
+                        exit_time: None,
+                        fade: 0.2,
+                    ),
+                    (
+                        from: Some("Idle"),
+                        to: "Move",
+                        conditions: [
+                            (
+                                param: "speed",
+                                test: Above(0.2),
+                            ),
+                        ],
+                        exit_time: None,
+                        fade: 0.25,
+                    ),
+                    (
+                        from: Some("Move"),
+                        to: "Idle",
+                        conditions: [
+                            (
+                                param: "speed",
+                                test: Below(0.2),
+                            ),
+                        ],
+                        exit_time: None,
+                        fade: 0.3,
+                    ),
+                    (
+                        from: Some("Look"),
+                        to: "Move",
+                        conditions: [
+                            (
+                                param: "speed",
+                                test: Above(0.2),
+                            ),
+                        ],
+                        exit_time: Some(0.9),
+                        fade: 0.3,
+                    ),
+                    (
+                        from: Some("Look"),
+                        to: "Idle",
+                        conditions: [],
+                        exit_time: Some(0.9),
+                        fade: 0.3,
+                    ),
+                ],
+                state: "",
+                time: 0.0,
+            ),
+            Animator: ([]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Name: ("Fox"),
+            Pace: (
+                angle: 0.0,
+                center: (0.0, 0.0, -0.6),
+                look: 2.0,
+                look_at: 4.5,
+                looking: 0.0,
+                radius: 2.6,
+                time: 0.0,
+            ),
+            Transform: (
+                translation: (0.0, 0.0, 2.0),
+                rotation: (0.0, 0.707107, 0.0, 0.707107),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "71c5e9a3d0b28f46": (
+            Name: ("Title"),
+            Text: (
+                text: "Animation state machines",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.85, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9b31f0d6a2c8e475": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 8000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "a3d9f2b7c6e10584": (
+            Name: ("Hint"),
+            Text: (
+                text: "Idle surveys, Move blends Walk and Run by speed, their feet in step, and the look trigger plays Look once, from any state",
+                font: None,
+                size: 0.22,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c4e2a9170f3b5d86": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 3.926, 8.131),
+                rotation: (-0.190809, 0.0, 0.0, 0.981627),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d6b04e8f3a7c2915": (
+            Name: ("State"),
+            StateLabel: (
+                of: Some("5a7e1c93b2d04f68"),
+            ),
+            Text: (
+                text: "Idle  ·  speed 0.0",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.4,
+                color: (0.15, 0.45, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.88, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e07d4b2a91c6f358": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 100000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.49303, -0.345121, 0.0, 0.798632),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

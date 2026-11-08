@@ -162,7 +162,9 @@ use package::{Files, Package};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 pub use animation::{
-    Animator, Curve, Ease, Flipbook, Play, Playback, Tween, TweenValue, Tweens, step_animation,
+    AnimationParam, AnimationState, AnimationStates, Animator, BlendPoint, Curve, Ease, Flipbook,
+    ParamCondition, ParamTest, ParamValue, Play, Playback, StateMotion, StateTransition, Tween,
+    TweenValue, Tweens, step_animation,
 };
 pub use audio::{Bus, Music, Place, Sound};
 pub use camera::{

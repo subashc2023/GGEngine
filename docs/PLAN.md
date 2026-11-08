@@ -130,10 +130,20 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Foxball's particles and prefabs** (2026-11-08)
 - **Prefabs in the editor** (2026-11-08)
 - **Phase 15, particles and linked prefabs** (2026-11-08)
+- **Animation state machines** (2026-11-08)
 
 ## Now
 
-The next phase is the user's to choose, as Open questions has it.
+16. **Gameplay systems.** Joints between bodies and continuous collision, in 2D and 3D, through
+    rapier; animation state machines over an `Animator`'s plays, their states clips or clips blended
+    along a parameter, their transitions on parameters, cross-fading; navigation, a navmesh baked
+    from the world's static colliders, paths across it, and agents that follow them and steer round
+    each other, alike on every platform; and a game's UI as a retained tree of its own files, laid
+    out by the engine, its buttons and lists focused by keys, pads and the mouse, reloaded as saved
+    and read through the tool API. *Done when* Foxball, run alone, plays against a fox that runs to
+    the ball by navigation, its foxes animate through a state machine, and its menu is a UI file;
+    and the showcase has a scene for each. Its milestones: joints and continuous collision;
+    animation state machines; navigation; a game's UI; and, once they're in, Foxball on them.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -340,7 +350,14 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sharing a skinned model's bind pose and weights between its instances: each instance's entity draws a copy of its model's mesh, its vertices and weights twice over, and the frame's moved vertices again | A crowd's memory is measured to matter |
 | Skinned meshes cut into meshlets and drawn into the visibility buffer, their meshlets' bounds made again each frame from their joints: they draw by their indices, shaded as they draw | Skinned characters are measured to cost the view, as a crowd would |
 | Skinned vertices carried past the reach their clips give, as code that poses joints itself, inverse kinematics or a ragdoll, carries them: they clamp to its box, which views cull by | A game poses joints past its clips |
-| Root motion, events at a clip's times, masks that blend a clip into some joints alone, additive clips, and graphs or state machines of clips: an `Animator` plays whole clips, each at a weight, which code and scripts set; Foxball sets Survey's, Walk's and Run's itself each tick | A game needs one, as a fox whose feet slide as it runs faster than its clip |
+| Root motion: a clip's root travel moving its entity, as a character controller takes it | A character's ground speed should come from its clips, as a fox whose feet slide past its run's speed |
+| Layers and masks: a state machine of some joints over another's, as an upper body's, and additive clips | A character acts as it moves, as a fox that kicks while it runs |
+| Events at a clip's times, as a footstep's sound or a hit's frame | A game times sound, particles or gameplay to a clip's frames |
+| IK: feet planted on uneven ground, a head or a hand turned toward a point | A model walks slopes or stairs, or looks at what it faces |
+| 2D blend spaces: clips blended by two parameters, as a direction and a speed | A character strafes or walks backward |
+| State machines as asset files of their own, shared by entities and prefabs and reloaded as saved | Several models share a machine, as a game's characters do |
+| Sub-state machines, a fade a transition cuts short, a transition's offset into its state, a from-any transition into the state it's in | A machine grows past a dozen states, or a game needs one of them |
+| Scripts reading a machine's state, as `gg.state(entity)`, which scripts can't read as a field, holding no strings | A script branches on what its model plays |
 | Where frames draw an entity between ticks, for layers: `Context` gives none, so Foxball's view eases toward its fox as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
 | Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
 | Foxball shipped and run as it ships in CI, as Shards is: its tests cook its package and replay its live recording from it | A change could break its shipping alone |
@@ -607,11 +624,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- Which phase comes after Phase 15? Recommendation: the built-in coding agent, v1's headline and
-  what sets the engine apart: an agent in the editor, modeled on the pi coding agent, working
-  through the tool API and the operations Claude Code drives today, before the upscalers and ray
-  tracing, which change how a game looks rather than how it's made, and before a flagship, which
-  that agent would help build. Decide before the next phase starts.
+- Which phase comes after Phase 16? Recommendation: the rendering looks a game reaches for first,
+  each a pass or two on the render graph: screen-space ambient occlusion, bloom and color grading,
+  height fog and a sky made from its sun; then the built-in coding agent, v1's headline. Decide
+  before the next phase starts.
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the

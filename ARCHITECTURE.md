@@ -1417,6 +1417,29 @@ which a second reference hash in `animation/` checks. The joints that animation 
 so snapshots, replays and peers see a pose as they see any transform; what they move of a skinned
 mesh is drawing's, as [Rendering](#rendering) says.
 
+A root's `AnimationStates`, beside its animator, is a state machine of its clips, which drives the
+animator and leaves the sampling to it, stepped before the animators: parameters, each a float, a
+bool or a trigger, which code sets with `World::set_param`, scripts with `gg.set_param` and tools
+through the component's fields; states, each a clip, or clips blended along a float parameter, the
+two whose points are nearest its value either side weighted between them, at a speed and a
+playback; and transitions, from a state or from any but the one they enter, checked in order, the
+first whose conditions all hold, a float above or below a value, a bool true or false, a trigger
+set, after its exit time if it has one, firing and consuming the triggers it tests. Entering a
+state, the animator cross-fades as `World::play` has it, but for a state played once, which starts
+its clips afresh, from their ends if it plays backward; then, at each tick, the state's plays take
+their motion's weights and every other play eases to 0, so that once the fade is done a lone clip
+plays exactly. A blend keeps its clips in step, each at the fraction of its length that its
+heaviest held clip is at, played at the speed that brings it round in the blend's length, the
+lengths of the clips of some length weighted as the blend weights them, over their weights alone,
+so that a walk and a run blend without their feet fighting, and a still pose among them speeds
+neither up. The state and the seconds in it are the component's fields, and
+the plays' times the animator's, so that snapshots, replays and peers resume a machine exactly; its
+arithmetic is f32's alone, which a third reference hash in `animation/`, of the Fox driven through
+its states, checks. A state, parameter or clip a machine names and hasn't warns once a world, which
+keeps what it has warned of as a resource. A tick that enters no state, nor brings back a blend's
+clip that left at a weight of 0, allocates nothing; one that does allocates the names of the plays
+it adds, but where a play that leaves at the tick, as each a cut leaves does, gives up its room.
+
 ## Rendering
 
 Each frame the engine extracts that frame's render data, as plain data, which the render thread

@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 26, "{scenes:?}");
+    assert_eq!(scenes.len(), 27, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -570,6 +570,79 @@ fn a_jukebox_plays_the_music_while_its_there() {
     cx.world_mut().despawn(jukebox).expect("despawned");
     showcase.update(&mut cx, frame);
     assert_eq!(cx.music_playing(), None);
+}
+
+/// The states scene's fox stands surveying, then walks round, Walk alone at a walking speed, which
+/// Pace sets through `gg.set_param`, jogs on Walk and Run blended in step, and at its look stands
+/// and plays Look once before it walks on; and its label says each state and speed.
+#[test]
+fn the_states_scene_walks_its_fox_through_its_states() {
+    use gg_engine::{AnimationStates, Animator, Text};
+
+    let (mut cx, mut showcase) = loaded();
+    let scene = dir().join("scenes").join("states.ron");
+    cx.load_scene_file(&scene).expect("the scene loads");
+    let world = cx.world_mut();
+    let fox = world
+        .query::<(gg_engine::Entity, &AnimationStates)>()
+        .next();
+    let fox = fox.expect("a fox with a state machine").0;
+    let label = world.query::<(gg_engine::Entity, &StateLabel)>().next();
+    let label = label.expect("a label").0;
+    let mut ticks = (0..).map(|number| Tick { number });
+    let mut run = |showcase: &mut Showcase, world: &mut World, seconds: f32| {
+        for _ in 0..(seconds * 64.0) as usize {
+            showcase.tick(world, ticks.next().expect("ticks without end"));
+        }
+    };
+    let state = |world: &World| {
+        let machine = world.get::<AnimationStates>(fox).expect("its machine");
+        machine.state.clone()
+    };
+    let plays = |world: &World| -> Vec<(String, f32)> {
+        let Animator(plays) = world.get::<Animator>(fox).expect("playing");
+        plays
+            .iter()
+            .map(|play| (play.clip.clone(), play.weight))
+            .collect()
+    };
+    let said = |world: &World| world.get::<Text>(label).expect("a text").text.clone();
+    run(&mut showcase, world, 1.0);
+    assert_eq!(state(world), "Idle");
+    assert_eq!(plays(world), [("Survey".to_owned(), 1.0)]);
+    assert_eq!(said(world), "Idle  ·  speed 0.0");
+    let start = world.get::<Transform>(fox).expect("placed").translation;
+    // Walking, three and a half seconds in.
+    run(&mut showcase, world, 2.5);
+    assert_eq!(state(world), "Move");
+    assert_eq!(plays(world), [("Walk".to_owned(), 1.0)]);
+    assert_eq!(said(world), "Move  ·  speed 1.6");
+    let moved = world.get::<Transform>(fox).expect("placed").translation;
+    assert!(moved.distance(start) > 1.0, "{start} to {moved}");
+    // Looking, from four and a half seconds in, until its share of Look has played.
+    run(&mut showcase, world, 1.25);
+    assert_eq!(state(world), "Look");
+    assert_eq!(said(world), "Look  ·  speed 0.0");
+    run(&mut showcase, world, 2.0);
+    assert_eq!(state(world), "Move");
+    // Jogging, Walk and Run blended in step, eight and a half seconds in, the round's seven.
+    run(&mut showcase, world, 1.75);
+    let jogging = plays(world);
+    let weights: Vec<f32> = jogging.iter().map(|(_, weight)| *weight).collect();
+    assert_eq!(jogging.len(), 2, "{jogging:?}");
+    assert!((weights[0] + weights[1] - 1.0).abs() < 1e-6, "{jogging:?}");
+    let Animator(played) = world.get::<Animator>(fox).expect("playing");
+    let lengths = |clip: &str| {
+        if clip == "Walk" {
+            0.708_333_3
+        } else {
+            1.158_333_3
+        }
+    };
+    let phases: Vec<f32> = (played.iter())
+        .map(|play| play.time / lengths(&play.clip))
+        .collect();
+    assert!((phases[0] - phases[1]).abs() < 1e-4, "in step: {phases:?}");
 }
 
 /// Moods cross-fades its fox to its model's next clip every so often, through `gg.play`: from

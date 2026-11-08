@@ -39,7 +39,10 @@
 //! placed four times, three of them changing a field of their own, a color, a caption or where
 //! their flame is, and a lamppost that links two lanterns, its own instances inside it, every
 //! lantern taking what its prefab's file changes as it's saved (`prefabs.ron`, of
-//! `prefabs/lantern.prefab` and `prefabs/lamppost.prefab`); and, once `cargo
+//! `prefabs/lantern.prefab` and `prefabs/lamppost.prefab`); the Fox driven round a circle by a state
+//! machine, surveying as it stands, walking, jogging and running blended by its speed, and looking
+//! about once a round at a trigger, a line of text saying its state and speed (`states.ron`); and,
+//! once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and walked through
 //! by a character that the keys or a pad move, a camera following it, Sponza's triangles what it
 //! collides with, among crates and balls it pushes (`walk.ron`), and Amazon
@@ -53,11 +56,13 @@
 //! jumping by Space or South, `scripts/follow.luau` follows it with a camera, casting back
 //! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
 //! so often, a tween easing it back, `scripts/moods.luau` cross-fades its fox to its next clip
-//! every few seconds through `gg.play`; and animation and physics step, so that each scene moves as
+//! every few seconds through `gg.play`, and `scripts/pace.luau` walks its fox round, setting its
+//! state machine's speed and pulling its trigger through `gg.set_param`; and animation and physics
+//! step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
 //! package without its code, and so without the keys' walking and its own components: the
-//! chimes, the bursters, the jukebox, the HUD, the plasma and the look, which its code registers
-//! and runs.
+//! chimes, the bursters, the jukebox, the HUD, the plasma, the look and the state labels, which its
+//! code registers and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -73,10 +78,10 @@ use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Curve, Ease,
-    Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton, Music, PadButton,
-    ParticleEmitter, Place, Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle,
-    Tick, Transform, Tween, World, step_animation, step_physics,
+    Actions, Align, AnimationStates, App, Binding, Blend, Bus, Change, Commands, Component,
+    Context, Curve, Ease, Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton,
+    Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, Scripts, Shader, Sound, Source,
+    Sprite, Stick, Text, TextStyle, Tick, Transform, Tween, World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -95,10 +100,11 @@ fn app() -> App {
 }
 
 /// The game's scripts, by their paths from its directory: each declares the component it is.
-const SCRIPTS: [&str; 6] = [
+const SCRIPTS: [&str; 7] = [
     "scripts/bob.luau",
     "scripts/follow.luau",
     "scripts/moods.luau",
+    "scripts/pace.luau",
     "scripts/pulse.luau",
     "scripts/spin.luau",
     "scripts/walk.luau",
@@ -219,6 +225,14 @@ struct Look {
 /// The furthest a [`Look`] turns up or down: 89°, short of straight, where its yaw would spin.
 const MAX_PITCH: f32 = 1.553_343;
 
+/// Has its entity's [`Text`] say the state that `of`'s state machine is in and its `speed`
+/// parameter, as each tick leaves them, as `Move  ·  speed 3.3`: `states.ron`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct StateLabel {
+    /// The entity whose [`AnimationStates`] it tells of.
+    of: Option<Entity>,
+}
+
 /// A corner of the plasma's square, as `shaders/plasma.slang` reads it: where it is in the square's
 /// own space, and where it is across the square, from 0 to 1.
 #[repr(C)]
@@ -313,7 +327,8 @@ fn register(world: &mut World) {
         world.register::<Jukebox>()?;
         world.register::<Hud>()?;
         world.register::<Plasma>()?;
-        world.register::<Look>()
+        world.register::<Look>()?;
+        world.register::<StateLabel>()
     });
     registered.expect("the game's components describe themselves");
 }
@@ -323,8 +338,8 @@ fn register(world: &mut World) {
 /// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
 /// it attaches; and at each tick applies what the keys, the mouse and the HUD's button did to its
 /// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters'
-/// emitters, counts the HUDs' ticks, steps animation and then physics, and gives the plasmas their
-/// draws. As it updates, it
+/// emitters, counts the HUDs' ticks, steps animation and then physics, gives the plasmas their
+/// draws and writes the state labels' text. As it updates, it
 /// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
 /// and draws the HUD while a HUD is. A script, an asset or the
 /// start scene that doesn't load ends the run with its error, through [`Context::fail`].
@@ -340,6 +355,10 @@ struct Showcase {
     drawn: Vec<(Entity, MeshDraw)>,
     /// The HUD's numbers' text, kept so that frames reuse its room.
     text: String,
+    /// The state labels found at a tick, each with the entity it tells of, and the text it says,
+    /// kept so that ticks reuse their room.
+    labeled: Vec<(Entity, Option<Entity>)>,
+    label: String,
     /// Whether it wants the cursor grabbed, for the looks: from a click in the view while the world
     /// has one until Escape, or until it has none.
     grab: bool,
@@ -373,6 +392,8 @@ impl Showcase {
             rang: Vec::new(),
             drawn: Vec::new(),
             text: String::new(),
+            labeled: Vec::new(),
+            label: String::new(),
             grab: false,
         }
     }
@@ -434,6 +455,32 @@ impl Showcase {
             world
                 .insert(entity, draw)
                 .expect("the plasma's entity, found this tick");
+        }
+    }
+
+    /// Has each of `world`'s state labels say its state machine's state and speed, where that
+    /// changed.
+    fn label(&mut self, world: &mut World) {
+        let labels = world.query::<(Entity, &StateLabel)>();
+        self.labeled
+            .extend(labels.map(|(entity, label)| (entity, label.of)));
+        for (entity, of) in self.labeled.drain(..) {
+            let Some(machine) = of.and_then(|of| world.get::<AnimationStates>(of)) else {
+                continue;
+            };
+            let speed = match machine.param("speed") {
+                Some(ParamValue::Float(speed)) => speed,
+                _ => 0.0,
+            };
+            self.label.clear();
+            let state = &machine.state;
+            write!(self.label, "{state}  ·  speed {speed:.1}").expect("a string takes any text");
+            let changed = world.get::<Text>(entity);
+            if changed.is_some_and(|text| text.text != self.label)
+                && let Some(text) = world.get_mut::<Text>(entity)
+            {
+                text.text.clone_from(&self.label);
+            }
         }
     }
 }
@@ -522,6 +569,7 @@ impl Layer for Showcase {
         step_animation(world);
         step_physics(world);
         self.shade(world);
+        self.label(world);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {

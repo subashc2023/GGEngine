@@ -1,17 +1,23 @@
 //! Animation at the world's ticks: sprites played through a sheet's cells, components' fields eased
 //! from one value to another, and models' clips played on their parts, which move skinned meshes'
-//! vertices as their joints. Their state is the world's, in their components, stepped by
+//! vertices as their joints, by state machines among them. Their state is the world's, in their
+//! components, stepped by
 //! [`Tick::DT`](crate::Tick::DT) at each tick a layer runs [`step_animation`] in, so that
 //! snapshots, replays and peers see them alike.
 
 mod animator;
 mod flipbook;
 mod skeleton;
+mod states;
 mod tween;
 
 pub use animator::{Animator, Play};
 pub use flipbook::Flipbook;
 pub(crate) use skeleton::{Channel, Clip, Interpolation, Path, Skin, placed, skinned_box};
+pub use states::{
+    AnimationParam, AnimationState, AnimationStates, BlendPoint, ParamCondition, ParamTest,
+    ParamValue, StateMotion, StateTransition,
+};
 pub use tween::{Curve, Ease, Tween, TweenValue, Tweens};
 
 use crate::{Reflect, World};
@@ -30,13 +36,15 @@ pub enum Playback {
 }
 
 /// Steps `world`'s animation a tick, [`Tick::DT`](crate::Tick::DT), as a system a layer's tick
-/// runs, after what starts its tweens and plays its clips, such as scripts, and before physics,
-/// which takes in bodies where animation put them: its [`Flipbook`]s, then its [`Tweens`], then
-/// its [`Animator`]s.
+/// runs, after what starts its tweens, plays its clips and sets its state machines' parameters,
+/// such as scripts, and before physics, which takes in bodies where animation put them: its
+/// [`Flipbook`]s, then its [`Tweens`], then its [`AnimationStates`], which set their animators'
+/// plays, then its [`Animator`]s.
 pub fn step_animation(world: &mut World) {
     let _zone = gg_core::zone!();
     flipbook::step(world);
     tween::step(world);
+    states::step(world);
     animator::step(world);
 }
 

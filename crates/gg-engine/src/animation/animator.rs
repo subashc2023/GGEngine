@@ -116,7 +116,7 @@ impl Play {
 }
 
 /// The clip of `clips` named `name`, the first of that name.
-fn named<'c>(clips: &'c [Clip], name: &str) -> Option<&'c Clip> {
+pub(super) fn named<'c>(clips: &'c [Clip], name: &str) -> Option<&'c Clip> {
     clips.iter().find(|clip| clip.name == name)
 }
 
@@ -294,7 +294,7 @@ impl World {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use gg_core::math::Vec3;
 
     use super::*;
@@ -307,7 +307,7 @@ mod tests {
     /// to 2 over a second, along a line, and the child about Z a quarter turn; "Lift", the root
     /// along Y to 4 over two seconds by steps of a second; and "Swing", the child about Z along a
     /// cubic spline, whose tangents are 0, so that it eases in and out.
-    fn clips() -> Imported {
+    pub(crate) fn clips() -> Imported {
         let part = |parent| Part {
             transform: Transform::IDENTITY,
             parent,
@@ -368,7 +368,7 @@ mod tests {
     }
 
     /// The node of part `part` of `root`'s model.
-    fn node(world: &World, root: Entity, part: usize) -> Entity {
+    pub(crate) fn node(world: &World, root: Entity, part: usize) -> Entity {
         let id = world.id(root).expect("alive");
         world
             .entity(node_id(id, part).expect("an ID"))
@@ -376,7 +376,7 @@ mod tests {
     }
 
     /// A context with the model of [`clips`], and a root of it, which it returns.
-    fn spawned() -> (Context, Entity) {
+    pub(crate) fn spawned() -> (Context, Entity) {
         let mut cx = Context::seeded(1);
         let (model, _) = added(&mut cx, "m", clips());
         let root = Model::spawn(model, cx.world_mut(), Transform::IDENTITY);
@@ -384,12 +384,12 @@ mod tests {
     }
 
     /// `entity`'s transform in `world`.
-    fn at(world: &World, entity: Entity) -> Transform {
+    pub(crate) fn at(world: &World, entity: Entity) -> Transform {
         *world.get::<Transform>(entity).expect("placed")
     }
 
     /// The clips and weights of `root`'s animator's plays.
-    fn weights(world: &World, root: Entity) -> Vec<(String, f32)> {
+    pub(crate) fn weights(world: &World, root: Entity) -> Vec<(String, f32)> {
         let Animator(plays) = world.get::<Animator>(root).expect("an animator");
         plays
             .iter()

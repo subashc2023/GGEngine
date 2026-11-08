@@ -27,7 +27,8 @@ use crate::ecs::{ComponentId, Kind};
 use crate::grant::{Capability, Grant};
 use crate::reflect::{Ident, Reflect, Type, Value, list};
 use crate::{
-    Cast, Context, Curve, Ease, Entity, Hit3D, Playback, Shape3D, Tick, Tween, TweenValue, World,
+    Cast, Context, Curve, Ease, Entity, Hit3D, ParamValue, Playback, Shape3D, Tick, Tween,
+    TweenValue, World,
 };
 
 mod bytecode;
@@ -142,6 +143,12 @@ const REMOVED: [&str; 7] = [
 /// `gg.play(entity, clip, fade)` has `entity`, a model's root, play its model's clip named `clip`,
 /// cross-fading from what it plays over `fade` seconds, or cutting to it without one, as
 /// [`World::play`] does. A mod's scripts play clips only if they may write `Animator`.
+///
+/// `gg.set_param(entity, name, value)` sets parameter `name` of `entity`'s state machine, its
+/// [`AnimationStates`](crate::AnimationStates), to `value`: a number for a float, and a boolean for
+/// a bool or a trigger, which a transition that fires on it consumes, as [`World::set_param`] does.
+/// A mod's scripts set parameters only if they may write `AnimationStates`. A call allocates nothing
+/// once its VM has been given its name, among the first 64 names it's given.
 ///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
@@ -279,6 +286,12 @@ struct Shared {
     budget: Cell<u32>,
     /// `None` for a game's own scripts, which reach everything.
     held: Option<Held>,
+    /// The parameters' names that scripts have given `gg.set_param` in calls it took, the first
+    /// [`PARAMS`] of them, each the Luau string, held so that its address stays its own, and its
+    /// text: so that a call that names one again, as calls at each tick do, finds its text by the
+    /// address of the string Luau interned, where reading a Luau string's text through mlua
+    /// allocates, as a call naming one past them does.
+    params: RefCell<Vec<(LuaString, String)>>,
     #[cfg(feature = "dev")]
     hooked: debugger::Hooked,
 }
@@ -653,6 +666,7 @@ impl Host {
                 loading: RefCell::new(None),
                 budget: Cell::new(BUDGET),
                 held,
+                params: RefCell::new(Vec::new()),
                 #[cfg(feature = "dev")]
                 hooked: debugger::Hooked::new(lua.clone()),
             },
@@ -761,6 +775,7 @@ impl Host {
         gg.raw_set("cast_capsule", lua.create_function(cast_capsule)?)?;
         gg.raw_set("tween", lua.create_function(tween)?)?;
         gg.raw_set("play", lua.create_function(play)?)?;
+        gg.raw_set("set_param", lua.create_function(set_param)?)?;
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
@@ -1952,6 +1967,11 @@ fn cast(
     })
 }
 
+/// The most parameters' names a VM keeps for `gg.set_param`, as [`Shared`]'s `params` says: as many
+/// as a game's state machines name many times over, few enough that searching them in turn costs
+/// little, and that a script's names, which past them it may give without end, hold little.
+const PARAMS: usize = 64;
+
 /// What a script gives `gg.tween`: the entity, the handle of its field, where the field goes, in
 /// how many seconds, and the table of the rest, if any.
 type TweenArgs = (LightUserData, Lua_, Lua_, f64, Option<Table>);
@@ -2066,6 +2086,57 @@ fn play(_: &Lua, (entity, clip, fade): (LightUserData, String, Option<f64>)) -> 
         let mut world = shared.world.borrow_mut();
         let played = world.play(entity, &clip, fade.unwrap_or(0.0) as f32);
         played.map_err(|error| mlua::Error::runtime(format!("{error:#}")))
+    })
+}
+
+/// `gg.set_param(entity, name, value)`: sets parameter `name` of `entity`'s state machine to
+/// `value`, a number or a boolean, as the scripts' doc says.
+fn set_param(_: &Lua, (entity, name, value): (LightUserData, LuaString, Lua_)) -> mlua::Result<()> {
+    shared(|shared| {
+        let entity = entity_of(entity)?;
+        if let Some(held) = &shared.held
+            && !held.grant.writes("AnimationStates")
+        {
+            let what = format!(
+                "setting parameter \"{}\", which its entity's `AnimationStates` holds,",
+                name.display()
+            );
+            return Err(mlua::Error::runtime(ungranted(
+                "write:AnimationStates",
+                &what,
+            )));
+        }
+        let value = match value {
+            Lua_::Number(x) => ParamValue::Float(x as f32),
+            Lua_::Integer(n) => ParamValue::Float(n as f32),
+            Lua_::Boolean(set) => ParamValue::Bool(set),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "parameter \"{}\" is set to a number or a boolean, not a {}",
+                    name.display(),
+                    other.type_name()
+                )));
+            }
+        };
+        let mut params = shared.params.borrow_mut();
+        let at = name.to_pointer();
+        let known = params.iter().position(|(held, _)| held.to_pointer() == at);
+        let unheld;
+        let name = match known {
+            Some(known) => params[known].1.as_str(),
+            None if params.len() < PARAMS => {
+                let text = name.to_str()?.to_owned();
+                params.push((name, text));
+                params[params.len() - 1].1.as_str()
+            }
+            None => {
+                unheld = name.to_str()?;
+                &*unheld
+            }
+        };
+        let mut world = shared.world.borrow_mut();
+        let set = world.set_param(entity, name, value);
+        set.map_err(|error| mlua::Error::runtime(format!("{error:#}")))
     })
 }
 
@@ -3241,5 +3312,117 @@ return Pulse
         assert!(transform.rotation.angle_between(eighth) < 1e-3);
         let tweens = &world.get::<Tweens>(pulsing).expect("tweens").0;
         assert_eq!(tweens.len(), 2, "the scale's ended");
+    }
+
+    /// Sets its entity's state machine's speed to its own at each tick, and at its first, pulls its
+    /// trigger and sets its bool, counting what's refused: a parameter there's none of, a number
+    /// for a bool, and a string.
+    const PACE: &str = r#"
+local Pace = gg.declare("Pace", { speed = 2.5, started = false, refused = 0 })
+
+function Pace.tick(entity, dt)
+    gg.set_param(entity, "speed", entity[Pace.speed])
+    if entity[Pace.started] then
+        return
+    end
+    entity[Pace.started] = true
+    gg.set_param(entity, "pounce", true)
+    gg.set_param(entity, "grounded", false)
+    local refusals = {
+        function() gg.set_param(entity, "height", 1) end,
+        function() gg.set_param(entity, "grounded", 1) end,
+        function() gg.set_param(entity, "jump", "high") end,
+    }
+    for _, refusal in refusals do
+        if not pcall(refusal) then
+            entity[Pace.refused] += 1
+        end
+    end
+end
+
+return Pace
+"#;
+
+    /// A script sets its entity's state machine's parameters, a float by a number and a trigger and
+    /// a bool by a boolean, as code does; and one it can't set is refused where it asks.
+    #[test]
+    fn a_script_sets_its_entity_s_state_machine_s_parameters() {
+        use crate::{AnimationParam, AnimationStates, ParamValue};
+
+        let dir = Scratch::new("luau-params");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/pace.luau", PACE)]);
+        let world = cx.world_mut();
+        let param = |name: &str, value| AnimationParam {
+            name: name.to_owned(),
+            value,
+        };
+        let machine = AnimationStates {
+            params: vec![
+                param("speed", ParamValue::Float(0.0)),
+                param("pounce", ParamValue::Trigger(false)),
+                param("grounded", ParamValue::Bool(true)),
+            ],
+            ..AnimationStates::default()
+        };
+        let pacing = world.spawn(machine);
+        world.add_default(pacing, "Pace").expect("added");
+        host.run(world);
+        let machine = world.get::<AnimationStates>(pacing).expect("its machine");
+        assert_eq!(machine.param("speed"), Some(ParamValue::Float(2.5)));
+        assert_eq!(machine.param("pounce"), Some(ParamValue::Trigger(true)));
+        assert_eq!(machine.param("grounded"), Some(ParamValue::Bool(false)));
+        let refused = world.get_field(pacing, "Pace", "refused");
+        assert_eq!(refused.expect("a field"), Value::F64(3.0));
+        // A call refused for its value keeps no name; those past the checks are kept, the missing
+        // parameter's among them.
+        let host = host.host.borrow();
+        let params = host.shared.params.borrow();
+        let kept: Vec<&str> = params.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(kept, ["speed", "pounce", "grounded", "height"]);
+    }
+
+    /// Sets 70 parameters of its entity's state machine at its first tick, each by a name of its
+    /// own, more than a VM keeps.
+    const MANY: &str = r#"
+local Many = gg.declare("Many", { done = false })
+
+function Many.tick(entity, dt)
+    if entity[Many.done] then
+        return
+    end
+    entity[Many.done] = true
+    for i = 1, 70 do
+        gg.set_param(entity, "p" .. i, i)
+    end
+end
+
+return Many
+"#;
+
+    /// A script sets parameters by names past the most its VM keeps, as it sets those it keeps.
+    #[test]
+    fn names_past_those_a_vm_keeps_set_their_parameters_too() {
+        use crate::{AnimationParam, AnimationStates, ParamValue};
+
+        let dir = Scratch::new("luau-many-params");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/many.luau", MANY)]);
+        let world = cx.world_mut();
+        let params = (1..=70).map(|i| AnimationParam {
+            name: format!("p{i}"),
+            value: ParamValue::Float(0.0),
+        });
+        let machine = AnimationStates {
+            params: params.collect(),
+            ..AnimationStates::default()
+        };
+        let many = world.spawn(machine);
+        world.add_default(many, "Many").expect("added");
+        host.run(world);
+        let machine = world.get::<AnimationStates>(many).expect("its machine");
+        for i in 1..=70 {
+            let set = machine.param(&format!("p{i}"));
+            assert_eq!(set, Some(ParamValue::Float(i as f32)), "p{i}");
+        }
+        assert_eq!(host.host.borrow().shared.params.borrow().len(), PARAMS);
     }
 }

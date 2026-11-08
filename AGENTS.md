@@ -123,7 +123,7 @@ look at before committing them. The sandbox's and the demos' world hashes, at ea
 run, are references too, which CI checks on every platform: a change to their simulations, to what
 the hash reads, or to glam, libm, rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
 test -p sandbox -p shards -p foxball` rewrites them and the demos' live recordings' alone.
-gg-engine's `physics/` holds three more and its `animation/` two, edited by hand. A difference on
+gg-engine's `physics/` holds three more and its `animation/` three, edited by hand. A difference on
 some platforms alone is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64

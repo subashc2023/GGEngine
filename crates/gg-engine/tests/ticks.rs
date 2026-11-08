@@ -2,8 +2,10 @@
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
 //! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
 //! own entities and spawn others in their place among them, and a Luau script that moves its
-//! entities and counts its ticks in its own component, and sprites' flipbooks and tweens of their
-//! fields, looping and going back and forth; before the job system's threads start,
+//! entities and counts its ticks in its own component, sprites' flipbooks and tweens of their
+//! fields, looping and going back and forth, and skinned foxes' state machines, blending a walk and
+//! a run along a speed that the layer sets for some and a Luau script for the rest, and cutting
+//! from a walk to a hop at a trigger and back; before the job system's threads start,
 //! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
 //! allocates the first time it does; and ticks that despawn entities and spawn others in their
 //! place, as a game's bullets and particles come and go.
@@ -20,6 +22,7 @@ mod common;
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{fs, process, thread};
@@ -27,8 +30,10 @@ use std::{fs, process, thread};
 use gg_engine::math::{Quat, Vec3};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    Component, Context, Curve, Entity, Flipbook, Layer, Playback, Script, Scripts, Sprite, Tick,
-    Transform, Tween, World, run_scripts, step_animation,
+    AnimationParam, AnimationState, AnimationStates, BlendPoint, Component, Context, Curve, Entity,
+    Flipbook, Layer, Model, ParamCondition, ParamTest, ParamValue, Playback, Script, Scripts,
+    Sprite, StateMotion, StateTransition, Tick, Transform, Tween, World, run_scripts,
+    step_animation,
 };
 
 use crate::common::Counted;
@@ -107,6 +112,99 @@ end
 return Drift
 "#;
 
+/// The foxes whose state machines blend Walk and Run along a speed, half of them the layer's, which
+/// it sets at each tick, and half a Luau script's; and those that cut from a walk to a hop, Run
+/// played once, at a trigger the layer pulls every `HOPS` ticks, and back once it's done.
+const BLENDING: u32 = 8;
+const CUTTING: u32 = 4;
+const HOPS: u64 = 48;
+
+/// Sets its entity's state machine's speed at each tick, between a walk's and a run's.
+const PACE: &str = r#"
+local Pace = gg.declare("Pace", { time = 0 })
+
+function Pace.tick(entity, dt)
+    local time = entity[Pace.time] + dt
+    entity[Pace.time] = time
+    gg.set_param(entity, "speed", 3.3 + 1.5 * math.sin(time))
+end
+
+return Pace
+"#;
+
+fn param(name: &str, value: ParamValue) -> AnimationParam {
+    AnimationParam {
+        name: name.to_owned(),
+        value,
+    }
+}
+
+/// A state of `name` that plays `motion`, at `speed`, as `playback` says.
+fn state(name: &str, motion: StateMotion, speed: f32, playback: Playback) -> AnimationState {
+    AnimationState {
+        name: name.to_owned(),
+        motion,
+        speed,
+        playback,
+    }
+}
+
+/// A transition from `from`, or from any state, to `to`, cutting, on `conditions`, after `exit` of
+/// its state's motion if that's given.
+fn cut(
+    from: Option<&str>,
+    to: &str,
+    conditions: Vec<ParamCondition>,
+    exit: Option<f32>,
+) -> StateTransition {
+    StateTransition {
+        from: from.map(str::to_owned),
+        to: to.to_owned(),
+        conditions,
+        exit_time: exit,
+        fade: 0.0,
+    }
+}
+
+/// A fox's machine that blends Walk and Run along its speed, and stays.
+fn blending() -> AnimationStates {
+    let points = [("Walk", 1.6), ("Run", 5.0)].map(|(clip, at)| BlendPoint {
+        clip: clip.to_owned(),
+        at,
+    });
+    let blend = StateMotion::Blend {
+        param: "speed".to_owned(),
+        points: points.into(),
+    };
+    AnimationStates {
+        params: vec![param("speed", ParamValue::Float(3.0))],
+        states: vec![state("Move", blend, 1.0, Playback::Loop)],
+        ..AnimationStates::default()
+    }
+}
+
+/// A fox's machine that walks, and hops at its trigger, from any state, and walks again once the
+/// hop's done.
+fn cutting() -> AnimationStates {
+    let clip = |name: &str| StateMotion::Clip(name.to_owned());
+    let hop = ParamCondition {
+        param: "hop".to_owned(),
+        test: ParamTest::True,
+    };
+    AnimationStates {
+        params: vec![param("hop", ParamValue::Trigger(false))],
+        states: vec![
+            state("Walk", clip("Walk"), 1.0, Playback::Loop),
+            state("Hop", clip("Run"), 2.0, Playback::Once),
+        ],
+        transitions: vec![
+            cut(None, "Hop", vec![hop], None),
+            cut(Some("Hop"), "Walk", Vec::new(), Some(1.0)),
+        ],
+        ..AnimationStates::default()
+    }
+}
+
 enum Command {
     Speed(f32),
 }
@@ -125,20 +223,31 @@ fn on_a_worker() -> bool {
 /// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
 /// job system's threads, and whose heavy ones it turns back on the ticks' thread alone;
 /// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs;
-/// and `ANIMATED` sprites, whose animation it steps.
+/// `ANIMATED` sprites, whose animation it steps; and the Fox, `BLENDING` and `CUTTING` times, the
+/// first half of the blending ones and the cutting ones driven by its tick.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
     scripts: Scripts,
+    fox: Option<Model>,
+    blending: Vec<Entity>,
+    cutting: Vec<Entity>,
 }
 
 impl Layer for Movers {
     fn load(&mut self, cx: &mut Context) {
-        let path = std::env::temp_dir().join(format!("gg-ticks-{}.luau", process::id()));
-        fs::write(&path, DRIFT).expect("the script is written");
-        let loaded = self.scripts.load(cx, &path);
-        let _ = fs::remove_file(&path);
-        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        for (name, script) in [("drift", DRIFT), ("pace", PACE)] {
+            let file = format!("gg-ticks-{name}-{}.luau", process::id());
+            let path = std::env::temp_dir().join(file);
+            fs::write(&path, script).expect("the script is written");
+            let loaded = self.scripts.load(cx, &path);
+            let _ = fs::remove_file(&path);
+            loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        }
+        let fox =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox/Fox.gltf");
+        let fox = cx.add_model("fox", fox);
+        self.fox = Some(fox.unwrap_or_else(|error| panic!("{error:#}")));
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -190,6 +299,21 @@ impl Layer for Movers {
                 world.tween(animated, tween).expect("fields of their kinds");
             }
         }
+        let fox = self.fox.expect("loaded");
+        for i in 0..BLENDING + CUTTING {
+            let root = fox.spawn(world, Transform::default());
+            if i < BLENDING {
+                world.insert(root, blending()).expect("alive");
+                if i < BLENDING / 2 {
+                    self.blending.push(root);
+                } else {
+                    world.add_default(root, "Pace").expect("a pacer");
+                }
+            } else {
+                world.insert(root, cutting()).expect("alive");
+                self.cutting.push(root);
+            }
+        }
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -211,6 +335,16 @@ impl Layer for Movers {
             velocity.0 = -velocity.0;
         }
         run_scripts::<Ephemeral>(world, tick);
+        let between = (tick.number % 128) as f32 / 128.0;
+        for &fox in &self.blending {
+            let set = world.set_param(fox, "speed", 2.0 + 2.5 * between);
+            set.expect("a float");
+        }
+        if tick.number.is_multiple_of(HOPS) {
+            for &fox in &self.cutting {
+                world.set_param(fox, "hop", true).expect("a trigger");
+            }
+        }
         self.scripts.run(world);
         step_animation(world);
     }
@@ -331,6 +465,9 @@ fn main() {
         commands: Vec::new(),
         speed: 1.0,
         scripts: Scripts::new().expect("Luau starts"),
+        fox: None,
+        blending: Vec::new(),
+        cutting: Vec::new(),
     };
     movers.load(&mut cx);
     movers.attach(&mut cx);
@@ -371,6 +508,19 @@ fn main() {
     let drifter = world.entities(Some("Drift")).expect("declared").next();
     let ran = world.get_field(drifter.expect("a drifter"), "Drift", "ticks");
     assert_eq!(ran.expect("its count"), Value::F64(number as f64));
+    // The foxes blended, paced by the layer and by their script, and hopped as they went.
+    let machines = world.query::<&AnimationStates>();
+    let states: Vec<&str> = machines.map(|machine| machine.state.as_str()).collect();
+    let count = |state| states.iter().filter(|&&of| of == state).count();
+    // The cutting ones 16 ticks into a hop, of the 38 that Run's 1.16 seconds take at twice its
+    // speed.
+    assert_eq!(number % HOPS, 16);
+    let counted = (count("Move"), count("Hop"));
+    assert_eq!(counted, (BLENDING as usize, CUTTING as usize), "{states:?}");
+    let pacer = world.entities(Some("Pace")).expect("declared").next();
+    let paced = world.get_field(pacer.expect("a pacer"), "Pace", "time");
+    let seconds = number as f64 / 64.0;
+    assert_eq!(paced.expect("its time"), Value::F64(seconds));
     workers_are_counted(cx.world_mut());
     println!("allocations on the job system's other threads count");
 
