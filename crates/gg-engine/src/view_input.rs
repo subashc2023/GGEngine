@@ -118,6 +118,8 @@ impl ViewInput {
             Event::Scroll(_) => {
                 reach(self.held != 0 || (under == Under::View && !egui.egui_is_using_pointer()))
             }
+            // As keys do, or while a drag the view started goes on.
+            Event::MouseMotion { .. } => reach(self.held != 0 || self.keys(egui, under, shown)),
             // egui uses the pointer while a button pressed over the view is held.
             Event::CursorMoved { x, y } => {
                 self.inside = true;
@@ -142,6 +144,12 @@ impl ViewInput {
             }
             _ => reach(!consumed),
         }
+    }
+
+    /// Whether the view has the keys, as it does from the start, and from a press over it, or the
+    /// UI over it, until a press elsewhere.
+    pub(crate) fn focused(&self) -> bool {
+        self.focused
     }
 
     fn focus(&mut self, focused: bool) {
@@ -353,6 +361,40 @@ mod tests {
         assert!(!input.keys(&using, Under::Other, true));
         assert_eq!(
             input.route(&using, &WHEEL, true, Under::View, true),
+            Reach::Nothing
+        );
+    }
+
+    /// The mouse's raw motion reaches the layers as keys do, while the view has them, as it does
+    /// grabbing the cursor, and while a drag the view started goes on.
+    #[test]
+    fn the_mouses_motion_reaches_the_layers_while_the_view_has_the_keys_or_a_drag() {
+        let egui = context(false);
+        let mut input = ViewInput::new();
+        let motion = Event::MouseMotion { x: 3.0, y: -2.0 };
+        assert_eq!(
+            input.route(&egui, &motion, false, Under::Other, true),
+            Reach::Event
+        );
+        assert!(input.focused());
+        let left = |pressed| button(MouseButton::Left, pressed);
+        input.route(&egui, &left(true), true, Under::Other, true);
+        assert!(!input.focused());
+        assert_eq!(
+            input.route(&egui, &motion, false, Under::Other, true),
+            Reach::Nothing
+        );
+        let right = |pressed| button(MouseButton::Right, pressed);
+        input.route(&egui, &right(true), true, Under::View, true);
+        let using = context(true);
+        assert_eq!(
+            input.route(&using, &motion, false, Under::Other, true),
+            Reach::Event
+        );
+        // Nor while the view doesn't show.
+        input.route(&egui, &right(false), false, Under::View, true);
+        assert_eq!(
+            input.route(&egui, &motion, false, Under::View, false),
             Reach::Nothing
         );
     }

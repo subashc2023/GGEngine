@@ -14,7 +14,8 @@
 //! loading what layers add, images as textures, glTF models, whose nodes spawn as entities, their
 //! metallic-roughness materials lit by the world's lights, and fonts, baked into fields that draw
 //! text crisp at any size, which it shapes and lays out; sounds,
-//! which ticks queue and layers play, through kira, panned and faded by where they show in the view,
+//! which ticks queue and layers play, through kira, panned and faded as the view hears them, a 2D
+//! view by where they show in it and a camera with perspective by their direction and distance,
 //! and music, decoded as it plays, looping, which layers play one at a time, under volume buses;
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;

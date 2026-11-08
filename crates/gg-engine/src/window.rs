@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use egui::ViewportId;
 use gg_core::{Error, Result};
 use gg_renderer::{Renderer, Settings, Viewport};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 #[cfg(feature = "dev")]
 use winit::dpi::{PhysicalPosition, Position};
 #[cfg(feature = "dev")]
 use winit::event::ElementState;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 #[cfg(feature = "dev")]
 use winit::keyboard::{Key, NamedKey};
@@ -130,6 +130,7 @@ pub(crate) fn run(
         api,
         frames: 0,
         minimized: false,
+        grabbed: false,
         waiting: None,
         error: None,
         ran: None,
@@ -203,6 +204,8 @@ struct Handler<'a> {
     frames: u64,
     /// Set while the window has no area to render into.
     minimized: bool,
+    /// Whether the cursor is grabbed, as [`hold_cursor`](Self::hold_cursor) last left it.
+    grabbed: bool,
     /// Tells `ping` that frames have paused while the window is minimized.
     waiting: Option<Waited>,
     error: Option<Error>,
@@ -300,6 +303,8 @@ impl Handler<'_> {
             event_loop.exit();
             return;
         }
+        // As the frames before asked.
+        self.hold_cursor();
         #[cfg(feature = "dev")]
         let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
@@ -353,6 +358,13 @@ impl Handler<'_> {
             );
             (MainUi::none(), Duration::ZERO)
         };
+        // egui shows the cursor as its widgets' hover asks, unless told it's hidden.
+        #[cfg(feature = "dev")]
+        if self.grabbed
+            && let Some(output) = &mut output
+        {
+            output.platform_output.cursor_icon = egui::CursorIcon::None;
+        }
         // The frame before, which rendered meanwhile.
         let (mut minimized, mut failed) = (false, None);
         match take_back(render, &mut self.cx, tessellated) {
@@ -470,6 +482,43 @@ impl Handler<'_> {
         }
     }
 
+    /// Grabs the cursor, or lets it go, as the layers want it, while the window has focus, and in a
+    /// dockspace while the view shows and has the keys, as [`Context::set_cursor_grabbed`] says.
+    /// Locked where the platform locks it, as macOS and Wayland do, and otherwise kept inside the
+    /// window, as on Windows and X11, which still report the mouse's raw motion past its edges;
+    /// warns `engine.cursor_grab` if it can't be either.
+    fn hold_cursor(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        #[cfg(feature = "dev")]
+        let view = (self.view_input.as_ref())
+            .is_none_or(|input| input.focused() && self.dock.view().is_positive());
+        #[cfg(not(feature = "dev"))]
+        let view = true;
+        let grab = self.cx.cursor_grabbed() && view && window.has_focus();
+        if grab == self.grabbed {
+            return;
+        }
+        self.grabbed = grab;
+        if grab {
+            use winit::window::CursorGrabMode;
+            let held = (window.set_cursor_grab(CursorGrabMode::Locked))
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+            if let Err(error) = held {
+                warn!(
+                    code = "engine.cursor_grab",
+                    "The cursor can't be grabbed: {error}; it's hidden, and the mouse's raw motion \
+                     still comes"
+                );
+            }
+        } else {
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        }
+        window.set_cursor_visible(!grab);
+        debug!(grabbed = grab, "Cursor grab");
+    }
+
     /// Restarts the clock if a layer paused the frames since it was last read, as a file dialog
     /// does while it's open, so that neither the frame the pause came in nor the update after it
     /// counts the pause. Where the clock is read, as a frame starts and as the run ends, rather
@@ -564,8 +613,8 @@ impl Handler<'_> {
 }
 
 fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-    // Every event but the cursor's moves, which would drown the rest.
-    if !matches!(event, Event::CursorMoved { .. }) {
+    // Every event but the cursor's and the mouse's moves, which would drown the rest.
+    if !matches!(event, Event::CursorMoved { .. } | Event::MouseMotion { .. }) {
         trace!(?event, "Event");
     }
     stack.event(cx, event)
@@ -709,6 +758,20 @@ impl ApplicationHandler for Handler<'_> {
                 let _ = self.dispatch(&event);
             }),
         }
+    }
+
+    /// The mouse's raw motion, which winit reports while the window has focus, as its
+    /// `DeviceEvents::WhenFocused`, its default, has it; in a dockspace, while the view has the
+    /// keys too.
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        let Some(event) = event::device(&event) else {
+            return;
+        };
+        #[cfg(feature = "dev")]
+        if self.view_reach(&event, false) == Reach::Nothing {
+            return;
+        }
+        let _ = self.dispatch(&event);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

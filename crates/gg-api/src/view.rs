@@ -59,6 +59,10 @@ struct Header {
     taken: AtomicU64,
     /// Each slot's frame, as [`Frame`] gives it: the game's, written before it publishes the slot.
     slots: [Slot; SLOTS as usize],
+    /// 1 while the game's layers want the cursor grabbed, for mouse look, else 0: the game's. Last,
+    /// so that a client or a game of an engine from before it, which reads none, lays the rest out
+    /// alike, and reads it as 0, as the memory starts zeroed.
+    grab: AtomicU64,
 }
 
 /// A slot's frame, in the header.
@@ -238,6 +242,13 @@ impl Reader {
     pub fn published(&self) -> u64 {
         self.memory.header().published.load(Ordering::Acquire)
     }
+
+    /// Whether the game's layers want the cursor grabbed, for mouse look, as the game last said
+    /// with [`Writer::set_cursor_grabbed`]: the client grabs its own, while it gives the game its
+    /// input.
+    pub fn cursor_grabbed(&self) -> bool {
+        self.memory.header().grab.load(Ordering::Relaxed) != 0
+    }
 }
 
 /// The game's end: the memory a client made, opened by its name, and the frames it publishes to it.
@@ -300,6 +311,13 @@ impl Writer {
     pub fn asked(&self) -> Option<[u32; 2]> {
         let size = unpack(self.memory.header().asked.load(Ordering::Relaxed));
         (fits_sides(size) && bytes(size) <= self.memory.capacity).then_some(size)
+    }
+
+    /// Says whether the game's layers want the cursor grabbed, for mouse look, as
+    /// [`Reader::cursor_grabbed`] reads it.
+    pub fn set_cursor_grabbed(&self, grabbed: bool) {
+        let grab = &self.memory.header().grab;
+        grab.store(u64::from(grabbed), Ordering::Relaxed);
     }
 
     /// What another thread reads to pace frames by the client's taking them, while this
@@ -944,6 +962,19 @@ mod tests {
             assert_eq!((taken.viewpoint, taken.look), (viewpoint, look));
             assert_eq!(taken, published);
         }
+    }
+
+    /// The client reads whether the game wants the cursor grabbed as the game last said, not
+    /// grabbed before it says.
+    #[test]
+    fn the_client_reads_whether_the_game_wants_the_cursor_grabbed() {
+        let reader = Reader::create(1, 1).expect("memory for a view");
+        let writer = Writer::open(reader.name()).expect("the memory");
+        assert!(!reader.cursor_grabbed());
+        writer.set_cursor_grabbed(true);
+        assert!(reader.cursor_grabbed());
+        writer.set_cursor_grabbed(false);
+        assert!(!reader.cursor_grabbed());
     }
 
     /// As a game that writes over the header, or whose camera is at no finite place, publishes.

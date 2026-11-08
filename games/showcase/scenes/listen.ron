@@ -1,0 +1,245 @@
+(
+    entities: {
+        "1a3c5e7f9b2d4608": (
+            Camera: (
+                projection: Perspective(
+                    fov: 1.2217305,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Look: (
+                yaw: 0.0,
+                pitch: 0.0,
+                sensitivity: 0.0025,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.6, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2b4d6f8a0c1e3579": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 8000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "3c5e7a9b1d2f4680": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 100000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.49303037, -0.34512126, 0.0, 0.79863155),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4d6f8b0c2e3a5791": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, -8.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (8.0, 1.0, 10.0),
+            ),
+        ),
+        "5e7a9c1d3f4b6802": (
+            Name: ("Title"),
+            Text: (
+                text: "Sounds in 3D",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.45,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, -5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6f8b0d2e4a5c7913": (
+            Name: ("Hint"),
+            Text: (
+                text: "Click to look about with the mouse, Escape to let go: each chime is heard from where it is, behind you too, fainter the farther it is",
+                font: None,
+                size: 0.13,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.0, -5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7a9c1e3f5b6d8024": (
+            Chime: (
+                tone: Bell,
+                every: 4.0,
+                time: 3.0,
+            ),
+            Circle: (
+                color: (1.0, 0.72, 0.28, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Bell: Left"),
+            Transform: (
+                translation: (-3.0, 1.2, 0.0),
+                rotation: (0.0, 0.70710677, 0.0, 0.70710677),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8b0d2f4a6c7e9135": (
+            Name: ("Label: Bell to the left, 3 units off"),
+            Text: (
+                text: "Bell to the left, 3 units off",
+                font: None,
+                size: 0.16,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-3.0, 0.3, 0.0),
+                rotation: (0.0, 0.70710677, 0.0, 0.70710677),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9c1e3a5b7d8f0246": (
+            Chime: (
+                tone: Pluck,
+                every: 4.0,
+                time: 2.0,
+            ),
+            Circle: (
+                color: (0.3, 0.85, 0.9, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Pluck: Behind"),
+            Transform: (
+                translation: (0.0, 1.2, 6.0),
+                rotation: (0.0, 1.0, 0.0, 0.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a0d2e4b6c8f13579": (
+            Name: ("Label: Pluck behind you, 6 units off"),
+            Text: (
+                text: "Pluck behind you, 6 units off",
+                font: None,
+                size: 0.16,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 0.3, 6.0),
+                rotation: (0.0, 1.0, 0.0, 0.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b1e3f5c7d9a24680": (
+            Chime: (
+                tone: Bell,
+                every: 4.0,
+                time: 1.0,
+            ),
+            Circle: (
+                color: (1.0, 0.72, 0.28, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Bell: Right, far"),
+            Transform: (
+                translation: (14.0, 3.0, -14.0),
+                rotation: (0.0, -0.38268343, 0.0, 0.9238795),
+                scale: (3.0, 3.0, 3.0),
+            ),
+        ),
+        "c2f4a6d8e0b35791": (
+            Name: ("Label: Bell to the right, 20 units off"),
+            Text: (
+                text: "Bell to the right, 20 units off",
+                font: None,
+                size: 0.16,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (14.0, 0.6, -14.0),
+                rotation: (0.0, -0.38268343, 0.0, 0.9238795),
+                scale: (3.0, 3.0, 3.0),
+            ),
+        ),
+        "d3a5b7e9f1c46802": (
+            Chime: (
+                tone: Pluck,
+                every: 4.0,
+                time: 0.0,
+            ),
+            Circle: (
+                color: (0.3, 0.85, 0.9, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Pluck: Ahead, farther"),
+            Transform: (
+                translation: (0.0, 6.0, -40.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.0, 6.0, 6.0),
+            ),
+        ),
+        "e4b6c8f0a2d57913": (
+            Name: ("Label: Pluck ahead, 40 units off"),
+            Text: (
+                text: "Pluck ahead, 40 units off",
+                font: None,
+                size: 0.16,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 1.2, -40.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.0, 6.0, 6.0),
+            ),
+        ),
+    },
+)

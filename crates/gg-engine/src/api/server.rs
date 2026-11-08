@@ -1006,6 +1006,8 @@ impl Api {
             });
         }
         if let Some(publish) = &mut frame.publish {
+            // For the client, which grabs its own cursor for the game.
+            publish.writer.set_cursor_grabbed(cx.cursor_grabbed());
             if let Some(error) = publish.failed.take()
                 && !mem::replace(&mut self.view_warned, true)
             {
@@ -2468,6 +2470,7 @@ fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<'_>> {
         },
         InputEvent::CursorEntered => Event::CursorEntered,
         InputEvent::CursorLeft => Event::CursorLeft,
+        InputEvent::Motion([x, y]) => Event::MouseMotion { x, y },
         InputEvent::Button { button, pressed } => Event::MouseButton {
             button: match button {
                 Button::Left => MouseButton::Left,

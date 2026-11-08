@@ -22,7 +22,10 @@
 //! (`models.ron`); Khronos's Fox, skinned, playing its clips, Survey, Walk and Run, each alone,
 //! walking and running blended, and cross-faded from one to the next (`skeletal.ron`, the model in
 //! `models/fox`, CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by
-//! AsoboStudio and scurest under CC BY 4.0, as its README there says); colors from a quarter as
+//! AsoboStudio and scurest under CC BY 4.0, as its README there says); chimes heard in 3D, by
+//! their direction and distance from a camera that the mouse looks about with, the cursor grabbed
+//! from a click in the view until Escape, a bell to the left, a pluck behind, and farther ones
+//! ahead (`listen.ron`); colors from a quarter as
 //! bright as white to 16 times, which the world's
 //! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
 //! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); the
@@ -46,7 +49,7 @@
 //! every few seconds through `gg.play`; and animation and physics step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
 //! package without its code, and so without the keys' walking and its own components: the
-//! chimes, the jukebox, the HUD and the plasma, which its code registers and runs.
+//! chimes, the jukebox, the HUD, the plasma and the look, which its code registers and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -59,13 +62,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_engine::math::{Mat4, Vec2, Vec3, Vec4};
+use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
     Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Curve, Ease,
     Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton, Music, PadButton, Place,
-    Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Tween, World,
-    step_animation, step_physics,
+    Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, Tween,
+    World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -111,6 +114,9 @@ enum Command {
     Jump,
     /// Counts a click on the HUD's button, on each [`Hud`].
     Click,
+    /// Turns each [`Look`] by the mouse's raw motion, `by`, right and down, as it moved with the
+    /// cursor grabbed.
+    Look { by: Vec2 },
 }
 
 /// A sound of the showcase's, which a [`Chime`] rings.
@@ -124,8 +130,9 @@ enum Tone {
 }
 
 /// Rings its tone every `every` seconds of the world's ticks, from its entity, so that it's panned
-/// by where the view shows it and fades past the view's edges, as [`Place::On`] says; a `Circle` on
-/// it flashes full as it rings, thinning back to [`RING`]: `sounds.ron`'s chimes.
+/// and faded as the view hears it there, as [`Place`] says: by where a 2D view shows it, and by its
+/// direction and distance from a camera with perspective; a `Circle` on it flashes full as it
+/// rings, thinning back to [`RING`]: `sounds.ron`'s chimes, and `listen.ron`'s.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Chime {
     /// What it rings.
@@ -173,6 +180,25 @@ struct Plasma {
     #[reflect(default = 1.0)]
     speed: f32,
 }
+
+/// Turns its entity, a camera, as the mouse moves with the cursor grabbed, which a click in the view
+/// grabs and Escape lets go of: about the world's up by `yaw`, and up or down by `pitch`, no further
+/// than [`MAX_PITCH`], level, each of the mouse's units turning it `sensitivity` radians:
+/// `listen.ron`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Look {
+    /// Its turn to its left about the world's up, in radians, from facing -Z.
+    yaw: f32,
+    /// Its turn up, in radians, no further than [`MAX_PITCH`] either way.
+    #[reflect(min = -1.553_343, max = 1.553_343)]
+    pitch: f32,
+    /// How far a unit of the mouse's motion turns it, in radians.
+    #[reflect(min = 0.0, default = 0.0025)]
+    sensitivity: f32,
+}
+
+/// The furthest a [`Look`] turns up or down: 89°, short of straight, where its yaw would spin.
+const MAX_PITCH: f32 = 1.553_343;
 
 /// A corner of the plasma's square, as `shaders/plasma.slang` reads it: where it is in the square's
 /// own space, and where it is across the square, from 0 to 1.
@@ -266,7 +292,8 @@ fn register(world: &mut World) {
     let registered = world.register::<Chime>().and_then(|()| {
         world.register::<Jukebox>()?;
         world.register::<Hud>()?;
-        world.register::<Plasma>()
+        world.register::<Plasma>()?;
+        world.register::<Look>()
     });
     registered.expect("the game's components describe themselves");
 }
@@ -274,10 +301,11 @@ fn register(world: &mut World) {
 /// The game's layer: it loads the scripts as it loads, which declares their components, and
 /// registers its own, so that its scenes, the Inspector's Add Component and the tool API know them
 /// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
-/// it attaches; and at each tick applies what the keys and the HUD's button did to its scenes'
-/// walkers and HUDs, then runs the scripts, rings the chimes, counts the HUDs' ticks, steps
-/// animation and then physics, and gives the plasmas their draws. As it updates, it plays the music
-/// while a jukebox is in the world, and draws the HUD while a HUD is. A script, an asset or the
+/// it attaches; and at each tick applies what the keys, the mouse and the HUD's button did to its
+/// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, counts the HUDs'
+/// ticks, steps animation and then physics, and gives the plasmas their draws. As it updates, it
+/// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
+/// and draws the HUD while a HUD is. A script, an asset or the
 /// start scene that doesn't load ends the run with its error, through [`Context::fail`].
 struct Showcase {
     scripts: Scripts,
@@ -291,6 +319,9 @@ struct Showcase {
     drawn: Vec<(Entity, MeshDraw)>,
     /// The HUD's numbers' text, kept so that frames reuse its room.
     text: String,
+    /// Whether it wants the cursor grabbed, for the looks: from a click in the view while the world
+    /// has one until Escape, or until it has none.
+    grab: bool,
 }
 
 impl Showcase {
@@ -321,6 +352,7 @@ impl Showcase {
             rang: Vec::new(),
             drawn: Vec::new(),
             text: String::new(),
+            grab: false,
         }
     }
 
@@ -374,7 +406,8 @@ impl Showcase {
 }
 
 /// Applies `command` to `world`: to each of its walkers, the entities with `walk.luau`'s `Walk`, its
-/// heading, with forward along -Z, or its jump; or to each of its HUDs, a click.
+/// heading, with forward along -Z, or its jump; to each of its HUDs, a click; or to each of its
+/// looks, a turn, which turns its entity.
 fn apply(world: &mut World, command: &Command) {
     let (field, value) = match *command {
         Command::Walk { heading } => (
@@ -385,6 +418,16 @@ fn apply(world: &mut World, command: &Command) {
         Command::Click => {
             for hud in world.query_mut::<&mut Hud>() {
                 hud.clicks = hud.clicks.saturating_add(1);
+            }
+            return;
+        }
+        Command::Look { by } => {
+            for (look, transform) in world.query_mut::<(&mut Look, &mut Transform)>() {
+                // Right turns to the right, about the world's up, and down looks down.
+                look.yaw -= by.x * look.sensitivity;
+                look.pitch = (look.pitch - by.y * look.sensitivity).clamp(-MAX_PITCH, MAX_PITCH);
+                transform.rotation =
+                    Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
             }
             return;
         }
@@ -451,8 +494,11 @@ impl Layer for Showcase {
         Some(&mut self.commands)
     }
 
-    /// Plays the music while a jukebox is in the world, and draws the HUD while a HUD is.
+    /// Grabs the cursor while it wants it for the looks, plays the music while a jukebox is in the
+    /// world, and draws the HUD while a HUD is.
     fn update(&mut self, cx: &mut Context, _: Duration) {
+        self.grab &= cx.world().query::<&Look>().next().is_some();
+        cx.set_cursor_grabbed(self.grab);
         let Some(assets) = &self.assets else {
             return;
         };
@@ -489,6 +535,27 @@ impl Layer for Showcase {
                 .is_some_and(on_button)
         {
             commands.push(Command::Click);
+        }
+        let looks = cx.world().query::<&Look>().next().is_some();
+        match *event {
+            Event::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            } if looks => self.grab = true,
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            } => self.grab = false,
+            // Each tick turns the looks once, by the motion since the tick before.
+            Event::MouseMotion { x, y } if self.grab => {
+                let by = Vec2::new(x as f32, y as f32);
+                match commands.last_mut() {
+                    Some(Command::Look { by: queued }) => *queued += by,
+                    _ => commands.push(Command::Look { by }),
+                }
+            }
+            _ => {}
         }
         ControlFlow::Continue(())
     }

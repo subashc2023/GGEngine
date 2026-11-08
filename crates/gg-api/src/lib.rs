@@ -603,6 +603,9 @@ pub enum InputEvent {
     CursorEntered,
     /// The cursor left the view.
     CursorLeft,
+    /// The mouse moved `[x, y]` in its own units, as its raw motion goes, with no cursor to move:
+    /// positive right and down, as the cursor would, for looking about with the cursor grabbed.
+    Motion([f64; 2]),
     /// A mouse button went down or up.
     Button { button: Button, pressed: bool },
     /// The wheel or a touchpad scrolled: positive `y` up, and positive `x` left.
@@ -1655,7 +1658,7 @@ mod tests {
     fn input_events_read_as_their_docs_say() {
         let json = r#"{"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left",
             {"button": {"button": {"other": 9}, "pressed": false}}, {"scroll": {"lines": [0, 1]}},
-            {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}]}"#;
+            {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}, {"motion": [3, -4.5]}]}"#;
         let input: Input = serde_json::from_str(json).unwrap();
         let expected = [
             InputEvent::Key {
@@ -1672,6 +1675,7 @@ mod tests {
             InputEvent::Cursor([1.5, 2.0]),
             InputEvent::Text("a".to_owned()),
             InputEvent::Focused(false),
+            InputEvent::Motion([3.0, -4.5]),
         ];
         assert_eq!(input.events, expected);
         let refused = r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#;

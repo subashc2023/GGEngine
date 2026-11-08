@@ -208,6 +208,9 @@ fn tools() -> Value {
                 "enum": ["cursor_entered", "cursor_left"],
                 "description": "The cursor came over the view, or left it",
             },
+            variant("motion", numbers(2, "The mouse moved [x, y] in its own units, as its raw \
+                                          motion goes, positive right and down, moving no \
+                                          cursor: for looking about with the cursor grabbed")),
             variant("button", json!({
                 "type": "object",
                 "description": "A mouse button went down or up",
@@ -844,6 +847,7 @@ mod tests {
             InputEvent::Cursor([1.0, 2.0]),
             InputEvent::CursorEntered,
             InputEvent::CursorLeft,
+            InputEvent::Motion([3.0, -4.0]),
             InputEvent::Button {
                 button: Button::Left,
                 pressed: true,
@@ -859,6 +863,7 @@ mod tests {
                     | InputEvent::Cursor(_)
                     | InputEvent::CursorEntered
                     | InputEvent::CursorLeft
+                    | InputEvent::Motion(_)
                     | InputEvent::Button { .. }
                     | InputEvent::Scroll(_)
                     | InputEvent::Focused(_) => {}

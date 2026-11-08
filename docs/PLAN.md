@@ -131,7 +131,10 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A networked 3D demo.** A small 3D game in `games/`, a project of its own: its players
   characters among physics' bodies, the keys or a pad moving them and the mouse looking about, its
   cursor grabbed, animated as they move, its sounds placed in 3D by where they are from the
-  listener. Done when Phase 14's *Done when* holds.
+  listener. Done when Phase 14's *Done when* holds. The engine's part of its looking and hearing is
+  in, as `listen.ron` shows: the mouse's raw motion with the cursor grabbed, the editor grabbing its
+  own for its game, and sounds heard by their direction and distance through a camera with
+  perspective.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -232,7 +235,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Circles, meshes and lines on the canvas, and clipping to a rectangle, as a list that scrolls needs: it draws sprites and text | A game's UI draws them |
 | Measuring text for laying it out, as a button sized to its label needs: a layer sizes its buttons itself | A game's UI lays out text of lengths it doesn't know, such as translations |
 | Hiding a game's UI from the editor's view while it edits, as Unity's Scene view leaves out a canvas over the screen: the canvas draws through the look's viewpoint too, and hides what's under it from picks | Someone edits under a game's HUD |
-| Sounds placed in 3D, by their direction and distance from a listener, as kira's spatial tracks place them: a sound is panned and faded by where it shows in the view, so a camera with perspective hears nothing behind it, and what's far as loud as what's near while both are in view | A 3D game's sounds |
+| A sound's own distances and spatialization, as kira's spatial tracks take each: a camera with perspective hears every sound full within a unit and silent at 100, panned three quarters of the way to a side, as those tracks' defaults have it; nor Doppler, nor occlusion by what's between | A game's units aren't about a meter, or a sound carries farther or nearer than the rest |
 | Setting a play's volume and pitch, and stopping it, as a hum that follows an engine's speed would: a sound plays as its file holds it, to its end | A game varies or cuts a sound as it plays it |
 | More than 128 sounds at once, as many as kira's mixer takes by default, past which a sound is left out (`audio.full`); and making way for the next by stopping the oldest or the quietest | A game plays that many at once |
 | Sounds and music pausing with the simulation, as the tool API pauses or stops it, and while the window is minimized: a sound playing plays to its end, and music plays on | A game's sounds outlast a pause noticeably, or its music should stop with it |
@@ -318,7 +321,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Answering picks sooner than [Rendering](../ARCHITECTURE.md#rendering) says they come: reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
 | More than 64 picks a frame: `Context::pick` gives none past them, as many as a frame reads back | A layer picks more at once, such as many cursors or touches |
 | A depth format for a device without D32_SFLOAT depth, which the engine refuses (`gpu.no_device`) | A target device lacks it |
-| Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller and the editor's camera look by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
+| The fly camera controller and the editor's camera looking by the mouse's raw motion, the cursor grabbed while the right button is held: they look by the cursor's moves, which stop at the screen's edges | Someone misses it |
+| The cursor's grab checked by hand: locked on macOS and Wayland, kept inside the window on Windows and X11, egui's cursor hidden with it, and the editor grabbing its own for its game in Play, letting go at Escape; the tests check what's asked, and the session was locked as it was made, so no window had focus | Someone is at a machine of each, Windows' first |
 | Mipmaps and anisotropic filtering for the textures layers add: `add_texture` and `add_sprite_sheet` give them one level, sampled without anisotropy, so one drawn smaller than it is shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | A game draws its own textures smaller than they are |
 | Keeping a masked texture's coverage as its levels shrink: averaging thins what its alpha cuts out, such as leaves and fences, at a distance, where scaling each level's alpha to keep the share above the cutoff would keep it | A masked model thins out at a distance |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |

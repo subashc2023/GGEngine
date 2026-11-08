@@ -388,7 +388,11 @@ in the editor is out of an agent's reach.
   window, which other processes can embed on Windows and X11 alone, and couldn't draw over: three
   slots of frames, a triple buffer that neither end waits on, which the render thread writes each
   frame's view into once the GPU has finished it, and the client reads, as agents can read live
-  frames too. A game run `--embedded` renders its view at the size the client asks, and runs each
+  frames too; and, after them in the header, whether the game's layers want the cursor grabbed,
+  which the editor, as the client, grabs its own window's for in Play while the view has the keys,
+  the mouse's raw motion going to the game through `input`, letting go at Escape, which the game
+  gets too, as a game may not let go itself, until a press in the view. A game run `--embedded`
+  renders its view at the size the client asks, and runs each
   frame once the client has taken the last, rather than rendering frames it never takes. The view
   has one look, as the engine renders one view, which every client sets part by part, the last to
   set a part winning: the viewpoint it sees from, in place of the game's own; the entity it
@@ -1214,6 +1218,19 @@ buttons, actions and pads alike, since not every platform reports the releases t
 window is out of focus; and nothing a pad does counts while the main window is out of focus, on
 every platform.
 
+Looking about with the mouse, as first-person games do, takes its raw motion, winit's device
+events, which go on past the window's and the screen's edges, rather than the cursor's moves: each
+motion is an event, which a layer adds up into a command of its own, as it does an action's change,
+so that each tick turns by all the motion since the tick before. Motion isn't an action, as an
+action holds a value, as a key or a stick does, and motion is a distance moved. A layer asks for the
+cursor grabbed through its `Context`, and the windowed loop applies it as the next frame starts:
+hidden, egui told so too, and locked where the platform locks it, macOS and Wayland, or else kept
+inside the window, Windows and X11, which report the raw motion all the same; held while the window
+has focus, and in a dockspace while the view has the keys, let go as either goes and grabbed again
+as it comes back. What to do with Escape is the game's, as a game may pause on it. The editor's
+game, which renders offscreen, says in its view's memory whether it wants the cursor grabbed, and
+the editor grabs its own window's in Play, as [Agents and tools](#agents-and-tools) says.
+
 ## World space
 
 World space is right-handed with +Y up, as glTF's is: a camera without rotation looks down -Z,
@@ -1981,11 +1998,17 @@ What plays mixes through three buses: the music's, the sounds', and the main one
 volumes layers set with `Context::set_volume`, gliding there over a fade, as a game's settings
 would, and as a menu ducks the music under it.
 
-A sound at a point or on an entity is panned and faded by where it shows in the game's view, the
-listener, as the frame handed off sees it: toward the side of the view it's on, halfway there at
-the view's edge, as kira pans at constant power, all of it in one ear at a side, and as loud as it
-is inside the view, fading out to silence a view's width or height past its edges; a camera with
-perspective hears nothing behind it. One on an entity follows it, each frame, to where the latest
+A sound at a point or on an entity is panned and faded as the game's view, the listener, hears it,
+as the frame handed off sees it. A view without perspective, as a 2D game's, hears it by where it
+shows in the view: toward the side of the view it's on, halfway there at the view's edge, as kira
+pans at constant power, all of it in one ear at a side, and as loud as it is inside the view,
+fading out to silence a view's width or height past its edges. A camera with perspective hears it
+by its direction and distance, before or behind it, as kira's spatial tracks would with their
+defaults: three quarters of the way toward the side it's straight out to, and as loud as it is
+within a unit, fading linearly in decibels to silence 100 units away. The engine pans and fades
+each play itself, as a frame goes, rather than giving each place a spatial track of kira's, so that
+a sound starts and follows its entity without a track made or dropped, allocating nothing. One on
+an entity follows it, each frame, to where the latest
 tick left it, up to a tick ahead of where it draws, too little to hear; once the entity is
 despawned, it plays to its end from where the entity was last, as an impact's does when what made
 it is gone.

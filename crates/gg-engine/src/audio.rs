@@ -1,6 +1,8 @@
 //! Sounds and music: what layers load from audio files. Sounds decode whole as they load; ticks
-//! queue them in the world and layers play them as they update, each panned and faded by where it
-//! shows in the game's view. Music decodes as it plays, which layers play one at a time, looping.
+//! queue them in the world and layers play them as they update, each panned and faded as the game's
+//! view hears it: by where it shows in a view without perspective, and by its direction and
+//! distance from a camera with perspective. Music decodes as it plays, which layers play one at a
+//! time, looping.
 //! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
 //! ARCHITECTURE.md's Audio says.
 
@@ -14,7 +16,7 @@ use std::time::Duration;
 use gg_core::math::libm::log10f;
 use gg_core::math::{Mat4, Vec3};
 use gg_core::{Error, Result};
-use gg_renderer::Viewpoint;
+use gg_renderer::{Projection, Viewpoint};
 use kira::backend::cpal::CpalBackend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::streaming::{Decoder, StreamingSoundData, StreamingSoundHandle};
@@ -59,6 +61,16 @@ const PAN: f32 = 0.5;
 /// them.
 const FADE: f32 = 1.0;
 
+/// How far from a camera with perspective a sound is as loud as it is, and how far it fades to
+/// silence by, in world units, the fade linear in decibels: kira's spatial tracks' defaults
+/// (`SpatialTrackDistances`, with their linear attenuation).
+const HEARD: [f32; 2] = [1.0, 100.0];
+
+/// How far toward a side a sound straight out to that side of a camera with perspective pans: as
+/// far as kira's spatial tracks' default spatialization strength pans one, so that the other ear
+/// still hears it.
+const SIDE_PAN: f32 = 0.75;
+
 /// The quickest a fade goes: kira's default tween, as a change of volume any quicker clicks.
 const QUICKEST: Duration = Duration::from_millis(10);
 
@@ -99,10 +111,14 @@ pub enum Bus {
     Sounds,
 }
 
-/// Where a sound plays from, which pans and fades it by where it shows in the game's view, the
-/// listener: toward the side of the view it's on, halfway there at the view's edge, and as loud as
-/// it is while it's in the view, fading out beyond the view's edges to silence a view's width or
-/// height past them. A camera with perspective hears nothing behind it.
+/// Where a sound plays from, which pans and fades it as the game's view, the listener, hears it.
+/// A view without perspective, as a 2D game's, hears it by where it shows in the view: toward the
+/// side of the view it's on, halfway there at the view's edge, and as loud as it is while it's in
+/// the view, fading out beyond the view's edges to silence a view's width or height past them. A
+/// camera with perspective hears it by its direction and distance, as kira's spatial tracks do:
+/// toward the side it's on, three quarters of the way there straight out to that side, before or
+/// behind; and as loud as it is within a unit of the camera, fading, linearly in decibels, to
+/// silence 100 units away.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Place {
     /// Nowhere in the world: in the middle, as loud as it is, wherever the view looks, as a game's
@@ -518,9 +534,9 @@ pub(crate) struct Audio {
     /// Each bus's volume as layers last set it, in [`Bus`]'s order, which the output takes as it
     /// opens.
     volumes: [f32; 3],
-    /// The matrix from the world to the clip space of the view the last frame handed off with one
-    /// that projects, which hears the sounds; `None` before any.
-    listener: Option<Mat4>,
+    /// The view the last frame handed off with one that projects, which hears the sounds; `None`
+    /// before any.
+    listener: Option<Listener>,
     /// What a world's queue is swapped with as it's played, so that both keep their memory.
     queued: Vec<(Sound, Spot)>,
     /// Whether kira's mixer was full as the last sound started, so that it warns as it fills.
@@ -540,6 +556,36 @@ impl Default for Audio {
             queued: Vec::new(),
             full: false,
         }
+    }
+}
+
+/// What hears the sounds, as [`Place`] says: a view without perspective, by its matrix from the
+/// world to its clip space; or a camera with perspective, by its matrix from the world to its own
+/// space, which looks along its -Z, its right +X.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Listener {
+    View(Mat4),
+    Ears(Mat4),
+}
+
+impl Listener {
+    /// What hears through `viewpoint`, `size` pixels across and down: `None` while it has no area,
+    /// or can't project.
+    fn new(viewpoint: &Viewpoint, size: [u32; 2]) -> Option<Self> {
+        let [width, height] = size.map(|side| side as f32);
+        if !(width > 0.0 && height > 0.0 && viewpoint.projection.projects()) {
+            return None;
+        }
+        Some(match viewpoint.projection {
+            Projection::Orthographic { .. } => {
+                Self::View(viewpoint.view_projection(width / height))
+            }
+            Projection::Perspective { .. } => {
+                let placed =
+                    Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position);
+                Self::Ears(placed.inverse())
+            }
+        })
     }
 }
 
@@ -854,9 +900,8 @@ impl Audio {
                 );
             }
         }
-        let [width, height] = size.map(|side| side as f32);
-        if width > 0.0 && height > 0.0 && viewpoint.projection.projects() {
-            self.listener = Some(viewpoint.view_projection(width / height));
+        if let Some(listener) = Listener::new(viewpoint, size) {
+            self.listener = Some(listener);
         }
         let listener = self.listener.as_ref();
         self.playing.retain_mut(|(handle, spot)| {
@@ -925,37 +970,62 @@ fn decibels(amplitude: f32) -> Decibels {
     }
 }
 
-/// How a sound at `at` is heard through the view whose matrix from the world to its clip space is
-/// `listener`: panned by how far across the view it shows, [`PAN`] of the way toward a side at its
-/// edge, and as loud as it is inside the view, fading out beyond its edges to silence [`FADE`]
-/// views past them. In the middle and as loud as it is from nowhere, or without a listener; silent
-/// behind a camera with perspective, which shows nothing there, and at a point that isn't a number.
-fn heard(listener: Option<&Mat4>, at: Option<Vec3>) -> (Panning, Decibels) {
+/// How a sound at `at` is heard by `listener`. Through a view without perspective: panned by how
+/// far across the view it shows, [`PAN`] of the way toward a side at its edge, and as loud as it is
+/// inside the view, fading out beyond its edges to silence [`FADE`] views past them. By a camera
+/// with perspective: panned by how far out to a side it is, [`SIDE_PAN`] of the way straight out
+/// to it, and as loud as it is within [`HEARD`]'s nearer distance, fading to silence by its farther
+/// one, linearly in decibels. In the middle and as loud as it is from nowhere, or without a
+/// listener; silent at a point that isn't a number.
+fn heard(listener: Option<&Listener>, at: Option<Vec3>) -> (Panning, Decibels) {
     let (Some(listener), Some(at)) = (listener, at) else {
         return (Panning::CENTER, Decibels::IDENTITY);
     };
-    let clip = *listener * at.extend(1.0);
-    let [x, y] = [clip.x / clip.w, clip.y / clip.w];
-    if !(clip.w > 0.0 && x.is_finite() && y.is_finite()) {
-        return (Panning::CENTER, Decibels::SILENCE);
+    let silent = (Panning::CENTER, Decibels::SILENCE);
+    match *listener {
+        Listener::View(listener) => {
+            let clip = listener * at.extend(1.0);
+            let [x, y] = [clip.x / clip.w, clip.y / clip.w];
+            if !(clip.w > 0.0 && x.is_finite() && y.is_finite()) {
+                return silent;
+            }
+            // Clip space spans the view from -1 to 1, across and down.
+            let beyond = (x.abs().max(y.abs()) - 1.0).max(0.0);
+            let volume = decibels(1.0 - beyond / (2.0 * FADE));
+            (Panning(x.clamp(-1.0, 1.0) * PAN), volume)
+        }
+        Listener::Ears(listener) => {
+            let own = listener.transform_point3(at);
+            let distance = own.length();
+            if !distance.is_finite() {
+                return silent;
+            }
+            let side = if distance > 0.0 {
+                own.x / distance
+            } else {
+                0.0
+            };
+            let [near, far] = HEARD;
+            let fading = ((distance - near) / (far - near)).clamp(0.0, 1.0);
+            (
+                Panning(side * SIDE_PAN),
+                Decibels(Decibels::SILENCE.0 * fading),
+            )
+        }
     }
-    // Clip space spans the view from -1 to 1, across and down.
-    let beyond = (x.abs().max(y.abs()) - 1.0).max(0.0);
-    let volume = decibels(1.0 - beyond / (2.0 * FADE));
-    (Panning(x.clamp(-1.0, 1.0) * PAN), volume)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use gg_renderer::Projection;
     use symphonia::core::codecs::CodecInfo;
     use symphonia::core::codecs::audio::{AudioCodecParameters, FinalizeResult};
     use symphonia::core::packet::PacketRef;
 
     use super::*;
     use crate::Transform;
+    use gg_core::math::Quat;
 
     /// A WAV file of `samples`, 16-bit mono at 48 kHz.
     pub(crate) fn wav(samples: &[i16]) -> Vec<u8> {
@@ -997,24 +1067,26 @@ pub(crate) mod tests {
             },
             ..Viewpoint::default()
         };
-        let (panning, volume) = heard(Some(&camera.view_projection(2.0)), Some(at));
+        let listener = Listener::new(&camera, [200, 100]).expect("a view that projects");
+        let (panning, volume) = heard(Some(&listener), Some(at));
         (panning.0, volume.0)
     }
 
-    /// A sound pans toward the side of the view it shows on, halfway at its edge and no further
-    /// beyond, as loud as it is inside the view, and fades out beyond the view's edges, across or
-    /// down, to silence a view past them; from nowhere, or before any view, it's in the middle, as
-    /// loud as it is; and behind a camera with perspective, or at a point that isn't a number, it's
-    /// silent.
+    /// Whether `(pan, volume)` is `want`'s, to within rounding.
+    fn near((pan, volume): (f32, f32), (want_pan, want_volume): (f32, f32)) {
+        let close = (pan - want_pan).abs() < 1e-5 && (volume - want_volume).abs() < 1e-3;
+        assert!(
+            close,
+            "{pan} and {volume} dB, not {want_pan} and {want_volume} dB"
+        );
+    }
+
+    /// A sound pans toward the side of a view without perspective it shows on, halfway at its edge
+    /// and no further beyond, as loud as it is inside the view, and fades out beyond the view's
+    /// edges, across or down, to silence a view past them; from nowhere, or before any view, it's
+    /// in the middle, as loud as it is; and at a point that isn't a number, it's silent.
     #[test]
     fn the_view_pans_and_fades_what_it_hears() {
-        let near = |(pan, volume): (f32, f32), (want_pan, want_volume): (f32, f32)| {
-            let close = (pan - want_pan).abs() < 1e-5 && (volume - want_volume).abs() < 1e-3;
-            assert!(
-                close,
-                "{pan} and {volume} dB, not {want_pan} and {want_volume} dB"
-            );
-        };
         near(heard_above(Vec3::ZERO), (0.0, 0.0));
         near(heard_above(Vec3::new(10.0, 0.0, 0.0)), (PAN, 0.0));
         near(heard_above(Vec3::new(-5.0, 4.0, 0.0)), (-PAN / 2.0, 0.0));
@@ -1027,22 +1099,49 @@ pub(crate) mod tests {
         near(heard_above(Vec3::new(0.0, 0.0, f32::NAN)), (0.0, silence));
         let middle = (Panning::CENTER, Decibels::IDENTITY);
         assert_eq!(heard(None, Some(Vec3::X)), middle);
-        assert_eq!(heard(Some(&Mat4::IDENTITY), None), middle);
+        assert_eq!(heard(Some(&Listener::View(Mat4::IDENTITY)), None), middle);
+    }
+
+    /// A camera with perspective hears a sound by its direction and distance: as loud as it is
+    /// within a unit, before or behind, fading linearly in decibels to silence 100 units away and
+    /// past; panned three quarters of the way to the side it's straight out to, less as it's more
+    /// before or behind, and as much behind as before; turned with the camera; and silent at a
+    /// point that isn't a number.
+    #[test]
+    fn a_camera_with_perspective_hears_by_direction_and_distance() {
+        // At (0, 2, 10), turned a quarter turn to its left, so that it looks along -X, its right
+        // along -Z.
         let camera = Viewpoint {
-            position: Vec3::Z * 10.0,
+            position: Vec3::new(0.0, 2.0, 10.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             projection: Projection::Perspective {
                 fov: std::f32::consts::FRAC_PI_2,
                 near: 0.1,
             },
-            ..Viewpoint::default()
         };
-        let listener = camera.view_projection(1.0);
-        assert_eq!(
-            heard(Some(&listener), Some(Vec3::ZERO)).1,
-            Decibels::IDENTITY
-        );
-        let behind = heard(Some(&listener), Some(Vec3::Z * 20.0));
-        assert_eq!(behind, (Panning::CENTER, Decibels::SILENCE));
+        let listener = Listener::new(&camera, [160, 90]).expect("a camera that projects");
+        let hear = |at: Vec3| {
+            let (panning, volume) = heard(Some(&listener), Some(at));
+            (panning.0, volume.0)
+        };
+        let silence = Decibels::SILENCE.0;
+        // Before it, half a unit, and behind it, as loud as it is, in the middle.
+        near(hear(Vec3::new(-0.5, 2.0, 10.0)), (0.0, 0.0));
+        near(hear(Vec3::new(1.0, 2.0, 10.0)), (0.0, 0.0));
+        // To its right, 34 units, a third of the way to silence; to its left, 100.
+        near(hear(Vec3::new(0.0, 2.0, -24.0)), (SIDE_PAN, silence / 3.0));
+        near(hear(Vec3::new(0.0, 2.0, 110.0)), (-SIDE_PAN, silence));
+        near(hear(Vec3::new(0.0, 2.0, 500.0)), (-SIDE_PAN, silence));
+        // Half right, before and behind alike: 1/√2 of the way to the side.
+        let half = SIDE_PAN * std::f32::consts::FRAC_1_SQRT_2;
+        let fading = |distance: f32| silence * (distance - 1.0) / 99.0;
+        let before = hear(Vec3::new(-4.0, 2.0, 6.0));
+        near(before, (half, fading(32f32.sqrt())));
+        near(hear(Vec3::new(4.0, 2.0, 6.0)), before);
+        // Straight above it: in the middle.
+        near(hear(Vec3::new(0.0, 12.0, 10.0)), (0.0, fading(10.0)));
+        let nan = heard(Some(&listener), Some(Vec3::new(f32::NAN, 0.0, 0.0)));
+        assert_eq!(nan, (Panning::CENTER, Decibels::SILENCE));
     }
 
     /// A sound on an entity follows it as it moves, and once it's despawned, plays from where it

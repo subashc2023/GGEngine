@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 23, "{scenes:?}");
+    assert_eq!(scenes.len(), 24, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -394,6 +394,69 @@ fn a_hud_counts_ticks_and_clicks_and_a_plasma_draws() {
     world.get_mut::<Plasma>(square).expect("its plasma").speed = 2.0;
     showcase.tick(world, Tick { number: 3 });
     assert_ne!(world.get::<MeshDraw>(square), Some(&drawn));
+}
+
+/// A click in the view grabs the cursor while the world has a look, and Escape lets go; the mouse's
+/// motion while it's grabbed, and only then, queues one turn a tick, adding up, which turns the
+/// look's camera to its right and up, level, no further up than 89°; and a world without a look
+/// lets go.
+#[test]
+fn a_look_turns_its_camera_by_the_mouse_while_the_cursor_is_grabbed() {
+    let (mut cx, mut showcase) = loaded();
+    let look = Look {
+        yaw: 0.0,
+        pitch: 0.0,
+        sensitivity: 0.0025,
+    };
+    let camera = cx.world_mut().spawn((Transform::IDENTITY, look));
+    let frame = Duration::from_millis(16);
+    let motion = |x, y| Event::MouseMotion { x, y };
+    let _ = showcase.event(&mut cx, &motion(100.0, 0.0));
+    assert!(showcase.commands.is_empty(), "not grabbed: no turn");
+    let click = Event::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    };
+    let _ = showcase.event(&mut cx, &click);
+    showcase.update(&mut cx, frame);
+    assert!(cx.cursor_grabbed());
+    // A quarter turn to the right, in two moves, and a little up.
+    for event in [motion(314.159_27, -40.0), motion(314.159_27, 0.0)] {
+        let _ = showcase.event(&mut cx, &event);
+    }
+    assert_eq!(showcase.commands.len(), 1, "{:?}", showcase.commands);
+    showcase.tick(cx.world_mut(), Tick { number: 0 });
+    let turned = cx
+        .world()
+        .get::<Transform>(camera)
+        .expect("the camera")
+        .rotation;
+    let forward = turned * Vec3::NEG_Z;
+    assert!(
+        (forward - Vec3::new(1.0, 0.1, 0.0).normalize()).length() < 1e-3,
+        "{forward}"
+    );
+    let right = turned * Vec3::X;
+    assert!(right.y.abs() < 1e-6, "level: {right}");
+    // Far up, no further than 89°.
+    let _ = showcase.event(&mut cx, &motion(0.0, -10_000.0));
+    showcase.tick(cx.world_mut(), Tick { number: 1 });
+    let looked = *cx.world().get::<Look>(camera).expect("the look");
+    assert_eq!(looked.pitch, MAX_PITCH);
+    let escape = Event::Key {
+        key: Key::Escape,
+        pressed: true,
+        repeat: false,
+    };
+    let _ = showcase.event(&mut cx, &escape);
+    showcase.update(&mut cx, frame);
+    assert!(!cx.cursor_grabbed(), "let go at Escape");
+    let _ = showcase.event(&mut cx, &click);
+    showcase.update(&mut cx, frame);
+    assert!(cx.cursor_grabbed());
+    cx.world_mut().despawn(camera).expect("despawned");
+    showcase.update(&mut cx, frame);
+    assert!(!cx.cursor_grabbed(), "nothing to look with");
 }
 
 /// The music plays while a jukebox is in the world, its bus at the jukebox's volume, and stops once

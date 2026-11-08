@@ -2,7 +2,7 @@
 //! types.
 
 use gg_core::math::Vec2;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 /// Something that happened to the window or came from the keyboard, the mouse or a gamepad.
@@ -41,6 +41,14 @@ pub enum Event<'a> {
     CursorEntered,
     /// The cursor went out of the window.
     CursorLeft,
+    /// The mouse moved `x` and `y` in its own units, positive right and down as the cursor goes:
+    /// its raw motion, before the OS moves the cursor by it, without the OS's acceleration where
+    /// the platform reports it without, as on Windows, and on past the window's and the screen's
+    /// edges, for looking about with the cursor grabbed, as
+    /// [`Context::set_cursor_grabbed`](crate::Context::set_cursor_grabbed) has it. It comes while
+    /// the window has focus, beside [`Event::CursorMoved`], with or without the cursor grabbed,
+    /// and in a dockspace while the view has the keys.
+    MouseMotion { x: f64, y: f64 },
     /// A mouse button went down or up. As with keys, a release can come without its press.
     MouseButton { button: MouseButton, pressed: bool },
     /// The mouse wheel or a touchpad scrolled.
@@ -239,6 +247,15 @@ pub(crate) fn convert<'a>(event: &'a WindowEvent, mut emit: impl FnMut(Event<'a>
             },
         })),
         _ => {}
+    }
+}
+
+/// The engine's event for one of winit's device events: the mouse's raw motion, and none for the
+/// rest, which windows' events give.
+pub(crate) fn device(event: &DeviceEvent) -> Option<Event<'static>> {
+    match *event {
+        DeviceEvent::MouseMotion { delta: (x, y) } => Some(Event::MouseMotion { x, y }),
+        _ => None,
     }
 }
 

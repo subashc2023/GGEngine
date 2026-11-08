@@ -144,7 +144,8 @@ Talk to a running game, through its tool API:
                                  its W3C `code`, `{\"key\":{\"key\":\"KeyW\",\"pressed\":true}}`,
                                  `{\"text\":\"w\"}`, the cursor at a pixel of the view from its top
                                  left, `{\"cursor\":[X,Y]}`, `\"cursor_entered\"`,
-                                 `\"cursor_left\"`, a mouse button,
+                                 `\"cursor_left\"`, the mouse's raw motion right and down, as with
+                                 the cursor grabbed, `{\"motion\":[X,Y]}`, a mouse button,
                                  `{\"button\":{\"button\":\"left\",\"pressed\":true}}`, a scroll,
                                  `{\"scroll\":{\"lines\":[0,1]}}`, and the keys' focus,
                                  `{\"focused\":true}`

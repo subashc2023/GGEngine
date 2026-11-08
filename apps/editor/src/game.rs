@@ -33,6 +33,12 @@
 //! does at first, the input staying the editor's, until the editor's camera takes some, which
 //! turns the view to it.
 //!
+//! A game that asks for the cursor grabbed, for looking about with the mouse, as the view's memory
+//! says it does, has the editor grab its own window's in Play while the view has the keys, the
+//! mouse's raw motion going to the game; Escape lets go of it, whatever the game does with the key,
+//! which it gets, as a game may not let go itself, and a press in the view grabs it again;
+//! Simulate and Stop let go.
+//!
 //! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
 //! handles move, turn and scale it through the Inspector's link, each drag one edit of the
@@ -207,6 +213,8 @@ struct Game {
     /// to be answered: one at a time, as the game answers one a frame.
     input: Vec<InputEvent>,
     inputting: bool,
+    /// Whether Escape let go of the cursor grabbed for the game, until a press in the view.
+    escaped: bool,
     run_state: RunState,
     /// Whether the game's simulation is paused, and whether the game is stopped, as it last
     /// answered: stopped until a game that serves answers, so that nothing goes to it before.
@@ -432,6 +440,7 @@ impl Game {
             refused: false,
             input: Vec::new(),
             inputting: false,
+            escaped: false,
             run_state: RunState::Building,
             paused: false,
             stopped: true,
@@ -1597,6 +1606,23 @@ impl Game {
     ) -> ControlFlow<()> {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
+        // Escape lets go of the cursor grabbed for the game, whatever the game does with it, as a
+        // game may not let go itself; a press in the view grabs it again. The game gets both, as
+        // its own window would give them.
+        let escape = matches!(
+            *event,
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            }
+        );
+        if through && escape {
+            self.escaped = true;
+        }
+        if through && matches!(*event, Event::MouseButton { pressed: true, .. }) {
+            self.escaped = false;
+        }
         let shortcut = shortcuts_key(event, reading.command);
         let handled = if shortcut || (through && !lets_go(event)) {
             ControlFlow::Continue(())
@@ -1650,13 +1676,18 @@ impl Game {
     }
 
     /// Queues `input` for the game's next `input`, a move of the cursor taking the place of one
-    /// queued just before it: so that while an `input` waits for its answer, as while a script has
-    /// stopped the game, what's queued grows with presses, as a key's, rather than with every move
-    /// of the mouse. The game gets what's queued then in one frame, as a game's window gets what
-    /// its OS queued while its frames waited.
+    /// queued just before it, and the mouse's raw motion adding to the motion queued just before
+    /// it: so that while an `input` waits for its answer, as while a script has stopped the game,
+    /// what's queued grows with presses, as a key's, rather than with every move of the mouse. The
+    /// game gets what's queued then in one frame, as a game's window gets what its OS queued while
+    /// its frames waited.
     fn queue(&mut self, input: InputEvent) {
         match (self.input.last_mut(), input) {
             (Some(InputEvent::Cursor(last)), InputEvent::Cursor(at)) => *last = at,
+            (Some(InputEvent::Motion([x, y])), InputEvent::Motion([by_x, by_y])) => {
+                *x += by_x;
+                *y += by_y;
+            }
             (_, input) => self.input.push(input),
         }
     }
@@ -1845,6 +1876,11 @@ impl Layer for Game {
             self.fit(view.size);
         }
         self.take_frame(cx);
+        // The game's grab, in Play alone; a Stop or Simulate ends what Escape did too.
+        let through = self.through();
+        self.escaped &= through;
+        let asked = self.reader.as_ref().is_some_and(Reader::cursor_grabbed);
+        cx.set_cursor_grabbed(through && asked && !self.escaped);
         let driving = !self.view.toolbar.world_camera;
         self.view.shown = self.seen.filter(|_| driving);
         let picked = picked(&self.view.link);
@@ -2253,6 +2289,7 @@ fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
         Event::CursorMoved { x, y } => InputEvent::Cursor(in_view([x, y], origin)),
         Event::CursorEntered => InputEvent::CursorEntered,
         Event::CursorLeft => InputEvent::CursorLeft,
+        Event::MouseMotion { x, y } => InputEvent::Motion([x, y]),
         Event::MouseButton { button, pressed } => InputEvent::Button {
             button: match button {
                 MouseButton::Left => gg_api::Button::Left,
@@ -3599,6 +3636,60 @@ mod tests {
         };
         let in_game = |[x, y]: [f64; 2]| InputEvent::Cursor(in_view([x, y], VIEW.origin));
         assert_eq!(game.input, [in_game(at(499)), w_down, in_game(at(999))]);
+    }
+
+    /// A game that asks for the cursor grabbed has the editor ask for its own in Play: Escape lets
+    /// go of it, though the game asks still, until a press in the view, the game getting both;
+    /// Simulate lets go; and the mouse's raw motion queued for the game adds up.
+    #[test]
+    fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
+        let (mut game, _ends) = serving();
+        let reader = Reader::create(4, 4).expect("memory");
+        let writer = Writer::open(reader.name()).expect("opened");
+        game.reader = Some(reader);
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert!(!cx.cursor_grabbed(), "before the game asks");
+        writer.set_cursor_grabbed(true);
+        game.update(&mut cx, Duration::ZERO);
+        assert!(cx.cursor_grabbed());
+        // As while the game hasn't answered the last `input`, so that what's queued stays.
+        game.inputting = true;
+        let at = reading([300.0, 200.0]);
+        for (x, y) in [(2.0, 1.0), (-0.5, 3.0)] {
+            let _ = game.route(&Event::MouseMotion { x, y }, &at, Some(VIEW));
+        }
+        let escape = Event::Key {
+            key: Key::Escape,
+            pressed: true,
+            repeat: false,
+        };
+        let _ = game.route(&escape, &at, Some(VIEW));
+        game.update(&mut cx, Duration::ZERO);
+        assert!(!cx.cursor_grabbed(), "let go at Escape");
+        let press = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        let _ = game.route(&press, &at, Some(VIEW));
+        game.update(&mut cx, Duration::ZERO);
+        assert!(cx.cursor_grabbed(), "grabbed again at a press in the view");
+        let escaped = InputEvent::Key {
+            key: "Escape".to_owned(),
+            pressed: true,
+            repeat: false,
+        };
+        let pressed = InputEvent::Button {
+            button: gg_api::Button::Left,
+            pressed: true,
+        };
+        assert_eq!(
+            game.input,
+            [InputEvent::Motion([1.5, 4.0]), escaped, pressed]
+        );
+        game.view.toolbar.world_camera = false;
+        game.update(&mut cx, Duration::ZERO);
+        assert!(!cx.cursor_grabbed(), "Simulate lets go");
     }
 
     #[test]
