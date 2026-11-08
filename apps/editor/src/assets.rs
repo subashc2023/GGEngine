@@ -181,7 +181,8 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         // An asset a regular file, as the game's scan takes them.
         let kind = match AssetKind::of(&path) {
             _ if is_folder => Kind::Folder,
-            Some(asset) if file_type.is_file() => Kind::Asset(asset),
+            // A UI's file, which nothing in the view takes, doesn't drag.
+            Some(asset) if file_type.is_file() && asset != AssetKind::Ui => Kind::Asset(asset),
             _ => Kind::File,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -388,9 +389,9 @@ pub(crate) mod tests {
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
     /// names that aren't Latin among them; a folder's name never makes it a file, nor an asset.
-    /// Textures, models, fonts and prefabs are assets, by their extensions in any case. An asset's ID
-    /// file
-    /// beside it doesn't show; one named for it but for case does, as the game warns of it, and so
+    /// Textures, models, fonts and prefabs are assets, by their extensions in any case, and a UI's
+    /// file a file, which doesn't drag. An asset's ID file beside it doesn't show, a UI's too; one
+    /// named for it but for case does, as the game warns of it, and so
     /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
     /// file it's named for, and, where links can be made, one beside a link to a file, which the
     /// game's scan doesn't take as an asset, nor does the panel.
@@ -411,6 +412,8 @@ pub(crate) mod tests {
             "gone.png.meta",
             "lamp.Prefab",
             "lamp.Prefab.meta",
+            "menu.ui",
+            "menu.ui.meta",
             "notes.meta",
             "old.png",
             "B.ron",
@@ -443,6 +446,7 @@ pub(crate) mod tests {
             ("e.png.meta", Kind::File),
             ("gone.png.meta", Kind::File),
             ("lamp.Prefab", Kind::Asset(AssetKind::Prefab)),
+            ("menu.ui", Kind::File),
             ("notes.meta", Kind::File),
             ("old.png", texture),
             ("rock.GLB", Kind::Asset(AssetKind::Model)),

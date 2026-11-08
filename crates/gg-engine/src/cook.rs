@@ -26,6 +26,69 @@ pub fn bake_font(name: &str, path: &Path) -> Result<Vec<u8>> {
     Ok(crate::font::bake(name, path)?.bytes())
 }
 
+/// What a UI's node names, which a run loads with the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiAsset {
+    Font,
+    Texture,
+}
+
+/// UI `name`'s file at `path`, read and checked as [`Context::add_ui`](crate::Context::add_ui)
+/// reads it, as a package holds it: as it is; and each font and texture its nodes name, once, as
+/// they name it: by its asset ID, a model's image by its model's name and its place in it, as
+/// `5f3c9a1e07b2d846#0`, or by its path from the asset root, which the cooker finds in the package
+/// as a run from it would, so that the package holds no UI a run would refuse.
+///
+/// Fails as `add_ui` does for a file that doesn't read or isn't a UI's.
+pub fn read_ui(name: &str, path: &Path) -> Result<ReadUi> {
+    let document = crate::game_ui::read(name, path, &Files::default())?;
+    let mut named: Vec<(UiAsset, String)> = Vec::new();
+    for node in &document.nodes {
+        let fonts = node.font.iter().map(|font| (UiAsset::Font, &font.name));
+        let textures = node.looks.iter().filter_map(|look| look.texture.as_ref());
+        let textures = textures.map(|texture| (UiAsset::Texture, &texture.name));
+        for (kind, asset) in fonts.chain(textures) {
+            if !named
+                .iter()
+                .any(|(was, at)| *was == kind && **at == **asset)
+            {
+                named.push((kind, asset.to_string()));
+            }
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|error| {
+        let message = format!("can't read UI {name:?} from {}", path.display());
+        gg_core::Error::new("engine.bad_ui", message).with_source(error)
+    })?;
+    Ok(ReadUi { bytes, named })
+}
+
+/// A UI's file as [`read_ui`] reads it: its bytes, and what its nodes name.
+pub struct ReadUi {
+    pub bytes: Vec<u8>,
+    pub named: Vec<(UiAsset, String)>,
+}
+
+/// Whether `name` is an asset's ID, 16 lowercase hex digits, as a run tells one from a path.
+pub fn is_id(name: &str) -> bool {
+    crate::assets::is_id(name)
+}
+
+/// The path from the asset root `root` of the file a run from a package finds by `name`, a path
+/// from the root, as a package names its entries: `/` between its parts, its `.` and `..` taken
+/// away as written; `None` for an absolute path, or one outside the root.
+pub fn within(root: &Path, name: &str) -> Option<String> {
+    let path = Path::new(name);
+    let prefixed = matches!(
+        path.components().next(),
+        Some(std::path::Component::Prefix(_))
+    );
+    if path.has_root() || prefixed {
+        return None;
+    }
+    crate::package::within(root, &root.join(path))
+}
+
 /// Game shader `name`'s file at `path`, compiled to SPIR-V as
 /// [`Context::add_shader`](crate::Context::add_shader) compiles it, as a game's package holds it,
 /// with the files it read, its own first, then those it includes. A run checks it against the

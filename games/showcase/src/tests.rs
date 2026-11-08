@@ -34,7 +34,7 @@ fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
     assert!(
         found.assets.len() >= 20,
-        "7 textures, a sky's and the Fox's among them, 10 models, a font and 2 prefabs"
+        "7 textures, a sky's and the Fox's among them, 10 models, a font, 2 prefabs and a UI"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 28, "{scenes:?}");
+    assert_eq!(scenes.len(), 29, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -569,6 +569,60 @@ fn a_hud_counts_ticks_and_clicks_and_a_plasma_draws() {
     world.get_mut::<Plasma>(square).expect("its plasma").speed = 2.0;
     showcase.tick(world, Tick { number: 3 });
     assert_ne!(world.get::<MeshDraw>(square), Some(&drawn));
+}
+
+/// The menu's UI takes input while a menu is in the world, and none without one: a key moves its
+/// focus, past its disabled button, and Enter presses the button with the focus, and Escape asks
+/// for back, each queuing a command that the next tick records on the menu, as it counts its
+/// ticks.
+#[test]
+fn the_menus_presses_reach_the_world_as_commands() {
+    let (mut cx, mut showcase) = loaded();
+    let ui = showcase.assets.as_ref().expect("loaded").menu;
+    let frame = Duration::from_millis(16);
+    let key = |key| Event::Key {
+        key,
+        pressed: true,
+        repeat: false,
+    };
+    // The arrows walk the walkers too, which queues commands of their own.
+    let presses = |showcase: &Showcase| -> Vec<Command> {
+        let presses = showcase.commands.iter();
+        let presses = presses.filter(|command| matches!(command, Command::Press { .. }));
+        presses.cloned().collect()
+    };
+    showcase.update(&mut cx, frame);
+    let _ = showcase.event(&mut cx, &key(Key::ArrowDown));
+    let _ = showcase.event(&mut cx, &key(Key::Enter));
+    assert_eq!(presses(&showcase), [], "no menu, no input");
+    assert_eq!(
+        ui.focused(&mut cx).as_deref(),
+        Some("new_game"),
+        "the file's"
+    );
+
+    let scene = dir().join("scenes").join("menu.ron");
+    cx.load_scene_file(&scene).expect("the scene loads");
+    showcase.update(&mut cx, frame);
+    let _ = showcase.event(&mut cx, &key(Key::ArrowUp));
+    assert_eq!(
+        ui.focused(&mut cx).as_deref(),
+        Some("new_game"),
+        "past the disabled one"
+    );
+    let _ = showcase.event(&mut cx, &key(Key::ArrowDown));
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("options"));
+    let _ = showcase.event(&mut cx, &key(Key::Enter));
+    let _ = showcase.event(&mut cx, &key(Key::Escape));
+    let press = |button: &str| Command::Press {
+        button: button.to_owned(),
+    };
+    assert_eq!(presses(&showcase), [press("options"), press("back")]);
+    showcase.tick(cx.world_mut(), Tick { number: 0 });
+    let menu = cx.world().query::<&Menu>().next().cloned();
+    let menu = menu.expect("the scene's menu");
+    assert_eq!((menu.ticks, menu.presses, &*menu.pressed), (1, 2, "back"));
+    showcase.update(&mut cx, frame);
 }
 
 /// A click in the view grabs the cursor while the world has a look, and Escape lets go; the mouse's

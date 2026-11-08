@@ -66,7 +66,7 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 31] = [
+const METHODS: [&str; 32] = [
     "hello",
     "ping",
     "status",
@@ -87,6 +87,7 @@ const METHODS: [&str; 31] = [
     "types",
     "hash",
     "assets",
+    "ui",
     "snapshot",
     "patch",
     "apply",
@@ -307,6 +308,7 @@ enum Call {
         skip: usize,
         take: usize,
     },
+    Ui,
     Snapshot(Option<PathBuf>),
     Patch(JumpTable),
     /// An edit's operations, and the gesture it's part of, if it's a set of one.
@@ -778,6 +780,7 @@ impl Api {
                         }
                     }
                 }
+                Call::Ui => reply.result(&cx.ui_list()),
                 // A run stopped, or playing a copy, is snapshotted before its first tick too, so
                 // that a restart keeps the world as edited; what the layers queued as they attached
                 // goes, as it does at a `stop` that brings that world back.
@@ -1962,6 +1965,7 @@ fn needs(call: &Call) -> Vec<Capability> {
         | Call::Types
         | Call::Hash
         | Call::Assets { .. }
+        | Call::Ui
         | Call::Edits(_) => {
             vec![Read(None)]
         }
@@ -2454,6 +2458,7 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "stop" => none(method, params).map(|()| Call::Stop)?,
         "types" => none(method, params).map(|()| Call::Types)?,
         "hash" => none(method, params).map(|()| Call::Hash)?,
+        "ui" => none(method, params).map(|()| Call::Ui)?,
         "snapshot" => {
             let gg_api::Snapshot { path } = take(method, params)?;
             if path.as_deref().is_some_and(|path| !path.is_absolute()) {
@@ -5132,6 +5137,7 @@ mod tests {
         };
         let given = json!({"kind": "model", "skip": 2});
         assert_eq!(parse(&request("assets", given)), Ok(assets));
+        assert_eq!(parse(&request("ui", Value::Null)), Ok(Call::Ui));
         // As `dx tools hotpatch` prints it, the map's keys as strings, its library a path from the
         // root.
         let lib = std::env::temp_dir().join("patch.dll");
@@ -5314,6 +5320,7 @@ mod tests {
             ("entities", json!({"take": 10_001}), "api.bad_params"),
             ("assets", json!({"take": 10_001}), "api.bad_params"),
             ("assets", json!({"kind": "sound"}), "api.bad_params"),
+            ("ui", json!({"name": "menu"}), "api.bad_params"),
             ("entity", json!({"id": "nope"}), "ecs.bad_id"),
             ("patch", Value::Null, "api.bad_params"),
             ("patch", json!({ "table": relative }), "api.bad_params"),

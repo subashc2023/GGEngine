@@ -161,22 +161,29 @@ Talk to a running game, through its tool API:
                                  values are read and written by
   hash                           Its world's hash
   assets [--kind <KIND>] [--skip <N>] [--take <N>]
-                                 List its textures, models, fonts and prefabs, those of KIND,
-                                 `texture`, `model`, `font` or `prefab`, N at a time (100), by their
-                                 paths from its asset root, each with its ID, whether a layer has
-                                 added it, and what's wrong with its ID file, and the ID files left
-                                 without their assets; the game, but a lockstep session's joiner,
-                                 whose host does, writes each one's ID in a file beside it,
+                                 List its textures, models, fonts, prefabs and UIs, those of KIND,
+                                 `texture`, `model`, `font`, `prefab` or `ui`, N at a time (100), by
+                                 their paths from its asset root, each with its ID, whether a layer
+                                 has added it, and what's wrong with its ID file, and the ID files
+                                 left without their assets; the game, but a lockstep session's
+                                 joiner, whose host does, writes each one's ID in a file beside it,
                                  `<file>.meta`, as it starts and as it finds new files: commit it
                                  with its file. A file renamed or moved alone keeps its ID, the game
                                  moving its ID file after it, unless it's edited in the same step. A
-                                 file of a texture, a model, a font, a prefab, a sound or music the
-                                 game has added, edited, reloads in it, as a shader's does, the
-                                 nodes its `ModelRoot`s spawn and the instances its `PrefabRoot`s
-                                 link with it, but in a recorded run or a lockstep session, where a
-                                 model's nodes and materials and a prefab's instances change as it
-                                 next starts
-  apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
+                                 file of a texture, a model, a font, a prefab, a UI, a sound or
+                                 music the game has added, edited, reloads in it, as a shader's
+                                 does, the nodes its `ModelRoot`s spawn, the instances its
+                                 `PrefabRoot`s link and the UIs of it with it, but in a recorded run
+                                 or a lockstep session, where a model's nodes and materials and a
+                                 prefab's instances change as it next starts
+  ui                             Each UI its layers added from a `.ui` file, laid out for its view:
+                                 each node's name, kind, parent, rectangle, `[x, y, width, height]`
+                                 from the view's top left in the canvas's units, 1,080 to its
+                                 height, and in its pixels, as `capture` and `input` have them,
+                                 whether it shows, what it says, and a button's whether it's
+                                 disabled, focused or pressed; and each UI's focus and whether it
+                                 takes input. Press a button by clicking its pixels with `input`
+  apply <OPERATIONS>            Apply OPERATIONS, a JSON array of the API's operations, as one edit:
                                  all or none, between ticks, which `undo` takes back; among them
                                  `{\"unlink\":{\"id\":ID}}`, which unlinks a prefab's instance into
                                  entities of its own, and
@@ -670,7 +677,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 follow: parsed.switch("--follow"),
             }
         }
-        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "quit") => {
+        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui"
+        | "quit") => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
         }
@@ -1061,6 +1069,7 @@ mod tests {
                 &["assets", "--kind", "model", "--take", "5"],
                 json!({"kind": "model", "skip": 0, "take": 5}),
             ),
+            (&["ui"], Value::Null),
             (&["debug"], json!({"wait_ms": 0})),
             (
                 &["debug", "break", "scripts/spin.luau", "10", "12"],
@@ -1141,6 +1150,7 @@ mod tests {
             &["step", "many"],
             &["entities", "--take"],
             &["assets", "x"],
+            &["ui", "menu"],
             &["logs", "--level", "loud"],
             &["debug", "break"],
             &["debug", "break", "scripts/spin.luau", "0"],

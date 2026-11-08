@@ -9,7 +9,12 @@
 //! faded (`shapes.ron`);
 //! text in the engine's font and the project's, aligned, sized, colored and turned (`text.ron`); a
 //! game's UI on the view's canvas, labels kept to its edges and corners, the ticks counted and a
-//! button that lights under the cursor and counts its clicks, over the world (`ui.ron`); a
+//! button that lights under the cursor and counts its clicks, over the world (`ui.ron`); a game's
+//! UI from a file, laid out by the engine, a menu in the view's middle, four buttons, one disabled,
+//! which keys, a pad and the mouse move the focus over and press, a HUD along the top whose clock
+//! the layer sets each second, and panels in its corners saying what was pressed and what has the
+//! focus, each press reaching the world as a command (`menu.ron`, its UI `ui/menu.ui`, which
+//! reloads as it's saved); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); sounds
 //! played from where their entities are, bells to the left, the middle and the right in turn and a
@@ -65,8 +70,9 @@
 //! its joint's motor around every few seconds through the joint's fields; and animation and
 //! physics step, so that each scene moves as it plays, in the editor from its Play, and in the
 //! reference player, which runs the game's package without its code, and so without the keys'
-//! walking and its own components: the chimes, the bursters, the jukebox, the HUD, the plasma, the
-//! look, the state labels, the tether and the launches, which its code registers and runs.
+//! walking and its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the
+//! plasma, the look, the state labels, the tether and the launches, which its code registers and
+//! runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -83,10 +89,10 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
     Actions, Align, AnimationStates, App, Binding, Blend, Bus, Change, Commands, Component,
-    Context, Curve, Ease, Entity, Error, Event, Font, Joint3D, Key, Layer, Mesh, MeshDraw,
+    Context, Curve, Ease, Entity, Error, Event, Font, GameUi, Joint3D, Key, Layer, Mesh, MeshDraw,
     MouseButton, Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, RigidBody3D,
-    Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween, World,
-    step_animation, step_physics,
+    Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween,
+    UiEvent, World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -137,6 +143,8 @@ enum Command {
     /// Turns each [`Look`] by the mouse's raw motion, `by`, right and down, as it moved with the
     /// cursor grabbed.
     Look { by: Vec2 },
+    /// Records a press of the menu's button named `button`, or `back` for back, on each [`Menu`].
+    Press { button: String },
 }
 
 /// A sound of the showcase's, which a [`Chime`] rings.
@@ -194,6 +202,18 @@ struct Hud {
     ticks: u32,
     /// The clicks on its button.
     clicks: u32,
+}
+
+/// Has the showcase drive its menu, `ui/menu.ui`, while its entity is in the world: draws it on the
+/// view's canvas, its clock the seconds the menu has been in the world, and has it take input,
+/// whose presses reach the world as commands, which record here what was pressed: `menu.ron`'s.
+#[derive(Clone, Debug, PartialEq, Component)]
+struct Menu {
+    /// The ticks it has been in the world for.
+    ticks: u32,
+    /// The presses of its buttons, and of back, and the name of the last pressed.
+    presses: u32,
+    pressed: String,
 }
 
 /// Has its entity drawn by the showcase's own shader, `shaders/plasma.slang`, once the world
@@ -320,6 +340,8 @@ struct Assets {
     /// The plasma's square and shader.
     square: Mesh<Corner>,
     plasma: Shader<Corner, Waves>,
+    /// The menu, `ui/menu.ui`, as [`Menu`] drives it.
+    menu: GameUi,
 }
 
 impl Assets {
@@ -339,12 +361,14 @@ impl Assets {
         });
         let square = cx.add_mesh("plasma", &corners, &[0, 1, 2, 0, 2, 3]);
         let square = square.expect("the square is two whole triangles");
+        let menu = cx.add_ui("menu", root.join("ui/menu.ui"))?;
         Ok(Self {
             tones,
             music,
             font,
             square,
             plasma,
+            menu,
         })
     }
 }
@@ -356,6 +380,7 @@ fn register(world: &mut World) {
         world.register::<Burster>()?;
         world.register::<Jukebox>()?;
         world.register::<Hud>()?;
+        world.register::<Menu>()?;
         world.register::<Plasma>()?;
         world.register::<Look>()?;
         world.register::<StateLabel>()?;
@@ -584,6 +609,13 @@ fn apply(world: &mut World, command: &Command) {
             }
             return;
         }
+        Command::Press { ref button } => {
+            for menu in world.query_mut::<&mut Menu>() {
+                menu.presses = menu.presses.saturating_add(1);
+                menu.pressed.clone_from(button);
+            }
+            return;
+        }
         Command::Look { by } => {
             for (look, transform) in world.query_mut::<(&mut Look, &mut Transform)>() {
                 // Right turns to the right, about the world's up, and down looks down.
@@ -649,6 +681,9 @@ impl Layer for Showcase {
         for hud in world.query_mut::<&mut Hud>() {
             hud.ticks = hud.ticks.saturating_add(1);
         }
+        for menu in world.query_mut::<&mut Menu>() {
+            menu.ticks = menu.ticks.saturating_add(1);
+        }
         Self::launch(world);
         step_animation(world);
         step_physics(world);
@@ -680,6 +715,12 @@ impl Layer for Showcase {
         if let Some(hud) = cx.world().query::<&Hud>().next().copied() {
             draw_hud(cx, hud, font, &mut self.text);
         }
+        let ui = assets.menu;
+        let menu = cx.world().query::<&Menu>().next().cloned();
+        ui.set_input(cx, menu.is_some());
+        if let Some(menu) = menu {
+            drive_menu(cx, ui, &menu, &mut self.text);
+        }
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
@@ -702,6 +743,25 @@ impl Layer for Showcase {
                 .is_some_and(on_button)
         {
             commands.push(Command::Click);
+        }
+        if let Some(assets) = &self.assets {
+            // This run's own, as a lockstep peer's menu is: a press reaches the world as a command.
+            let (menu, tones) = (assets.menu, assets.tones);
+            match menu.event(cx, event) {
+                Some(UiEvent::Pressed(button)) => {
+                    let button = button.to_string();
+                    commands.push(Command::Press { button });
+                    cx.play_sound(tones[Tone::Bell as usize], Place::Nowhere);
+                }
+                Some(UiEvent::Back) => {
+                    let button = "back".to_owned();
+                    commands.push(Command::Press { button });
+                }
+                Some(UiEvent::Focused(_)) => {
+                    cx.play_sound(tones[Tone::Pluck as usize], Place::Nowhere);
+                }
+                None => {}
+            }
         }
         let looks = cx.world().query::<&Look>().next().is_some();
         match *event {
@@ -726,6 +786,40 @@ impl Layer for Showcase {
         }
         ControlFlow::Continue(())
     }
+}
+
+/// Draws the menu's UI, `ui`, as `menu` has it, writing its texts through `text`: its clock, the
+/// minutes and seconds the menu has been in the world, its presses, the last pressed and the button
+/// with the focus, each by its name in capitals, a space for each `_`. A node the UI's file no
+/// longer names, as an edit of it may take one away, goes unset: the file says what shows.
+fn drive_menu(cx: &mut Context, ui: GameUi, menu: &Menu, text: &mut String) {
+    let seconds = (Tick::DT * menu.ticks).as_secs();
+    text.clear();
+    let written = write!(text, "{:02}:{:02}", seconds / 60, seconds % 60);
+    written.expect("a string takes any text");
+    let _ = ui.set_text(cx, "clock", text);
+    text.clear();
+    write!(text, "{}", menu.presses).expect("a string takes any text");
+    let _ = ui.set_text(cx, "presses", text);
+    let label = |text: &mut String, name: &str| {
+        text.clear();
+        let capitals = name.chars().map(|c| match c {
+            '_' => ' ',
+            c => c.to_ascii_uppercase(),
+        });
+        text.extend(capitals);
+    };
+    match menu.pressed.as_str() {
+        "" => label(text, "nothing yet"),
+        pressed => label(text, pressed),
+    }
+    let _ = ui.set_text(cx, "pressed", text);
+    match ui.focused(cx) {
+        Some(focused) => label(text, &focused),
+        None => label(text, "none"),
+    }
+    let _ = ui.set_text(cx, "focus", text);
+    ui.draw(cx);
 }
 
 /// Whether `at`, on the canvas from its middle, is on the HUD's button.

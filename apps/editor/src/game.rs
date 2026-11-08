@@ -1469,6 +1469,8 @@ impl Game {
                 };
                 self.view.link.create(components);
             }
+            // The Assets panel drags none: nothing in the view takes a UI.
+            AssetKind::Ui => {}
         }
     }
 
@@ -1485,7 +1487,9 @@ impl Game {
         };
         let (component, field) = match dropped.kind {
             AssetKind::Font => ("Text", "font"),
-            AssetKind::Texture | AssetKind::Model | AssetKind::Prefab => ("Sprite", "texture"),
+            AssetKind::Texture | AssetKind::Model | AssetKind::Prefab | AssetKind::Ui => {
+                ("Sprite", "texture")
+            }
         };
         let link = &self.view.link;
         link.pick(Some(found.id));

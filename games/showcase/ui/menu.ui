@@ -1,0 +1,179 @@
+(
+    focus: "new_game",
+    nodes: [
+        Panel(
+            name: "hud",
+            anchor: (Center, Start),
+            width: Fill(1.0),
+            color: (0.0, 0.0, 0.0, 0.5),
+            padding: (44.0, 20.0),
+            children: [
+                Row(
+                    width: Fill(1.0),
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "game",
+                            text: "SHOWCASE",
+                            font: "d2f1930c7b1ab233",
+                            size: 34.0,
+                        ),
+                        Text(
+                            name: "file",
+                            text: "ui/menu.ui",
+                            size: 26.0,
+                            color: (0.3, 0.36, 0.5, 1.0),
+                        ),
+                        Stack(
+                            width: Fill(1.0),
+                        ),
+                        Text(
+                            name: "presses_label",
+                            text: "PRESSES",
+                            size: 24.0,
+                            color: (0.3, 0.36, 0.5, 1.0),
+                        ),
+                        Text(
+                            name: "presses",
+                            text: "0",
+                            font: "d2f1930c7b1ab233",
+                            size: 34.0,
+                        ),
+                        Stack(
+                            width: Fixed(28.0),
+                        ),
+                        Text(
+                            name: "clock_label",
+                            text: "TIME",
+                            size: 24.0,
+                            color: (0.3, 0.36, 0.5, 1.0),
+                        ),
+                        Text(
+                            name: "clock",
+                            text: "00:00",
+                            font: "d2f1930c7b1ab233",
+                            size: 34.0,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "menu",
+            color: (0.004, 0.005, 0.012, 0.9),
+            radius: 32.0,
+            padding: (72.0, 60.0),
+            children: [
+                Column(
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "title",
+                            text: "A GAME'S UI",
+                            font: "d2f1930c7b1ab233",
+                            size: 88.0,
+                        ),
+                        Text(
+                            name: "subtitle",
+                            text: "LAID OUT FROM ui/menu.ui",
+                            size: 28.0,
+                            color: (0.15, 0.45, 1.0, 1.0),
+                        ),
+                        Stack(
+                            height: Fixed(22.0),
+                        ),
+                        Button(
+                            name: "continue",
+                            text: "CONTINUE",
+                            width: Fixed(560.0),
+                            height: Fixed(88.0),
+                            radius: 14.0,
+                            disabled: true,
+                        ),
+                        Button(
+                            name: "new_game",
+                            text: "NEW GAME",
+                            width: Fixed(560.0),
+                            height: Fixed(88.0),
+                            radius: 14.0,
+                        ),
+                        Button(
+                            name: "options",
+                            text: "OPTIONS",
+                            width: Fixed(560.0),
+                            height: Fixed(88.0),
+                            radius: 14.0,
+                        ),
+                        Button(
+                            name: "quit",
+                            text: "QUIT",
+                            width: Fixed(560.0),
+                            height: Fixed(88.0),
+                            radius: 14.0,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "corner",
+            anchor: (Start, End),
+            margin: (44.0, 44.0),
+            color: (0.0, 0.0, 0.0, 0.55),
+            radius: 20.0,
+            padding: (32.0, 26.0),
+            children: [
+                Column(
+                    gap: 8.0,
+                    align: (Start, Start),
+                    children: [
+                        Text(
+                            name: "pressed_label",
+                            text: "LAST PRESSED",
+                            size: 22.0,
+                            color: (0.3, 0.36, 0.5, 1.0),
+                        ),
+                        Text(
+                            name: "pressed",
+                            text: "NOTHING YET",
+                            font: "d2f1930c7b1ab233",
+                            size: 38.0,
+                        ),
+                        Stack(
+                            height: Fixed(10.0),
+                        ),
+                        Text(
+                            name: "focus_label",
+                            text: "FOCUS",
+                            size: 22.0,
+                            color: (0.3, 0.36, 0.5, 1.0),
+                        ),
+                        Text(
+                            name: "focus",
+                            text: "NONE",
+                            font: "d2f1930c7b1ab233",
+                            size: 38.0,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "controls",
+            anchor: (End, End),
+            margin: (44.0, 44.0),
+            color: (0.0, 0.0, 0.0, 0.55),
+            radius: 20.0,
+            padding: (32.0, 26.0),
+            children: [
+                Text(
+                    name: "hint",
+                    text: "ARROWS · TAB · D-PAD · STICK  MOVE THE FOCUS\nENTER · SPACE · SOUTH  PRESS\nESCAPE · EAST  BACK\nTHE MOUSE  HOVERS AND CLICKS",
+                    size: 22.0,
+                    color: (0.45, 0.5, 0.62, 1.0),
+                    align: (End, Center),
+                ),
+            ],
+        ),
+    ],
+)

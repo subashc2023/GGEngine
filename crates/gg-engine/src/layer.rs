@@ -39,6 +39,7 @@ use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
 use crate::environment::{self, Environment};
 use crate::font::{self, Align, Font, Fonts, TextStyle};
+use crate::game_ui::{self, GameUi};
 use crate::gltf;
 use crate::grid::{self, Plane};
 #[cfg(feature = "dev")]
@@ -327,6 +328,8 @@ pub struct Context {
     over: Draws,
     /// What the layers drew on the canvas this frame, which draws over all of it.
     canvas: canvas::Drawn,
+    /// The UIs the layers added from their files, and what each holds, as [`GameUi`] says.
+    uis: game_ui::Uis,
     /// Whether the world's colliders' outlines draw, over the rest.
     colliders: bool,
     /// What to outline in the view this frame, if anything.
@@ -641,6 +644,7 @@ impl Context {
             draws: Draws::default(),
             over: Draws::default(),
             canvas: canvas::Drawn::default(),
+            uis: game_ui::Uis::default(),
             colliders: false,
             outline: None,
             view: None,
@@ -1536,6 +1540,113 @@ impl Context {
         };
         self.added("prefab", &named);
         Ok(prefab)
+    }
+
+    /// Loads the UI at `path`, a `.ui` file holding a tree of named nodes, as ARCHITECTURE.md's
+    /// Events and layers describes, or the UI file under the asset root whose asset ID `path` is,
+    /// as text names one; and adds a UI of it, which the layer drives through the handle, as
+    /// [`GameUi`] says, with its own focus and what code sets of its nodes, apart from any other UI
+    /// of the file, which is read once, by whatever form of its path. `name` names it in errors,
+    /// the log and the tool API's `ui`. Its file is named by its asset ID, where it has one, or
+    /// else by its path, as a texture's is. The fonts and textures its nodes name, by their IDs or
+    /// paths, are loaded with it, as a scene's are. In a development run that serves the tool API,
+    /// its file is read again as it changes, every UI of it taking its nodes, each node keeping
+    /// what code set of it by its name, and the focus staying on the button of its name, logging
+    /// `UI reloaded`; a change that doesn't read warns with its code, the UI staying as it was.
+    ///
+    /// Fails with `engine.bad_ui` if the file can't be read, isn't a regular file, is more than
+    /// 16 MiB or isn't UTF-8; with `ui.syntax`, `ui.bad_name`, `ui.duplicate_name`,
+    /// `ui.bad_field`, `ui.unnamed_button`, `ui.bad_value` or `ui.no_node` for a file that isn't a
+    /// UI's, as ARCHITECTURE.md's Project state says, saying the line and column where it's
+    /// refused;
+    /// as finding an ID's file fails, as with `asset.unknown_id`; with `asset.no_font` or
+    /// `asset.no_texture` for a font or a texture it names that doesn't load, saying why; and with
+    /// `renderer.too_many_textures` if the renderer hasn't room for the texture rounded corners
+    /// are cut from, which the first UI adds.
+    pub fn add_ui(&mut self, name: &str, path: impl AsRef<Path>) -> Result<GameUi> {
+        let path = path.as_ref();
+        let path = match path.to_str().filter(|given| assets::is_id(given)) {
+            Some(id) => {
+                // A run that follows another loads a UI of its own, which names no asset of the
+                // world's, by its ID as its own database has it.
+                let at = self.asset_path(id, "UI", true)?;
+                self.named_file(id, &at)?
+            }
+            None => path.to_owned(),
+        };
+        if self.uis.disc.is_none() {
+            let (size, pixels) = game_ui::disc();
+            let disc = self
+                .textures
+                .add("UI corners", size, pixels, Mipmaps::AlphaWeighted)?;
+            self.add_assets(|assets| assets.add_unnamed(disc));
+            self.uis.disc = Some(disc);
+        }
+        let file = self.files.file_of(&path);
+        let named = assets::name_of(self.root.as_deref(), &path);
+        let asset = self.texture_name(&named, &path, file.as_deref(), None);
+        let found = match self.uis.file_of(&asset, file.as_deref()) {
+            Some(found) => found,
+            None => {
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
+                let mut document = game_ui::read(name, &path, &self.files)?;
+                self.load_ui_assets(&mut document)?;
+                let found = self.uis.add_file(asset.clone(), named, document, file);
+                #[cfg(feature = "dev")]
+                self.watch_ui(found, name, &path, read_at, &asset);
+                found
+            }
+        };
+        Ok(self.uis.add(found, name))
+    }
+
+    /// Loads each font and texture the nodes of `document`, a UI's, name that none loaded has, as
+    /// [`load_named`](Self::load_named) loads what a scene names, and gives each node what it
+    /// names, and an image its texture's size, where a layer's add or a scene loaded it from its
+    /// file.
+    ///
+    /// Fails with `asset.no_font` or `asset.no_texture` for one that doesn't load, saying why.
+    fn load_ui_assets(&mut self, document: &mut game_ui::Document) -> Result<()> {
+        let mut names = Vec::new();
+        for node in &document.nodes {
+            names.extend(node.font.iter().map(|font| Asset::Font(font.name.clone())));
+            let textures = node.looks.iter().filter_map(|look| look.texture.as_ref());
+            names.extend(textures.map(|texture| Asset::Texture(texture.name.clone())));
+        }
+        if names.is_empty() {
+            return Ok(());
+        }
+        self.load_named(names, self.follows);
+        for node in &mut document.nodes {
+            if let Some(font) = &mut node.font {
+                let found = self.assets.font(&font.name).ok_or_else(|| {
+                    Error::new("asset.no_font", self.assets.not_found("font", &font.name))
+                })?;
+                font.handle = Some(found);
+            }
+            for texture in node
+                .looks
+                .iter_mut()
+                .filter_map(|look| look.texture.as_mut())
+            {
+                let found = self.assets.live_texture(&texture.name).ok_or_else(|| {
+                    Error::new(
+                        "asset.no_texture",
+                        self.assets.not_found("texture", &texture.name),
+                    )
+                })?;
+                texture.handle = Some(found);
+            }
+            let shown = node.looks[0]
+                .texture
+                .as_ref()
+                .and_then(|texture| texture.handle);
+            let loaded = self.loaded.textures.values();
+            let size = loaded.copied().find(|&(loaded, _)| Some(loaded) == shown);
+            node.natural = size.map(|(_, size)| Vec2::new(size[0] as f32, size[1] as f32));
+        }
+        Ok(())
     }
 
     /// Loads the audio file at `path`, WAV, Ogg Vorbis, FLAC or MP3, as a sound for ticks to queue
@@ -2507,6 +2618,14 @@ impl Context {
     #[cfg(feature = "dev")]
     fn set_catalog(&mut self, catalog: Catalog) {
         self.add_assets(|assets| assets.set_catalog(catalog));
+        let catalog = self.assets.catalog();
+        self.uis.follow(|asset| {
+            let id = asset
+                .parse::<AssetId>()
+                .ok()
+                .filter(|_| assets::is_id(asset))?;
+            catalog.path(id).map(Arc::from)
+        });
         if let (Some(hot_reload), Some(root)) = (&mut self.hot_reload, &self.root) {
             hot_reload.follow(self.assets.catalog(), root);
         }
@@ -2604,6 +2723,7 @@ impl Context {
                 Reloaded::Prefab { prefab, path, text } => {
                     self.reload_prefab(prefab, &path, text, recorded);
                 }
+                Reloaded::Ui { ui, path, document } => self.reload_ui(ui, &path, document),
                 Reloaded::Sound { sound, path, data } => {
                     let named = assets::name_of(self.root.as_deref(), &path);
                     let frames = data.num_frames();
@@ -2660,6 +2780,7 @@ impl Context {
             return;
         }
         self.fonts.set(font, baked);
+        self.uis.font_changed(font);
         if let Some(file) = assets::file_of(path) {
             self.loaded.fonts.entry(file).or_insert(font);
         }
@@ -2725,6 +2846,8 @@ impl Context {
                 *was = size;
             }
         }
+        self.uis
+            .texture_resized(texture, Vec2::new(size[0] as f32, size[1] as f32));
         if let Some(file) = assets::file_of(path) {
             self.loaded.textures.entry(file).or_insert((texture, size));
         }
@@ -2859,6 +2982,50 @@ impl Context {
         }
         self.add_assets(|assets| assets.set_prefab_text(prefab, text));
         info!(prefab = &*named, "Prefab reloaded");
+    }
+
+    /// Puts `document`, UI file `file` read again from `path`, in place of what it held, every UI
+    /// of it taking its nodes, as [`add_ui`](Self::add_ui) says, logging `UI reloaded`, unless it
+    /// holds the same; what it names that isn't loaded is loaded first, and a font or a texture
+    /// that doesn't load warns with its code, the UI staying as it was. A UI's state is the run's
+    /// alone, so a recorded run or a lockstep peer takes it too.
+    #[cfg(feature = "dev")]
+    fn reload_ui(&mut self, file: usize, path: &Path, mut document: game_ui::Document) {
+        let named = assets::name_of(self.root.as_deref(), path);
+        if let Err(error) = self.load_ui_assets(&mut document) {
+            warn!(
+                code = error.code(),
+                ui = &*named,
+                "{error:#}; the UI stays as it was"
+            );
+            return;
+        }
+        if self.uis.holds(file, &document) {
+            return;
+        }
+        self.uis.reload(file, document);
+        info!(ui = self.uis.path(file), "UI reloaded");
+    }
+
+    /// Has the thread that reloads assets, if one does, watch UI file `file`, loaded as `name` from
+    /// the file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture)
+    /// has it watch a texture.
+    #[cfg(feature = "dev")]
+    fn watch_ui(&mut self, file: usize, name: &str, path: &Path, read_at: SystemTime, named: &str) {
+        let id = named
+            .parse::<AssetId>()
+            .ok()
+            .filter(|_| assets::is_id(named));
+        let (id, at) = self.followed(id, path);
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Ui {
+                ui: file,
+                name: name.to_owned(),
+                path: path.to_owned(),
+                read_at,
+            };
+            hot_reload.watch(source, id, at);
+        }
     }
 
     /// Has the thread that reloads assets, if one does, watch `prefab`, loaded as `name` from the
@@ -3231,6 +3398,28 @@ impl Context {
         )
     }
 
+    /// What the UIs the layers added lay out, draw and take input with, lent apart: the UIs, the
+    /// fonts their texts are measured and drawn in, the canvas and the shaders it draws with,
+    /// where the view was as the last frame handed it off, and the input as the layers are sent
+    /// it.
+    pub(crate) fn ui_parts(&mut self) -> game_ui::Parts<'_> {
+        game_ui::Parts {
+            uis: &mut self.uis,
+            fonts: &mut self.fonts,
+            drawn: &mut self.canvas,
+            shaders: &mut self.shaders,
+            view: self.view,
+            input: &self.input,
+        }
+    }
+
+    /// Each UI the layers added, laid out for the view as the last frame handed it off, as the
+    /// tool API's `ui` lists them.
+    #[cfg(feature = "dev")]
+    pub(crate) fn ui_list(&mut self) -> gg_api::UiList {
+        self.uis.listed(&mut self.fonts, self.view)
+    }
+
     /// Ends the run before its next frame, as closing its window does when no layer handles that:
     /// a game's own Quit, such as its menu's.
     pub fn exit(&mut self) {
@@ -3593,6 +3782,7 @@ impl Context {
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         self.canvas.place(viewport.size, &mut frame.canvas);
+        self.uis.handed_off();
         self.loader.take(&mut self.textures);
         frame.loading = self.loader.pending();
         self.fonts.place(&mut self.textures);
@@ -6110,6 +6300,214 @@ mod tests {
             world.children(root).expect("alive").count(),
             0,
             "its root alone"
+        );
+    }
+
+    /// A UI added by its file's asset ID is named by its ID and loads the texture it names, its
+    /// image fit to the texture's size; its layer sets a text by its name, refused for a name no
+    /// node has or a node that says nothing, and moves its focus by a key; a second add of its
+    /// file reads it no more, sharing it, and is a UI of its own. Edited, the file reads again, and
+    /// each UI takes its nodes, keeping the text code set and the focus by their names; an edit
+    /// naming a texture that doesn't load warns with its code, and the UIs stay as they were.
+    /// Renamed with its ID file, the file is found by its ID at its new path, which each UI lists,
+    /// a third add by that path sharing it, and its edits there read again; and a new file at its
+    /// old path is a file of its own.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
+        use gg_api::asset::Meta;
+
+        use crate::{Key, UiEvent};
+
+        let logged = crate::testing::logged();
+        let scratch = crate::dirs::tests::Scratch::new("ui-by-id");
+        let root = scratch.0.join("game");
+        std::fs::create_dir_all(root.join("ui")).expect("a directory");
+        // Dated an hour back, so that it loads as it is.
+        let written_long_ago = |name: &str, bytes: &[u8]| {
+            let path = root.join(name);
+            std::fs::write(&path, bytes).expect("written");
+            let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+            let file = std::fs::File::options().write(true).open(path);
+            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        };
+        // Focused on `play` as it's added, a logo, a button of each name and a score.
+        let menu = |texture: &str, buttons: &[&str]| {
+            let buttons: String = (buttons.iter())
+                .map(|name| format!("    Button(name: \"{name}\"),\n"))
+                .collect();
+            format!(
+                "(focus: \"play\", nodes: [Column(children: [\n    Image(name: \"logo\", \
+                 texture: \"{texture}\"),\n{buttons}    Text(name: \"score\", text: \"0\"),\n])])\n"
+            )
+        };
+        let logo = "ui/logo.png";
+        written_long_ago("ui/menu.ui", menu(logo, &["options", "play"]).as_bytes());
+        let id = "6b7c8d9e0fa1b2c3";
+        let meta = Meta {
+            id: id.parse().expect("an ID"),
+        };
+        written_long_ago("ui/menu.ui.meta", meta.text().as_bytes());
+        let (color, depth) = (png::ColorType::Rgba, png::BitDepth::Eight);
+        let png = crate::image::tests::png(color, depth, 2, &[255; 8], None);
+        written_long_ago(logo, &png);
+
+        let mut cx = Context::seeded(0).root(root.clone());
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        let ui = cx.add_ui("menu", id).expect("added by its ID");
+        assert!(cx.assets.texture(logo).is_some(), "what it names");
+        let listed = cx.ui_list();
+        let (asset, path) = (&*listed.uis[0].asset, &*listed.uis[0].path);
+        assert_eq!((asset, path), (id, "ui/menu.ui"));
+        assert_eq!(
+            listed.uis[0].nodes[1].rect[2..],
+            [2.0, 1.0],
+            "its texture's size"
+        );
+        ui.set_text(&mut cx, "score", "120").expect("a text");
+        let refused = |set: Result<()>| set.expect_err("refused").code();
+        assert_eq!(refused(ui.set_text(&mut cx, "scores", "1")), "ui.no_node");
+        assert_eq!(refused(ui.set_text(&mut cx, "logo", "1")), "ui.wrong_kind");
+        assert_eq!(ui.focused(&mut cx).as_deref(), Some("play"), "the file's");
+        let key = |key| Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+        };
+        let up = ui.event(&mut cx, &key(Key::ArrowUp));
+        assert_eq!(up, Some(UiEvent::Focused("options".into())));
+        let again = cx.add_ui("again", root.join("ui/menu.ui")).expect("added");
+        assert_eq!(cx.uis.files(), 1, "the file read once");
+        assert_eq!(again.focused(&mut cx).as_deref(), Some("play"), "its own");
+
+        // Frame starts, until `done`.
+        let until = |cx: &mut Context, done: &dyn Fn(&mut Context) -> bool, what: &str| {
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while !done(cx) {
+                assert!(std::time::Instant::now() < until, "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+                cx.take_reloaded(false);
+            }
+        };
+        // Whether UI `at` has a node named `name`.
+        let named = |cx: &mut Context, at: usize, name: &str| {
+            let listed = cx.ui_list();
+            let nodes = &listed.uis[at].nodes;
+            nodes.iter().any(|node| node.name.as_deref() == Some(name))
+        };
+        let path = root.join("ui/menu.ui");
+        std::fs::write(&path, menu(logo, &["play", "options", "settings"])).expect("an edit");
+        let took = |cx: &mut Context| named(cx, 0, "settings");
+        until(&mut cx, &took, "the UI takes its nodes");
+        assert!(
+            named(&mut cx, 1, "settings"),
+            "the second UI takes them too"
+        );
+        // `options`, though the file focuses `play` and `options` has moved.
+        assert_eq!(
+            ui.focused(&mut cx).as_deref(),
+            Some("options"),
+            "by its name"
+        );
+        assert_eq!(again.focused(&mut cx).as_deref(), Some("play"));
+        let listed = cx.ui_list();
+        let text = |at: usize, name: &str| {
+            let nodes = listed.uis[at].nodes.iter();
+            let found = nodes
+                .clone()
+                .find(|node| node.name.as_deref() == Some(name));
+            found.and_then(|node| node.text.clone())
+        };
+        assert_eq!(text(0, "score").as_deref(), Some("120"), "what code set");
+        assert_eq!(text(1, "score").as_deref(), Some("0"));
+
+        let _ = logged.codes.try_iter().count();
+        let missing = menu("ui/none.png", &["play", "quit"]);
+        std::fs::write(&path, missing).expect("an edit");
+        let warned = |_: &mut Context| {
+            let mut codes = logged.codes.try_iter();
+            codes.any(|code| code == "asset.no_texture")
+        };
+        until(&mut cx, &warned, "an edit naming what doesn't load warns");
+        assert!(
+            named(&mut cx, 0, "settings") && !named(&mut cx, 0, "quit"),
+            "as it was"
+        );
+
+        // Renamed with its ID file, as `git mv` renames both.
+        let renamed = root.join("ui/main.ui");
+        std::fs::rename(&path, &renamed).expect("renamed");
+        std::fs::rename(Meta::path(&path), Meta::path(&renamed)).expect("renamed");
+        cx.scan_assets(false);
+        let listed = cx.ui_list();
+        let paths: Vec<&str> = listed.uis.iter().map(|ui| &*ui.path).collect();
+        assert_eq!(paths, ["ui/main.ui"; 2]);
+        cx.add_ui("third", &renamed).expect("added by its new path");
+        cx.add_ui("fourth", id).expect("added by its ID");
+        assert_eq!(cx.uis.files(), 1, "the file read once still");
+        std::fs::write(&renamed, menu(logo, &["play", "quit"])).expect("an edit");
+        let quit = |cx: &mut Context| named(cx, 2, "quit") && named(cx, 0, "quit");
+        until(
+            &mut cx,
+            &quit,
+            "the file renamed reads again as it's edited",
+        );
+        // A new file where it was, without an ID file, is a file of its own.
+        std::fs::write(&path, menu(logo, &["play", "new"])).expect("a new file");
+        cx.add_ui("fifth", &path).expect("added");
+        assert_eq!(cx.uis.files(), 2, "a file of its own");
+        assert!(named(&mut cx, 4, "new") && !named(&mut cx, 0, "new"));
+    }
+
+    /// A UI lays out again as a font it writes in bakes again, its text measured by what it baked,
+    /// and as a texture an image shows reads again at another size, the image fit to that.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_ui_lays_out_again_as_its_font_or_texture_reloads() {
+        let scratch = crate::dirs::tests::Scratch::new("ui-font-texture");
+        let root = scratch.0.join("game");
+        std::fs::create_dir_all(root.join("ui")).expect("a directory");
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter");
+        let font_path = root.join("ui/a.ttf");
+        std::fs::copy(fonts.join("Inter-Regular.ttf"), &font_path).expect("a font");
+        let (color, depth) = (png::ColorType::Rgba, png::BitDepth::Eight);
+        let image_of = |width| {
+            crate::image::tests::png(color, depth, width, &vec![255; 4 * width as usize], None)
+        };
+        let logo = root.join("ui/logo.png");
+        std::fs::write(&logo, image_of(2)).expect("a texture");
+        let menu = "(nodes: [Column(children: [Image(name: \"logo\", texture: \"ui/logo.png\"), \
+                    Text(name: \"label\", text: \"A WIDE LABEL\", font: \"ui/a.ttf\")])])";
+        std::fs::write(root.join("ui/menu.ui"), menu).expect("a UI");
+        let mut cx = Context::seeded(0).root(root.clone());
+        cx.add_ui("menu", root.join("ui/menu.ui")).expect("added");
+        let size = |cx: &mut Context, name: &str| {
+            let listed = cx.ui_list();
+            let found = listed.uis[0]
+                .nodes
+                .iter()
+                .find(|node| node.name.as_deref() == Some(name));
+            let rect = found.expect("a node").rect;
+            [rect[2], rect[3]]
+        };
+        assert_eq!(size(&mut cx, "logo"), [2.0, 1.0]);
+        let regular = size(&mut cx, "label");
+
+        std::fs::write(&logo, image_of(4)).expect("an edit");
+        let texture = cx.assets.texture("ui/logo.png").expect("loaded");
+        let files = package::Files::default();
+        let image = crate::image::load_image("logo", &logo, &files).expect("an image");
+        let image = crate::image::decode_texture("logo", &logo, image).expect("decoded");
+        cx.reload_texture(texture, &logo, image);
+        assert_eq!(size(&mut cx, "logo"), [4.0, 1.0], "fit to its new size");
+
+        let font = cx.assets.font("ui/a.ttf").expect("loaded");
+        let bold = font::bake("a", &fonts.join("Inter-Bold.ttf")).expect("baked");
+        cx.reload_font(font, &font_path, bold);
+        let bolder = size(&mut cx, "label");
+        assert!(
+            bolder[0] > regular[0],
+            "bold is wider: {bolder:?} {regular:?}"
         );
     }
 

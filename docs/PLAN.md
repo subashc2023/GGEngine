@@ -132,6 +132,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 15, particles and linked prefabs** (2026-11-08)
 - **Animation state machines** (2026-11-08)
 - **Joints and continuous collision** (2026-11-08)
+- **A game's UI** (2026-11-08)
 
 ## Now
 
@@ -232,11 +233,22 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Development builds' frames that draw UI allocating nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own; builds without `dev` run no egui | A tool needs frames that allocate nothing, as for measuring one |
-| Widgets for a game's UI: buttons, lists and their focus, moved by keys, pads and the mouse; Shards draws its menu's buttons, finds what the cursor is over, and keeps their focus itself | A game other than Shards writes the same |
+| Shards' menu as a UI file: Shards draws its menu's buttons, finds what the cursor is over, and keeps their focus itself, as it did before UI files | Shards' menu changes |
+| Text fields in a game's UI, and the OS's composition of what's typed (IME): a node typed into, its caret and selection; a UI takes keys for its focus alone | A game takes a name, a chat or a code in its UI |
+| Sliders, toggles and drop-downs in a game's UI, which take the focus and change a value by keys, a pad and the mouse: a UI's buttons are pressed alone | A game's options menu sets values, as a volume or a difficulty |
+| Scrolling lists in a game's UI, and clipping a node to its parent's rectangle: the canvas draws sprites and text unclipped, and what a parent's room can't hold overflows it | A game's UI lists more than fits, as saves or servers |
+| Tweens on a UI's nodes: fades and slides as a menu opens, and a button easing between its looks, which change at once | A game's menus are to move |
+| Binding a UI's nodes to the world or a layer's values, so that a text or a node's visibility follows them without code setting them by name each frame | A game's UI shows many values, as an inventory's or a scoreboard's |
+| Styles shared between UI files: a button's looks, colors, a font and its sizes named once and taken by name, which each file and node repeats now | A game's UIs are several files of one look |
+| The editor showing a game's UI files: their nodes in a panel, picked in the view by their rectangles, edited and saved as text; agents and people edit them as text and see them reload | Someone lays a UI out in the editor rather than as text |
+| Writing UI files in a canonical form, as scenes are written, so that a tool's edit changes only what it changes: the engine reads them and writes none | A tool writes or rewrites UI files, as the editor would |
+| A pad's D-pad and stick moving the focus again while held, as a key's repeats do: each press, or push of the stick, steps once | A game's menu is long enough that its players hold to move through it |
+| Focus kept within a panel or a group of buttons, and coming round at a UI's edges: the arrows stop at the last button that way, and Tab goes through every button of the UI | A game shows a dialog over a menu whose buttons mustn't take the focus |
+| Pressing a button by name through the tool API: an agent clicks its pixels through `input`, as `ui` gives them | An agent presses buttons it can't reach by a click, as one hidden under another |
+| A UI's sounds named in its file, played as the focus moves and a button is pressed: the layer plays them on `Focused` and `Pressed` | Several games' menus play the same way |
 | The canvas scaled by the view's width or its smaller side, or to a height a game sets, rather than 1,080 units to the view's height: a view much narrower than 16:9 crowds what's anchored to its sides, and a portrait one overlaps it | A game runs in portrait, or at aspect ratios far from 16:9 |
-| Stretching what's drawn on the canvas between anchors, as a backdrop filling the view: each draw is placed from one anchor, and scaled with the view's height alone | A game's UI fills the view, as a dim behind a menu |
+| Stretching what a layer draws on the canvas itself between anchors: each such draw is placed from one anchor, and scaled with the view's height alone; a UI file's fills stretch to the room they're given | A layer draws a backdrop filling the view itself rather than through a UI file |
 | Circles, meshes and lines on the canvas, and clipping to a rectangle, as a list that scrolls needs: it draws sprites and text | A game's UI draws them |
-| Measuring text for laying it out, as a button sized to its label needs: a layer sizes its buttons itself | A game's UI lays out text of lengths it doesn't know, such as translations |
 | Hiding a game's UI from the editor's view while it edits, as Unity's Scene view leaves out a canvas over the screen: the canvas draws through the look's viewpoint too, and hides what's under it from picks | Someone edits under a game's HUD |
 | A sound's own distances and spatialization, as kira's spatial tracks take each: a camera with perspective hears every sound full within a unit and silent at 100, panned three quarters of the way to a side, as those tracks' defaults have it; nor Doppler, nor occlusion by what's between | A game's units aren't about a meter, or a sound carries farther or nearer than the rest |
 | Setting a play's volume and pitch, and stopping it, as a hum that follows an engine's speed would: a sound plays as its file holds it, to its end | A game varies or cuts a sound as it plays it |

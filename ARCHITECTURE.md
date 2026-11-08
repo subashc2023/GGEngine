@@ -349,8 +349,11 @@ in the editor is out of an agent's reach.
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), play and stop, pause and step, open, save and empty the [open
   scene](#project-state), capture frames, share the view as frames render it, set how it looks and
-  pick what it shows, list the assets in the asset root with their [IDs](#project-state),
-  hand the layers input as the window would, save the world whole as a snapshot file, as [ECS](#ecs)
+  pick what it shows, list the assets in the asset root with their [IDs](#project-state), list each
+  UI the layers added from its file, its nodes' rectangles in the canvas's units and the view's
+  pixels, what they say and the focus, so that an agent checks a layout as data (`ui`), as [Events
+  and layers](#events-and-layers) says, hand the layers input as the window would, save the world
+  whole as a snapshot file, as [ECS](#ecs)
   describes, which a run given `--restore` starts from, apply patches of the game's code and debug
   its scripts, as [Game code](#game-code) describes, read [diagnostics](#diagnostics), and log a
   client's notes among them, warnings or facts it gives with stable codes, as `gg run` tells a game
@@ -496,20 +499,22 @@ A project's state is text that people and agents edit, diff and merge with ordin
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
   makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels, but
   a DDS image's BC7 blocks and levels kept as they are; and the
-  rest as they are, sounds and music, scenes, prefabs and other RON, and scripts. It leaves out the
-  manifest and the fetch list, mods' folders, whose scripts a player installs, a module that
+  rest as they are, sounds and music, scenes, prefabs, UIs and other RON, and scripts. It leaves out
+  the manifest and the fetch list, mods' folders, whose scripts a player installs, a module that
   shaders include rather than one that compiles alone, and what no run loads, as code and docs, by
   its extension, a
   model's buffers among them, which its model holds. Which of
   the rest a game's code loads the cooker can't know, but it refuses a project whose package
   wouldn't hold its start scene (`cook.no_start`), and, as it takes every PNG and JPEG under the
-  root for a texture, one of them that doesn't load as a texture (`engine.bad_texture`). It gives
-  each asset the ID its ID file holds, and the cooker refuses a project whose ID files a development
-  run would warn of (`asset.bad_meta`, `asset.meta_case`, `asset.duplicate_id`), so that a run from
-  the package names its assets as a development run does, and replays what one recorded to every
-  hash. A run finds a file there by its path from the root, worked out from the path it's given as
-  the disk would, a relative path from the working directory, but without reading the disk, and
-  with its case, so that a package runs alike wherever it's copied. A run from a package reads
+  root for a texture, one of them that doesn't load as a texture (`engine.bad_texture`), and every
+  `.ui` file for a UI, one a run would refuse, with its code, as one naming a font or a texture the
+  package doesn't hold where a run from it would look (`asset.no_font`, `asset.no_texture`). It
+  gives each asset the ID its ID file holds, and the cooker refuses a project whose ID files a
+  development run would warn of (`asset.bad_meta`, `asset.meta_case`, `asset.duplicate_id`), so that
+  a run from the package names its assets as a development run does, and replays what one recorded
+  to every hash. A run finds a file there by its path from the root, worked out from the path it's
+  given as the disk would, a relative path from the working directory, but without reading the disk,
+  and with its case, so that a package runs alike wherever it's copied. A run from a package reads
   nothing of the disk's under its root: it scans for no ID file, watches nothing, and the API's
   `scene` refuses (`api.no_scene`). A
   development build runs from one too, given `--package`, as the demo's test that replays its live
@@ -626,6 +631,37 @@ A project's state is text that people and agents edit, diff and merge with ordin
   own, `mix64(local ^ mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy,
   so that two copies' meet only by chance. [prefab.rs](crates/gg-engine/src/ecs/prefab.rs) and
   [template.rs](crates/gg-engine/src/ecs/scene/template.rs) have the rest.
+- **UIs.** A game's UI, as [Events and layers](#events-and-layers) says, is a `.ui` file under the
+  asset root, an asset as a texture is, with its ID file, which a layer adds by its path or its
+  asset ID (`Context::add_ui`), each add a UI of its own of the file read once, found by its ID
+  wherever its file has been renamed or moved, and which is cooked into the package as it is. It's
+  RON as the canonical files are written, a part to a line: `(focus: "play", nodes: [...])`, the
+  button focused as it's added, by its name, if any, and the nodes at its top, each its kind,
+  `Panel`, `Text`, `Image`, `Button`, `Row`, `Column` or `Stack`, and its fields inside its kind's
+  parentheses, as `Button(name: "play", text: "PLAY")`, a field it leaves out taking its kind's
+  default and one that may be left out written as its value. Every node has its `name`, `visible`,
+  `width` and `height`, each `Fixed(units)`, `Fit` or `Fill(share)`, `margin` and `anchor`; a
+  container its `children`, `padding` and `align`, and a row or a column its `gap`; a panel its
+  `color`, `texture`, `radius` and `slice`; a text its `text`, `font`, `size`, `color` and `align`;
+  an image its `texture`, fit to its pixels, and `color`; and a button its `text`, `font`, `size`,
+  `padding`, `radius`, `slice`, `disabled` and `looks`, each of its states' `color`, `text_color`
+  and `texture`, a look's texture the normal one's unless it gives its own. Colors are linear RGBA,
+  as a scene's, and a font or a texture is named by its asset ID or its path from the root, loading
+  with the UI. A name is 1 to 64 ASCII letters, digits, `_` and `-`, its UI's alone, and every
+  button has one, which its presses are told by. A load checks the whole file, refusing it at the
+  line and column where its text is refused with `ui.syntax` for text that isn't a UI's, as of a
+  field no node has, `ui.bad_name`, `ui.duplicate_name`, `ui.bad_field` for a field its kind doesn't
+  take or an image without a texture, `ui.unnamed_button`, `ui.bad_value` for a number outside its
+  range, a size, a margin, padding, a gap, a radius, a slice's width, a text's size and a fill's
+  share each 0 to 1,000,000, at the number, or `ui.too_many_nodes` past 10,000 nodes, so that what a
+  file comes to, and each UI's copy of its nodes, stays bounded; and with `ui.no_node` for a `focus`
+  no button has. The engine writes none, as people and agents write them. In a development run that
+  serves the tool API, as a UI's file is saved, every UI of it takes its nodes, each keeping what
+  code set of it, its text, whether it shows and whether it's disabled, by its name, and the focus
+  staying on the button of its name, or else going to the file's, logging `UI reloaded`; or it warns
+  with the code of a file it refuses, or of a font or a texture that doesn't load, and the UI stays
+  as it was. A recorded run and a lockstep peer take it too, as a UI is the run's alone.
+  [game_ui](crates/gg-engine/src/game_ui/mod.rs) has the rest.
 - **Models in scenes.** A model is placed as an entity with a `ModelRoot`, which names it as a
   texture is named, by its asset ID or else its path; the world spawns the model's nodes under it
   as it comes with one, whether a scene loads it, a tool's create or add gives it, or code spawns it
@@ -652,8 +688,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
 - **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`, `.hdr`), model (`.gltf`, `.glb`), font
-  (`.ttf`, `.otf`) and prefab (`.prefab`) under the asset root, whatever its extension's case,
-  has an ID that outlives
+  (`.ttf`, `.otf`), prefab (`.prefab`) and UI (`.ui`) under the asset root, whatever its extension's
+  case, has an ID that outlives
   its file's name: 64 random bits, never 0, written as 16 lowercase hex digits, as an entity's
   are, in an ID file beside it, its file's name and `.meta`, such as `stone.png.meta`, matched by
   that exact
@@ -1250,17 +1286,45 @@ egui, the engine's immediate-mode UI, is the top overlay in development builds: 
 first and keeps those it wants, such as a click on one of its panels, but no key's or button's
 release, and `gg-renderer` draws its meshes over the frame.
 
-egui is the development UI. A game's own, its HUDs and menus, is immediate too, but apart from it:
-layers lay it out as they update, each frame, on the view's canvas, `Context::canvas`, as text and
-sprites placed from an anchor, one of the view's edges, its corners or its middle, which the engine
-places them from as it hands the frame off, at the view's size then, so that a resize moves them in
-the frame it comes in. The canvas scales with the view, `CANVAS_HEIGHT`, 1,080 of its units, to its
-height, and draws into it over everything else there, so that captures and the editor's view show
-it; it's of no entity, so a pick there finds none. A layer finds the cursor on the canvas as the
-last frame showed it, to tell what it's over; the engine has no widgets, so a game draws its buttons
-itself. Its state, such as which button has the focus, is the layer's, so that each lockstep peer
-has its own, and a choice that changes the game queues a command, as input does; a Quit asks the
-run to end through `Context::exit`, as closing the window does.
+egui is the development UI. A game's own, its HUDs and menus, is apart from it, on the view's
+canvas, `Context::canvas`: text and sprites placed from an anchor, one of the view's edges, its
+corners or its middle, which the engine places them from as it hands the frame off, at the view's
+size then, so that a resize moves them in the frame it comes in. The canvas scales with the view,
+`CANVAS_HEIGHT`, 1,080 of its units, to its height, and draws into it over everything else there,
+so that captures and the editor's view show it; it's of no entity, so a pick there finds none. A
+layer finds the cursor on the canvas as the last frame showed it, to tell what it's over, and may
+draw there itself.
+
+A game's UI is a file, as [Project state](#project-state)'s UIs says: a tree of named nodes, panels,
+texts, images and buttons in rows, columns and stacks, which a layer adds (`Context::add_ui`),
+getting a handle, `GameUi`, and drives each frame, through what its file names and nothing else. The
+engine lays it out, flexbox-lite, in the canvas's units: each node sized fixed, fit to what it
+holds, a text's text measured by its font (`Fonts::measure`), or filling its share of its parent,
+none below its fit; a row's or a column's children along it, with a gap between each two, what's
+left without a fill to take it before, around or after them as the parent's alignment says, and
+across it, as a stack's or a panel's both ways, each where its anchor or else the parent's alignment
+puts it; padding inside a node and a margin round it; a hidden node taking no room. Each node at the
+top is placed in the view from the point its anchor names, the view's middle by default, and drawn
+from it through the canvas, so that a resize keeps it there in the frame it comes in. Layout runs as
+the UI's drawn only once its tree, its texts, the view's size, or a font or a texture it names,
+reloaded, changed, in the memory the last layout had, and drawing an unchanged UI allocates nothing,
+as no input that changes nothing does. A panel is a color or a texture, its corners rounded by
+quarters of a disc the engine makes with the first UI, or its texture cut into nine; a button a
+panel holding its text, in a look for each of its states, normal, focused, pressed and disabled. The
+layer hands the UI the events it's sent (`GameUi::event`), which give back what happened, at most
+one thing an event: a button pressed, by its name, the focus moved to one, or back asked for, by
+Escape or a pad's East. The arrows, a pad's D-pad and its left stick move the focus to the nearest
+button that takes it the way they go, one level with the focused one first, the stick once a push
+until it comes back near rest; Tab and Shift+Tab through them in the file's order, coming round;
+Enter, Space and a pad's South press the focused button, the mouse focuses what it's over and
+presses what it's let go over after going down on it; a hidden or disabled button takes neither.
+Code sets a node's text, whether it shows and a button's whether it's disabled, by its name, kept as
+the file reloads, and turns the UI's input off while the game plays under it. Its state, the focus
+and what code set, is the run's, not the world's: each lockstep peer has its own, and none of it is
+hashed, snapshot or recorded, as Shards' layer keeps its menu's. A choice that changes the game
+queues a command, as input does, so that the next tick applies it on every peer, and a replay too; a
+Quit asks the run to end through `Context::exit`, as closing the window does. The tool API's `ui`
+lists each UI's nodes where they lie, as [Agents and tools](#agents-and-tools) says.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit in
@@ -1843,11 +1907,12 @@ breaks it, naming each way (`renderer.shader_mismatch`). It reads the SPIR-V bec
 reflection names what a pointer points at but none of its fields.
 
 In a development run that serves the tool API, a thread of its own, `gg-watch`, watches the files
-each game's shader, texture, model, font and prefab read as it was loaded, a shader's own and those
-it includes as slangc lists them, a texture's image, a model's glTF file and the buffers and images
-it names, a font's file and a prefab's, by their times and lengths every tenth of a second, and
-reads the asset again as they change and then hold for a look, off the main thread: compiles the
-shader, decodes the image, reads the model, bakes the font, reads the prefab's text. As the next
+each game's shader, texture, model, font, prefab and UI read as it was loaded, a shader's own and
+those it includes as slangc lists them, a texture's image, a model's glTF file and the buffers and
+images it names, a font's file, a prefab's and a UI's, by their times and lengths every tenth of a
+second, and reads the asset again as they change and then hold for a look, off the main thread:
+compiles the shader, decodes the image, reads the model, bakes the font, reads the prefab's text,
+reads and checks the UI's tree. As the next
 frame starts, the main thread puts what it read
 in place of the asset, under the same handle: a shader draws with its new pipeline from that frame,
 the old retiring until the GPU is done with it, and a mesh's or a texture's new bytes stream as any
@@ -1868,12 +1933,13 @@ the run starts again. The engine adds its model shader for every alpha mode with
 model, so that a material read again adds none. A font takes what it baked, its field's texels at
 any size, which its text is laid out by from that frame. A prefab takes its text, which its
 instances take, as [Prefabs](#project-state) says, but in a run that's recorded or in a lockstep
-session, which keeps it until the run starts again (`asset.prefab_changed`). A texture's or a
-font's stand-in takes its
+session, which keeps it until the run starts again (`asset.prefab_changed`). A UI takes its tree,
+as [UIs](#project-state) says, in any run, as it's the run's alone. A texture's or a font's
+stand-in takes its
 file's once the file comes, or the file of the asset whose ID it stands for, once one has it, but
-never a file outside the asset root (`asset.outside_root`); and a texture, a model, a font or a
-prefab whose file under the root is renamed or moved, as the asset database finds it by the ID it
-has, or that
+never a file outside the asset root (`asset.outside_root`); and a texture, a model, a font, a
+prefab or a UI whose file under the root is renamed or moved, as the asset database finds it by the
+ID it has, or that
 the database gives its file once it has one, is watched where it is, a rename alone reading nothing
 again. A change that doesn't compile, decode, read or bake, or breaks a shader's contract, warns,
 and the asset keeps drawing as it did. The engine's own shaders and font don't reload, nor do the

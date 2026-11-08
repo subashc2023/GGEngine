@@ -1,6 +1,7 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
 //! rate, window and input, and the actions that name what a game does with it, and layers, which
-//! change the world at its ticks, and their UI, a game's own on the view's canvas; the world of
+//! change the world at its ticks, and their UI, a game's own on the view's canvas, laid out from
+//! UI files of named nodes, which take the focus from keys, pads and the mouse; the world of
 //! entities and their components, which it draws between its ticks, handing each frame's render
 //! data to `gg-renderer` on a thread of its own, a frame behind, and the job system, which a tick's
 //! systems split a query's rows across;
@@ -21,7 +22,7 @@
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
-//! files, reloading games' shaders, textures, models, fonts, prefabs, sounds and music as
+//! files, reloading games' shaders, textures, models, fonts, prefabs, UIs, sounds and music as
 //! their files change, the OS's file dialogs, and the UI, egui's, which layers draw through
 //! `Ui`: the dock, the
 //! title bars it draws, and the Inspector's and the Performance panel's panels.
@@ -64,6 +65,7 @@ mod edits;
 mod environment;
 mod event;
 mod font;
+mod game_ui;
 mod gltf;
 mod grant;
 pub mod grid;
@@ -185,6 +187,7 @@ pub use egui;
 pub use environment::Environment;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 pub use font::{Align, Font, Text, TextStyle};
+pub use game_ui::{GameUi, UiEvent};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;

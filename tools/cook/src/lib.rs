@@ -15,7 +15,7 @@ use std::path::{Component, Path};
 
 use gg_api::asset::{self, Found};
 use gg_api::{Fetch, Project};
-use gg_engine::cook::{self, Compressed, Kind, Lod, Texels, Writer};
+use gg_engine::cook::{self, Compressed, Kind, Lod, Texels, UiAsset, Writer};
 use gg_engine::{Error, Result};
 
 /// A file a package holds, as [`cook()`] cooked it.
@@ -40,6 +40,8 @@ enum Take {
     Model,
     Font,
     Shader,
+    /// As it is, once it reads as a UI.
+    Ui,
 }
 
 impl Take {
@@ -54,6 +56,7 @@ impl Take {
             "gltf" | "glb" => Self::Model,
             "ttf" | "otf" => Self::Font,
             "slang" => Self::Shader,
+            "ui" => Self::Ui,
             _ => return None,
         })
     }
@@ -64,21 +67,24 @@ impl Take {
 ///
 /// The package holds the files under the asset root, through the folders gg-api's scan goes
 /// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, the
-/// manifest and the fetch list: sounds and music, scenes and other RON, and scripts, as they are;
+/// manifest and the fetch list: sounds and music, scenes and other RON, UIs, and scripts, as they
+/// are;
 /// textures compressed
 /// to BC7, or a Radiance HDR's colors of high dynamic range to BC6H, of one level, as a layer's
 /// texture has; models read as a run reads them, with the
 /// buffers and images they name, their primitives' triangles optimized and given levels of detail,
 /// and their images compressed to BC7 with their full chains of mip levels, made as a run makes
 /// them; fonts baked into their fields; and shaders compiled, but for a file that doesn't compile
-/// alone that another includes. Each texture, model and font whose ID file holds its ID has it
-/// there.
+/// alone that another includes. Each texture, model, font, prefab and UI whose ID file holds its ID
+/// has it there.
 ///
 /// Fails, writing nothing, as the manifest's reading does; with `cook.unread` for a folder or a
 /// file it can't read; with `asset.bad_meta` or `asset.meta_case` for an asset whose ID file doesn't
 /// read, as gg-api's scan finds it, and `asset.duplicate_id` for an ID two assets' ID files hold;
-/// as adding a texture, a model, a font or a shader fails; with `cook.uncompressed` for a texture
-/// that doesn't compress; with `cook.no_start` if the start scene isn't among what it holds, as in
+/// as adding a texture, a model, a font, a UI or a shader fails; with `asset.no_font` or
+/// `asset.no_texture` for a font or a texture a UI names that a run from the package wouldn't
+/// find there, as `find` says; with `cook.uncompressed` for a texture that doesn't compress;
+/// with `cook.no_start` if the start scene isn't among what it holds, as in
 /// a folder the scan doesn't go through; and with `package.unwritten` if the package can't be
 /// written.
 pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
@@ -119,6 +125,7 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
         cooked: BTreeMap::new(),
     };
     let mut shaders = Vec::new();
+    let mut uis = Vec::new();
     for (found, take) in taken {
         let Found { path, file } = found;
         let id = ids.get(path).copied();
@@ -137,6 +144,11 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
             Take::Model => package.add(path, id, Kind::Model, model(path, file)?)?,
             Take::Font => package.add(path, id, Kind::Font, cook::bake_font(path, file)?)?,
             Take::Shader => shaders.push((path, file)),
+            Take::Ui => {
+                let cook::ReadUi { bytes, named } = cook::read_ui(path, file)?;
+                package.add(path, id, Kind::File, bytes)?;
+                uis.push((path, named));
+            }
         }
     }
     // A file that doesn't compile alone may be a module that others include, which slangc lists
@@ -158,6 +170,11 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     {
         return Err(error);
     }
+    for (ui, named) in uis {
+        for (kind, name) in &named {
+            find(ui, *kind, name, &root, &ids, &package)?;
+        }
+    }
     // What every run loads first: its other files, which its code names, the cook can't know.
     let start = project.start_path(dir);
     if !within(&root, &start).is_some_and(|start| package.cooked.contains_key(&start)) {
@@ -170,6 +187,60 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     }
     package.writer.write(out)?;
     Ok(package.cooked.into_values().collect())
+}
+
+/// Finds what UI `ui` names `name`, a font or a texture as `kind` says, in `package`, as a run from
+/// it would, from the asset root `root`: by its ID, as `ids` gives each asset's by its path from
+/// the root, or else by its path from the root; a model's image by its model, which has an image of
+/// its place.
+///
+/// Fails with `asset.no_font` or `asset.no_texture`, as the run's add of the UI would, for an ID no
+/// asset has, an absolute path, one outside the root, one the package doesn't hold, one that isn't
+/// a font's or a texture's, or a model's, for its image, or an image the model hasn't.
+fn find(
+    ui: &str,
+    kind: UiAsset,
+    name: &str,
+    root: &Path,
+    ids: &HashMap<String, u64>,
+    package: &Package,
+) -> Result<()> {
+    let (code, what, held) = match kind {
+        UiAsset::Font => ("asset.no_font", "font", Kind::Font),
+        UiAsset::Texture => ("asset.no_texture", "texture", Kind::Texture),
+    };
+    let refused = |why: String| {
+        let message = format!("UI {ui} names the {what} `{name}`, which a run can't load: {why}");
+        Error::new(code, message)
+    };
+    let image = name.rsplit_once('#').filter(|&(_, image)| {
+        kind == UiAsset::Texture && !image.is_empty() && image.bytes().all(|b| b.is_ascii_digit())
+    });
+    let (asset, held) = match image {
+        Some((model, _)) => (model, Kind::Model),
+        None => (name, held),
+    };
+    let path = if cook::is_id(asset) {
+        let id = u64::from_str_radix(asset, 16).ok();
+        let found = ids.iter().find(|&(_, &has)| Some(has) == id);
+        let found = found.ok_or_else(|| refused(format!("no asset has the ID {asset}")))?;
+        found.0.clone()
+    } else {
+        let why = "a path names a file under the asset root, from it";
+        cook::within(root, asset).ok_or_else(|| refused(why.to_owned()))?
+    };
+    match package.cooked.get(&path) {
+        Some(cooked) if cooked.kind == held => {}
+        Some(_) => return Err(refused(format!("{path} isn't a {what} the package holds"))),
+        None => return Err(refused(format!("the package holds no {path}"))),
+    }
+    if let Some((_, image)) = image {
+        let images = cook::read_model(&path, &root.join(&path))?.images.len();
+        if !image.parse::<usize>().is_ok_and(|image| image < images) {
+            return Err(refused(format!("model {path} has {images} images")));
+        }
+    }
+    Ok(())
 }
 
 /// Model `path`'s file at `file`, cooked as a run from the package reads it: read as a run reads
@@ -334,6 +405,10 @@ mod tests {
     /// A scene without entities.
     const SCENE: &str = "(\n    entities: {},\n)\n";
 
+    /// A UI of a button, and of the stone texture by its ID and by its path.
+    const MENU: &str = "(nodes: [Button(name: \"play\"), Image(texture: \"5f3c9a1e07b2d846\"), \
+                        Panel(texture: \"textures/./stone.png\")])";
+
     /// A module that a shader includes, which doesn't compile alone.
     const COMMON: &str = "float4 red() { return float4(1.0, 0.0, 0.0, 1.0); }\n";
 
@@ -425,14 +500,15 @@ Targets fragment_main(Varyings input) {
     }
 
     /// A package holds what a game's runs load, by their paths from the asset root: a texture
-    /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab, with its ID
-    /// too, and a script as they are; and a shader compiled, but the module it includes, which doesn't compile alone; and
-    /// leaves out the manifest, the fetch list, a mod's folder, and what no run loads, as code and
-    /// notes. Cooked again, it's the same bytes.
+    /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab and a UI, with
+    /// their IDs too, and a script as they are; and a shader compiled, but the module it includes,
+    /// which doesn't compile alone; and leaves out the manifest, the fetch list, a mod's folder,
+    /// and what no run loads, as code and notes. Cooked again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
         let lamp = id_file("6a4d0b2f18c9e357");
+        let menu = id_file("7b5e1c3a29d0f468");
         let fixture = Fixture::new(
             "holds",
             &[
@@ -441,6 +517,8 @@ Targets fragment_main(Varyings input) {
                 ("scenes/main.ron", SCENE),
                 ("prefabs/lamp.prefab", SCENE),
                 ("prefabs/lamp.prefab.meta", &lamp),
+                ("ui/menu.ui", MENU),
+                ("ui/menu.ui.meta", &menu),
                 ("textures/stone.png.meta", &stone),
                 ("shaders/flat.slang", FLAT),
                 ("shaders/common.slang", COMMON),
@@ -474,6 +552,7 @@ Targets fragment_main(Varyings input) {
                 Kind::Texture,
                 Some(0x5f3c_9a1e_07b2_d846),
             ),
+            ("ui/menu.ui", Kind::File, Some(0x7b5e_1c3a_29d0_f468)),
         ];
         assert_eq!(held, expected);
         let first = fs::read(&out).unwrap();
@@ -638,8 +717,8 @@ Targets fragment_main(Varyings input) {
         assert_eq!(held, expected);
     }
 
-    /// A project whose package couldn't name its assets alike, or whose shader doesn't compile, is
-    /// refused, and no package is written.
+    /// A project whose package couldn't name its assets alike, whose shader doesn't compile, or
+    /// whose UI a run would refuse, is refused, and no package is written.
     #[test]
     fn a_project_that_wouldnt_run_alike_is_refused() {
         let twice = id_file("5f3c9a1e07b2d846");
@@ -659,6 +738,35 @@ Targets fragment_main(Varyings input) {
         );
         refused("undecoded", &[("a.png", "not a PNG")], "engine.bad_texture");
         refused("unread_model", &[("a.gltf", "{}")], "engine.bad_model");
+        let button = "(nodes: [Button(text: \"PLAY\")])";
+        refused("unnamed", &[("menu.ui", button)], "ui.unnamed_button");
+        // A UI naming what a run from the package couldn't load: a texture it doesn't hold, one
+        // outside the root, a scene for a texture, and a font by an ID no asset has.
+        for (name, ui, code) in [
+            (
+                "no_texture",
+                "Image(texture: \"ui/none.png\")",
+                "asset.no_texture",
+            ),
+            (
+                "outside",
+                "Image(texture: \"../stone.png\")",
+                "asset.no_texture",
+            ),
+            (
+                "not_texture",
+                "Image(texture: \"scenes/main.ron\")",
+                "asset.no_texture",
+            ),
+            (
+                "no_font",
+                "Text(font: \"0123456789abcdef\")",
+                "asset.no_font",
+            ),
+        ] {
+            let ui = format!("(nodes: [{ui}])");
+            refused(name, &[("menu.ui", &ui)], code);
+        }
         // A start scene where the scan doesn't look, as in `tests` at the root.
         let project = PROJECT.replace("\"scenes", "\"tests");
         let files = [("project.ron", &*project), ("tests/main.ron", SCENE)];

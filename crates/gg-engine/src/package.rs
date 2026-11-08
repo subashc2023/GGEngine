@@ -399,7 +399,7 @@ pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
 /// its entries. Both are taken as the disk takes them, a relative path from the working directory,
 /// but without reading it, their `.` and `..` taken away as written. `None` for a path outside the
 /// root, or the root itself.
-fn within(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn within(root: &Path, path: &Path) -> Option<String> {
     let (root, path) = (lexical(root)?, lexical(path)?);
     let parts = path.strip_prefix(root).ok()?.components();
     let parts: Option<Vec<&str>> = parts.map(|part| part.as_os_str().to_str()).collect();

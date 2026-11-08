@@ -1,0 +1,98 @@
+(
+    entities: {
+        "114205d4562c7dba": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 0.6981317,
+            ),
+            Transform: (
+                translation: (-6.6, 0.3, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.6),
+            ),
+        ),
+        "5e6a268532f77b1d": (
+            Bob: (
+                height: 0.4,
+                period: 2.6,
+                time: 0.0,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 0.7),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-6.6, -2.6, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.2, 3.2, 1.0),
+            ),
+        ),
+        "70cfac66fc9f2695": (
+            Bob: (
+                height: 0.4,
+                period: 2.2,
+                time: 0.0,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 0.7),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (6.6, -2.6, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.2, 3.2, 1.0),
+            ),
+        ),
+        "ce2adf7f65314c22": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: -0.6981317,
+            ),
+            Transform: (
+                translation: (6.6, 0.3, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.6),
+            ),
+        ),
+        "e6a7b9c0d1f23458": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fef159fa5b313eec": (
+            Menu: (
+                ticks: 0,
+                presses: 0,
+                pressed: "",
+            ),
+            Name: ("Menu"),
+        ),
+    },
+)

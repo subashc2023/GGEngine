@@ -4,9 +4,9 @@
 //! in; what each method takes and answers; the memory a game's view is shared through as it
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
 //! [`Project`], which tools find a game by and its development build reads; assets' ID files,
-//! [`asset`], which its development build writes beside each texture, model, font and prefab; and a
-//! project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it. It depends on no crate
-//! of the engine's, so that tools build without the GPU's toolchain.
+//! [`asset`], which its development build writes beside each texture, model, font, prefab and UI;
+//! and a project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it. It depends on no
+//! crate of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -102,10 +102,10 @@
 //!   otherwise; the revision changes with each change to the types, so that a client reads them
 //!   again as the revision `entities` answers moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
-//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts and prefabs
-//!   under the game's asset root, in the order of their paths, each with its ID, which its ID file
-//!   beside it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID
-//!   files whose assets aren't there. It answers once the game has looked at the root since it
+//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts, prefabs
+//!   and UIs under the game's asset root, in the order of their paths, each with its ID, which its
+//!   ID file beside it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and
+//!   the ID files whose assets aren't there. It answers once the game has looked at the root since it
 //!   asked, or at once from its last look while its frames pause, as while its window is minimized,
 //!   so that an asset added or renamed since is listed, a run that writes ID files, a game alone or
 //!   a lockstep session's host that serves the API, having written each one missing and moved
@@ -129,6 +129,12 @@
 //!   made with an edit, goes beside its asset, named for it, or is deleted. It fails with
 //!   `engine.no_root` in a game that names no asset root, and with `asset.unlisted` if the root
 //!   can't be listed.
+//! - `ui`: answers [`UiList`], each UI the game's layers added, as ARCHITECTURE.md's Events and
+//!   layers describes, with its nodes laid out for the view: each one's name, kind, parent, its
+//!   rectangle in the canvas's units and in the view's pixels, whether it shows, what it says, and
+//!   a button's state, so that a client checks a layout as data rather than by eye; it changes
+//!   nothing but a layout that its tree, its texts or the view changed since a frame drew it, which
+//!   it lays out again. A button is pressed as a click does it, through `input`, at its pixels.
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
 //!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
 //!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run
@@ -212,14 +218,14 @@
 //!
 //! A connection is kept to what its `hello` grants, [`Hello::grant`], every capability without it:
 //! a request its grant doesn't cover fails with `api.ungranted`, naming the capability it needs.
-//! `ping` and `status` need none; `logs`, `entities`, `entity`, `types`, `hash`, `assets` and
-//! `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the type
-//! each set, add and remove names, and `write` for any other operation, as `undo` and `redo` need;
-//! `save_prefab` needs `write` and `scene`, as it writes a file of the project's as `scene` does;
-//! `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and `pick`
-//! need `view`, a `pick` answering its entity's name only with `read` of `Name` too; `input`,
-//! `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and a `capture` or a
-//! `snapshot` given a path needs `files` too.
+//! `ping` and `status` need none; `logs`, `entities`, `entity`, `types`, `hash`, `assets`, `ui`
+//! and `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the
+//! type each set, add and remove names, and `write` for any other operation, as `undo` and `redo`
+//! need; `save_prefab` needs `write` and `scene`, as it writes a file of the project's as `scene`
+//! does; `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and
+//! `pick` need `view`, a `pick` answering its entity's name only with `read` of `Name` too;
+//! `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and a `capture`
+//! or a `snapshot` given a path needs `files` too.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -1099,6 +1105,73 @@ pub struct ListedOrphan {
     pub path: String,
     pub kind: asset::AssetKind,
     pub id: Option<String>,
+}
+
+/// What `ui` answers: the view's size in its pixels, as the last frame handed it off, or 1,920 by
+/// 1,080 before one has, which each node's `pixels` are in; and each UI the game's layers added, in
+/// the order they added them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UiList {
+    pub view: [u32; 2],
+    pub uis: Vec<ListedUi>,
+}
+
+/// A UI as `ui` lists it: the name its layer gave it; its file's name, its asset ID or else its
+/// path, as values name a texture; its file's path from the asset root, as [`Status::scene`] names
+/// files; whether the last frame handed off drew it; whether it takes input; the button with the
+/// focus, by its name; and its nodes, in the order of its file, each after its parent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListedUi {
+    pub name: String,
+    pub asset: String,
+    pub path: String,
+    pub drawn: bool,
+    pub input: bool,
+    pub focus: Option<String>,
+    pub nodes: Vec<UiNode>,
+}
+
+/// A node of a UI as `ui` lists it: its name, if its file gives it one; its kind; its parent's
+/// place among the UI's nodes, `None` for one at its top; its rectangle, `[x, y, width, height]`
+/// from the view's top left, +Y down, in the canvas's units, 1,080 to the view's height, and in the
+/// view's pixels, as a capture's PNG has them; whether it shows, it and each node above it visible,
+/// a hidden one's rectangle of no size; what a text or a button says; and a button's whether it's
+/// disabled, has the focus, or is held pressed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UiNode {
+    pub name: Option<String>,
+    pub kind: UiKind,
+    pub parent: Option<usize>,
+    pub rect: [f32; 4],
+    pub pixels: [f32; 4],
+    pub visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub focused: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pressed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// What a node of a UI is, as its file names it: a panel, a background behind the children it
+/// stacks; a text; an image; a button; or a container that lays its children out in a row, a
+/// column, or stacked over each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiKind {
+    Panel,
+    Text,
+    Image,
+    Button,
+    Row,
+    Column,
+    Stack,
 }
 
 /// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;

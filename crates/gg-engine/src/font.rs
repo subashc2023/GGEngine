@@ -346,26 +346,7 @@ impl Fonts {
             buffer,
             glyphs,
         } = self;
-        let slot = style.font.map(|font| match fonts.get(font.index()) {
-            Some(slot) => slot,
-            None => panic!("{font:?} is a font of another context"),
-        });
-        let found = slot.and_then(|slot| Some((slot.field, slot.baked.as_ref()?)));
-        let (field, baked) = match found {
-            Some(found) => found,
-            None => {
-                let baked = inter.baked.get_or_insert_with(|| {
-                    let Bake {
-                        size,
-                        pixels,
-                        baked,
-                    } = bake_inter();
-                    *unplaced = Some((size, pixels));
-                    baked
-                });
-                (inter.field, &*baked)
-            }
-        };
+        let (field, baked) = baked(inter, unplaced, fonts, style.font);
         let font = FontRef::new(&baked.bytes).expect("it read as it baked");
         let shaper = baked.shaping.shaper(&font).build();
         let features = features();
@@ -423,6 +404,79 @@ impl Fonts {
         *buffer = Some(unshaped);
         glyphs.drain(..)
     }
+
+    /// How large `text` is in `style`, across then down, in the units its em is `style.size` of:
+    /// its widest line's advance, as [`lay_out`](Self::lay_out) aligns its lines by, and its box's
+    /// height, from its first line's ascent to its last line's descent, as `lay_out` aligns it
+    /// down by; for laying text out, as a game's UI fits a node to its text. It shapes the text as
+    /// `lay_out` does, in the memory `lay_out` keeps, and bakes the engine's font as `lay_out`
+    /// does where the style names none.
+    ///
+    /// # Panics
+    ///
+    /// If `style`'s font is another context's.
+    pub(crate) fn measure(&mut self, text: &str, style: &TextStyle) -> Vec2 {
+        let Self {
+            inter,
+            unplaced,
+            fonts,
+            buffer,
+            ..
+        } = self;
+        let (_, baked) = baked(inter, unplaced, fonts, style.font);
+        let font = FontRef::new(&baked.bytes).expect("it read as it baked");
+        let shaper = baked.shaping.shaper(&font).build();
+        let features = features();
+        let (mut widest, mut lines) = (0.0_f32, 0);
+        let mut unshaped = buffer.take().unwrap_or_default();
+        for line in text.split('\n') {
+            lines += 1;
+            unshaped.push_str(line.strip_suffix('\r').unwrap_or(line));
+            unshaped.set_direction(Direction::LeftToRight);
+            unshaped.set_script(harfrust::script::LATIN);
+            let options = ShapeOptions::new().plan(Some(&baked.plan));
+            let shaped = shaper.shape(unshaped, options.features(&features));
+            let advance: i32 = shaped.glyph_positions().iter().map(|at| at.x_advance).sum();
+            widest = widest.max(advance as f32 / baked.units_per_em);
+            unshaped = shaped.clear();
+        }
+        *buffer = Some(unshaped);
+        let metrics = baked.lines;
+        let height = metrics.ascent - metrics.descent + (lines - 1) as f32 * metrics.advance();
+        Vec2::new(widest, height) * style.size
+    }
+}
+
+/// The field and what baked of the font `font` names among `fonts`, or of the engine's own,
+/// `inter`, for none or for a stand-in, which bakes the first time, its field waiting in `unplaced`
+/// for [`Fonts::place`].
+///
+/// # Panics
+///
+/// If `font` is another context's.
+fn baked<'f>(
+    inter: &'f mut Slot,
+    unplaced: &mut Option<([u32; 2], Vec<u8>)>,
+    fonts: &'f [Slot],
+    font: Option<Font>,
+) -> (Texture, &'f Baked) {
+    let slot = font.map(|font| match fonts.get(font.index()) {
+        Some(slot) => slot,
+        None => panic!("{font:?} is a font of another context"),
+    });
+    if let Some(found) = slot.and_then(|slot| Some((slot.field, slot.baked.as_ref()?))) {
+        return found;
+    }
+    let baked = inter.baked.get_or_insert_with(|| {
+        let Bake {
+            size,
+            pixels,
+            baked,
+        } = bake_inter();
+        *unplaced = Some((size, pixels));
+        baked
+    });
+    (inter.field, &*baked)
 }
 
 /// What a font bakes into: its field's size and its rows of RGBA8, as [`Field`] has them, which a
@@ -1285,6 +1339,41 @@ mod tests {
         };
         let centered = middles(&mut fonts, "B", [Align::Center, Align::Start])[0];
         assert!((b.x - centered.x).abs() < 1e-5, "{b} {centered}");
+    }
+
+    /// Text measures as it lays out: as wide as its widest line's advance, kerned, which aligns it,
+    /// and as tall as its box, from its first line's ascent to its last line's descent, a line
+    /// more for each line more; text of nothing is a line tall and nothing across.
+    #[test]
+    fn text_measures_as_it_lays_out() {
+        let (baked, _) = inter();
+        let mut fonts = Fonts::new(&mut Textures::default());
+        let font = fonts.push(Texture::WHITE, Some(baked));
+        let style = TextStyle {
+            font: Some(font),
+            size: 2.0,
+            color: Vec4::ONE,
+            align: [Align::Start; 2],
+        };
+        let lines = fonts.fonts[0].baked.as_ref().expect("baked").lines;
+        let [a, v, av] = ["A", "V", "AV"].map(|text| fonts.measure(text, &style));
+        assert!(av.x < a.x + v.x, "kerned: {av} against {a} and {v}");
+        let tall = (lines.ascent - lines.descent) * 2.0;
+        assert!((a.y - tall).abs() < 1e-5, "{a}");
+        let two = fonts.measure("AV\nA", &style);
+        assert_eq!(two.x, av.x, "its widest line");
+        assert!((two.y - tall - lines.advance() * 2.0).abs() < 1e-5, "{two}");
+        assert_eq!(fonts.measure("", &style), Vec2::new(0.0, a.y));
+        // Laid out from its right, it starts as far left of the origin as it's wide.
+        let first = |fonts: &mut Fonts, align| {
+            let style = TextStyle { align, ..style };
+            let mut glyphs = fonts.lay_out(Mat4::IDENTITY, "AV", &style, 0);
+            let (at, ..) = glyphs.next().expect("an A");
+            at.w_axis.x
+        };
+        let start = first(&mut fonts, [Align::Start; 2]);
+        let end = first(&mut fonts, [Align::End, Align::Start]);
+        assert!((start - end - av.x).abs() < 1e-4, "{start} {end} {av}");
     }
 
     /// Inter with `units` font units to its em, as its `head` table says, its outlines as they are,

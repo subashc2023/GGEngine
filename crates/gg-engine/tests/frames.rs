@@ -1,9 +1,12 @@
-//! Steady-state frames of an app whose layers draw no UI allocate nothing, on any thread: frames
+//! Steady-state frames of an app whose layers draw no development UI, egui's, which allocates,
+//! allocate nothing, on any thread: frames
 //! of what games draw, sprites flat, textured and of a sprite sheet's cells, circles filled and
 //! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
 //! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
-//! text, written and shaped again each frame, a sprite and that text on the view's canvas,
+//! text, written and shaped again each frame, a sprite and that text on the view's canvas, a UI
+//! from its file, laid out again each frame as code changes its text, drawn on the canvas and fed
+//! input that changes nothing,
 //! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under the default environment,
@@ -46,8 +49,8 @@ use std::time::Duration;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Environment, Event, Font, Key, Layer, Mesh, MeshDraw, Model,
-    MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source, Sprite,
+    Component, Context, Entity, Environment, Event, Font, GameUi, Key, Layer, Mesh, MeshDraw,
+    Model, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source, Sprite,
     SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
@@ -144,6 +147,8 @@ struct Assets {
     plain: Model,
     /// The engine's own font, Inter.
     font: Font,
+    /// A panel of a text and two buttons, the second disabled, in the view's bottom left corner.
+    ui: GameUi,
 }
 
 /// The app: what it spawns as it attaches, and what its ticks move, spawn and despawn.
@@ -242,6 +247,7 @@ impl Layer for Scene {
         let inter =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter/Inter-Regular.ttf");
         let font = cx.add_font("inter", inter);
+        let ui = cx.add_ui("corner", self.dir.join("corner.ui"));
         let assets = Assets {
             quad: quad.expect("the quad is whole triangles"),
             opaque: opaque.expect("the shader compiles"),
@@ -250,6 +256,7 @@ impl Layer for Scene {
             sheet: sheet.expect("the cells load"),
             plain: plain.expect("the plain model loads"),
             font: font.expect("Inter bakes"),
+            ui: ui.expect("the UI reads"),
         };
         let pair = pair.expect("the pair loads");
 
@@ -448,6 +455,20 @@ impl Layer for Scene {
         let inset = Mat4::from_translation(Vec3::new(-40.0, -80.0, 0.0));
         canvas.draw_text(inset, &self.text, &on_canvas);
         let _ = canvas.cursor();
+        // The UI's text shaped and laid out again, its title set to what it says already, and keys
+        // it takes nothing from: a letter, and a step down from its last button.
+        let ui = self.assets().ui;
+        ui.set_text(cx, "frame", &self.text).expect("a text");
+        ui.set_text(cx, "title", "CORNER").expect("a text");
+        for key in [Key::KeyA, Key::ArrowDown] {
+            let pressed = Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+            };
+            let _ = ui.event(cx, &pressed);
+        }
+        ui.draw(cx);
         let turning = self.turning.expect("attached");
         let turning = cx.world().id(turning).expect("alive");
         cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);
@@ -579,7 +600,40 @@ fn write_assets(dir: &Path) {
     fs::write(dir.join("pair.gltf"), pair.to_string()).expect("the pair is written");
     let plain = model(json!([quad(2)]));
     fs::write(dir.join("plain.gltf"), plain.to_string()).expect("the plain model is written");
+    fs::write(dir.join("corner.ui"), CORNER).expect("the UI is written");
 }
+
+/// The UI in the view's bottom left corner, away from its middle, where the picks look: a rounded
+/// panel of a title, a text and two buttons, the first focused and the second disabled.
+const CORNER: &str = r#"(
+    focus: "go",
+    nodes: [
+        Panel(
+            anchor: (Start, End),
+            margin: (24.0, 24.0),
+            padding: (16.0, 16.0),
+            color: (0.0, 0.0, 0.0, 0.6),
+            radius: 16.0,
+            children: [
+                Column(
+                    gap: 8.0,
+                    children: [
+                        Text(name: "title", text: "CORNER", size: 32.0),
+                        Text(name: "frame", size: 24.0),
+                        Row(
+                            gap: 8.0,
+                            children: [
+                                Button(name: "go", text: "GO"),
+                                Button(name: "stop", text: "STOP", disabled: true),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)
+"#;
 
 fn main() {
     if gg_engine::profile::ENABLED {

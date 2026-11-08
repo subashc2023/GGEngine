@@ -37,9 +37,9 @@ can be undone. `look` sets parts of the view's look, its viewpoint, an outline r
 grid, and whether colliders' outlines show, which the editor and any other client set too, the \
 last to set a part winning; give back, as null, what you set when you're done. `capture` shows \
 the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it. \
-Textures, models and fonts have IDs, 16 hex digits, which `assets` lists with their paths: the \
-game, but a lockstep session's joiner, whose host does, writes each one's in an ID file beside \
-it, `<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it \
+Textures, models, fonts, prefabs and UIs have IDs, 16 hex digits, which `assets` lists with their \
+paths: the game, but a lockstep session's joiner, whose host does, writes each one's in an ID file \
+beside it, `<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it \
 with its file. Rename or move a file with its ID file or alone: the game moves an ID file left behind \
 beside the file it was renamed to, by what the file holds, as it runs or as it next starts, so \
 that it keeps its ID, unless you edit it in the same step, or rename it in a clone the game hasn't \
@@ -49,10 +49,12 @@ path; a value you give may name it either way, by its path from the asset root, 
 one it hasn't loaded yet. A model is placed as an entity with a `ModelRoot` of it, under which the \
 game spawns the model's nodes, which you change through the model's file or the root, never \
 themselves. An entity's `Text` draws its text where the entity is, in its font, or the engine's \
-own for none. Edit the file of a shader, a texture, a model, a font, a sound or music the game \
-has loaded, and it reloads within a second or so, warning in its logs if it doesn't compile, \
-decode or bake, music playing on from where it was; in a recorded run or a lockstep session, a \
-model's nodes and materials change only as the game next starts. You can't hear the game, but its \
+own for none. Edit the file of a shader, a texture, a model, a font, a UI, a sound or music the \
+game has loaded, and it reloads within a second or so, warning in its logs if it doesn't compile, \
+decode, bake or read, music playing on from where it was; in a recorded run or a lockstep session, \
+a model's nodes and materials change only as the game next starts. A game's UI from a `.ui` file, \
+its menus and HUDs, is laid out by the engine: `ui` lists each node's rectangle, text and state. \
+You can't hear the game, but its \
 logs say each sound and music it starts, `Sound started` and `Music started`, at the debug level. \
 `debug` debugs its Luau scripts: set a script's breakpoints by its path and lines, then wait for \
 a stop with `wait_ms`, and read the stack's locals; while a script has stopped, the game waits \
@@ -475,6 +477,20 @@ fn tools() -> Value {
             &[],
         ),
         tool(
+            "ui",
+            "Each UI the game's layers added from a `.ui` file under its asset root, laid out for \
+             its view, so that you check a layout as data: its `name`, its file's `asset` ID and \
+             `path`, whether the last frame `drawn` drew it, whether it takes `input`, its \
+             `focus`, and its `nodes`, each after its parent: `name`, `kind`, `parent`, `rect`, \
+             [x, y, width, height] from the view's top left in the canvas's units, 1,080 to its \
+             height, `pixels`, the same in the view's pixels as a capture's PNG has them, \
+             `visible`, `text`, and a button's `disabled`, `focused` and `pressed`. Edit the \
+             file and it reloads, each node keeping what the game's code set of it. Press a \
+             button with `input`: the cursor at its pixels, then the left button down and up.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "snapshot",
             "Saves the world whole as a snapshot file, which a run given `--restore` starts from.",
             json!({}),
@@ -659,7 +675,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "snapshot" => {
+        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui" | "snapshot" => {
             call(name, Value::Null)
         }
         // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
@@ -815,6 +831,7 @@ mod tests {
         let assets = tools.iter().find(|tool| tool["name"] == "assets");
         let kinds = &assets.expect("an `assets` tool")["inputSchema"]["properties"]["kind"]["enum"];
         assert_eq!(*kinds, json!(gg_api::asset::KINDS));
+        assert!(tools.iter().any(|tool| tool["name"] == "ui"), "a `ui` tool");
         let unknown = super::answer(&mut pick, r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#);
         assert_eq!(unknown.expect("answered")["error"]["code"], -32601);
         let broken = super::answer(&mut pick, "{").expect("answered");
