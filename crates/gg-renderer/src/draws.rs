@@ -26,7 +26,8 @@ use crate::{
 /// nothing.
 ///
 /// The renderer's [`Scene`](crate::Scene) draws among them where [`draw_scene`](Self::draw_scene)
-/// says, or else before them all.
+/// says, or else before them all. Skinned meshes, the scene's or these', draw where the frame's
+/// skins move them, as [`skin`](Self::skin) says.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
@@ -39,6 +40,10 @@ pub struct Draws {
     pub(crate) ids: Vec<[u32; 2]>,
     /// Every draw's parameters, one after another.
     pub(crate) params: Vec<u8>,
+    /// The skinned meshes the frame moves, each with where its joints' matrices are in `joints`.
+    pub(crate) skins: Vec<(u32, Range<usize>)>,
+    /// Every skin's joints' matrices, one after another.
+    pub(crate) joints: Vec<Mat4>,
 }
 
 /// Consecutive draws of one mesh with one shader that draw the same faces: the instances of one
@@ -234,9 +239,37 @@ impl Draws {
         }
     }
 
+    /// Has the frame draw skinned `mesh`, a model's mesh that
+    /// [`pack_skinned`](crate::ModelMesh::pack_skinned) packed, wherever it draws, with its vertices
+    /// where `joints` carry them: the matrix of each of its skin's joints, in order, from the
+    /// mesh's own space as the joint was bound, to the mesh's own space as the joint is drawn now,
+    /// which each vertex blends by its weights, as glTF's skins do. A frame that doesn't, or that
+    /// gives a mesh that isn't skinned or drawable yet, draws it unmoved, as it was bound. A joint
+    /// past those given counts as the last.
+    pub fn skin<V>(&mut self, mesh: Mesh<V>, joints: impl IntoIterator<Item = Mat4>) {
+        let start = self.joints.len();
+        self.joints.extend(joints);
+        if self.joints.len() > start {
+            self.skins.push((mesh.index, start..self.joints.len()));
+        }
+    }
+
+    /// The skinned meshes the frame moves, each by its handle, with its joints' matrices, in
+    /// order: for tests, which read what a frame skins.
+    #[doc(hidden)]
+    pub fn skins(&self) -> impl Iterator<Item = (u32, &[Mat4])> {
+        (self.skins.iter()).map(|(mesh, joints)| (*mesh, &self.joints[joints.clone()]))
+    }
+
     /// Moves `other`'s draws after these, in their order, leaving it empty but with its memory, as
     /// though they'd been drawn here.
     pub fn append(&mut self, other: &mut Draws) {
+        let joint = self.joints.len();
+        self.joints.append(&mut other.joints);
+        (self.skins).extend(
+            (other.skins.drain(..))
+                .map(|(mesh, joints)| (mesh, joint + joints.start..joint + joints.end)),
+        );
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.append(&mut other.transforms);
         self.ids.append(&mut other.ids);
@@ -330,6 +363,8 @@ impl Draws {
         self.transforms.clear();
         self.ids.clear();
         self.params.clear();
+        self.skins.clear();
+        self.joints.clear();
     }
 }
 

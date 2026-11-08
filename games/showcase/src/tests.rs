@@ -33,8 +33,8 @@ fn every_asset_has_its_id_file_beside_it() {
     let project = Project::read(dir()).expect("the project reads");
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
     assert!(
-        found.assets.len() >= 16,
-        "6 textures, a sky's among them, 9 models and a font"
+        found.assets.len() >= 18,
+        "7 textures, a sky's and the Fox's among them, 10 models and a font"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 22, "{scenes:?}");
+    assert_eq!(scenes.len(), 23, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -412,4 +412,45 @@ fn a_jukebox_plays_the_music_while_its_there() {
     cx.world_mut().despawn(jukebox).expect("despawned");
     showcase.update(&mut cx, frame);
     assert_eq!(cx.music_playing(), None);
+}
+
+/// Moods cross-fades its fox to its model's next clip every so often, through `gg.play`: from
+/// Survey to Walk once its three seconds have passed, Walk's weight easing in over half a second as
+/// Survey's eases out and leaves; and the fox's joints move as its clips play.
+#[test]
+fn a_mood_cross_fades_its_fox_to_its_next_clip() {
+    let (mut cx, mut showcase) = loaded();
+    let scene = dir().join("scenes").join("skeletal.ron");
+    cx.load_scene_file(&scene).expect("the scene loads");
+    let world = cx.world_mut();
+    let moody = world.entities(Some("Moods")).expect("declared").next();
+    let fox = moody.expect("a fox with moods");
+    let plays = |world: &World| -> Vec<(String, f32)> {
+        let gg_engine::Animator(plays) = world.get::<gg_engine::Animator>(fox).expect("playing");
+        plays
+            .iter()
+            .map(|play| (play.clip.clone(), play.weight))
+            .collect()
+    };
+    let mut ticks = (0..).map(|number| Tick { number });
+    let mut run = |showcase: &mut Showcase, world: &mut World, count: usize| {
+        for _ in 0..count {
+            showcase.tick(world, ticks.next().expect("ticks without end"));
+        }
+    };
+    let joints = |world: &World| -> Vec<Transform> {
+        let nodes = world.query::<(&gg_engine::ModelNode, &Transform)>();
+        nodes.map(|(_, transform)| *transform).collect()
+    };
+    let before = joints(world);
+    run(&mut showcase, world, 191);
+    assert_eq!(plays(world), [("Survey".to_owned(), 1.0)]);
+    assert_ne!(joints(world), before, "the joints move");
+    run(&mut showcase, world, 1);
+    run(&mut showcase, world, 1);
+    let fading = plays(world);
+    assert_eq!(fading[0].0, "Survey");
+    assert_eq!(fading[1], ("Walk".to_owned(), 2.0 / 32.0), "{fading:?}");
+    run(&mut showcase, world, 31);
+    assert_eq!(plays(world), [("Walk".to_owned(), 1.0)]);
 }

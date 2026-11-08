@@ -13,7 +13,8 @@
 //! ```text
 //! ignored     a count, then each thing the model has that the engine ignores, as a string
 //! parts       a count, then each part's translation (3 f32s), rotation (4) and scale (3); its
-//!             parent's index and its primitive's, each u32::MAX for none; and its light's kind,
+//!             parent's index, its primitive's and its skin's, each u32::MAX for none; and its
+//!             light's kind,
 //!             a byte (0 for none, then directional, point, spot), and, if it has one, its color
 //!             (3 f32s), intensity, range (0 for none), inner cone and outer cone (an f32 each)
 //! primitives  a count, then each one's name, as a string; its mesh: its packing (8 f32s: offset,
@@ -23,8 +24,10 @@
 //!             and error (an f32), its sphere's center (3 f32s) and radius, its meshlets' count and
 //!             each one's first vertex, vertex count, first triangle and triangle count, its
 //!             center (3 f32s) and radius and its cone (4 bytes), its meshlets' vertices' count and
-//!             each, its meshlets' triangles' bytes' count and the bytes, and the count of its
-//!             levels' meshlets, none or as many as its levels, and each one's first and count;
+//!             each, its meshlets' triangles' bytes' count and the bytes, the count of its
+//!             levels' meshlets, none or as many as its levels, and each one's first and count,
+//!             and its skinned vertices' count, none or as many as its vertices, and each one's
+//!             joints and weights (4 u16s each);
 //!             its material's color (4 f32s), its workflow, a byte (0 for metallic-roughness, 1 for
 //!             specular-glossiness),
 //!             then its metallic and roughness (an f32 each) or its specular color (3 f32s) and
@@ -33,6 +36,12 @@
 //!             for none), whether it's nearest (a byte) and its wrap (a byte: clamp, repeat,
 //!             mirror); its alpha mode (a byte: opaque, mask, blend), the mask's cutoff (an f32),
 //!             and whether it's double-sided and unlit (a byte each)
+//! skins       a count, then each one's joints' count, each joint's part's index, and each joint's
+//!             inverse bind matrix (16 f32s, column by column)
+//! clips       a count, then each one's name, as a string, its duration (an f32) and its channels'
+//!             count, and each channel's part's index, its path (a byte: translation, rotation,
+//!             scale), its interpolation (a byte: linear, step, cubic spline), its times' count
+//!             and its times, and its values' count and its values (f32s each)
 //! images      a count, then each one's KTX2, as its length and its bytes
 //! ```
 //!
@@ -41,12 +50,14 @@
 
 use std::path::Path;
 
-use gg_core::math::{Quat, Vec2, Vec3};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Lod, Lods, Meshlet, Meshlets, ModelMesh, PackedVertex, Packing, Workflow, Wrap,
+    AlphaMode, Lod, Lods, Meshlet, Meshlets, ModelMesh, PackedVertex, Packing, SkinVertex,
+    Workflow, Wrap,
 };
 
+use crate::animation::{Channel, Clip, Interpolation, Path as Moved, Skin};
 use crate::gltf::{self, Imported, Material, Part, Primitive, Sampling};
 use crate::image::read_ktx2;
 use crate::model;
@@ -106,6 +117,7 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         floats(&mut bytes, &scale.to_array());
         index(&mut bytes, part.parent);
         index(&mut bytes, part.primitive);
+        index(&mut bytes, part.skin);
         let Some(light) = &part.light else {
             bytes.push(0);
             continue;
@@ -200,6 +212,12 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         bytes.extend_from_slice(&meshlets.triangles);
         count(&mut bytes, meshlets.levels.len());
         words(&mut bytes, meshlets.levels.as_flattened());
+        count(&mut bytes, mesh.skin.len());
+        for skinned in &mesh.skin {
+            for half in skinned.joints.into_iter().chain(skinned.weights) {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+        }
         let material = &primitive.material;
         floats(&mut bytes, &material.color);
         match material.workflow {
@@ -244,6 +262,39 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         bytes.push(alpha);
         floats(&mut bytes, &[cutoff]);
         bytes.extend_from_slice(&[u8::from(material.double_sided), u8::from(material.unlit)]);
+    }
+    count(&mut bytes, imported.skins.len());
+    for skin in &imported.skins {
+        count(&mut bytes, skin.joints.len());
+        for &joint in &skin.joints {
+            bytes.extend_from_slice(&joint.to_le_bytes());
+        }
+        for bind in &skin.inverse_binds {
+            floats(&mut bytes, &bind.to_cols_array());
+        }
+    }
+    count(&mut bytes, imported.clips.len());
+    for clip in &imported.clips {
+        string(&mut bytes, &clip.name);
+        floats(&mut bytes, &[clip.duration]);
+        count(&mut bytes, clip.channels.len());
+        for channel in &clip.channels {
+            bytes.extend_from_slice(&channel.part.to_le_bytes());
+            bytes.push(match channel.path {
+                Moved::Translation => 0,
+                Moved::Rotation => 1,
+                Moved::Scale => 2,
+            });
+            bytes.push(match channel.interpolation {
+                Interpolation::Linear => 0,
+                Interpolation::Step => 1,
+                Interpolation::CubicSpline => 2,
+            });
+            count(&mut bytes, channel.times.len());
+            floats(&mut bytes, &channel.times);
+            count(&mut bytes, channel.values.len());
+            floats(&mut bytes, &channel.values);
+        }
     }
     count(&mut bytes, images.len());
     for image in images {
@@ -302,8 +353,8 @@ impl<'a> Reader<'a> {
             .map(|_| self.string())
             .collect::<Result<_, _>>()?;
         let mut parts: Vec<Part> = Vec::new();
-        // A transform, two indices and a light's kind.
-        let part_count = self.count(49)?;
+        // A transform, three indices and a light's kind.
+        let part_count = self.count(53)?;
         let mut drawn = Vec::with_capacity(part_count);
         for i in 0..part_count {
             let [x, y, z, rx, ry, rz, rw, sx, sy, sz] = self.floats()?;
@@ -324,6 +375,10 @@ impl<'a> Reader<'a> {
             }
             let primitive = self.index()?;
             drawn.extend(primitive);
+            let skin = self.index()?;
+            if skin.is_some() && primitive.is_none() {
+                return Err(format!("its part {i} is skinned, and draws nothing"));
+            }
             let light = self
                 .light()
                 .map_err(|problem| format!("its part {i} {problem}"))?;
@@ -332,6 +387,7 @@ impl<'a> Reader<'a> {
                 parent,
                 primitive,
                 light,
+                skin,
             });
         }
         let mut held = 0;
@@ -352,6 +408,22 @@ impl<'a> Reader<'a> {
         if let Some(i) = drawn.iter().find(|&&i| i >= primitives.len()) {
             return Err(format!("a part draws primitive {i}, which it hasn't"));
         }
+        let skins = (0..self.count(4)?)
+            .map(|i| {
+                self.skin(parts.len())
+                    .map_err(|problem| format!("its skin {i} {problem}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if let Some(skin) = (parts.iter().filter_map(|part| part.skin)).find(|&s| s >= skins.len())
+        {
+            return Err(format!("a part is skinned by skin {skin}, which it hasn't"));
+        }
+        let clips = (0..self.count(12)?)
+            .map(|i| {
+                self.clip(parts.len())
+                    .map_err(|problem| format!("its clip {i} {problem}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut images = Vec::new();
         for i in 0..self.count(4)? {
             let len = self.count(1)?;
@@ -388,8 +460,105 @@ impl<'a> Reader<'a> {
             parts,
             primitives,
             images,
+            skins,
+            clips,
             ignored,
         })
+    }
+
+    /// A skin of a model of `parts` parts: its joints, each one of them, and their inverse bind
+    /// matrices, finite. The error says what's wrong with it.
+    fn skin(&mut self, parts: usize) -> Result<Skin, String> {
+        // A joint's part and its matrix.
+        let count = self.count(68)?;
+        if count == 0 {
+            return Err("has no joints".to_owned());
+        }
+        let joints = (0..count)
+            .map(|_| self.u32())
+            .collect::<Result<Vec<_>, String>>()?;
+        if let Some(joint) = joints.iter().find(|&&joint| joint as usize >= parts) {
+            return Err(format!("has a joint of part {joint}, of its {parts}"));
+        }
+        let inverse_binds = (0..count)
+            .map(|_| Ok(Mat4::from_cols_array(&self.floats()?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        if !inverse_binds.iter().all(Mat4::is_finite) {
+            return Err("has an inverse bind matrix of a number that isn't finite".to_owned());
+        }
+        Ok(Skin {
+            joints,
+            inverse_binds,
+        })
+    }
+
+    /// A clip of a model of `parts` parts: its channels, each of one of them, its times from 0 up,
+    /// each after the last, and as many values as its interpolation takes, all finite. The error
+    /// says what's wrong with it.
+    fn clip(&mut self, parts: usize) -> Result<Clip, String> {
+        let name = self.string()?;
+        let [duration] = self.floats()?;
+        // A part, a path, an interpolation and two counts.
+        let channels = (0..self.count(14)?)
+            .map(|c| {
+                let part = self.u32()?;
+                let [path, interpolation]: [u8; 2] = self.take(2)?.try_into().expect("2 bytes");
+                let path = match path {
+                    0 => Moved::Translation,
+                    1 => Moved::Rotation,
+                    2 => Moved::Scale,
+                    other => return Err(format!("has channel {c} of path {other}")),
+                };
+                let interpolation = match interpolation {
+                    0 => Interpolation::Linear,
+                    1 => Interpolation::Step,
+                    2 => Interpolation::CubicSpline,
+                    other => return Err(format!("has channel {c} interpolated as {other}")),
+                };
+                let times = self.f32s()?;
+                let values = self.f32s()?;
+                let channel = Channel {
+                    part,
+                    path,
+                    interpolation,
+                    times,
+                    values,
+                };
+                let keys = if interpolation == Interpolation::CubicSpline {
+                    3
+                } else {
+                    1
+                };
+                let held = channel.values.len() == channel.times.len() * keys * channel.width();
+                let finite = (channel.times.iter().chain(&channel.values)).all(|f| f.is_finite());
+                let ordered = channel.times.windows(2).all(|pair| pair[0] < pair[1]);
+                let from_zero = channel.times.first().is_some_and(|&first| first >= 0.0);
+                if part as usize >= parts || !(held && finite && ordered && from_zero) {
+                    return Err(format!(
+                        "has channel {c}, of part {part} of its {parts}, of times or values that \
+                         don't hold together"
+                    ));
+                }
+                Ok(channel)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if !duration.is_finite() {
+            return Err("has a duration that isn't finite".to_owned());
+        }
+        Ok(Clip {
+            name,
+            duration,
+            channels,
+        })
+    }
+
+    /// A count of floats, then the floats, the count checked against the bytes left.
+    fn f32s(&mut self) -> Result<Vec<f32>, String> {
+        let count = self.count(4)?;
+        let bytes = self.take(count * 4)?;
+        Ok((bytes.as_chunks::<4>().0.iter())
+            .map(|&float| f32::from_le_bytes(float))
+            .collect())
     }
 
     /// A part's light, if it has one, as [`gltf::allowed`] allows it. The error says what's wrong
@@ -499,6 +668,9 @@ impl<'a> Reader<'a> {
             colors: Vec::new(),
             normals: Vec::new(),
             tangents: Vec::new(),
+            joints: Vec::new(),
+            weights: Vec::new(),
+            reach: None,
             indices: Vec::new(),
             mesh: Some(mesh),
             material,
@@ -569,6 +741,17 @@ impl<'a> Reader<'a> {
         let meshlet_levels = (0..self.count(8)?)
             .map(|_| Ok([self.u32()?, self.u32()?]))
             .collect::<Result<Vec<_>, String>>()?;
+        let skin = (0..self.count(size_of::<SkinVertex>())?)
+            .map(|_| {
+                let bytes = self.take(size_of::<SkinVertex>())?;
+                let halves = bytes.as_chunks::<2>().0;
+                let half = |i: usize| u16::from_le_bytes(halves[i]);
+                Ok(SkinVertex {
+                    joints: [half(0), half(1), half(2), half(3)],
+                    weights: [half(4), half(5), half(6), half(7)],
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mesh = ModelMesh {
             packing,
             vertices,
@@ -584,6 +767,7 @@ impl<'a> Reader<'a> {
                 triangles,
                 levels: meshlet_levels,
             },
+            skin,
         };
         // What's wrong with it, which follows the primitive's own name in the error.
         mesh.check("its").map_err(|error| {
@@ -736,6 +920,9 @@ mod tests {
                 double_sided: true,
                 unlit: true,
             },
+            joints: Vec::new(),
+            weights: Vec::new(),
+            reach: None,
         };
         let turned = Transform {
             translation: Vec3::new(1.0, 2.0, 3.0),
@@ -757,12 +944,14 @@ mod tests {
                 parent: None,
                 primitive: None,
                 light: Some(spot),
+                skin: None,
             },
             Part {
                 transform: Transform::IDENTITY,
                 parent: Some(0),
                 primitive: Some(0),
                 light: None,
+                skin: Some(0),
             },
         ];
         // And the same again, of specular and glossiness, which no part draws.
@@ -777,7 +966,33 @@ mod tests {
             parts,
             primitives: vec![primitive, glossy],
             images: vec![read(&colors), read(&normals)],
-            ignored: vec!["1 animation".to_owned()],
+            ignored: vec!["1 camera".to_owned()],
+            skins: vec![Skin {
+                joints: vec![0, 1],
+                inverse_binds: vec![Mat4::IDENTITY, Mat4::from_rotation_x(0.5)],
+            }],
+            clips: vec![Clip {
+                name: "Wave".to_owned(),
+                duration: 2.0,
+                channels: vec![
+                    Channel {
+                        part: 1,
+                        path: Moved::Rotation,
+                        interpolation: Interpolation::CubicSpline,
+                        times: vec![0.0, 2.0],
+                        values: [[0.0; 4], [0.0, 0.0, 0.0, 1.0], [0.0; 4]]
+                            .repeat(2)
+                            .concat(),
+                    },
+                    Channel {
+                        part: 0,
+                        path: Moved::Scale,
+                        interpolation: Interpolation::Step,
+                        times: vec![0.5],
+                        values: vec![2.0, 2.0, 2.0],
+                    },
+                ],
+            }],
         };
         (imported, vec![colors, normals])
     }
@@ -953,9 +1168,9 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, byte)| {
-                // The light's kind is the byte after the first part's transform and indices, past
-                // the ignored's count and string and the parts' count.
-                let at = 4 + 4 + "1 animation".len() + 4 + 48;
+                // The light's kind is the byte after the first part's transform and its three
+                // indices, past the ignored's count and string and the parts' count.
+                let at = 4 + 4 + "1 camera".len() + 4 + 40 + 12;
                 if i == at { 9 } else { byte }
             })
             .collect(),
@@ -964,6 +1179,10 @@ mod tests {
             let error = decode("m", Path::new("m.glb"), &bytes).expect_err(case);
             assert_eq!(error.code(), "engine.bad_model", "{case}");
             assert!(error.to_string().contains("\"m\""), "{case}: {error}");
+            if case == "a light of a kind it hasn't" {
+                let kind = error.to_string().contains("has a light of kind 9");
+                assert!(kind, "{case}: {error}");
+            }
         }
     }
 }

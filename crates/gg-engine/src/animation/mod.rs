@@ -1,12 +1,17 @@
-//! Animation at the world's ticks: sprites played through a sheet's cells, and components' fields
-//! eased from one value to another. Their state is the world's, in their components, stepped by
+//! Animation at the world's ticks: sprites played through a sheet's cells, components' fields eased
+//! from one value to another, and models' clips played on their parts, which move skinned meshes'
+//! vertices as their joints. Their state is the world's, in their components, stepped by
 //! [`Tick::DT`](crate::Tick::DT) at each tick a layer runs [`step_animation`] in, so that
 //! snapshots, replays and peers see them alike.
 
+mod animator;
 mod flipbook;
+mod skeleton;
 mod tween;
 
+pub use animator::{Animator, Play};
 pub use flipbook::Flipbook;
+pub(crate) use skeleton::{Channel, Clip, Interpolation, Path, Skin, placed, skinned_box};
 pub use tween::{Curve, Ease, Tween, TweenValue, Tweens};
 
 use crate::{Reflect, World};
@@ -14,8 +19,8 @@ use crate::{Reflect, World};
 /// How an animation goes on once it reaches its end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum Playback {
-    /// It stops there: a flipbook on its last cell, and a tween with its field at its end, which
-    /// leaves its entity's [`Tweens`].
+    /// It stops there: a flipbook on its last cell, a tween with its field at its end, which
+    /// leaves its entity's [`Tweens`], and a clip on its last pose.
     #[default]
     Once,
     /// It starts again from its start.
@@ -25,12 +30,14 @@ pub enum Playback {
 }
 
 /// Steps `world`'s animation a tick, [`Tick::DT`](crate::Tick::DT), as a system a layer's tick
-/// runs, after what starts its tweens, such as scripts, and before physics, which takes in bodies
-/// where the tweens put them: its [`Flipbook`]s, then its [`Tweens`].
+/// runs, after what starts its tweens and plays its clips, such as scripts, and before physics,
+/// which takes in bodies where animation put them: its [`Flipbook`]s, then its [`Tweens`], then
+/// its [`Animator`]s.
 pub fn step_animation(world: &mut World) {
     let _zone = gg_core::zone!();
     flipbook::step(world);
     tween::step(world);
+    animator::step(world);
 }
 
 #[cfg(test)]

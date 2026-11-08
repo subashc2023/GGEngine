@@ -123,7 +123,7 @@ run, are references too, which CI checks on every platform: a change to their si
 the hash reads, or to glam, libm, rapier2d or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
 test -p sandbox -p shards` rewrites them alone, with those of the demo's live recording,
 `games/shards/tests/references/live.recording`. gg-engine's `physics/` holds three more and its
-`animation/` one, edited by hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
+`animation/` two, edited by hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
 new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64

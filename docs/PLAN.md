@@ -122,16 +122,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **3D physics** (2026-11-07)
 - **Characters and queries** (2026-11-07)
 - **Flipbooks and tweens** (2026-11-07)
+- **Skeletal animation** (2026-11-08)
 
 ## Now
 
-**Phase 14, 3D gameplay**, as Next has it. Its milestones after flipbooks and tweens, in order:
+**Phase 14, 3D gameplay**, as Next has it. Its last milestone:
 
-- **Skeletal animation.** glTF's skins and animations: a model's joints its nodes' entities, which
-  its clips move at the ticks, sampled, blended and cross-faded as a component on its root says; the
-  joints' matrices handed to the renderer, which skins a mesh's vertices in a compute pass before
-  the view draws, culling it by bounds its clips reach. The showcase gets an animated character, a
-  skinned glTF under a free license.
 - **A networked 3D demo.** A small 3D game in `games/`, a project of its own: its players
   characters among physics' bodies, the keys or a pad moving them and the mouse looking about, its
   cursor grabbed, animated as they move, its sounds placed in 3D by where they are from the
@@ -329,7 +325,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
-| glTF that `Context::add_model` refuses or ignores, as it lists: skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, a material's textures that read a second set of texture coordinates, as occlusion baked for a lightmap does, an image sampled as both colors and data, material extensions past unlit, emission's strength and specular-glossiness (texture transforms, clearcoat, transmission, as the Bistro's 18 glass materials have it, which draw opaque, specular, sheen and the rest), quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it |
+| glTF that `Context::add_model` refuses or ignores, as it lists: morph targets and animations' channels of their weights, more than four joints a vertex (JOINTS_1 and WEIGHTS_1), cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, a material's textures that read a second set of texture coordinates, as occlusion baked for a lightmap does, an image sampled as both colors and data, material extensions past unlit, emission's strength and specular-glossiness (texture transforms, clearcoat, transmission, as the Bistro's 18 glass materials have it, which draw opaque, specular, sheen and the rest), quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it |
+| Skinned primitives whose materials blend, which draw as they were bound, unmoved: what blends draws from the frame's own draws, which take no mesh of an entity's own | A skinned model blends, as hair cards and eyelashes do |
+| Skinned meshes' own motion under TAA: a skinned vertex moves with its instance's transform alone, as the frame before's skinned vertices aren't kept, so what its joints move leaves a frame's smear | Smearing shows on a character that moves its limbs fast |
+| Sharing a skinned model's bind pose and weights between its instances: each instance's entity draws a copy of its model's mesh, its vertices and weights twice over, and the frame's moved vertices again | A crowd's memory is measured to matter |
+| Skinned meshes cut into meshlets and drawn into the visibility buffer, their meshlets' bounds made again each frame from their joints: they draw by their indices, shaded as they draw | Skinned characters are measured to cost the view, as a crowd would |
+| Skinned vertices carried past the reach their clips give, as code that poses joints itself, inverse kinematics or a ragdoll, carries them: they clamp to its box, which views cull by | A game poses joints past its clips |
+| Root motion, events at a clip's times, masks that blend a clip into some joints alone, additive clips, and graphs or state machines of clips: an `Animator` plays whole clips, each at a weight, which code and scripts set | The networked 3D demo, or a game after it, needs one |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |

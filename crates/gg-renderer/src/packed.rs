@@ -7,12 +7,13 @@
 //! A mesh's buffer holds, in order: a [`Header`], in two vertices' room, which says how its
 //! vertices unpack and where its meshlets' parts are; its vertices; and, if it has meshlets, what
 //! draws each, as [`GpuMeshlet`] has it, their vertices' indices among the mesh's, and their
-//! triangles' bytes, each part starting at a word. Shaders reach every part through the buffer's
-//! address, as `shaders/model.slang` reads them.
+//! triangles' bytes, each part starting at a word; or, if it's skinned, which keeps it from being
+//! cut into meshlets, each vertex's [`SkinVertex`]. Shaders reach every part through the buffer's
+//! address, as `shaders/model.slang` and `shaders/skin.slang` read them.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
-use gg_core::math::{Vec2, Vec3, libm};
+use gg_core::math::{BVec3, Vec2, Vec3, libm};
 
 use crate::mesh::{bad_mesh, check, check_lods};
 use crate::{Lod, Lods, ModelVertex};
@@ -49,6 +50,42 @@ pub struct PackedVertex {
     pub color: [u8; 4],
 }
 
+/// A skinned vertex's joints and how far each moves it, as a skinned mesh's buffer holds them after
+/// its vertices: `SkinVertex` in `shaders/skin.slang`. Each frame the renderer places the vertex
+/// where its joints, as they're drawn then, carry it, each as much as its weight says.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, NoUninit)]
+pub struct SkinVertex {
+    /// Its joints, each the index of one of its skin's joints among the joint matrices a frame
+    /// gives its mesh, as [`Draws::skin`](crate::Draws::skin) says.
+    pub joints: [u16; 4],
+    /// How much each joint moves it, as unsigned 16-bit fractions of 1, which add up to 1 within
+    /// their rounding; a vertex whose add up to 0 stays where it is.
+    pub weights: [u16; 4],
+}
+
+impl SkinVertex {
+    /// A vertex moved by `joints` as much as `weights` say, its weights scaled to add up to 1, as
+    /// glTF has them nearly, and rounded to 16 bits each; those that aren't finite, or are less
+    /// than 0, taken as 0, so that a vertex of weights that add up to 0 stays where it is.
+    pub fn new(joints: [u16; 4], weights: [f32; 4]) -> Self {
+        let weights = weights.map(|weight| {
+            if weight.is_finite() {
+                weight.max(0.0)
+            } else {
+                0.0
+            }
+        });
+        let total: f32 = weights.iter().sum();
+        let weights = if total > 0.0 && total.is_finite() {
+            weights.map(|weight| (weight / total * 65_535.0).round() as u16)
+        } else {
+            [0; 4]
+        };
+        Self { joints, weights }
+    }
+}
+
 /// How a mesh's [`PackedVertex`]es unpack: a vertex's position is `offset + step * position`, and
 /// its texture coordinates `uv_offset + uv_scale * uv`.
 ///
@@ -66,8 +103,8 @@ pub struct Packing {
 }
 
 /// What a mesh's buffer starts with, `Header` in `shaders/model.slang`: its [`Packing`], and where
-/// its meshlets' parts start, in words from the buffer's start, or 0 for a mesh without them. Two
-/// vertices' room, so that its vertices follow it in place.
+/// its meshlets' parts start and where its [`SkinVertex`]es do, in words from the buffer's start,
+/// or 0 for a mesh without them. Two vertices' room, so that its vertices follow it in place.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 struct Header {
@@ -75,7 +112,7 @@ struct Header {
     meshlets: u32,
     meshlet_vertices: u32,
     triangles: u32,
-    unused: u32,
+    skin: u32,
 }
 
 /// How many vertices' room a mesh's [`Header`] takes at its buffer's start: `HEADER` in
@@ -146,7 +183,7 @@ pub struct Meshlets {
 
 /// A model's mesh as the GPU draws it: its vertices packed, its triangles' indices, its levels of
 /// detail among them with the sphere round its vertices, and its meshlets, if the cooker cut it
-/// into them.
+/// into them; or, skinned, none, and what moves each vertex.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelMesh {
     pub packing: Packing,
@@ -155,6 +192,10 @@ pub struct ModelMesh {
     pub indices: Vec<u32>,
     pub lods: Lods,
     pub meshlets: Meshlets,
+    /// For a skinned mesh, what moves each of `vertices`, as many as they are, which its packing
+    /// and sphere hold wherever its clips take them, as [`pack_skinned`](Self::pack_skinned)
+    /// packs it; none for the rest.
+    pub skin: Vec<SkinVertex>,
 }
 
 impl ModelMesh {
@@ -180,7 +221,52 @@ impl ModelMesh {
         indices: Vec<u32>,
         levels: Vec<Lod>,
     ) -> Result<Self> {
-        let (offset, step) = grid(bounds(vertices.iter().map(|v| v.position.to_array())));
+        Self::pack_within(name, vertices, indices, levels, None)
+    }
+
+    /// `vertices` packed, as [`pack`](Self::pack) packs them, as a skinned mesh, each moved by
+    /// what `skin` says, as many as they are: its grid and its sphere hold `reach`, a box, its
+    /// least corner and its most, as well as the vertices, so that the vertices skinned within it
+    /// pack too, and views cull it there.
+    ///
+    /// Fails as `pack` does, for vertices or a box its grid can't reach.
+    ///
+    /// # Panics
+    ///
+    /// If `skin` isn't as many as `vertices`.
+    pub fn pack_skinned(
+        name: &str,
+        vertices: &[ModelVertex],
+        indices: Vec<u32>,
+        levels: Vec<Lod>,
+        skin: Vec<SkinVertex>,
+        reach: [Vec3; 2],
+    ) -> Result<Self> {
+        assert_eq!(skin.len(), vertices.len(), "a skinned vertex each");
+        let mut mesh = Self::pack_within(name, vertices, indices, levels, Some(reach))?;
+        mesh.skin = skin;
+        Ok(mesh)
+    }
+
+    /// `vertices` packed, as [`pack`](Self::pack) says, their grid and sphere holding `reach` too,
+    /// if it's given.
+    fn pack_within(
+        name: &str,
+        vertices: &[ModelVertex],
+        indices: Vec<u32>,
+        levels: Vec<Lod>,
+        reach: Option<[Vec3; 2]>,
+    ) -> Result<Self> {
+        let corners: Vec<Vec3> = (reach.into_iter())
+            .flat_map(|[low, high]| {
+                (0..8).map(move |corner: u32| {
+                    let pick = BVec3::new(corner & 1 != 0, corner & 2 != 0, corner & 4 != 0);
+                    Vec3::select(pick, high, low)
+                })
+            })
+            .collect();
+        let points = (vertices.iter().map(|v| v.position)).chain(corners.iter().copied());
+        let (offset, step) = grid(bounds(points.map(|point| point.to_array())));
         let (uv_offset, uv_scale) = uv_box(bounds(vertices.iter().map(|v| v.uv.to_array())));
         let packing = Packing {
             offset,
@@ -225,6 +311,7 @@ impl ModelMesh {
                 radius: 0.0,
             },
             meshlets: Meshlets::default(),
+            skin: Vec::new(),
         };
         // Checked as they unpack rather than by the grid alone, whose offset and step can be finite
         // while a vertex unpacks past what an f32 holds.
@@ -239,7 +326,13 @@ impl ModelMesh {
                 ),
             ));
         }
-        (mesh.lods.center, mesh.lods.radius) = sphere(&positions);
+        // The box's corners as the grid holds them, its nearest points.
+        let mut held = positions;
+        held.extend(corners.iter().map(|&corner| {
+            let steps = ((corner - offset) / step).round();
+            offset + steps.clamp(Vec3::ZERO, Vec3::splat(65_535.0)) * step
+        }));
+        (mesh.lods.center, mesh.lods.radius) = sphere(&held);
         Ok(mesh)
     }
 
@@ -273,6 +366,21 @@ impl ModelMesh {
             || !(step.is_finite() && step > 0.0)
         {
             return bad(format!("packs its vertices by {:?}", self.packing));
+        }
+        if !self.skin.is_empty() {
+            if self.skin.len() != self.vertices.len() {
+                return bad(format!(
+                    "has {} skinned vertices, of its {} vertices",
+                    self.skin.len(),
+                    self.vertices.len()
+                ));
+            }
+            if !(self.meshlets.meshlets.is_empty() && self.meshlets.levels.is_empty()) {
+                return bad(
+                    "is skinned and cut into meshlets, which skinning would leave behind"
+                        .to_owned(),
+                );
+            }
         }
         let Meshlets {
             meshlets,
@@ -367,16 +475,24 @@ impl ModelMesh {
         } else {
             meshlet_vertices + vertices.len() as u32
         };
+        // A skinned mesh has no meshlets, as `check` says, so its skin follows its vertices.
+        let skin = if self.skin.is_empty() {
+            0
+        } else {
+            words(start)
+        };
         let header = Header {
             packing: self.packing,
             meshlets: gpu_meshlets,
             meshlet_vertices,
             triangles: triangles_at,
-            unused: 0,
+            skin,
         };
-        let mut bytes = Vec::with_capacity(start + self.meshlets_bytes());
+        let skin_bytes = size_of_val(self.skin.as_slice());
+        let mut bytes = Vec::with_capacity(start + self.meshlets_bytes() + skin_bytes);
         bytes.extend_from_slice(bytemuck::bytes_of(&header));
         bytes.extend_from_slice(bytemuck::cast_slice(&self.vertices));
+        bytes.extend_from_slice(bytemuck::cast_slice(&self.skin));
         for meshlet in meshlets {
             let gpu = GpuMeshlet {
                 vertices: meshlet.vertices,
@@ -576,6 +692,60 @@ mod tests {
         v.x += if v.x >= 0.0 { -t } else { t };
         v.y += if v.y >= 0.0 { -t } else { t };
         v.normalize()
+    }
+
+    /// A skinned vertex's weights add up to 1 within their rounding, whatever they added up to,
+    /// and to 0 where none is above 0 or one isn't finite; and a skinned mesh packs on a grid,
+    /// and in a sphere, that hold its reach as well as its vertices, its weights after its
+    /// vertices in its buffer, which its header says, and refuses meshlets and a weight short.
+    #[test]
+    fn a_skinned_mesh_packs_within_its_reach_with_its_weights() {
+        let weighed = SkinVertex::new([3, 1, 0, 0], [2.0, 2.0, 0.0, 0.0]);
+        assert_eq!(weighed.weights, [32_768, 32_768, 0, 0]);
+        assert_eq!(
+            SkinVertex::new([0; 4], [-1.0, 0.0, 0.0, 0.0]).weights,
+            [0; 4]
+        );
+        assert_eq!(
+            SkinVertex::new([0; 4], [f32::NAN, 1.0, 0.0, 0.0]).weights,
+            [0, 65_535, 0, 0]
+        );
+        let vertices = [vertex(Vec3::ZERO), vertex(Vec3::X), vertex(Vec3::Y)];
+        let skin = vec![weighed; 3];
+        let reach = [Vec3::new(-4.0, -1.0, 0.0), Vec3::new(2.0, 5.0, 1.0)];
+        let indices = vec![0, 1, 2];
+        let mesh = ModelMesh::pack_skinned("skinned", &vertices, indices, Vec::new(), skin, reach)
+            .expect("packs");
+        mesh.check("skinned").expect("holds together");
+        assert!(
+            mesh.packing.offset.cmple(reach[0]).all(),
+            "{:?}",
+            mesh.packing
+        );
+        let far = mesh.packing.offset + Vec3::splat(65_535.0 * mesh.packing.step);
+        assert!(far.cmpge(reach[1]).all(), "{far}");
+        for corner in [reach[0], reach[1]] {
+            let apart = corner.distance(mesh.lods.center);
+            assert!(
+                apart <= mesh.lods.radius + mesh.packing.step,
+                "{corner} in the sphere"
+            );
+        }
+        let bytes = mesh.bytes();
+        let word = |at: usize| u32::from_le_bytes(bytes[4 * at..4 * at + 4].try_into().unwrap());
+        // The header's last word, after its packing's eight and its meshlets' three.
+        let skin_at = (size_of::<Header>() + 3 * size_of::<PackedVertex>()) / 4;
+        assert_eq!(word(11) as usize, skin_at);
+        let halves = [0, 1, 2, 3].map(|i| [word(skin_at + i) & 0xFFFF, word(skin_at + i) >> 16]);
+        let joints = weighed.joints.map(u32::from);
+        let weights = weighed.weights.map(u32::from);
+        assert_eq!(halves.as_flattened(), [joints, weights].as_flattened());
+        let mut cut = mesh.clone();
+        cut.meshlets.levels = vec![[0, 1]];
+        assert!(cut.check("cut").is_err(), "skinned and cut into meshlets");
+        let mut short = mesh;
+        short.skin.pop();
+        assert!(short.check("short").is_err(), "a skinned vertex short");
     }
 
     /// Positions unpack within half a step of where they were, on a step that's a power of two,

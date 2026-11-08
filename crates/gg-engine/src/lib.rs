@@ -113,6 +113,7 @@ mod render_thread;
 mod renderer_components;
 mod scene_files;
 mod script;
+mod skins;
 mod snapshot;
 mod sync_test;
 // What tests share, in tests alone.
@@ -155,7 +156,9 @@ use tracing::{debug, error, info, warn};
 use package::{Files, Package};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
-pub use animation::{Curve, Ease, Flipbook, Playback, Tween, TweenValue, Tweens, step_animation};
+pub use animation::{
+    Animator, Curve, Ease, Flipbook, Play, Playback, Tween, TweenValue, Tweens, step_animation,
+};
 pub use audio::{Bus, Music, Place, Sound};
 pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,

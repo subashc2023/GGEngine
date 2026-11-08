@@ -39,7 +39,8 @@ struct PackedVertex {
 };
 
 // What a mesh's buffer starts with, in `HEADER` vertices' room, `Header` in src/packed.rs: how its
-// vertices unpack, and where its meshlets' parts start, in words from the buffer's start.
+// vertices unpack, and where its meshlets' parts start and its skin, as skin.slang reads it, in
+// words from the buffer's start.
 struct Header {
     float3 offset;
     float step;
@@ -48,7 +49,7 @@ struct Header {
     uint meshlets;
     uint meshlet_vertices;
     uint triangles;
-    uint unused;
+    uint skin;
 };
 
 // `HEADER_VERTICES` in src/packed.rs.

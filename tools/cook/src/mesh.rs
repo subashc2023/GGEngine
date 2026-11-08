@@ -78,6 +78,9 @@ pub(crate) struct Vertices<'a> {
     pub(crate) colors: &'a mut Vec<[f32; 4]>,
     pub(crate) normals: &'a mut Vec<[f32; 3]>,
     pub(crate) tangents: &'a mut Vec<[f32; 4]>,
+    /// A skinned primitive's joints and weights, as many as its positions; none for the rest.
+    pub(crate) joints: &'a mut Vec<[u16; 4]>,
+    pub(crate) weights: &'a mut Vec<[f32; 4]>,
 }
 
 impl Vertices<'_> {
@@ -88,6 +91,10 @@ impl Vertices<'_> {
         *self.colors = remap_vertex_buffer(self.colors, count, remap);
         *self.normals = remap_vertex_buffer(self.normals, count, remap);
         *self.tangents = remap_vertex_buffer(self.tangents, count, remap);
+        if !self.joints.is_empty() {
+            *self.joints = remap_vertex_buffer(self.joints, count, remap);
+            *self.weights = remap_vertex_buffer(self.weights, count, remap);
+        }
     }
 }
 
@@ -111,6 +118,9 @@ impl Vertices<'_> {
 /// the order they draw in, no level's triangles are ordered for the vertex cache or overdraw: level
 /// 0's are the input's in its order, and a coarser level's in the order the simplifier gives them.
 ///
+/// A skinned primitive's joints and weights move with its vertices, and merge vertices identical
+/// in them too.
+///
 /// Panics if the vertex arrays differ in length, if `indices` aren't whole triangles, or if one is
 /// past the vertices, as the glTF reader leaves none; and if the levels' indices together pass
 /// what 32 bits count.
@@ -120,6 +130,7 @@ pub(crate) fn optimize(
     keep_order: bool,
 ) -> Vec<Lod> {
     let len = vertices.positions.len();
+    let skinned = !vertices.joints.is_empty();
     // meshoptimizer builds with its assertions off in release, and reads past the vertices of an
     // index that is.
     assert!(
@@ -129,6 +140,8 @@ pub(crate) fn optimize(
             vertices.normals.len(),
             vertices.tangents.len()
         ] == [len; 4]
+            && (!skinned || [vertices.joints.len(), vertices.weights.len()] == [len; 2])
+            && vertices.joints.len() == vertices.weights.len()
             && indices.len().is_multiple_of(3)
             && indices.iter().all(|&index| (index as usize) < len),
         "a primitive's vertex arrays are of one length, and its indices whole triangles within them"
@@ -137,17 +150,18 @@ pub(crate) fn optimize(
     // Its simplifier follows the mesh's topology, so identical vertices left apart would be seams
     // it can't collapse across (the README's basic simplification). Every attribute is compared,
     // bit for bit, as the shader reads them.
-    let (count, remap) = generate_vertex_remap_multi(
-        len,
-        &[
-            VertexStream::new(vertices.positions.as_ptr()),
-            VertexStream::new(vertices.uvs.as_ptr()),
-            VertexStream::new(vertices.colors.as_ptr()),
-            VertexStream::new(vertices.normals.as_ptr()),
-            VertexStream::new(vertices.tangents.as_ptr()),
-        ],
-        Some(indices),
-    );
+    let mut streams = vec![
+        VertexStream::new(vertices.positions.as_ptr()),
+        VertexStream::new(vertices.uvs.as_ptr()),
+        VertexStream::new(vertices.colors.as_ptr()),
+        VertexStream::new(vertices.normals.as_ptr()),
+        VertexStream::new(vertices.tangents.as_ptr()),
+    ];
+    if skinned {
+        streams.push(VertexStream::new(vertices.joints.as_ptr()));
+        streams.push(VertexStream::new(vertices.weights.as_ptr()));
+    }
+    let (count, remap) = generate_vertex_remap_multi(len, &streams, Some(indices));
     *indices = remap_index_buffer(Some(indices.as_slice()), len, &remap);
     vertices.remap(count, &remap);
 
@@ -316,6 +330,8 @@ mod tests {
                 colors: &mut self.colors,
                 normals: &mut self.normals,
                 tangents: &mut self.tangents,
+                joints: &mut Vec::new(),
+                weights: &mut Vec::new(),
             };
             optimize(vertices, &mut self.indices, keep_order)
         }

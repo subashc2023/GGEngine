@@ -139,6 +139,10 @@ const REMOVED: [&str; 7] = [
 /// before it starts. A mod's scripts tween only fields they may write, and only if they may write
 /// `Tweens`.
 ///
+/// `gg.play(entity, clip, fade)` has `entity`, a model's root, play its model's clip named `clip`,
+/// cross-fading from what it plays over `fade` seconds, or cutting to it without one, as
+/// [`World::play`] does. A mod's scripts play clips only if they may write `Animator`.
+///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
 /// whose precision is the platform's are libm's, which the compiler is told aren't builtins: it
@@ -756,6 +760,7 @@ impl Host {
         gg.raw_set("cast_box", lua.create_function(cast_box)?)?;
         gg.raw_set("cast_capsule", lua.create_function(cast_capsule)?)?;
         gg.raw_set("tween", lua.create_function(tween)?)?;
+        gg.raw_set("play", lua.create_function(play)?)?;
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
@@ -2044,6 +2049,23 @@ fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Resul
         }
         let started = world.tween(entity, tween);
         started.map_err(|error| reaching(&world, entity, field, &error))
+    })
+}
+
+/// `gg.play(entity, clip, fade)`: has `entity`, a model's root, play its clip `clip`, cross-fading
+/// over `fade` seconds, or at once without them, as the scripts' doc says.
+fn play(_: &Lua, (entity, clip, fade): (LightUserData, String, Option<f64>)) -> mlua::Result<()> {
+    shared(|shared| {
+        let entity = entity_of(entity)?;
+        if let Some(held) = &shared.held
+            && !held.grant.writes("Animator")
+        {
+            let what = format!("playing clip {clip:?}, which its root's `Animator` holds,");
+            return Err(mlua::Error::runtime(ungranted("write:Animator", &what)));
+        }
+        let mut world = shared.world.borrow_mut();
+        let played = world.play(entity, &clip, fade.unwrap_or(0.0) as f32);
+        played.map_err(|error| mlua::Error::runtime(format!("{error:#}")))
     })
 }
 

@@ -16,6 +16,7 @@ use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
 use gg_renderer::{AlphaMode, Map, ModelMesh, Workflow, Wrap};
 
+use crate::animation::{Channel, Clip, Interpolation, Path as Moved, Skin, placed, skinned_box};
 use crate::image::{self, Image};
 use crate::package::Files;
 use crate::{Light, LightKind, Transform};
@@ -32,7 +33,11 @@ pub struct Imported {
     /// Each image a reached material samples, once, in the order first reached: read as far as its
     /// header, for the loader to decode, unless the engine has decoded it, as for hot reload.
     pub images: Vec<Image>,
-    /// What the file has that the engine ignores, for an info event, such as "1 animation" or
+    /// Each skin a part's node names, once, in the order the walk first reaches it.
+    pub(crate) skins: Vec<Skin>,
+    /// Each animation, in the file's order, its channels of nodes in the scene.
+    pub(crate) clips: Vec<Clip>,
+    /// What the file has that the engine ignores, for an info event, such as "1 camera" or
     /// "extension KHR_texture_transform".
     pub(crate) ignored: Vec<String>,
 }
@@ -69,6 +74,8 @@ pub(crate) struct Part {
     pub(crate) primitive: Option<usize>,
     /// The light its node holds, as KHR_lights_punctual gives it, if it has one.
     pub(crate) light: Option<Light>,
+    /// The index in `skins` of the skin whose joints move what it draws, if its node's skinned.
+    pub(crate) skin: Option<usize>,
 }
 
 /// Triangles, with what their vertices and their material give them.
@@ -89,6 +96,15 @@ pub struct Primitive {
     /// MikkTSpace makes for a lit material with a normal map, as glTF says, its vertices apart where
     /// their corners' tangents differ; and (1, 0, 0, 1), which nothing reads, for the rest.
     pub tangents: Vec<[f32; 4]>,
+    /// As many as the positions, for a primitive with JOINTS_0 and WEIGHTS_0: each vertex's four
+    /// joints, of the skin that moves it; and none for the rest.
+    pub joints: Vec<[u16; 4]>,
+    /// As many as `joints`: how much each of a vertex's joints moves it.
+    pub weights: Vec<[f32; 4]>,
+    /// For a primitive a skinned node draws, the box, its least corner and its most, that its
+    /// vertices reach as its skins' joints move them through the model's clips, with room to
+    /// spare, which its mesh packs within and views cull it by.
+    pub reach: Option<[Vec3; 2]>,
     /// Three for each triangle; 0..count where the primitive has none.
     pub indices: Vec<u32>,
     /// Its mesh as the cooker made it, its triangles optimized, with levels of detail and
@@ -113,7 +129,18 @@ impl Primitive {
             + size_of_val(self.colors.as_slice())
             + size_of_val(self.normals.as_slice())
             + size_of_val(self.tangents.as_slice())
+            + size_of_val(self.joints.as_slice())
+            + size_of_val(self.weights.as_slice())
             + size_of_val(self.indices.as_slice())
+    }
+
+    /// The bytes each of its vertices' joints and weights take: none for a primitive without them.
+    fn skin_bytes(&self) -> usize {
+        if self.joints.is_empty() {
+            0
+        } else {
+            size_of::<[u16; 4]>() + size_of::<[f32; 4]>()
+        }
     }
 
     /// Gives each triangle corners of its own, facing as the triangle does, counterclockwise its
@@ -126,7 +153,7 @@ impl Primitive {
             indices.iter().map(|&i| values[i as usize]).collect()
         }
         // A vertex a corner, but its tangent, and its index.
-        let corner = VERTEX - size_of::<[f32; 4]>() + size_of::<u32>();
+        let corner = VERTEX - size_of::<[f32; 4]>() + size_of::<u32>() + self.skin_bytes();
         memory.hold(self.indices.len() * corner)?;
         let before = self.held();
         let (positions, uvs, colors) = (
@@ -134,6 +161,10 @@ impl Primitive {
             corners(&self.indices, &self.uvs),
             corners(&self.indices, &self.colors),
         );
+        if !self.joints.is_empty() {
+            self.joints = corners(&self.indices, &self.joints);
+            self.weights = corners(&self.indices, &self.weights);
+        }
         self.normals = positions
             .as_chunks::<3>()
             .0
@@ -181,7 +212,8 @@ impl Primitive {
             .collect();
         drop(tangents);
         let vertices = placed.len();
-        memory.hold(vertices * VERTEX)?;
+        memory.hold(vertices * (VERTEX + self.skin_bytes()))?;
+        let skinned = if self.joints.is_empty() { 0 } else { vertices };
         let mut welded = Self {
             name: self.name.clone(),
             positions: vec![[0.0; 3]; vertices],
@@ -189,6 +221,9 @@ impl Primitive {
             colors: vec![[0.0; 4]; vertices],
             normals: vec![[0.0; 3]; vertices],
             tangents: vec![[0.0; 4]; vertices],
+            joints: vec![[0; 4]; skinned],
+            weights: vec![[0.0; 4]; skinned],
+            reach: self.reach,
             indices,
             mesh: self.mesh.clone(),
             material: self.material,
@@ -200,6 +235,10 @@ impl Primitive {
             welded.colors[at] = self.colors[v];
             welded.normals[at] = self.normals[v];
             welded.tangents[at] = tangent.map(f32::from_bits);
+            if skinned > 0 {
+                welded.joints[at] = self.joints[v];
+                welded.weights[at] = self.weights[v];
+            }
         }
         let before = self.held();
         *self = welded;
@@ -473,15 +512,10 @@ pub(crate) fn read(
         )));
     }
     let mut ignored = Vec::new();
-    for (count, what) in [
-        (gltf.animations.len(), "animation"),
-        (gltf.cameras.len(), "camera"),
-    ] {
-        match count {
-            0 => {}
-            1 => ignored.push(format!("1 {what}")),
-            _ => ignored.push(format!("{count} {what}s")),
-        }
+    match gltf.cameras.len() {
+        0 => {}
+        1 => ignored.push("1 camera".to_owned()),
+        count => ignored.push(format!("{count} cameras")),
     }
     ignored.extend(
         (gltf.extensions_used.iter())
@@ -499,6 +533,7 @@ pub(crate) fn read(
         meshes: BTreeMap::new(),
         images: BTreeMap::new(),
         holds: BTreeMap::new(),
+        parts_of: Vec::new(),
         imported: Imported {
             ignored,
             ..Imported::default()
@@ -510,6 +545,8 @@ pub(crate) fn read(
         },
     };
     reader.scene()?;
+    reader.animations()?;
+    reader.reach()?;
     Ok(reader.imported)
 }
 
@@ -571,7 +608,9 @@ const GLB_MAGIC: u32 = u32::from_le_bytes(*b"glTF");
 const JSON_CHUNK: u32 = u32::from_le_bytes(*b"JSON");
 const BIN_CHUNK: u32 = u32::from_le_bytes(*b"BIN\0");
 
+const BYTE: u32 = 5120;
 const UNSIGNED_BYTE: u32 = 5121;
+const SHORT: u32 = 5122;
 const UNSIGNED_SHORT: u32 = 5123;
 const UNSIGNED_INT: u32 = 5125;
 const FLOAT: u32 = 5126;
@@ -734,6 +773,8 @@ struct Reader<'a, F> {
     /// What each image in `imported.images` holds, as the first texture that samples it says:
     /// colors, `None`, or a map of data.
     holds: BTreeMap<usize, Option<Map>>,
+    /// By node: the part it is, if the scene reaches it.
+    parts_of: Vec<Option<usize>>,
     imported: Imported,
     memory: Memory<'a>,
 }
@@ -749,6 +790,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             })?;
         let scene = model.item(&gltf.scenes, "scene", index)?;
         let mut reached = vec![false; gltf.nodes.len()];
+        self.parts_of = vec![None; gltf.nodes.len()];
+        // Each skinned part, and its skin in glTF's order, which are read once every joint's part
+        // is known.
+        let mut skinned: Vec<(usize, u32)> = Vec::new();
         // A stack of its own rather than recursion, so that no chain of nodes is too deep.
         let mut stack: Vec<(u32, Option<usize>)> =
             scene.nodes.iter().rev().map(|&node| (node, None)).collect();
@@ -757,11 +802,6 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             if mem::replace(&mut reached[index as usize], true) {
                 return Err(model.bad(format!(
                     "reaches node {index} twice: it's in a cycle, or has two parents"
-                )));
-            }
-            if node.skin.is_some() {
-                return Err(model.unsupported(format!(
-                    "has node {index} skinned, which the engine doesn't draw"
                 )));
             }
             // A node's morph weights replace its mesh's, which are only their default.
@@ -786,23 +826,292 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             };
             self.memory.hold(size_of::<Part>())?;
             let part = self.imported.parts.len();
+            self.parts_of[index as usize] = Some(part);
+            let one = (primitives.len() == 1).then_some(primitives.start);
             self.imported.parts.push(Part {
                 transform,
                 parent,
-                primitive: (primitives.len() == 1).then_some(primitives.start),
+                primitive: one,
                 light,
+                skin: None,
             });
+            if let (Some(skin), Some(_)) = (node.skin, one) {
+                skinned.push((part, skin));
+            }
             if primitives.len() > 1 {
                 // An entity draws one primitive, so each of the mesh's is a child of the node's.
                 self.memory.hold(primitives.len() * size_of::<Part>())?;
-                (self.imported.parts).extend(primitives.map(|primitive| Part {
-                    transform: Transform::IDENTITY,
-                    parent: Some(part),
-                    primitive: Some(primitive),
-                    light: None,
-                }));
+                for primitive in primitives {
+                    if let Some(skin) = node.skin {
+                        skinned.push((self.imported.parts.len(), skin));
+                    }
+                    self.imported.parts.push(Part {
+                        transform: Transform::IDENTITY,
+                        parent: Some(part),
+                        primitive: Some(primitive),
+                        light: None,
+                        skin: None,
+                    });
+                }
             }
             stack.extend(node.children.iter().rev().map(|&child| (child, Some(part))));
+        }
+        // Each skin once, as it's first reached, and the parts it moves checked against it.
+        let mut read: BTreeMap<u32, usize> = BTreeMap::new();
+        for (part, index) in skinned {
+            let skin = match read.get(&index) {
+                Some(&skin) => skin,
+                None => {
+                    let skin = self.skin(index)?;
+                    self.imported.skins.push(skin);
+                    read.insert(index, self.imported.skins.len() - 1);
+                    self.imported.skins.len() - 1
+                }
+            };
+            self.imported.parts[part].skin = Some(skin);
+            let primitive = self.imported.parts[part]
+                .primitive
+                .expect("a skinned part draws");
+            let primitive = &self.imported.primitives[primitive];
+            let joints = self.imported.skins[skin].joints.len();
+            if primitive.joints.is_empty() {
+                return Err(model.bad(format!(
+                    "has primitive {}, which a node skinned by skin {index} draws, without \
+                     JOINTS_0 and WEIGHTS_0",
+                    primitive.name
+                )));
+            }
+            let past = primitive
+                .joints
+                .iter()
+                .flatten()
+                .find(|&&j| usize::from(j) >= joints);
+            if let Some(past) = past {
+                return Err(model.bad(format!(
+                    "has primitive {} moved by joint {past}, past the {joints} of skin {index}, \
+                     which skins it",
+                    primitive.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Skin `index`: its joints' parts, each node of them in the scene, and their inverse bind
+    /// matrices, identities without them.
+    fn skin(&mut self, index: u32) -> Result<Skin> {
+        let (model, gltf) = (self.model, self.gltf);
+        let skin = model.item(&gltf.skins, "skin", index)?;
+        if skin.joints.is_empty() || skin.joints.len() > usize::from(u16::MAX) + 1 {
+            return Err(model.bad(format!(
+                "has skin {index} of {} joints, where glTF's skins have from 1 to 65,536",
+                skin.joints.len()
+            )));
+        }
+        self.memory
+            .hold(skin.joints.len() * (size_of::<u32>() + size_of::<Mat4>()))?;
+        let joints = (skin.joints.iter())
+            .map(|&node| {
+                let part = self.parts_of.get(node as usize).copied().flatten();
+                let part = part.ok_or_else(|| {
+                    model.bad(format!(
+                        "has skin {index} of joint node {node}, which isn't in its scene"
+                    ))
+                })?;
+                Ok(u32::try_from(part).expect("fewer than 2^32 parts"))
+            })
+            .collect::<Result<Vec<u32>>>()?;
+        let inverse_binds = match skin.inverse_bind_matrices {
+            Some(accessor) => {
+                let what = format!("skin {index}");
+                self.attribute(&what, "its inverse bind matrices", accessor, &[16], false)?;
+                let matrices = self.floats[&accessor].0.as_chunks::<16>().0;
+                if matrices.len() < joints.len() {
+                    return Err(model.bad(format!(
+                        "has skin {index} of {} joints and {} inverse bind matrices",
+                        joints.len(),
+                        matrices.len()
+                    )));
+                }
+                (matrices[..joints.len()].iter())
+                    .map(Mat4::from_cols_array)
+                    .collect()
+            }
+            None => vec![Mat4::IDENTITY; joints.len()],
+        };
+        Ok(Skin {
+            joints,
+            inverse_binds,
+        })
+    }
+
+    /// Reads each animation into a clip, in the file's order, its channels that move nodes the
+    /// scene reaches, each checked as glTF says: its times from 0 up, each after the last, and as
+    /// many values as its interpolation takes, its rotations made unit. A channel of morph weights,
+    /// or of a node outside the scene, is ignored, as `imported.ignored` says.
+    fn animations(&mut self) -> Result<()> {
+        let (model, gltf) = (self.model, self.gltf);
+        for (i, animation) in gltf.animations.iter().enumerate() {
+            let name = animation.name.clone().unwrap_or_else(|| i.to_string());
+            self.memory.hold(name.len())?;
+            let mut channels = Vec::new();
+            let mut duration: f32 = 0.0;
+            for (c, channel) in animation.channels.iter().enumerate() {
+                let what = format!("channel {c} of animation {i}");
+                let Some(node) = channel.target.node else {
+                    continue;
+                };
+                let path = match channel.target.path.as_str() {
+                    "translation" => Moved::Translation,
+                    "rotation" => Moved::Rotation,
+                    "scale" => Moved::Scale,
+                    "weights" => {
+                        self.imported
+                            .ignored
+                            .push(format!("{what}, of morph weights"));
+                        continue;
+                    }
+                    other => {
+                        return Err(model.bad(format!(
+                            "has {what} of path {other:?}, which glTF doesn't have"
+                        )));
+                    }
+                };
+                let part = self.parts_of.get(node as usize).copied().flatten();
+                let Some(part) = part else {
+                    (self.imported.ignored)
+                        .push(format!("{what}, of node {node} outside the scene"));
+                    continue;
+                };
+                let sampler = model.item(
+                    &animation.samplers,
+                    &format!("sampler of animation {i}"),
+                    channel.sampler,
+                )?;
+                let interpolation = match sampler.interpolation.as_deref().unwrap_or("LINEAR") {
+                    "LINEAR" => Interpolation::Linear,
+                    "STEP" => Interpolation::Step,
+                    "CUBICSPLINE" => Interpolation::CubicSpline,
+                    other => {
+                        return Err(model.bad(format!(
+                            "has {what} interpolated {other:?}, which glTF doesn't have"
+                        )));
+                    }
+                };
+                self.attribute(&what, "its times", sampler.input, &[1], false)?;
+                let times = self.memory.copy(&self.floats[&sampler.input].0)?;
+                let ordered = times.windows(2).all(|pair| pair[0] < pair[1]);
+                if !(ordered && times[0] >= 0.0) {
+                    return Err(model.bad(format!(
+                        "has {what} of times that don't go up from 0, each after the last"
+                    )));
+                }
+                let rotation = path == Moved::Rotation;
+                let width = if rotation { 4 } else { 3 };
+                let (count, finite) = self.floats_of(
+                    &what,
+                    "its values",
+                    sampler.output,
+                    &[width],
+                    rotation,
+                    rotation,
+                )?;
+                debug_assert_eq!(count, width);
+                if !finite {
+                    let output = sampler.output;
+                    return Err(model.bad(format!(
+                        "accessor {output} holds a number that isn't finite"
+                    )));
+                }
+                let mut values = self.memory.copy(&self.floats[&sampler.output].0)?;
+                let keys = if interpolation == Interpolation::CubicSpline {
+                    3
+                } else {
+                    1
+                };
+                if values.len() != times.len() * keys * width {
+                    return Err(model.bad(format!(
+                        "has {what} of {} times and {} values, where its interpolation takes {}",
+                        times.len(),
+                        values.len() / width,
+                        times.len() * keys
+                    )));
+                }
+                if rotation {
+                    // Values of a cubic spline in turn its tangents and its values, of which the
+                    // values alone are rotations.
+                    for (v, value) in values.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        if keys == 3 && v % 3 != 1 {
+                            continue;
+                        }
+                        let unit = unit(Quat::from_array(*value)).ok_or_else(|| {
+                            model.bad(format!("has {what} of a rotation that won't make unit"))
+                        })?;
+                        *value = unit.to_array();
+                    }
+                }
+                duration = duration.max(*times.last().expect("an accessor has elements"));
+                channels.push(Channel {
+                    part: u32::try_from(part).expect("fewer than 2^32 parts"),
+                    path,
+                    interpolation,
+                    times,
+                    values,
+                });
+            }
+            self.memory.hold(channels.len() * size_of::<Channel>())?;
+            self.imported.clips.push(Clip {
+                name,
+                duration,
+                channels,
+            });
+        }
+        Ok(())
+    }
+
+    /// Gives each primitive a skinned part draws its reach: the box its vertices span as the part's
+    /// skin moves them, as the model rests and posed at each clip's keys' times, or at as many as
+    /// [`Clip::pose_times`] gives, each clip's from the model at rest; grown by a tenth of its
+    /// longest side each way, for the poses between those times, and between clips blended.
+    fn reach(&mut self) -> Result<()> {
+        let Imported {
+            parts,
+            primitives,
+            skins,
+            clips,
+            ..
+        } = &mut self.imported;
+        let rest: Vec<Transform> = parts.iter().map(|part| part.transform).collect();
+        let parents: Vec<Option<usize>> = parts.iter().map(|part| part.parent).collect();
+        let mut poses = vec![placed(&rest, &parents)];
+        for clip in clips.iter() {
+            for time in clip.pose_times() {
+                let mut locals = rest.clone();
+                for channel in &clip.channels {
+                    let local = &mut locals[channel.part as usize];
+                    channel.apply(local, channel.sample(time));
+                }
+                poses.push(placed(&locals, &parents));
+            }
+        }
+        for (part, skinned) in parts.iter().enumerate() {
+            let (Some(skin), Some(primitive)) = (skinned.skin, skinned.primitive) else {
+                continue;
+            };
+            let primitive = &mut primitives[primitive];
+            let skin = &skins[skin];
+            let positions = &primitive.positions;
+            let (joints, weights) = (&primitive.joints, &primitive.weights);
+            let bounds = poses
+                .iter()
+                .map(|pose| skinned_box(pose, part, skin, positions, joints, weights))
+                .chain(primitive.reach);
+            let [low, high] = bounds
+                .fold([Vec3::INFINITY, Vec3::NEG_INFINITY], |[l, h], [a, b]| {
+                    [l.min(a), h.max(b)]
+                });
+            let spare = Vec3::splat((high - low).max_element() / 10.0);
+            primitive.reach = Some([low - spare, high + spare]);
         }
         Ok(())
     }
@@ -1058,6 +1367,28 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
             None => None,
         };
+        let attributes = &primitive.attributes;
+        let (joints, weights) = match (attributes.get("JOINTS_0"), attributes.get("WEIGHTS_0")) {
+            (Some(&joints), Some(&weights)) => {
+                let joints = self.joints(&what, joints)?;
+                same_count("JOINTS_0", joints.len())?;
+                self.attribute(&what, "WEIGHTS_0", weights, &[4], true)?;
+                let weights = self.copied(weights)?;
+                same_count("WEIGHTS_0", weights.len())?;
+                (joints, weights)
+            }
+            (None, None) => (Vec::new(), Vec::new()),
+            _ => {
+                return Err(model.bad(format!(
+                    "{what} has one of JOINTS_0 and WEIGHTS_0 without the other"
+                )));
+            }
+        };
+        if attributes.contains_key("JOINTS_1") {
+            self.imported.ignored.push(format!(
+                "{what}'s JOINTS_1 and WEIGHTS_1: it's moved by its first four joints"
+            ));
+        }
         let name = match &mesh.name {
             Some(name) => format!("{name}/{index}"),
             None => format!("{mesh_index}/{index}"),
@@ -1069,6 +1400,9 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             colors,
             normals: Vec::new(),
             tangents: Vec::new(),
+            joints,
+            weights,
+            reach: None,
             indices,
             mesh: None,
             material,
@@ -1359,12 +1693,29 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         components: &[usize],
         normalized: bool,
     ) -> Result<(usize, bool)> {
+        self.floats_of(what, semantic, index, components, normalized, false)
+    }
+
+    /// Accessor `index`, as [`floats`](Self::floats) reads it, of normalized signed bytes or
+    /// shorts too, if `signed`, each 1 at its most and -1 at its least and the one past it, as
+    /// glTF allows for an animation's rotations.
+    fn floats_of(
+        &mut self,
+        what: &str,
+        semantic: &str,
+        index: u32,
+        components: &[usize],
+        normalized: bool,
+        signed: bool,
+    ) -> Result<(usize, bool)> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
         let component = match (accessor.component_type, accessor.normalized) {
             (FLOAT, false) => Some(Component::Float),
             (UNSIGNED_BYTE, true) if normalized => Some(Component::Byte),
             (UNSIGNED_SHORT, true) if normalized => Some(Component::Short),
+            (BYTE, true) if normalized && signed => Some(Component::SignedByte),
+            (SHORT, true) if normalized && signed => Some(Component::SignedShort),
             _ => None,
         };
         let count = match accessor.kind.as_str() {
@@ -1372,6 +1723,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             "VEC2" => Some(2),
             "VEC3" => Some(3),
             "VEC4" => Some(4),
+            "MAT4" => Some(16),
             _ => None,
         };
         let (Some(component), Some(count)) = (component, count.filter(|c| components.contains(c)))
@@ -1399,6 +1751,12 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 Component::Short => (elements.flat_map(|element| element.as_chunks::<2>().0))
                     .map(|&short| f32::from(u16::from_le_bytes(short)) / 65535.0)
                     .collect(),
+                Component::SignedByte => (elements.flatten())
+                    .map(|&byte| (f32::from(byte as i8) / 127.0).max(-1.0))
+                    .collect(),
+                Component::SignedShort => (elements.flat_map(|element| element.as_chunks::<2>().0))
+                    .map(|&short| (f32::from(i16::from_le_bytes(short)) / 32767.0).max(-1.0))
+                    .collect(),
             };
             let finite = floats.iter().all(|float| float.is_finite());
             self.floats.insert(index, (floats, finite));
@@ -1411,6 +1769,41 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     fn copied<const N: usize>(&mut self, index: u32) -> Result<Vec<[f32; N]>> {
         let floats = self.floats[&index].0.as_chunks::<N>().0;
         self.memory.copy(floats)
+    }
+
+    /// Accessor `index`, which `what` reads as JOINTS_0: each vertex's four joints, of unsigned
+    /// bytes or shorts, as glTF allows.
+    fn joints(&mut self, what: &str, index: u32) -> Result<Vec<[u16; 4]>> {
+        let (model, gltf) = (self.model, self.gltf);
+        let accessor = model.item(&gltf.accessors, "accessor", index)?;
+        let size = match (
+            accessor.kind.as_str(),
+            accessor.component_type,
+            accessor.normalized,
+        ) {
+            ("VEC4", UNSIGNED_BYTE, false) => 1,
+            ("VEC4", UNSIGNED_SHORT, false) => 2,
+            _ => {
+                return Err(model.bad(format!(
+                    "{what} reads JOINTS_0 from accessor {index}, {}, which glTF doesn't allow \
+                     for it",
+                    accessor.describe()
+                )));
+            }
+        };
+        // Checked first, so that a count past the bytes there are fails as that, then counted.
+        self.accessor_bytes(index, accessor, 4 * size)?;
+        self.memory
+            .hold(accessor.count as usize * size_of::<[u16; 4]>())?;
+        let (bytes, stride) = self.accessor_bytes(index, accessor, 4 * size)?;
+        Ok((bytes.chunks(stride))
+            .map(|element| {
+                std::array::from_fn(|i| match size {
+                    1 => u16::from(element[i]),
+                    _ => u16::from_le_bytes([element[2 * i], element[2 * i + 1]]),
+                })
+            })
+            .collect())
     }
 
     /// Accessor `index`, which `what` reads as its indices, once, into `indices`, checked to be
@@ -1660,21 +2053,23 @@ pub(crate) fn allowed(light: &Light) -> bool {
         && outer_cone <= std::f32::consts::FRAC_PI_2
 }
 
-/// The type of an attribute's components that glTF allows: floats, or unsigned bytes or shorts
-/// normalized to 0 to 1.
+/// The type of an attribute's components that glTF allows: floats, unsigned bytes or shorts
+/// normalized to 0 to 1, or, for an animation's rotations, signed ones normalized to -1 to 1.
 #[derive(Clone, Copy)]
 enum Component {
     Float,
     Byte,
     Short,
+    SignedByte,
+    SignedShort,
 }
 
 impl Component {
     fn size(self) -> usize {
         match self {
             Self::Float => 4,
-            Self::Byte => 1,
-            Self::Short => 2,
+            Self::Byte | Self::SignedByte => 1,
+            Self::Short | Self::SignedShort => 2,
         }
     }
 }
@@ -1768,7 +2163,8 @@ mod json {
         pub(super) textures: Vec<Texture>,
         pub(super) samplers: Vec<Sampler>,
         pub(super) images: Vec<Image>,
-        pub(super) animations: Vec<IgnoredAny>,
+        pub(super) skins: Vec<Skin>,
+        pub(super) animations: Vec<Animation>,
         pub(super) cameras: Vec<IgnoredAny>,
         pub(super) extensions: Extensions,
     }
@@ -1824,6 +2220,43 @@ mod json {
         pub(super) scale: Option<[f32; 3]>,
         pub(super) weights: Vec<f32>,
         pub(super) extensions: NodeExtensions,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct Skin {
+        pub(super) inverse_bind_matrices: Option<u32>,
+        pub(super) joints: Vec<u32>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct Animation {
+        pub(super) name: Option<String>,
+        pub(super) channels: Vec<AnimationChannel>,
+        pub(super) samplers: Vec<AnimationSampler>,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct AnimationChannel {
+        pub(super) sampler: u32,
+        pub(super) target: AnimationTarget,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct AnimationTarget {
+        pub(super) node: Option<u32>,
+        pub(super) path: String,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub(super) struct AnimationSampler {
+        pub(super) input: u32,
+        pub(super) interpolation: Option<String>,
+        pub(super) output: u32,
     }
 
     #[derive(Deserialize, Default)]
@@ -2282,6 +2715,7 @@ pub(crate) mod tests {
             parent,
             primitive,
             light: None,
+            skin: None,
         };
         let lit = |transform, parent, primitive| Part {
             light: Some(Light {
@@ -2364,6 +2798,9 @@ pub(crate) mod tests {
                         unlit: true,
                         ..Material::default()
                     },
+                    joints: Vec::new(),
+                    weights: Vec::new(),
+                    reach: None,
                 },
                 // Without normals, so flat: each triangle's corners its own, in its order.
                 Primitive {
@@ -2392,6 +2829,9 @@ pub(crate) mod tests {
                         double_sided: true,
                         ..Material::default()
                     },
+                    joints: Vec::new(),
+                    weights: Vec::new(),
+                    reach: None,
                 },
                 Primitive {
                     name: "1/1".to_owned(),
@@ -2407,6 +2847,9 @@ pub(crate) mod tests {
                     indices: vec![0, 1, 2],
                     mesh: None,
                     material: Material::default(),
+                    joints: Vec::new(),
+                    weights: Vec::new(),
+                    reach: None,
                 },
             ]
         );
@@ -2427,10 +2870,14 @@ pub(crate) mod tests {
             .decode_images("m", Path::new("m.glb"))
             .expect("its images decode");
         assert_eq!(decoded.images, [image.clone(), image]);
+        // Its animation of no channels, a clip that moves nothing, named by its index.
+        let clips: Vec<(&str, f32, usize)> = (imported.clips.iter())
+            .map(|clip| (clip.name.as_str(), clip.duration, clip.channels.len()))
+            .collect();
+        assert_eq!(clips, [("0", 0.0, 0)]);
         assert_eq!(
             imported.ignored,
             [
-                "1 animation",
                 "2 cameras",
                 "extension KHR_texture_transform",
                 "material 0's occlusionTexture, which samples image 0 as values where another \
@@ -2516,6 +2963,7 @@ pub(crate) mod tests {
             parent: None,
             primitive: Some(0),
             light: None,
+            skin: None,
         };
         assert_eq!(imported.parts, [part]);
         // Without normals, so flat: each corner its own, in the triangle's order.
@@ -2542,6 +2990,9 @@ pub(crate) mod tests {
                 ],
                 ..Material::default()
             },
+            joints: Vec::new(),
+            weights: Vec::new(),
+            reach: None,
         };
         assert_eq!(imported.primitives, [primitive]);
         assert_eq!(imported.images[0].pixels, PIXELS);
@@ -2694,6 +3145,190 @@ pub(crate) mod tests {
             "bufferViews": bin.views,
         });
         (gltf, bin.bytes)
+    }
+
+    /// A model of a triangle without normals, so drawn flat, that a skin of two joints moves, a
+    /// root's and its child's, a unit along X: its first corner the root's alone, its second half
+    /// each, its third the child's; and an animation, "Turn", that turns the child a quarter about
+    /// Z over a second, along a line, lifts the root two units at once at half a second, by steps,
+    /// and moves node 3, outside the scene.
+    fn skinned() -> (Value, Vec<u8>) {
+        let mut bin = Bin::default();
+        let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
+        let joints = bin.view(&[0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0], None);
+        let weights = floats(&[1., 0., 0., 0., 0.5, 0.5, 0., 0., 1., 0., 0., 0.]);
+        let weights = bin.view(&weights, None);
+        let mut binds = Mat4::IDENTITY.to_cols_array().to_vec();
+        binds.extend(Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0)).to_cols_array());
+        let binds = bin.view(&floats(&binds), None);
+        let times = bin.view(&floats(&[0.0, 1.0]), None);
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let turns = bin.view(&floats(&[0., 0., 0., 1., 0., 0., half, half]), None);
+        let steps = bin.view(&floats(&[0.0, 0.5]), None);
+        let lifts = bin.view(&floats(&[0., 0., 0., 0., 2., 0.]), None);
+        let gltf = json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0, 2]}],
+            "nodes": [
+                {"children": [1]},
+                {"translation": [1.0, 0.0, 0.0]},
+                {"mesh": 0, "skin": 0},
+                {},
+            ],
+            "meshes": [{"primitives": [{
+                "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
+            }]}],
+            "skins": [{"joints": [0, 1], "inverseBindMatrices": 3}],
+            "animations": [{
+                "name": "Turn",
+                "channels": [
+                    {"sampler": 0, "target": {"node": 1, "path": "rotation"}},
+                    {"sampler": 1, "target": {"node": 0, "path": "translation"}},
+                    {"sampler": 1, "target": {"node": 3, "path": "translation"}},
+                ],
+                "samplers": [
+                    {"input": 4, "output": 5},
+                    {"input": 6, "output": 7, "interpolation": "STEP"},
+                ],
+            }],
+            "accessors": [
+                {"bufferView": positions, "componentType": 5126, "count": 3, "type": "VEC3"},
+                {"bufferView": joints, "componentType": 5121, "count": 3, "type": "VEC4"},
+                {"bufferView": weights, "componentType": 5126, "count": 3, "type": "VEC4"},
+                {"bufferView": binds, "componentType": 5126, "count": 2, "type": "MAT4"},
+                {"bufferView": times, "componentType": 5126, "count": 2, "type": "SCALAR"},
+                {"bufferView": turns, "componentType": 5126, "count": 2, "type": "VEC4"},
+                {"bufferView": steps, "componentType": 5126, "count": 2, "type": "SCALAR"},
+                {"bufferView": lifts, "componentType": 5126, "count": 2, "type": "VEC3"},
+            ],
+            "buffers": [{"byteLength": bin.bytes.len()}],
+            "bufferViews": bin.views,
+        });
+        (gltf, bin.bytes)
+    }
+
+    /// A skinned model reads its skin, its joints' parts and their inverse bind matrices; its
+    /// primitive's joints and weights, which follow its corners as it's made flat; its skinned
+    /// part's skin; and its animation's channels of nodes in its scene, as clips, sampled along
+    /// their keys, leaving out the one of a node outside it. Its primitive reaches as far as its
+    /// joints carry it in every pose, with room to spare.
+    #[test]
+    fn a_skinned_model_reads_its_skin_its_weights_and_its_clips() {
+        let (gltf, bin) = skinned();
+        let imported = read_glb(&glb(&gltf.to_string(), &bin)).expect("a skinned model");
+        let parts: Vec<(Option<usize>, Option<usize>, Option<usize>)> = (imported.parts.iter())
+            .map(|part| (part.parent, part.primitive, part.skin))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (None, None, None),
+                (Some(0), None, None),
+                (None, Some(0), Some(0))
+            ]
+        );
+        let unbound = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
+        let skin = Skin {
+            joints: vec![0, 1],
+            inverse_binds: vec![Mat4::IDENTITY, unbound],
+        };
+        assert_eq!(imported.skins, [skin]);
+        let primitive = &imported.primitives[0];
+        assert_eq!(primitive.joints, [[0, 0, 0, 0], [0, 1, 0, 0], [1, 0, 0, 0]]);
+        let weights = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ];
+        assert_eq!(primitive.weights, weights);
+        assert_eq!(primitive.normals, [[0.0, 0.0, 1.0]; 3], "flat");
+        let [clip] = &imported.clips[..] else {
+            panic!("a clip: {:?}", imported.clips);
+        };
+        assert_eq!((clip.name.as_str(), clip.duration), ("Turn", 1.0));
+        let moved: Vec<(u32, Moved, Interpolation)> = (clip.channels.iter())
+            .map(|channel| (channel.part, channel.path, channel.interpolation))
+            .collect();
+        let (rotation, translation) = (Moved::Rotation, Moved::Translation);
+        let (linear, step) = (Interpolation::Linear, Interpolation::Step);
+        assert_eq!(moved, [(1, rotation, linear), (0, translation, step)]);
+        let eighth = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let turned = Quat::from_vec4(clip.channels[0].sample(0.5));
+        assert!(turned.abs_diff_eq(eighth, 1e-6), "{turned}");
+        let lift = |time| clip.channels[1].sample(time).truncate();
+        assert_eq!(
+            [lift(0.49), lift(0.5), lift(9.0)],
+            [Vec3::ZERO, Vec3::Y * 2.0, Vec3::Y * 2.0]
+        );
+        let ignored = "channel 2 of animation 0, of node 3 outside the scene";
+        assert_eq!(imported.ignored, [ignored]);
+        // Lifted two at half a second, its first corner at (0, 2) and its second at (1, 2); and
+        // its third, the child turned an eighth, at (1 - √2, 2): within its reach, which spares a
+        // tenth of its longest side, 2, each way.
+        let [low, high] = primitive.reach.expect("a skinned primitive reaches");
+        let turned = Vec3::new(1.0 - std::f32::consts::SQRT_2, 2.0, 0.0);
+        let held = [Vec3::ZERO, Vec3::Y * 2.0, Vec3::new(1.0, 2.0, 0.0), turned];
+        for point in held {
+            assert!(
+                point.cmpge(low).all() && point.cmple(high).all(),
+                "{point} in {low}..{high}"
+            );
+        }
+        assert!(
+            (low - Vec3::new(turned.x - 0.2, -0.2, -0.2))
+                .abs()
+                .max_element()
+                < 1e-5,
+            "{low}"
+        );
+        assert!(
+            (high - Vec3::new(1.2, 2.2, 0.2)).abs().max_element() < 1e-5,
+            "{high}"
+        );
+    }
+
+    /// A skin, a skinned primitive or a clip that doesn't hold together refuses the model, saying
+    /// how.
+    #[test]
+    fn a_skin_or_clip_that_doesnt_hold_together_is_refused() {
+        let (gltf, bin) = skinned();
+        type Change = fn(&mut Value);
+        let cases: [(&str, Change); 7] = [
+            ("one of JOINTS_0 and WEIGHTS_0 without the other", |g| {
+                remove(
+                    &mut g["meshes"][0]["primitives"][0]["attributes"],
+                    "WEIGHTS_0",
+                );
+            }),
+            ("without JOINTS_0 and WEIGHTS_0", |g| {
+                let attributes = &mut g["meshes"][0]["primitives"][0]["attributes"];
+                remove(attributes, "WEIGHTS_0");
+                remove(attributes, "JOINTS_0");
+            }),
+            ("moved by joint 1, past the 1 of skin 0", |g| {
+                g["skins"][0]["joints"] = json!([0])
+            }),
+            ("of joint node 3, which isn't in its scene", |g| {
+                g["skins"][0]["joints"] = json!([0, 3]);
+            }),
+            ("of 2 joints and 1 inverse bind matrices", |g| {
+                g["accessors"][3]["count"] = json!(1)
+            }),
+            ("of times that don't go up from 0", |g| {
+                g["accessors"][4]["bufferView"] = json!(5)
+            }),
+            ("of 2 times and 1 values", |g| {
+                g["accessors"][7]["count"] = json!(1)
+            }),
+        ];
+        for (problem, change) in cases {
+            let mut gltf = gltf.clone();
+            change(&mut gltf);
+            let error = read_glb(&glb(&gltf.to_string(), &bin)).expect_err(problem);
+            assert_eq!(error.code(), "engine.bad_model", "{problem}: {error}");
+            assert!(error.to_string().contains(problem), "{problem}: {error}");
+        }
     }
 
     /// A `.gltf` of [`triangle`]'s model, its buffer in a data URI, with `edit` made to its JSON:
@@ -2876,7 +3511,6 @@ pub(crate) mod tests {
             (unsupported, "no buffer view", |g| {
                 remove(&mut g["accessors"][0], "bufferView");
             }),
-            (unsupported, "skinned", |g| g["nodes"][0]["skin"] = json!(0)),
             (unsupported, "morph weights", |g| {
                 g["meshes"][0]["weights"] = json!([0.5]);
             }),

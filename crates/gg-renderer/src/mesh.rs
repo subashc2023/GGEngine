@@ -117,6 +117,16 @@ impl MeshDraw {
         }
     }
 
+    /// The same draw, of `mesh` in place of its own: of the same vertex type as its own, as a
+    /// skinned model's instance's own copy of its model's mesh is, or its draws panic, as they
+    /// check the mesh's vertices against the shader's.
+    pub fn with_mesh<V>(self, mesh: Mesh<V>) -> Self {
+        Self {
+            mesh: mesh.index,
+            ..self
+        }
+    }
+
     /// What it batches by, if its shader is opaque: the same for every draw of its mesh with its
     /// shader, and ordered by shader, then mesh. An opaque shader writes depth, which hides what's
     /// behind it whatever order they draw in, so opaque draws can go in this one, which makes each
@@ -252,6 +262,8 @@ pub(crate) struct Added {
     lods: Lods,
     /// A model's mesh's meshlets, if it has them: what culls each, and each level's.
     meshlets: Option<MeshletParts>,
+    /// For a skinned model's mesh, how many vertices it has, which the skin pass moves.
+    skinned: Option<u32>,
 }
 
 /// What culls a mesh's meshlets, as the renderer keeps it apart from the mesh's buffer: each
@@ -277,6 +289,9 @@ impl Added {
             meshlets: (!meshlets.meshlets.is_empty()).then(|| MeshletParts {
                 bounds: model.meshlet_bounds(),
                 levels: meshlets.levels.clone(),
+            }),
+            skinned: (!model.skin.is_empty()).then(|| {
+                u32::try_from(model.vertices.len()).expect("a mesh's vertices have 32-bit indices")
             }),
         }
     }
@@ -380,6 +395,7 @@ impl Meshes {
             indices: indices.to_vec(),
             lods,
             meshlets: None,
+            skinned: None,
         }));
         Mesh::new(index)
     }
@@ -453,6 +469,7 @@ impl Meshes {
             indices: indices.to_vec(),
             lods,
             meshlets: None,
+            skinned: None,
         });
         Ok(())
     }
@@ -672,6 +689,12 @@ pub(crate) struct MeshPass {
     meshlet_table: MeshletTable,
     /// What shades the game's view from its visibility buffer.
     shading: ComputePipeline,
+    /// Where this frame's skin pass moved each skinned mesh's vertices, by the mesh's handle, which
+    /// its draws read in place of its own; 0 for a mesh it didn't move. Kept from frame to frame,
+    /// each frame setting again those it sets, so that it allocates nothing once it's grown.
+    skinned: Vec<u64>,
+    /// The meshes `skinned` holds an address for.
+    skinned_set: Vec<u32>,
 }
 
 /// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
@@ -714,6 +737,8 @@ struct GpuMesh {
     vertex_size: usize,
     /// Where its meshlets are in the table, for a model's mesh that has them.
     meshlets: Option<PlacedMeshlets>,
+    /// For a skinned model's mesh, how many vertices it has, which the skin pass moves.
+    skinned: Option<u32>,
 }
 
 /// What the pass holds for a mesh's handle: nothing yet, while what was added streams, what it
@@ -942,6 +967,7 @@ enum Asset {
         vertex_size: usize,
         lods: Lods,
         meshlets: Option<MeshletParts>,
+        skinned: Option<u32>,
         /// Its buffers, once there's room for them: boxed, so that the queue's items stay small.
         buffers: Option<Box<(GpuBuffer, GpuBuffer)>>,
     },
@@ -1218,7 +1244,42 @@ impl MeshPass {
                 entries: Vec::new(),
                 written: 0,
             },
+            skinned: Vec::new(),
+            skinned_set: Vec::new(),
         })
+    }
+
+    /// The vertices of skinned mesh `index`, and how many there are, if it's drawable: the
+    /// address of its buffer, which starts with its header, as its own draws read it.
+    pub(crate) fn skinned_mesh(&self, index: u32) -> Option<(u64, u32)> {
+        let mesh = self.meshes.get(index as usize)?.ready()?;
+        Some((mesh.vertices.address(), mesh.skinned?))
+    }
+
+    /// Has the frame's draws of each of `moved`'s meshes, by its handle, read its vertices where
+    /// the skin pass moved them, at the address beside it, which starts with its header; and of
+    /// the rest, theirs.
+    pub(crate) fn set_skinned(&mut self, moved: impl Iterator<Item = (u32, u64)>) {
+        for index in self.skinned_set.drain(..) {
+            self.skinned[index as usize] = 0;
+        }
+        for (index, address) in moved {
+            let at = index as usize;
+            if self.skinned.len() <= at {
+                self.skinned.resize(at + 1, 0);
+            }
+            self.skinned[at] = address;
+            self.skinned_set.push(index);
+        }
+    }
+
+    /// Where mesh `index`, `mesh`, has its draws read its vertices this frame: where the skin pass
+    /// moved them, if it did, or else its own buffer.
+    fn vertices_address(&self, index: u32, mesh: &GpuMesh) -> u64 {
+        match self.skinned.get(index as usize) {
+            Some(&moved) if moved != 0 => moved,
+            _ => mesh.vertices.address(),
+        }
     }
 
     /// Makes the pipelines of the shaders in `uploads`, taking them, and drops those of the shaders
@@ -1424,6 +1485,7 @@ impl MeshPass {
                 vertex_size: added.vertex_size,
                 lods: added.lods,
                 meshlets: added.meshlets,
+                skinned: added.skinned,
                 buffers: None,
             },
         });
@@ -1543,6 +1605,7 @@ impl MeshPass {
                 vertex_size,
                 lods,
                 meshlets,
+                skinned,
                 buffers,
             } => {
                 if buffers.is_none() {
@@ -1604,6 +1667,7 @@ impl MeshPass {
                             .unwrap_or(0),
                         levels: parts.levels,
                     }),
+                    skinned: *skinned,
                 };
                 let held = &mut meshes[item.index as usize];
                 // Which the draws' sizes are checked against: its own type, since only the
@@ -1793,6 +1857,7 @@ impl MeshPass {
             if culled_run.is_some() != culling || (run.is_none() && culled_run.is_none()) {
                 continue;
             }
+            let mesh_index = mesh;
             let mesh = self
                 .meshes
                 .get(mesh as usize)
@@ -1851,7 +1916,7 @@ impl MeshPass {
             }
             let push = Push {
                 clip_from_world: view_projection,
-                vertices: mesh.vertices.address(),
+                vertices: self.vertices_address(mesh_index, mesh),
                 // Where each draw's instances are, which it sets.
                 transforms: 0,
                 ids: 0,

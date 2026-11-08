@@ -10,9 +10,10 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     AlphaMode, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
-    ModelVertex, PackedVertex, Sampled, Shaders, Texels, Texture, Textures,
+    ModelVertex, PackedVertex, Sampled, Shaders, SkinVertex, Texels, Texture, Textures,
 };
 
+use crate::animation::{Clip, Skin};
 use crate::gltf::{self, Imported, Part, Primitive, Slot};
 use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
@@ -80,15 +81,19 @@ impl Component for ModelNode {}
 
 /// What a model's root spawns under it, as [`Assets`](crate::assets::Assets) keeps it for the
 /// worlds: the scene's nodes, and a part for each primitive of a mesh with more than one, in
-/// pre-order, each after its parent; each primitive's draw, with its material; and each
+/// pre-order, each after its parent; each primitive's draw, with its material; each
 /// primitive's surface, which physics collides with as a
 /// [`MeshCollider3D`](crate::MeshCollider3D) says, shared by every copy, so that physics tells the
-/// model read again, as its file changes, from the one it made a collider of.
+/// model read again, as its file changes, from the one it made a collider of; the skins that move
+/// skinned parts' vertices; and the clips an [`Animator`](crate::Animator) plays on its parts,
+/// shared too, so that each tick reaches them without copying them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Nodes {
     pub(crate) parts: Vec<Part>,
     pub(crate) draws: Vec<MeshDraw>,
     pub(crate) surfaces: Arc<Vec<Surface>>,
+    pub(crate) skins: Arc<Vec<Skin>>,
+    pub(crate) clips: Arc<Vec<Clip>>,
 }
 
 /// A primitive's triangles as physics collides with them: level 0's, its whole mesh's, and its
@@ -179,11 +184,14 @@ fn canonical(mut corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
 /// removal removes: each primitive's mesh and material, each image's texture and the texels its
 /// levels are made from, which say what it holds; how many primitives and images the model has
 /// now, as a reload that drops some keeps their meshes, materials and textures for their places,
-/// which a later one gives back; and, in development builds, each primitive's material as it was
-/// read, which a reload compares its own with.
+/// which a later one gives back; each skinned primitive's mesh, which each of its skinned parts'
+/// entities draws a copy of, posed apart; and, in development builds, each primitive's material
+/// as it was read, which a reload compares its own with.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
     pub(crate) meshes: Vec<Mesh<PackedVertex>>,
+    /// By primitive: its mesh, if it's skinned.
+    pub(crate) skinned: Vec<Option<Arc<ModelMesh>>>,
     pub(crate) materials: Vec<MaterialId>,
     pub(crate) images: Vec<(Texture, Texels)>,
     counts: (usize, usize),
@@ -220,6 +228,8 @@ pub(crate) fn add(
         parts,
         primitives,
         images,
+        skins,
+        clips,
         ..
     } = imported;
     let Stores {
@@ -233,6 +243,7 @@ pub(crate) fn add(
     room(name, images.len(), textures)?;
     let packed = model_meshes(name, &primitives)?;
     let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
+    let skinned = skinned(&packed);
     shaders.add_model_shaders();
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
@@ -255,6 +266,7 @@ pub(crate) fn add(
     let made = Made {
         counts: (meshes.len(), images.len()),
         meshes,
+        skinned,
         materials: added,
         images,
         #[cfg(feature = "dev")]
@@ -268,8 +280,17 @@ pub(crate) fn add(
         parts,
         draws,
         surfaces,
+        skins: Arc::new(skins),
+        clips: Arc::new(clips),
     };
     Ok((nodes, made))
+}
+
+/// Each of `packed`'s meshes that's skinned, by its primitive, shared.
+fn skinned(packed: &[(String, ModelMesh)]) -> Vec<Option<Arc<ModelMesh>>> {
+    (packed.iter())
+        .map(|(_, mesh)| (!mesh.skin.is_empty()).then(|| Arc::new(mesh.clone())))
+        .collect()
 }
 
 /// What [`reload`] gives: what the model's root spawns, what changed of the model, and the textures
@@ -307,6 +328,8 @@ pub(crate) fn reload(
         parts,
         primitives,
         images,
+        skins,
+        clips,
         ..
     } = imported;
     let Stores {
@@ -355,6 +378,7 @@ pub(crate) fn reload(
     // Read again from its files, as a development run does, each has one level.
     let packed = model_meshes(name, &primitives)?;
     let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
+    let skinned = skinned(&packed);
     let read = primitives.iter().map(|primitive| primitive.material);
     let changed = [
         (parts != was.parts, "nodes"),
@@ -379,6 +403,12 @@ pub(crate) fn reload(
                 made.images.push((texture, made_from));
                 added.push((i, texture));
             }
+        }
+    }
+    for (i, mesh) in skinned.into_iter().enumerate() {
+        match made.skinned.get_mut(i) {
+            Some(was) => *was = mesh,
+            None => made.skinned.push(mesh),
         }
     }
     for (i, (name, mesh)) in packed.into_iter().enumerate() {
@@ -414,6 +444,8 @@ pub(crate) fn reload(
         parts,
         draws,
         surfaces,
+        skins: Arc::new(skins),
+        clips: Arc::new(clips),
     };
     Ok((nodes, changed, added))
 }
@@ -484,28 +516,38 @@ pub(crate) fn pack(
     levels: Vec<gg_renderer::Lod>,
 ) -> Result<ModelMesh> {
     let mesh = mesh_name(name, primitive);
-    let (vertices, indices) = used(primitive);
-    let packed = ModelMesh::pack(&mesh, &vertices, indices, levels);
+    let (kept, indices) = used(primitive);
+    let all = vertices(primitive);
+    let vertices: Vec<ModelVertex> = kept.iter().map(|&i| all[i]).collect();
+    let packed = match primitive.reach {
+        Some(reach) if !primitive.joints.is_empty() => {
+            let skin = (kept.iter())
+                .map(|&i| SkinVertex::new(primitive.joints[i], primitive.weights[i]))
+                .collect();
+            ModelMesh::pack_skinned(&mesh, &vertices, indices, levels, skin, reach)
+        }
+        _ => ModelMesh::pack(&mesh, &vertices, indices, levels),
+    };
     packed.map_err(|error| refused(name, &error))
 }
 
-/// `primitive`'s vertices that its triangles use, in their order, and its indices of them; all of
-/// them where they use each, or where it has no triangles, as a mesh of none packs as it did.
-fn used(primitive: &Primitive) -> (Vec<ModelVertex>, Vec<u32>) {
-    let all = vertices(primitive);
-    let mut uses = vec![false; all.len()];
+/// Which of `primitive`'s vertices its triangles use, in their order, and its indices of them; all
+/// of them where they use each, or where it has no triangles, as a mesh of none packs as it did.
+fn used(primitive: &Primitive) -> (Vec<usize>, Vec<u32>) {
+    let count = primitive.positions.len();
+    let mut uses = vec![false; count];
     for &index in &primitive.indices {
         uses[index as usize] = true;
     }
     if primitive.indices.is_empty() || uses.iter().all(|&used| used) {
-        return (all, primitive.indices.clone());
+        return ((0..count).collect(), primitive.indices.clone());
     }
-    let mut moved = vec![u32::MAX; all.len()];
+    let mut moved = vec![u32::MAX; count];
     let mut kept = Vec::new();
-    for ((vertex, used), to) in all.into_iter().zip(uses).zip(&mut moved) {
+    for (i, (used, to)) in uses.into_iter().zip(&mut moved).enumerate() {
         if used {
             *to = u32::try_from(kept.len()).expect("fewer than 2^32 vertices");
-            kept.push(vertex);
+            kept.push(i);
         }
     }
     let indices = (primitive.indices.iter())
@@ -664,6 +706,9 @@ pub(crate) mod tests {
             indices: vec![0, 1, 2],
             mesh: None,
             material,
+            joints: Vec::new(),
+            weights: Vec::new(),
+            reach: None,
         };
         let masked = gltf::Material {
             alpha: AlphaMode::Mask { cutoff: 0.5 },
@@ -675,6 +720,7 @@ pub(crate) mod tests {
             parent,
             primitive,
             light: None,
+            skin: None,
         };
         let image = Image {
             size: [1, 1],
@@ -691,6 +737,8 @@ pub(crate) mod tests {
             primitives: vec![triangle("pair/0", masked), triangle("pair/1", opaque)],
             images: vec![image.clone(), image],
             ignored: Vec::new(),
+            skins: Vec::new(),
+            clips: Vec::new(),
         }
     }
 
@@ -737,18 +785,24 @@ pub(crate) mod tests {
             indices,
             mesh: None,
             material: gltf::Material::default(),
+            joints: Vec::new(),
+            weights: Vec::new(),
+            reach: None,
         };
         let part = gltf::Part {
             transform: at,
             parent: None,
             primitive: Some(0),
             light: None,
+            skin: None,
         };
         Imported {
             parts: vec![part],
             primitives: vec![primitive],
             images: Vec::new(),
             ignored: Vec::new(),
+            skins: Vec::new(),
+            clips: Vec::new(),
         }
     }
 

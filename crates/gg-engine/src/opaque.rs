@@ -6,6 +6,7 @@
 use gg_renderer::{MeshDraw, Scene};
 
 use crate::placed::Placed;
+use crate::skins::Skins;
 use crate::{Entity, Transform, World};
 
 /// What the renderer's scene holds of the world's opaque meshes, as the module says, by the
@@ -26,14 +27,22 @@ pub(crate) struct OpaqueMeshes {
 }
 
 impl OpaqueMeshes {
-    /// Has `scene` hold `world`'s opaque meshes as `placed` has them draw this frame, setting and
+    /// Has `scene` hold `world`'s opaque meshes as `placed` has them draw this frame, a skinned
+    /// entity's of the mesh of its own that `skins` gives it, setting and
     /// taking away what changed since it last did: everything, in another world; else each whose
     /// mesh changed, or that joined a table, as one spawned or given a mesh or a transform does;
     /// each that `placed` placed again, or draws on its way between ticks, or drew so last frame
-    /// and doesn't now; and, as entities' rows changed, each held that went, or lost its transform
+    /// and doesn't now; each that `skins` gave a mesh of its own this frame; and, as entities' rows
+    /// changed, each held that went, or lost its transform
     /// or its mesh, or whose mesh no longer writes depth, which it looks over all held for. Called
-    /// once a frame, after `placed` has drawn it.
-    pub(crate) fn hold(&mut self, world: &World, placed: &Placed, scene: &mut Scene) {
+    /// once a frame, after `placed` has drawn it and `skins` found it.
+    pub(crate) fn hold(
+        &mut self,
+        world: &World,
+        placed: &Placed,
+        skins: &Skins,
+        scene: &mut Scene,
+    ) {
         let _zone = gg_core::zone!();
         let (serial, version) = world.version();
         let since = match self.seen {
@@ -83,21 +92,22 @@ impl OpaqueMeshes {
                 }
                 let slot = entity.slot();
                 if meshes[row].batch().is_some() {
-                    self.set(world, placed, scene, entity, &meshes[row], pass);
+                    self.set(world, placed, skins, scene, entity, &meshes[row], pass);
                 } else if self.held[slot] == entity {
                     scene.remove(slot as u32);
                     self.held[slot] = Entity::DEAD;
                 }
             }
         }
-        // Those placed again, or on their way between ticks, this frame or the last.
+        // Those placed again, or on their way between ticks, this frame or the last, and those
+        // given a mesh of their own.
         let mut moved = std::mem::take(&mut self.moved);
         let placed_again = placed.changed().iter().chain(placed.moving()).chain(&moved);
-        for &entity in placed_again {
+        for &entity in placed_again.chain(skins.fresh()) {
             if self.held[entity.slot()] == entity
                 && let Some(draw) = opaque(world, entity)
             {
-                self.set(world, placed, scene, entity, draw, pass);
+                self.set(world, placed, skins, scene, entity, draw, pass);
             }
         }
         moved.clear();
@@ -106,12 +116,17 @@ impl OpaqueMeshes {
         self.moved = moved;
     }
 
-    /// Sets `entity`'s mesh, `draw`, in its slot of `scene`, where `placed` has it draw, unless
-    /// pass `pass` has.
+    /// Sets `entity`'s mesh, `draw`, or the mesh of its own `skins` gives it, in its slot of
+    /// `scene`, where `placed` has it draw, unless pass `pass` has.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "what setting a slot reads, each apart"
+    )]
     fn set(
         &mut self,
         world: &World,
         placed: &Placed,
+        skins: &Skins,
         scene: &mut Scene,
         entity: Entity,
         draw: &MeshDraw,
@@ -125,7 +140,7 @@ impl OpaqueMeshes {
         self.held[slot] = entity;
         let place = placed.drawn(entity).expect("a drawn entity is placed");
         let id = world.id(entity).expect("a row's entity is alive").get();
-        scene.set(slot as u32, place.matrix, draw, id);
+        scene.set(slot as u32, place.matrix, &skins.draw_of(entity, draw), id);
     }
 
     /// Starts a pass, with room for each of `world`'s slots, and returns its number.
@@ -189,7 +204,7 @@ mod tests {
     ) -> Vec<u32> {
         placed.place(world);
         placed.draw(world, past, alpha, started, world.component::<MeshDraw>());
-        opaque.hold(world, placed, scene);
+        opaque.hold(world, placed, &Skins::default(), scene);
         world.advance();
         let mut changed = Vec::new();
         for change in scene.changes() {

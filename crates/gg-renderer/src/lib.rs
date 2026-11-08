@@ -26,6 +26,7 @@ mod packed;
 mod pick;
 mod shader;
 mod shadow;
+mod skin;
 mod sky;
 mod sprite;
 mod taa;
@@ -64,7 +65,7 @@ pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
 pub use packed::{
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, Meshlets, ModelMesh, PackedVertex,
-    Packing,
+    Packing, SkinVertex,
 };
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
@@ -84,6 +85,7 @@ use cluster::{ClusterData, ClusterPlan, Lighting};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
+use skin::{SkinPlan, Skinning};
 use sky::{SkyData, SkyLight, SkyPass};
 use taa::TaaPass;
 use tonemap::TonemapPass;
@@ -401,6 +403,8 @@ pub struct Renderer {
     counted: [(u64, DrawCounts, bool); 2],
     /// The frame's lights as shaders read them, and what bins them into the view's clusters.
     lighting: Lighting,
+    /// What moves skinned meshes' vertices before the frame draws them.
+    skinning: Skinning,
 }
 
 enum Output {
@@ -411,6 +415,9 @@ enum Output {
 
 /// The game's view's images and passes in a frame's graph.
 struct ViewPasses {
+    /// What moves skinned meshes' vertices before the passes that draw them, if the frame skins
+    /// any.
+    skin: Option<SkinPlan>,
     /// What culls the view's opaque runs and their shadows' casters, if it draws any.
     cull: Option<CullPlan>,
     /// What bins the lights into the view's clusters, if a light is binned.
@@ -474,6 +481,14 @@ enum Shown {
 fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     match cull {
         Some(cull) => cull.drawn(pass),
+        None => pass,
+    }
+}
+
+/// `pass`, reading the skinned meshes' vertices where the skin pass moved them, if it moves any.
+fn skinned<'g>(skin: Option<&SkinPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
+    match skin {
+        Some(skin) => pass.read_buffer(skin.buffer),
         None => pass,
     }
 }
@@ -602,6 +617,7 @@ impl Renderer {
             drawn: DrawCounts::default(),
             counted: [(0, DrawCounts::default(), false); 2],
             lighting: Lighting::new(device)?,
+            skinning: Skinning::new(device)?,
         })
     }
 
@@ -851,6 +867,7 @@ impl Renderer {
             _ => None,
         };
         let meshes = &self.meshes;
+        let skinning = &mut self.skinning;
         let lighting = &self.lighting;
         let taa = &self.taa;
         let visibility_buffer = self.visibility_buffer;
@@ -860,6 +877,9 @@ impl Renderer {
             // and the cascades' casters, for the view's first pass; and after them, the binning of
             // the lights into the view's clusters, which its passes read. The culling and the
             // binning run on the compute queue where there's one, the binning beside the shadows.
+            // First, the skinned meshes' vertices moved, which every pass that draws reads.
+            let skin_plan = skinning.plan(graph, data.draws, meshes);
+            let skin = skin_plan.as_ref();
             let aspect = data.viewport.aspect();
             let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
             let mut cull = (meshes.cull_bounds(data.draws))
@@ -879,7 +899,8 @@ impl Renderer {
                 ];
                 let maps = names.map(|name| graph.depth(name, [MAP_SIZE; 2]));
                 let passes = std::array::from_fn(|i| {
-                    culled(cull.as_ref(), graph.render(labels[i]).depth(maps[i])).add()
+                    let pass = skinned(skin, graph.render(labels[i]).depth(maps[i]));
+                    culled(cull.as_ref(), pass).add()
                 });
                 ShadowPasses {
                     cascades,
@@ -908,11 +929,13 @@ impl Renderer {
                 .map(|_| graph.visibility("view visibility", size));
             let first = match visibility {
                 Some(visibility) => {
-                    let first = culled(cull.as_ref(), graph.render(label!("view visibility")));
+                    let first = skinned(skin, graph.render(label!("view visibility")));
+                    let first = culled(cull.as_ref(), first);
                     first.visibility(visibility).ids(ids)
                 }
                 None => {
-                    let first = culled(cull.as_ref(), graph.render(label!("view")));
+                    let first = skinned(skin, graph.render(label!("view")));
+                    let first = culled(cull.as_ref(), first);
                     let first = binned(clusters.as_ref(), sampling(lit(), first));
                     first.clear(hdr, data.clear_color).ids(ids).motion(motion)
                 }
@@ -925,11 +948,12 @@ impl Renderer {
                 cull.second_pass(graph, depth, size);
                 let second = match visibility {
                     Some(visibility) => {
-                        let second = graph.render(label!("view visibility second"));
+                        let second = skinned(skin, graph.render(label!("view visibility second")));
                         cull.drawn(second).keep(visibility)
                     }
                     None => {
-                        let second = cull.drawn(graph.render(label!("view second")));
+                        let second = skinned(skin, graph.render(label!("view second")));
+                        let second = cull.drawn(second);
                         let second = binned(clusters.as_ref(), sampling(lit(), second));
                         second.keep(hdr).keep(motion)
                     }
@@ -944,7 +968,7 @@ impl Renderer {
                     None => shade,
                 };
                 let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
-                let rest = cull.drawn(graph.render(label!("view rest")));
+                let rest = cull.drawn(skinned(skin, graph.render(label!("view rest"))));
                 let rest = (binned(clusters.as_ref(), sampling(lit(), rest)).keep(hdr))
                     .keep(ids)
                     .keep(motion)
@@ -992,6 +1016,7 @@ impl Renderer {
             });
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
+                skin: skin_plan,
                 cull,
                 clusters,
                 shadows,
@@ -1060,6 +1085,9 @@ impl Renderer {
         // culled drew, and whether the frame culled any.
         let (counts, view, culled) = match (view, pixels_shown) {
             (Some(view), _) => {
+                // The skinned meshes moved, before anything draws them.
+                let (skinning, meshes) = (&self.skinning, &mut self.meshes);
+                skinning.record(&mut frame, view.skin.as_ref(), data.draws, meshes)?;
                 // Every pass's instances, copied once, culled for the view and the cascades.
                 let uploaded = MeshPass::upload_draws(&mut frame, data.draws)?;
                 let on_canvas = MeshPass::upload_draws(&mut frame, data.canvas)?;

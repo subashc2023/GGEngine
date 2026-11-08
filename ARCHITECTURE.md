@@ -1288,6 +1288,19 @@ libm's functions and its rotations glam's slerp, which a reference hash in `anim
 every platform. Scenes list tweens; code starts one with `World::tween` and scripts with
 `gg.tween`, each in place of a tween of the same field.
 
+A model's root's `Animator` plays its model's clips, glTF's animations, on its nodes: each play a
+clip by its name, its time, speed and playback, and a weight, which eases toward a target over a
+fade, a play eased to 0 leaving. Each tick samples each play's channels at its time, linear,
+stepped or along a cubic spline as glTF says, a rotation by slerp, and each node a play moves takes
+the plays' poses blended by their weights, the first play's alone where it's the only one, so that
+a lone play is exact; a node no play moves keeps its transform, and the transform is written only
+where it changed. The nodes are found by the IDs mixed from the root's, without a map, so that a
+tick allocates nothing. `World::play` cross-fades to a clip, each other play easing to 0 over the
+fade, and scripts call it as `gg.play`. The clips' samples are arithmetic on f32s and glam's slerp,
+which a second reference hash in `animation/` checks. The joints that animation moves are nodes,
+so snapshots, replays and peers see a pose as they see any transform; what they move of a skinned
+mesh is drawing's, as [Rendering](#rendering) says.
+
 ## Rendering
 
 Each frame the engine extracts that frame's render data, as plain data, which the render thread
@@ -1776,7 +1789,9 @@ as textures, once, all of itself or nothing, or the engine does as text names it
 `ModelRoot` of it, as `Model::spawn` makes one and a scene loads one, has its default scene spawned
 under it as entities, as often as the game likes, as [Models in scenes](#project-state) says: a node
 each, with its transform in its parent's space, and a child for each primitive of a mesh with
-several, since an entity holds one `MeshDraw`. The engine reads glTF itself, over serde_json,
+several, since an entity holds one `MeshDraw`; its skins, the joints that move its skinned
+primitives, and its clips are its assets, shared by every root, which the world reaches each tick.
+The engine reads glTF itself, over serde_json,
 rather than through the `gltf` crate, whose public calls panic on some malformed files. A model's
 URIs can't name a file outside its folder, though a link inside the folder is followed wherever it
 leads.
@@ -1921,6 +1936,21 @@ its own over the view's resolved colors, which the resolve then writes apart fro
 that a game's UI stays sharp and out of the history. The view's IDs are drawn off by the frame's
 offset too, so that a pick at an edge, and the editor's outline of the pick, can move a pixel from
 frame to frame.
+
+A skinned model's primitive, of glTF's JOINTS_0 and WEIGHTS_0, packs as any model's mesh does, its
+vertices as they were bound, with each vertex's four joints and their weights after them, as
+16-bit indices and fractions, on a grid that holds where its joints carry it: the box its vertices
+reach as each clip poses the model, from rest, at each of its keys' times, or at 64 evenly, grown by
+a tenth each way, which views cull it by too; a vertex carried past it clamps to it. Each entity of
+a skinned part draws a mesh of its own, a copy of its model's that the engine adds as it first draws
+it and removes as it goes, so that each root poses apart; the scene draws the entity by it. Each
+frame hands the renderer the copy's joints' matrices, each from the mesh's space as it was bound to
+its own as the joint draws, between ticks too, so that a pose moves as smoothly as anything drawn;
+and a compute pass before the culling and the shadows, on the graphics queue, moves each copy's
+vertices by them into a part of a buffer of the graph's own, its header first, which every pass that
+draws reads, the frame's draws of the copy reading its vertices there rather than from its own
+buffer. A skinned mesh isn't cut into meshlets, whose bounds its joints would leave behind, so it
+draws by its indices, outside the visibility buffer; its motion is its instance's alone.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:

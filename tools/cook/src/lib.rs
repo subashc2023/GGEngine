@@ -211,6 +211,8 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
                 colors: &mut primitive.colors,
                 normals: &mut primitive.normals,
                 tangents: &mut primitive.tangents,
+                joints: &mut primitive.joints,
+                weights: &mut primitive.weights,
             },
             &mut primitive.indices,
             blends,
@@ -223,8 +225,9 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
             })
             .collect();
         let mut packed = cook::pack(path, primitive, levels)?;
-        // What blends draws its triangles in their order, through its indices.
-        if !blends {
+        // What blends draws its triangles in their order, through its indices; and what's skinned,
+        // whose meshlets' bounds its joints would leave behind, through its indices too.
+        if !blends && packed.skin.is_empty() {
             mesh::cut(&mut packed);
         }
         primitive.mesh = Some(packed);
@@ -475,7 +478,7 @@ Targets fragment_main(Varyings input) {
     /// and each image compressed as what it holds, with its full chain of levels.
     #[test]
     fn a_model_cooks_to_what_a_run_reads() {
-        for name in ["crate.gltf", "torus.gltf", "tiles.gltf"] {
+        for name in ["crate.gltf", "torus.gltf", "tiles.gltf", "fox/Fox.gltf"] {
             let file = showcase_model(name);
             let read = cook::read_model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
             let bytes = model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
@@ -488,14 +491,17 @@ Targets fragment_main(Varyings input) {
                 assert_eq!(finest.start, 0, "{name}");
                 assert_eq!(finest.count as usize, read.indices.len(), "{name}");
                 assert_eq!(finest.error, 0.0, "{name}");
-                // Cut into meshlets but where it blends.
+                // Cut into meshlets but where it blends or is skinned, which keeps a weight a vertex.
                 let levels = mesh.meshlets.levels.len();
-                let cut = if read.blends() {
+                let skinned = !read.joints.is_empty();
+                let cut = if read.blends() || skinned {
                     0
                 } else {
                     mesh.lods.levels.len()
                 };
                 assert_eq!(levels, cut, "{name}");
+                let weights = if skinned { mesh.vertices.len() } else { 0 };
+                assert_eq!(mesh.skin.len(), weights, "{name}");
             }
             assert_eq!(cooked.images.len(), read.images.len(), "{name}");
             for (i, (cooked, image)) in cooked.images.iter().zip(&read.images).enumerate() {

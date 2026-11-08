@@ -1,0 +1,297 @@
+(
+    entities: {
+        "0026c3241bf143d2": (
+            Animator: ([
+                (
+                    clip: "Walk",
+                    time: 0.0,
+                    speed: 1.0,
+                    playback: Loop,
+                    weight: 0.5,
+                    target: 0.5,
+                    fade: 0.0,
+                ),
+                (
+                    clip: "Run",
+                    time: 0.0,
+                    speed: 0.611511,
+                    playback: Loop,
+                    weight: 0.5,
+                    target: 0.5,
+                    fade: 0.0,
+                ),
+            ]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Name: ("Fox: Walk and run, half each"),
+            Transform: (
+                translation: (5.4, 0.0, -0.6),
+                rotation: (0.0, 0.707107, 0.0, 0.707107),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "03c626de8deac93b": (
+            Animator: ([
+                (
+                    clip: "Survey",
+                    time: 0.0,
+                    speed: 1.0,
+                    playback: Loop,
+                    weight: 1.0,
+                    target: 1.0,
+                    fade: 0.0,
+                ),
+            ]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Name: ("Fox: Survey"),
+            Transform: (
+                translation: (-5.4, 0.0, -0.6),
+                rotation: (0.0, 0.707107, 0.0, 0.707107),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "14c6b2116cdb1eb6": (
+            Name: ("Label: Walk"),
+            Text: (
+                text: "Walk",
+                font: None,
+                size: 0.26,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-1.8, 2.3, -0.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1512b98de556d890": (
+            Name: ("Title"),
+            Text: (
+                text: "Skeletal animation",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 4.55, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4c15c0f05f9d5b17": (
+            Name: ("Label: Walk and run blended, half each"),
+            Text: (
+                text: "Walk and run blended, half each",
+                font: None,
+                size: 0.26,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (5.4, 2.3, -0.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "53cf8275fcb3084c": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 4.6, 9.8),
+                rotation: (-0.190809, 0.0, 0.0, 0.981627),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "62bd90444c5706c7": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 1.0, 2.4),
+            ),
+        ),
+        "6751e6d3ab167668": (
+            Animator: ([
+                (
+                    clip: "Survey",
+                    time: 0.0,
+                    speed: 1.0,
+                    playback: Loop,
+                    weight: 1.0,
+                    target: 1.0,
+                    fade: 0.0,
+                ),
+            ]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Moods: (
+                every: 3.0,
+                fade: 0.5,
+                mood: 0.0,
+                time: 0.0,
+            ),
+            Name: ("Fox: Cross-fading"),
+            Transform: (
+                translation: (0.0, 0.0, 2.0),
+                rotation: (0.0, 0.5, 0.0, 0.866025),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "6cb92a4fdaafa169": (
+            Animator: ([
+                (
+                    clip: "Run",
+                    time: 0.0,
+                    speed: 1.0,
+                    playback: Loop,
+                    weight: 1.0,
+                    target: 1.0,
+                    fade: 0.0,
+                ),
+            ]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Name: ("Fox: Run"),
+            Transform: (
+                translation: (1.8, 0.0, -0.6),
+                rotation: (0.0, 0.707107, 0.0, 0.707107),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "779a19a8c9ffcd01": (
+            Name: ("Label: Cross-fading"),
+            Text: (
+                text: "Cross-fading from clip to clip every three seconds, by a script",
+                font: None,
+                size: 0.28,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 0.05, 3.4),
+                rotation: (-0.707107, 0.0, 0.0, 0.707107),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c326af538c7a7c7d": (
+            Name: ("Label: Survey"),
+            Text: (
+                text: "Survey",
+                font: None,
+                size: 0.26,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-5.4, 2.3, -0.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c99aec4543703c8a": (
+            Name: ("Hint"),
+            Text: (
+                text: "The Fox's clips played on its joints, which move its skinned mesh on the GPU: each fox poses apart",
+                font: None,
+                size: 0.22,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.95, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e52ba3af391c6db0": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 100000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.49303, -0.345121, 0.0, 0.798632),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f2fc8187b3238cc5": (
+            Name: ("Label: Run"),
+            Text: (
+                text: "Run",
+                font: None,
+                size: 0.26,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (1.8, 2.3, -0.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fc036e1eab8606bf": (
+            Animator: ([
+                (
+                    clip: "Walk",
+                    time: 0.0,
+                    speed: 1.0,
+                    playback: Loop,
+                    weight: 1.0,
+                    target: 1.0,
+                    fade: 0.0,
+                ),
+            ]),
+            ModelRoot: ("9c6d44d54cacfc0c"),
+            Name: ("Fox: Walk"),
+            Transform: (
+                translation: (-1.8, 0.0, -0.6),
+                rotation: (0.0, 0.707107, 0.0, 0.707107),
+                scale: (0.02, 0.02, 0.02),
+            ),
+        ),
+        "fec2e4927358a085": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 8000.0,
+            ),
+            Name: ("Environment"),
+        ),
+    },
+)

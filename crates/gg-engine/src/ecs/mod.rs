@@ -47,7 +47,6 @@ use id::IdStream;
 #[cfg(feature = "dev")]
 pub(crate) use id::mix64;
 pub use log::Log;
-#[cfg(test)]
 pub(crate) use nodes::node_id;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};

@@ -64,11 +64,12 @@ use crate::recording::text::Text;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
 use crate::scene_files::{self, SceneFile, SceneFiles};
+use crate::skins::Skins;
 use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::sync_test::SyncTest;
 use crate::{
-    App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model, ModelNode,
-    ModelRoot, Name, Owner, RigidBody2D, Transform, Tweens, Ui, World,
+    Animator, App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model,
+    ModelNode, ModelRoot, Name, Owner, RigidBody2D, Transform, Tweens, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -365,6 +366,8 @@ pub struct Context {
     /// What the renderer's scene holds of the world's opaque meshes, and what's changed of it
     /// since a frame last took it.
     opaque: OpaqueMeshes,
+    /// The skinned entities' own meshes, which the scene draws them by, and their joints.
+    skins: Skins,
     scene: Scene,
     /// Set from when the layers have attached until they detach: the world then changes only at
     /// ticks.
@@ -589,6 +592,7 @@ impl Context {
             world.register::<CharacterController3D>()?;
             world.register::<Flipbook>()?;
             world.register::<Tweens>()?;
+            world.register::<Animator>()?;
             world.register::<ModelRoot>()?;
             world.register::<ModelNode>()?;
             world.register::<font::Text>()?;
@@ -646,6 +650,7 @@ impl Context {
             placed: Placed::default(),
             tick_started: 0,
             opaque: OpaqueMeshes::default(),
+            skins: Skins::default(),
             scene: Scene::default(),
             attached: false,
             root: None,
@@ -1127,7 +1132,13 @@ impl Context {
     /// unless the run is recorded, in a lockstep session or follows another, its nodes and
     /// materials, which its roots' nodes take.
     ///
-    /// It ignores animations, cameras and the extensions the model uses without requiring them but
+    /// Its skins move skinned primitives' vertices by their joints, its nodes in the scene, each
+    /// vertex by its first four joints, JOINTS_0 and WEIGHTS_0, as the frame draws them; its
+    /// animations are clips, linear, stepped or cubic splines of its nodes' translations, rotations
+    /// and scales, which an [`Animator`] on a root plays on its nodes.
+    ///
+    /// It ignores cameras, animations' channels of morph weights or of nodes outside the scene,
+    /// JOINTS_1 and WEIGHTS_1, and the extensions the model uses without requiring them but
     /// those it reads, a material's texture that reads other texture coordinates than its others,
     /// or whose image another texture samples as what it doesn't, as data where it samples colors,
     /// and a primitive's TANGENT that holds numbers that aren't finite, which glTF doesn't allow,
@@ -1140,14 +1151,16 @@ impl Context {
     ///
     /// Fails, adding nothing, with `engine.unsupported_model` for glTF the engine doesn't draw:
     /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
-    /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
+    /// accessors without a buffer view, morph weights other than 0, a sampler that
     /// wraps across and down differently, a texture without an image, any required extension but
     /// KHR_materials_unlit, KHR_lights_punctual, KHR_materials_emissive_strength,
     /// KHR_materials_pbrSpecularGlossiness and MSFT_texture_dds, and a model that takes more than 8
     /// GiB to read, of its buffers, images, as read and as decoded, vertices and nodes; with
     /// `engine.bad_model` for a file that can't be read, isn't a regular file or isn't
     /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
-    /// its vertices, a node with two parents, a matrix that isn't a translation, rotation and
+    /// its vertices, a skinned primitive without JOINTS_0 and WEIGHTS_0 or moved by a joint past
+    /// its skin's, a skin's joint outside the scene, an animation's times that don't go up from 0,
+    /// a node with two parents, a matrix that isn't a translation, rotation and
     /// scale, a light the extension doesn't allow, a URI that's neither a data URI nor a relative
     /// path, or that has a `..`, or an image that isn't a PNG, a JPEG or a DDS of BC7 as far as its
     /// header, and,
@@ -3174,7 +3187,9 @@ impl Context {
         self.placed.place(&self.world);
         let held = self.world.component::<MeshDraw>();
         (self.placed).draw(&self.world, &self.past, alpha, self.tick_started, held);
-        (self.opaque).hold(&self.world, &self.placed, &mut self.scene);
+        let (made, meshes, draws) = (&self.loaded.made, &mut self.meshes, &mut self.draws);
+        (self.skins).find(&self.world, &self.placed, made, meshes, draws);
+        (self.opaque).hold(&self.world, &self.placed, &self.skins, &mut self.scene);
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         self.seen = camera::seen(world, past, placed, alpha, &mut self.tie);
         self.environment = environment::seen(world, &mut self.environment_tie);
@@ -4429,6 +4444,56 @@ mod tests {
 
     use super::*;
     use crate::{Key, Transform, render_thread};
+
+    /// Each skinned part of a model's root draws a mesh of its own, a copy of its model's, which
+    /// the frame skins by its skin's joints, each where it draws, from the mesh's space as it was
+    /// bound: at rest, as the Fox spawns, the matrix of no change for each of its 24; the copy
+    /// kept from frame to frame, and gone with its root.
+    #[test]
+    fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
+        let mut cx = Context::seeded(1);
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let model = cx
+            .add_model("fox", fox.join("Fox.gltf"))
+            .expect("the Fox reads");
+        let root = model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.draw_world(1.0, 0.0);
+        let model_mesh = cx.loaded.made[model.index()].meshes[0].index();
+        let skins: Vec<(u32, Vec<Mat4>)> = (cx.draws.skins())
+            .map(|(mesh, joints)| (mesh, joints.to_vec()))
+            .collect();
+        let [(own, joints)] = &skins[..] else {
+            panic!("a skin: {skins:?}");
+        };
+        assert_ne!(*own, model_mesh, "a copy of its own");
+        assert_eq!(joints.len(), 24);
+        for (i, joint) in joints.iter().enumerate() {
+            assert!(
+                joint.abs_diff_eq(Mat4::IDENTITY, 1e-4),
+                "joint {i} at rest: {joint}"
+            );
+        }
+        let drawn: Vec<u32> = (cx.scene.changes().flatten())
+            .filter_map(|(_, set)| set)
+            .map(|(_, _, draw)| draw.parts().0)
+            .collect();
+        assert!(
+            drawn.contains(own) && !drawn.contains(&model_mesh),
+            "{drawn:?}"
+        );
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0);
+        assert_eq!(
+            cx.draws.skins().map(|(mesh, _)| mesh).collect::<Vec<_>>(),
+            [*own]
+        );
+        assert_eq!(cx.skins.held(), 1);
+        cx.world_mut().despawn(root).expect("alive");
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0);
+        assert_eq!(cx.draws.skins().count(), 0);
+        assert_eq!(cx.skins.held(), 0);
+    }
 
     /// Records each call it gets, by layer name, and handles events if `handles` is set.
     struct Probe {

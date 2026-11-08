@@ -26,8 +26,9 @@ use gg_renderer::{
     GridLines, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map,
     Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh,
     ModelVertex, Outline, PackedVertex, Pick, Pixels, Projection, RenderData, Renderer, Sampled,
-    Sampler, Scene, Settings, Shaders, Sky, Sprite, SpriteSheet, Texels, Texture, Textures,
-    Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
+    Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture,
+    Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow,
+    Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -114,6 +115,7 @@ fn main() -> ExitCode {
         depth_matches_its_reference,
         levels_of_detail_match_their_reference,
         models_match_their_reference,
+        skinned_meshes_move_with_their_joints,
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
@@ -3102,6 +3104,93 @@ fn models_match_their_reference() {
     let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     assert_eq!(drew, drawn);
     check(renderer, "models", WIDTH, HEIGHT);
+}
+
+/// Draws three copies of a skinned strip, unlit, in a column of quads up from a joint at its foot,
+/// the rest moved by a joint at its middle, as an orthographic view sees them, and compares them
+/// with their reference image: on the left, its upper half turned an eighth about its middle; in
+/// the middle, slid half a unit right; and on the right, given no skin this frame, as it was bound,
+/// straight up. Its lower half moves with the joint at its foot alone, which stays put, and a row
+/// of vertices at its middle half with each. Each copy is a mesh of its own, posed apart, as each
+/// instance of a skinned model is.
+fn skinned_meshes_move_with_their_joints() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 0.1,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    // Rows from y = -1 to 1, half a unit apart, each of two corners, a quarter of a unit either
+    // side of x = 0: the lowest two moved by joint 0 alone, the middle half by each, the rest by
+    // joint 1.
+    let rows = [-1.0, -0.5, 0.0, 0.5, 1.0];
+    let mut vertices = Vec::new();
+    let mut skin = Vec::new();
+    for (row, y) in rows.into_iter().enumerate() {
+        let weights = match row {
+            0 | 1 => [1.0, 0.0, 0.0, 0.0],
+            2 => [0.5, 0.5, 0.0, 0.0],
+            _ => [0.0, 1.0, 0.0, 0.0],
+        };
+        for x in [-0.25, 0.25] {
+            vertices.push(ModelVertex {
+                position: Vec3::new(x, y, 0.0),
+                uv: Vec2::ZERO,
+                color: Vec4::ONE,
+                normal: Vec3::Z,
+                tangent: Vec4::X,
+            });
+            skin.push(SkinVertex::new([0, 1, 0, 0], weights));
+        }
+    }
+    let indices: Vec<u32> = (0..4)
+        .flat_map(|row| {
+            let at = 2 * row;
+            [at, at + 1, at + 3, at + 3, at + 2, at]
+        })
+        .collect();
+    let reach = [Vec3::new(-1.5, -1.5, -0.5), Vec3::new(1.5, 1.5, 0.5)];
+    let strip = ModelMesh::pack_skinned("strip", &vertices, indices, Vec::new(), skin, reach)
+        .expect("a mesh");
+    let copies = ["bent strip", "slid strip", "straight strip"]
+        .map(|name| stores.meshes.add_model(name, &strip).expect("a mesh"));
+    let material = Material {
+        color: Vec4::new(0.9, 0.5, 0.1, 1.0),
+        unlit: true,
+        double_sided: true,
+        ..Material::default()
+    };
+    let material = stores.materials.add(&material);
+    let (materials, shaders) = (&mut stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    for (copy, x) in copies.into_iter().zip([-1.6, 0.0, 1.6]) {
+        let draw = MeshDraw::with_material(copy, material, materials, shaders);
+        draws.push_draw(Mat4::from_translation(Vec3::new(x, 0.0, 0.0)), &draw, 0);
+    }
+    // About the strip's middle, where joint 1 was bound.
+    let bent = Mat4::from_rotation_z(PI / 4.0);
+    let slid = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.0));
+    draws.skin(copies[0], [Mat4::IDENTITY, bent]);
+    draws.skin(copies[1], [Mat4::IDENTITY, slid]);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws),
+    );
+    check(renderer, "skinned", WIDTH, HEIGHT);
 }
 
 /// Draws a run of sprites across the top half of an offscreen image, then a run of models' squares

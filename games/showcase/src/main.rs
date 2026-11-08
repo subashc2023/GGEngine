@@ -19,7 +19,11 @@
 //! repository); squares drawn by the game's own shader, which reloads as it's saved (`shader.ron`,
 //! its shader `shaders/plasma.slang`); glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
-//! (`models.ron`); colors from a quarter as bright as white to 16 times, which the world's
+//! (`models.ron`); Khronos's Fox, skinned, playing its clips, Survey, Walk and Run, each alone,
+//! walking and running blended, and cross-faded from one to the next (`skeletal.ron`, the model in
+//! `models/fox`, CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by
+//! AsoboStudio and scurest under CC BY 4.0, as its README there says); colors from a quarter as
+//! bright as white to 16 times, which the world's
 //! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
 //! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); the
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
@@ -38,7 +42,8 @@
 //! keys or a pad say, W and S or the arrows or the left stick forward and back, turning by A and D,
 //! jumping by Space or South, `scripts/follow.luau` follows it with a camera, casting back
 //! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
-//! so often, a tween easing it back; and animation and physics step, so that each scene moves as
+//! so often, a tween easing it back, `scripts/moods.luau` cross-fades its fox to its next clip
+//! every few seconds through `gg.play`; and animation and physics step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
 //! package without its code, and so without the keys' walking and its own components: the
 //! chimes, the jukebox, the HUD and the plasma, which its code registers and runs.
@@ -79,9 +84,10 @@ fn app() -> App {
 }
 
 /// The game's scripts, by their paths from its directory: each declares the component it is.
-const SCRIPTS: [&str; 5] = [
+const SCRIPTS: [&str; 6] = [
     "scripts/bob.luau",
     "scripts/follow.luau",
+    "scripts/moods.luau",
     "scripts/pulse.luau",
     "scripts/spin.luau",
     "scripts/walk.luau",
