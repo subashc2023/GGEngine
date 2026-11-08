@@ -10,7 +10,7 @@ use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 use super::{
     Angle, Color, Digest, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind,
 };
-use crate::{Entity, Font, Model, Texture};
+use crate::{Entity, Font, Model, Prefab, Texture};
 
 /// `set_value` as all of them have it, and no parts.
 macro_rules! whole {
@@ -131,6 +131,7 @@ plain! {
     Texture => Texture texture,
     Model => Model model,
     Font => Font font,
+    Prefab => Prefab prefab,
 }
 
 impl Reflect for String {

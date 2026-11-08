@@ -12,7 +12,7 @@ use super::id::Named;
 use super::table::{AnyColumn, ComponentId, Table};
 use super::{Component, Entity, Location, Parent, World};
 use crate::reflect::{self, Ident, Reflect, Resolved, Shape, Type, Types, Value};
-use crate::{ModelNode, ModelRoot};
+use crate::{ModelNode, ModelRoot, PrefabRoot};
 
 impl World {
     /// Registers component type `T`, describing it to reflection, if it hasn't registered yet: a
@@ -146,12 +146,13 @@ impl World {
     /// value refused changes nothing: its kinds, the bounds of its fields, which it's outside of if
     /// a number isn't finite, and a rotation being a unit quaternion. What's opaque is set only to
     /// [`Value::Opaque`], which keeps it as it is. A [`Parent`] isn't set by name: the world keeps
-    /// it, and [`World::set_parent`] changes it; nor is a [`ModelNode`], which the world keeps too.
-    /// A [`ModelRoot`] given another model has that model's nodes in place of its own, as it says.
+    /// it, and [`World::set_parent`] changes it; nor is a [`ModelNode`] or a [`PrefabRoot`], which
+    /// the world keeps too, the tool API's operations changing an instance's link. A [`ModelRoot`]
+    /// given another model has that model's nodes in place of its own, as it says.
     ///
-    /// Fails as `get_field` does; with `reflect.read_only` for `Parent` and `ModelNode`, at any
-    /// path, whether the entity has one or not; with `reflect.out_of_range` for a number outside
-    /// its field's bounds or its type's; and as [`Reflect::with_value`]
+    /// Fails as `get_field` does; with `reflect.read_only` for `Parent`, `ModelNode` and
+    /// `PrefabRoot`, at any path, whether the entity has one or not; with `reflect.out_of_range`
+    /// for a number outside its field's bounds or its type's; and as [`Reflect::with_value`]
     /// does for a value that doesn't fit the field. Every error names the entity, by its ID while
     /// it's alive, the component and the path, down to the part refused.
     pub fn set_field(
@@ -161,11 +162,27 @@ impl World {
         path: &str,
         value: &Value,
     ) -> Result<Value> {
+        self.write_field(entity, component, path, value, false)
+    }
+
+    /// Sets a field as [`set_field`](Self::set_field) does, and a [`PrefabRoot`]'s too if
+    /// `relinks`: as operations and refits set one, spawning its instance's entities again
+    /// themselves, as the world keeps them.
+    pub(super) fn write_field(
+        &mut self,
+        entity: Entity,
+        component: &str,
+        path: &str,
+        value: &Value,
+        relinks: bool,
+    ) -> Result<Value> {
         // Named before the closure, which would otherwise still borrow the world at `row_mut`.
         let name = self.name_of(entity);
         let about = |error: Error| about(error, "set", name, component, path);
         let (id, at) = self.find(entity, component).map_err(about)?;
-        self.settable(id).map_err(about)?;
+        if !(relinks && Some(id) == self.components.get(TypeId::of::<PrefabRoot>())) {
+            self.settable(id).map_err(about)?;
+        }
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
@@ -203,8 +220,9 @@ impl World {
         Ok(old)
     }
 
-    /// Fails with `reflect.read_only` if component type `id` is one the world keeps, [`Parent`] or
-    /// [`ModelNode`], which nothing sets by name, as [`set_field`](Self::set_field) says.
+    /// Fails with `reflect.read_only` if component type `id` is one the world keeps, [`Parent`],
+    /// [`ModelNode`] or [`PrefabRoot`], which nothing sets by name, as
+    /// [`set_field`](Self::set_field) says.
     fn settable(&self, id: ComponentId) -> Result<()> {
         if Some(id) == self.components.get(TypeId::of::<Parent>()) {
             return Err(Error::new(
@@ -217,6 +235,13 @@ impl World {
             return Err(Error::new(
                 "reflect.read_only",
                 "the world keeps it, as it spawns a model's nodes under the model's root",
+            ));
+        }
+        if Some(id) == self.components.get(TypeId::of::<PrefabRoot>()) {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world keeps it, as it spawns the prefab's entities under the instance's root; \
+                 the tool API's operations change it",
             ));
         }
         Ok(())
@@ -364,9 +389,9 @@ impl World {
     /// entity or none, which no bounds apply to, set as an `Option<Entity>` without the `Value` of
     /// one, which would allocate.
     ///
-    /// Fails as [`field_at`](Self::field_at) does; with `reflect.read_only` for `Parent` and
-    /// `ModelNode`; and with `reflect.out_of_range` for a number outside its field's bounds, which
-    /// it's outside of if it isn't finite.
+    /// Fails as [`field_at`](Self::field_at) does; with `reflect.read_only` for `Parent`,
+    /// `ModelNode` and `PrefabRoot`; and with `reflect.out_of_range` for a number outside its
+    /// field's bounds, which it's outside of if it isn't finite.
     pub(crate) fn field_to_set(
         &mut self,
         entity: Entity,

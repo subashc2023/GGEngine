@@ -1,0 +1,100 @@
+(
+    entities: {
+        "013fb1879066bec1": (
+            Text: (
+                text: "BLUE",
+            ),
+        ),
+        "1b8e4f2a9c7d0365": (
+            Name: ("Lamppost"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5d97b3e0a1c6f284": (
+            Name: ("Pole"),
+            Parent: ("1b8e4f2a9c7d0365"),
+            Sprite: (
+                color: (0.25, 0.27, 0.33, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -0.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 3.4, 1.0),
+            ),
+        ),
+        "6a3c9e1f8b2d7054": (
+            Parent: ("1b8e4f2a9c7d0365"),
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (-1.15, 0.45, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.7, 0.7, 1.0),
+            ),
+        ),
+        "7c8e572f678692b4": (
+            Text: (
+                text: "NESTED",
+            ),
+        ),
+        "8f04c6d2b9a17e35": (
+            Name: ("Arm"),
+            Parent: ("1b8e4f2a9c7d0365"),
+            Sprite: (
+                color: (0.25, 0.27, 0.33, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 1.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.6, 0.14, 1.0),
+            ),
+        ),
+        "985a2611b3b2c312": (
+            Sprite: (
+                color: (0.3, 0.6, 1.0, 1.0),
+            ),
+        ),
+        "c2f5a8d3e7b10964": (
+            Parent: ("1b8e4f2a9c7d0365"),
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (1.15, 0.45, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.7, 0.7, 1.0),
+            ),
+        ),
+        "e3a95d1c7f20b648": (
+            Name: ("Caption"),
+            Parent: ("1b8e4f2a9c7d0365"),
+            Text: (
+                text: "LAMPPOST, OF TWO LANTERNS",
+                font: None,
+                size: 0.2,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -2.45, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -35,7 +35,11 @@
 //! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
 //! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor
 //! lit by a light beside it, sparks that a burster bursts every so often, and a comet's trail
-//! behind an emitter a spinning pivot carries round (`particles.ron`); and, once `cargo
+//! behind an emitter a spinning pivot carries round (`particles.ron`); linked prefabs, a lantern
+//! placed four times, three of them changing a field of their own, a color, a caption or where
+//! their flame is, and a lamppost that links two lanterns, its own instances inside it, every
+//! lantern taking what its prefab's file changes as it's saved (`prefabs.ron`, of
+//! `prefabs/lantern.prefab` and `prefabs/lamppost.prefab`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and walked through
 //! by a character that the keys or a pad move, a camera following it, Sponza's triangles what it
 //! collides with, among crates and balls it pushes (`walk.ron`), and Amazon

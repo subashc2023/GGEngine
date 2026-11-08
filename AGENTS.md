@@ -90,8 +90,8 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 
 Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a scene
 file or script a layer loaded (`Context::load_scene_file`, `Scripts::load`) as it's saved, and,
-serving the API, reload a game's shaders, textures, models, fonts, sounds and music as their files
-change (`Shader reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`,
+serving the API, reload a game's assets as their files change (`Shader reloaded`,
+`Texture reloaded`, `Model reloaded`, `Font reloaded`, `Prefab reloaded`, `Sound reloaded`,
 `Music reloaded`), warning at a change that fails. Windowed and embedded runs play sound, which an
 agent can't hear: each sound or music started logs `Sound started` or `Music started` at the debug
 level. Run a game under `cargo gg run`, in the background: it patches in an edit inside function

@@ -99,8 +99,8 @@ impl Fetch {
     /// named, neither `.` nor `..`, with `/` between them, without `\`, `:` or a control character,
     /// so that they stay inside the project's directory on every OS; each file's SHA-256 64
     /// lowercase hex digits; no file's path into the project twice; and each of `ids` an asset ID,
-    /// as gg-api's [`AssetId`] reads one, of a texture, a model or a font of `files`, no two the
-    /// same.
+    /// as gg-api's [`AssetId`] reads one, of a texture, a model, a font or a prefab of `files`, no
+    /// two the same.
     ///
     /// Fails with `fetch.bad`, naming what's wrong.
     pub fn check(&self) -> Result<(), Failure> {
@@ -150,8 +150,8 @@ impl Fetch {
                 })?;
                 if !(source.files.contains_key(name) && AssetKind::of(Path::new(name)).is_some()) {
                     return bad(format!(
-                        "`ids` gives `{name}` an ID, but it isn't a texture, a model or a font \
-                         that `files` names"
+                        "`ids` gives `{name}` an ID, but it isn't a texture, a model, a font or a \
+                         prefab that `files` names"
                     ));
                 }
                 if !ids.insert(parsed) {

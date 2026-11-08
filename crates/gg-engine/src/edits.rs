@@ -381,6 +381,19 @@ fn operation_value(operation: &Operation) -> Value {
             "Reparent",
             vec![entity(of), ("parent".into(), maybe(parent))],
         ),
+        Operation::Unlink { entity: of } => ("Unlink", vec![entity(of)]),
+        Operation::Revert {
+            entity: of,
+            component,
+            path,
+        } => (
+            "Revert",
+            vec![
+                entity(of),
+                ("component".into(), text(component)),
+                ("path".into(), text(path)),
+            ],
+        ),
     };
     Value::Variant(name.into(), fields)
 }
@@ -466,6 +479,20 @@ fn operation(value: &Value) -> Result<Operation> {
                 parent: maybe(parent, "parent")?,
             }
         }
+        "Unlink" => {
+            let [of] = reflect::pick(fields, ["entity"])?;
+            Operation::Unlink {
+                entity: entity(of)?,
+            }
+        }
+        "Revert" => {
+            let [of, named, path] = reflect::pick(fields, ["entity", "component", "path"])?;
+            Operation::Revert {
+                entity: entity(of)?,
+                component: component(named)?,
+                path: text(path, "path")?,
+            }
+        }
         other => {
             let names = [
                 "Create",
@@ -475,6 +502,8 @@ fn operation(value: &Value) -> Result<Operation> {
                 "Remove",
                 "Set",
                 "Reparent",
+                "Unlink",
+                "Revert",
             ];
             return Err(reflect::no_variant(other, &names));
         }

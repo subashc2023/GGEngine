@@ -583,7 +583,7 @@ impl Lockstep {
             #[cfg(feature = "dev")]
             patches: Patches::default(),
             #[cfg(feature = "dev")]
-            named: (0, 0, 0),
+            named: (0, 0, 0, 0),
             #[cfg(feature = "dev")]
             names: Vec::new(),
         })

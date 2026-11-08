@@ -107,7 +107,7 @@ impl Recorder {
             app,
             line: String::new(),
             failed: None,
-            named: (0, 0, 0),
+            named: (0, 0, 0, 0),
         })
     }
 

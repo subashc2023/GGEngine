@@ -60,8 +60,8 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
-    Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Name, Operation, Pose, Scroll,
-    Texture, World, patch, snapshot,
+    Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Name, Operation, Pose, Prefab,
+    Scroll, Texture, World, patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
@@ -1321,7 +1321,8 @@ fn field(world: &World, id: EntityId, component: &str, path: &str) -> Result<Str
     Ok(out)
 }
 
-/// The textures, models and fonts that the values of the operations `given` asks for name that
+/// The textures, models, fonts and prefabs that the values of the operations `given` asks for name
+/// that
 /// none loaded has, as [`operations`] reads them in `world`: which a client's edit names, to load
 /// before it's read.
 fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>> {
@@ -1333,9 +1334,9 @@ fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>
     gathering.missing.into_inner()
 }
 
-/// What reads values as a world does, `world`, but for a texture, a model or a font that none
-/// loaded has, which it keeps the name of, reading on as though it were the engine's white
-/// texture, or the first model or font.
+/// What reads values as a world does, `world`, but for a texture, a model, a font or a prefab that
+/// none loaded has, which it keeps the name of, reading on as though it were the engine's white
+/// texture, or the first model, font or prefab.
 struct Gathering<'w> {
     world: &'w World,
     missing: RefCell<Vec<Asset<String>>>,
@@ -1398,6 +1399,18 @@ impl json::Names for Gathering<'_> {
         }
         self.missed(Asset::Font(name));
         Ok(reflect::Value::Font(Font::new(0)))
+    }
+
+    fn prefab_name(&self, prefab: Prefab) -> Option<&str> {
+        Some(self.world.assets().prefab_name(prefab))
+    }
+
+    fn prefab(&self, name: &str) -> Result<reflect::Value> {
+        if let Some(prefab) = self.world.assets().prefab(name) {
+            return Ok(reflect::Value::Prefab(prefab));
+        }
+        self.missed(Asset::Prefab(name));
+        Ok(reflect::Value::Prefab(Prefab::new(0)))
     }
 }
 
@@ -1506,6 +1519,20 @@ fn operation_of(
             entity: id(&of)?,
             parent: maybe(parent)?,
         },
+        Given::Unlink { id: of } => Operation::Unlink { entity: id(&of)? },
+        Given::Revert {
+            id: of,
+            component,
+            path,
+        } => {
+            // Refused as a set of the path is, for a type or a field there's none of.
+            field(&component, &path)?;
+            Operation::Revert {
+                entity: id(&of)?,
+                component: component.into(),
+                path,
+            }
+        }
     })
 }
 
@@ -1825,7 +1852,8 @@ fn needs(call: &Call) -> Vec<Capability> {
             .map(|operation| match operation {
                 gg_api::Operation::Add { component, .. }
                 | gg_api::Operation::Remove { component, .. }
-                | gg_api::Operation::Set { component, .. } => Write(Some(component.clone())),
+                | gg_api::Operation::Set { component, .. }
+                | gg_api::Operation::Revert { component, .. } => Write(Some(component.clone())),
                 _ => Write(None),
             })
             .collect(),

@@ -8,16 +8,19 @@
 //! would refuse where code had stored what a set refuses. Only the [`Log`](super::Log) holds
 //! inverses, and it releases what they keep.
 
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::{fmt, mem};
 
 use gg_core::{Error, Result};
 
 use super::nodes;
-use super::scene::NO_HINTS;
+use super::prefab::Instance;
+use super::scene::{Expanding, NO_HINTS, Template};
 use super::table::{AnyColumn, ComponentId, Row};
 use super::{Entity, EntityId, Parent, World};
-use crate::reflect::{self, Ident, Value};
-use crate::{ModelNode, ModelRoot};
+use crate::reflect::{self, Ident, Reflect, Value};
+use crate::{ModelNode, ModelRoot, PrefabRoot};
 
 /// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies,
 /// and undoes. It names entities by their IDs, and carries values as reflection's, whose entities
@@ -34,8 +37,23 @@ use crate::{ModelNode, ModelRoot};
 /// a whole, as [`MeshDraw`](crate::MeshDraw) is. A create is refused with `ecs.id_taken` for an ID
 /// a living entity has, and a duplicate for one of its copies' IDs that a living entity has, or a
 /// delete keeps for its undo, and with `ops.bad_copies` for copies' IDs given other than one each;
-/// a remove with `reflect.missing_component`; a set as `set_field` refuses it; and a reparent as
-/// [`World::set_parent`] refuses it.
+/// a remove with `reflect.missing_component`; a set as `set_field` refuses it, but for a
+/// `PrefabRoot`, which it changes, as below; and a reparent as [`World::set_parent`] refuses it.
+///
+/// An instance of a prefab, as [`PrefabRoot`] says, is one edit with its root: a create of a root
+/// with a `PrefabRoot`, or an add or a set of one, spawns its prefab's entities, which its undo
+/// takes out, and a remove or a set takes out those it had, with the components its prefab gave the
+/// root, which its undo puts back as they were, each instance put back taking what its prefab's
+/// file changed since in a development build. Each is refused with `ecs.prefab_entity` for an
+/// entity an instance's prefab gives that it would delete, move, unlink, or give, change or take
+/// away a `PrefabRoot` of, and for a component a prefab gives that a remove would take away; as the
+/// prefab's template refuses to load, as a scene that names it would, such as with
+/// `scene.prefab_cycle`; and with `ecs.id_taken` for an ID of the instance's entities that a living
+/// entity has, or, for a duplicate's copy, a delete keeps. A duplicate is refused with
+/// `ops.bad_copies` for an ID it's given that an instance's copy gives one of its entities, mixed
+/// from the ID its root's copy is given. An unlink is refused with `ecs.no_prefab` for an entity
+/// without a `PrefabRoot`, and a revert for one no instance gives, or a component its prefab
+/// doesn't give it, or as a set of the prefab's value is.
 ///
 /// A create, an add or a set that makes a component's [exclusive](crate::Component::exclusive)
 /// field true on its entity makes it false on every other entity with the component, and its
@@ -83,6 +101,19 @@ pub enum Operation {
         entity: EntityId,
         parent: Option<EntityId>,
     },
+    /// Unlinks the instance whose root is `entity` from its prefab, as [`PrefabRoot`] says: takes
+    /// its `PrefabRoot` away, and its entities stay as they are, under their IDs, its own from then
+    /// on.
+    Unlink { entity: EntityId },
+    /// Sets the field at `path` of `entity`'s `component`, or the whole component for an empty
+    /// path, to what the prefab of the instance that gives it has there, as `set_field` does: the
+    /// instance's root's, but its `Transform`, which is its own; or the entity's, that the
+    /// outermost instance whose prefab gives it gives.
+    Revert {
+        entity: EntityId,
+        component: Ident,
+        path: String,
+    },
 }
 
 impl Operation {
@@ -96,7 +127,9 @@ impl Operation {
             | Self::Add { entity, .. }
             | Self::Remove { entity, .. }
             | Self::Set { entity, .. }
-            | Self::Reparent { entity, .. } => Some(*entity),
+            | Self::Reparent { entity, .. }
+            | Self::Unlink { entity }
+            | Self::Revert { entity, .. } => Some(*entity),
         }
     }
 }
@@ -131,6 +164,12 @@ impl fmt::Display for Operation {
                 entity,
                 parent: None,
             } => write!(f, "make {entity} a root"),
+            Self::Unlink { entity } => write!(f, "unlink {entity}"),
+            Self::Revert {
+                entity,
+                component,
+                path,
+            } => write!(f, "revert `{}` of {entity}", reflect::join(component, path)),
         }
     }
 }
@@ -173,6 +212,10 @@ enum Undo {
     Restore {
         taken: Vec<Taken>,
         created: bool,
+        /// The instances among them, as [`World::kept_instances`] found them, each of which takes
+        /// what its prefab's file changed while it was out as it's put back.
+        #[cfg(feature = "dev")]
+        instances: Vec<(EntityId, Rc<Template>)>,
     },
     /// Applies `undo`, then sets the exclusive fields `excluded` names to `to`: true again, to
     /// undo an operation that made them false as it made another entity's true, and false, to
@@ -182,6 +225,35 @@ enum Undo {
         excluded: Vec<Excluded>,
         to: bool,
     },
+    /// Takes out of instance root `entity` what its prefab gave it, the components `given` and
+    /// the entities `spawned` under it, with what's under them, and its `PrefabRoot`, keeping
+    /// their slots and IDs as a delete does; and puts back what `put` keeps, which an add, a set
+    /// or a remove of its `PrefabRoot` took out: undoing it, its prefab's entities as they were.
+    Relink {
+        entity: EntityId,
+        put: Linked,
+        given: Vec<ComponentId>,
+        spawned: Vec<EntityId>,
+    },
+    /// Gives instance root `entity` back the `PrefabRoot` an unlink took, in a one-row column of
+    /// its own.
+    Link {
+        entity: EntityId,
+        column: Box<dyn AnyColumn>,
+    },
+}
+
+/// What a change of an instance's root's prefab took out of it, which [`Undo::Relink`] puts back:
+/// its `PrefabRoot`, if it had one, in a one-row column; the components its prefab gave it; and the
+/// entities its prefab gave under it, each top one's subtree in the order a delete takes it.
+struct Linked {
+    link: Option<Box<dyn AnyColumn>>,
+    row: Row,
+    taken: Vec<Taken>,
+    /// Its instance and those among the entities, as [`World::kept_instances`] found them, each of
+    /// which takes what its prefab's file changed while it was out as it's put back.
+    #[cfg(feature = "dev")]
+    instances: Vec<(EntityId, Rc<Template>)>,
 }
 
 /// An entity's exclusive field, `field` of `component`, which an operation made false as it made
@@ -303,8 +375,18 @@ impl World {
         {
             return self.put_back(set, &mut **kept);
         }
+        if let Undo::Relink { .. } = undo {
+            return self.relink_back(undo);
+        }
         let redo = match &*undo {
-            Undo::Exclusive { .. } => unreachable!("reverted above"),
+            Undo::Exclusive { .. } | Undo::Relink { .. } => unreachable!("reverted above"),
+            Undo::Link { entity, .. } => {
+                let id = self
+                    .component::<PrefabRoot>()
+                    .expect("a `PrefabRoot` was taken");
+                self.can_put(*entity, id)?;
+                Undo::Apply(Operation::Unlink { entity: *entity })
+            }
             Undo::Apply(operation) | Undo::Set { set: operation, .. } => self.applied(operation)?,
             Undo::Put {
                 entity, component, ..
@@ -319,23 +401,19 @@ impl World {
             Undo::Uncreate(made) => {
                 let root = self.can_uncreate(made)?;
                 Undo::Restore {
+                    // Found before they're taken out.
+                    #[cfg(feature = "dev")]
+                    instances: self.kept_instances(root),
                     taken: self.vacate_subtree(root),
                     created: true,
                 }
             }
-            Undo::Restore { taken, created } => {
+            Undo::Restore { taken, created, .. } => {
                 self.can_restore(taken)?;
                 let root = taken.last().expect("a delete takes its entity");
                 if *created {
-                    // The root first, which was taken last; models' nodes go with their roots.
-                    let node = self.component::<ModelNode>();
-                    let made = taken.iter().rev().filter(|taken| {
-                        !taken
-                            .row
-                            .iter()
-                            .any(|&(component, _)| Some(component) == node)
-                    });
-                    Undo::Uncreate(made.map(|taken| taken.id).collect())
+                    // Once they're back, as `made` finds them.
+                    Undo::Uncreate(Vec::new())
                 } else {
                     Undo::Apply(Operation::Delete { entity: root.id })
                 }
@@ -343,7 +421,7 @@ impl World {
         };
         // Checked, so that what the inverse kept goes back, which can't fail.
         match mem::replace(undo, redo) {
-            Undo::Exclusive { .. } => unreachable!("reverted above"),
+            Undo::Exclusive { .. } | Undo::Relink { .. } => unreachable!("reverted above"),
             Undo::Apply(_) | Undo::Set { .. } | Undo::Uncreate(_) => {}
             Undo::Put {
                 entity,
@@ -355,9 +433,45 @@ impl World {
                 self.give(entity, at, component, column);
                 self.fit_root(entity, component);
             }
-            Undo::Restore { taken, .. } => self.restore(taken),
+            Undo::Link { entity, column } => {
+                let entity = self.entity(entity).expect("checked alive");
+                let at = self.location(entity).expect("alive");
+                let id = self
+                    .component::<PrefabRoot>()
+                    .expect("a `PrefabRoot` was taken");
+                self.give(entity, at, id, column);
+            }
+            Undo::Restore {
+                taken,
+                created,
+                #[cfg(feature = "dev")]
+                instances,
+            } => {
+                let root = taken.last().expect("a delete takes its entity").entity;
+                self.restore(taken);
+                #[cfg(feature = "dev")]
+                self.refit_kept(&instances);
+                if created {
+                    *undo = Undo::Uncreate(self.made(root));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// The IDs of what a create or a duplicate made, whose root is `root`, which is alive, as its
+    /// undo takes them out: the root's first, then those in its subtree but models' nodes, which go
+    /// with their roots, and the entities instances in it give, which go with theirs.
+    fn made(&self, root: Entity) -> Vec<EntityId> {
+        let claims = self
+            .claims(&[root], &mut Expanding::default())
+            .unwrap_or_default();
+        let subtree = self.subtree(root).into_iter();
+        let ids = subtree.map(|(entity, _)| (entity, self.id(entity).expect("alive")));
+        let made = ids.filter(|&(entity, id)| {
+            entity == root || (self.get::<ModelNode>(entity).is_none() && !claims.has(id))
+        });
+        made.map(|(_, id)| id).collect()
     }
 
     /// Puts back the component `set`, a set's inverse, changed, whole, as `kept` holds it, which
@@ -430,14 +544,22 @@ impl World {
     /// Frees the slots `undo` keeps, and lets their IDs go.
     fn let_go(&mut self, undo: Undo) {
         match undo {
-            Undo::Restore { taken, .. } => {
+            Undo::Restore { taken, .. }
+            | Undo::Relink {
+                put: Linked { taken, .. },
+                ..
+            } => {
                 for taken in taken {
                     self.free_slot(taken.entity.index);
                     self.free_id(taken.id);
                 }
             }
             Undo::Exclusive { undo, .. } => self.let_go(*undo),
-            Undo::Apply(_) | Undo::Set { .. } | Undo::Put { .. } | Undo::Uncreate(_) => {}
+            Undo::Apply(_)
+            | Undo::Set { .. }
+            | Undo::Put { .. }
+            | Undo::Uncreate(_)
+            | Undo::Link { .. } => {}
         }
     }
 
@@ -454,12 +576,16 @@ impl World {
             Operation::Add { component, .. } => vec![(component, "")],
             Operation::Set {
                 component, path, ..
+            }
+            | Operation::Revert {
+                component, path, ..
             } => vec![(component, path)],
             // A duplicate's copies have their exclusive fields false.
             Operation::Duplicate { .. }
             | Operation::Delete { .. }
             | Operation::Remove { .. }
-            | Operation::Reparent { .. } => {
+            | Operation::Reparent { .. }
+            | Operation::Unlink { .. } => {
                 return undo;
             }
         };
@@ -537,7 +663,9 @@ impl World {
             | Operation::Delete { entity }
             | Operation::Add { entity, .. }
             | Operation::Remove { entity, .. }
-            | Operation::Set { entity, .. } => [Some(*entity), None],
+            | Operation::Set { entity, .. }
+            | Operation::Unlink { entity }
+            | Operation::Revert { entity, .. } => [Some(*entity), None],
         };
         for touched in touched
             .into_iter()
@@ -546,15 +674,29 @@ impl World {
         {
             self.not_a_node(touched).map_err(refused)?;
         }
+        // An instance's prefab's entities and components, which tools change but take none of
+        // away.
+        self.prefabs_kept(operation).map_err(refused)?;
+        let linked = self.component::<PrefabRoot>();
+        let link_name = linked.map(|id| self.components.name(id).to_owned());
+        let links = |name: &str| link_name.as_deref() == Some(name);
         Ok(match operation {
             Operation::Create {
                 entity,
                 parent,
                 components,
             } => {
-                let id = self.create(*entity, *parent, components).map_err(refused)?;
-                // Its model's nodes, which its undo takes out with it, whichever it has then.
-                self.fit_nodes(self.entity(id).expect("made"), None);
+                let template = self.created_template(components).map_err(refused)?;
+                let made = self.create(*entity, *parent, components, template.as_deref());
+                let id = made.map_err(refused)?;
+                let made = self.entity(id).expect("made");
+                // Its prefab's entities and its model's nodes, which its undo takes out with it,
+                // whichever it has then.
+                if let Some(template) = template {
+                    let ids = template.ids(id).expect("checked as it was made");
+                    self.spawn_instance(made, &Instance { template, ids });
+                }
+                self.fit_nodes(made, None);
                 Undo::Uncreate(vec![id])
             }
             Operation::Duplicate { entity, copies } => {
@@ -563,6 +705,9 @@ impl World {
             Operation::Delete { entity } => {
                 let root = self.living(*entity).map_err(refused)?;
                 Undo::Restore {
+                    // Found before they're taken out.
+                    #[cfg(feature = "dev")]
+                    instances: self.kept_instances(root),
                     taken: self.vacate_subtree(root),
                     created: false,
                 }
@@ -585,6 +730,9 @@ impl World {
                     )));
                 }
                 let column = self.build(id, component, value).map_err(refused)?;
+                if links(component) {
+                    return self.relink(handle, Some(column)).map_err(refused);
+                }
                 self.give(handle, at, id, column);
                 self.fit_root(handle, id);
                 Undo::Apply(Operation::Remove {
@@ -597,6 +745,9 @@ impl World {
                 let at = self.location(handle).expect("alive");
                 let id = self.writable_type(component).map_err(refused)?;
                 self.column(at, id, component).map_err(refused)?;
+                if links(component) {
+                    return self.relink(handle, None).map_err(refused);
+                }
                 let column = self.take_out(handle, at, id);
                 self.fit_root(handle, id);
                 Undo::Put {
@@ -614,8 +765,9 @@ impl World {
                 let handle = self.living(*entity).map_err(refused)?;
                 // Whole, before anything changes, for a roll back.
                 let kept = self.copy_of(handle, component);
-                let old = self.set_field(handle, component, path, value)?;
-                Undo::Set {
+                // A link too, which the relink below spawns the instance of.
+                let old = self.write_field(handle, component, path, value, true)?;
+                let undo = Undo::Set {
                     set: Operation::Set {
                         entity: *entity,
                         component: component.clone(),
@@ -623,7 +775,61 @@ impl World {
                         value: old,
                     },
                     kept,
+                };
+                let (
+                    Undo::Set {
+                        kept: Some(kept), ..
+                    },
+                    true,
+                ) = (&undo, links(component))
+                else {
+                    return Ok(undo);
+                };
+                // Another prefab: the one the world held goes back, for the relink to take out.
+                let id = linked.expect("a link's");
+                let set = self.copy_of(handle, component).expect("set");
+                if set.value(0) == kept.value(0) {
+                    return Ok(undo);
                 }
+                let Undo::Set {
+                    kept: Some(mut kept),
+                    ..
+                } = undo
+                else {
+                    unreachable!("matched above");
+                };
+                self.swap_component(handle, id, &mut *kept);
+                return self.relink(handle, Some(set)).map_err(refused);
+            }
+            Operation::Unlink { entity } => {
+                let handle = self.living(*entity).map_err(refused)?;
+                let at = self.location(handle).expect("alive");
+                let id = linked.filter(|&id| self.tables[at.table as usize].has(id));
+                let Some(id) = id else {
+                    return Err(refused(Error::new(
+                        "ecs.no_prefab",
+                        "it has no `PrefabRoot`: it's no instance's root",
+                    )));
+                };
+                Undo::Link {
+                    entity: *entity,
+                    column: self.take_out(handle, at, id),
+                }
+            }
+            Operation::Revert {
+                entity,
+                component,
+                path,
+            } => {
+                let handle = self.living(*entity).map_err(refused)?;
+                let value = self.prefab_value(handle, component, path);
+                let value = value.map_err(refused)?;
+                self.applied(&Operation::Set {
+                    entity: *entity,
+                    component: component.clone(),
+                    path: path.clone(),
+                    value,
+                })?
             }
             Operation::Reparent { entity, parent } => {
                 let child = self.living(*entity).map_err(refused)?;
@@ -656,12 +862,295 @@ impl World {
         }
     }
 
-    /// Spawns the entity a create makes, and returns its ID.
+    /// Fails with `ecs.prefab_entity` for `operation` if it would take away what an instance's
+    /// prefab gives: delete or move one of the entities it gives, or unlink one, or give one a
+    /// `PrefabRoot`, change it, or take it away, as those of instances inside another's are the
+    /// other's prefab's; or remove a component the prefab gives one of its entities, or its root.
+    fn prefabs_kept(&self, operation: &Operation) -> Result<()> {
+        let linked = self.component::<PrefabRoot>();
+        let links = |name: &str| linked.is_some() && self.components.named(name) == linked;
+        let (id, component) = match operation {
+            Operation::Delete { entity }
+            | Operation::Reparent { entity, .. }
+            | Operation::Unlink { entity } => (*entity, None),
+            Operation::Add {
+                entity, component, ..
+            }
+            | Operation::Set {
+                entity, component, ..
+            } if links(component) => (*entity, None),
+            Operation::Remove { entity, component } if links(component) => (*entity, None),
+            Operation::Remove { entity, component } => (*entity, Some(component)),
+            _ => return Ok(()),
+        };
+        // One no entity has, its operation refuses.
+        let Some(entity) = self.entity(id) else {
+            return Ok(());
+        };
+        let Some(component) = component else {
+            return self.not_a_prefabs(entity);
+        };
+        let Some(of) = self.components.named(component) else {
+            return Ok(());
+        };
+        let mut expanding = Expanding::default();
+        let (root, instance, part) = match self.claimer(entity, &mut expanding)? {
+            Some(claimed) => claimed,
+            None => match self.instance(entity, &mut expanding)? {
+                Some(instance) => (entity, instance, 0),
+                None => return Ok(()),
+            },
+        };
+        if instance.components(self, part).contains(&of) {
+            return Err(self.prefabs_own(entity, root, &format!("its `{component}`")));
+        }
+        Ok(())
+    }
+
+    /// The template of the prefab a create's `components` link, if they give a `PrefabRoot`.
+    ///
+    /// Fails as the `PrefabRoot`'s value does, and as the template does.
+    fn created_template(&self, components: &[(Ident, Value)]) -> Result<Option<Rc<Template>>> {
+        let Some(linked) = self.component::<PrefabRoot>() else {
+            return Ok(None);
+        };
+        let name = self.components.name(linked);
+        let Some((_, value)) = components.iter().find(|(given, _)| given == name) else {
+            return Ok(None);
+        };
+        let PrefabRoot(prefab) = PrefabRoot::from_value(value)?;
+        Expanding::default().template(self, prefab).map(Some)
+    }
+
+    /// Changes `root`'s prefab to the one `link`, a one-row column of a `PrefabRoot`, names, or
+    /// takes its prefab away without one: takes out its `PrefabRoot`, the components its prefab
+    /// gave it, but its `Transform`, and the entities its prefab gave under it, with what's under
+    /// them, keeping their slots and IDs as a delete does; then gives it `link`, and its prefab's
+    /// instance, as [`spawn_instance`](Self::spawn_instance) does. Returns what undoes it.
+    ///
+    /// Fails, changing nothing, as the instances' templates do, and with `ecs.id_taken` for an ID
+    /// an entity of the new instance takes that a living entity has, but one taken out.
+    fn relink(&mut self, root: Entity, link: Option<Box<dyn AnyColumn>>) -> Result<Undo> {
+        let id = self.id(root).expect("alive");
+        let mut expanding = Expanding::default();
+        let old = self.instance(root, &mut expanding)?;
+        let new = match &link {
+            Some(link) => {
+                let PrefabRoot(prefab) = PrefabRoot::from_value(&link.value(0))?;
+                let template = expanding.template(self, prefab)?;
+                let ids = template.ids(id)?;
+                Some(Instance { template, ids })
+            }
+            None => None,
+        };
+        let tops = self.linked_tops(root, old.as_ref());
+        if let Some(new) = &new {
+            let leaving = self.subtree_ids(&tops);
+            let mut ids = new.ids[1..].iter();
+            let taken = ids.find(|&id| self.by_id.contains_key(id) && !leaving.contains(id));
+            if let Some(taken) = taken {
+                return Err(Error::new(
+                    "ecs.id_taken",
+                    format!(
+                        "entity {taken}, which its prefab gives it, is in the world already, as \
+                         an entity of its own under it"
+                    ),
+                ));
+            }
+        }
+        let given = old.map_or_else(Vec::new, |old| old.components(self, 0));
+        let put = self.take_link(root, &given, &tops);
+        let (given, spawned) = match (link, new) {
+            (Some(link), Some(new)) => {
+                let at = self.location(root).expect("alive");
+                self.give(
+                    root,
+                    at,
+                    self.component::<PrefabRoot>().expect("linked"),
+                    link,
+                );
+                self.spawn_instance(root, &new)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        Ok(Undo::Relink {
+            entity: id,
+            put,
+            given,
+            spawned,
+        })
+    }
+
+    /// Applies `undo`, an [`Undo::Relink`], and leaves in its place what undoes that; refused, it
+    /// changes neither the world nor `undo`: with `ecs.no_entity` for the root gone since,
+    /// `ecs.id_taken` for an ID of what goes back that a living entity has since, but those taken
+    /// out, and `reflect.has_component` for a component that goes back that the root has since.
+    fn relink_back(&mut self, undo: &mut Undo) -> Result<()> {
+        let Undo::Relink {
+            entity,
+            put,
+            given,
+            spawned,
+        } = undo
+        else {
+            unreachable!("a relink's");
+        };
+        let root = self.living(*entity)?;
+        let tops = spawned.iter().filter_map(|&id| self.entity(id));
+        let tops: Vec<Entity> = tops
+            .filter(|&top| self.parent(top).expect("alive") == Some(root))
+            .collect();
+        let leaving = self.subtree_ids(&tops);
+        let refused = |error: Error| {
+            let message = format!("can't put entity {entity}'s prefab back: {error}");
+            error.with_message(message)
+        };
+        let mut back = put.taken.iter().map(|taken| taken.id);
+        if let Some(taken) = back.find(|id| self.by_id.contains_key(id) && !leaving.contains(id)) {
+            return Err(refused(Error::new(
+                "ecs.id_taken",
+                format!("entity {taken} is in the world again"),
+            )));
+        }
+        let at = self.location(root).expect("alive");
+        for &(component, _) in &put.row {
+            if self.tables[at.table as usize].has(component) && !given.contains(&component) {
+                let name = self.components.name(component);
+                return Err(refused(Error::new(
+                    "reflect.has_component",
+                    format!("it has a `{name}` again"),
+                )));
+            }
+        }
+        let current = self.take_link(root, given, &tops);
+        // The root's own, which what goes back doesn't give it.
+        let at = self.location(root).expect("alive");
+        let own: Vec<ComponentId> = self.tables[at.table as usize].components().to_vec();
+        let own_children: HashSet<Entity> = self.children(root).expect("alive").collect();
+        let Linked {
+            link,
+            row,
+            taken,
+            #[cfg(feature = "dev")]
+            instances,
+        } = mem::replace(put, current);
+        let model = self.component::<ModelRoot>();
+        let fits = row.iter().any(|&(component, _)| Some(component) == model);
+        for (component, column) in row {
+            let at = self.location(root).expect("alive");
+            self.give(root, at, component, column);
+        }
+        self.restore(taken);
+        if let Some(link) = link {
+            let at = self.location(root).expect("alive");
+            self.give(
+                root,
+                at,
+                self.component::<PrefabRoot>().expect("linked"),
+                link,
+            );
+        }
+        if fits {
+            self.fit_nodes(root, None);
+        }
+        #[cfg(feature = "dev")]
+        self.refit_kept(&instances);
+        // What its prefab gives it now, which undoing this takes out: what went back, as its
+        // prefab's file changed it while it was out.
+        let link_type = self.component::<PrefabRoot>();
+        let at = self.location(root).expect("alive");
+        let types = self.tables[at.table as usize].components().iter().copied();
+        let types =
+            types.filter(|&component| !own.contains(&component) && Some(component) != link_type);
+        *given = types.collect();
+        // But its model's nodes, which come and go with its `ModelRoot`.
+        let tops = self.children(root).expect("alive");
+        let tops = tops
+            .filter(|&top| !own_children.contains(&top) && self.get::<ModelNode>(top).is_none());
+        *spawned = tops.map(|top| self.id(top).expect("alive")).collect();
+        Ok(())
+    }
+
+    /// `root`'s children that `instance`, its instance, if it has one, gives.
+    fn linked_tops(&self, root: Entity, instance: Option<&Instance>) -> Vec<Entity> {
+        let Some(instance) = instance else {
+            return Vec::new();
+        };
+        let given: HashSet<EntityId> = instance.ids[1..].iter().copied().collect();
+        let children = self.children(root).expect("alive");
+        let tops = children.filter(|&child| given.contains(&self.id(child).expect("alive")));
+        tops.collect()
+    }
+
+    /// The IDs of `tops`, which are alive, and their descendants.
+    fn subtree_ids(&self, tops: &[Entity]) -> HashSet<EntityId> {
+        let subtrees = tops.iter().flat_map(|&top| self.subtree(top));
+        subtrees
+            .map(|(entity, _)| self.id(entity).expect("alive"))
+            .collect()
+    }
+
+    /// Takes out of `root` its `PrefabRoot`, the components of the types `given` that it has, and
+    /// `tops`, which are under it, with what's under them, keeping their slots and IDs as a delete
+    /// does; and its model's nodes, if its `ModelRoot` goes. Returns what it took out, as an
+    /// [`Undo::Relink`] keeps it.
+    fn take_link(&mut self, root: Entity, given: &[ComponentId], tops: &[Entity]) -> Linked {
+        // Found before they're taken out: those of the root and among what's taken alone.
+        #[cfg(feature = "dev")]
+        let mut instances = self.kept_instances(root);
+        #[cfg(feature = "dev")]
+        {
+            let root_id = self.id(root).expect("alive");
+            let leaving = self.subtree_ids(tops);
+            instances.retain(|(id, _)| *id == root_id || leaving.contains(id));
+        }
+        let take = |world: &mut World, component: ComponentId| {
+            let at = world.location(root).expect("alive");
+            let has = world.tables[at.table as usize].has(component);
+            has.then(|| world.take_out(root, at, component))
+        };
+        let link = self.component::<PrefabRoot>().and_then(|id| take(self, id));
+        let mut row = Vec::with_capacity(given.len());
+        for &component in given {
+            if let Some(column) = take(self, component) {
+                row.push((component, column));
+            }
+        }
+        let mut taken = Vec::new();
+        for &top in tops {
+            taken.extend(self.vacate_subtree(top));
+        }
+        let model = self.component::<ModelRoot>();
+        if row.iter().any(|&(component, _)| Some(component) == model) {
+            self.fit_nodes(root, None);
+        }
+        Linked {
+            link,
+            row,
+            taken,
+            #[cfg(feature = "dev")]
+            instances,
+        }
+    }
+
+    /// Swaps `entity`'s component `id` with the one `column`, a one-row column of its type, holds,
+    /// unchecked, as a roll back puts back what a set kept.
+    fn swap_component(&mut self, entity: Entity, id: ComponentId, column: &mut dyn AnyColumn) {
+        let at = self.location(entity).expect("alive");
+        let tick = self.change_tick;
+        let table = &mut self.tables[at.table as usize];
+        let position = table.position(id).expect("the entity has the component");
+        (table.row_mut(position, at.row as usize, tick)).swap_row(at.row as usize, column);
+    }
+
+    /// Spawns the entity a create makes, and returns its ID: one that leaves free the IDs the
+    /// entities of its instance of `template`, if it links a prefab, take.
     fn create(
         &mut self,
         id: Option<EntityId>,
         parent: Option<EntityId>,
         components: &[(Ident, Value)],
+        template: Option<&Template>,
     ) -> Result<EntityId> {
         if let Some(id) = id
             && self.by_id.contains_key(&id)
@@ -669,6 +1158,19 @@ impl World {
             return Err(Error::new(
                 "ecs.id_taken",
                 format!("entity {id} is in the world already"),
+            ));
+        }
+        if let (Some(id), Some(template)) = (id, template)
+            && let Some(taken) = template.ids(id)?[1..]
+                .iter()
+                .find(|id| self.by_id.contains_key(id))
+        {
+            return Err(Error::new(
+                "ecs.id_taken",
+                format!(
+                    "entity {taken}, which its prefab gives it, is in the world already: give it \
+                     another ID"
+                ),
             ));
         }
         let parent = parent.map(|parent| self.living(parent)).transpose()?;
@@ -692,12 +1194,22 @@ impl World {
         row.sort_unstable_by_key(|&(component, _)| component);
         // Only once nothing can refuse, so that a refusal draws no ID.
         let entity = self.take_slot();
-        let id = match id {
-            Some(id) => {
+        let id = match (id, template) {
+            (Some(id), _) => {
                 self.find_by_id(id, entity);
                 id
             }
-            None => self.draw_id(entity, &[]),
+            (None, None) => self.draw_id(entity, &[]),
+            // Drawn until its instance's IDs are free too, as a model's nodes' are.
+            (None, Some(template)) => loop {
+                let id = self.draw_id(entity, &[]);
+                let ids = template.ids(id).ok();
+                if ids.is_some_and(|ids| ids[1..].iter().all(|&id| !self.reserved(id))) {
+                    break id;
+                }
+                self.by_id.remove(&id);
+                self.stream.reseed();
+            },
         };
         self.place(entity, id, row);
         if let Some(parent) = parent {
@@ -726,14 +1238,17 @@ impl World {
 
     /// The root of what a create or a duplicate made, `made`, the root's ID first, if undoing it
     /// can take them out again: the root is alive, and its subtree is them alone, every one of
-    /// them, without what the create or the duplicate didn't make, but models' nodes, which go
-    /// with their roots, whichever their models have now.
+    /// them, without what the create or the duplicate didn't make, but models' nodes and the
+    /// entities instances give, which go with their roots, whichever their models and prefabs have
+    /// now.
     fn can_uncreate(&self, made: &[EntityId]) -> Result<Entity> {
         let root = self.living(made[0])?;
+        let claims = self.claims(&[root], &mut Expanding::default())?;
         let subtree = self.subtree(root);
-        let under = subtree[1..]
-            .iter()
-            .filter(|&&(entity, _)| self.get::<ModelNode>(entity).is_none());
+        let under = subtree[1..].iter().filter(|&&(entity, _)| {
+            let id = self.id(entity).expect("alive");
+            self.get::<ModelNode>(entity).is_none() && !claims.has(id)
+        });
         let under: Vec<Entity> = under.map(|&(entity, _)| entity).collect();
         let mut ours = made[1..].to_vec();
         ours.sort_unstable();
@@ -775,14 +1290,31 @@ impl World {
         let is_node: Vec<bool> = (originals.iter())
             .map(|&(original, _)| self.get::<ModelNode>(original).is_some())
             .collect();
-        let named = is_node.iter().filter(|&&node| !node).count();
+        // Each original an instance in the subtree gives, by the instance and its part, whose copy
+        // the instance's copy gives, its ID mixed from the copy's root's.
+        let claims = self.claims(&[root], &mut Expanding::default())?;
+        let claimed: Vec<Option<(usize, usize)>> = (originals.iter())
+            .map(|&(original, _)| claims.of(self.id(original).expect("alive")))
+            .collect();
+        let mixes: Vec<bool> = (is_node.iter().zip(&claimed))
+            .map(|(&node, claimed)| node || claimed.is_some())
+            .collect();
+        let root_at: Vec<usize> = (claims.instances.iter())
+            .map(|(of, _)| {
+                let at = originals.iter().position(|(original, _)| original == of);
+                at.expect("an instance in the subtree")
+            })
+            .collect();
+        let mut copied_ids: Vec<Option<Vec<EntityId>>> = vec![None; claims.instances.len()];
+        let named = mixes.iter().filter(|&&mixed| !mixed).count();
         if !ids.is_empty() {
             if ids.len() != named {
                 return Err(Error::new(
                     "ops.bad_copies",
                     format!(
                         "it's given {} IDs for {named} copies, one for each of the entity and its \
-                         descendants but its models' nodes",
+                         descendants but its models' nodes and the entities its instances' \
+                         prefabs give",
                         ids.len(),
                     ),
                 ));
@@ -799,6 +1331,43 @@ impl World {
                         "ops.bad_copies",
                         format!("it's given ID {id} twice, but each copy has its own"),
                     ));
+                }
+            }
+            // The IDs each instance's copy gives its entities, mixed from its root's copy's, which
+            // no other copy is given, and which are free.
+            let mut given = ids.iter();
+            let given: Vec<Option<EntityId>> = (mixes.iter())
+                .map(|&mixed| (!mixed).then(|| *given.next().expect("one for each")))
+                .collect();
+            for (instance, &at) in root_at.iter().enumerate() {
+                let Some(copy_root) = given[at] else {
+                    continue;
+                };
+                let template = &claims.instances[instance].1.template;
+                for &id in &template.ids(copy_root)?[1..] {
+                    if ids.contains(&id) {
+                        return Err(Error::new(
+                            "ops.bad_copies",
+                            format!(
+                                "it's given ID {id}, which the copy of the instance whose root is \
+                                 entity {} gives an entity of its prefab, as its ID {copy_root} \
+                                 mixes",
+                                self.name_of(originals[at].0)
+                            ),
+                        ));
+                    }
+                    if self.reserved(id) {
+                        return Err(Error::new(
+                            "ecs.id_taken",
+                            format!(
+                                "entity {id}, which the copy of the instance whose root is entity \
+                                 {} gives an entity of its prefab, as its ID {copy_root} mixes, is \
+                                 in the world already, or a delete keeps its ID: give the copy \
+                                 another ID",
+                                self.name_of(originals[at].0)
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -844,14 +1413,44 @@ impl World {
                 }
                 None
             });
-            let id = if is_node[at] { mixed } else { given.next() };
+            // An instance's entity's copy is its root's copy's, its ID mixed from the copy's, which
+            // the checks above, or the draw of the root's copy, leave free; drawn only where
+            // another copy took it since, by chance.
+            let linked = claimed[at].and_then(|(instance, part)| {
+                let copy_root = made[root_at[instance]].1;
+                let template = &claims.instances[instance].1.template;
+                let copied = copied_ids[instance]
+                    .get_or_insert_with(|| template.ids(copy_root).unwrap_or_default());
+                let id = copied.get(part).copied();
+                id.filter(|&id| !self.reserved(id) && !ids.contains(&id))
+            });
+            let id = match (is_node[at], claimed[at]) {
+                (true, _) => mixed,
+                (false, Some(_)) => linked,
+                (false, None) => given.next(),
+            };
             let copy = self.take_slot();
-            let id = match id {
-                Some(id) => {
+            let instance = root_at.iter().position(|&root| root == at);
+            let id = match (id, instance) {
+                (Some(id), _) => {
                     self.find_by_id(id, copy);
                     id
                 }
-                None => self.draw_id(copy, ids),
+                (None, None) => self.draw_id(copy, ids),
+                // An instance's root's copy, drawn until the IDs its instance's copy gives are free
+                // too, as a create's is.
+                (None, Some(instance)) => loop {
+                    let id = self.draw_id(copy, ids);
+                    let template = &claims.instances[instance].1.template;
+                    let mixed = template.ids(id).ok();
+                    let free =
+                        |mixed: Vec<EntityId>| mixed[1..].iter().all(|&id| !self.reserved(id));
+                    if mixed.is_some_and(free) {
+                        break id;
+                    }
+                    self.by_id.remove(&id);
+                    self.stream.reseed();
+                },
             };
             self.place(copy, id, row);
             if let Some(parent) = parent {
@@ -890,7 +1489,7 @@ impl World {
                 }
             }
         }
-        let named = made.into_iter().zip(is_node).filter(|&(_, node)| !node);
+        let named = made.into_iter().zip(mixes).filter(|&(_, mixed)| !mixed);
         Ok(named.map(|((_, id), _)| id).collect())
     }
 
@@ -1024,7 +1623,12 @@ impl Inverse {
             match undo {
                 Undo::Set { kept, .. } => *kept = None,
                 Undo::Exclusive { undo, .. } => settle(undo),
-                Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) | Undo::Restore { .. } => {}
+                Undo::Apply(_)
+                | Undo::Put { .. }
+                | Undo::Uncreate(_)
+                | Undo::Restore { .. }
+                | Undo::Relink { .. }
+                | Undo::Link { .. } => {}
             }
         }
         settle(&mut self.undo);
@@ -1052,16 +1656,37 @@ impl Inverse {
                     column: column.cloned(),
                 },
                 Undo::Uncreate(made) => Undo::Uncreate(made.clone()),
-                Undo::Restore { taken, created } => Undo::Restore {
-                    taken: (taken.iter())
-                        .map(|taken| Taken {
-                            row: (taken.row.iter())
-                                .map(|(id, column)| (*id, column.cloned()))
-                                .collect(),
-                            ..*taken
-                        })
-                        .collect(),
+                Undo::Restore {
+                    taken,
+                    created,
+                    #[cfg(feature = "dev")]
+                    instances,
+                } => Undo::Restore {
+                    taken: copied_taken(taken),
                     created: *created,
+                    #[cfg(feature = "dev")]
+                    instances: instances.clone(),
+                },
+                Undo::Relink {
+                    entity,
+                    put,
+                    given,
+                    spawned,
+                } => Undo::Relink {
+                    entity: *entity,
+                    put: Linked {
+                        link: put.link.as_ref().map(|link| link.cloned()),
+                        row: copied_row(&put.row),
+                        taken: copied_taken(&put.taken),
+                        #[cfg(feature = "dev")]
+                        instances: put.instances.clone(),
+                    },
+                    given: given.clone(),
+                    spawned: spawned.clone(),
+                },
+                Undo::Link { entity, column } => Undo::Link {
+                    entity: *entity,
+                    column: column.cloned(),
                 },
                 Undo::Exclusive { undo, excluded, to } => Undo::Exclusive {
                     undo: Box::new(copied(undo)),
@@ -1069,6 +1694,17 @@ impl Inverse {
                     to: *to,
                 },
             }
+        }
+        fn copied_row(row: &Row) -> Row {
+            let row = row.iter();
+            row.map(|(id, column)| (*id, column.cloned())).collect()
+        }
+        fn copied_taken(taken: &[Taken]) -> Vec<Taken> {
+            let taken = taken.iter().map(|taken| Taken {
+                row: copied_row(&taken.row),
+                ..*taken
+            });
+            taken.collect()
         }
         Inverse {
             world: self.world,
@@ -1092,9 +1728,17 @@ impl Inverse {
     pub(super) fn kept(&self) -> usize {
         fn kept(undo: &Undo) -> usize {
             match undo {
-                Undo::Restore { taken, .. } => taken.len(),
+                Undo::Restore { taken, .. }
+                | Undo::Relink {
+                    put: Linked { taken, .. },
+                    ..
+                } => taken.len(),
                 Undo::Exclusive { undo, .. } => kept(undo),
-                Undo::Apply(_) | Undo::Set { .. } | Undo::Put { .. } | Undo::Uncreate(_) => 0,
+                Undo::Apply(_)
+                | Undo::Set { .. }
+                | Undo::Put { .. }
+                | Undo::Uncreate(_)
+                | Undo::Link { .. } => 0,
             }
         }
         kept(&self.undo)

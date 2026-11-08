@@ -33,7 +33,7 @@ pub struct Cooked {
 /// What [`cook()`] makes of a file under the asset root, by its extension.
 #[derive(Clone, Copy, PartialEq)]
 enum Take {
-    /// As it is: a sound or music, a scene or other RON, or a script.
+    /// As it is: a sound or music, a scene, a prefab or other RON, or a script.
     File,
     Texture,
     /// With the files it names.
@@ -49,7 +49,7 @@ impl Take {
     fn of(path: &str) -> Option<Self> {
         let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
         Some(match extension.as_str() {
-            "wav" | "ogg" | "flac" | "mp3" | "ron" | "luau" => Self::File,
+            "wav" | "ogg" | "flac" | "mp3" | "ron" | "prefab" | "luau" => Self::File,
             "png" | "jpg" | "jpeg" | "hdr" => Self::Texture,
             "gltf" | "glb" => Self::Model,
             "ttf" | "otf" => Self::Font,
@@ -425,19 +425,22 @@ Targets fragment_main(Varyings input) {
     }
 
     /// A package holds what a game's runs load, by their paths from the asset root: a texture
-    /// compressed, with the ID its ID file holds; a model cooked; a scene and a script as they
-    /// are; and a shader compiled, but the module it includes, which doesn't compile alone; and
+    /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab, with its ID
+    /// too, and a script as they are; and a shader compiled, but the module it includes, which doesn't compile alone; and
     /// leaves out the manifest, the fetch list, a mod's folder, and what no run loads, as code and
     /// notes. Cooked again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
+        let lamp = id_file("6a4d0b2f18c9e357");
         let fixture = Fixture::new(
             "holds",
             &[
                 ("project.ron", PROJECT),
                 ("fetch.ron", "[]\n"),
                 ("scenes/main.ron", SCENE),
+                ("prefabs/lamp.prefab", SCENE),
+                ("prefabs/lamp.prefab.meta", &lamp),
                 ("textures/stone.png.meta", &stone),
                 ("shaders/flat.slang", FLAT),
                 ("shaders/common.slang", COMMON),
@@ -458,6 +461,11 @@ Targets fragment_main(Varyings input) {
             .collect();
         let expected = [
             ("models/crate.gltf", Kind::Model, None),
+            (
+                "prefabs/lamp.prefab",
+                Kind::File,
+                Some(0x6a4d_0b2f_18c9_e357),
+            ),
             ("scenes/main.ron", Kind::File, None),
             ("scripts/spin.luau", Kind::File, None),
             ("shaders/flat.slang", Kind::Shader, None),

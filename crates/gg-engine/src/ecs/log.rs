@@ -156,8 +156,12 @@ impl Log {
     /// As [`apply`](Self::apply), but a set of the field the last entry set, while its gesture
     /// goes on, joins that entry: it takes the new value and keeps its inverse, with the exclusive
     /// fields each set of the gesture made false, so that undoing it undoes the gesture. A set
-    /// starts a gesture, which [`seal`](Self::seal) ends.
+    /// starts a gesture, which [`seal`](Self::seal) ends. A set of a
+    /// [`PrefabRoot`](crate::PrefabRoot) joins none: each relinks its instance, and the first set's
+    /// inverse would take out only the entities its own set spawned.
     pub fn amend(&mut self, world: &mut World, mut operation: Operation) -> Result<()> {
+        let link = world.component::<crate::PrefabRoot>();
+        let relinks = |name: &str| link.is_some() && world.component_named(name) == link;
         let joins = |entry: &Entry| match (entry.operations.as_slice(), &operation) {
             (
                 [
@@ -174,7 +178,7 @@ impl Log {
                     path: at,
                     ..
                 },
-            ) => (entity, component, path) == (next, of, at),
+            ) => (entity, component, path) == (next, of, at) && !relinks(of),
             _ => false,
         };
         if !(self.open && self.done.last().is_some_and(joins)) {

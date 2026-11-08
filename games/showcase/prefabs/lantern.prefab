@@ -1,0 +1,72 @@
+(
+    entities: {
+        "2a64c0f19d7e8b53": (
+            Name: ("Body"),
+            Parent: ("4c1a7e93b2d05f68"),
+            Sprite: (
+                color: (0.3, 0.33, 0.42, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 1.2, 1.0),
+            ),
+        ),
+        "4c1a7e93b2d05f68": (
+            Name: ("Lantern"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9e2b5d71c8a3f046": (
+            Bob: (
+                height: 0.12,
+                period: 1.6,
+                time: 0.0,
+            ),
+            Name: ("Flame"),
+            Parent: ("4c1a7e93b2d05f68"),
+            Sprite: (
+                color: (1.0, 0.62, 0.18, 1.0),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 0.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.9, 0.9, 1.0),
+            ),
+        ),
+        "d7f30a8c61e4b925": (
+            Name: ("Caption"),
+            Parent: ("4c1a7e93b2d05f68"),
+            Text: (
+                text: "LANTERN",
+                font: None,
+                size: 0.2,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -1.25, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

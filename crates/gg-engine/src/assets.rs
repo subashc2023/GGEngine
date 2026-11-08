@@ -3,9 +3,9 @@
 //! another process, or another machine, finds it again: its asset ID, where it has one, and else
 //! its path; what the layers loaded, and what was loaded where text named it, by their files as the
 //! OS resolves them, so that a file loads once however its path is written; and, in development
-//! builds, the asset database, `Catalog`: the textures, models and fonts under the root and the IDs
-//! their ID files hold, whose text and scan are gg-api's, an ID going with its asset as it's
-//! renamed or moved, paired by what its file holds where the rename left its ID file behind.
+//! builds, the asset database, `Catalog`: the textures, models, fonts and prefabs under the root
+//! and the IDs their ID files hold, whose text and scan are gg-api's, an ID going with its asset as
+//! it's renamed or moved, paired by what its file holds where the rename left its ID file behind.
 
 use std::collections::HashMap;
 #[cfg(feature = "dev")]
@@ -37,7 +37,7 @@ use crate::dirs::{self, Kind};
 #[cfg(feature = "dev")]
 use crate::ecs::mix64;
 use crate::model::{Made, Nodes};
-use crate::{Font, Model, Music, Sound};
+use crate::{Font, Model, Music, Prefab, Sound};
 
 /// The textures a context added, as its layers added them or where text named them, each by its
 /// index, with the path of the file it was loaded from: relative to the app's
@@ -70,6 +70,11 @@ pub(crate) struct Assets {
     fonts: Vec<(Arc<str>, Arc<str>)>,
     /// Each font, by its name and by each path the layers gave its file, as a texture by `by_name`.
     font_names: HashMap<Arc<str>, Font>,
+    /// Each prefab's name and path, as a texture's, and its text, by its index.
+    prefabs: Vec<NamedPrefab>,
+    /// Each prefab, by its name and by each path the layers gave its file, as a texture by
+    /// `by_name`.
+    prefab_names: HashMap<Arc<str>, Prefab>,
     /// What the layers added, and the textures loaded where text named them, and stand-ins, in
     /// order, each with how many meshes, shaders and textures there were after it, as
     /// `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and textures by their
@@ -118,23 +123,36 @@ struct NamedModel {
     removed: bool,
 }
 
-/// How many textures, models and fonts there are, the engine's white texture among them: the
-/// indices the next added take, from which [`Assets::named_from`] goes on.
-pub(crate) type Counts = (usize, usize, usize);
+/// A prefab, as [`Assets`] holds it: named as a texture is, and its text, as its file held it as
+/// last read, `None` for a stand-in, whose instances are their roots alone.
+#[derive(Clone, Debug)]
+struct NamedPrefab {
+    name: Arc<str>,
+    path: Arc<str>,
+    text: Option<Arc<str>>,
+}
 
-/// An asset that text names, by its name or a path to its file: a texture, a model or a font.
+/// How many textures, models, fonts and prefabs there are, the engine's white texture among them:
+/// the indices the next added take, from which [`Assets::named_from`] goes on.
+pub(crate) type Counts = (usize, usize, usize, usize);
+
+/// An asset that text names, by its name or a path to its file: a texture, a model, a font or a
+/// prefab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Asset<S> {
     Texture(S),
     Model(S),
     Font(S),
+    Prefab(S),
 }
 
 impl<S: AsRef<str>> Asset<S> {
     /// The name or path that names it.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Texture(name) | Self::Model(name) | Self::Font(name) => name.as_ref(),
+            Self::Texture(name) | Self::Model(name) | Self::Font(name) | Self::Prefab(name) => {
+                name.as_ref()
+            }
         }
     }
 
@@ -144,6 +162,7 @@ impl<S: AsRef<str>> Asset<S> {
             Self::Texture(name) => Asset::Texture(name.as_ref()),
             Self::Model(name) => Asset::Model(name.as_ref()),
             Self::Font(name) => Asset::Font(name.as_ref()),
+            Self::Prefab(name) => Asset::Prefab(name.as_ref()),
         }
     }
 
@@ -153,6 +172,7 @@ impl<S: AsRef<str>> Asset<S> {
             Self::Texture(name) => Asset::Texture(name.as_ref().to_owned()),
             Self::Model(name) => Asset::Model(name.as_ref().to_owned()),
             Self::Font(name) => Asset::Font(name.as_ref().to_owned()),
+            Self::Prefab(name) => Asset::Prefab(name.as_ref().to_owned()),
         }
     }
 
@@ -162,6 +182,7 @@ impl<S: AsRef<str>> Asset<S> {
             Self::Texture(_) => "texture",
             Self::Model(_) => "model",
             Self::Font(_) => "font",
+            Self::Prefab(_) => "prefab",
         }
     }
 }
@@ -176,6 +197,8 @@ impl Default for Assets {
             model_names: HashMap::new(),
             fonts: Vec::new(),
             font_names: HashMap::new(),
+            prefabs: Vec::new(),
+            prefab_names: HashMap::new(),
             added: Vec::new(),
             failed: HashMap::new(),
             #[cfg(feature = "dev")]
@@ -239,15 +262,16 @@ impl Assets {
         named.expect("a texture of a file is named").removed = true;
     }
 
-    /// How many textures, models and fonts there are, as [`Counts`] says.
+    /// How many textures, models, fonts and prefabs there are, as [`Counts`] says.
     pub(crate) fn counts(&self) -> Counts {
-        (self.textures.len(), self.models.len(), self.fonts.len())
+        let (textures, models) = (self.textures.len(), self.models.len());
+        (textures, models, self.fonts.len(), self.prefabs.len())
     }
 
-    /// The name and path of each texture, then each model, then each font from `from` on, as
-    /// [`counts`] gave it, that's named otherwise than by its path, as by its ID, in the order they
-    /// were added: what a run that names its assets by IDs tells those that follow it, as a
-    /// recording does its replay and a lockstep host its joiner.
+    /// The name and path of each texture, then each model, then each font, then each prefab from
+    /// `from` on, as [`counts`] gave it, that's named otherwise than by its path, as by its ID, in
+    /// the order they were added: what a run that names its assets by IDs tells those that follow
+    /// it, as a recording does its replay and a lockstep host its joiner.
     ///
     /// [`counts`]: Self::counts
     pub(crate) fn named_from(&self, from: Counts) -> impl Iterator<Item = (&str, &str)> {
@@ -260,8 +284,69 @@ impl Assets {
             .iter()
             .skip(from.2)
             .map(|(name, path)| (name, path));
-        let named = (textures.chain(models).chain(fonts)).filter(|(name, path)| name != path);
+        let prefabs = self.prefabs.iter().skip(from.3);
+        let prefabs = prefabs.map(|prefab| (&prefab.name, &prefab.path));
+        let named = textures.chain(models).chain(fonts).chain(prefabs);
+        let named = named.filter(|(name, path)| name != path);
         named.map(|(name, path)| (&**name, &**path))
+    }
+
+    /// The name of `prefab`, which text names it by.
+    pub(crate) fn prefab_name(&self, prefab: Prefab) -> &str {
+        &self.prefabs[prefab.index()].name
+    }
+
+    /// The path of `prefab`'s file: for people, whom a path tells more than an ID.
+    pub(crate) fn prefab_path(&self, prefab: Prefab) -> &str {
+        &self.prefabs[prefab.index()].path
+    }
+
+    /// Whether these assets have `prefab`, as they haven't one another context added.
+    pub(crate) fn has_prefab(&self, prefab: Prefab) -> bool {
+        prefab.index() < self.prefabs.len()
+    }
+
+    /// The prefab that `name` names, by its name or a path to its file, if one does.
+    pub(crate) fn prefab(&self, name: &str) -> Option<Prefab> {
+        self.prefab_names.get(name).copied()
+    }
+
+    /// The text of `prefab`, as its file held it as last read; `None` for a stand-in, or a prefab
+    /// these assets don't have, as one another context added.
+    pub(crate) fn prefab_text(&self, prefab: Prefab) -> Option<&Arc<str>> {
+        self.prefabs.get(prefab.index())?.text.as_ref()
+    }
+
+    /// Adds the next prefab, loaded from the file `path` names, named `name`, of `text`, or a
+    /// stand-in without, and returns it: each named by them from now on, unless another names it
+    /// already.
+    pub(crate) fn add_prefab(
+        &mut self,
+        path: Arc<str>,
+        name: Arc<str>,
+        text: Option<Arc<str>>,
+    ) -> Prefab {
+        let prefab = Prefab::new(self.prefabs.len());
+        self.prefabs.push(NamedPrefab {
+            name: name.clone(),
+            path: path.clone(),
+            text,
+        });
+        self.alias_prefab(prefab, name);
+        self.alias_prefab(prefab, path);
+        prefab
+    }
+
+    /// Has `path` name `prefab` too, added before from another path to its file, unless it names
+    /// one already.
+    pub(crate) fn alias_prefab(&mut self, prefab: Prefab, path: Arc<str>) {
+        self.prefab_names.entry(path).or_insert(prefab);
+    }
+
+    /// Has `prefab` hold `text` from now on, as its file read again gives it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_prefab_text(&mut self, prefab: Prefab, text: Arc<str>) {
+        self.prefabs[prefab.index()].text = Some(text);
     }
 
     /// The name of `font`, which text names it by.
@@ -418,7 +503,8 @@ impl Assets {
         }
     }
 
-    /// What a refusal of text that names a texture, a model or a font, as `kind` says, `name`,
+    /// What a refusal of text that names a texture, a model, a font or a prefab, as `kind` says,
+    /// `name`,
     /// which none has, says of it: that none is loaded, and why it couldn't be, if it was tried.
     pub(crate) fn not_found(&self, kind: &str, name: &str) -> String {
         match self.failed.get(name) {
@@ -453,10 +539,12 @@ impl Assets {
             Asset::Texture(name) => self.live_texture(name.as_ref()).is_some(),
             Asset::Model(name) => self.live_model(name.as_ref()).is_some(),
             Asset::Font(name) => self.font(name.as_ref()).is_some(),
+            Asset::Prefab(name) => self.prefab(name.as_ref()).is_some(),
         }
     }
 
-    /// Names each texture, model and font as `names` gives its path a name, and every other by its
+    /// Names each texture, model, font and prefab as `names` gives its path a name, and every other
+    /// by its
     /// path, in place of what named it before: as a run takes the names its recording's run, or
     /// its lockstep host, gave its assets.
     #[cfg(feature = "dev")]
@@ -468,8 +556,21 @@ impl Assets {
             model_names,
             fonts,
             font_names,
+            prefabs,
+            prefab_names,
             ..
         } = self;
+        for (index, prefab) in prefabs.iter_mut().enumerate() {
+            let at = Prefab::new(index);
+            if prefab.name != prefab.path && prefab_names.get(&prefab.name) == Some(&at) {
+                prefab_names.remove(&prefab.name);
+            }
+            prefab.name = names.get(&prefab.path).unwrap_or(&prefab.path).clone();
+        }
+        for (index, prefab) in prefabs.iter().enumerate() {
+            let at = Prefab::new(index);
+            prefab_names.entry(prefab.name.clone()).or_insert(at);
+        }
         for (index, (name, path)) in fonts.iter_mut().enumerate() {
             let at = Font::new(index);
             if name != path && font_names.get(name) == Some(&at) {
@@ -535,6 +636,7 @@ pub(crate) struct Loaded {
     pub(crate) textures: HashMap<PathBuf, (Texture, [u32; 2])>,
     pub(crate) models: HashMap<PathBuf, Model>,
     pub(crate) fonts: HashMap<PathBuf, Font>,
+    pub(crate) prefabs: HashMap<PathBuf, Prefab>,
     pub(crate) sounds: HashMap<PathBuf, Sound>,
     pub(crate) music: HashMap<PathBuf, Music>,
     /// What each model is made of on the renderer, by its index, which a reload replaces and a
@@ -576,7 +678,8 @@ pub(crate) fn is_id(name: &str) -> bool {
     name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The textures, models and fonts under the app's root, as the scans found them, and their IDs,
+/// The textures, models, fonts and prefabs under the app's root, as the scans found them, and their
+/// IDs,
 /// from their ID files, which gg-api reads: the asset database. An asset the run has found it
 /// keeps, with its ID, even once its file is gone, so that its ID stays its for the run, until it
 /// turns up at another path, renamed or moved, which takes it, as [`scanned`] says.

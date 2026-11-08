@@ -119,7 +119,7 @@ pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) 
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
     }
-    for (name, path) in world.assets().named_from((0, 0, 0)) {
+    for (name, path) in world.assets().named_from((0, 0, 0, 0)) {
         out.push_str("named ");
         crate::recording::text::write_named(&mut out, name, path);
         out.push('\n');
@@ -272,6 +272,7 @@ pub(crate) fn again(line: &str) -> Option<Again<'_>> {
         "texture" => Asset::Texture(path),
         "model" => Asset::Model(path.rsplitn(5, ' ').nth(4)?),
         "font" => Asset::Font(path),
+        "prefab" => Asset::Prefab(path),
         _ => return None,
     };
     Some(Again::Load(asset))
@@ -587,7 +588,10 @@ impl Snapshot {
         for line in &mut self.assets {
             let path = match again(line) {
                 Some(Again::Load(
-                    Asset::Texture(path) | Asset::Model(path) | Asset::Font(path),
+                    Asset::Texture(path)
+                    | Asset::Model(path)
+                    | Asset::Font(path)
+                    | Asset::Prefab(path),
                 )) => path,
                 Some(Again::RemoveTexture(_, path) | Again::RemoveModel(_, path)) => path,
                 Some(Again::RemoveMesh(_)) | None => continue,
@@ -686,8 +690,8 @@ impl Snapshot {
         #[cfg(feature = "dev")]
         let own = {
             let own = Arc::clone(world.shared_assets());
-            let alike = own.named_from((0, 0, 0)).count() == self.names.len()
-                && (own.named_from((0, 0, 0))).all(|(name, path)| {
+            let alike = own.named_from((0, 0, 0, 0)).count() == self.names.len()
+                && (own.named_from((0, 0, 0, 0))).all(|(name, path)| {
                     self.names.get(path).is_some_and(|theirs| **theirs == *name)
                 });
             if !alike {

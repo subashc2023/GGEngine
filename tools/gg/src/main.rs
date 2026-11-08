@@ -159,22 +159,27 @@ Talk to a running game, through its tool API:
                                  values are read and written by
   hash                           Its world's hash
   assets [--kind <KIND>] [--skip <N>] [--take <N>]
-                                 List its textures, models and fonts, those of KIND, `texture`,
-                                 `model` or `font`, N at a time (100), by their paths from its
-                                 asset root, each with its ID, whether a layer has added it, and
-                                 what's wrong with its ID file, and the ID files left without their
-                                 assets; the game, but a lockstep session's joiner, whose host
-                                 does, writes each one's ID in a file beside it, `<file>.meta`, as
-                                 it starts and as it finds new files: commit it with its file. A
-                                 file renamed or moved alone keeps its ID, the game moving its ID
-                                 file after it, unless it's edited in the same step. A file of a
-                                 texture, a model, a font, a sound or music the game has added,
-                                 edited, reloads in it, as a shader's does, the nodes its
-                                 `ModelRoot`s spawn with it, but in a recorded run or a lockstep
-                                 session, where a model's nodes and materials change as it next
-                                 starts
+                                 List its textures, models, fonts and prefabs, those of KIND,
+                                 `texture`, `model`, `font` or `prefab`, N at a time (100), by their
+                                 paths from its asset root, each with its ID, whether a layer has
+                                 added it, and what's wrong with its ID file, and the ID files left
+                                 without their assets; the game, but a lockstep session's joiner,
+                                 whose host does, writes each one's ID in a file beside it,
+                                 `<file>.meta`, as it starts and as it finds new files: commit it
+                                 with its file. A file renamed or moved alone keeps its ID, the game
+                                 moving its ID file after it, unless it's edited in the same step. A
+                                 file of a texture, a model, a font, a prefab, a sound or music the
+                                 game has added, edited, reloads in it, as a shader's does, the
+                                 nodes its `ModelRoot`s spawn and the instances its `PrefabRoot`s
+                                 link with it, but in a recorded run or a lockstep session, where a
+                                 model's nodes and materials and a prefab's instances change as it
+                                 next starts
   apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
-                                 all or none, between ticks, which `undo` takes back
+                                 all or none, between ticks, which `undo` takes back; among them
+                                 `{\"unlink\":{\"id\":ID}}`, which unlinks a prefab's instance into
+                                 entities of its own, and
+                                 `{\"revert\":{\"id\":ID,\"component\":C,\"path\":P}}`, which sets a
+                                 field of an instance's entity back to its prefab's
   set <ID> <COMPONENT> <PATH> <VALUE>
                                  Set a field, such as `translation.x`, or a whole component for an
                                  empty PATH, to VALUE: JSON, or else a string, as one edit

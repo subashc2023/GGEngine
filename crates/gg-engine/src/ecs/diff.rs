@@ -3,13 +3,15 @@
 //! field a line, so that the dumps of two machines' worlds diff to the field where they part.
 
 #[cfg(feature = "dev")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "dev")]
 use gg_core::Result;
 
 #[cfg(feature = "dev")]
 use super::ops::Operation;
+#[cfg(feature = "dev")]
+use super::scene::Expanding;
 use super::{Entity, EntityId, World};
 #[cfg(feature = "dev")]
 use crate::ModelNode;
@@ -115,7 +117,12 @@ impl World {
     ///
     /// Those entities the file holds now that the world hasn't come first, alone, as
     /// [`SceneEdit::Creates`], so that the rest may hold them once they're made: whoever applies
-    /// them asks again for the rest.
+    /// them asks again for the rest. So do the links of instances the file changes: a link it takes
+    /// away unlinks the instance, whose entities the rest then sets or deletes as the file holds
+    /// them; and a link it gives or changes deletes first the world's own entities that hold the
+    /// IDs the prefab gives, as an unlink leaves them, with what's under them. The rest then takes
+    /// each such instance's root, and the entities its link gives, for what the file held, as
+    /// without `old` below, since the world holds them as the link gave them.
     ///
     /// Without `old`, as where the file as last applied no longer loads, as after a rebuild took a
     /// field away that it holds, the world's entities are taken for what the file held: each field
@@ -131,6 +138,8 @@ impl World {
         }
         let mut after = self.emptied();
         after.load_scene(new)?;
+        // The entities instances give, which come and go with their roots' links.
+        let given_after = given(&after)?;
         let parent_id = |world: &World, entity: Entity| {
             let parent = world.parent(entity).expect("alive");
             parent.map(|parent| world.id(parent).expect("a parent is alive"))
@@ -149,8 +158,76 @@ impl World {
         order.sort_unstable_by_key(|id| (depth(id), *id));
         let mut creates = Vec::new();
         let mut made = Vec::new();
+        let link = |world: &World, entity: Option<Entity>| world.get_field(entity?, LINK, "").ok();
+        // A prefab's value names it alone, whatever world it's read in.
+        let same_link = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
+            (Some(a), Some(b)) => same(a, self, b, &after),
+            (a, b) => a.is_none() && b.is_none(),
+        };
         for &id in &order {
-            if self.entity(id).is_some() || before.entity(id).is_some() {
+            if given_after.contains(&id) {
+                continue;
+            }
+            let linked = link(&after, after.entity(id));
+            if let Some(entity) = self.entity(id) {
+                // A link the file changes, which the world takes first, so that the rest may set
+                // what the prefab gives.
+                let was = match old {
+                    Some(_) => link(&before, before.entity(id)),
+                    None => link(self, Some(entity)),
+                };
+                let now = link(self, Some(entity));
+                let component = || reflect::Ident::from(LINK);
+                if same_link(&was, &linked) || same_link(&now, &linked) {
+                    continue;
+                }
+                let Some(value) = linked else {
+                    // Its entities stay, its own, which the rest sets as the file holds them, or
+                    // deletes.
+                    creates.push(Operation::Unlink { entity: id });
+                    continue;
+                };
+                // The entities of its own that hold the IDs the link gives, as an unlink left
+                // them, which the file holds as the prefab's: an entity of its own under one goes
+                // with it.
+                let mut expanding = Expanding::default();
+                let giving = self.instance(entity, &mut expanding)?;
+                let giving = giving.map_or_else(Vec::new, |instance| instance.ids);
+                let to_give = after.instance(after.entity(id).expect("alive"), &mut expanding)?;
+                let held: Vec<Entity> = (to_give.expect("linked").ids[1..].iter())
+                    .filter(|id| !giving.contains(id))
+                    .filter_map(|&id| self.entity(id))
+                    .collect();
+                let above_held = |entity: Entity| {
+                    let mut at = entity;
+                    while let Some(up) = self.parent(at).expect("alive") {
+                        if held.contains(&up) {
+                            return true;
+                        }
+                        at = up;
+                    }
+                    false
+                };
+                let held = held.iter().filter(|&&entity| !above_held(entity));
+                creates.extend(held.map(|&entity| Operation::Delete {
+                    entity: self.id(entity).expect("alive"),
+                }));
+                creates.push(match now {
+                    Some(_) => Operation::Set {
+                        entity: id,
+                        component: component(),
+                        path: String::new(),
+                        value,
+                    },
+                    None => Operation::Add {
+                        entity: id,
+                        component: component(),
+                        value,
+                    },
+                });
+                continue;
+            }
+            if before.entity(id).is_some() {
                 continue;
             }
             let parent = parent_id(&after, after.entity(id).expect("alive"));
@@ -160,14 +237,42 @@ impl World {
                 continue;
             }
             made.push(id);
+            // With its link, so that the entities its prefab gives come with it.
+            let components = linked.map(|value| (reflect::Ident::from(LINK), value));
             creates.push(Operation::Create {
                 entity: Some(id),
                 parent,
-                components: Vec::new(),
+                components: components.into_iter().collect(),
             });
         }
         if !creates.is_empty() {
             return Ok(SceneEdit::Creates(creates));
+        }
+        // The entities the world's instances give, whose links the file's match now, which come and
+        // go with them; an entity the file gave through a link the world has let go of since is
+        // the world's own, as any other.
+        let given_now = given(self)?;
+        // The roots of the instances whose links the file changed, which the world has taken, and
+        // the entities those links give now, which the world holds as the links gave them, not as
+        // the file held them: each is taken for what the file held, as without `old`.
+        let mut relinked = HashSet::new();
+        if old.is_some() {
+            let mut expanding = Expanding::default();
+            for &id in &order {
+                let (Some(b), Some(entity)) = (after.entity(id), self.entity(id)) else {
+                    continue;
+                };
+                let linked = link(&after, Some(b));
+                if same_link(&link(&before, before.entity(id)), &linked)
+                    || !same_link(&link(self, Some(entity)), &linked)
+                {
+                    continue;
+                }
+                relinked.insert(id);
+                if let Some(instance) = after.instance(b, &mut expanding)? {
+                    relinked.extend(instance.ids[1..].iter().copied());
+                }
+            }
         }
         let mut operations = Vec::new();
         for &id in &order {
@@ -178,11 +283,12 @@ impl World {
             let b = after.entity(id).expect("alive");
             // What the file held of the entity, or without it, the world's.
             let (held, a) = match old {
-                Some(_) => (&before, before.entity(id)),
-                None => (self, Some(entity)),
+                Some(_) if !relinked.contains(&id) => (&before, before.entity(id)),
+                _ => (self, Some(entity)),
             };
             let mut names: Vec<&str> = components(&after, b).collect();
             if old.is_some() {
+                let a = before.entity(id);
                 names.extend(a.into_iter().flat_map(|a| components(&before, a)));
             }
             names.retain(|&name| name != PARENT);
@@ -246,6 +352,7 @@ impl World {
         // reparents before have moved what they move, which goes with it.
         let mut gone: Vec<EntityId> = scene_ids(&before)
             .filter(|&id| after.entity(id).is_none() && self.entity(id).is_some())
+            .filter(|id| !given_now.contains(id))
             .collect();
         gone.sort_unstable();
         let moved: HashMap<EntityId, Option<EntityId>> = (operations.iter())
@@ -339,6 +446,27 @@ pub(crate) enum SceneEdit {
 /// The name of [`Parent`](super::Parent)'s type, which reparents change rather than sets.
 #[cfg(feature = "dev")]
 const PARENT: &str = "Parent";
+
+/// The name of [`PrefabRoot`](crate::PrefabRoot)'s type, which a scene edit changes before the
+/// rest, as the entities an instance's prefab gives come with it.
+#[cfg(feature = "dev")]
+const LINK: &str = "PrefabRoot";
+
+/// The IDs of the entities the instances in `world` give, as [`World::claims`] finds them.
+///
+/// Fails as an instance's template does.
+#[cfg(feature = "dev")]
+fn given(world: &World) -> Result<HashSet<EntityId>> {
+    let tops = world.query::<Entity>();
+    let tops = tops.filter(|&entity| world.parent(entity).is_ok_and(|up| up.is_none()));
+    let tops: Vec<Entity> = tops.collect();
+    let claims = world.claims(&tops, &mut Expanding::default())?;
+    let given = claims
+        .instances
+        .iter()
+        .flat_map(|(_, instance)| &instance.ids[1..]);
+    Ok(given.copied().collect())
+}
 
 /// The IDs of `world`'s entities, in no order.
 fn ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
@@ -492,7 +620,7 @@ fn first(
 
 /// Whether `a`, in `ours`, and `b`, in `theirs`, are the same, as the world's hash tells values
 /// apart.
-fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
+pub(super) fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
     let floats = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(&x, &y)| same_f32(x, y));
     let fields = |x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]| {
         let mut both = x.iter().zip(y);
@@ -514,6 +642,9 @@ fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
         }
         (&Value::Font(x), &Value::Font(y)) => {
             ours.assets().font_name(x) == theirs.assets().font_name(y)
+        }
+        (&Value::Prefab(x), &Value::Prefab(y)) => {
+            ours.assets().prefab_name(x) == theirs.assets().prefab_name(y)
         }
         (Value::Option(x), Value::Option(y)) => match (x, y) {
             (Some(x), Some(y)) => same(x, ours, y, theirs),

@@ -59,6 +59,7 @@ use crate::physics::{
     MeshCollider3D, Physics2D, Physics3D, RigidBody3D, SphereCollider3D,
 };
 use crate::placed::Placed;
+use crate::prefab;
 use crate::recording::Recorder;
 use crate::recording::text::Text;
 use crate::reflect::{Reflect, Value};
@@ -69,7 +70,8 @@ use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::sync_test::SyncTest;
 use crate::{
     Animator, App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model,
-    ModelNode, ModelRoot, Name, Owner, ParticleEmitter, RigidBody2D, Transform, Tweens, Ui, World,
+    ModelNode, ModelRoot, Name, Owner, ParticleEmitter, Prefab, PrefabRoot, RigidBody2D, Transform,
+    Tweens, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -416,8 +418,8 @@ pub struct Context {
     /// API, as [`start_assets`](Self::start_assets) starts it.
     #[cfg(feature = "dev")]
     asset_watch: Option<AssetWatch>,
-    /// The thread that reads the layers' shaders, textures, models, fonts, sounds and music again
-    /// as their files change, in a run that serves the tool API, as
+    /// The thread that reads the layers' shaders, textures, models, fonts, prefabs, sounds and
+    /// music again as their files change, in a run that serves the tool API, as
     /// [`start_assets`](Self::start_assets) starts it.
     #[cfg(feature = "dev")]
     hot_reload: Option<HotReload>,
@@ -601,6 +603,7 @@ impl Context {
             world.register::<ModelNode>()?;
             world.register::<font::Text>()?;
             world.register::<Owner>()?;
+            world.register::<PrefabRoot>()?;
             world.register_saved::<Physics2D>()?;
             world.register_saved::<Physics3D>()
         });
@@ -1481,6 +1484,57 @@ impl Context {
         Ok(font)
     }
 
+    /// Loads the prefab at `path`, a `.prefab` file holding a scene of one subtree, as
+    /// [`World::save_scene`] saves one, for [`Prefab::spawn`] and the [`PrefabRoot`]s that name it
+    /// to spawn instances of from then on, through the handle. `name` names it in errors. A file
+    /// added again, by whatever form of its path, gives the prefab it gave first, as does an
+    /// asset's file renamed or moved since, by the ID that names it. It's named by its asset ID,
+    /// where its file has one, or else by its path, as a texture is. Its text is read as it loads,
+    /// and the textures, models, fonts and prefabs it names that none loaded has are loaded after
+    /// it, as a scene's are; its entities' components are made as its instances spawn, of the types
+    /// the world has registered, as a scene's are, which refuses a text that doesn't load. In a
+    /// development run that serves the tool API, it's read again as its file changes, and every
+    /// instance takes what changed, as [`PrefabRoot`] says, unless the run is recorded, in a
+    /// lockstep session or follows another.
+    ///
+    /// Fails with `engine.bad_prefab` if the file can't be read, isn't a regular file, is more than
+    /// 16 MiB, isn't UTF-8, or isn't a scene's RON as far as its syntax and its entities' IDs go.
+    pub fn add_prefab(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Prefab> {
+        let path = path.as_ref();
+        let named = assets::name_of(self.root.as_deref(), path);
+        let file = self.files.file_of(path);
+        let prefab = match self.loaded_prefab(&named, path, file.as_deref()) {
+            Some(prefab) => {
+                if self.assets.prefab(&named).is_none() {
+                    self.add_assets(|assets| assets.alias_prefab(prefab, named.clone()));
+                }
+                prefab
+            }
+            None => {
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
+                let text: Arc<str> = prefab::read(name, path, &self.files)?.into();
+                let id = self.texture_name(&named, path, file.as_deref(), None);
+                let held = Some(Arc::clone(&text));
+                let prefab =
+                    self.add_assets(|assets| assets.add_prefab(named.clone(), id.clone(), held));
+                #[cfg(feature = "dev")]
+                self.watch_prefab(prefab, name, path, read_at, &id);
+                if let Some(file) = file {
+                    self.loaded.prefabs.insert(file, prefab);
+                }
+                self.added("prefab", &named);
+                // What its text names, as a scene's load loads it, after it, so that a restored
+                // run loads them in the same order; a text that doesn't load is refused as its
+                // instances spawn.
+                let _ = self.load_scene_assets(&text);
+                return Ok(prefab);
+            }
+        };
+        self.added("prefab", &named);
+        Ok(prefab)
+    }
+
     /// Loads the audio file at `path`, WAV, Ogg Vorbis, FLAC or MP3, as a sound for ticks to queue
     /// with [`World::play_sound`], and layers to play with [`play_sound`](Self::play_sound), from
     /// then on, through the handle, decoding it whole into memory, as a game's short sounds are.
@@ -1629,8 +1683,9 @@ impl Context {
         }
     }
 
-    /// Loads, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model) and
-    /// [`add_font`](Self::add_font) load a file, each texture, model and font that `names` names,
+    /// Loads, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model),
+    /// [`add_font`](Self::add_font) and [`add_prefab`](Self::add_prefab) load a file, each texture,
+    /// model, font and prefab that `names` names,
     /// as text names one, that none loaded has, or none but one removed, which loads anew, as
     /// [`remove_texture`](Self::remove_texture) says: where a scene, the tool API, or a recorded or
     /// a lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's Project
@@ -1658,11 +1713,15 @@ impl Context {
                 continue;
             }
             tried.push(named);
-            let (Asset::Texture(name) | Asset::Model(name) | Asset::Font(name)) = named;
+            let (Asset::Texture(name)
+            | Asset::Model(name)
+            | Asset::Font(name)
+            | Asset::Prefab(name)) = named;
             let (path, loaded) = match named {
                 Asset::Texture(_) => self.load_texture_named(name, stand_in),
                 Asset::Model(_) => self.load_model_named(name, stand_in),
                 Asset::Font(_) => self.load_font_named(name, stand_in),
+                Asset::Prefab(_) => self.load_prefab_named(name, stand_in),
             };
             match (loaded, named) {
                 (Ok(()), _) => {}
@@ -1674,6 +1733,9 @@ impl Context {
                 }
                 (Err(error), Asset::Font(_)) if stand_in => {
                     self.stand_in_font(name, path.as_deref(), &error);
+                }
+                (Err(error), Asset::Prefab(_)) if stand_in => {
+                    self.stand_in_prefab(name, path.as_deref(), &error);
                 }
                 (Err(error), _) => failed.push((name, error)),
             }
@@ -1781,13 +1843,41 @@ impl Context {
         (Some(path), loaded)
     }
 
+    /// Loads the prefab that text names `name`, as [`load_named`](Self::load_named) does, a file
+    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
+    /// path from the asset root its name led to, if it led to one.
+    ///
+    /// Fails as [`asset_path`](Self::asset_path) and [`add_prefab`](Self::add_prefab) do, and with
+    /// `asset.outside_root` for a file outside the root, as through `..` or a link.
+    fn load_prefab_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
+        let path = match self.asset_path(name, "prefab", stand_in) {
+            Ok(path) => path,
+            Err(error) => return (None, Err(error)),
+        };
+        let loaded = self.named_file(name, &path).and_then(|file| {
+            let resolved = self.files.file_of(&file);
+            let prefab = match self.loaded_prefab(&path, &file, resolved.as_deref()) {
+                Some(prefab) => prefab,
+                None => self.add_prefab(&path, &file)?,
+            };
+            for named in [&*path, name] {
+                if self.assets.prefab(named).is_none() {
+                    self.add_assets(|assets| assets.alias_prefab(prefab, named.into()));
+                }
+            }
+            Ok(())
+        });
+        (Some(path), loaded)
+    }
+
     /// Takes again what the run a snapshot was taken from noted past the notes this run's layers
     /// made alike as they loaded, of `lines`, the snapshot's `asset` lines, in order, as
     /// [`Snapshot::added`] gives them: as a run restored from it, or a lockstep joiner given its
     /// host's world, does before it reads the world, so that its values find every asset they
     /// name, and what's opaque in it comes back where the run's assets line up with the
     /// snapshot's. It loads, as [`load_named`](Self::load_named) does with `stand_in`, each
-    /// texture, model and font a line gives the path of that none loaded has, in the order that run
+    /// texture, model, font and prefab a line gives the path of that none loaded has, in the order
+    /// that run
     /// loaded them, so that a texture's index, which what's opaque holds, is what it was where the
     /// layers added the same before; a path outside the root, as only a layer gives one, stands
     /// in, as one text names does. And it removes again what that run removed, a texture, a model
@@ -1835,19 +1925,36 @@ impl Context {
         }
     }
 
-    /// Loads each texture, model and font scene `text` names that none loaded has, as
-    /// [`load_named`](Self::load_named) does, standing in for what can't be in a run that follows
-    /// another; and returns the names of those still missing.
+    /// Loads each texture, model, font and prefab scene `text` names that none loaded has, and
+    /// those the prefabs it names name, in turn, as [`load_named`](Self::load_named) does, standing
+    /// in for what can't be in a run that follows another; and returns the names of those still
+    /// missing.
     ///
     /// Fails, loading nothing, as [`World::load_scene`] does but for those.
     pub(crate) fn load_scene_assets(&mut self, text: &str) -> Result<Vec<String>> {
-        let names = self.world.scene_assets(text)?;
-        self.load_named(names.iter().map(Asset::as_deref), self.follows);
-        let missing = names.into_iter().filter(|asset| !self.assets.has(asset));
-        Ok(missing.map(|asset| asset.name().to_owned()).collect())
+        let mut missing = Vec::new();
+        // Again while a prefab loads, whose text may name more: each time one more at least.
+        loop {
+            let names = self.world.scene_assets(text)?;
+            self.load_named(names.iter().map(Asset::as_deref), self.follows);
+            let prefab = |asset: &Asset<String>| matches!(asset, Asset::Prefab(_));
+            let more = names
+                .iter()
+                .any(|asset| prefab(asset) && self.assets.has(asset));
+            for asset in names.into_iter().filter(|asset| !self.assets.has(asset)) {
+                let name = asset.name().to_owned();
+                if !missing.contains(&name) {
+                    missing.push(name);
+                }
+            }
+            if !more {
+                return Ok(missing);
+            }
+        }
     }
 
-    /// Loads each texture, model and font `text`, a value as a recording writes it, names that
+    /// Loads each texture, model, font and prefab `text`, a value as a recording writes it, names
+    /// that
     /// none loaded has, standing in for what can't be, as [`load_named`](Self::load_named) does: a
     /// value that a recording or a lockstep peer gives, which names assets as the run that wrote it
     /// did.
@@ -2138,6 +2245,34 @@ impl Context {
         );
     }
 
+    /// Has a stand-in, a prefab whose instances are their roots alone, take the place of the prefab
+    /// text names `name`, as [`stand_in_model`](Self::stand_in_model) has one take a model's: so
+    /// that what names it reads, though its instances spawn nothing. It never gives way to its
+    /// file, since a run that follows another takes no entities the prefab's file would give later.
+    fn stand_in_prefab(&mut self, name: &str, path: Option<&str>, why: &Error) {
+        let (path, named): (Arc<str>, Arc<str>) = match path {
+            Some(path) => {
+                let root = self.root.as_deref();
+                let file = root.map_or(PathBuf::from(path), |root| root.join(path));
+                (path.into(), self.texture_name(path, &file, None, None))
+            }
+            None => (name.into(), name.into()),
+        };
+        self.add_assets(|assets| {
+            let prefab = assets.add_prefab(path.clone(), named, None);
+            assets.alias_prefab(prefab, name.into());
+        });
+        self.added("prefab", &path);
+        warn!(
+            code = "asset.stand_in",
+            name,
+            path = &*path,
+            cause = why.code(),
+            "Prefab `{name}` can't be loaded, so a stand-in whose instances are their roots alone \
+             takes its place, as the run follows another, which names it: {why:#}"
+        );
+    }
+
     /// What names the texture or the model loaded from `file`, which a layer gave as `path`, whose
     /// path among assets is `named`, as [`Assets`] says, or with `image`, its image of that place
     /// in the model: in a development build, the name given its path, if the run is given its
@@ -2248,6 +2383,24 @@ impl Context {
         Some(font)
     }
 
+    /// The prefab loaded from `file`, which a layer gave as `path`, whose path among assets is
+    /// `named`, if one was, as [`loaded_texture`](Self::loaded_texture) finds a texture.
+    fn loaded_prefab(&mut self, named: &str, path: &Path, file: Option<&Path>) -> Option<Prefab> {
+        if let Some(&found) = file.and_then(|file| self.loaded.prefabs.get(file)) {
+            return Some(found);
+        }
+        let id = self.texture_name(named, path, file, None);
+        let prefab = self.assets.prefab(&id).filter(|_| assets::is_id(&id))?;
+        // Only one loaded from a file, which a stand-in wasn't.
+        if !self.loaded.prefabs.values().any(|&loaded| loaded == prefab) {
+            return None;
+        }
+        if let Some(file) = file {
+            self.loaded.prefabs.insert(file.to_owned(), prefab);
+        }
+        Some(prefab)
+    }
+
     /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path
     /// from the root, if it's given inside it, as layers spell a file's path as its disk does, or
     /// else by the path from the root of the file the OS resolves it to, as through `..`, a link
@@ -2346,8 +2499,8 @@ impl Context {
     }
 
     /// Has the worlds share `catalog`, the asset database as a scan left it, and the thread that
-    /// reloads assets follow each texture, model and font whose file it has elsewhere since, as
-    /// [`HotReload::follow`] says.
+    /// reloads assets follow each texture, model, font and prefab whose file it has elsewhere
+    /// since, as [`HotReload::follow`] says.
     #[cfg(feature = "dev")]
     fn set_catalog(&mut self, catalog: Catalog) {
         self.add_assets(|assets| assets.set_catalog(catalog));
@@ -2357,14 +2510,15 @@ impl Context {
     }
 
     /// As a run starts, before the layers load, if a tool API `serves` the run, starts the thread
-    /// that reloads the layers' shaders, textures, models, fonts, sounds and music as their files
-    /// change, as `hot_reload` says, warning if it can't; then scans the assets under the app's
-    /// root, as [`scan_assets`](Self::scan_assets) does, writing the ID files missing if `writes`,
-    /// and moving those that renames made since the last run left behind beside their assets, by
-    /// the prints its cache keeps, as [`assets::scanned`] says; then, if the API serves the run,
-    /// starts the thread that keeps the database from then on, as `asset_watch` says, warning if it
-    /// can't, so that the API's `assets` scans on the main thread instead. A context without a root
-    /// has no assets to scan, nor does a run that reads its game's package, which reloads none.
+    /// that reloads the layers' shaders, textures, models, fonts, prefabs, sounds and music as
+    /// their files change, as `hot_reload` says, warning if it can't; then scans the assets under
+    /// the app's root, as [`scan_assets`](Self::scan_assets) does, writing the ID files missing if
+    /// `writes`, and moving those that renames made since the last run left behind beside their
+    /// assets, by the prints its cache keeps, as [`assets::scanned`] says; then, if the API serves
+    /// the run, starts the thread that keeps the database from then on, as `asset_watch` says,
+    /// warning if it can't, so that the API's `assets` scans on the main thread instead. A context
+    /// without a root has no assets to scan, nor does a run that reads its game's package, which
+    /// reloads none.
     #[cfg(feature = "dev")]
     pub(crate) fn start_assets(&mut self, serves: bool, writes: bool) {
         if self.reads_package() {
@@ -2444,6 +2598,9 @@ impl Context {
                     imported,
                 } => self.reload_model(&file, &path, imported, recorded),
                 Reloaded::Font { font, path, bake } => self.reload_font(font, &path, *bake),
+                Reloaded::Prefab { prefab, path, text } => {
+                    self.reload_prefab(prefab, &path, text, recorded);
+                }
                 Reloaded::Sound { sound, path, data } => {
                     let named = assets::name_of(self.root.as_deref(), &path);
                     let frames = data.num_frames();
@@ -2645,6 +2802,88 @@ impl Context {
             }
         }
         info!(model = &*named, "Model reloaded");
+    }
+
+    /// Puts `text`, prefab `prefab`'s file read again from `path`, in place of what it held, and
+    /// has every instance of it, in the world and the world as edited, take what changed, as
+    /// [`World::refit_prefab`] says, logging `Prefab reloaded`; but where the run is `recorded`, in
+    /// a lockstep session or follows another, whose worlds change only as the run they go with
+    /// changed them, it keeps what it held, warning `asset.prefab_changed`. What the text names
+    /// that isn't loaded is loaded first; text that doesn't load into the world, as one naming a
+    /// type the world hasn't, or a prefab that links it, warns with its error's code, and the
+    /// prefab and its instances stay as they were.
+    #[cfg(feature = "dev")]
+    fn reload_prefab(&mut self, prefab: Prefab, path: &Path, text: String, recorded: bool) {
+        let named = assets::name_of(self.root.as_deref(), path);
+        if recorded || self.player.is_some() || self.follows {
+            warn!(
+                code = "asset.prefab_changed",
+                prefab = &*named,
+                "Prefab `{named}` changed, which its instances keep as they were until the run \
+                 starts again, as the run is recorded or in a lockstep session"
+            );
+            return;
+        }
+        if self
+            .assets
+            .prefab_text(prefab)
+            .is_some_and(|was| **was == *text)
+        {
+            return;
+        }
+        let _ = self.load_scene_assets(&text);
+        let text: Arc<str> = text.into();
+        // Each world's found before either takes them, so that both take the text or neither does.
+        let refits = self.world.refits(prefab, &text).and_then(|refits| {
+            let edited = self.edited.as_ref();
+            let edited = edited.map(|edited| edited.world.refits(prefab, &text));
+            Ok((refits, edited.transpose()?))
+        });
+        let (refits, edited_refits) = match refits {
+            Ok(refits) => refits,
+            Err(error) => {
+                warn!(
+                    code = error.code(),
+                    prefab = &*named,
+                    "{error:#}; the prefab and its instances stay as they were"
+                );
+                return;
+            }
+        };
+        self.world.refit_prefab(refits);
+        if let (Some(edited), Some(refits)) = (&mut self.edited, edited_refits) {
+            edited.world.refit_prefab(refits);
+        }
+        self.add_assets(|assets| assets.set_prefab_text(prefab, text));
+        info!(prefab = &*named, "Prefab reloaded");
+    }
+
+    /// Has the thread that reloads assets, if one does, watch `prefab`, loaded as `name` from the
+    /// file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture) has
+    /// it watch a texture.
+    #[cfg(feature = "dev")]
+    fn watch_prefab(
+        &mut self,
+        prefab: Prefab,
+        name: &str,
+        path: &Path,
+        read_at: SystemTime,
+        named: &str,
+    ) {
+        let id = named
+            .parse::<AssetId>()
+            .ok()
+            .filter(|_| assets::is_id(named));
+        let (id, at) = self.followed(id, path);
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Prefab {
+                prefab,
+                name: name.to_owned(),
+                path: path.to_owned(),
+                read_at,
+            };
+            hot_reload.watch(source, id, at);
+        }
     }
 
     /// Has the thread that reloads assets, if one does, watch `texture`, loaded as `name` from the
@@ -3061,9 +3300,10 @@ impl Context {
 
     /// Loads the scene file at `path` into the world as the layer attaches, as [`World::load_scene`]
     /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots; first loading
-    /// each texture, model and font it names, by its ID or its path from the asset root, that no
-    /// layer has added, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model) and
-    /// [`add_font`](Self::add_font) load a file, and a model's image with its model. A development
+    /// each texture, model, font and prefab it names, by its ID or its path from the asset root,
+    /// that no layer has added, as [`add_texture`](Self::add_texture),
+    /// [`add_model`](Self::add_model), [`add_font`](Self::add_font) and
+    /// [`add_prefab`](Self::add_prefab) load a file, a model's image with its model. A development
     /// build watches the file
     /// from then on: saved while the game runs, it applies to the world as the operations that take
     /// the world's entities from what the file held to what it holds, between ticks, which keeps
@@ -3074,11 +3314,12 @@ impl Context {
     /// is the open scene too.
     ///
     /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message, as for
-    /// a texture, a model or a font that can't be loaded, `asset.no_texture`, `asset.no_model` or
-    /// `asset.no_font`, with why: an image its model hasn't, or one named by an absolute path or
-    /// one leading outside the asset root, by an ID no asset has, or by a path to a file that
-    /// doesn't load as `add_texture`, `add_model` or `add_font` loads it. In a replay or a lockstep
-    /// joiner, which goes as another run went, such an asset stands in, warning `asset.stand_in`.
+    /// a texture, a model, a font or a prefab that can't be loaded, `asset.no_texture`,
+    /// `asset.no_model`, `asset.no_font` or `asset.no_prefab`, with why: an image its model hasn't,
+    /// or one named by an absolute path or one leading outside the asset root, by an ID no asset
+    /// has, or by a path to a file that doesn't load as `add_texture`, `add_model` or `add_font`
+    /// loads it. In a replay or a lockstep joiner, which goes as another run went, such an asset
+    /// stands in, warning `asset.stand_in`.
     ///
     /// # Panics
     ///
@@ -3092,7 +3333,7 @@ impl Context {
         if loaded.as_ref().is_err_and(|error| {
             matches!(
                 error.code(),
-                "asset.no_texture" | "asset.no_model" | "asset.no_font"
+                "asset.no_texture" | "asset.no_model" | "asset.no_font" | "asset.no_prefab"
             )
         }) {
             loaded =
@@ -4932,7 +5173,7 @@ mod tests {
     /// A run that reads a package loads from it what layers add and text names, though no file of
     /// theirs is on the disk: a texture, compressed, by its path, however it's written, named by
     /// its ID, and by that ID, as text names it; a model, cooked, its primitives with levels of
-    /// detail and its images compressed; a scene's text; and a script.
+    /// detail and its images compressed; a scene's text; a script; and a prefab, by its ID.
     #[test]
     fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
         use crate::image::tests::ktx2;
@@ -4994,6 +5235,17 @@ mod tests {
         writer
             .add("scripts/still.luau", None, Kind::File, still.into())
             .unwrap();
+        let lamp = b"(\n    entities: {\n        \"0000000000000001\": (\n            Sprite: (\n                \
+                     texture: Some(\"5f3c9a1e07b2d846\"),\n            ),\n        ),\n    },\n)\n";
+        let lamp_id = 0x6b5e_1c3f_29d0_a487;
+        writer
+            .add(
+                "prefabs/lamp.prefab",
+                Some(lamp_id),
+                Kind::File,
+                lamp.to_vec(),
+            )
+            .unwrap();
         let path = dir.0.join("game.ggpk");
         writer.write(&path).unwrap();
         let mut cx = Context::seeded(1);
@@ -5035,6 +5287,14 @@ mod tests {
         let mut scripts = crate::Scripts::new().expect("Luau starts");
         let declared = scripts.load(&mut cx, root.join("scripts/still.luau"));
         assert_eq!(declared.expect("the script loads"), "Still");
+        // A prefab by its ID, whose instance's sprite shows the texture it names.
+        cx.load_named([Asset::Prefab("6b5e1c3f29d0a487")], false);
+        let prefab = cx.assets.prefab("6b5e1c3f29d0a487").expect("by its ID");
+        assert_eq!(cx.assets.prefab_path(prefab), "prefabs/lamp.prefab");
+        let placed = prefab.spawn(cx.world_mut(), Transform::IDENTITY);
+        let placed = placed.unwrap_or_else(|error| panic!("{error:#}"));
+        let sprite = cx.world().get::<Sprite>(placed).expect("the prefab's");
+        assert_eq!(sprite.texture, Some(stone));
         // Nor does a scan, as the tool API's `assets` asks for, read the disk under the root, or
         // write an ID file there.
         #[cfg(feature = "dev")]
@@ -5191,7 +5451,7 @@ mod tests {
             [Some(textured); 2]
         );
         assert_eq!(assets.name(plain), Some("assets/plain.png"));
-        let named: Vec<_> = assets.named_from((0, 0, 0)).collect();
+        let named: Vec<_> = assets.named_from((0, 0, 0, 0)).collect();
         let images = &named[1..named.len() - 1];
         assert_eq!(named[0], (stone, dotted));
         assert!(!images.is_empty(), "{named:?}");
@@ -5690,6 +5950,172 @@ mod tests {
         let model = cx.assets.model(id).expect("loaded by its ID");
         assert_eq!(cx.assets.model_path(model), "assets/moved.gltf");
         assert!(cx.world().children(placed).expect("alive").next().is_some());
+    }
+
+    /// A scene that names a prefab by its ID loads it, and the textures its text names, and its
+    /// instance spawns the prefab's entities. Edited, the prefab reloads, and its instance takes
+    /// what changed but what it changed itself, unless the run is recorded, which keeps it,
+    /// warning; and a run following another stands in for a prefab it can't load, whose instances
+    /// are their roots alone.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
+        use gg_api::asset::Meta;
+
+        let logged = crate::testing::logged();
+        let scratch = crate::dirs::tests::Scratch::new("prefab-by-id");
+        let root = scratch.0.join("game");
+        for dir in ["assets", "scenes"] {
+            std::fs::create_dir_all(root.join(dir)).expect("a directory");
+        }
+        let id = "4d5e6f708192a3b4";
+        let text_of = |scale: f32, name: &str| {
+            format!(
+                "(\n    entities: {{\n        \"0000000000000001\": (\n            Name: \
+                 (\"{name}\"),\n            Sprite: (\n                color: (1.0, 1.0, 1.0, \
+                 1.0),\n                texture: Some(\"assets/stone.png\"),\n            \
+                 ),\n        ),\n        \"0000000000000002\": (\n            Parent: \
+                 (\"0000000000000001\"),\n            Transform: (\n                scale: \
+                 ({scale}, {scale}, 1.0),\n            ),\n        ),\n    }},\n)\n"
+            )
+        };
+        // Dated an hour back, so that it loads as it is.
+        let written_long_ago = |name: &str, bytes: &[u8]| {
+            let path = root.join("assets").join(name);
+            std::fs::write(&path, bytes).expect("written");
+            let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+            let file = std::fs::File::options().write(true).open(path);
+            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        };
+        written_long_ago("lamp.prefab", text_of(2.0, "lamp").as_bytes());
+        let meta = Meta {
+            id: id.parse().expect("an ID"),
+        };
+        written_long_ago("lamp.prefab.meta", meta.text().as_bytes());
+        let (color, depth) = (png::ColorType::Rgba, png::BitDepth::Eight);
+        let png = crate::image::tests::png(color, depth, 1, &[255; 4], None);
+        written_long_ago("stone.png", &png);
+        let scene = root.join("scenes/s.ron");
+        let text = format!(
+            "(\n    entities: {{\n        \"0000000000000100\": (\n            Name: \
+             (\"mine\"),\n            PrefabRoot: (\"{id}\"),\n        ),\n    }},\n)\n"
+        );
+        std::fs::write(&scene, &text).expect("written");
+
+        let mut cx = Context::seeded(0).root(root.clone());
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        cx.load_scene_file(&scene).expect("loaded");
+        let prefab = cx.assets.prefab(id).expect("loaded by its ID");
+        assert_eq!(cx.assets.prefab_path(prefab), "assets/lamp.prefab");
+        assert!(
+            cx.assets.texture("assets/stone.png").is_some(),
+            "what it names"
+        );
+        let placed = cx
+            .world()
+            .entity("0000000000000100".parse().expect("an ID"));
+        let placed = placed.expect("its root");
+        let child = |cx: &Context| -> Entity {
+            let mut children = cx.world().children(placed).expect("alive");
+            children.next().expect("its child")
+        };
+        let scale = |cx: &Context| {
+            let transform = cx.world().get::<Transform>(child(cx));
+            transform.expect("the prefab's").scale
+        };
+        assert_eq!(scale(&cx), Vec3::new(2.0, 2.0, 1.0));
+        let name = |cx: &Context| cx.world().get::<Name>(placed).cloned();
+        assert_eq!(name(&cx), Some(Name("mine".to_owned())), "its own");
+
+        // Frame starts, as a run that's `recorded` or not, until `done`.
+        let until = |cx: &mut Context, recorded, done: &dyn Fn(&Context) -> bool, what: &str| {
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while !done(cx) {
+                assert!(std::time::Instant::now() < until, "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+                cx.take_reloaded(recorded);
+            }
+        };
+        let path = root.join("assets/lamp.prefab");
+        std::fs::write(&path, text_of(3.0, "post")).expect("an edit");
+        let grown = |cx: &Context| scale(cx) == Vec3::new(3.0, 3.0, 1.0);
+        until(&mut cx, false, &grown, "the instance takes it");
+        assert_eq!(
+            name(&cx),
+            Some(Name("mine".to_owned())),
+            "and keeps its own"
+        );
+
+        let _ = logged.codes.try_iter().count();
+        std::fs::write(&path, text_of(4.0, "post")).expect("an edit");
+        let warned = |_: &Context| {
+            logged
+                .codes
+                .try_iter()
+                .any(|code| code == "asset.prefab_changed")
+        };
+        until(&mut cx, true, &warned, "a recorded run warns");
+        assert!(grown(&cx), "and keeps its instances");
+
+        let mut follower = Context::seeded(0);
+        follower.follows = true;
+        follower.load_named([Asset::Prefab("assets/none.prefab")], true);
+        let stand_in = follower
+            .assets
+            .prefab("assets/none.prefab")
+            .expect("a stand-in");
+        assert_eq!(follower.assets.prefab_text(stand_in), None);
+        let world = follower.world_mut();
+        let root = stand_in.spawn(world, Transform::IDENTITY).expect("spawned");
+        assert_eq!(
+            world.children(root).expect("alive").count(),
+            0,
+            "its root alone"
+        );
+    }
+
+    /// A prefab's change that the world as edited can't take, as it hasn't registered a type the
+    /// text names, changes neither the world playing nor the prefab: both worlds take it, or
+    /// neither does.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_prefab_change_one_world_refuses_changes_neither() {
+        #[derive(Clone, Debug, PartialEq, crate::Component)]
+        struct Lit {
+            bright: f32,
+        }
+
+        let mut cx = Context::seeded(0);
+        let text = "(\n    entities: {\n        \"0000000000000001\": (\n            Name: \
+                    (\"lamp\"),\n        ),\n    },\n)\n";
+        let prefab = cx.add_assets(|assets| {
+            assets.add_prefab(
+                "lamp.prefab".into(),
+                "lamp.prefab".into(),
+                Some(text.into()),
+            )
+        });
+        let root = prefab.spawn(cx.world_mut(), Transform::IDENTITY);
+        let root = root.expect("spawned");
+        // Held aside as a copy plays, which registers a type the world as edited hasn't.
+        cx.edited = Some(Edited {
+            world: cx.world.clone(),
+            ticks: 0,
+            scenes: Vec::new(),
+            open: scene_files::Open::default(),
+            authors: Authors::default(),
+        });
+        cx.world_mut().register::<Lit>().expect("describes itself");
+        let lit = text.replace(
+            "Name: (\"lamp\"),",
+            "Lit: (\n                bright: 2.0,\n            ),\n            Name: (\"lit\"),",
+        );
+        cx.reload_prefab(prefab, Path::new("lamp.prefab"), lit, false);
+        let name = cx.world().get::<Name>(root).cloned();
+        assert_eq!(name, Some(Name("lamp".to_owned())), "the copy as it was");
+        assert_eq!(cx.world().get::<Lit>(root), None);
+        let kept = cx.assets.prefab_text(prefab).map(|text| &**text);
+        assert_eq!(kept, Some(text), "the prefab as it was");
     }
 
     /// A model that a run following another can't load stands in, as a model of no nodes, named as

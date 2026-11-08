@@ -4,7 +4,7 @@
 //! in; what each method takes and answers; the memory a game's view is shared through as it
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
 //! [`Project`], which tools find a game by and its development build reads; assets' ID files,
-//! [`asset`], which its development build writes beside each texture, model and font; and a
+//! [`asset`], which its development build writes beside each texture, model, font and prefab; and a
 //! project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it. It depends on no crate
 //! of the engine's, so that tools build without the GPU's toolchain.
 //!
@@ -99,15 +99,15 @@
 //!   otherwise; the revision changes with each change to the types, so that a client reads them
 //!   again as the revision `entities` answers moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
-//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models and fonts under
-//!   the game's asset root, in the order of their paths, each with its ID, which its ID file beside
-//!   it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID files
-//!   whose assets aren't there. It answers once the game has looked at the root since it asked, or at
-//!   once from its last look while its frames pause, as while its window is minimized, so that
-//!   an asset added or renamed since is listed, a run that writes ID files, a game alone or a
-//!   lockstep session's host that serves the API, having written each one missing and moved beside
-//!   its file each that a rename of the file alone left behind, as it does as it starts and as it
-//!   watches the root. A listed asset's `problem` says what's wrong with its ID file:
+//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts and prefabs
+//!   under the game's asset root, in the order of their paths, each with its ID, which its ID file
+//!   beside it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID
+//!   files whose assets aren't there. It answers once the game has looked at the root since it
+//!   asked, or at once from its last look while its frames pause, as while its window is minimized,
+//!   so that an asset added or renamed since is listed, a run that writes ID files, a game alone or
+//!   a lockstep session's host that serves the API, having written each one missing and moved
+//!   beside its file each that a rename of the file alone left behind, as it does as it starts and
+//!   as it watches the root. A listed asset's `problem` says what's wrong with its ID file:
 //!   - `asset.no_id`, none, in a run that writes none, a lockstep session's joiner: its host writes
 //!     it, as a game alone does;
 //!   - `asset.bad_meta`, one that doesn't read: fix it, or remove it for a fresh one;
@@ -196,18 +196,18 @@
 //! or `NaN`; an entity its ID, a string of 16 hex digits, or `null` if it isn't alive; a texture
 //! its name, its asset ID where its file has one, such as `5f3c9a1e07b2d846`, a model's image the
 //! model's and its place, such as `5f3c9a1e07b2d846#0`, or else its path, such as
-//! `assets/logo.png`, or `null` for one without; a model or a font its name, as a texture's; an
-//! option `null` or its value; a list an array; a struct an object of its fields, in their order, a
-//! tuple struct's named `0`, `1` and so on; an enum's variant its name, as a string, or for a
-//! variant with fields an object of one key, its name, whose value is an object of the fields; and
-//! what reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`. A value given, as an
-//! operation's, is read the same way, by the type of the field it goes in, as a component's
-//! description gives it: an integer where a float goes, a texture, a model or a font by its name or
-//! a path to its file, which the game loads from the file under its asset root if it hasn't, its
-//! model's image with its model, an entity by the ID of one that's alive, or `null` for none
-//! alive, and a struct, or a variant's fields, missing a field, which takes its default, as in a
-//! scene; what's opaque is kept as it is, or made as the type's own is, as an `(opaque)` that a
-//! create or an add gives says.
+//! `assets/logo.png`, or `null` for one without; a model, a font or a prefab its name, as a
+//! texture's; an option `null` or its value; a list an array; a struct an object of its fields, in
+//! their order, a tuple struct's named `0`, `1` and so on; an enum's variant its name, as a string,
+//! or for a variant with fields an object of one key, its name, whose value is an object of the
+//! fields; and what reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`. A value
+//! given, as an operation's, is read the same way, by the type of the field it goes in, as a
+//! component's description gives it: an integer where a float goes, a texture, a model, a font or a
+//! prefab by its name or a path to its file, which the game loads from the file under its asset
+//! root if it hasn't, its model's image with its model, an entity by the ID of one that's alive, or
+//! `null` for none alive, and a struct, or a variant's fields, missing a field, which takes its
+//! default, as in a scene; what's opaque is kept as it is, or made as the type's own is, as an
+//! `(opaque)` that a create or an add gives says.
 
 pub mod asset;
 pub mod fetch;
@@ -924,8 +924,8 @@ pub struct VariantInfo {
 
 /// A field's type: `"bool"`, `{"int":{"bits":32,"signed":true}}`, `"f32"`, `"f64"`, `"string"`,
 /// `"vec2"`, `"vec3"`, `"vec4"`, `"quat"`, `"entity"`, `"texture"`, `"model"`, `"font"`,
-/// `{"option":...}`, `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a type `types`
-/// describes, or `"opaque"`, a field reflection leaves as it is.
+/// `"prefab"`, `{"option":...}`, `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a
+/// type `types` describes, or `"opaque"`, a field reflection leaves as it is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Type {
@@ -942,6 +942,7 @@ pub enum Type {
     Texture,
     Model,
     Font,
+    Prefab,
     Option(Box<Type>),
     List(Box<Type>),
     Array(Box<Type>, u32),
@@ -1117,6 +1118,18 @@ pub enum Operation {
         /// Given, `null` for a root, so that one left out isn't taken for a root.
         #[serde(deserialize_with = "Option::deserialize")]
         parent: Option<String>,
+    },
+    /// Unlinks the instance of a prefab whose root is entity `id`: takes its `PrefabRoot` away,
+    /// its entities staying as they are, under their IDs, its own from then on.
+    Unlink { id: String },
+    /// Sets the field at `path` of entity `id`'s `component`, or the whole component for an empty
+    /// path, to what the prefab of the instance that gives it has there: an instance's root's, but
+    /// its `Transform`, which is its own; or an entity's that an instance's prefab gives.
+    Revert {
+        id: String,
+        component: String,
+        #[serde(default)]
+        path: String,
     },
 }
 
@@ -1602,6 +1615,15 @@ mod tests {
             parent: None,
         };
         assert_eq!(root, expected);
+        let revert = read(r#"{"revert": {"id": "a", "component": "Sprite"}}"#).unwrap();
+        let expected = Operation::Revert {
+            id: "a".to_owned(),
+            component: "Sprite".to_owned(),
+            path: String::new(),
+        };
+        assert_eq!(revert, expected);
+        let unlink = read(r#"{"unlink": {"id": "a"}}"#).unwrap();
+        assert_eq!(unlink, Operation::Unlink { id: "a".to_owned() });
         for refused in [
             r#"{"reparent": {"id": "a"}}"#,
             r#"{"set": {"id": "a", "component": "Spin", "value": 2, "extra": 1}}"#,

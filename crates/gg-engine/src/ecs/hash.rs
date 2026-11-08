@@ -7,7 +7,7 @@ use std::fmt;
 use super::id::mix64;
 use super::{Entity, EntityId, World};
 use crate::reflect::Reflect;
-use crate::{Font, Model, Texture};
+use crate::{Font, Model, Prefab, Texture};
 
 // What a type's key, a term of the content and the layout start from: the 64-bit words of π's
 // fraction after the ID stream's (id.rs), as constants that hide nothing, none of them the zero
@@ -109,6 +109,12 @@ impl Digest<'_> {
     pub(crate) fn font(&mut self, font: Font) {
         let world = self.world;
         self.bytes(world.assets().font_name(font).as_bytes());
+    }
+
+    /// By its name, as a texture is.
+    pub(crate) fn prefab(&mut self, prefab: Prefab) {
+        let world = self.world;
+        self.bytes(world.assets().prefab_name(prefab).as_bytes());
     }
 }
 

@@ -648,6 +648,10 @@ fn migrate(
             Some(font) => Value::Font(font),
             None => return Err(world.assets().not_found("font", at)),
         },
+        (Type::Prefab, Text::Prefab(at)) => match world.assets().prefab(at) {
+            Some(prefab) => Value::Prefab(prefab),
+            None => return Err(world.assets().not_found("prefab", at)),
+        },
         (Type::Option(_), Text::None) => Value::Option(None),
         (Type::Option(inner), Text::Some(text)) => {
             match migrate(world, inner, hints, text, path, changes) {

@@ -25,16 +25,16 @@ fn the_project_is_canonical_and_starts_in_its_welcome() {
     assert_eq!(project.start_path(dir()), start);
 }
 
-/// Each texture, model and font under the game's asset root has its ID file beside it, committed
-/// with it, each holding an ID of its own, and no ID file is left without its asset, so that every
-/// checkout gives each asset the ID the repository holds, which its scenes name it by.
+/// Each texture, model, font and prefab under the game's asset root has its ID file beside it,
+/// committed with it, each holding an ID of its own, and no ID file is left without its asset, so
+/// that every checkout gives each asset the ID the repository holds, which its scenes name it by.
 #[test]
 fn every_asset_has_its_id_file_beside_it() {
     let project = Project::read(dir()).expect("the project reads");
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
     assert!(
-        found.assets.len() >= 18,
-        "7 textures, a sky's and the Fox's among them, 10 models and a font"
+        found.assets.len() >= 20,
+        "7 textures, a sky's and the Fox's among them, 10 models, a font and 2 prefabs"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 25, "{scenes:?}");
+    assert_eq!(scenes.len(), 26, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -128,6 +128,71 @@ fn every_scene_loads_and_saves_as_it_is() {
         let saved = cx.world().save_scene(&roots).expect("saved");
         assert_eq!(saved, text, "{}", path.display());
     }
+}
+
+/// Each prefab under the game's asset root loads, as the scene of one subtree it is, and saves to
+/// its own bytes.
+#[test]
+fn every_prefab_loads_and_saves_as_it_is() {
+    for name in ["lantern", "lamppost"] {
+        let path = dir().join("prefabs").join(format!("{name}.prefab"));
+        let text = fs::read_to_string(&path).expect("the prefab");
+        let (mut cx, _showcase) = loaded();
+        cx.add_prefab(name, &path).expect("added");
+        let roots = cx.world_mut().load_scene(&text);
+        let roots = roots.unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        assert_eq!(roots.len(), 1, "{}", path.display());
+        let saved = cx.world().save_scene(&roots).expect("saved");
+        assert_eq!(saved, text, "{}", path.display());
+    }
+}
+
+/// The prefabs scene's lanterns are the prefab's, each with what it changes itself, the
+/// lamppost's two among them, its right one's flame blue, and a caption of the prefab's on the
+/// one that changes nothing.
+#[test]
+fn the_prefabs_scene_links_its_lanterns() {
+    use gg_engine::{Name, PrefabRoot, Sprite, Text};
+
+    let (mut cx, _showcase) = loaded();
+    let path = dir().join("scenes").join("prefabs.ron");
+    cx.load_scene_file(&path).expect("loaded");
+    let world = cx.world();
+    let lanterns = world.query::<(gg_engine::Entity, &Name)>();
+    let lanterns = lanterns.filter(|(_, name)| name.0 == "Lantern");
+    let lanterns: Vec<gg_engine::Entity> = lanterns.map(|(entity, _)| entity).collect();
+    assert_eq!(lanterns.len(), 6, "four in the scene, two in the lamppost");
+    for &lantern in &lanterns {
+        assert!(world.get::<PrefabRoot>(lantern).is_some());
+    }
+    let named = |name: &str| {
+        let found = world.query::<(gg_engine::Entity, &Name)>();
+        let found = found
+            .filter(|(_, named)| named.0 == name)
+            .map(|(entity, _)| entity);
+        found.collect::<Vec<_>>()
+    };
+    let colors: Vec<[f32; 4]> = (named("Flame").into_iter())
+        .map(|flame| {
+            world
+                .get::<Sprite>(flame)
+                .expect("a sprite")
+                .color
+                .to_array()
+        })
+        .collect();
+    let orange = [1.0, 0.62, 0.18, 1.0];
+    assert_eq!(colors.iter().filter(|&&color| color == orange).count(), 4);
+    assert!(colors.contains(&[0.3, 1.0, 0.45, 1.0]), "the green flame");
+    assert!(
+        colors.contains(&[0.3, 0.6, 1.0, 1.0]),
+        "the lamppost's blue flame"
+    );
+    let captions: Vec<String> = (named("Caption").into_iter())
+        .map(|caption| world.get::<Text>(caption).expect("a text").text.clone())
+        .collect();
+    assert_eq!(captions.iter().filter(|text| *text == "LANTERN").count(), 1);
+    assert!(captions.contains(&"NESTED".to_owned()), "{captions:?}");
 }
 
 /// Spin turns its entity about its axis, about Z without one, a quarter turn in a second at 90°

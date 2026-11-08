@@ -1,0 +1,141 @@
+(
+    entities: {
+        "0c7e2b9f4d1a8563": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1f4a8c2e6b9d0375": (
+            Name: ("Title"),
+            Text: (
+                text: "Linked prefabs",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.6,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "27f9d03c6a8e15b4": (
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (-7.0, -0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "34e16271e8ac6e3d": (
+            Text: (
+                text: "RED BODY",
+            ),
+        ),
+        "396a2914b935e115": (
+            Sprite: (
+                color: (0.75, 0.22, 0.28, 1.0),
+            ),
+        ),
+        "3b6d9f1a2c8e4705": (
+            Name: ("Hint"),
+            Text: (
+                text: "prefabs/lantern.prefab, placed four times, and prefabs/lamppost.prefab, which links it twice: each instance keeps only what it changes.\nEdit lantern.prefab while this runs, and every lantern takes the change, but in what it changes itself.",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4d0b7e3a9f6c2518": (
+            Circle: (
+                color: (1.0, 0.8, 0.3, 0.35),
+                thickness: 0.15,
+                fade: 0.4,
+            ),
+            Name: ("Halo"),
+            Parent: ("e9c41b7a5f3d2068"),
+            Transform: (
+                translation: (0.0, 0.95, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "83d2a6f10c9e4b57": (
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (-4.4, -0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8de80230f6f1e6bd": (
+            Transform: (
+                translation: (0.0, 0.95, 0.1),
+                scale: (1.5, 1.5, 1.0),
+            ),
+        ),
+        "add113cf296427e9": (
+            Text: (
+                text: "GREEN FLAME",
+            ),
+        ),
+        "b5e0947c2d1a6f38": (
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (-1.8, -0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c31c94f324692357": (
+            Sprite: (
+                color: (0.3, 1.0, 0.45, 1.0),
+            ),
+        ),
+        "e47cf31776d136e4": (
+            Text: (
+                text: "BIG FLAME, OWN HALO",
+            ),
+        ),
+        "e9c41b7a5f3d2068": (
+            PrefabRoot: ("a7c3f19d2b6e4085"),
+            Transform: (
+                translation: (0.8, -0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f16a2e8d4b07c935": (
+            PrefabRoot: ("3fb81c6d9a2e5470"),
+            Transform: (
+                translation: (5.4, 0.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

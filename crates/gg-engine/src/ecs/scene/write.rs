@@ -7,13 +7,15 @@ use std::fmt::{self, Write as _};
 
 use gg_core::{Error, Result};
 
-use super::{MAX_DEPTH, NO_HINTS};
-use crate::ModelNode;
+use super::{Expanding, MAX_DEPTH, NO_HINTS};
 use crate::ecs::by_name::about;
+use crate::ecs::diff::same;
 use crate::ecs::id::Named;
+use crate::ecs::prefab::Claims;
 use crate::ecs::table::{AnyColumn, ComponentId};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Shape, Type, Types, Value};
+use crate::{ModelNode, PrefabRoot};
 
 /// RON's words, which no name a scene writes is, so that a name never reads as a value.
 pub(in crate::ecs) const WORDS: [&str; 10] = [
@@ -27,7 +29,7 @@ pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result
         world.locate(root)?;
         world.not_a_node(root)?;
     }
-    // Each once, in the order of their IDs.
+    // Each once.
     let mut saved = Vec::new();
     let mut seen = HashSet::new();
     let mut next = roots.to_vec();
@@ -44,16 +46,72 @@ pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result
             }
         }
     }
+    let claims = instances(world, &mut saved)?;
+    // In the order of their IDs.
     saved.sort_unstable_by_key(|&(id, _)| id);
     let mut writer = Writer {
         world,
         types: world.types(),
         saved: &saved,
+        claims: &claims,
         out: String::new(),
         built: HashMap::new(),
     };
     writer.scene()?;
     Ok(writer.out)
+}
+
+/// The instances among `saved` whose roots are, each by the outermost; and the entities they give,
+/// which go into `saved` with their roots.
+///
+/// Fails as an instance's template does, as [`Expanding::template`] says, and with
+/// `scene.prefab_missing` for an entity an instance's prefab gives that isn't alive, as one code
+/// despawned, which a scene can't save the instance without.
+fn instances(world: &World, saved: &mut Vec<(EntityId, Entity)>) -> Result<Claims> {
+    let depth = |mut entity: Entity| {
+        let mut depth = 0;
+        while let Some(up) = world.parent(entity).expect("a saved entity is alive") {
+            entity = up;
+            depth += 1;
+        }
+        depth
+    };
+    let mut linked: Vec<(usize, EntityId, Entity)> = (saved.iter())
+        .filter(|&&(_, entity)| world.get::<PrefabRoot>(entity).is_some())
+        .map(|&(id, entity)| (depth(entity), id, entity))
+        .collect();
+    linked.sort_unstable();
+    let mut claims = Claims::default();
+    let mut expanding = Expanding::default();
+    for (_, id, root) in linked {
+        if claims.has(id) {
+            continue;
+        }
+        let instance = world.instance(root, &mut expanding)?.expect("linked");
+        if let Some(gone) = instance.ids[1..]
+            .iter()
+            .find(|&&id| world.entity(id).is_none())
+        {
+            return Err(Error::new(
+                "scene.prefab_missing",
+                format!(
+                    "entity {gone}, which the prefab of the instance whose root is entity {id} \
+                     gives, isn't in the world, but a scene saves an instance with every entity \
+                     its prefab gives"
+                ),
+            ));
+        }
+        claims.claim(root, instance);
+    }
+    let seen: HashSet<EntityId> = saved.iter().map(|&(id, _)| id).collect();
+    for (_, instance) in &claims.instances {
+        for &id in &instance.ids[1..] {
+            if !seen.contains(&id) {
+                saved.push((id, world.entity(id).expect("checked alive")));
+            }
+        }
+    }
+    Ok(claims)
 }
 
 /// Fails with `scene.model_node` if anything under `node`, a model's node, which the world spawns
@@ -88,6 +146,8 @@ struct Writer<'w> {
     types: &'w Types,
     /// The entities saved, by ID.
     saved: &'w [(EntityId, Entity)],
+    /// The instances whose roots are saved, and the entities they give.
+    claims: &'w Claims,
     out: String,
     /// A column of each component type saved, in which each component is made again, as a load
     /// makes it, and taken out of again.
@@ -108,12 +168,57 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Writes entity `id` and its components, in the order of their names.
+    /// Writes entity `id` and its components, in the order of their names: of an instance's root,
+    /// or of an entity an instance saved gives, those that differ from what the prefab gives it,
+    /// each struct of named fields with the fields that differ alone, and of an entity an instance
+    /// gives where none does, nothing.
     fn entity(&mut self, id: EntityId, entity: Entity) -> Result<()> {
         let world = self.world;
         let at = world.location(entity).expect("a saved entity is alive");
         let table = &world.tables[at.table as usize];
         let parent = world.component::<Parent>();
+        // What its prefab gives it, if an instance saved does: the instance, and its part.
+        let claims = self.claims;
+        let roots = claims.instances.iter();
+        let base = (claims.of(id)).or_else(|| {
+            let root = roots.clone().position(|&(root, _)| root == entity);
+            root.map(|at| (at, 0))
+        });
+        let instance = base.map(|(at, part)| (&claims.instances[at].1, part));
+        // An entity an instance gives is saved under a parent the scene saves: a load puts one
+        // whose parent the text leaves out under its prefab's.
+        if let Some((at, part)) = base
+            && part > 0
+        {
+            let up = world.parent(entity).expect("a saved entity is alive");
+            if up.is_none_or(|up| !self.is_saved(up)) {
+                let root = world.name_of(claims.instances[at].0);
+                let place = match up {
+                    None => "has no parent".to_owned(),
+                    Some(up) => format!("is under entity {}, which isn't saved", world.name_of(up)),
+                };
+                return Err(Error::new(
+                    "scene.prefab_parent",
+                    format!(
+                        "entity {id}, which the prefab of the instance whose root is entity {root} \
+                         gives, {place}, but a scene loads it under its prefab's parent where it \
+                         saves none: give it a parent the scene saves"
+                    ),
+                ));
+            }
+        }
+        let given = instance.map_or_else(Vec::new, |(of, part)| of.components(world, part));
+        if let Some(&gone) = given.iter().find(|&&component| !table.has(component)) {
+            let name = world.components.name(gone);
+            let error = Error::new(
+                "scene.prefab_missing",
+                format!(
+                    "its prefab gives it a `{name}`, which it hasn't, but a scene saves an \
+                     instance's entities with every component their prefab gives them"
+                ),
+            );
+            return Err(about(error, "save", Named::Id(id), name, ""));
+        }
         let mut components = Vec::new();
         for (column, &component) in table.components().iter().enumerate() {
             if world.components.ty(component).is_opaque(self.types) {
@@ -124,24 +229,46 @@ impl Writer<'_> {
                     .get::<Parent>(entity)
                     .expect("the entity has a parent")
                     .0;
-                if !self.is_saved(up) {
+                let placed = instance
+                    .is_some_and(|(of, part)| part > 0 && of.parent(world, part) == Some(up));
+                if !self.is_saved(up) || placed {
                     continue;
                 }
             }
-            components.push((world.components.name(component), column));
+            let value = table.column_at(column).value(at.row as usize);
+            let base = (instance.filter(|_| given.contains(&component)))
+                .and_then(|(of, part)| of.value(world, part, component));
+            let written = match &base {
+                None => Written::Whole,
+                Some(base) if same(&value, world, base, world) => continue,
+                Some(base) => match (&value, base) {
+                    (Value::Struct(fields), Value::Struct(was))
+                        if self.named_fields(component) && fields.len() == was.len() =>
+                    {
+                        let fields = fields.iter().zip(was);
+                        let differ =
+                            fields.filter(|((_, now), (_, was))| !same(now, world, was, world));
+                        Written::Fields(differ.map(|((name, _), _)| name.clone()).collect())
+                    }
+                    _ => Written::Whole,
+                },
+            };
+            components.push((world.components.name(component), column, value, written));
         }
-        components.sort_unstable_by_key(|&(name, _)| name);
+        components.sort_unstable_by_key(|&(name, ..)| name);
+        if components.is_empty() && base.is_some_and(|(_, part)| part > 0) {
+            return Ok(());
+        }
         write!(self.out, "        \"{id}\": ").expect("a string takes any text");
         if components.is_empty() {
             self.out.push_str("(),\n");
             return Ok(());
         }
         self.out.push_str("(\n");
-        for (name, column) in components {
+        for (name, column, value, written) in components {
             let about = |error: Error| about(error, "save", Named::Id(id), name, "");
             let component = table.components()[column];
             let ty = world.components.ty(component);
-            let value = table.column_at(column).value(at.row as usize);
             reflect::check(self.types, &ty, &NO_HINTS, &value).map_err(about)?;
             let built = self
                 .built
@@ -153,11 +280,37 @@ impl Writer<'_> {
             pad(&mut self.out, 3);
             self.out.push_str(name);
             self.out.push_str(": ");
-            self.value(&ty, &value, 3, 1).map_err(about)?;
+            match written {
+                Written::Whole => self.value(&ty, &value, 3, 1).map_err(about)?,
+                Written::Fields(differ) => {
+                    let (Type::Named(index), Value::Struct(given)) = (&ty, &value) else {
+                        unreachable!("a struct's fields are written of a struct");
+                    };
+                    let Shape::Struct { fields, .. } = &self.types.info(*index).shape else {
+                        unreachable!("a struct's fields are written of a struct");
+                    };
+                    let parts = self.saved_parts(fields, given).map_err(about)?;
+                    let parts = parts
+                        .into_iter()
+                        .filter(|(field, _)| differ.contains(&field.name));
+                    let parts: Vec<(&Field, &Value)> = parts.collect();
+                    self.block(&parts, false, 3, 1).map_err(about)?;
+                }
+            }
             self.out.push_str(",\n");
         }
         self.out.push_str("        ),\n");
         Ok(())
+    }
+
+    /// Whether component type `component` is a struct of named fields, which a scene writes of an
+    /// instance's entity field by field.
+    fn named_fields(&self, component: ComponentId) -> bool {
+        let Type::Named(index) = self.world.components.ty(component) else {
+            return false;
+        };
+        let shape = &self.types.info(index).shape;
+        matches!(shape, Shape::Struct { tuple: false, .. })
     }
 
     /// Whether `entity` is alive and saved.
@@ -203,6 +356,7 @@ impl Writer<'_> {
             }
             (_, &Value::Model(model)) => quote(out, self.world.assets().model_name(model)),
             (_, &Value::Font(font)) => quote(out, self.world.assets().font_name(font)),
+            (_, &Value::Prefab(prefab)) => quote(out, self.world.assets().prefab_name(prefab)),
             (Type::Option(_), Value::Option(None)) => out.push_str("None"),
             (Type::Option(inner), Value::Option(Some(value))) => {
                 if **value == Value::Opaque {
@@ -342,6 +496,13 @@ impl Writer<'_> {
         write!(self.out, "\"{id}\"").expect("a string takes any text");
         Ok(())
     }
+}
+
+/// What a scene writes of a component: all of it, or the fields of a struct of named fields that
+/// differ from its prefab's, by their names.
+enum Written {
+    Whole,
+    Fields(Vec<reflect::Ident>),
 }
 
 /// Indents a line `indent` levels, of 4 spaces each.

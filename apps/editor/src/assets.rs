@@ -177,10 +177,11 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         if file_type.is_file() {
             files.insert(path.clone());
         }
-        // A texture or a model a regular file, as the game's scan takes them.
+        // A texture, a model or a font a regular file, as the game's scan takes them; a prefab,
+        // which nothing places from here yet, a file.
         let kind = match AssetKind::of(&path) {
             _ if is_folder => Kind::Folder,
-            Some(asset) if file_type.is_file() => Kind::Asset(asset),
+            Some(asset) if file_type.is_file() && asset != AssetKind::Prefab => Kind::Asset(asset),
             _ => Kind::File,
         };
         let name = entry.file_name().to_string_lossy().into_owned();

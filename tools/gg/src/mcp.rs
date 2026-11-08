@@ -448,12 +448,13 @@ fn tools() -> Value {
         ),
         tool(
             "assets",
-            "The game's textures, models and fonts, a page of them by their paths from its asset \
-             root, as `scene` names files: each one's ID, 16 hex digits, or null while it has \
-             none; its kind; whether a layer has added it; and `problem`, what's wrong with its ID \
-             file, if anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets \
-             aren't there, as after a rename made with an edit. It answers once the game has looked at the asset \
-             root since, so that a file added or renamed since is listed, and the game, but a \
+            "The game's textures, models, fonts and prefabs, a page of them by their paths from its \
+             asset root, as `scene` names files: each one's ID, 16 hex digits, or null while it \
+             has none; its kind; whether a layer has added it; and `problem`, what's wrong with its \
+             ID file, if anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets \
+             aren't there, as after a rename made with an edit. It answers once the game has \
+             looked at the asset root since, so that a file added or renamed since is listed, and \
+             the game, but a \
              lockstep session's joiner, writes each missing ID file, `<file>.meta` beside its \
              file, which you commit with it, and moves one a rename of its file alone left behind \
              beside it.",
@@ -481,8 +482,11 @@ fn tools() -> Value {
              \"value\"}}, {\"create\": {\"id\"?, \"parent\"?, \"components\": {name: value}}}, \
              {\"duplicate\": {\"id\", \"copies\"?}}, {\"delete\": {\"id\"}}, {\"add\": {\"id\", \
              \"component\", \"value\"?}}, {\"remove\": {\"id\", \"component\"}}, {\"reparent\": \
-             {\"id\", \"parent\"}}. Values are JSON as `entity` shows them; a struct missing \
-             fields takes their defaults. Answers the IDs of the entities it made.",
+             {\"id\", \"parent\"}}, {\"unlink\": {\"id\"}}, which unlinks a prefab's instance into \
+             entities of its own, and {\"revert\": {\"id\", \"component\", \"path\"?}}, which sets \
+             a field of an instance's entity back to its prefab's. Values are JSON as `entity` \
+             shows them; a struct missing fields takes their defaults. Answers the IDs of the \
+             entities it made.",
             json!({"operations": {"type": "array", "items": {"type": "object"}}}),
             &["operations"],
         ),

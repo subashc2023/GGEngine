@@ -176,6 +176,7 @@ impl Inspected for World {
             },
             Value::Model(model) => self.assets().model_path(model).to_owned(),
             Value::Font(font) => self.assets().font_path(font).to_owned(),
+            Value::Prefab(prefab) => self.assets().prefab_path(prefab).to_owned(),
             _ => "?".to_owned(),
         }
     }

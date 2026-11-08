@@ -239,7 +239,7 @@ impl Fields<'_> {
                 ui.label(self.world.entity_label(value));
                 None
             }
-            (Type::Texture | Type::Model | Type::Font, value) => {
+            (Type::Texture | Type::Model | Type::Font | Type::Prefab, value) => {
                 ui.label(self.world.asset_label(value));
                 None
             }

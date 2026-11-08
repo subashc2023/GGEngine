@@ -16,6 +16,7 @@ mod id;
 mod log;
 mod nodes;
 mod ops;
+mod prefab;
 mod query;
 mod resources;
 mod scene;
@@ -945,6 +946,15 @@ impl World {
                 world.free_slot(index);
             }
         }
+        world
+    }
+
+    /// A world of no entities, of this one's component types and its assets, as a prefab's text
+    /// loads into to make its template: it costs neither this world's slots nor its tables.
+    fn scratch(&self) -> World {
+        let mut world = World::seeded(0);
+        world.components = self.components.clone();
+        world.assets = Arc::clone(&self.assets);
         world
     }
 

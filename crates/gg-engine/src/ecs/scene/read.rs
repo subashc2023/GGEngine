@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::mem;
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
@@ -17,6 +18,7 @@ use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
 };
 
+use super::template::Expanding;
 use super::{MAX_DEPTH, NO_HINTS};
 use crate::assets::Asset;
 use crate::ecs::by_name::about;
@@ -24,25 +26,56 @@ use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Ident, Meta, Shape, Type, Types, Value, Variant};
-use crate::{Font, Model, ModelNode, Reflect, Texture};
+use crate::{Font, Model, ModelNode, Prefab, PrefabRoot, Reflect, Texture, Transform};
 
 /// A scene's entity, as the parse reads it.
 pub(super) struct Loaded {
     pub(super) id: EntityId,
     /// The handle it takes as it's spawned.
     pub(super) handle: Entity,
+    /// Its components as the text gives them, until the parse has built them into `row`.
+    given: Vec<Given>,
     pub(super) row: Row,
-    /// Its parent's index among the scene's entities, and the item its `Parent` is.
+    /// Its parent's index among the scene's entities, and the item its `Parent` is, or, for one an
+    /// instance's prefab places, its root's `PrefabRoot`.
     pub(super) parent: Option<(usize, u32)>,
+    /// For one an instance's prefab gives, the index of the instance's root among the scene's
+    /// entities, or of the root of the instance within it whose prefab gives it, and its ID as that
+    /// prefab gives it, which its own mixes from that root's; `None` for one of the text's own.
+    pub(super) spawned: Option<(usize, EntityId)>,
     /// The item its key is, once it's read.
     key: Option<u32>,
     /// The item it's first named at, as a key or a reference.
     first: u32,
 }
 
-/// The scene `text`'s entities, in the order it first names them, with the handles they take in
-/// that order: a prefab's, whose IDs are its own, if `prefab`, and which has one root.
-pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loaded>> {
+/// A component as a scene's text gives it, which the parse builds once it knows whose instance its
+/// entity is of, if it's one: its type, the item its value is, and its value.
+struct Given {
+    component: ComponentId,
+    item: u32,
+    value: Partial,
+}
+
+/// A component's value as a scene's text gives it: a struct's of named fields, whose fields a load
+/// takes from the prefab where an instance's entity leaves them out, field by field; or another
+/// type's, whole.
+enum Partial {
+    Fields(Vec<Option<Value>>),
+    Whole(Value),
+}
+
+/// The scene `text`'s entities, in the order it first names them, then the instances' entities it
+/// leaves out, with the handles they take in that order: a prefab's, whose IDs are its own, if
+/// `prefab`, and which has one root. Each instance's entities are its prefab's, as `expanding`
+/// makes its prefabs' templates, under IDs mixed from its root's, each field the text leaves out
+/// taking the prefab's, as [`PrefabRoot`] says.
+pub(super) fn parse(
+    world: &World,
+    text: &str,
+    prefab: bool,
+    expanding: &mut Expanding,
+) -> Result<Vec<Loaded>> {
     let mut load = Load::new(world, prefab, None, false);
     let mut deserializer = deserializer(text)?;
     if let Err(error) = run(&mut load, &mut deserializer) {
@@ -51,17 +84,272 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
             None => syntax(&error),
         });
     }
+    resolve(world, text, load, expanding)
+}
+
+/// The textures, models, fonts and prefabs scene `text` names that none loaded has, each once, in
+/// the order it first names them, as [`parse`] reads it into `world`, but on past them; and those
+/// that the prefabs it names that are loaded name, through the prefabs they name, in turn.
+///
+/// Fails as the parse does, but for those; a loaded prefab's text that doesn't parse is the parse's
+/// to refuse.
+pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
+    let mut load = Load::new(world, false, None, true);
+    let mut reading = deserializer(text)?;
+    if let Err(error) = run(&mut load, &mut reading) {
+        return Err(match load.refused.take() {
+            Some((item, refusal)) => locate(world, text, false, true, item, refusal),
+            None => syntax(&error),
+        });
+    }
+    let mut missing = load.missing.unwrap_or_default();
+    // Each prefab once, through those that the loaded prefabs name.
+    let mut seen = load.prefabs;
+    let mut next = seen.clone();
+    while let Some(prefab) = next.pop() {
+        let Some(text) = world.assets().prefab_text(prefab) else {
+            continue;
+        };
+        let mut load = Load::new(world, true, None, true);
+        let Ok(mut reading) = deserializer(text) else {
+            continue;
+        };
+        if run(&mut load, &mut reading).is_err() {
+            continue;
+        }
+        for asset in load.missing.unwrap_or_default() {
+            if !missing.contains(&asset) {
+                missing.push(asset);
+            }
+        }
+        for named in load.prefabs {
+            if !seen.contains(&named) {
+                seen.push(named);
+                next.push(named);
+            }
+        }
+    }
+    Ok(missing)
+}
+
+/// The rest of [`parse`], once the text has parsed: each instance's entities found, by its
+/// prefab's template, and those the text leaves out added; each entity's components built, from
+/// the text and the prefab; and the hierarchy checked.
+fn resolve(
+    world: &World,
+    text: &str,
+    load: Load<'_>,
+    expanding: &mut Expanding,
+) -> Result<Vec<Loaded>> {
+    let Load {
+        prefab,
+        mut slots,
+        mut entities,
+        mut by_id,
+        map,
+        ..
+    } = load;
     let refuse = |item, error| Err(locate(world, text, prefab, false, item, error));
-    let entities = load.entities;
-    if let Some(unknown) = entities.iter().find(|entity| entity.key.is_none()) {
+    let linked = world.component::<PrefabRoot>();
+    // Each instance's root, by its index, its prefab, and the item its `PrefabRoot` is.
+    let mut roots = Vec::new();
+    for (i, entity) in entities.iter().enumerate() {
+        let mut given = entity.given.iter();
+        let Some(link) = given.find(|given| Some(given.component) == linked) else {
+            continue;
+        };
+        let Partial::Whole(Value::Struct(fields)) = &link.value else {
+            unreachable!("a `PrefabRoot` is a tuple struct");
+        };
+        let Some((_, Value::Prefab(of))) = fields.first() else {
+            unreachable!("a `PrefabRoot` holds a prefab");
+        };
+        let of = *of;
+        if prefab && entity.parent.is_none() {
+            let error = Error::new(
+                "scene.prefab_variant",
+                "a prefab's root links no prefab: link it from an entity under the root, or place \
+                 the other prefab's entities in this one",
+            );
+            return refuse(link.item, error);
+        }
+        roots.push((i, of, link.item));
+    }
+    // Each instance's template, and the IDs of its entities, by which the text names them; and
+    // each entity an instance gives, by its ID, with the instance and its place in the template.
+    let mut instances = Vec::with_capacity(roots.len());
+    let mut claims: HashMap<EntityId, (usize, usize)> = HashMap::new();
+    for (r, &(i, of, item)) in roots.iter().enumerate() {
+        let template = match expanding.template(world, of) {
+            Ok(template) => template,
+            Err(error) => return refuse(item, error),
+        };
+        let ids = match template.ids(entities[i].id) {
+            Ok(ids) => ids,
+            Err(error) => return refuse(item, error),
+        };
+        for (part, &id) in ids.iter().enumerate().skip(1) {
+            if claims.insert(id, (r, part)).is_some() {
+                let error = Error::new(
+                    "scene.duplicate_id",
+                    format!(
+                        "two instances' prefabs give entity {id}, but a scene gives each entity \
+                         once"
+                    ),
+                );
+                return refuse(item, error);
+            }
+            if !prefab && world.entity(id).is_some() {
+                let error = Error::new(
+                    "ecs.id_taken",
+                    format!(
+                        "its prefab gives entity {id}, which is in the world already, but a \
+                         scene's entities are new"
+                    ),
+                );
+                return refuse(item, error);
+            }
+        }
+        instances.push((template, ids));
+    }
+    for &(i, _, item) in &roots {
+        if claims.contains_key(&entities[i].id) {
+            let error = Error::new(
+                "scene.prefab_entity",
+                format!(
+                    "entity {} is an entity of another instance's prefab, whose `PrefabRoot` is \
+                     the prefab's",
+                    entities[i].id
+                ),
+            );
+            return refuse(item, error);
+        }
+    }
+    let unknown = entities
+        .iter()
+        .find(|entity| entity.key.is_none() && !claims.contains_key(&entity.id));
+    if let Some(unknown) = unknown {
         let error = Error::new(
             "scene.unknown_id",
             format!(
-                "the scene has no entity {}: a scene's entities refer only to each other",
+                "the scene has no entity {}: a scene's entities refer only to each other and to \
+                 those its instances' prefabs give",
                 unknown.id
             ),
         );
         return refuse(unknown.first, error);
+    }
+    // The instances' entities the text names nowhere, which take the handles after its own.
+    for (r, (_, ids)) in instances.iter().enumerate() {
+        for &id in &ids[1..] {
+            if by_id.contains_key(&id) {
+                continue;
+            }
+            by_id.insert(id, entities.len());
+            entities.push(Loaded {
+                id,
+                handle: slots.next().expect("there's always another slot"),
+                given: Vec::new(),
+                row: Vec::new(),
+                parent: None,
+                spawned: None,
+                key: None,
+                first: roots[r].2,
+            });
+        }
+    }
+    // Each instance's template's entities, by their handles in it, as their instance has them,
+    // which its references are retargeted to.
+    let handles: Vec<HashMap<Entity, Entity>> = (instances.iter())
+        .map(|(template, ids)| {
+            let parts = template.parts.iter().zip(ids);
+            let handle = |id: &EntityId| entities[by_id[id]].handle;
+            parts.map(|(part, id)| (part.handle, handle(id))).collect()
+        })
+        .collect();
+    let parent_type = world.component::<Parent>();
+    let parent_type = parent_type.expect("every world has registered `Parent`");
+    let transform = world.component::<Transform>();
+    for i in 0..entities.len() {
+        let id = entities[i].id;
+        let base = match roots.iter().position(|&(root, ..)| root == i) {
+            Some(r) => Some((r, 0)),
+            None => claims.get(&id).copied(),
+        };
+        let given = mem::take(&mut entities[i].given);
+        let named: Vec<ComponentId> = given.iter().map(|given| given.component).collect();
+        let mut row: Row = Vec::with_capacity(given.len());
+        let (template, ids, handles) = match base {
+            Some((r, _)) => (
+                Some(&*instances[r].0),
+                &instances[r].1[..],
+                Some(&handles[r]),
+            ),
+            None => (None, &[][..], None),
+        };
+        let part = base.and_then(|(_, part)| Some(&template?.parts[part]));
+        let retarget = |column: &mut dyn AnyColumn| {
+            let handles = handles.expect("a template's column is an instance's");
+            column.entities_mut(0, &mut |entity| {
+                *entity = handles.get(entity).copied().unwrap_or(Entity::DEAD);
+            });
+        };
+        // A root's transform is its own, which takes nothing of its prefab's.
+        let rooted =
+            |component| base.is_some_and(|(_, at)| at == 0) && Some(component) == transform;
+        for given in given {
+            let from = part.filter(|_| !rooted(given.component)).and_then(|part| {
+                let column = part.row.iter().find(|&&(of, _)| of == given.component);
+                column.map(|(_, column)| column)
+            });
+            let value = match given.value {
+                Partial::Whole(value) => Ok(value),
+                Partial::Fields(fields) => {
+                    let base = from.map(|column| {
+                        let mut column = column.cloned();
+                        retarget(&mut *column);
+                        column.value(0)
+                    });
+                    let base = match &base {
+                        Some(Value::Struct(base)) => Some(&base[..]),
+                        _ => None,
+                    };
+                    let of = named_fields(world, given.component);
+                    fill(world.types(), of, fields, base).map(Value::Struct)
+                }
+            };
+            let mut column = world.components.new_column(given.component);
+            let built = value.and_then(|value| column.push_value(&value));
+            if let Err(error) = built {
+                return refuse(given.item, error);
+            }
+            row.push((given.component, column));
+        }
+        if let (Some(part), Some((r, at))) = (part, base) {
+            for (component, column) in &part.row {
+                let own = *component == parent_type || (at == 0 && Some(*component) == transform);
+                if own || named.contains(component) {
+                    continue;
+                }
+                let mut column = column.cloned();
+                retarget(&mut *column);
+                row.push((*component, column));
+            }
+            if at > 0 {
+                entities[i].spawned = Some(match part.spawner {
+                    None => (roots[r].0, part.id),
+                    Some((spawner, local)) => (by_id[&ids[spawner]], local),
+                });
+            }
+            if let (true, None, Some(up)) = (at > 0, entities[i].parent, part.parent) {
+                let up = by_id[&ids[up]];
+                let column: Box<dyn AnyColumn> = Box::new(vec![Parent(entities[up].handle)]);
+                row.push((parent_type, column));
+                entities[i].parent = Some((up, roots[r].2));
+            }
+        }
+        row.sort_unstable_by_key(|&(component, _)| component);
+        entities[i].row = row;
     }
     if let Some(item) = cycle(&entities) {
         let error = Error::new(
@@ -80,7 +368,7 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
                     "scene.prefab_roots",
                     "a prefab is an entity and its descendants, but this one has no entities",
                 );
-                return refuse(load.map, error);
+                return refuse(map, error);
             }
             [first, second, ..] => {
                 let error = Error::new(
@@ -90,27 +378,11 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
                         first.id, second.id
                     ),
                 );
-                return refuse(second.key.expect("every entity has a key"), error);
+                return refuse(second.key.unwrap_or(second.first), error);
             }
         }
     }
     Ok(entities)
-}
-
-/// The textures, models and fonts scene `text` names that none loaded has, each once, in the order
-/// it first names them, as [`parse`] reads it into `world`, but on past them.
-///
-/// Fails as the parse does, but for those.
-pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
-    let mut load = Load::new(world, false, None, true);
-    let mut deserializer = deserializer(text)?;
-    if let Err(error) = run(&mut load, &mut deserializer) {
-        return Err(match load.refused.take() {
-            Some((item, refusal)) => locate(world, text, false, true, item, refusal),
-            None => syntax(&error),
-        });
-    }
-    Ok(load.missing.unwrap_or_default())
 }
 
 /// The IDs scene `text` gives its entities, its map of entities' keys, read from its syntax alone,
@@ -120,7 +392,6 @@ pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
 ///
 /// Fails with `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions, and
 /// with `ecs.bad_id` for a key that isn't an ID.
-#[cfg(feature = "dev")]
 pub(super) fn ids(text: &str) -> Result<Vec<EntityId>> {
     use std::collections::BTreeMap;
 
@@ -217,9 +488,9 @@ fn syntax(error: &SpannedError) -> Error {
 }
 
 /// `refusal`, at item `item`, saying where it is: the text is parsed again, as it was, past the
-/// textures, models and fonts none loaded has if `collect`, up to the item, where the parser is at
-/// its first character, and the refusal is carried out from there, gathering the entity, the
-/// component and the path.
+/// textures, models, fonts and prefabs none loaded has if `collect`, up to the item, where the
+/// parser is at its first character, and the refusal is carried out from there, gathering the
+/// entity, the component and the path.
 fn locate(
     world: &World,
     text: &str,
@@ -263,9 +534,11 @@ struct Load<'w> {
     /// out from there as `carried`.
     stop: Option<(u32, Error)>,
     carried: Option<Error>,
-    /// The textures, models and fonts named that none loaded has, while the parse reads on past
-    /// them, as [`assets`] does, rather than refusing them.
+    /// The textures, models, fonts and prefabs named that none loaded has, while the parse reads on
+    /// past them, as [`assets`] does, rather than refusing them.
     missing: Option<Vec<Asset<String>>>,
+    /// The prefabs named that are loaded, each once, whose own names [`assets`] gathers too.
+    prefabs: Vec<Prefab>,
 }
 
 impl<'w> Load<'w> {
@@ -284,6 +557,7 @@ impl<'w> Load<'w> {
             stop,
             carried: None,
             missing: collect.then(Vec::new),
+            prefabs: Vec::new(),
         }
     }
 
@@ -324,8 +598,10 @@ impl<'w> Load<'w> {
         self.entities.push(Loaded {
             id,
             handle: self.slots.next().expect("there's always another slot"),
+            given: Vec::new(),
             row: Vec::new(),
             parent: None,
+            spawned: None,
             key: None,
             first: item,
         });
@@ -541,7 +817,7 @@ impl<'de> Visitor<'de> for Components<'_, '_> {
         let id = self.load.entities[self.index].id;
         let parent = self.load.world.component::<Parent>();
         let parent = parent.expect("every world has registered `Parent`");
-        let mut row: Row = Vec::new();
+        let mut given: Vec<Given> = Vec::new();
         loop {
             let key = ComponentKey {
                 load: &mut *self.load,
@@ -551,27 +827,30 @@ impl<'de> Visitor<'de> for Components<'_, '_> {
                 break;
             };
             let about = |error| about(error, "load", Named::Id(id), name, "");
-            if row.iter().any(|&(other, _)| other == component) {
+            if given.iter().any(|given| given.component == component) {
                 let error = Error::new(
                     "reflect.duplicate_component",
                     "it's given twice, but an entity has one of each component",
                 );
                 return Err(self.load.refuse(item, about(error)));
             }
-            let built = Built {
+            let read = Top {
                 load: &mut *self.load,
                 component,
             };
-            let built = map.next_value_seed(built);
-            let (column, item) = built.inspect_err(|_| self.load.wrap(about))?;
+            let read = map.next_value_seed(read);
+            let (value, item) = read.inspect_err(|_| self.load.wrap(about))?;
             if component == parent {
                 let up = self.load.referenced;
                 self.load.entities[self.index].parent = Some((up, item));
             }
-            row.push((component, column));
+            given.push(Given {
+                component,
+                item,
+                value,
+            });
         }
-        row.sort_unstable_by_key(|&(component, _)| component);
-        self.load.entities[self.index].row = row;
+        self.load.entities[self.index].given = given;
         Ok(())
     }
 }
@@ -622,20 +901,37 @@ impl<'de, 'w> DeserializeSeed<'de> for ComponentKey<'_, 'w> {
     }
 }
 
-/// A component's value, made as it ends, in a column of its own; returns the column, and its item.
-struct Built<'a, 'w> {
+/// A component's value, as the text gives it: a struct's of named fields field by field, which the
+/// parse fills in once it knows whose instance its entity is of, if it's one, and builds; another
+/// type's whole. Returns it, and its item.
+struct Top<'a, 'w> {
     load: &'a mut Load<'w>,
     component: ComponentId,
 }
 
-impl<'de> DeserializeSeed<'de> for Built<'_, '_> {
-    type Value = (Box<dyn AnyColumn>, u32);
+impl<'de> DeserializeSeed<'de> for Top<'_, '_> {
+    type Value = (Partial, u32);
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         let item = self.load.enter()?;
         let world = self.load.world;
-        let components = &world.components;
-        let ty = components.ty(self.component);
+        let ty = world.components.ty(self.component);
+        if let Type::Named(index) = ty
+            && let Shape::Struct {
+                fields,
+                tuple: false,
+            } = &self.load.types.info(index).shape
+        {
+            // As `Read` enters it, a level deep.
+            self.load.enter()?;
+            let fields = Fields {
+                load: &mut *self.load,
+                fields,
+                depth: 1,
+            };
+            let given = deserializer.deserialize_struct("", &[], fields)?;
+            return Ok((Partial::Fields(given), item));
+        }
         let read = Read {
             load: &mut *self.load,
             ty: &ty,
@@ -643,10 +939,27 @@ impl<'de> DeserializeSeed<'de> for Built<'_, '_> {
             depth: 1,
         };
         let value = read.deserialize(deserializer)?;
-        let mut column = components.new_column(self.component);
+        // Built as it's read, as a whole value never takes a prefab's fields, so that a value its
+        // type refuses is refused where it's read.
+        let mut column = world.components.new_column(self.component);
         let built = column.push_value(&value);
         built.map_err(|error| self.load.refuse(item, error))?;
-        Ok((column, item))
+        Ok((Partial::Whole(value), item))
+    }
+}
+
+/// The fields of the struct of named fields that component type `component` is.
+///
+/// # Panics
+///
+/// If it isn't one.
+fn named_fields(world: &World, component: ComponentId) -> &[Field] {
+    let Type::Named(index) = world.components.ty(component) else {
+        unreachable!("a struct's fields are given for a struct");
+    };
+    match &world.types().info(index).shape {
+        Shape::Struct { fields, .. } => fields,
+        _ => unreachable!("a struct's fields are given for a struct"),
     }
 }
 
@@ -689,7 +1002,8 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
             | Type::Entity
             | Type::Texture
             | Type::Model
-            | Type::Font => {
+            | Type::Font
+            | Type::Prefab => {
                 let leaf = Leaf {
                     load,
                     item,
@@ -741,14 +1055,13 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
                     fields,
                     tuple: false,
                 } => {
-                    let fields = Fields {
-                        load,
-                        item,
+                    let named = Fields {
+                        load: &mut *load,
                         fields,
                         depth,
                     };
-                    let read = deserializer.deserialize_struct("", &[], fields);
-                    read.map(Value::Struct)
+                    let given = deserializer.deserialize_struct("", &[], named)?;
+                    assemble(load, item, fields, given).map(Value::Struct)
                 }
                 Shape::Struct {
                     fields,
@@ -804,23 +1117,40 @@ fn assemble<E: de::Error>(
     fields: &[Field],
     given: Vec<Option<Value>>,
 ) -> Result<Vec<(Ident, Value)>, E> {
+    fill(load.types, fields, given, None).map_err(|error| load.refuse(item, error))
+}
+
+/// The fields `given` of `fields`, as [`assemble`] fills them in, but each one left out that isn't
+/// opaque taken from `base`, the fields of the component of an instance's prefab, where it's given,
+/// rather than its default.
+///
+/// Fails with `reflect.missing_field` for a field left out that has no default.
+fn fill(
+    types: &Types,
+    fields: &[Field],
+    given: Vec<Option<Value>>,
+    base: Option<&[(Ident, Value)]>,
+) -> Result<Vec<(Ident, Value)>> {
     let mut parts = Vec::with_capacity(fields.len());
     for (field, value) in fields.iter().zip(given) {
+        let from_base = || {
+            let base = base?.iter().find(|(name, _)| *name == field.name);
+            base.map(|(_, value)| value.clone())
+        };
         let value = match value {
             Some(value) => value,
-            None if field.ty.is_opaque(load.types) => Value::Opaque,
-            None => match load.types.field_default(field) {
-                Ok(value) => value,
-                Err(error) => {
-                    let error = Error::new(
+            None if field.ty.is_opaque(types) => Value::Opaque,
+            None => match from_base() {
+                Some(value) => value,
+                None => types.field_default(field).map_err(|error| {
+                    Error::new(
                         "reflect.missing_field",
                         format!(
                             "field `{}` isn't given, and has no default to start from: {error}",
                             field.name
                         ),
-                    );
-                    return Err(load.refuse(item, error));
-                }
+                    )
+                })?,
             },
         };
         parts.push((field.name.clone(), value));
@@ -899,7 +1229,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
                 let id = id.map_err(|error| self.load.refuse(self.item, error))?;
                 Ok(Value::Entity(self.load.reference(id, self.item)))
             }
-            Type::Texture | Type::Model | Type::Font => {
+            Type::Texture | Type::Model | Type::Font | Type::Prefab => {
                 let assets = self.load.world.assets();
                 let (found, asset, code) = match self.ty {
                     Type::Texture => {
@@ -910,13 +1240,24 @@ impl Visitor<'_> for Leaf<'_, '_> {
                         let found = assets.model(text).map(Value::Model);
                         (found, Asset::Model(text), "asset.no_model")
                     }
+                    Type::Prefab => {
+                        let found = assets.prefab(text).map(Value::Prefab);
+                        (found, Asset::Prefab(text), "asset.no_prefab")
+                    }
                     _ => {
                         let found = assets.font(text).map(Value::Font);
                         (found, Asset::Font(text), "asset.no_font")
                     }
                 };
                 match (found, &mut self.load.missing) {
-                    (Some(value), _) => Ok(value),
+                    (Some(value), _) => {
+                        if let &Value::Prefab(prefab) = &value
+                            && !self.load.prefabs.contains(&prefab)
+                        {
+                            self.load.prefabs.push(prefab);
+                        }
+                        Ok(value)
+                    }
                     (None, Some(missing)) => {
                         if !missing.iter().any(|named| named.as_deref() == asset) {
                             missing.push(asset.owned());
@@ -926,6 +1267,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
                             Asset::Texture(_) => Value::Texture(Texture::WHITE),
                             Asset::Model(_) => Value::Model(Model::new(0)),
                             Asset::Font(_) => Value::Font(Font::new(0)),
+                            Asset::Prefab(_) => Value::Prefab(Prefab::new(0)),
                         })
                     }
                     (None, None) => {
@@ -949,7 +1291,9 @@ impl Visitor<'_> for Leaf<'_, '_> {
 
     fn visit_string<E: de::Error>(self, text: String) -> Result<Value, E> {
         match self.ty {
-            Type::Entity | Type::Texture | Type::Model | Type::Font => self.visit_str(&text),
+            Type::Entity | Type::Texture | Type::Model | Type::Font | Type::Prefab => {
+                self.visit_str(&text)
+            }
             _ => Ok(Value::String(text)),
         }
     }
@@ -1113,16 +1457,16 @@ impl<'de> Visitor<'de> for List<'_, '_> {
     }
 }
 
-/// A struct's or a struct variant's fields, by name.
+/// A struct's or a struct variant's fields, by name: each one's value, if it's given, by its place
+/// among `fields`, which [`assemble`] fills in.
 struct Fields<'a, 'w> {
     load: &'a mut Load<'w>,
-    item: u32,
     fields: &'a [Field],
     depth: u32,
 }
 
 impl<'de> Visitor<'de> for Fields<'_, '_> {
-    type Value = Vec<(Ident, Value)>;
+    type Value = Vec<Option<Value>>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("fields by name, `(name: value)`")
@@ -1158,7 +1502,7 @@ impl<'de> Visitor<'de> for Fields<'_, '_> {
             let value = map.next_value_seed(read);
             given[i] = Some(value.inspect_err(within!(self.load, &field.name))?);
         }
-        assemble(self.load, self.item, self.fields, given)
+        Ok(given)
     }
 }
 
@@ -1281,12 +1625,12 @@ impl<'de> Visitor<'de> for Choice<'_, '_> {
             access.tuple_variant(len, parts)?
         } else {
             let named = Fields {
-                load: self.load,
-                item: self.item,
+                load: &mut *self.load,
                 fields,
                 depth: self.depth,
             };
-            access.struct_variant(&[], named)?
+            let given = access.struct_variant(&[], named)?;
+            assemble(self.load, self.item, fields, given)?
         };
         Ok(Value::Variant(variant.name.clone(), given))
     }

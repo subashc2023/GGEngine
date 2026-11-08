@@ -1440,6 +1440,10 @@ impl Game {
                     });
                 }
             }
+            AssetKind::Prefab => {
+                let why = "nothing places a prefab from the Assets panel yet";
+                self.log(Level::Info, format!("{file} was let go, but {why}"));
+            }
             AssetKind::Model => {
                 let Some(landing) = self.landing(at, view, scale) else {
                     let why = "the view has shown no frame to place it in yet";
@@ -1476,7 +1480,7 @@ impl Game {
         };
         let (component, field) = match dropped.kind {
             AssetKind::Font => ("Text", "font"),
-            AssetKind::Texture | AssetKind::Model => ("Sprite", "texture"),
+            AssetKind::Texture | AssetKind::Model | AssetKind::Prefab => ("Sprite", "texture"),
         };
         let link = &self.view.link;
         link.pick(Some(found.id));

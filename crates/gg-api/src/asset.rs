@@ -1,6 +1,6 @@
-//! Assets' ID files, `<file>.meta` beside each texture, model and font under a game's asset root:
-//! what names an asset beyond its file's name, which a game's development build writes and reads,
-//! as ARCHITECTURE.md's Project state describes; their text, and the scan that finds them.
+//! Assets' ID files, `<file>.meta` beside each texture, model, font and prefab under a game's asset
+//! root: what names an asset beyond its file's name, which a game's development build writes and
+//! reads, as ARCHITECTURE.md's Project state describes; their text, and the scan that finds them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -92,10 +92,12 @@ pub enum AssetKind {
     Model,
     /// A TrueType or OpenType font, `.ttf` or `.otf`, as `Context::add_font` loads.
     Font,
+    /// A prefab, `.prefab`, a scene of one subtree, as `Context::add_prefab` loads.
+    Prefab,
 }
 
 /// The kinds, by the names the API gives them, as `assets`' `kind` takes them.
-pub const KINDS: [&str; 3] = ["texture", "model", "font"];
+pub const KINDS: [&str; 4] = ["texture", "model", "font", "prefab"];
 
 impl AssetKind {
     /// The kind of the file at `path`, by its extension, whatever its case; `None` for any other
@@ -106,6 +108,7 @@ impl AssetKind {
             "png" | "jpg" | "jpeg" | "hdr" => Some(Self::Texture),
             "gltf" | "glb" => Some(Self::Model),
             "ttf" | "otf" => Some(Self::Font),
+            "prefab" => Some(Self::Prefab),
             _ => None,
         }
     }
@@ -183,7 +186,7 @@ pub type Stamp = (SystemTime, u64);
 /// between them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Scan {
-    /// The textures, models and fonts, in the order of their paths.
+    /// The textures, models, fonts and prefabs, in the order of their paths.
     pub assets: Vec<Scanned>,
     /// The ID files whose assets aren't there, in the order of their paths.
     pub orphans: Vec<Orphan>,
@@ -227,7 +230,7 @@ pub struct Unread {
     pub error: String,
 }
 
-/// Scans the asset root `root` for textures, models and fonts and their ID files, as
+/// Scans the asset root `root` for textures, models, fonts and prefabs and their ID files, as
 /// ARCHITECTURE.md's Project state describes: every folder under it but those whose names start
 /// with `.`, those named `target`, and at its top level [`UNBUILT`]'s, which a package's root holds;
 /// never through a link, to a folder or to a file; each asset's ID file by its exact name.
@@ -552,6 +555,8 @@ mod tests {
             ("c.GLB", AssetKind::Model),
             ("fonts/d.ttf", AssetKind::Font),
             ("d.OTF", AssetKind::Font),
+            ("prefabs/lamp.prefab", AssetKind::Prefab),
+            ("e.PREFAB", AssetKind::Prefab),
         ] {
             assert_eq!(kind(name), Some(expected), "{name}");
         }

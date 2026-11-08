@@ -488,7 +488,7 @@ A project's state is text that people and agents edit, diff and merge with ordin
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
   makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels, but
   a DDS image's BC7 blocks and levels kept as they are; and the
-  rest as they are, sounds and music, scenes and other RON, and scripts. It leaves out the
+  rest as they are, sounds and music, scenes, prefabs and other RON, and scripts. It leaves out the
   manifest and the fetch list, mods' folders, whose scripts a player installs, a module that
   shaders include rather than one that compiles alone, and what no run loads, as code and docs, by
   its extension, a
@@ -523,23 +523,69 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
   most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
-  that reflection's descriptions drive, never its untyped values. A texture, a model or a font is
-  saved as its name, its asset ID or else its path relative to the app's root (`App::root`), as
-  Asset IDs says below, which a load finds it by, as it finds it by a path to its file, as a scene
-  written by hand may name it, loading it where no layer has; what's opaque, such as a `MeshDraw`,
-  isn't saved: a load builds each component on its type's `Component::base`, which gives it that,
-  or from the scene alone. A field a scene leaves out, as one saved before its type had the field
-  does, takes its default, and saves again whole. A child's `Parent` is saved as its parent's ID,
-  and a root's isn't. A save makes each component again as a load would, so that every scene saved
-  loads; a load checks everything before it spawns anything, all or nothing, and a refusal begins
-  with the line and column where the text is refused, and, but for a syntax error, names the
-  entity, the component and the field.
-- **Prefabs.** A prefab is a scene of one subtree, placed as a copy under a parent. Each of the
-  copy's IDs is mixed from one drawn for the copy and the prefab's own, `mix64(local ^
-  mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy, fixed for good, so
-  that a copy's IDs are as distinct as its prefab's, and two copies' meet only by chance;
-  references inside the prefab are to the copy's own entities. A scene saves the copies as
-  entities like any others.
+  that reflection's descriptions drive, never its untyped values. A texture, a model, a font or a
+  prefab is saved as its name, its asset ID or else its path relative to the app's root
+  (`App::root`), as Asset IDs says below, which a load finds it by, as it finds it by a path to its
+  file, as a scene written by hand may name it, loading it where no layer has; what's opaque, such
+  as a `MeshDraw`, isn't saved: a load builds each component on its type's `Component::base`,
+  which gives it that, or from the scene alone. A field a scene leaves out, as one saved before
+  its type had the field does, takes its default, and saves again whole. A child's `Parent` is
+  saved as its parent's ID, and a root's isn't. A prefab's instance, as Prefabs says below, is
+  saved as what differs from its prefab: its root as its `PrefabRoot`, its `Transform`, and each
+  other component that differs from the prefab's root's; each entity its prefab gives under it
+  where something differs, under its mixed ID, and the rest not at all; a component the prefab
+  gives as a struct of named fields, as the fields that differ alone, in their description's
+  order, a field left out taking the prefab's rather than its default, and a component of another
+  type, or one the prefab doesn't give, whole; and a `Parent` that's the prefab's, not at all. A
+  save makes each component again as a load would, so that every scene saved loads; a load checks
+  everything before it spawns anything, all or nothing, and a refusal begins with the line and
+  column where the text is refused, and, but for a syntax error, names the entity, the component
+  and the field.
+- **Prefabs.** A prefab is a `.prefab` file under the asset root holding a scene of one subtree, in
+  canonical text, an asset as a texture is, with its ID file, named by its asset ID or else its
+  path, and cooked into the package as it is. An entity with a `PrefabRoot` naming one is an
+  instance of it, linked: the world spawns the prefab's entities under it as it comes with one,
+  whether a scene loads it, a tool's create or add gives it, or code spawns it through
+  `Prefab::spawn`, and spawns another's in their place as it's given another prefab. The root takes
+  the prefab's root's components but its `Transform`, which is its own and places the instance;
+  each other entity's ID is mixed from the root's and the prefab's own for it, `mix64(local ^
+  mix64(root ^ LINK))`, by a constant of its own, so that the root's ID alone gives them wherever
+  it's loaded, made or restored, and they meet neither a copy's nor the root's model's nodes';
+  references inside the prefab are to the instance's own entities. An entity of a prefab may link
+  another, its entities' IDs mixing again from its own, as nested in the outer prefab's text, which
+  saves what differs from the inner prefab as a scene does; a prefab that links itself, through
+  others or not, is refused (`scene.prefab_cycle`), as is one whose root links another
+  (`scene.prefab_variant`); a model's root in a prefab spawns its nodes as anywhere. The world
+  keeps `PrefabRoot` as it keeps `ModelRoot`: code reads it but changes it no other way, a set by
+  name refused (`reflect.read_only`). An instance's overrides are what differs from its prefab,
+  found by comparison, never kept apart: a scene saves them, as Canonical text files says above,
+  and a load takes the prefab's for the rest, the outermost instance's prefab giving an entity of a
+  prefab nested in it as it has it. A save refuses an instance missing an entity or a component its
+  prefab gives, as one code took away (`scene.prefab_missing`), or with an entity code made a root
+  or put under one the scene doesn't save, which a load would put back under its prefab's parent
+  (`scene.prefab_parent`); and a load refuses an instance's entity given a `PrefabRoot` of its own
+  (`scene.prefab_entity`). Tools' operations change an instance's entities' fields, give them
+  components and children, and create, copy and delete the root, its entities following, as one
+  edit, a copy's mixed from the copy's ID with what the original changed; change the root's prefab
+  or take it away, its entities and the components its prefab gave it with it, an undo giving
+  back each as it was, under its handle; unlink it (`unlink`), its entities staying under their IDs,
+  its own from then on; and set a field back to its prefab's (`revert`); but refuse to delete or
+  move an entity its prefab gives, remove a component the prefab gives one, or give one a link, or
+  change or take away a nested instance's (`ecs.prefab_entity`), and to revert what the prefab
+  doesn't give (`ecs.no_prefab`). In a development run that serves the tool API, neither recorded
+  nor in a lockstep session, as the prefab's file is saved, every instance takes what changed, in
+  the world and the world as edited alike: each field it had as the prefab did takes what the
+  prefab has now, and each that differed is kept; a component the prefab gives now is given, and
+  one it gives no more taken away where it was the prefab's; an entity the prefab gives now
+  spawns, and one it gives no more goes, with what's under it but the prefab's entities, which go
+  first where it has them now, under their stable IDs; and an instance an undo or a redo puts back
+  takes what changed while it was out. It logs `Prefab reloaded`, or warns with the code of a text
+  that either world refuses, the prefab and its instances staying as they were. Elsewhere the change
+  waits for the next run (`asset.prefab_changed`). `World::place_prefab` places a prefab's text as
+  a copy instead, unlinked, each of its IDs mixed from one drawn for the copy and the prefab's
+  own, `mix64(local ^ mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy,
+  so that two copies' meet only by chance. [prefab.rs](crates/gg-engine/src/ecs/prefab.rs) and
+  [template.rs](crates/gg-engine/src/ecs/scene/template.rs) have the rest.
 - **Models in scenes.** A model is placed as an entity with a `ModelRoot`, which names it as a
   texture is named, by its asset ID or else its path; the world spawns the model's nodes under it
   as it comes with one, whether a scene loads it, a tool's create or add gives it, or code spawns it
@@ -559,14 +605,15 @@ A project's state is text that people and agents edit, diff and merge with ordin
   one has them as it was, but for draws that a run of other assets left out, which come back from
   the model; as the model's nodes change, as its file's read again, nodes that keep their places
   in its hierarchy stay, as code left them but for their draws and the transforms the model
-  changed, and the others are spawned again, under the same IDs. Overrides of a node's fields, as
-  linked prefabs will keep them, wait for those.
+  changed, and the others are spawned again, under the same IDs. Unlike a prefab's instance's, a
+  node's fields keep no overrides: what code changes of them lasts the run.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
-- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`, `.hdr`), model (`.gltf`, `.glb`) and font
-  (`.ttf`, `.otf`) under the asset root, whatever its extension's case, has an ID that outlives
+- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`, `.hdr`), model (`.gltf`, `.glb`), font
+  (`.ttf`, `.otf`) and prefab (`.prefab`) under the asset root, whatever its extension's case,
+  has an ID that outlives
   its file's name: 64 random bits, never 0, written as 16 lowercase hex digits, as an entity's
   are, in an ID file beside it, its file's name and `.meta`, such as `stone.png.meta`, matched by
   that exact
@@ -619,32 +666,36 @@ A project's state is text that people and agents edit, diff and merge with ordin
     changed does. A texture loaded from an asset's file before it was renamed is the one its new
     path gives, loaded once.
   - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a
-    texture, a model or a font by its name: its asset ID, or a model's image by its model's and its
+    texture, a model, a font or a prefab by its name: its asset ID, or a model's image by its
+    model's and its
     place in it, such as `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none
     of them; or else its path, as for an asset outside the root, or whose ID file is missing in a
     run that writes none. Each is read by a name or by a path to the asset's file. An asset is
     named as it's added, by the ID its run's database holds for its file then, and keeps that name
     for the run, but in a replay or a lockstep joiner, which go by the names they're given, as
     below.
-  - A texture, a model or a font that a scene, the tool API's edit or `scene open`, or a recorded
-    or a lockstep peer's command or edit names, and no layer has added, loads there, before the
-    text is read, as `Context::add_texture`, `add_model` and `add_font` load a file, and is named as
+  - A texture, a model, a font or a prefab that a scene, the tool API's edit or `scene open`, or a
+    recorded or a lockstep peer's command or edit names, and no layer has added, loads there,
+    before the text is read, as `Context::add_texture`, `add_model`, `add_font` and `add_prefab`
+    load a file, a prefab with what its text names, in turn, and is named as
     they name one, its file found by the name: in a run that follows another, a replay or a
     lockstep joiner, at the path the name was given; else by an ID, as the run's package or
     database has it, which a joiner has but a replay without a package, reading no ID file,
     doesn't; else by a path from the asset
     root, which mustn't be absolute or lead outside it, as through `..` or a link. A model's image
     loads with its model, which a name of the image loads. A name that doesn't load refuses what
-    names it where it's asked for (`asset.no_texture`, `asset.no_model` or `asset.no_font`, the
-    API's `api.no_texture`, `api.no_model` or `api.no_font`), saying why: `asset.model_image` for
+    names it where it's asked for (`asset.no_texture`, `asset.no_model`, `asset.no_font` or
+    `asset.no_prefab`, the API's `api.no_texture`, `api.no_model`, `api.no_font` or
+    `api.no_prefab`), saying why: `asset.model_image` for
     an image the model hasn't, `asset.unknown_id`, `asset.outside_root`, or the add's own, as
     `engine.bad_texture`. In a run that follows another, and in a restore, a stand-in takes its
-    place instead, of magenta and black squares for a texture, of no nodes for a model, and for a
-    font one whose text draws in the engine's own, named as named, warning `asset.stand_in`, so
-    that the run goes as the other did, its hash reading names alone, but for a model's nodes,
-    which its roots spawn none of then. What's loaded so is noted among what the layers added, so
-    that a snapshot's `asset` lines list it, and a run restored from one loads each texture, model
-    and font its run had, in order, before it reads the world. A lockstep host loads what a scene
+    place instead, of magenta and black squares for a texture, of no nodes for a model, for a font
+    one whose text draws in the engine's own, and for a prefab one whose instances are their roots
+    alone, named as named, warning `asset.stand_in`, so that the run goes as the other did, its
+    hash reading names alone, but for a model's nodes and a prefab's entities, which its roots
+    spawn none of then. What's loaded so is noted among what the layers added, so that a snapshot's
+    `asset` lines list it, and a run restored from one loads each texture, model, font and prefab
+    its run had, in order, before it reads the world. A lockstep host loads what a scene
     file's save names before it offers it, so that their names go out first, and offers none
     naming an asset it can't load; a joiner loads for its tool API only what its host named
     (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
@@ -666,8 +717,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
     a recording or a snapshot naming one by its ID finds none there.
   - A run's names travel with what another process reads of it, so that the other goes as it did
     whatever ID files its disk holds, as a checkout without those not yet committed. A recording
-    has a `named` line for each texture, model and font named otherwise than by its path, the name
-    and the path, by which its replay, reading no ID file, names its assets. A snapshot file has
+    has a `named` line for each texture, model, font and prefab named otherwise than by its path,
+    the name and the path, by which its replay, reading no ID file, names its assets. A snapshot
+    file has
     them too, by which a run restored from it reads its values, an asset whose ID changed since
     coming back by its path, though the run names it its own way, and one whose file was renamed
     since, its ID file moved with it, from where the run's database has that ID now, its `asset`
@@ -682,7 +734,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   [asset_watch.rs](crates/gg-engine/src/asset_watch.rs) have the rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
   inverse: create, duplicate or delete an entity, add or remove a component, set a field,
-  reparent. An operation names entities by their IDs and carries values as reflection's, and
+  reparent, and unlink a prefab's instance or revert a field of one to its prefab's, as Prefabs
+  says above. An operation names entities by their IDs and carries values as reflection's, and
   applying one checks everything before anything changes. A delete's and a remove's inverses keep
   what they took out, typed, so that what's opaque comes back too; a set's keeps the component it
   changed, whole, until nothing can roll its edit back, so that an edit refused partway rolls back
@@ -692,7 +745,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
   applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
   applies one of several operations all or nothing, merges a gesture's sets of one field, such as
-  a drag's, into one edit, a tool API client's too, by the number it gives each of its gestures,
+  a drag's, but an instance's link, into one edit, a tool API client's too, by the number it gives
+  each of its gestures,
   and drops an entry whose undo the world refuses, as where a set's old value is one that code
   stored and a set refuses: an undo sets each field back, checked, keeping what has changed the
   component's other fields since. A running game applies the tool API's edits
@@ -704,7 +758,10 @@ A project's state is text that people and agents edit, diff and merge with ordin
   `Context::load_scene_file`, saved, applies in a development build as the operations that take
   the world's entities from what the file held to what it holds, which keep what the file doesn't
   change, such as where the game has moved an entity, and leave alone what the game has deleted;
-  the entities it adds are made first, so that the rest may hold them. A snapshot keeps the files
+  the entities it adds are made first, so that the rest may hold them, and the links of instances
+  it changes are changed first: one it takes away unlinks its instance, and one it gives deletes
+  the world's own entities that hold the IDs its prefab gives, as an unlink leaves them, each such
+  instance then taken for what the file holds. A snapshot keeps the files
   watched, as last applied, so that a restarted run watches them too.
   [ops.rs](crates/gg-engine/src/ecs/ops.rs), `World::undo` among it,
   [log.rs](crates/gg-engine/src/ecs/log.rs), [edits.rs](crates/gg-engine/src/edits.rs) and
@@ -1682,11 +1739,12 @@ breaks it, naming each way (`renderer.shader_mismatch`). It reads the SPIR-V bec
 reflection names what a pointer points at but none of its fields.
 
 In a development run that serves the tool API, a thread of its own, `gg-watch`, watches the files
-each game's shader, texture, model and font read as it was loaded, a shader's own and those it
-includes as slangc lists them, a texture's image, a model's glTF file and the buffers and images it
-names, and a font's file, by their times and lengths every tenth of a second, and reads the asset
-again as they change and then hold for a look, off the main thread: compiles the shader, decodes the
-image, reads the model, bakes the font. As the next frame starts, the main thread puts what it read
+each game's shader, texture, model, font and prefab read as it was loaded, a shader's own and those
+it includes as slangc lists them, a texture's image, a model's glTF file and the buffers and images
+it names, a font's file and a prefab's, by their times and lengths every tenth of a second, and
+reads the asset again as they change and then hold for a look, off the main thread: compiles the
+shader, decodes the image, reads the model, bakes the font, reads the prefab's text. As the next
+frame starts, the main thread puts what it read
 in place of the asset, under the same handle: a shader draws with its new pipeline from that frame,
 the old retiring until the GPU is done with it, and a mesh's or a texture's new bytes stream as any
 asset's do, below, whatever draws it drawing what it had until they can draw, and then what's new,
@@ -1704,10 +1762,14 @@ images takes nothing. In any run, a model whose image holds something else now, 
 held a normal map, takes nothing (`asset.model_changed`), as a texture keeps what it holds, until
 the run starts again. The engine adds its model shader for every alpha mode with a run's first
 model, so that a material read again adds none. A font takes what it baked, its field's texels at
-any size, which its text is laid out by from that frame. A texture's or a font's stand-in takes its
+any size, which its text is laid out by from that frame. A prefab takes its text, which its
+instances take, as [Prefabs](#project-state) says, but in a run that's recorded or in a lockstep
+session, which keeps it until the run starts again (`asset.prefab_changed`). A texture's or a
+font's stand-in takes its
 file's once the file comes, or the file of the asset whose ID it stands for, once one has it, but
-never a file outside the asset root (`asset.outside_root`); and a texture, a model or a font whose
-file under the root is renamed or moved, as the asset database finds it by the ID it has, or that
+never a file outside the asset root (`asset.outside_root`); and a texture, a model, a font or a
+prefab whose file under the root is renamed or moved, as the asset database finds it by the ID it
+has, or that
 the database gives its file once it has one, is watched where it is, a rename alone reading nothing
 again. A change that doesn't compile, decode, read or bake, or breaks a shader's contract, warns,
 and the asset keeps drawing as it did. The engine's own shaders and font don't reload, nor do the

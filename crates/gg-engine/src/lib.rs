@@ -21,8 +21,9 @@
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
-//! files, reloading games' shaders, textures, models, fonts, sounds and music as their files
-//! change, the OS's file dialogs, and the UI, egui's, which layers draw through `Ui`: the dock, the
+//! files, reloading games' shaders, textures, models, fonts, prefabs, sounds and music as
+//! their files change, the OS's file dialogs, and the UI, egui's, which layers draw through
+//! `Ui`: the dock, the
 //! title bars it draws, and the Inspector's and the Performance panel's panels.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
@@ -110,6 +111,7 @@ mod perf;
 mod physics;
 mod pipeline_cache;
 mod placed;
+mod prefab;
 mod recording;
 pub mod reflect;
 mod render_thread;
@@ -223,6 +225,7 @@ pub use physics::{
     CircleCollider2D, Hit3D, MeshCollider3D, Physics2D, Physics3D, RigidBody2D, RigidBody3D,
     Shape3D, SphereCollider3D, step_physics,
 };
+pub use prefab::{Prefab, PrefabRoot};
 use recording::Recorder;
 #[doc(hidden)]
 pub use recording::Replay;
@@ -302,11 +305,11 @@ impl App {
     /// Names each asset the layers add from a file by its path relative to `root`, the game's
     /// directory, as `env!("CARGO_MANIFEST_DIR")` gives it, with `/` between its parts, such as
     /// `assets/logo.png`: what scenes, snapshots, recordings and the tool API name a sprite's
-    /// texture by, so that they find it again in another run, or on another machine. Without it,
-    /// or for a file outside it, an asset is named by its path as the layer gave it. In a
-    /// development build, each texture, model and font under it has an ID, kept in an ID file
-    /// beside it, which a run that serves the tool API writes where it's missing, but a lockstep
-    /// session's joiner, whose host writes them, as ARCHITECTURE.md's Project state describes.
+    /// texture by, so that they find it again in another run, or on another machine. Without it, or
+    /// for a file outside it, an asset is named by its path as the layer gave it. In a development
+    /// build, each texture, model, font and prefab under it has an ID, kept in an ID file beside
+    /// it, which a run that serves the tool API writes where it's missing, but a lockstep session's
+    /// joiner, whose host writes them, as ARCHITECTURE.md's Project state describes.
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());

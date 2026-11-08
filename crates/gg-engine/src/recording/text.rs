@@ -111,6 +111,11 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
             quote(out, world.assets().font_name(font));
             out.push(')');
         }
+        &Value::Prefab(prefab) => {
+            out.push_str("Prefab(");
+            quote(out, world.assets().prefab_name(prefab));
+            out.push(')');
+        }
         Value::Option(None) => out.push_str("None"),
         Value::Option(Some(value)) => {
             out.push_str("Some(");
@@ -224,6 +229,8 @@ pub(crate) enum Text {
     Model(String),
     /// A font, as a texture.
     Font(String),
+    /// A prefab, as a texture.
+    Prefab(String),
     None,
     Some(Box<Text>),
     List(Vec<Text>),
@@ -265,6 +272,7 @@ impl Text {
             Self::Texture(_) => "Texture",
             Self::Model(_) => "Model",
             Self::Font(_) => "Font",
+            Self::Prefab(_) => "Prefab",
             Self::None => "None",
             Self::Some(_) => "Some",
             Self::List(_) => "List",
@@ -274,7 +282,7 @@ impl Text {
         }
     }
 
-    /// Adds each texture, model and font it holds to `names`, in order.
+    /// Adds each texture, model, font and prefab it holds to `names`, in order.
     pub(crate) fn assets<'t>(&'t self, names: &mut Vec<Asset<&'t str>>) {
         let fields = |given: &'t [(String, Text)], names: &mut Vec<Asset<&'t str>>| {
             for (_, text) in given {
@@ -285,6 +293,7 @@ impl Text {
             Self::Texture(name) => names.push(Asset::Texture(name)),
             Self::Model(name) => names.push(Asset::Model(name)),
             Self::Font(name) => names.push(Asset::Font(name)),
+            Self::Prefab(name) => names.push(Asset::Prefab(name)),
             Self::Some(text) => text.assets(names),
             Self::List(items) => items.iter().for_each(|item| item.assets(names)),
             Self::Struct(given) | Self::Variant(_, given) => fields(given, names),
@@ -349,6 +358,9 @@ impl Text {
             }
             Self::Model(name) => (world.assets().model(name)).map_or(Value::Opaque, Value::Model),
             Self::Font(name) => (world.assets().font(name)).map_or(Value::Opaque, Value::Font),
+            Self::Prefab(name) => {
+                (world.assets().prefab(name)).map_or(Value::Opaque, Value::Prefab)
+            }
             Self::None => Value::Option(None),
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),
             Self::List(items) => Value::List(items.iter().map(|item| item.value(world)).collect()),

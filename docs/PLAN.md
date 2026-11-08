@@ -126,16 +126,18 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A networked 3D demo** (2026-11-08)
 - **Phase 14, 3D gameplay** (2026-11-08)
 - **Particles** (2026-11-08)
+- **Linked prefabs** (2026-11-08)
 
 ## Now
 
-**Phase 15, particles and linked prefabs**, as Next has it. Its milestone built beside particles:
+**Phase 15, particles and linked prefabs**, as Next has it. Its next milestone:
 
-- **Linked prefabs.** `.prefab` files as assets with IDs, an entity linking one taking its root's
-  components and spawning its other entities under IDs mixed from its own, a prefab nesting others
-  but not itself; a scene saving an instance as its root and the fields that differ from the
-  prefab's, every instance following its file as it's saved, keeping those; operations that create,
-  unlink and revert, through the tool API too; cooked into the package; a showcase scene.
+- **Prefabs in the editor.** The Inspector marking the fields where an instance's entity differs
+  from its prefab, reverting each through the operations' `Revert`, and unlinking an instance; the
+  Assets panel listing `.prefab` files as prefabs, one dropped in the view placed as an instance
+  where it's dropped, as a model is; and the Entities panel saving a subtree as a prefab, linked in
+  its place. Done when the showcase's prefabs.ron is edited so in the editor, each step undone and
+  redone.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -514,8 +516,16 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message, which the tool API gives as its code and message alone | A tool reads an error's entity or place without parsing its message |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 5 ms, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
-| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep; and overrides of a model's nodes, which scenes don't save and tools don't change, as links will keep them | A game editing a prefab its scenes hold many copies of, or a node of a model placed in a scene |
-| Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
+| Overrides of a model's nodes, which scenes don't save and tools don't change, as a prefab's instances keep theirs | A node of a model placed in a scene needs a field of its own |
+| Removing one of a prefab's entities or components from an instance: tools refuse it (`ecs.prefab_entity`), and a save refuses an instance code took one away from (`scene.prefab_missing`) | An instance needs one of its prefab's entities or components gone |
+| Writing an instance's overrides back into its prefab's file | The editor's prefab UI offers it, or an agent edits a prefab through an instance |
+| Prefab variants: a prefab whose root links another, refused (`scene.prefab_variant`) | A game wants one prefab as another with changes |
+| Giving an instance's entity a link of its own, or changing or taking away a nested instance's link in one instance (`ecs.prefab_entity`, `scene.prefab_entity`) | One instance swaps a prefab nested in it |
+| Overrides finer than a component's top-level fields: a nested struct's field, a list's element, or a tuple struct's or enum's part is written whole where any of it differs | Instances often differ in one part of such a field |
+| Templates kept across loads, saves, operations and refits, each of which parses an instance's prefab text again | Scenes of many instances load, save or edit slowly |
+| Spawning a prefab without parsing its text again: `Prefab::spawn` and `World::place_prefab` parse it each time, which allocates | A game spawns prefabs as it runs, rather than as it loads |
+| A prefab standing in for a following run with its entities: a replay or a joiner that can't read a prefab's file stands in with a root alone, which gives no entities, so a scene's overrides of the instance's entities load as roots of their own, the fields they leave out taking their types' defaults, which can refuse a load the recorded run took | A replay or a joiner runs without a game's prefab files, as a bug report's might |
+| Instances taking a prefab file's change in a recorded run or a lockstep session, which warn `asset.prefab_changed` and keep it until the run restarts | Someone edits prefabs while recording or in a lockstep session |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |

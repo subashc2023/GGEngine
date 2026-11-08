@@ -16,7 +16,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::ecs::MAX_DEPTH;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
-use crate::{Entity, EntityId, Font, Model, Texture, World};
+use crate::{Entity, EntityId, Font, Model, Prefab, Texture, World};
 
 /// What finds the entities and textures values hold as JSON names them, by their IDs and names,
 /// and names them back: a game's [`World`], or a client's [`Remote`].
@@ -47,6 +47,12 @@ pub(crate) trait Names {
     ///
     /// Fails with `api.no_font` if none is.
     fn font(&self, name: &str) -> Result<Value>;
+    /// The name of `prefab`, as a texture's.
+    fn prefab_name(&self, prefab: Prefab) -> Option<&str>;
+    /// The value of the prefab `name` names, by its name or a path to its file.
+    ///
+    /// Fails with `api.no_prefab` if none is.
+    fn prefab(&self, name: &str) -> Result<Value>;
 }
 
 impl Names for World {
@@ -99,6 +105,18 @@ impl Names for World {
         })?;
         Ok(Value::Font(font))
     }
+
+    fn prefab_name(&self, prefab: Prefab) -> Option<&str> {
+        Some(self.assets().prefab_name(prefab))
+    }
+
+    fn prefab(&self, name: &str) -> Result<Value> {
+        let prefab = self.assets().prefab(name).ok_or_else(|| {
+            let message = self.assets().not_found("prefab", name);
+            Error::new("api.no_prefab", message)
+        })?;
+        Ok(Value::Prefab(prefab))
+    }
 }
 
 /// Another process's values, as a client of its API keeps them, by the types it described: an
@@ -143,6 +161,14 @@ impl Names for Remote<'_> {
     fn font(&self, name: &str) -> Result<Value> {
         Ok(Value::String(name.to_owned()))
     }
+
+    fn prefab_name(&self, _: Prefab) -> Option<&str> {
+        None
+    }
+
+    fn prefab(&self, name: &str) -> Result<Value> {
+        Ok(Value::String(name.to_owned()))
+    }
 }
 
 /// Writes `value` as JSON, with the entities it holds by their IDs, as `names` names them, `null`
@@ -182,6 +208,10 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
             Some(name) => string(out, name),
             None => out.push_str("null"),
         },
+        &Value::Prefab(prefab) => match names.prefab_name(prefab) {
+            Some(name) => string(out, name),
+            None => out.push_str("null"),
+        },
         Value::Option(None) => out.push_str("null"),
         Value::Option(Some(value)) => write(out, value, names),
         Value::List(items) => {
@@ -209,16 +239,17 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
 
 /// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
 /// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
-/// alive writes, and the textures, models and fonts by their names or paths to their files, as
-/// `names` finds them; a struct, or a variant's fields, missing a field takes its default, or is
-/// opaque, which keeps or makes it as its type's own is; and a whole number an `Int` for a signed
-/// field, as reflection reads one, and a `UInt` for an unsigned one, if it can be.
+/// alive writes, and the textures, models, fonts and prefabs by their names or paths to their
+/// files, as `names` finds them; a struct, or a variant's fields, missing a field takes its
+/// default, or is opaque, which keeps or makes it as its type's own is; and a whole number an `Int`
+/// for a signed field, as reflection reads one, and a `UInt` for an unsigned one, if it can be.
 ///
 /// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
 /// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
 /// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
-/// `api.no_texture`, `api.no_model` or `api.no_font` for a name or path no texture, model or font
-/// has, and `api.too_deep` for a value nested more than a scene's values may be.
+/// `api.no_texture`, `api.no_model`, `api.no_font` or `api.no_prefab` for a name or path no
+/// texture, model, font or prefab has, and `api.too_deep` for a value nested more than a scene's
+/// values may be.
 pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
     read_at(json, ty, names, 1)
 }
@@ -310,6 +341,10 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         Type::Font => match json {
             JsonValue::String(name) => names.font(name)?,
             _ => return Err(wrong("a font's ID or path, a string")),
+        },
+        Type::Prefab => match json {
+            JsonValue::String(name) => names.prefab(name)?,
+            _ => return Err(wrong("a prefab's ID or path, a string")),
         },
         Type::Option(inner) => match json {
             JsonValue::Null => Value::Option(None),
@@ -561,6 +596,7 @@ fn api_type(types: &Types, ty: &Type) -> gg_api::Type {
         Type::Texture => Api::Texture,
         Type::Model => Api::Model,
         Type::Font => Api::Font,
+        Type::Prefab => Api::Prefab,
         Type::Option(of) => Api::Option(inner(of)),
         Type::List(of) => Api::List(inner(of)),
         Type::Array(of, n) => Api::Array(inner(of), *n),
@@ -717,6 +753,7 @@ fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, Strin
         Api::Texture => Type::Texture,
         Api::Model => Type::Model,
         Api::Font => Type::Font,
+        Api::Prefab => Type::Prefab,
         Api::Option(of) => Type::Option(inner(of)?),
         Api::List(of) => Type::List(inner(of)?),
         Api::Array(of, n) => Type::Array(inner(of)?, *n),
@@ -896,6 +933,11 @@ mod tests {
         let text = Type::Named(world.types().find("Text").expect("registered"));
         let error = read_json(&world, &text, r#"{"font": "fonts/none.ttf"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_font", "{error}");
+        // And a root's prefab, as a texture.
+        world.register::<crate::PrefabRoot>().expect("registered");
+        let root = Type::Named(world.types().find("PrefabRoot").expect("registered"));
+        let error = read_json(&world, &root, r#"{"0": "prefabs/none.prefab"}"#).expect_err("none");
+        assert_eq!(error.code(), "api.no_prefab", "{error}");
     }
 
     /// A whole number reads as reflection reads its field's: an `Int` for a signed one, and a

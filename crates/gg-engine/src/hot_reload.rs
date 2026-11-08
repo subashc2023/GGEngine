@@ -1,18 +1,19 @@
-//! Hot reload of games' assets, shaders, textures, models, fonts, sounds and music, in development
-//! runs that serve the tool API. A thread of its own, `gg-watch`, watches the files each one read
-//! as it was loaded, a shader's own and those it includes, a texture's image, a model's glTF file
-//! and those it names, a font's file, a sound's, a music's, and reads it again as they change, off
-//! the main thread: compiles the shader, decodes the image, reads the model, bakes the font,
-//! decodes the sound, reads the music. The main thread puts what it read in place of the asset,
-//! under the same handle, which the renderer draws once its frames have streamed it, drawing the
-//! asset as it was until then, a shader from the next frame, a sound's next play plays, and
-//! music's play crossfades to. A change that doesn't compile, decode, read or bake, or a
-//! shader's that breaks the contract that `Shaders::add` describes, warns, and the asset keeps
-//! drawing, or playing, as it did; until one reads, a change to any file beside its files reads it
-//! again too, such as an include it couldn't find, since a compile that fails lists none of the
-//! files it read. The thread follows a texture, a model or a font whose file is renamed or moved,
-//! as the asset database has it, which the main thread tells it of; a sound or music, which has no
-//! asset ID, it watches where it was loaded from. A texture or a model removed it watches no more.
+//! Hot reload of games' assets, shaders, textures, models, fonts, prefabs, sounds and music, in
+//! development runs that serve the tool API. A thread of its own, `gg-watch`, watches the files
+//! each one read as it was loaded, a shader's own and those it includes, a texture's image, a
+//! model's glTF file and those it names, a font's file, a prefab's, a sound's, a music's, and reads
+//! it again as they change, off the main thread: compiles the shader, decodes the image, reads the
+//! model, bakes the font, reads the prefab's text, decodes the sound, reads the music. The main
+//! thread puts what it read in place of the asset, under the same handle, which the renderer draws
+//! once its frames have streamed it, drawing the asset as it was until then, a shader from the next
+//! frame, a sound's next play plays, and music's play crossfades to. A change that doesn't compile,
+//! decode, read or bake, or a shader's that breaks the contract that `Shaders::add` describes,
+//! warns, and the asset keeps drawing, or playing, as it did; until one reads, a change to any file
+//! beside its files reads it again too, such as an include it couldn't find, since a compile that
+//! fails lists none of the files it read. The thread follows a texture, a model, a font or a prefab
+//! whose file is renamed or moved, as the asset database has it, which the main thread tells it of;
+//! a sound or music, which has no asset ID, it watches where it was loaded from. A texture or a
+//! model removed it watches no more.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -35,7 +36,8 @@ use crate::font::{self, Bake};
 use crate::gltf::{self, Imported};
 use crate::image::{self, Image};
 use crate::package;
-use crate::{Font, Music, Sound};
+use crate::prefab;
+use crate::{Font, Music, Prefab, Sound};
 
 /// How long the thread waits between looks at the files. A change reads on the look after the one
 /// that sees it, in about a tenth of a second more.
@@ -84,6 +86,13 @@ pub(crate) enum Source {
         path: PathBuf,
         read_at: SystemTime,
     },
+    /// `prefab`, loaded as `name` from the prefab file at `path`, by a read begun at `read_at`.
+    Prefab {
+        prefab: Prefab,
+        name: String,
+        path: PathBuf,
+        read_at: SystemTime,
+    },
     /// `sound`, loaded as `name` from the audio file at `path`, by a read begun at `read_at`.
     Sound {
         sound: Sound,
@@ -107,6 +116,7 @@ impl Source {
             Self::Texture { name, .. }
             | Self::Model { name, .. }
             | Self::Font { name, .. }
+            | Self::Prefab { name, .. }
             | Self::Sound { name, .. }
             | Self::Music { name, .. } => name,
         }
@@ -119,6 +129,7 @@ impl Source {
             Self::Texture { path, .. }
             | Self::Model { path, .. }
             | Self::Font { path, .. }
+            | Self::Prefab { path, .. }
             | Self::Sound { path, .. }
             | Self::Music { path, .. } => path,
         }
@@ -130,6 +141,7 @@ impl Source {
             Self::Shader(shader) => shader.files(),
             Self::Texture { path, .. }
             | Self::Font { path, .. }
+            | Self::Prefab { path, .. }
             | Self::Sound { path, .. }
             | Self::Music { path, .. } => slice::from_ref(path),
             Self::Model { files, .. } => files,
@@ -143,26 +155,28 @@ impl Source {
             Self::Texture { read_at, .. }
             | Self::Model { read_at, .. }
             | Self::Font { read_at, .. }
+            | Self::Prefab { read_at, .. }
             | Self::Sound { read_at, .. }
             | Self::Music { read_at, .. } => *read_at,
         }
     }
 
-    /// Which texture, model or font it is; `None` for a shader, a sound or music, which nothing
-    /// follows by an asset ID.
+    /// Which texture, model, font or prefab it is; `None` for a shader, a sound or music, which
+    /// nothing follows by an asset ID.
     fn asset(&self) -> Option<Asset> {
         match self {
             Self::Shader(_) | Self::Sound { .. } | Self::Music { .. } => None,
             Self::Texture { texture, .. } => Some(Asset::Texture(*texture)),
             Self::Model { file, .. } => Some(Asset::Model(file.clone())),
             Self::Font { font, .. } => Some(Asset::Font(*font)),
+            Self::Prefab { prefab, .. } => Some(Asset::Prefab(*prefab)),
         }
     }
 
-    /// Reads it again from its files, as it was loaded: compiles a shader and checks it against
-    /// the contract for the types it was added for, decodes a texture's image, reads a model,
-    /// bakes a font, decodes a sound, and reads music. Returns what it read, and the files it read,
-    /// its own first.
+    /// Reads it again from its files, as it was loaded: compiles a shader and checks it against the
+    /// contract for the types it was added for, decodes a texture's image, reads a model, bakes a
+    /// font, reads a prefab's text, decodes a sound, and reads music. Returns what it read, and the
+    /// files it read, its own first.
     ///
     /// Fails as loading it does.
     fn read(&self) -> Result<(Reloaded, Vec<PathBuf>)> {
@@ -212,6 +226,16 @@ impl Source {
                 };
                 Ok((reloaded, vec![path.clone()]))
             }
+            Self::Prefab {
+                prefab, name, path, ..
+            } => {
+                let reloaded = Reloaded::Prefab {
+                    prefab: *prefab,
+                    path: path.clone(),
+                    text: prefab::read(name, path, &package::Files::default())?,
+                };
+                Ok((reloaded, vec![path.clone()]))
+            }
             Self::Sound {
                 sound, name, path, ..
             } => {
@@ -236,14 +260,15 @@ impl Source {
     }
 }
 
-/// A texture, a model or a font that the thread watches, as the main thread knows it: a texture
-/// and a font by its handle, and a model by the file it resolved to as it was loaded, which the
-/// context keeps it by.
+/// A texture, a model, a font or a prefab that the thread watches, as the main thread knows it: a
+/// texture, a font and a prefab by its handle, and a model by the file it resolved to as it was
+/// loaded, which the context keeps it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Asset {
     Texture(Texture),
     Model(PathBuf),
     Font(Font),
+    Prefab(Prefab),
 }
 
 /// An asset that the thread read again, which the main thread puts in place of the one loaded.
@@ -267,6 +292,12 @@ pub(crate) enum Reloaded {
         path: PathBuf,
         bake: Box<Bake>,
     },
+    /// What `prefab`'s file holds, read again from `path`.
+    Prefab {
+        prefab: Prefab,
+        path: PathBuf,
+        text: String,
+    },
     /// What `sound` decoded again from `path`, boxed, as kira's data, its settings among it, is
     /// over 400 bytes, twice the next largest.
     Sound {
@@ -286,8 +317,8 @@ pub(crate) enum Reloaded {
 enum Message {
     /// An asset to watch.
     Watch(Source),
-    /// A texture, a model or a font whose file is at a path anew, renamed or moved, as what it
-    /// holds.
+    /// A texture, a model, a font or a prefab whose file is at a path anew, renamed or moved, as
+    /// what it holds.
     Moved(Asset, PathBuf),
     /// A texture or a model removed, which it watches no more.
     Unwatch(Asset),
@@ -300,13 +331,13 @@ pub(crate) struct HotReload {
     /// `None` once it's dropping.
     messages: Option<Sender<Message>>,
     reloaded: Receiver<Reloaded>,
-    /// The textures, models and fonts it watches whose files are under the asset root, or will be,
-    /// which it follows by their asset IDs as the files are renamed or moved.
+    /// The textures, models, fonts and prefabs it watches whose files are under the asset root, or
+    /// will be, which it follows by their asset IDs as the files are renamed or moved.
     followed: Vec<Followed>,
 }
 
-/// A texture, a model or a font whose file is under the asset root, which [`HotReload::follow`]
-/// follows.
+/// A texture, a model, a font or a prefab whose file is under the asset root, which
+/// [`HotReload::follow`] follows.
 struct Followed {
     asset: Asset,
     /// The name it was loaded as.
@@ -527,6 +558,7 @@ fn take(message: Message, watched: &mut Vec<Option<(Source, Files)>>) {
                     Source::Texture { path: was, .. }
                     | Source::Model { path: was, .. }
                     | Source::Font { path: was, .. }
+                    | Source::Prefab { path: was, .. }
                     | Source::Sound { path: was, .. }
                     | Source::Music { path: was, .. } => *was = path,
                 }
@@ -595,6 +627,12 @@ fn read(source: &Source, files: &mut Files, back: &Sender<Reloaded>) {
                     font = name,
                     path = %path,
                     "{why}; the font keeps drawing as it did"
+                ),
+                Source::Prefab { name, .. } if news => warn!(
+                    code,
+                    prefab = name,
+                    path = %path,
+                    "{why}; the prefab and its instances stay as they were"
                 ),
                 Source::Sound { name, .. } if news => warn!(
                     code,

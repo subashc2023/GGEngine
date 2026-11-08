@@ -22,7 +22,7 @@ pub use gg_core::{Error, Result};
 pub use gg_macros::Reflect;
 
 pub use crate::ecs::Digest;
-use crate::{Entity, Font, Model, Texture};
+use crate::{Entity, Font, Model, Prefab, Texture};
 pub(crate) use path::{Resolved, reach, reach_mut, resolve};
 
 /// An identifier: a type's, a field's or a variant's name, borrowed for Rust's types, and owned
@@ -60,6 +60,8 @@ pub enum Value {
     Model(Model),
     /// A font's handle, which only a font added hands out, named as a texture is.
     Font(Font),
+    /// A prefab's handle, which only a prefab added hands out, named as a texture is.
+    Prefab(Prefab),
     Option(Option<Box<Value>>),
     /// A list's elements, or an array's.
     List(Vec<Value>),
@@ -99,6 +101,8 @@ pub enum Type {
     /// A font, named as a texture is, which has no default either: a field that may name none, as
     /// a text's does for the engine's own font, holds one in an `Option`.
     Font,
+    /// A prefab, named as a texture is, which has no default either.
+    Prefab,
     Option(Box<Type>),
     List(Box<Type>),
     /// This many elements, always.
@@ -458,6 +462,13 @@ impl Types {
                     "a font has no default, since only a font loaded from a file has a name to \
                      save; a field that may name none is an `Option<Font>`, whose default is \
                      `None`",
+                ));
+            }
+            Type::Prefab => {
+                return Err(Error::new(
+                    "reflect.no_default",
+                    "a prefab has no default, since only a prefab loaded from a file has a name to \
+                     save",
                 ));
             }
             Type::Option(_) => Value::Option(None),
@@ -948,6 +959,7 @@ pub(crate) fn kind(value: &Value) -> &'static str {
         Value::Texture(_) => "Texture",
         Value::Model(_) => "Model",
         Value::Font(_) => "Font",
+        Value::Prefab(_) => "Prefab",
         Value::Option(_) => "Option",
         Value::List(_) => "List",
         Value::Struct(_) => "Struct",
@@ -1163,6 +1175,7 @@ fn what_is(types: &Types, ty: &Type) -> String {
         Type::Texture => "a texture".to_owned(),
         Type::Model => "a model".to_owned(),
         Type::Font => "a font".to_owned(),
+        Type::Prefab => "a prefab".to_owned(),
         Type::Option(inner) => format!("an option of {}", what_is(types, inner)),
         Type::List(inner) => format!("a list of {}", what_is(types, inner)),
         Type::Array(inner, len) => format!("an array of {len} of {}", what_is(types, inner)),

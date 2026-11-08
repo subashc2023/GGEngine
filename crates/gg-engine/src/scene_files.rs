@@ -385,7 +385,7 @@ mod open_scene {
     use super::{Open, SceneFile, same_file};
     use crate::ecs::SceneEdit;
     use crate::layer::Stack;
-    use crate::{Context, Entity, EntityId, ModelNode, Operation, World};
+    use crate::{Context, Entity, EntityId, Operation, World};
 
     /// The scene file that `path`, absolute or relative to the asset root, names for the tool
     /// API's `scene`: its path rebuilt from the asset root, and its author, its path from the asset
@@ -676,9 +676,8 @@ mod open_scene {
             error.with_message(message)
         })?;
         let owned: HashSet<Entity> = owned(world, files, open).into_iter().collect();
-        let theirs = |id: &EntityId| {
-            (world.entity(*id)).is_some_and(|e| !owned.contains(&world.node_root(e)))
-        };
+        let theirs =
+            |id: &EntityId| (world.entity(*id)).is_some_and(|e| !owned.contains(&world.owner(e)));
         if let Some(id) = World::scene_ids(&text)?.into_iter().find(theirs) {
             let message = format!(
                 "{}: entity {id} is in the world already, and the open scene doesn't own it, so \
@@ -734,20 +733,21 @@ mod open_scene {
 
     /// The operations that delete the entities of `world` that open scene `open`, of scene files
     /// `files`, owns, and how many it owns: each child of theirs it doesn't own made a root first,
-    /// so that it stays, but a model's node, which goes with its root, with whatever is under it,
-    /// as when its model changes; and then each deleted whose parent it doesn't own, nor the
-    /// model's root of a parent that's a node, with its descendants, which it owns once those
-    /// children are roots, but models' nodes and what's under them.
+    /// so that it stays, but a model's node or an entity an instance's prefab gives, which goes
+    /// with its root, with whatever is under it, as when its model or its prefab changes; and then
+    /// each deleted whose parent it doesn't own, nor the root that a parent goes with, with its
+    /// descendants, which it owns once those children are roots, but models' nodes, the entities
+    /// prefabs give, and what's under them.
     fn emptying(world: &World, files: &[SceneFile], open: &Open) -> (Vec<Operation>, usize) {
         let owned = owned(world, files, open);
         let owns: HashSet<Entity> = owned.iter().copied().collect();
         let id = |entity| world.id(entity).expect("alive");
         let mut operations = Vec::new();
         for &entity in &owned {
-            // Nothing is taken out from under a node: its undo, as an open refused after the
-            // deletes has, would put it back under the node, which operations refuse.
-            let theirs =
-                |child: &Entity| !owns.contains(child) && world.get::<ModelNode>(*child).is_none();
+            // Nothing is taken out from under a node, nor an instance's entity: its undo, as an
+            // open refused after the deletes has, would put it back under the node, which
+            // operations refuse, and an instance takes none of its prefab's entities away.
+            let theirs = |child: &Entity| !owns.contains(child) && world.owner(*child) == *child;
             let children = world.children(entity).expect("alive");
             for child in children.filter(theirs) {
                 let entity = id(child);
@@ -758,8 +758,11 @@ mod open_scene {
             }
         }
         for &entity in &owned {
+            if world.owner(entity) != entity {
+                continue;
+            }
             let parent = world.parent(entity).expect("alive");
-            let parent = parent.map(|parent| world.node_root(parent));
+            let parent = parent.map(|parent| world.owner(parent));
             if parent.is_none_or(|parent| !owns.contains(&parent)) {
                 let entity = id(entity);
                 operations.push(Operation::Delete { entity });

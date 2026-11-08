@@ -91,11 +91,14 @@ pub(crate) fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// What a reseed mixes into the stream's state, and what a placement mixes into its instance: each
-/// 64 bits of pi's fraction, as constants that hide nothing. Both are fixed, since seeded worlds
-/// reseed the same way every run, and linked prefab instances will mix their IDs again.
+/// What a reseed mixes into the stream's state, what a placement mixes into its instance, and what
+/// a linked instance mixes into its root's ID: each 64 bits of pi's fraction, as constants that
+/// hide nothing; the hash's (hash.rs) are the three after `PLACE`, and `LINK` the one after those.
+/// All are fixed, since seeded worlds reseed the same way every run, and scenes hold the IDs a
+/// copy's and an instance's entities mix to.
 const RESEED: u64 = 0x243f_6a88_85a3_08d3;
 const PLACE: u64 = 0x1319_8a2e_0370_7344;
+const LINK: u64 = 0xbe54_66cf_34e9_0c6c;
 
 /// The ID of a prefab's entity `local` in the copy of it placed as `instance`: a permutation of
 /// the local IDs for each instance, so that a copy's IDs are as distinct as its prefab's, and a
@@ -103,6 +106,14 @@ const PLACE: u64 = 0x1319_8a2e_0370_7344;
 /// chance. `None` for the one local ID it mixes to zero.
 pub(super) fn placed(instance: EntityId, local: EntityId) -> Option<EntityId> {
     let key = mix64(instance.0.get() ^ PLACE);
+    NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
+}
+
+/// The ID of a prefab's entity `local` in the linked instance whose root's ID is `root`, as
+/// [`placed`] mixes a copy's, but by a constant of its own, so that an instance's IDs meet neither
+/// a copy's nor its root's model's nodes', which [`placed`] mixes from the root's too.
+pub(super) fn linked(root: EntityId, local: EntityId) -> Option<EntityId> {
+    let key = mix64(root.0.get() ^ LINK);
     NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
 }
 
@@ -333,8 +344,8 @@ pub(super) mod tests {
         }
     }
 
-    /// Pinned, since seeded worlds reseed the same way every run, and linked prefab instances
-    /// will mix their IDs again.
+    /// Pinned, since seeded worlds reseed the same way every run, and scenes hold the IDs copies
+    /// and linked instances mix to.
     #[test]
     fn reseeding_and_placing_mix_as_they_always_have() {
         let mut stream = IdStream::new(0);
@@ -354,10 +365,24 @@ pub(super) mod tests {
             "776f67f8ae5c03a9",
         ];
         assert_eq!(mixed, pinned);
-        // A permutation of the local IDs for each instance.
+        let mixed = [(1, 1), (1, 2), (2, 1), (u64::MAX, 0x5f3a_9c0e_12b4_7d68)];
+        let mixed = mixed.map(|(root, local)| {
+            let linked = linked(id(root), id(local)).expect("not zero");
+            linked.to_string()
+        });
+        let pinned = [
+            "81c568c0872c998b",
+            "8fcab490b1070e89",
+            "9fd4bdef2d5d0871",
+            "c67ece635afbab7b",
+        ];
+        assert_eq!(mixed, pinned);
+        // A permutation of the local IDs for each instance, linked or not.
         let locals: Vec<EntityId> = (1..=1000).map(id).collect();
         let copies: HashSet<EntityId> = locals.iter().filter_map(|&l| placed(id(9), l)).collect();
         assert_eq!(copies.len(), 1000);
+        let instance: HashSet<EntityId> = locals.iter().filter_map(|&l| linked(id(9), l)).collect();
+        assert_eq!(instance.len(), 1000);
     }
 
     #[test]
