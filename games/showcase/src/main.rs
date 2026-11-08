@@ -8,8 +8,16 @@
 //! and an alpha, and a crate a script pops (`tweens.ron`); circles, discs and rings, crisp and
 //! faded (`shapes.ron`);
 //! text in the engine's font and the project's, aligned, sized, colored and turned (`text.ron`); a
+//! game's UI on the view's canvas, labels kept to its edges and corners, the ticks counted and a
+//! button that lights under the cursor and counts its clicks, over the world (`ui.ron`); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
-//! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); glTF
+//! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); sounds
+//! played from where their entities are, bells to the left, the middle and the right in turn and a
+//! pluck sweeping across and out past the view's edges (`sounds.ron`, its sounds `sounds/*.wav`);
+//! music looping while the scene is open, its volume a field, bars bouncing at its tempo
+//! (`music.ron`, its music `music/loop.ogg`; those three synthesized by a script outside the
+//! repository); squares drawn by the game's own shader, which reloads as it's saved (`shader.ron`,
+//! its shader `shaders/plasma.slang`); glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
 //! (`models.ron`); colors from a quarter as bright as white to 16 times, which the world's
 //! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
@@ -32,21 +40,27 @@
 //! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
 //! so often, a tween easing it back; and animation and physics step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
-//! package without its code, and so without the keys' walking.
+//! package without its code, and so without the keys' walking and its own components: the
+//! chimes, the jukebox, the HUD and the plasma, which its code registers and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
 #![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
 
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
-use gg_engine::math::{Vec2, Vec3};
+use bytemuck::NoUninit;
+use gg_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    Actions, App, Binding, Change, Commands, Context, Event, Key, Layer, PadButton, Reflect,
-    Scripts, Source, Stick, Tick, World, step_animation, step_physics,
+    Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Curve, Ease,
+    Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton, Music, PadButton, Place,
+    Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Tween, World,
+    step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -82,24 +96,195 @@ enum Act {
     Jump,
 }
 
-/// What the keys and a pad do, queued for the next tick, which a recording keeps.
+/// What the keys, a pad and the mouse do, queued for the next tick, which a recording keeps.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 enum Command {
     /// Has every walker go this way, until the next: across to turn, and up to go forward.
     Walk { heading: Vec2 },
     /// Has every walker jump, if it stands.
     Jump,
+    /// Counts a click on the HUD's button, on each [`Hud`].
+    Click,
 }
 
-/// The game's layer: it loads the scripts as it loads, which declares their components, so that
-/// its scenes, the Inspector's Add Component and the tool API know them before any entity has one;
-/// loads the start scene as it attaches; and at each tick applies what the keys did to its
-/// scenes' walkers, then runs the scripts, steps animation and then physics. A script or the start scene that
-/// doesn't load ends the run with its error, through [`Context::fail`].
+/// A sound of the showcase's, which a [`Chime`] rings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+enum Tone {
+    /// `sounds/bell.wav`, a struck bell.
+    #[default]
+    Bell,
+    /// `sounds/pluck.wav`, a plucked string.
+    Pluck,
+}
+
+/// Rings its tone every `every` seconds of the world's ticks, from its entity, so that it's panned
+/// by where the view shows it and fades past the view's edges, as [`Place::On`] says; a `Circle` on
+/// it flashes full as it rings, thinning back to [`RING`]: `sounds.ron`'s chimes.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Chime {
+    /// What it rings.
+    tone: Tone,
+    /// The seconds between its rings.
+    #[reflect(min = 0.05, default = 1.0)]
+    every: f32,
+    /// The seconds since it last rang; negative, a wait before its first.
+    time: f32,
+}
+
+/// Has the showcase's music, `music/loop.ogg`, play while its entity is in the world, looping, its
+/// bus at `volume`, fading in as it starts and out once no entity has one, as another scene opens:
+/// `music.ron`'s. It plays whether the world ticks or not, as music plays on through a pause.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Jukebox {
+    /// How loud the music's bus plays it: 1 as loud as the music is, 0 silent.
+    #[reflect(min = 0.0, max = 1.0, default = 1.0)]
+    volume: f32,
+}
+
+/// Has the showcase draw its HUD on the view's canvas while its entity is in the world: a label at
+/// each of the canvas's edges and corners, the ticks it has counted, and a button that lights as
+/// the cursor is over it and counts the clicks on it, which reach it as commands: `ui.ron`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Hud {
+    /// The ticks it has been in the world for.
+    ticks: u32,
+    /// The clicks on its button.
+    clicks: u32,
+}
+
+/// Has its entity drawn by the showcase's own shader, `shaders/plasma.slang`, once the world
+/// ticks: a unit square that its transform places, colored by waves drifting with the frame's time,
+/// `cells` of them across, at `speed`, tinted by `tint`: `shader.ron`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Plasma {
+    /// What the waves' colors are multiplied by, in linear RGB; its alpha is unused.
+    #[reflect(default = Vec4::ONE)]
+    tint: Vec4,
+    /// How many waves cross the square.
+    #[reflect(min = 0.0, default = 1.0)]
+    cells: f32,
+    /// How fast the waves drift, 1 a radian a second.
+    #[reflect(default = 1.0)]
+    speed: f32,
+}
+
+/// A corner of the plasma's square, as `shaders/plasma.slang` reads it: where it is in the square's
+/// own space, and where it is across the square, from 0 to 1.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Corner {
+    position: Vec3,
+    uv: Vec2,
+}
+
+/// What `shaders/plasma.slang` draws a square in, as it reads it: a [`Plasma`]'s fields.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Waves {
+    tint: Vec4,
+    cells: f32,
+    speed: f32,
+    pad: Vec2,
+}
+
+/// The thickness `sounds.ron` draws its chimes' rings at, which a ring flashes back to.
+const RING: f32 = 0.12;
+
+/// How long music takes to fade in as it starts and out as it stops.
+const MUSIC_FADE: Duration = Duration::from_millis(1500);
+
+/// How long the music's bus takes to reach a jukebox's volume.
+const VOLUME_FADE: Duration = Duration::from_millis(100);
+
+/// How far the HUD's labels are from the canvas's edges, in its units.
+const HUD_INSET: f32 = 36.0;
+
+/// The HUD's labels at the canvas's edges and corners, each where it's anchored, across then down,
+/// which its text aligns to.
+const ANCHORED: [([Align; 2], &str); 8] = [
+    ([Align::Start, Align::Start], "TOP LEFT"),
+    ([Align::Center, Align::Start], "TOP"),
+    ([Align::End, Align::Start], "TOP RIGHT"),
+    ([Align::Start, Align::Center], "LEFT"),
+    ([Align::End, Align::Center], "RIGHT"),
+    ([Align::Start, Align::End], "BOTTOM LEFT"),
+    ([Align::Center, Align::End], "BOTTOM"),
+    ([Align::End, Align::End], "BOTTOM RIGHT"),
+];
+
+/// The HUD's button: its middle and its half size, from the canvas's middle.
+const BUTTON: (Vec2, Vec2) = (Vec2::new(0.0, -40.0), Vec2::new(190.0, 56.0));
+
+/// What the showcase loads beside its scripts, for its scenes' components.
+struct Assets {
+    /// The sounds, by [`Tone`].
+    tones: [Sound; 2],
+    music: Music,
+    /// Its font, Inter Bold, which the HUD writes in.
+    font: Font,
+    /// The plasma's square and shader.
+    square: Mesh<Corner>,
+    plasma: Shader<Corner, Waves>,
+}
+
+impl Assets {
+    /// Loads them from the game's directory, `root`. Fails with the first that doesn't load, as a
+    /// shader that doesn't compile.
+    fn load(cx: &mut Context, root: &Path) -> Result<Self, Error> {
+        let sound = |cx: &mut Context, name: &str| {
+            cx.add_sound(name, root.join(format!("sounds/{name}.wav")))
+        };
+        let tones = [sound(cx, "bell")?, sound(cx, "pluck")?];
+        let music = cx.add_music("loop", root.join("music/loop.ogg"))?;
+        let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"))?;
+        let plasma = cx.add_shader("plasma", root.join("shaders/plasma.slang"), Blend::Opaque)?;
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|[u, v]| Corner {
+            position: Vec3::new(u - 0.5, v - 0.5, 0.0),
+            uv: Vec2::new(u, v),
+        });
+        let square = cx.add_mesh("plasma", &corners, &[0, 1, 2, 0, 2, 3]);
+        let square = square.expect("the square is two whole triangles");
+        Ok(Self {
+            tones,
+            music,
+            font,
+            square,
+            plasma,
+        })
+    }
+}
+
+/// Registers the game's own components with `world`, so that its scenes, the Inspector's Add
+/// Component and the tool API know them before any entity has one.
+fn register(world: &mut World) {
+    let registered = world.register::<Chime>().and_then(|()| {
+        world.register::<Jukebox>()?;
+        world.register::<Hud>()?;
+        world.register::<Plasma>()
+    });
+    registered.expect("the game's components describe themselves");
+}
+
+/// The game's layer: it loads the scripts as it loads, which declares their components, and
+/// registers its own, so that its scenes, the Inspector's Add Component and the tool API know them
+/// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
+/// it attaches; and at each tick applies what the keys and the HUD's button did to its scenes'
+/// walkers and HUDs, then runs the scripts, rings the chimes, counts the HUDs' ticks, steps
+/// animation and then physics, and gives the plasmas their draws. As it updates, it plays the music
+/// while a jukebox is in the world, and draws the HUD while a HUD is. A script, an asset or the
+/// start scene that doesn't load ends the run with its error, through [`Context::fail`].
 struct Showcase {
     scripts: Scripts,
     actions: Actions<Act>,
     commands: Vec<Command>,
+    /// Once loaded.
+    assets: Option<Assets>,
+    /// The chimes that rang at a tick, gathered before they play, and the plasmas' draws, before
+    /// they're given: kept, so that ticks reuse their room.
+    rang: Vec<(Entity, Tone)>,
+    drawn: Vec<(Entity, MeshDraw)>,
+    /// The HUD's numbers' text, kept so that frames reuse its room.
+    text: String,
 }
 
 impl Showcase {
@@ -126,23 +311,81 @@ impl Showcase {
             scripts: Scripts::new().expect("Luau starts"),
             actions,
             commands: Vec::new(),
+            assets: None,
+            rang: Vec::new(),
+            drawn: Vec::new(),
+            text: String::new(),
+        }
+    }
+
+    /// Rings each of `world`'s chimes whose time has come, from its entity, flashing its circle.
+    fn ring(&mut self, world: &mut World) {
+        let dt = Tick::DT.as_secs_f32();
+        for (entity, chime) in world.query_mut::<(Entity, &mut Chime)>() {
+            chime.time += dt;
+            if chime.time >= chime.every {
+                chime.time -= chime.every;
+                self.rang.push((entity, chime.tone));
+            }
+        }
+        for (entity, tone) in self.rang.drain(..) {
+            if let Some(assets) = &self.assets {
+                world.play_sound(assets.tones[tone as usize], Place::On(entity));
+            }
+            let flash = Tween {
+                curve: Curve::Quad,
+                ease: Ease::Out,
+                ..Tween::new("Circle", "thickness", 1.0, RING, 0.6)
+            };
+            // A chime without a circle rings without one.
+            let _ = world.tween(entity, flash);
+        }
+    }
+
+    /// Gives each of `world`'s plasmas its draw with the showcase's shader, as its fields are now.
+    fn shade(&mut self, world: &mut World) {
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        for (entity, plasma) in world.query::<(Entity, &Plasma)>() {
+            let waves = Waves {
+                tint: plasma.tint,
+                cells: plasma.cells,
+                speed: plasma.speed,
+                pad: Vec2::ZERO,
+            };
+            let draw = MeshDraw::new(assets.square, assets.plasma, waves);
+            if world.get::<MeshDraw>(entity) != Some(&draw) {
+                self.drawn.push((entity, draw));
+            }
+        }
+        for (entity, draw) in self.drawn.drain(..) {
+            world
+                .insert(entity, draw)
+                .expect("the plasma's entity, found this tick");
         }
     }
 }
 
-/// Applies `command` to each of `world`'s walkers, the entities with `walk.luau`'s `Walk`: its
-/// heading, with forward along -Z, or its jump.
-fn walk(world: &mut World, command: &Command) {
-    let walkers: Vec<_> = match world.entities(Some("Walk")) {
-        Ok(walkers) => walkers.collect(),
-        Err(_) => return,
-    };
+/// Applies `command` to `world`: to each of its walkers, the entities with `walk.luau`'s `Walk`, its
+/// heading, with forward along -Z, or its jump; or to each of its HUDs, a click.
+fn apply(world: &mut World, command: &Command) {
     let (field, value) = match *command {
         Command::Walk { heading } => (
             "heading",
             Value::Vec3(Vec3::new(heading.x, 0.0, -heading.y)),
         ),
         Command::Jump => ("jump", Value::Bool(true)),
+        Command::Click => {
+            for hud in world.query_mut::<&mut Hud>() {
+                hud.clicks = hud.clicks.saturating_add(1);
+            }
+            return;
+        }
+    };
+    let walkers: Vec<_> = match world.entities(Some("Walk")) {
+        Ok(walkers) => walkers.collect(),
+        Err(_) => return,
     };
     for walker in walkers {
         // A walker whose script holds no such field, as one edited to drop it, goes without.
@@ -159,6 +402,11 @@ impl Layer for Showcase {
                 cx.fail(error);
                 return;
             }
+        }
+        register(cx.world_mut());
+        match Assets::load(cx, root) {
+            Ok(assets) => self.assets = Some(assets),
+            Err(error) => cx.fail(error),
         }
     }
 
@@ -181,18 +429,41 @@ impl Layer for Showcase {
 
     fn tick(&mut self, world: &mut World, _: Tick) {
         for command in self.commands.drain(..) {
-            walk(world, &command);
+            apply(world, &command);
         }
         self.scripts.run(world);
+        self.ring(world);
+        for hud in world.query_mut::<&mut Hud>() {
+            hud.ticks = hud.ticks.saturating_add(1);
+        }
         step_animation(world);
         step_physics(world);
+        self.shade(world);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
         Some(&mut self.commands)
     }
 
-    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+    /// Plays the music while a jukebox is in the world, and draws the HUD while a HUD is.
+    fn update(&mut self, cx: &mut Context, _: Duration) {
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        let (music, font) = (assets.music, assets.font);
+        let jukebox = cx.world().query::<&Jukebox>().next().copied();
+        cx.play_music(jukebox.map(|_| music), MUSIC_FADE);
+        if let Some(Jukebox { volume }) = jukebox
+            && volume.is_finite()
+        {
+            cx.set_volume(Bus::Music, volume, VOLUME_FADE);
+        }
+        if let Some(hud) = cx.world().query::<&Hud>().next().copied() {
+            draw_hud(cx, hud, font, &mut self.text);
+        }
+    }
+
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         // Queued now, rather than at the next update, so that the next tick applies them.
         let commands = &mut self.commands;
         self.actions.event(event, |change| match change {
@@ -200,6 +471,86 @@ impl Layer for Showcase {
             Change::Pressed(Act::Jump) => commands.push(Command::Jump),
             _ => {}
         });
+        let click = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        if *event == click
+            && cx.world().query::<&Hud>().next().is_some()
+            && cx
+                .canvas([Align::Center; 2])
+                .cursor()
+                .is_some_and(on_button)
+        {
+            commands.push(Command::Click);
+        }
         ControlFlow::Continue(())
     }
+}
+
+/// Whether `at`, on the canvas from its middle, is on the HUD's button.
+fn on_button(at: Vec2) -> bool {
+    let (middle, half) = BUTTON;
+    let off = (at - middle).abs();
+    off.x <= half.x && off.y <= half.y
+}
+
+/// Draws `hud` on the view's canvas, in `font`, writing its numbers through `text`: its labels at
+/// the canvas's edges and corners; and in its middle, its title, the ticks it has counted, its
+/// button, lit while the cursor is over it, and the clicks on it.
+fn draw_hud(cx: &mut Context, hud: Hud, font: Font, text: &mut String) {
+    let style = |size: f32, color: Vec4, align: [Align; 2]| TextStyle {
+        font: Some(font),
+        size,
+        color,
+        align,
+    };
+    let at = |x: f32, y: f32| Mat4::from_translation(Vec3::new(x, y, 0.0));
+    let dim = Vec4::new(0.62, 0.66, 0.78, 1.0);
+    for (anchor, label) in ANCHORED {
+        // Inward from the edges it's anchored to: across from the left or the right, and down from
+        // the top or up from the bottom.
+        let inward = |align: Align, toward: f32| match align {
+            Align::Start => toward * HUD_INSET,
+            Align::Center => 0.0,
+            Align::End => -toward * HUD_INSET,
+        };
+        let place = at(inward(anchor[0], 1.0), inward(anchor[1], -1.0));
+        cx.canvas(anchor)
+            .draw_text(place, label, &style(30.0, dim, anchor));
+    }
+    let mut canvas = cx.canvas([Align::Center; 2]);
+    let middle = [Align::Center; 2];
+    let title = style(52.0, Vec4::ONE, middle);
+    canvas.draw_text(at(0.0, 260.0), "A GAME'S UI, ON THE VIEW'S CANVAS", &title);
+    let write = |text: &mut String, label: &str, value: u32| {
+        text.clear();
+        write!(text, "{label} {value}").expect("a string takes any text");
+    };
+    write(text, "TICKS", hud.ticks);
+    canvas.draw_text(at(0.0, 150.0), text, &style(40.0, dim, middle));
+    let lit = canvas.cursor().is_some_and(on_button);
+    let (fill, ink) = if lit {
+        (Vec4::new(0.95, 0.55, 0.15, 1.0), Vec4::ONE)
+    } else {
+        (Vec4::new(1.0, 1.0, 1.0, 0.1), Vec4::new(1.0, 1.0, 1.0, 0.8))
+    };
+    let (button, half) = BUTTON;
+    let rect =
+        Mat4::from_translation(button.extend(0.0)) * Mat4::from_scale((half * 2.0).extend(1.0));
+    let sprite = Sprite {
+        color: fill,
+        ..Sprite::default()
+    };
+    canvas.draw_sprite(rect, sprite);
+    canvas.draw_text(
+        at(button.x, button.y),
+        "CLICK ME",
+        &style(40.0, ink, middle),
+    );
+    write(text, "CLICKS", hud.clicks);
+    canvas.draw_text(at(0.0, -170.0), text, &style(40.0, dim, middle));
+    let hint =
+        "PLAY COUNTS THE TICKS AND THE CLICKS: THE LABELS KEEP TO THE VIEW'S EDGES AS IT RESIZES";
+    canvas.draw_text(at(0.0, -260.0), hint, &style(24.0, dim, middle));
 }

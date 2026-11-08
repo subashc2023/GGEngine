@@ -1,0 +1,66 @@
+(
+    entities: {
+        "3cbd2b043b6c2959": (
+            Name: ("Crate, in the world"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 0.5235988,
+            ),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("d8c5ed37db09113b"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-6.8, -2.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "839fc9cfa72bfd4a": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "84ac9cf1a05e3f8b": (
+            Hud: (
+                ticks: 0,
+                clicks: 0,
+            ),
+            Name: ("HUD"),
+        ),
+        "f6e37419d681dbfd": (
+            Name: ("Label: The world, under the canvas"),
+            Text: (
+                text: "The world, under the canvas",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-6.8, -3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

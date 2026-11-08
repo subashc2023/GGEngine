@@ -1,0 +1,320 @@
+(
+    entities: {
+        "06c9d368c493ee64": (
+            Name: ("Label: The bars bounce at its tempo, 120 beats a minute, once the scene plays"),
+            Text: (
+                text: "The bars bounce at its tempo, 120 beats a minute, once the scene plays",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -2.6, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2ca7b9a8c8434b15": (
+            Name: ("Bar 4"),
+            Sprite: (
+                color: (0.462857, 0.317143, 0.597143, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.1875,
+                ),
+            ]),
+        ),
+        "4867d999133483cc": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "54cbb7f32fda7ef4": (
+            Jukebox: (
+                volume: 1.0,
+            ),
+            Name: ("Jukebox"),
+        ),
+        "8cef47d92ad9ea89": (
+            Name: ("Bar 1"),
+            Sprite: (
+                color: (0.06, 0.06, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-3.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "9a00c50ecfc2b411": (
+            Name: ("Bar 8"),
+            Sprite: (
+                color: (1.0, 0.06, 0.06, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (3.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.4375,
+                ),
+            ]),
+        ),
+        "a7b9478ea11a2166": (
+            Name: ("Bar 6"),
+            Sprite: (
+                color: (0.731429, 0.231429, 0.328571, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.3125,
+                ),
+            ]),
+        ),
+        "af89dd3049d21e30": (
+            Name: ("Bar 3"),
+            Sprite: (
+                color: (0.328571, 0.231429, 0.731429, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-1.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.125,
+                ),
+            ]),
+        ),
+        "c98c76c2fc4cd776": (
+            Name: ("Hint"),
+            Text: (
+                text: "Music, music/loop.ogg, looping while this scene is open, fading in and out",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "cbfe4097f317b970": (
+            Name: ("Bar 7"),
+            Sprite: (
+                color: (0.865714, 0.145714, 0.194286, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.375,
+                ),
+            ]),
+        ),
+        "d36a63496d17171d": (
+            Name: ("Bar 5"),
+            Sprite: (
+                color: (0.597143, 0.317143, 0.462857, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.25,
+                ),
+            ]),
+        ),
+        "d44100251355b4db": (
+            Name: ("Label: Its volume is the Jukebox's: set it in the Inspector, and the music goes to it"),
+            Text: (
+                text: "Its volume is the Jukebox's: set it in the Inspector, and the music goes to it",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "edfda8083c62af76": (
+            Name: ("Bar 2"),
+            Sprite: (
+                color: (0.194286, 0.145714, 0.865714, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.5, 0.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.4, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale.y",
+                    from: Number(0.4),
+                    to: Number(2.4),
+                    seconds: 0.25,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: -0.0625,
+                ),
+            ]),
+        ),
+    },
+)

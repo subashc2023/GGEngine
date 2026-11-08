@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 18, "{scenes:?}");
+    assert_eq!(scenes.len(), 22, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -323,4 +323,93 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
     let walker_at = transform(cx.world(), walker).translation;
     let off = near - walker_at - Vec3::Y * 2.0;
     assert!(off.length() < 1.75, "in front of the wall: {off}");
+}
+
+/// A chime rings once its seconds have passed, its tone placed on its entity, its circle flashing
+/// full and thinning back to its ring; and again each time they pass once more.
+#[test]
+fn a_chime_rings_from_its_entity_and_flashes() {
+    let (mut cx, mut showcase) = loaded();
+    let world = cx.world_mut();
+    let ring = gg_engine::Circle {
+        thickness: RING,
+        ..gg_engine::Circle::default()
+    };
+    let chime = Chime {
+        tone: Tone::Pluck,
+        every: 1.0,
+        time: 0.0,
+    };
+    let bell = world.spawn((Transform::IDENTITY, ring, chime));
+    let tones = showcase.assets.as_ref().expect("loaded").tones;
+    let mut rang = Vec::new();
+    for number in 0..192 {
+        let world = cx.world_mut();
+        showcase.tick(world, Tick { number });
+        // The queue, which the engine would play and empty once each tick has run, grows here.
+        if world.sounds_queued().count() > rang.len() {
+            let queued: Vec<_> = world.sounds_queued().skip(rang.len()).collect();
+            assert_eq!(queued, [(tones[1], Place::On(bell))]);
+            rang.push(number);
+        }
+        let thickness = world
+            .get::<gg_engine::Circle>(bell)
+            .expect("its circle")
+            .thickness;
+        let since = rang.last().map(|rang| number - rang);
+        match since {
+            Some(0) => assert!(thickness > 0.9, "flashed: {thickness}"),
+            Some(since) if since >= 38 => assert_eq!(thickness, RING),
+            _ => assert!((RING..=1.0).contains(&thickness)),
+        }
+    }
+    // Every second, 64 ticks, the first at the end of the first.
+    assert_eq!(rang, [63, 127, 191]);
+}
+
+/// A HUD counts its ticks and the clicks on its button, which reach it as commands; and a plasma's
+/// entity gets its draw with the showcase's shader at a tick, again as its fields change.
+#[test]
+fn a_hud_counts_ticks_and_clicks_and_a_plasma_draws() {
+    let (mut cx, mut showcase) = loaded();
+    let world = cx.world_mut();
+    let hud = world.spawn(Hud {
+        ticks: 0,
+        clicks: 0,
+    });
+    let plasma = Plasma {
+        tint: Vec4::ONE,
+        cells: 1.0,
+        speed: 1.0,
+    };
+    let square = world.spawn((Transform::IDENTITY, plasma));
+    assert!(world.get::<MeshDraw>(square).is_none());
+    showcase.commands.extend([Command::Click, Command::Click]);
+    for number in 0..3 {
+        showcase.tick(world, Tick { number });
+    }
+    let counted = *world.get::<Hud>(hud).expect("the HUD");
+    assert_eq!((counted.ticks, counted.clicks), (3, 2));
+    let drawn = *world.get::<MeshDraw>(square).expect("drawn");
+    world.get_mut::<Plasma>(square).expect("its plasma").speed = 2.0;
+    showcase.tick(world, Tick { number: 3 });
+    assert_ne!(world.get::<MeshDraw>(square), Some(&drawn));
+}
+
+/// The music plays while a jukebox is in the world, its bus at the jukebox's volume, and stops once
+/// it's gone.
+#[test]
+fn a_jukebox_plays_the_music_while_its_there() {
+    let (mut cx, mut showcase) = loaded();
+    let music = showcase.assets.as_ref().expect("loaded").music;
+    let frame = Duration::from_millis(16);
+    showcase.update(&mut cx, frame);
+    assert_eq!(cx.music_playing(), None);
+    let jukebox = cx.world_mut().spawn(Jukebox { volume: 0.5 });
+    showcase.update(&mut cx, frame);
+    assert_eq!(cx.music_playing(), Some(music));
+    assert_eq!(cx.volume(Bus::Music), 0.5);
+    cx.world_mut().despawn(jukebox).expect("despawned");
+    showcase.update(&mut cx, frame);
+    assert_eq!(cx.music_playing(), None);
 }

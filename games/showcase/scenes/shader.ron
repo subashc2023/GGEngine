@@ -1,0 +1,153 @@
+(
+    entities: {
+        "0c4c49fb84e0deb6": (
+            Name: ("Plasma: Cells 1, speed 1"),
+            Plasma: (
+                tint: (1.0, 1.0, 1.0, 1.0),
+                cells: 1.0,
+                speed: 1.0,
+            ),
+            Transform: (
+                translation: (-4.6, 0.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.4, 3.4, 1.0),
+            ),
+        ),
+        "129d6a6d84273d4c": (
+            Name: ("Label: Cells 0.5, speed 0.5, cool"),
+            Text: (
+                text: "Cells 0.5, speed 0.5, cool",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (4.6, -2.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "216ef28822c29df8": (
+            Name: ("Plasma: Cells 0.5, speed 0.5, cool"),
+            Plasma: (
+                tint: (0.12, 0.55, 1.0, 1.0),
+                cells: 0.5,
+                speed: 0.5,
+            ),
+            Transform: (
+                translation: (4.6, 0.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.4, 3.4, 1.0),
+            ),
+        ),
+        "759afdd8f93196fc": (
+            Name: ("Label: Each is a Plasma of the showcase's, which gives its entity a draw with the shader at each tick"),
+            Text: (
+                text: "Each is a Plasma of the showcase's, which gives its entity a draw with the shader at each tick",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -3.6, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "843f2c9d726e380b": (
+            Name: ("Label: Cells 1, speed 1"),
+            Text: (
+                text: "Cells 1, speed 1",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-4.6, -2.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9d98a65a271d137e": (
+            Name: ("Plasma: Cells 2.5, speed 2, warm, turning"),
+            Plasma: (
+                tint: (1.0, 0.42, 0.1, 1.0),
+                cells: 2.5,
+                speed: 2.0,
+            ),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 0.3926991,
+            ),
+            Transform: (
+                translation: (0.0, 0.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.4, 3.4, 1.0),
+            ),
+        ),
+        "9fc9ec070feb3cb2": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "be44c49dffd3fedc": (
+            Name: ("Label: Cells 2.5, speed 2, warm, turning"),
+            Text: (
+                text: "Cells 2.5, speed 2, warm, turning",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -2.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f9e818cc6d2906f0": (
+            Name: ("Hint"),
+            Text: (
+                text: "A game's own shader, shaders/plasma.slang, drawn once the scene plays: save a change to it, and it reloads",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -1,0 +1,213 @@
+(
+    entities: {
+        "08c3bab2cec79213": (
+            Chime: (
+                tone: Bell,
+                every: 3.0,
+                time: 2.0,
+            ),
+            Circle: (
+                color: (1.0, 0.72, 0.28, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            Name: ("Bell: Left"),
+            Transform: (
+                translation: (-6.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "2682f634108b9a50": (
+            Name: ("Label: Plucks as it sweeps across, panned with it, fading out past the view's edges"),
+            Text: (
+                text: "Plucks as it sweeps across, panned with it, fading out past the view's edges",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -3.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4fb9581e8ea1269f": (
+            Chime: (
+                tone: Pluck,
+                every: 0.5,
+                time: 0.0,
+            ),
+            Circle: (
+                color: (0.3, 0.85, 0.9, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            Name: ("Sweeper"),
+            Transform: (
+                translation: (-12.0, -2.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.7, 0.7, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-12.0),
+                    to: Number(12.0),
+                    seconds: 8.0,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "4ff51c699ba759fc": (
+            Chime: (
+                tone: Bell,
+                every: 3.0,
+                time: 1.0,
+            ),
+            Circle: (
+                color: (1.0, 0.72, 0.28, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            Name: ("Bell: Middle"),
+            Transform: (
+                translation: (0.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "668f3eaf369511c4": (
+            Name: ("Label: Each is a Chime of the showcase's: its tone, the seconds between its rings, and its time"),
+            Text: (
+                text: "Each is a Chime of the showcase's: its tone, the seconds between its rings, and its time",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -4.2, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "71073031615b7d58": (
+            Name: ("Hint"),
+            Text: (
+                text: "Sounds, each played from where its entity is: press Play and listen",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a92eb7469089d4fa": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b022777f37b1584a": (
+            Chime: (
+                tone: Bell,
+                every: 3.0,
+                time: 0.0,
+            ),
+            Circle: (
+                color: (1.0, 0.72, 0.28, 1.0),
+                thickness: 0.12,
+                fade: 0.02,
+            ),
+            Name: ("Bell: Right"),
+            Transform: (
+                translation: (6.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.0),
+            ),
+        ),
+        "bb516e65265ede5b": (
+            Name: ("Label: Left: panned left"),
+            Text: (
+                text: "Left: panned left",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-6.0, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fca07f5d1244e52a": (
+            Name: ("Label: Right: panned right"),
+            Text: (
+                text: "Right: panned right",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (6.0, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fca34fc83e6caabc": (
+            Name: ("Label: Middle"),
+            Text: (
+                text: "Middle",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

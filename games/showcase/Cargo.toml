@@ -11,6 +11,8 @@ name = "gg-showcase"
 path = "src/main.rs"
 
 [dependencies]
+# The plasma's vertices and parameters, which its shader reads as they are.
+bytemuck = { workspace = true, features = ["derive"] }
 gg-engine.workspace = true
 
 [features]
