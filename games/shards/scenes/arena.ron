@@ -21,6 +21,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -69,6 +70,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -99,6 +101,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -129,6 +132,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -159,6 +163,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),

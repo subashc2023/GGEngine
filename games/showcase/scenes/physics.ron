@@ -30,6 +30,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -48,6 +49,58 @@
                 scale: (0.8, 0.8, 1.0),
             ),
         ),
+        "1a768e3890b405eb": (
+            Joint2D: (
+                body_a: Some("3f73a4572c389e08"),
+                body_b: Some("783f8af55d5af76e"),
+                kind: Revolute,
+                anchor_a: (0.0, 0.0),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
+        ),
+        "20dae420e2db265c": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Link"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.75, 0.78, 0.86, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.379159, 2.022988, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.12, 0.5, 1.0),
+            ),
+        ),
         "25a9993544e864c3": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -60,6 +113,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -90,6 +144,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -125,6 +180,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -132,6 +188,37 @@
                 translation: (-5.6, 1.8, 0.2),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "2e23e828f49adfdb": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Link"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.75, 0.78, 0.86, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.987495, 2.333793, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.12, 0.5, 1.0),
             ),
         ),
         "34d45cd11c930a06": (
@@ -146,6 +233,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -164,10 +252,31 @@
                 scale: (0.4, 7.6, 1.0),
             ),
         ),
+        "3a64b5b67ee32939": (
+            Joint2D: (
+                body_a: Some("783f8af55d5af76e"),
+                body_b: Some("2e23e828f49adfdb"),
+                kind: Revolute,
+                anchor_a: (0.0, -0.5),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
+        ),
         "3bf585bed7c35883": (
             Name: ("Hint"),
             Text: (
-                text: "Press Play: boxes stack and topple, balls bounce down the ramp, and a kinematic paddle turns",
+                text: "Press Play: boxes stack and topple, balls bounce down the ramp, a kinematic paddle turns and a chain swings",
                 font: None,
                 size: 0.24,
                 color: (0.45, 0.5, 0.62, 1.0),
@@ -182,6 +291,26 @@
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
+        "3f73a4572c389e08": (
+            Circle: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Pin"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (0.4, 2.8, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.24, 0.24, 1.0),
+            ),
+        ),
         "41cfe8ebb56816f9": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -194,6 +323,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -212,6 +342,27 @@
                 scale: (0.8, 0.8, 1.0),
             ),
         ),
+        "4450a1541a274416": (
+            Joint2D: (
+                body_a: Some("20dae420e2db265c"),
+                body_b: Some("c49564e43b9fa480"),
+                kind: Revolute,
+                anchor_a: (0.0, -0.5),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
+        ),
         "5faea07debeb9ecf": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -224,6 +375,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -259,6 +411,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -280,6 +433,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -298,6 +452,58 @@
                 scale: (2.4, 0.3, 1.0),
             ),
         ),
+        "783f8af55d5af76e": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Link"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.75, 0.78, 0.86, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.595832, 2.644598, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.12, 0.5, 1.0),
+            ),
+        ),
+        "79c97499ffce42d5": (
+            Joint2D: (
+                body_a: Some("b6453051d3f54efe"),
+                body_b: Some("876cc8174bb3c7fd"),
+                kind: Revolute,
+                anchor_a: (0.0, -0.5),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
+        ),
         "79f378557774952e": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -310,6 +516,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -340,6 +547,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -358,6 +566,33 @@
                 scale: (0.55, 0.55, 1.0),
             ),
         ),
+        "876cc8174bb3c7fd": (
+            Circle: (
+                color: (1.0, 0.8, 0.15, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 2.0,
+                friction: 0.4,
+                restitution: 0.2,
+            ),
+            Name: ("Chain ball"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (2.593315, 1.059492, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
         "90d2a86756e1336a": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -370,6 +605,7 @@
             RigidBody2D: (
                 body_type: Kinematic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 1.4,
             ),
@@ -400,6 +636,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -430,6 +667,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -448,6 +686,27 @@
                 scale: (0.55, 0.55, 1.0),
             ),
         ),
+        "aa1ec6066527d74f": (
+            Joint2D: (
+                body_a: Some("2e23e828f49adfdb"),
+                body_b: Some("20dae420e2db265c"),
+                kind: Revolute,
+                anchor_a: (0.0, -0.5),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
+        ),
         "b1ee5d536b0e4884": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -460,6 +719,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -476,6 +736,37 @@
                 translation: (1.42, -2.91, 0.2),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "b6453051d3f54efe": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Link"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.75, 0.78, 0.86, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.162486, 1.401378, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.12, 0.5, 1.0),
             ),
         ),
         "bf2bf92af85ca456": (
@@ -495,6 +786,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -502,6 +794,37 @@
                 translation: (-6.0, 2.6, 0.2),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "c49564e43b9fa480": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Link"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.75, 0.78, 0.86, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.770822, 1.712183, 0.3),
+                rotation: (0.0, 0.0, 0.434966, 0.900447),
+                scale: (0.12, 0.5, 1.0),
             ),
         ),
         "dddf9b167e2a52df": (
@@ -516,6 +839,7 @@
             RigidBody2D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),
@@ -533,6 +857,27 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
             ),
+        ),
+        "e07dbcadf852fb58": (
+            Joint2D: (
+                body_a: Some("c49564e43b9fa480"),
+                body_b: Some("b6453051d3f54efe"),
+                kind: Revolute,
+                anchor_a: (0.0, -0.5),
+                anchor_b: (0.0, 0.5),
+                axis: (1.0, 0.0),
+                limited: false,
+                lower: 0.0,
+                upper: 0.0,
+                target_velocity: 0.0,
+                target_position: 0.0,
+                stiffness: 0.0,
+                damping: 0.0,
+                max_force: inf,
+                length: 1.0,
+                bodies_collide: false,
+            ),
+            Name: ("Chain joint"),
         ),
         "e8a7f76412f61d5d": (
             Camera: (
@@ -562,6 +907,7 @@
             RigidBody2D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0),
                 angular_velocity: 0.0,
             ),

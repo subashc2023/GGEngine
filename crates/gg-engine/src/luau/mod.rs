@@ -3242,6 +3242,73 @@ return Look
         assert_eq!(field("missed"), Value::Bool(true));
     }
 
+    /// Drives the motor of the joint on its entity at its own speed.
+    const DRIVE: &str = r#"
+local Joint3D = gg.component("Joint3D")
+local Drive = gg.declare("Drive", { speed = 0 })
+
+function Drive.tick(entity, dt)
+    entity[Joint3D.target_velocity] = entity[Drive.speed]
+    entity[Joint3D.damping] = 20
+end
+
+return Drive
+"#;
+
+    /// A script sets the target of a joint's motor through the joint's fields, as it sets any
+    /// component's, and the steps after drive the joint by it: a door hinged about Y turns
+    /// counterclockwise, as seen from above, at the script's speed once its motor has it going.
+    #[test]
+    fn a_script_drives_a_joints_motor_through_its_fields() {
+        use crate::{
+            BodyType, BoxCollider3D, Joint3D, JointKind3D, RigidBody3D, Transform, step_physics,
+        };
+
+        let dir = Scratch::new("luau-joints");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/drive.luau", DRIVE)]);
+        let world = cx.world_mut();
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let at = |x| Transform {
+            translation: Vec3::new(x, 1.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let post = world.spawn((at(0.0), fixed, BoxCollider3D::default()));
+        let door = (at(1.0), RigidBody3D::default(), BoxCollider3D::default());
+        let door = world.spawn(door);
+        let hinge = Joint3D {
+            body_a: Some(post),
+            body_b: Some(door),
+            kind: JointKind3D::Revolute,
+            anchor_a: Vec3::new(0.5, 0.0, 0.0),
+            anchor_b: Vec3::new(-0.5, 0.0, 0.0),
+            axis: Vec3::Y,
+            ..Joint3D::default()
+        };
+        let joint = world.spawn(hinge);
+        world.add_default(joint, "Drive").expect("added");
+        world
+            .set_field(joint, "Drive", "speed", &Value::F64(1.0))
+            .expect("set");
+        for _ in 0..64 {
+            host.run(cx.world_mut());
+            step_physics(cx.world_mut());
+        }
+        let world = cx.world();
+        let driven = world.get::<Joint3D>(joint).expect("a joint");
+        assert_eq!((driven.target_velocity, driven.damping), (1.0, 20.0));
+        let turning = world
+            .get::<RigidBody3D>(door)
+            .expect("a body")
+            .angular_velocity;
+        assert!(
+            turning.abs_diff_eq(Vec3::Y, 0.02),
+            "a radian a second about Y: {turning}"
+        );
+    }
+
     /// Starts its entity's tweens at its first tick: its scale, eased in; its own size, looping
     /// after a wait; and its rotation; and counts the tweens refused, of a scale to a number, a
     /// curve and an option there are none of, and seconds less than none.

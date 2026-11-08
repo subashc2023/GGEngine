@@ -1,8 +1,8 @@
 //! Physics, through rapier: bodies that it moves at the world's ticks, as their entities'
-//! components describe them, in the XY plane ([`dim2`]) or in space ([`dim3`]), with characters
-//! and casts through the colliders in space; the world's resources that hold rapier's bodies and
-//! contacts, which snapshots copy and snapshot files hold; and the colliders' outlines, drawn where
-//! their entities draw.
+//! components describe them, and joints that hold them together, in the XY plane ([`dim2`]) or in
+//! space ([`dim3`]), with characters and casts through the colliders in space; the world's
+//! resources that hold rapier's bodies, joints and contacts, which snapshots copy and snapshot
+//! files hold; and the colliders' outlines and the joints' lines, drawn where their entities draw.
 
 use std::f32::consts::TAU;
 
@@ -16,10 +16,10 @@ use crate::{Component, Entity, Reflect, Transform, World};
 mod dim2;
 mod dim3;
 
-pub use dim2::{BoxCollider2D, CircleCollider2D, Physics2D, RigidBody2D};
+pub use dim2::{BoxCollider2D, CircleCollider2D, Joint2D, JointKind2D, Physics2D, RigidBody2D};
 pub use dim3::{
-    BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D, Hit3D, MeshCollider3D,
-    Physics3D, RigidBody3D, Shape3D, SphereCollider3D,
+    BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D, Hit3D, Joint3D, JointKind3D,
+    MeshCollider3D, Physics3D, RigidBody3D, Shape3D, SphereCollider3D,
 };
 
 /// How a [`RigidBody2D`] or a [`RigidBody3D`] moves.
@@ -41,7 +41,8 @@ pub enum BodyType {
 /// [`RigidBody2D`] or a [`RigidBody3D`] and a [`Transform`], in the order queries find them, and
 /// taking out each whose entity has gone or lost either; and takes a change to a body's components
 /// that the last step didn't make, a game's or an edit's, as where the body is, how fast it goes,
-/// how it moves or its colliders. Then it moves the bodies, and writes where each went and how fast
+/// how it moves or its colliders; then makes, changes or takes out the joint of each [`Joint2D`]
+/// and [`Joint3D`] as they say. Then it moves the bodies, and writes where each went and how fast
 /// into its components: a 2D body's translation across and up, its z as it was, and its rotation
 /// turned about Z as far as the body turned, so that what turns it otherwise stays; a 3D body's
 /// translation and rotation whole; and their velocities. A world is given a [`Physics2D`] or a
@@ -206,9 +207,76 @@ impl<L: Link> Links<L> {
     }
 }
 
+/// Why a joint joins nothing: the code it's warned of with, and why, to say.
+type Unjoined = (&'static str, String);
+
+/// The bodies a joint joins, whose fields name `named`, its `body_a` and `body_b`, each as `body_of`
+/// finds an entity's body, its handle and what else goes with it; or, where it joins nothing, why:
+/// a body it doesn't name, one gone, or one that physics doesn't move, as without a `body`, the name
+/// of a body's component, or under a parent (`physics.joint_no_body`); and one body named twice,
+/// as their handles alone tell (`physics.joint_one_body`).
+fn joined<H: Copy + PartialEq, S: Copy>(
+    world: &World,
+    named: [Option<Entity>; 2],
+    body: &str,
+    body_of: impl Fn(Entity) -> Option<(H, S)>,
+) -> Result<[(H, S); 2], Unjoined> {
+    let mut found = [None; 2];
+    for ((field, named), found) in ["body_a", "body_b"].into_iter().zip(named).zip(&mut found) {
+        let no_body = |why: String| ("physics.joint_no_body", why);
+        let Some(entity) = named else {
+            return Err(no_body(format!("its {field} names no entity")));
+        };
+        let Some(id) = world.id(entity) else {
+            return Err(no_body(format!("its {field}'s entity is gone")));
+        };
+        *found = body_of(entity);
+        if found.is_none() {
+            return Err(no_body(format!(
+                "its {field}, entity {id}, isn't a body that physics moves: it has no {body}, or \
+                 it's under a parent"
+            )));
+        }
+    }
+    match found {
+        [Some(a), Some(b)] if a.0 != b.0 => Ok([a, b]),
+        _ => {
+            let id = named[0].and_then(|entity| world.id(entity));
+            let id = id.expect("found alive");
+            let why = format!("its body_a and body_b are one body, entity {id}'s");
+            Err(("physics.joint_one_body", why))
+        }
+    }
+}
+
+/// Warns that the joint `entity`'s `name`, its component's, joins nothing, as `unjoined` says why,
+/// unless `warned`, why it was last warned of, says so already: once for each reason, while it
+/// joins nothing, so that a joint that goes from one reason to another is warned of each.
+fn warn_unjoined(
+    world: &World,
+    entity: Entity,
+    name: &str,
+    (code, why): Unjoined,
+    warned: &mut Option<String>,
+) {
+    if warned.as_deref() == Some(why.as_str()) {
+        return;
+    }
+    let id = world.id(entity).expect("found alive");
+    warn!(
+        code,
+        entity = %id,
+        "Entity {id}'s {name} joins nothing: {why}"
+    );
+    *warned = Some(why);
+}
+
 /// The color colliders' outlines draw in, linear: a light green, as physics debuggers draw them,
 /// apart from the grid's darker green axis.
 const OUTLINE: Vec4 = Vec4::new(0.3, 1.0, 0.3, 1.0);
+
+/// The color joints' lines draw in, linear: an orange, apart from the colliders' green.
+const JOINT: Vec4 = Vec4::new(1.0, 0.55, 0.1, 1.0);
 
 /// How wide colliders' outlines draw, in points: pixels of a window at a scale of 1.
 const OUTLINE_WIDTH: f32 = 2.0;
@@ -251,8 +319,9 @@ enum Outline {
 /// Draws into `draws` the outline of each 2D and 3D collider in `world` whose entity has a
 /// [`Transform`], 2 points wide in a window of `scale` pixels a point, where its entity draws this
 /// frame as `poses` has it, with the entity's ID, so that a pick of an outline finds its entity:
-/// the 2D colliders' first. Lines draw with the engine's line shader, which `shaders` adds the
-/// first time any do.
+/// the 2D colliders' first; then each joint's lines, as [`lines_between`] has them, with its own
+/// entity's ID, the 2D joints' first. Lines draw with the engine's line shader, which `shaders`
+/// adds the first time any do.
 pub(crate) fn draw_colliders(
     world: &World,
     poses: &Poses<'_>,
@@ -277,6 +346,52 @@ pub(crate) fn draw_colliders(
     };
     dim2::outlines(world, poses, &mut each);
     dim3::outlines(world, poses, &mut each);
+    let mut joined = |from, to, id| {
+        let line = Line {
+            from,
+            to,
+            color: JOINT,
+            width,
+        };
+        draws.push_line(shaders, Mat4::IDENTITY, line, id);
+    };
+    dim2::joint_lines(world, poses, &mut joined);
+    dim3::joint_lines(world, poses, &mut joined);
+}
+
+/// Gives `each` a joint's lines, in the world's space, with `id`, its entity's: from where its
+/// first body's entity draws, as `poses` has it in `world`, to its first anchor there, from there
+/// to its second, and from there to its second body's; `anchors` in each body's space, as
+/// [`Joint2D`] and [`Joint3D`] name them, and `bodies` its bodies. A joint draws none where either
+/// body is gone or has no [`Transform`], as it joins nothing there.
+fn lines_between(
+    world: &World,
+    poses: &Poses<'_>,
+    bodies: [Option<Entity>; 2],
+    anchors: [Vec3; 2],
+    id: u64,
+    each: &mut impl FnMut(Vec3, Vec3, u64),
+) {
+    let transform = world.component::<Transform>();
+    let matrix = |body: Option<Entity>| {
+        let (table, row) = world.table_row(body?)?;
+        let (table, row) = (table as usize, row as usize);
+        world.tables()[table]
+            .has(transform?)
+            .then(|| poses.matrix(table, row))
+    };
+    let (Some(a), Some(b)) = (matrix(bodies[0]), matrix(bodies[1])) else {
+        return;
+    };
+    let points = [
+        a.transform_point3(Vec3::ZERO),
+        a.transform_point3(anchors[0]),
+        b.transform_point3(anchors[1]),
+        b.transform_point3(Vec3::ZERO),
+    ];
+    for pair in points.windows(2) {
+        each(pair[0], pair[1], id);
+    }
 }
 
 /// Gives `each` the lines `outline` draws with, each as the matrix that places it and its ends in
@@ -448,6 +563,24 @@ mod tests {
         }
         assert!(near(reach[0], -1.25) && near(reach[1], 1.25), "{reach:?}");
         assert!(drawn(Outline::Rect(Mat4::IDENTITY)).is_empty());
+    }
+
+    /// A joint naming one body twice joins nothing (`physics.joint_one_body`), found by the body's
+    /// handle alone, so that what goes with it, as a scale that isn't a number, which equals nothing,
+    /// can't make one body two.
+    #[test]
+    fn a_joint_naming_one_body_twice_joins_nothing_whatever_its_scale() {
+        let mut world = World::default();
+        let body = world.spawn(Transform::IDENTITY);
+        let other = world.spawn(Transform::IDENTITY);
+        let found = |entity| Some((u32::from(entity == other), f32::NAN));
+        let once = joined(&world, [Some(body), Some(body)], "RigidBody3D", found);
+        assert_eq!(
+            once.map_err(|(code, _)| code),
+            Err("physics.joint_one_body")
+        );
+        let twice = joined(&world, [Some(body), Some(other)], "RigidBody3D", found);
+        assert!(twice.is_ok());
     }
 
     /// A world is given each kind of physics' resource the first time it steps with a body of that

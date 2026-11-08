@@ -131,6 +131,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Prefabs in the editor** (2026-11-08)
 - **Phase 15, particles and linked prefabs** (2026-11-08)
 - **Animation state machines** (2026-11-08)
+- **Joints and continuous collision** (2026-11-08)
 
 ## Now
 
@@ -553,14 +554,20 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
-| Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; joints; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
+| Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
 | Mesh colliders' outlines: `MeshCollider3D` outlines nothing, as its model shows where it is, and Sponza's would draw some 790,000 lines | Someone needs to see a mesh collider apart from its model, as one of another model's |
 | Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; a character's rotation turned by its controller, toward where it goes; and a character's own collision filter, as one that passes through other characters | Each with its first game use; the platforms with the 3D demo's level, if it moves |
 | Casts that give every hit along their way, rather than the first; overlap queries, what's within a shape or at a point; casts that pass through colliders by component or group rather than an entity's; and casts in 2D | Each with its first game use |
 | Flipbooks of sheets whose cells don't fill their texture, or have space between them, by cells in pixels as `SpriteSheet` takes them; clips, named runs of cells a game switches between; and events at a flipbook's cells, as a footstep's sound at a foot's | Each with its first game use; clips and events with the 3D demo's animated characters, if they need them |
 | Tweens of another entity's fields, or of fields deeper than a vector's component, as a list's element; tweens one after another or together as a sequence; a tween's end told to code and scripts, as an event, and scripts asking whether a field is tweening; and tweens of integers, or of colors through a space other than linear's | Each with its first game use |
 | A 3D body's rotation locked about some axes alone, as one that turns about Y but never tips: `RigidBody3D::fixed_rotation` locks all three, and what sets its rotation turns it | A game's body tips about some axes but not others |
-| Continuous collision detection, rapier's CCD, for a body fast enough to pass through a thin collider within a tick: each step tests where the bodies are at its end | A game's fast bodies pass through what they should hit, as bullets would |
+| Ragdolls: a skinned model's bones made bodies held by limited joints from its nodes | A game knocks a character down, or one goes limp |
+| Breakable joints, and what a joint holds with read back for scripts | A game breaks a bridge, a chain or a door off its hinges, or reacts to a joint's strain |
+| Multibody joints, rapier's reduced-coordinate ones, which keep long chains and ragdolls from stretching as impulse joints do | A chain or ragdoll of many links stretches or jitters |
+| Joints in the editor's view: anchors and axes as gizmos dragged where they hold, drawn over the meshes that now hide joints' lines | Joints are made in the editor by hand rather than by agents and scene text |
+| A joint's frames turned apart: a rotation in each body's space, so a fixed or prismatic joint holds bodies turned otherwise than alike and a revolute's 0 is elsewhere | A game welds or hinges bodies turned apart |
+| A spherical joint's limits and motors (cone and twist), and joints' softness (rapier's spring coefficients) | A ragdoll's shoulders, or a joint that should give |
+| A joint to a point in the world, without a static body to name | Scenes tire of hook entities |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
 | Telling the colliders physics doesn't simulate from those it does: one without a `RigidBody2D` or a `RigidBody3D`, or under a parent, outlines as the rest do | Someone wonders why an outlined collider doesn't collide |
 | Gravity from a scene or a setting: `Physics2D::gravity` and `Physics3D::gravity` are code's, Earth's by default | A game sets its own |

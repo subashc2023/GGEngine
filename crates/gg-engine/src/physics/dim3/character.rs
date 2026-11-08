@@ -7,7 +7,7 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use gg_core::math::Vec3;
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::{
-    ColliderHandle, Pose, QueryFilter, RigidBodyBuilder, RigidBodyHandle, Vector,
+    Collider, ColliderHandle, Pose, QueryFilter, RigidBodyBuilder, RigidBodyHandle, Vector,
 };
 use tracing::warn;
 
@@ -23,7 +23,8 @@ use crate::{Component, Entity, Tick, Transform, World};
 /// controller: as fast as `velocity` says, sliding along what it moves into, climbing slopes up to
 /// `max_slope` and steps up to `step_height`, and kept on the ground going down as far as `snap`.
 /// It moves as its entity's [`CapsuleCollider3D`], its body kinematic, which pushes what's dynamic
-/// in its way as it goes and stops for the rest, characters among them. Its entity needs no
+/// in its way as it goes and stops for the rest, characters among them, but passes through what a
+/// [`Joint3D`](super::Joint3D) joins it to without colliding. Its entity needs no
 /// [`RigidBody3D`]: one with one is moved as a body, and its controller does nothing, warned of
 /// once (`physics.not_character`), as is one without a `CapsuleCollider3D`; one under a parent
 /// isn't moved (`physics.child_body`), as a body under one isn't.
@@ -182,10 +183,12 @@ impl Physics3D {
     }
 
     /// Moves each character, in their order, as far as its controller lets it go toward where its
-    /// velocity takes it this step, against the colliders as the last step left them: its body
-    /// goes there as rapier steps, pushing what's dynamic that it hit on the way. Writes what that
-    /// left of its controller into its entity's, as it changed: its velocity, pulled down by
-    /// gravity and stopped by the ground and by what's above it, and whether it's grounded.
+    /// velocity takes it this step, against the colliders as the last step left them but those of
+    /// the bodies joined to it without colliding, as a [`Joint3D`](super::Joint3D)'s
+    /// `bodies_collide` says: its body goes there as rapier steps, pushing what's dynamic that it
+    /// hit on the way. Writes what that left of its controller into its entity's, as it changed:
+    /// its velocity, pulled down by gravity and stopped by the ground and by what's above it, and
+    /// whether it's grounded.
     pub(super) fn move_characters(&mut self, world: &mut World) {
         let dt = Tick::DT.as_secs_f32();
         let Rapier {
@@ -193,6 +196,7 @@ impl Physics3D {
             colliders,
             broad_phase,
             narrow_phase,
+            impulse_joints,
             ..
         } = &mut self.rapier;
         for character in &mut self.characters.linked {
@@ -222,7 +226,21 @@ impl Physics3D {
             let at = *body.position() * on_body.unwrap_or(Pose::IDENTITY);
             let mass = collider.mass();
             let moving = controller.controller();
-            let alone = QueryFilter::new().exclude_rigid_body(character.body);
+            let own = character.body;
+            // What a joint keeps it from colliding with, as rapier's contacts leave out but its
+            // queries don't: asked only of a character joined to something, so that the rest sweep
+            // as they did.
+            let apart = |_: ColliderHandle, other: &Collider| {
+                let joined = other
+                    .parent()
+                    .map(|other| impulse_joints.joints_between(own, other));
+                !joined
+                    .is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
+            };
+            let mut alone = QueryFilter::new().exclude_rigid_body(own);
+            if impulse_joints.attached_joints(own).next().is_some() {
+                alone = alone.predicate(&apart);
+            }
             let dispatcher = narrow_phase.query_dispatcher();
             let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, alone);
             self.hits.clear();
@@ -798,6 +816,6 @@ pub(super) mod tests {
         let walkers = course(&mut world);
         walk(&mut world, &walkers, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0xe0b5_3e92_2823_299e, "{content:#018x}");
+        assert_eq!(content, 0x869f_f714_d0cc_6e4d, "{content:#018x}");
     }
 }

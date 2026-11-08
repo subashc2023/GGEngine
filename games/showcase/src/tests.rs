@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 27, "{scenes:?}");
+    assert_eq!(scenes.len(), 28, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -388,6 +388,86 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
     let walker_at = transform(cx.world(), walker).translation;
     let off = near - walker_at - Vec3::Y * 2.0;
     assert!(off.length() < 1.75, "in front of the wall: {off}");
+}
+
+/// The joints scene, played: its bridge's planks stay on their hinges; its rope keeps its ball no
+/// further than its length, its tether drawn from the hook to the ball; the door swings out one
+/// way, then, as its swing turns its motor around through the joint's fields, the other; and of
+/// the balls fired at the thin plate, the marbles, which have continuous collision, never pass it,
+/// where some of the orange balls, which don't, do.
+#[test]
+fn the_joints_scene_holds_its_bodies_and_stops_only_whats_swept() {
+    use gg_engine::{Joint3D, Name};
+
+    let (mut cx, mut showcase) = loaded();
+    let path = dir().join("scenes").join("joints.ron");
+    cx.load_scene_file(&path).expect("loaded");
+    let named = |world: &World, name: &str| -> Vec<Entity> {
+        let found = world.query::<(Entity, &Name)>();
+        let found = found.filter(|(_, named)| named.0 == name);
+        found.map(|(entity, _)| entity).collect()
+    };
+    let world = cx.world_mut();
+    let [marbles, balls, hinges] =
+        ["Marble, continuous", "Ball", "Bridge hinge"].map(|name| named(world, name));
+    assert_eq!((marbles.len(), balls.len(), hinges.len()), (3, 3, 10));
+    let [rope] = named(world, "Rope")[..] else {
+        panic!("one rope");
+    };
+    let [door] = named(world, "Door")[..] else {
+        panic!("one door");
+    };
+    let transform = |world: &World, entity| *world.get::<Transform>(entity).expect("placed");
+    let anchored = |world: &World, body: Option<Entity>, anchor: Vec3| {
+        let body = body.expect("a body");
+        transform(world, body).matrix().transform_point3(anchor)
+    };
+    let door_turned = |world: &World| {
+        let x = transform(world, door).rotation * Vec3::X;
+        gg_engine::math::libm::atan2f(-x.z, x.x)
+    };
+    let (mut passed, mut swung) = (0, [0.0f32; 2]);
+    for number in 0..320 {
+        let world = cx.world_mut();
+        showcase.tick(world, Tick { number });
+        for &marble in &marbles {
+            let x = transform(world, marble).translation.x;
+            assert!(x < 5.2, "a marble passed the plate at tick {number}: {x}");
+        }
+        passed += balls
+            .iter()
+            .filter(|&&ball| transform(world, ball).translation.x > 5.3)
+            .count();
+        let roped = *world.get::<Joint3D>(rope).expect("a joint");
+        let ends = [
+            anchored(world, roped.body_a, roped.anchor_a),
+            anchored(world, roped.body_b, roped.anchor_b),
+        ];
+        assert!(
+            ends[0].distance(ends[1]) < 1.73,
+            "past the rope's length at tick {number}"
+        );
+        let drawn = transform(world, rope);
+        assert!(drawn.translation.distance((ends[0] + ends[1]) * 0.5) < 1e-4);
+        // The swing turns the door's motor around every 2.5 seconds, 160 ticks.
+        if number == 150 || number == 310 {
+            swung[usize::from(number == 310)] = door_turned(world);
+        }
+    }
+    assert!(passed > 0, "no orange ball passed the plate");
+    assert!(swung[0] > 1.0 && swung[1] < -1.0, "{swung:?}");
+    let world = cx.world();
+    for hinge in hinges {
+        let joint = *world.get::<Joint3D>(hinge).expect("a joint");
+        let ends = [
+            anchored(world, joint.body_a, joint.anchor_a),
+            anchored(world, joint.body_b, joint.anchor_b),
+        ];
+        assert!(
+            ends[0].distance(ends[1]) < 0.02,
+            "a plank off its hinge: {ends:?}"
+        );
+    }
 }
 
 /// A chime rings once its seconds have passed, its tone placed on its entity, its circle flashing

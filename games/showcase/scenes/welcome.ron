@@ -139,7 +139,7 @@
         "63588cecf0028036": (
             Name: ("Hint"),
             Text: (
-                text: "Open a scene in the Scenes panel, below the Entities, then press Play to run it.\nsprites  ·  flipbooks  ·  tweens  ·  shapes  ·  text  ·  ui  ·  hierarchy  ·  physics  ·  sounds  ·  music  ·  shader\nmodels  ·  skeletal  ·  listen, click to look about  ·  hdr  ·  lights  ·  sky  ·  shadows  ·  physics3d  ·  particles\nprefabs  ·  states  ·  walk, with WASD and Space  ·  sponza  ·  bistro  ·  bistro_grid",
+                text: "Open a scene in the Scenes panel, below the Entities, then press Play to run it.\nsprites  ·  flipbooks  ·  tweens  ·  shapes  ·  text  ·  ui  ·  hierarchy  ·  physics  ·  sounds  ·  music  ·  shader\nmodels  ·  skeletal  ·  listen, click to look about  ·  hdr  ·  lights  ·  sky  ·  shadows  ·  physics3d  ·  particles\nprefabs  ·  states  ·  joints  ·  walk, with WASD and Space  ·  sponza  ·  bistro  ·  bistro_grid",
                 font: None,
                 size: 0.26,
                 color: (0.45, 0.5, 0.62, 1.0),

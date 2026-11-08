@@ -224,8 +224,8 @@ pub use particles::{EmitterShape, ParticleBlend, ParticleEmitter};
 pub use perf::PerfPanel;
 pub use physics::{
     BodyType, BoxCollider2D, BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D,
-    CircleCollider2D, Hit3D, MeshCollider3D, Physics2D, Physics3D, RigidBody2D, RigidBody3D,
-    Shape3D, SphereCollider3D, step_physics,
+    CircleCollider2D, Hit3D, Joint2D, Joint3D, JointKind2D, JointKind3D, MeshCollider3D, Physics2D,
+    Physics3D, RigidBody2D, RigidBody3D, Shape3D, SphereCollider3D, step_physics,
 };
 pub use prefab::{Prefab, PrefabRoot};
 use recording::Recorder;

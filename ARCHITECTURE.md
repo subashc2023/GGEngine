@@ -1355,12 +1355,51 @@ rather than as the cooker leaves them, so that both runs collide alike; every mo
 meshes' surfaces so for physics, and a model read again, as its file changes, has its colliders
 made again. `step_physics` is a system a layer's tick runs, stepping 2D physics, then 3D. rapier is
 built with `enhanced-determinism`, so that a step gives the same bits on every platform. Physics'
-state, rapier's bodies, colliders and contacts and what sleeps, is the world's `Physics2D` and
-`Physics3D` resources, each given to a world as it first steps with a body of its kind, which
-snapshots copy, as [ECS](#ecs) describes: bodies made again from their components alone wouldn't
-step as the world did. A snapshot file holds them through rapier's own serialization, which writes
-a mesh collider's triangles whole, at a cost [DEFECTS.md](docs/DEFECTS.md) weighs. A body under a
-parent isn't moved, since its transform is in its parent's space (`physics.child_body`).
+state, rapier's bodies, colliders, joints and contacts and what sleeps, is the world's
+`Physics2D` and `Physics3D` resources, each given to a world as it first steps with a body of its
+kind, which snapshots copy, as [ECS](#ecs) describes: bodies made again from their components
+alone wouldn't step as the world did. A snapshot file holds them through rapier's own
+serialization, which writes a mesh collider's triangles whole, at a cost
+[DEFECTS.md](docs/DEFECTS.md) weighs. A body under a parent isn't moved, since its transform is
+in its parent's space (`physics.child_body`).
+
+A joint is a `Joint2D` or a `Joint3D`, a component naming the two bodies it holds together,
+`body_a` and `body_b`, by their entities, which rapier's impulse joints hold: fixed; revolute, a
+hinge about its axis; prismatic, a slider along it; spherical, a ball joint, in 3D; a rope, which
+keeps its anchors no further apart than its length; and a spring, which pulls them toward it. Its
+anchors are in each body's space, scaled with it as a collider's offset is, and its frames are its
+anchors and its axis there, the axis turned with each body but not scaled, so that bodies turned
+alike stay alike whatever their scales, a mirrored body's too; so the component alone says where it
+holds, which scenes save, the Inspector and the tool API edit and the hash reads. A revolute's or a
+prismatic's limits and motor are its fields too, each a field of its own, so that a script sets a
+motor's target as it sets any field. A joint is on an entity of its own or on either body's,
+naming both, rather than on one body naming the other: so that a body is in as many joints as name
+it, as a chain's link is in two and a ragdoll's torso in four, with no rule for where a second
+goes; so that a joint comes and goes, as an edit's create or delete, without changing either
+body's components, as between two prefabs' instances, whose overrides would otherwise hold it; and
+so that an entity holds one joint, whatever its kind. Physics' joints are rapier's, in its joint sets, which snapshots copy and
+snapshot files hold with the rest of its state, each with its entity, its component as the last
+step made it and why it was last warned of; rapier's pipeline, its workspace, keeps the joints it
+last solved by counts the joint set copied brings back, so a copy taken into physics' memory, as a
+rollback's is, makes it anew, as a copy has it, at the cost of its memory made again. Each step
+takes the joints in after the bodies, making, changing or taking out each as its component or a
+body it names changed: a body made again, as one put under a parent and back, is another of
+rapier's, which takes its joints with it, and its joints are made again. A joint whose bodies
+don't collide, as made or changed, has rapier find their colliders' contacts afresh, as it
+recycles a touching pair's while it barely moves, past its check of the pair's joints; and a
+character's sweep passes through what it's joined to so, as rapier's contacts do. One naming an
+entity that isn't a body that physics moves joins nothing, warned of once for each reason
+(`physics.joint_no_body`), as does one naming one body twice, by its handle
+(`physics.joint_one_body`), until it joins two; and its joint goes as it does, or its entity, or
+either body.
+
+A body's `continuous_collision` makes it a bullet, as rapier calls it: at each step it goes fast
+in, rapier sweeps its colliders along its way against every other body but bullets, stopping it at
+the first it would otherwise pass through between the step's start and its end, as a small fast
+ball passes through a thin wall. rapier sweeps each fast dynamic body against what's static anyway,
+so it's for what's fired at what moves, kinematic or dynamic; and it's off by default, as each sweep
+costs. Joints, motors and sweeps are rapier's arithmetic, which a reference hash of each kind of
+joint, 2D and 3D, with a bullet among them, checks on every platform.
 
 A character is an entity with a `CharacterController3D` and a `CapsuleCollider3D`, which rapier's
 kinematic character controller moves at each step as fast as the controller's `velocity` says,
@@ -1382,9 +1421,11 @@ body's rapier holds its entity, which a snapshot file checks.
 
 `Context::set_colliders_shown` outlines the world's colliders where their entities draw, in lines,
 a sphere by its rings about its three axes and a capsule by its rings, its side's lines and its
-caps' arcs, which draw over the rest of the view but where an opaque mesh is nearer, as
+caps' arcs, and draws each joint, in orange, as lines from its first body to its anchors and on to
+its second, which draw over the rest of the view but where an opaque mesh is nearer, as
 [Rendering](#rendering) says, rather than nudged toward the camera: so they show from behind a
-sprite as from in front of it, since sprites test depth without writing it.
+sprite as from in front of it, since sprites test depth without writing it, and a joint inside the
+meshes of the bodies it joins shows only where they don't hide it.
 
 ## Animation
 

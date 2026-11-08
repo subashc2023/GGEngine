@@ -24,18 +24,22 @@ use crate::recording::text;
 use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
 
 mod character;
+mod joint;
 mod query;
 
 use character::Character;
 pub use character::CharacterController3D;
+pub(super) use joint::joint_lines;
+pub use joint::{Joint3D, JointKind3D};
+use joint::{Jointed, SavedJoint};
 pub use query::{Cast, Hit3D, Shape3D};
 
 /// A body that 3D physics moves, at each tick a layer runs [`step_physics`](crate::step_physics)
 /// in: its entity's [`Transform`]'s translation and rotation, and the velocities here, which each
 /// step reads and writes back. It collides as its entity's [`BoxCollider3D`], [`SphereCollider3D`]
 /// and [`CapsuleCollider3D`], whichever it has, which give a dynamic body its mass too, together
-/// where it has more than one. A body under a parent isn't moved, since its transform is in its
-/// parent's space (`physics.child_body`).
+/// where it has more than one; and [`Joint3D`]s hold it to other bodies. A body under a parent
+/// isn't moved, since its transform is in its parent's space (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody3D {
     /// How it moves: dynamic, by its velocity, which gravity and what it hits change; kinematic, by
@@ -45,6 +49,12 @@ pub struct RigidBody3D {
     /// Whether it never turns, as a character that stays upright: what sets its rotation still
     /// turns it.
     pub fixed_rotation: bool,
+    /// Whether a step that it goes fast in sweeps it along its way against what moves too, rapier's
+    /// continuous collision, so that it stops at a kinematic or dynamic body that it would
+    /// otherwise pass through between one step and the next, as a small fast ball passes through a
+    /// thin moving wall. Each dynamic body that goes fast is swept against what's static anyway,
+    /// and one with this against all but others with it, as rapier sweeps bullets, at some cost.
+    pub continuous_collision: bool,
     /// How fast it goes, in units a second.
     pub velocity: Vec3,
     /// How fast it turns, about the axis it points along, in radians a second: counterclockwise as
@@ -320,9 +330,9 @@ fn built(
 /// The world's 3D physics, a [`Resource`](crate::Resource) that
 /// [`step_physics`](crate::step_physics) gives a world the first time it steps one with a
 /// [`RigidBody3D`] and without it, or that a game inserts first, with its gravity: rapier's bodies,
-/// colliders and contacts, which each step carries on from, and each body's entity, so that a
-/// snapshot restored steps as its world did. A world cleared, or whose entities a scene replaced,
-/// keeps it, its bodies going at the next step, as their entities have.
+/// colliders, joints and contacts, which each step carries on from, and each body's and joint's
+/// entity, so that a snapshot restored steps as its world did. A world cleared, or whose entities a
+/// scene replaced, keeps it, its bodies and joints going at the next step, as their entities have.
 pub struct Physics3D {
     /// Which way everything dynamic falls, and how much faster it goes each second, in units a
     /// second: down along -Y at 9.81 by default, Earth's, as though a unit were a meter; and the
@@ -333,6 +343,7 @@ pub struct Physics3D {
     pipeline: PhysicsPipeline,
     links: Links<Linked>,
     characters: Links<Character>,
+    joints: Links<Jointed>,
     /// The entities with a `CharacterController3D` that aren't characters, as they lack a
     /// `CapsuleCollider3D` or have a `RigidBody3D`, warned of once each.
     unmoved: Vec<Entity>,
@@ -404,6 +415,7 @@ impl Default for Physics3D {
             pipeline: PhysicsPipeline::new(),
             links: Links::default(),
             characters: Links::default(),
+            joints: Links::default(),
             unmoved: Vec::new(),
             hits: Vec::new(),
         }
@@ -418,26 +430,33 @@ impl Clone for Physics3D {
             pipeline: PhysicsPipeline::new(),
             links: self.links.clone(),
             characters: self.characters.clone(),
+            joints: self.joints.clone(),
             unmoved: self.unmoved.clone(),
             hits: Vec::new(),
         }
     }
 
     /// Copies `source` into the memory this one holds, as far as rapier's types copy so, keeping
-    /// its own workspaces.
+    /// its own workspace for the characters, but not rapier's: its pipeline keeps the joints it last
+    /// solved and its solver's layout of them, by counts that the joint set copied brings back, so
+    /// that, kept, it would solve another world's joints, or ones gone, at the next step. A new one,
+    /// as a copy has, costs its workspace's memory made again as that step goes.
     fn clone_from(&mut self, source: &Self) {
         self.gravity = source.gravity;
         self.rapier.clone_from(&source.rapier);
+        self.pipeline = PhysicsPipeline::new();
         self.links.clone_from(&source.links);
         self.characters.clone_from(&source.characters);
+        self.joints.clone_from(&source.joints);
         self.unmoved.clone_from(&source.unmoved);
     }
 }
 
 /// What a snapshot file holds of [`Physics3D`], `R` its rapier's state, as its own or borrowed: its
-/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body
-/// and each character, with its entity by its ID; and the bodies under a parent and the entities
-/// with a character's controller that aren't characters warned of, by their entities' IDs.
+/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body,
+/// each character and each joint, with its entity by its ID; and the bodies under a parent and the
+/// entities with a character's controller that aren't characters warned of, by their entities'
+/// IDs. Text that lists no joints reads as having none, so that a world saved without them loads.
 #[derive(Serialize, Deserialize)]
 struct SavedPhysics<R> {
     gravity: [f32; 3],
@@ -447,6 +466,8 @@ struct SavedPhysics<R> {
     characters: Vec<SavedCharacter>,
     character_children: Vec<Option<u64>>,
     unmoved: Vec<Option<u64>>,
+    #[serde(default)]
+    joints: Vec<SavedJoint>,
 }
 
 /// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
@@ -481,8 +502,8 @@ struct SavedCharacter {
 /// process steps on as the one saved would have: its contacts' warm starts, its islands' sleep and
 /// its handles as they were, which bodies made again from their components would lose. A rapier of
 /// another version may not read it, which leaves physics out, to be made again from the entities,
-/// as does text whose bodies name a rigid body or a collider that its rapier's state doesn't hold
-/// as theirs (`physics.load`).
+/// as does text whose bodies name a rigid body or a collider, or whose joints a joint, that its
+/// rapier's state doesn't hold as theirs (`physics.load`).
 impl Saved for Physics3D {
     const NAME: &'static str = "Physics3D";
 
@@ -516,6 +537,14 @@ impl Saved for Physics3D {
                 transform: value(&character.transform),
                 capsule: value(&character.capsule),
             });
+        let joints = self.joints.linked.iter().map(|jointed| SavedJoint {
+            entity: id(jointed.entity),
+            handle: jointed.handle,
+            bodies: jointed.bodies,
+            scales: jointed.scales.map(|scale| scale.to_array()),
+            joint: value(&jointed.joint),
+            warned: jointed.warned.clone(),
+        });
         let ids = |entities: &[Entity]| entities.iter().map(|&entity| id(entity)).collect();
         let saved = SavedPhysics {
             gravity: self.gravity.to_array(),
@@ -525,6 +554,7 @@ impl Saved for Physics3D {
             characters: characters.collect(),
             character_children: ids(&self.characters.children),
             unmoved: ids(&self.unmoved),
+            joints: joints.collect(),
         };
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
@@ -611,17 +641,45 @@ impl Saved for Physics3D {
                 return Err(refused(entity, what));
             }
         }
+        // A joint's handle, which a step reaches rapier's joint by: there, and linked once.
+        let refused_joint = |entity: Entity, what: &str| {
+            let who = world.id(entity);
+            let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
+            Error::new("physics.load", format!("{who}'s joint {what}"))
+        };
+        let mut joints = Vec::with_capacity(saved.joints.len());
+        let mut handles = HashSet::with_capacity(saved.joints.len());
+        for joint in saved.joints {
+            let entity = entity(joint.entity);
+            if let Some(handle) = joint.handle
+                && (!rapier.impulse_joints.contains(handle) || !handles.insert(handle))
+            {
+                let what = "names no joint of rapier's, or another joint's";
+                return Err(refused_joint(entity, what));
+            }
+            joints.push(Jointed {
+                entity,
+                handle: joint.handle,
+                bodies: joint.bodies,
+                scales: joint.scales.map(Vec3::from_array),
+                joint: world.component_from_text(&joint.joint)?,
+                warned: joint.warned,
+            });
+        }
         let entities = |ids: Vec<Option<u64>>| ids.into_iter().map(entity).collect();
         let links = Links::new(linked, entities(saved.children));
         let links = links.map_err(|twice| refused(twice, "is its second"))?;
         let characters = Links::new(characters, entities(saved.character_children));
         let characters = characters.map_err(|twice| refused(twice, "is its second"))?;
+        let joints = Links::new(joints, Vec::new());
+        let joints = joints.map_err(|twice| refused_joint(twice, "is its second"))?;
         Ok(Self {
             gravity: Vec3::from_array(saved.gravity),
             rapier: saved.rapier,
             pipeline: PhysicsPipeline::new(),
             links,
             characters,
+            joints,
             unmoved: entities(saved.unmoved),
             hits: Vec::new(),
         })
@@ -642,8 +700,9 @@ pub(super) fn step(world: &mut World) {
 }
 
 impl Physics3D {
-    /// Takes in what changed, moves the characters as far as what they move into lets them, then
-    /// steps rapier, which carries the characters there, and writes back where everything went.
+    /// Takes in what changed, the joints after the bodies and the characters they join, moves the
+    /// characters as far as what they move into lets them, then steps rapier, which carries the
+    /// characters there, and writes back where everything went.
     fn step(&mut self, world: &mut World) {
         self.unlink_gone(world);
         self.unlink_gone_characters(world);
@@ -656,7 +715,15 @@ impl Physics3D {
                 }
             });
         self.find_characters(world);
+        self.join(world);
         self.move_characters(world);
+        self.step_rapier();
+        self.write_back(world);
+        self.write_back_characters(world);
+    }
+
+    /// Steps rapier a tick, its bodies, characters and joints as they've been taken in.
+    fn step_rapier(&mut self) {
         let Rapier {
             bodies,
             colliders,
@@ -684,8 +751,6 @@ impl Physics3D {
             &(),
             &(),
         );
-        self.write_back(world);
-        self.write_back_characters(world);
     }
 
     /// Takes out each body whose entity has gone, lost its `RigidBody3D` or its `Transform`, or
@@ -770,6 +835,7 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
         .pose(at)
         .linvel(vector(rigid_body.velocity))
         .angvel(vector(rigid_body.angular_velocity))
+        .ccd_enabled(rigid_body.continuous_collision)
         .user_data(user_data(entity));
     if rigid_body.fixed_rotation {
         built = built.lock_rotations();
@@ -820,6 +886,9 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     }
     if rigid_body.fixed_rotation != was.fixed_rotation {
         body.lock_rotations(rigid_body.fixed_rotation, true);
+    }
+    if rigid_body.continuous_collision != was.continuous_collision {
+        body.enable_ccd(rigid_body.continuous_collision);
     }
     if rigid_body.velocity != was.velocity {
         body.set_linvel(vector(rigid_body.velocity), true);
@@ -1215,7 +1284,7 @@ mod tests {
         pile(&mut world);
         step(&mut world, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0x336b_b560_82cb_aac1, "{content:#018x}");
+        assert_eq!(content, 0x9f58_bd03_4a49_8885, "{content:#018x}");
     }
 
     /// What a game or an edit changes of a body's components between steps, the next step takes:
@@ -1258,6 +1327,61 @@ mod tests {
         step(&mut world, 1);
         let rotation = transform(&world, moved).rotation;
         assert!(turned_as(rotation, turned), "{rotation:?}");
+    }
+
+    /// A small ball going fast enough that a step carries it from one side of a thin kinematic wall
+    /// to the other passes through it, but one with continuous collision stops at it, and stays
+    /// this side, as does one given continuous collision between steps, from the next; and one
+    /// without stops at a thin static wall, as every fast body is swept against what's static.
+    #[test]
+    fn continuous_collision_stops_what_a_step_would_carry_through_a_thin_wall() {
+        let mut world = World::default();
+        let wall = |world: &mut World, z: f32, body_type| {
+            let wall = Transform {
+                translation: Vec3::new(5.0, 0.0, z),
+                scale: Vec3::new(0.05, 4.0, 3.0),
+                ..Transform::IDENTITY
+            };
+            let body = RigidBody3D {
+                body_type,
+                ..RigidBody3D::default()
+            };
+            world.spawn((wall, body, BoxCollider3D::default()));
+        };
+        wall(&mut world, -2.0, BodyType::Kinematic);
+        wall(&mut world, 2.0, BodyType::Static);
+        // 0.9375 units a step: from x 0, at 4.6875, short of the walls, then at 5.625, past them.
+        let fired = |world: &mut World, z: f32, continuous_collision: bool| {
+            let at = Transform {
+                translation: Vec3::new(0.0, 0.0, z),
+                ..Transform::IDENTITY
+            };
+            let body = RigidBody3D {
+                continuous_collision,
+                velocity: Vec3::new(60.0, 0.0, 0.0),
+                ..RigidBody3D::default()
+            };
+            let ball = SphereCollider3D {
+                radius: 0.1,
+                ..SphereCollider3D::default()
+            };
+            world.spawn((at, body, ball))
+        };
+        let through = fired(&mut world, -3.0, false);
+        let stopped = fired(&mut world, -2.0, true);
+        let late = fired(&mut world, -1.0, false);
+        let swept = fired(&mut world, 2.0, false);
+        step(&mut world, 1);
+        world
+            .get_mut::<RigidBody3D>(late)
+            .expect("alive")
+            .continuous_collision = true;
+        step(&mut world, 15);
+        let x = |entity| transform(&world, entity).translation.x;
+        assert!(x(through) > 5.5, "through the wall: {}", x(through));
+        for ball in [stopped, late, swept] {
+            assert!(x(ball) < 4.975, "stopped this side: {}", x(ball));
+        }
     }
 
     /// A sphere is as large as its radius scaled by the largest of its entity's scales, and a

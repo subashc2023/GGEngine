@@ -55,8 +55,8 @@ use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
 use crate::perf::Perf;
 use crate::physics::{
-    self, BoxCollider3D, CapsuleCollider3D, CharacterController3D, CircleCollider2D,
-    MeshCollider3D, Physics2D, Physics3D, RigidBody3D, SphereCollider3D,
+    self, BoxCollider3D, CapsuleCollider3D, CharacterController3D, CircleCollider2D, Joint2D,
+    Joint3D, MeshCollider3D, Physics2D, Physics3D, RigidBody3D, SphereCollider3D,
 };
 use crate::placed::Placed;
 use crate::prefab;
@@ -595,6 +595,8 @@ impl Context {
             world.register::<CapsuleCollider3D>()?;
             world.register::<MeshCollider3D>()?;
             world.register::<CharacterController3D>()?;
+            world.register::<Joint2D>()?;
+            world.register::<Joint3D>()?;
             world.register::<Flipbook>()?;
             world.register::<ParticleEmitter>()?;
             world.register::<Tweens>()?;

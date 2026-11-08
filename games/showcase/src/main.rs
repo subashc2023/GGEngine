@@ -41,8 +41,12 @@
 //! lantern taking what its prefab's file changes as it's saved (`prefabs.ron`, of
 //! `prefabs/lantern.prefab` and `prefabs/lamppost.prefab`); the Fox driven round a circle by a state
 //! machine, surveying as it stands, walking, jogging and running blended by its speed, and looking
-//! about once a round at a trigger, a line of text saying its state and speed (`states.ron`); and,
-//! once `cargo
+//! about once a round at a trigger, a line of text saying its state and speed (`states.ron`);
+//! joints, a bridge of planks on revolute joints, a pendulum on a spherical one, a door its motor
+//! swings to either side within its limits, a piston its motor drives along a prismatic joint
+//! between its limits and a ball on a rope, and continuous collision, balls fired at a thin plate
+//! that turns, those that have it stopping at it where some of the others pass through
+//! (`joints.ron`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and walked through
 //! by a character that the keys or a pad move, a camera following it, Sponza's triangles what it
 //! collides with, among crates and balls it pushes (`walk.ron`), and Amazon
@@ -56,13 +60,13 @@
 //! jumping by Space or South, `scripts/follow.luau` follows it with a camera, casting back
 //! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
 //! so often, a tween easing it back, `scripts/moods.luau` cross-fades its fox to its next clip
-//! every few seconds through `gg.play`, and `scripts/pace.luau` walks its fox round, setting its
-//! state machine's speed and pulling its trigger through `gg.set_param`; and animation and physics
-//! step, so that each scene moves as
-//! it plays, in the editor from its Play, and in the reference player, which runs the game's
-//! package without its code, and so without the keys' walking and its own components: the
-//! chimes, the bursters, the jukebox, the HUD, the plasma, the look and the state labels, which its
-//! code registers and runs.
+//! every few seconds through `gg.play`, `scripts/pace.luau` walks its fox round, setting its state
+//! machine's speed and pulling its trigger through `gg.set_param`, and `scripts/swing.luau` turns
+//! its joint's motor around every few seconds through the joint's fields; and animation and
+//! physics step, so that each scene moves as it plays, in the editor from its Play, and in the
+//! reference player, which runs the game's package without its code, and so without the keys'
+//! walking and its own components: the chimes, the bursters, the jukebox, the HUD, the plasma, the
+//! look, the state labels, the tether and the launches, which its code registers and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -79,9 +83,10 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
     Actions, Align, AnimationStates, App, Binding, Blend, Bus, Change, Commands, Component,
-    Context, Curve, Ease, Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton,
-    Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, Scripts, Shader, Sound, Source,
-    Sprite, Stick, Text, TextStyle, Tick, Transform, Tween, World, step_animation, step_physics,
+    Context, Curve, Ease, Entity, Error, Event, Font, Joint3D, Key, Layer, Mesh, MeshDraw,
+    MouseButton, Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, RigidBody3D,
+    Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween, World,
+    step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -100,13 +105,14 @@ fn app() -> App {
 }
 
 /// The game's scripts, by their paths from its directory: each declares the component it is.
-const SCRIPTS: [&str; 7] = [
+const SCRIPTS: [&str; 8] = [
     "scripts/bob.luau",
     "scripts/follow.luau",
     "scripts/moods.luau",
     "scripts/pace.luau",
     "scripts/pulse.luau",
     "scripts/spin.luau",
+    "scripts/swing.luau",
     "scripts/walk.luau",
 ];
 
@@ -233,6 +239,30 @@ struct StateLabel {
     of: Option<Entity>,
 }
 
+/// Places its entity, a model a unit tall along its Y, from one anchor of the [`Joint3D`] on it to
+/// the other, where the last tick left the joint's bodies, `thickness` across: `joints.ron`'s rope.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Tether {
+    /// How wide and deep it is.
+    #[reflect(min = 0.0, default = 0.03)]
+    thickness: f32,
+}
+
+/// Fires its entity, a body, every `every` seconds of the world's ticks: puts it at `from`,
+/// unturned, going at `velocity`: `joints.ron`'s balls, fired at a thin plate.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Launch {
+    /// Where it's fired from.
+    from: Vec3,
+    /// How fast it's fired, in units a second.
+    velocity: Vec3,
+    /// The seconds between its firings.
+    #[reflect(min = 0.05, default = 1.0)]
+    every: f32,
+    /// The seconds since it was last fired; negative, a wait before its first.
+    time: f32,
+}
+
 /// A corner of the plasma's square, as `shaders/plasma.slang` reads it: where it is in the square's
 /// own space, and where it is across the square, from 0 to 1.
 #[repr(C)]
@@ -328,7 +358,9 @@ fn register(world: &mut World) {
         world.register::<Hud>()?;
         world.register::<Plasma>()?;
         world.register::<Look>()?;
-        world.register::<StateLabel>()
+        world.register::<StateLabel>()?;
+        world.register::<Tether>()?;
+        world.register::<Launch>()
     });
     registered.expect("the game's components describe themselves");
 }
@@ -338,8 +370,9 @@ fn register(world: &mut World) {
 /// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
 /// it attaches; and at each tick applies what the keys, the mouse and the HUD's button did to its
 /// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters'
-/// emitters, counts the HUDs' ticks, steps animation and then physics, gives the plasmas their
-/// draws and writes the state labels' text. As it updates, it
+/// emitters, counts the HUDs' ticks, fires the launches' bodies, steps animation and then physics,
+/// places the tethers, gives the plasmas their draws and writes the state labels' text. As it
+/// updates, it
 /// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
 /// and draws the HUD while a HUD is. A script, an asset or the
 /// start scene that doesn't load ends the run with its error, through [`Context::fail`].
@@ -349,10 +382,12 @@ struct Showcase {
     commands: Vec<Command>,
     /// Once loaded.
     assets: Option<Assets>,
-    /// The chimes that rang at a tick, gathered before they play, and the plasmas' draws, before
-    /// they're given: kept, so that ticks reuse their room.
+    /// The chimes that rang at a tick, gathered before they play, the plasmas' draws, before
+    /// they're given, and the tethers' places, before they're placed: kept, so that ticks reuse
+    /// their room.
     rang: Vec<(Entity, Tone)>,
     drawn: Vec<(Entity, MeshDraw)>,
+    tethered: Vec<(Entity, Transform)>,
     /// The HUD's numbers' text, kept so that frames reuse its room.
     text: String,
     /// The state labels found at a tick, each with the entity it tells of, and the text it says,
@@ -391,6 +426,7 @@ impl Showcase {
             assets: None,
             rang: Vec::new(),
             drawn: Vec::new(),
+            tethered: Vec::new(),
             text: String::new(),
             labeled: Vec::new(),
             label: String::new(),
@@ -431,6 +467,53 @@ impl Showcase {
                 burster.time -= burster.every;
                 emitter.bursts = emitter.bursts.wrapping_add(1);
             }
+        }
+    }
+
+    /// Fires each of `world`'s launches' bodies whose time has come.
+    fn launch(world: &mut World) {
+        let dt = Tick::DT.as_secs_f32();
+        let launches = world.query_mut::<(&mut Launch, &mut Transform, &mut RigidBody3D)>();
+        for (launch, transform, body) in launches {
+            launch.time += dt;
+            if launch.time >= launch.every {
+                launch.time -= launch.every;
+                transform.translation = launch.from;
+                transform.rotation = Quat::IDENTITY;
+                body.velocity = launch.velocity;
+                body.angular_velocity = Vec3::ZERO;
+            }
+        }
+    }
+
+    /// Places each of `world`'s tethers from one anchor of its joint to the other, as its bodies
+    /// are now, where that moves it: none of a joint whose bodies aren't both there.
+    fn tether(&mut self, world: &mut World) {
+        let anchored = |body: Option<Entity>, anchor: Vec3| {
+            let transform = world.get::<Transform>(body?)?;
+            Some(transform.matrix().transform_point3(anchor))
+        };
+        for (entity, tether, joint) in world.query::<(Entity, &Tether, &Joint3D)>() {
+            let (Some(from), Some(to)) = (
+                anchored(joint.body_a, joint.anchor_a),
+                anchored(joint.body_b, joint.anchor_b),
+            ) else {
+                continue;
+            };
+            let along = to - from;
+            let placed = Transform {
+                translation: (from + to) * 0.5,
+                rotation: Quat::from_rotation_arc(Vec3::Y, along.normalize_or(Vec3::Y)),
+                scale: Vec3::new(tether.thickness, along.length(), tether.thickness),
+            };
+            if world.get::<Transform>(entity) != Some(&placed) {
+                self.tethered.push((entity, placed));
+            }
+        }
+        for (entity, placed) in self.tethered.drain(..) {
+            world
+                .insert(entity, placed)
+                .expect("the tether's entity, found this tick");
         }
     }
 
@@ -566,8 +649,10 @@ impl Layer for Showcase {
         for hud in world.query_mut::<&mut Hud>() {
             hud.ticks = hud.ticks.saturating_add(1);
         }
+        Self::launch(world);
         step_animation(world);
         step_physics(world);
+        self.tether(world);
         self.shade(world);
         self.label(world);
     }

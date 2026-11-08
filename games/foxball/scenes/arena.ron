@@ -86,6 +86,7 @@
             RigidBody3D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0, 0.0),
                 angular_velocity: (0.0, 0.0, 0.0),
             ),
@@ -133,6 +134,7 @@
             RigidBody3D: (
                 body_type: Static,
                 fixed_rotation: false,
+                continuous_collision: false,
                 velocity: (0.0, 0.0, 0.0),
                 angular_velocity: (0.0, 0.0, 0.0),
             ),
