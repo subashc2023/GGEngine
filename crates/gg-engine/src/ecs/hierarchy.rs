@@ -723,6 +723,7 @@ pub(super) mod tests {
             &past,
             &Placed::of(&world, &past, 1.0),
             1.0,
+            0,
             &mut draws,
             shaders,
             &mut Fonts::new(&mut Textures::default()),

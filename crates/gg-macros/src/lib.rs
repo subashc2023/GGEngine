@@ -811,7 +811,8 @@ impl Bound {
 }
 
 /// `tokens`, each located at `span`, so that an error in them is reported there, but resolved as
-/// they were.
+/// they were; but literals, as an array's length, which stay where they are, as lints read the
+/// source at a literal's span as its text, and would take a hint's `0` for a length's `2`.
 fn respanned(tokens: TokenStream, span: Span) -> TokenStream {
     tokens
         .into_iter()
@@ -821,7 +822,7 @@ fn respanned(tokens: TokenStream, span: Span) -> TokenStream {
                     proc_macro2::Group::new(group.delimiter(), respanned(group.stream(), span));
                 inner.set_span(group.span().located_at(span));
                 token = TokenTree::Group(inner);
-            } else {
+            } else if !matches!(token, TokenTree::Literal(_)) {
                 token.set_span(token.span().located_at(span));
             }
             token

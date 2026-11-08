@@ -391,7 +391,7 @@ pub(crate) fn run_frame(
     stack.interpolate(cx, dt);
     let alpha = stepper.alpha();
     gg_core::plot!("alpha", f64::from(alpha));
-    cx.draw_world(alpha, stepper.time(alpha));
+    cx.draw_world(alpha, stepper.time(alpha), stepper.ticks);
     let updated = Instant::now();
     #[cfg(feature = "dev")]
     let pass = ui.map(|(egui, dock, input)| {

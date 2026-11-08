@@ -3,7 +3,8 @@
 //! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
 //! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
-//! text, written and shaped again each frame, a sprite and that text on the view's canvas, and an
+//! text, written and shaped again each frame, a sprite and that text on the view's canvas,
+//! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under the default environment,
 //! which antialiases the view against the frames before, run through the engine's main
@@ -46,8 +47,8 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
     Component, Context, Entity, Environment, Event, Font, Key, Layer, Mesh, MeshDraw, Model,
-    MouseButton, Pick, Projection, Shader, Source, Sprite, SpriteSheet, Text, TextStyle, Texture,
-    Tick, Transform, World,
+    MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source, Sprite,
+    SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -153,6 +154,8 @@ struct Scene {
     turning: Option<Entity>,
     /// What carries the camera round.
     pivot: Option<Entity>,
+    /// The emitter the ticks burst.
+    sparks: Option<Entity>,
     subtrees: VecDeque<Entity>,
     copies: VecDeque<Entity>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
@@ -288,8 +291,23 @@ impl Layer for Scene {
             ..Text::default()
         };
         let label = world.spawn((at(0.0, -1.0, 0.0), label));
+        // Particles from a fountain the parent carries round, which leaves a trail, and sparks
+        // that the ticks burst.
+        let fountain = ParticleEmitter {
+            rate: 300.0,
+            ..ParticleEmitter::default()
+        };
+        let fountain = world.spawn((at(0.0, 2.0, 0.0), fountain));
+        let sparks = ParticleEmitter {
+            rate: 0.0,
+            burst: 200,
+            blend: ParticleBlend::Additive,
+            ..ParticleEmitter::default()
+        };
+        self.sparks = Some(world.spawn((at(3.0, -3.0, 0.0), sparks)));
         let children = [(glass, parent), (sprite, parent), (grandchild, sprite)];
-        for (child, parent) in children.into_iter().chain([(label, parent)]) {
+        let more = [(label, parent), (fountain, parent)];
+        for (child, parent) in children.into_iter().chain(more) {
             world.set_parent(child, Some(parent)).expect("both alive");
         }
         self.turning = Some(parent);
@@ -367,6 +385,11 @@ impl Layer for Scene {
         let pivot = self.pivot.expect("attached");
         let transform = world.get_mut::<Transform>(pivot).expect("alive");
         transform.rotation = Quat::from_rotation_y(turn);
+        if tick.number.is_multiple_of(16) {
+            let sparks = self.sparks.expect("attached");
+            let emitter = world.get_mut::<ParticleEmitter>(sparks).expect("alive");
+            emitter.bursts += 1;
+        }
         for i in 0..REPLACED {
             let oldest = self.subtrees.pop_front().expect("a full pool");
             world.despawn(oldest).expect("alive");

@@ -19,6 +19,7 @@ use tracing::warn;
 
 use crate::draws::Run;
 use crate::packed::{MeshletBounds, ModelMesh, PackedVertex};
+use crate::particles::ParticleDraws;
 use crate::shader::{self, Shader};
 use crate::texture::{self, Map, Texels};
 use crate::{DrawCounts, Draws, Streaming, Uploads, grid, model, shadow, sprite};
@@ -1790,7 +1791,9 @@ impl MeshPass {
     /// mesh with levels of detail, one for each stretch of its instances in a row that draw at one
     /// level, in order. The scene's runs draw only as they're culled. A run of a mesh that isn't
     /// drawable yet, or was removed, or with a shader that was, draws nothing. Each draws as `way`
-    /// says. Returns what it drew of the runs it didn't cull, which the culling counts of the rest.
+    /// says; and an emitter's particles, in their place among the rest, as `particles` draws them,
+    /// where the pass shades, and nothing without them. Returns what it drew of the runs it didn't
+    /// cull, which the culling counts of the rest.
     ///
     /// # Panics
     ///
@@ -1813,6 +1816,7 @@ impl MeshPass {
         uploaded: Uploaded,
         runs: Runs<'_>,
         way: Way,
+        particles: Option<&ParticleDraws<'_>>,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
@@ -1870,6 +1874,17 @@ impl MeshPass {
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
             };
+            // An emitter's particles, which are never culled, on the quad, whose indices they take.
+            if let Some(index) = run.and_then(|run| run.particles) {
+                if let (Way::Shaded { .. }, Some(particles)) = (way, particles) {
+                    pass.begin_label(c"particles");
+                    drawn += particles.draw(pass, &mesh.indices, index, view_projection);
+                    pass.end_label();
+                    // Its pipeline is bound and its faces are set in place of the runs'.
+                    (bound, faces) = (None, None);
+                }
+                continue;
+            }
             // A run the culling draws by its meshlets, by its shader's meshlet geometry.
             let by_meshlets = culled_run.is_some_and(|run| self.culling.by_meshlets(run));
             let (geometry, shadow) = match &shader.meshlets {

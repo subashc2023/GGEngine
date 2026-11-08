@@ -22,13 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Antialiasing, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid,
-    GridLines, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map,
-    Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh,
-    ModelVertex, Outline, PackedVertex, Pick, Pixels, Projection, RenderData, Renderer, Sampled,
-    Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture,
-    Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow,
-    Wrap,
+    AlphaMode, Antialiasing, Births, Blend, Bursts, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts,
+    Draws, Emission, Glyph, Grid, GridLines, Light, LightKind, Line, Lod, Lods,
+    MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes,
+    Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline, PackedVertex, ParticleShape,
+    Particles, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
+    Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
+    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -116,6 +116,7 @@ fn main() -> ExitCode {
         levels_of_detail_match_their_reference,
         models_match_their_reference,
         skinned_meshes_move_with_their_joints,
+        particles_match_their_reference,
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
@@ -3191,6 +3192,171 @@ fn skinned_meshes_move_with_their_joints() {
         stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws),
     );
     check(renderer, "skinned", WIDTH, HEIGHT);
+}
+
+/// Emitters' particles over frames, as a camera with perspective sees them over a dark square and
+/// under a square in front of the fire's base, against their reference image: on the left, a
+/// fountain of discs that go over what's behind them by their alpha, thrown up a cone and pulled
+/// down; in the middle, a fire of glowing discs that add their light, past 1, rising from a sphere
+/// against drag; and on the right, a burst of sparks, spinning squares of a texture's cells. The
+/// first frame bears most of the fountain's and the fire's, the second the rest, the fountain having
+/// moved right between them, along which its births between them are born, and the burst; so the
+/// second shows the first's births as their ages alone carry them on. A third frame at the same time,
+/// without births, as a paused world's are, draws the same.
+fn particles_match_their_reference() {
+    const WIDTH: u32 = 160;
+    const HEIGHT: u32 = 96;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let at = |x: f32, y: f32| Mat4::from_translation(Vec3::new(x, y, 0.0));
+    let mut squares = Draws::default();
+    let back =
+        Mat4::from_translation(Vec3::new(0.0, 0.0, -1.0)) * Mat4::from_scale(Vec3::splat(8.0));
+    squares.push(square, flat, back, Vec4::new(0.08, 0.08, 0.1, 1.0));
+    let front = Mat4::from_translation(Vec3::new(0.0, -0.9, 0.5))
+        * Mat4::from_scale(Vec3::new(0.6, 0.3, 1.0));
+    squares.push(square, flat, front, Vec4::new(0.3, 0.3, 0.32, 1.0));
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &squares);
+    let disc = Emission {
+        shape: ParticleShape::Point,
+        speed: [0.0; 2],
+        lifetime: [1.0; 2],
+        spin: [0.0; 2],
+        acceleration: Vec3::ZERO,
+        drag: 0.0,
+        size: [0.1; 2],
+        color: [Vec4::ONE; 2],
+        texture: None,
+        cells: [1, 1],
+        additive: false,
+    };
+    let fountain = Emission {
+        shape: ParticleShape::Cone {
+            angle: 0.35,
+            radius: 0.05,
+        },
+        speed: [2.6, 3.2],
+        lifetime: [1.0, 1.2],
+        acceleration: Vec3::new(0.0, -6.0, 0.0),
+        drag: 0.2,
+        size: [0.12, 0.06],
+        color: [Vec4::new(0.4, 0.7, 1.0, 0.9), Vec4::new(0.2, 0.4, 1.0, 0.0)],
+        ..disc
+    };
+    let fire = Emission {
+        shape: ParticleShape::Sphere { radius: 0.15 },
+        speed: [0.1, 0.4],
+        lifetime: [0.5, 0.9],
+        acceleration: Vec3::new(0.0, 3.0, 0.0),
+        drag: 1.5,
+        size: [0.35, 0.1],
+        color: [
+            Vec4::new(4.0, 1.6, 0.4, 0.8),
+            Vec4::new(1.5, 0.2, 0.05, 0.0),
+        ],
+        additive: true,
+        ..disc
+    };
+    let sparks = Emission {
+        speed: [1.5, 2.5],
+        lifetime: [0.6, 1.0],
+        spin: [-6.0, 6.0],
+        acceleration: Vec3::new(0.0, -3.0, 0.0),
+        color: [Vec4::new(3.0, 2.0, 0.6, 1.0), Vec4::new(2.0, 0.6, 0.1, 0.0)],
+        texture: Some(Texture::WHITE),
+        cells: [2, 1],
+        additive: true,
+        ..disc
+    };
+    // Each emitter's particles at `now`, of `births`, `bursts` and the most it has alive.
+    let drawn =
+        |id: u64, now: f64, most: u32, births: Births, bursts: Bursts, emission| Particles {
+            id,
+            fresh: false,
+            most,
+            now,
+            tick: 1.0 / 64.0,
+            births,
+            bursts,
+            emission,
+        };
+    // `count` births from `first`, every `every` ticks from `time`, each where the emitter was
+    // between `from`, as a frame at `then` drew it, and `to`, as a frame at `now` does.
+    let births = |first, count, (time, every), (from, to), (then, now): (f64, f64)| Births {
+        first,
+        count,
+        time,
+        every,
+        from,
+        to,
+        along: ((time - then) / (now - then)) as f32,
+        step: (every / (now - then)) as f32,
+    };
+    let (fountain_at, moved, fire_at, sparks_at) =
+        (at(-1.6, -1.2), at(-1.3, -1.2), at(0.0, -1.0), at(1.6, 0.3));
+    let burst = Bursts {
+        first: 0,
+        count: 1,
+        size: 48,
+        skip: 0,
+        time: 40.0,
+        at: sparks_at,
+    };
+    // The first frame, at 32 ticks; the second, at 48; and the third, at 48 again, without births.
+    let frames = [
+        (
+            32.0,
+            births(0, 129, (0.0, 0.25), (fountain_at, fountain_at), (0.0, 32.0)),
+            births(0, 161, (0.0, 0.2), (fire_at, fire_at), (0.0, 32.0)),
+            Bursts::none(sparks_at),
+        ),
+        (
+            48.0,
+            births(129, 64, (32.25, 0.25), (fountain_at, moved), (32.0, 48.0)),
+            births(161, 80, (32.2, 0.2), (fire_at, fire_at), (32.0, 48.0)),
+            burst,
+        ),
+        (
+            48.0,
+            Births::none(moved),
+            Births::none(fire_at),
+            Bursts::none(sparks_at),
+        ),
+    ];
+    let frame = |(now, spray, flame, burst): (f64, Births, Births, Bursts)| {
+        let mut draws = Draws::default();
+        draws.push(square, flat, back, Vec4::new(0.08, 0.08, 0.1, 1.0));
+        draws.push(square, flat, front, Vec4::new(0.3, 0.3, 0.32, 1.0));
+        draws.push_particles(drawn(1, now, 308, spray, Bursts::none(moved), fountain));
+        draws.push_particles(drawn(2, now, 288, flame, Bursts::none(fire_at), fire));
+        draws.push_particles(drawn(3, now, 48, Births::none(sparks_at), burst, sparks));
+        draws
+    };
+    for drawn in &frames[..2] {
+        let draws = frame(*drawn);
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    }
+    let born = frame_pixels(&mut renderer);
+    let draws = frame(frames[2]);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    assert!(
+        frame_pixels(&mut renderer) == born,
+        "a frame at the same time without births draws the same"
+    );
+    check(renderer, "particles", WIDTH, HEIGHT);
 }
 
 /// Draws a run of sprites across the top half of an offscreen image, then a run of models' squares

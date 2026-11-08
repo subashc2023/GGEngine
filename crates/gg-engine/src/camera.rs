@@ -791,6 +791,7 @@ mod tests {
             &past,
             &Placed::of(&world, &past, 0.5),
             0.5,
+            0,
             &mut draws,
             shaders,
             &mut Fonts::new(&mut Textures::default()),

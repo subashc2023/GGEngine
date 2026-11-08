@@ -69,7 +69,7 @@ use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::sync_test::SyncTest;
 use crate::{
     Animator, App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model,
-    ModelNode, ModelRoot, Name, Owner, RigidBody2D, Transform, Tweens, Ui, World,
+    ModelNode, ModelRoot, Name, Owner, ParticleEmitter, RigidBody2D, Transform, Tweens, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -594,6 +594,7 @@ impl Context {
             world.register::<MeshCollider3D>()?;
             world.register::<CharacterController3D>()?;
             world.register::<Flipbook>()?;
+            world.register::<ParticleEmitter>()?;
             world.register::<Tweens>()?;
             world.register::<Animator>()?;
             world.register::<ModelRoot>()?;
@@ -3199,13 +3200,13 @@ impl Context {
     }
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
-    /// from where it was as the latest tick started to where the tick left it, at `time`, the
-    /// simulation's in seconds, and their colliders' outlines, over the rest, while they're shown,
-    /// or the look shows them; and finds where the world's camera sees from, the world's
-    /// environment, and its lights, where they draw. Before the entities, a development build
-    /// draws the look's grid, unless the frame is bare, as the viewpoint the frame sees from so far
-    /// sees it.
-    pub(crate) fn draw_world(&mut self, alpha: f32, time: f32) {
+    /// from where it was as the latest of the `ticks` ticks run started to where the tick left it,
+    /// at `time`, the simulation's in seconds, emitters' particles too, and their colliders'
+    /// outlines, over the rest, while they're shown, or the look shows them; and finds where the
+    /// world's camera sees from, the world's environment, and its lights, where they draw. Before
+    /// the entities, a development build draws the look's grid, unless the frame is bare, as the
+    /// viewpoint the frame sees from so far sees it.
+    pub(crate) fn draw_world(&mut self, alpha: f32, time: f32, ticks: u64) {
         self.past.resolve(&self.world);
         self.placed.place(&self.world);
         let held = self.world.component::<MeshDraw>();
@@ -3226,7 +3227,9 @@ impl Context {
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
         let scratch = &mut self.scratch;
-        draw::draw_world(world, past, placed, alpha, draws, shaders, fonts, scratch);
+        draw::draw_world(
+            world, past, placed, alpha, ticks, draws, shaders, fonts, scratch,
+        );
         if self.colliders_drawn()
             && let Some(poses) = Poses::new(world, past, placed, alpha)
         {
@@ -4480,7 +4483,7 @@ mod tests {
             .add_model("fox", fox.join("Fox.gltf"))
             .expect("the Fox reads");
         let root = model.spawn(cx.world_mut(), Transform::IDENTITY);
-        cx.draw_world(1.0, 0.0);
+        cx.draw_world(1.0, 0.0, 0);
         let model_mesh = cx.loaded.made[model.index()].meshes[0].index();
         let skins: Vec<(u32, Vec<Mat4>)> = (cx.draws.skins())
             .map(|(mesh, joints)| (mesh, joints.to_vec()))
@@ -4505,7 +4508,7 @@ mod tests {
             "{drawn:?}"
         );
         cx.draws.clear();
-        cx.draw_world(1.0, 0.0);
+        cx.draw_world(1.0, 0.0, 0);
         assert_eq!(
             cx.draws.skins().map(|(mesh, _)| mesh).collect::<Vec<_>>(),
             [*own]
@@ -4513,7 +4516,7 @@ mod tests {
         assert_eq!(cx.skins.held(), 1);
         cx.world_mut().despawn(root).expect("alive");
         cx.draws.clear();
-        cx.draw_world(1.0, 0.0);
+        cx.draw_world(1.0, 0.0, 0);
         assert_eq!(cx.draws.skins().count(), 0);
         assert_eq!(cx.skins.held(), 0);
     }

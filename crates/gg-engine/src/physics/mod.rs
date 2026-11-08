@@ -385,7 +385,7 @@ mod tests {
             cx.draw_circle(Mat4::IDENTITY, Circle::default());
             cx.draw_line(line.from, line.to, line.color, line.width);
             cx.draw_rect(square, line.color, 1.0);
-            cx.draw_world(1.0, 0.0);
+            cx.draw_world(1.0, 0.0, 0);
             cx.extract(&mut frame, viewport);
             let mut shaders = Shaders::default();
             let mut want = Draws::default();

@@ -6,7 +6,8 @@
 //! systems split a query's rows across;
 //! reflection, which describes the components' types so that tools reach them by name, and the
 //! Inspector, which edits them; scripts, components that act at ticks; 2D and 3D physics, through
-//! rapier, whose state is a resource of the world; animation, sprites' flipbooks and fields' tweens; scenes and prefabs, the world's entities as canonical
+//! rapier, whose state is a resource of the world; animation, sprites' flipbooks and fields' tweens;
+//! particles' emitters, components whose particles the frames emit and own; scenes and prefabs, the world's entities as canonical
 //! text; operations, the authoring changes made to the world, each with its inverse, and their
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
@@ -101,6 +102,7 @@ mod package;
 mod pads;
 // subsecond applies a patch of the game's code only through unsafe code: this module alone may use
 // it, in development builds alone.
+mod particles;
 #[cfg(feature = "dev")]
 #[allow(unsafe_code)]
 mod patch;
@@ -214,6 +216,7 @@ use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};
 pub use name::Name;
 pub use owner::Owner;
+pub use particles::{EmitterShape, ParticleBlend, ParticleEmitter};
 pub use perf::PerfPanel;
 pub use physics::{
     BodyType, BoxCollider2D, BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D,

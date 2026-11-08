@@ -8,7 +8,8 @@ use gg_core::math::{Mat3, Mat4, Vec4};
 use gg_gpu::Faces;
 
 use crate::{
-    Circle, Glyph, Grid, Line, Mesh, MeshDraw, Meshes, Shader, Shaders, Sprite, halves, sprite,
+    Circle, Glyph, Grid, Line, Mesh, MeshDraw, Meshes, Particles, Shader, Shaders, Sprite, halves,
+    sprite,
 };
 
 /// What a frame draws besides UI: meshes, each with a shader for its vertex type, the parameters
@@ -27,7 +28,8 @@ use crate::{
 ///
 /// The renderer's [`Scene`](crate::Scene) draws among them where [`draw_scene`](Self::draw_scene)
 /// says, or else before them all. Skinned meshes, the scene's or these', draw where the frame's
-/// skins move them, as [`skin`](Self::skin) says.
+/// skins move them, as [`skin`](Self::skin) says. Emitters' particles draw among those that blend,
+/// each emitter's where [`push_particles`](Self::push_particles) puts them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
@@ -44,6 +46,8 @@ pub struct Draws {
     pub(crate) skins: Vec<(u32, Range<usize>)>,
     /// Every skin's joints' matrices, one after another.
     pub(crate) joints: Vec<Mat4>,
+    /// Every emitter's particles, in order, each drawn in its run's place.
+    pub(crate) particles: Vec<Particles>,
 }
 
 /// Consecutive draws of one mesh with one shader that draw the same faces: the instances of one
@@ -57,6 +61,9 @@ pub(crate) struct Run {
     pub(crate) instances: Range<usize>,
     /// Where their parameters are in `Draws::params`.
     pub(crate) params: Range<usize>,
+    /// For an emitter's particles, which draw in its place in place of its draws, of which it has
+    /// none, of the engine's quad with the sprite shader: their index in `Draws::particles`.
+    pub(crate) particles: Option<usize>,
 }
 
 impl Draws {
@@ -239,6 +246,33 @@ impl Draws {
         }
     }
 
+    /// Draws `particles`, an emitter's, over what's drawn before them and what's opaque, but where
+    /// what's opaque is nearer, as [`Particles`] describes: every particle facing the view, alive
+    /// at the frame's time, in its emitter's ring's order, from its oldest, testing depth without
+    /// writing it, and writing their emitter's ID where they show. A frame that doesn't draw an
+    /// emitter lets go of its particles, as does one that doesn't render the view; and of two
+    /// draws of one emitter in a frame, the second draws nothing. What's on the canvas draws no
+    /// particles.
+    pub fn push_particles(&mut self, particles: Particles) {
+        self.particles.push(particles);
+        let (instance, start) = (self.transforms.len(), self.params.len());
+        self.runs.push(Run {
+            mesh: sprite::QUAD.index,
+            shader: sprite::SHADER.index,
+            faces: Faces::Both,
+            instances: instance..instance,
+            params: start..start,
+            particles: Some(self.particles.len() - 1),
+        });
+    }
+
+    /// The emitters' particles the frame draws, in order: for tests, which read what a frame
+    /// draws of them.
+    #[doc(hidden)]
+    pub fn particles(&self) -> &[Particles] {
+        &self.particles
+    }
+
     /// Has the frame draw skinned `mesh`, a model's mesh that
     /// [`pack_skinned`](crate::ModelMesh::pack_skinned) packed, wherever it draws, with its vertices
     /// where `joints` carry them: the matrix of each of its skin's joints, in order, from the
@@ -270,6 +304,8 @@ impl Draws {
             (other.skins.drain(..))
                 .map(|(mesh, joints)| (mesh, joint + joints.start..joint + joints.end)),
         );
+        let emitter = self.particles.len();
+        self.particles.append(&mut other.particles);
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.append(&mut other.transforms);
         self.ids.append(&mut other.ids);
@@ -281,13 +317,16 @@ impl Draws {
             }
             let instances = instance + run.instances.start..instance + run.instances.end;
             let params = start + run.params.start..start + run.params.end;
+            let particles = run.particles.map(|index| emitter + index);
             let scene_last = self.scene_at == Some(self.runs.len());
             match self.runs.last_mut() {
                 // Its first run goes on from these' last, if it's of the same mesh, shader and
-                // faces, and the scene doesn't draw between them: the last ends where it begins.
+                // faces, neither is particles, and the scene doesn't draw between them: the last
+                // ends where it begins.
                 Some(last)
                     if (last.mesh, last.shader, last.faces)
                         == (run.mesh, run.shader, run.faces)
+                        && (last.particles, particles) == (None, None)
                         && !scene_last =>
                 {
                     last.instances.end = instances.end;
@@ -296,6 +335,7 @@ impl Draws {
                 _ => self.runs.push(Run {
                     instances,
                     params,
+                    particles,
                     ..run
                 }),
             }
@@ -311,7 +351,9 @@ impl Draws {
         let scene_last = self.scene_at == Some(self.runs.len());
         match self.runs.last_mut() {
             Some(run)
-                if (run.mesh, run.shader, run.faces) == (mesh, shader, faces) && !scene_last =>
+                if (run.mesh, run.shader, run.faces) == (mesh, shader, faces)
+                    && run.particles.is_none()
+                    && !scene_last =>
             {
                 run.instances.end = self.transforms.len();
                 run.params.end = self.params.len();
@@ -322,6 +364,7 @@ impl Draws {
                 faces,
                 instances: instance..self.transforms.len(),
                 params: start..self.params.len(),
+                particles: None,
             }),
         }
     }
@@ -365,6 +408,7 @@ impl Draws {
         self.params.clear();
         self.skins.clear();
         self.joints.clear();
+        self.particles.clear();
     }
 }
 

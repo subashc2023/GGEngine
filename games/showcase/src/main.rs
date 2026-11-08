@@ -32,7 +32,10 @@
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
 //! shows behind them (`sky.ron`); models casting a sun's shadows (`shadows.ron`); 3D physics,
 //! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
-//! swept about within walls (`physics3d.ron`); and, once `cargo
+//! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
+//! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor
+//! lit by a light beside it, sparks that a burster bursts every so often, and a comet's trail
+//! behind an emitter a spinning pivot carries round (`particles.ron`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), and walked through
 //! by a character that the keys or a pad move, a camera following it, Sponza's triangles what it
 //! collides with, among crates and balls it pushes (`walk.ron`), and Amazon
@@ -49,7 +52,8 @@
 //! every few seconds through `gg.play`; and animation and physics step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
 //! package without its code, and so without the keys' walking and its own components: the
-//! chimes, the jukebox, the HUD, the plasma and the look, which its code registers and runs.
+//! chimes, the bursters, the jukebox, the HUD, the plasma and the look, which its code registers
+//! and runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -66,9 +70,9 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
     Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Curve, Ease,
-    Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton, Music, PadButton, Place,
-    Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, Tween,
-    World, step_animation, step_physics,
+    Entity, Error, Event, Font, Key, Layer, Mesh, MeshDraw, MouseButton, Music, PadButton,
+    ParticleEmitter, Place, Reflect, Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle,
+    Tick, Transform, Tween, World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -141,6 +145,17 @@ struct Chime {
     #[reflect(min = 0.05, default = 1.0)]
     every: f32,
     /// The seconds since it last rang; negative, a wait before its first.
+    time: f32,
+}
+
+/// Bursts its entity's [`ParticleEmitter`] every `every` seconds of the world's ticks, raising its
+/// count of bursts at the tick: `particles.ron`'s sparks.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Burster {
+    /// The seconds between its bursts.
+    #[reflect(min = 0.05, default = 1.0)]
+    every: f32,
+    /// The seconds since it last burst; negative, a wait before its first.
     time: f32,
 }
 
@@ -290,6 +305,7 @@ impl Assets {
 /// Component and the tool API know them before any entity has one.
 fn register(world: &mut World) {
     let registered = world.register::<Chime>().and_then(|()| {
+        world.register::<Burster>()?;
         world.register::<Jukebox>()?;
         world.register::<Hud>()?;
         world.register::<Plasma>()?;
@@ -302,8 +318,9 @@ fn register(world: &mut World) {
 /// registers its own, so that its scenes, the Inspector's Add Component and the tool API know them
 /// before any entity has one, and loads its sounds, music, font and shader; loads the start scene as
 /// it attaches; and at each tick applies what the keys, the mouse and the HUD's button did to its
-/// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, counts the HUDs'
-/// ticks, steps animation and then physics, and gives the plasmas their draws. As it updates, it
+/// scenes' walkers, looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters'
+/// emitters, counts the HUDs' ticks, steps animation and then physics, and gives the plasmas their
+/// draws. As it updates, it
 /// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
 /// and draws the HUD while a HUD is. A script, an asset or the
 /// start scene that doesn't load ends the run with its error, through [`Context::fail`].
@@ -377,6 +394,18 @@ impl Showcase {
             };
             // A chime without a circle rings without one.
             let _ = world.tween(entity, flash);
+        }
+    }
+
+    /// Bursts each of `world`'s bursters' emitters whose time has come.
+    fn burst(world: &mut World) {
+        let dt = Tick::DT.as_secs_f32();
+        for (burster, emitter) in world.query_mut::<(&mut Burster, &mut ParticleEmitter)>() {
+            burster.time += dt;
+            if burster.time >= burster.every {
+                burster.time -= burster.every;
+                emitter.bursts = emitter.bursts.wrapping_add(1);
+            }
         }
     }
 
@@ -482,6 +511,7 @@ impl Layer for Showcase {
         }
         self.scripts.run(world);
         self.ring(world);
+        Self::burst(world);
         for hud in world.query_mut::<&mut Hud>() {
             hud.ticks = hud.ticks.saturating_add(1);
         }

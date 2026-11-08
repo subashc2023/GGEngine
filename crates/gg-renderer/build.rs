@@ -8,7 +8,7 @@ use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
 /// Those that draw, of a vertex and a fragment shader each.
-const SHADERS: [&str; 13] = [
+const SHADERS: [&str; 14] = [
     "circle",
     "egui",
     "grid",
@@ -17,6 +17,7 @@ const SHADERS: [&str; 13] = [
     "model_masked",
     "model_opaque",
     "outline",
+    "particles",
     "sky",
     "sprite",
     "text",
@@ -25,9 +26,10 @@ const SHADERS: [&str; 13] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 9] = [
+const COMPUTE: [(&str, &[&str]); 10] = [
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
+    ("emit", &["emit_main", "grow_main"]),
     ("gather", &["gather_main"]),
     ("meshlets", &["meshlets_main"]),
     ("pyramid", &["depth_main", "reduce_main"]),

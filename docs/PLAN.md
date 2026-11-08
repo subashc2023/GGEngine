@@ -125,10 +125,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Skeletal animation** (2026-11-08)
 - **A networked 3D demo** (2026-11-08)
 - **Phase 14, 3D gameplay** (2026-11-08)
+- **Particles** (2026-11-08)
 
 ## Now
 
-The next phase is the user's to choose, as Open questions has it.
+**Phase 15, particles and linked prefabs**, as Next has it. Its milestone built beside particles:
+
+- **Linked prefabs.** `.prefab` files as assets with IDs, an entity linking one taking its root's
+  components and spawning its other entities under IDs mixed from its own, a prefab nesting others
+  but not itself; a scene saving an instance as its root and the fields that differ from the
+  prefab's, every instance following its file as it's saved, keeping those; operations that create,
+  unlink and revert, through the tool API too; cooked into the package; a showcase scene.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -156,7 +163,17 @@ Each phase ends in something you can run and check.
 
 Phases 11 to 14 are done, as Done has it, but for what Deferred holds.
 
-Later: particles, linked prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
+15. **Particles and linked prefabs.** Prefabs placed as links to their files, each instance's
+    fields overridden where they differ from its prefab's, every instance following its file as it's
+    saved; particles, emitters in the world whose particles the frames draw from the GPU, freezing
+    with the world and surviving rollback. *Done when* the showcase shows each, editing a prefab's
+    file reaches every instance as it's saved, and Foxball's kicks and goals throw particles and its
+    arena's walls are instances of one prefab, its reference hashes and live recording made again
+    and passing on every platform CI runs. Its milestones, in order: linked prefabs and particles,
+    side by side; prefabs in the editor, overrides marked and reverted in the Inspector, a prefab
+    dropped from the Assets panel and a subtree saved as one; and Foxball's particles and prefabs.
+
+Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
 
 ## Deferred
@@ -285,6 +302,19 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Fonts other than a file's default instance of outlines: a variable font draws at its axes' defaults, unhinted, and collections (`.ttc`, `.otc`), color fonts and fonts of bitmaps alone don't load | A game needs one |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
+| Sorting each emitter's particles by their depth in the view, on the GPU: within an emitter they draw in their ring's order, oldest first, so particles that blend by alpha stack by age rather than back to front | A game's alpha-blended emitter seen across, as a column of smoke from the side, shows its particles stacking wrongly |
+| Soft particles, fading as they near the depth behind them, which takes the view's depth sampled in the pass that draws them | A game's particles cross floors or walls in hard lines, as smoke at ground level |
+| Lit particles, shaded by the frame's lights and sky: particles draw their colors as they are, unexposed | A game's smoke or dust needs to take its scene's light |
+| Particles colliding with the world, by depth or physics | A game's sparks, rain or debris need to bounce off or stop at what they hit |
+| Forces beyond constant acceleration and linear drag, such as noise, vortices and attractors, which need simulating each frame rather than a closed form of the age | A game's effect needs turbulence or attraction |
+| Trails as ribbons, strips joining an emitter's particles in birth order | A game needs a continuous trail, as a sword swing, a tracer or a comet |
+| Particles in the editor's own world: a stopped world's time stands still, so an emitter shows its first particle alone, frozen, until Play | Someone authors effects in the editor and wants them playing while stopped |
+| Curves of size, color and alpha over a particle's life, beyond a line from birth to death | A game's effect needs to fade in, or more than two colors |
+| Particles a layer draws itself, as `Context::draw_sprite` draws a sprite, and particles on the canvas | A game's UI needs particles, or a layer emits without an entity |
+| Particles' own motion for TAA: they write none, so the resolve takes what's behind them, and small fast particles may dim as the history is clamped | Fast particles visibly dim or smear under TAA |
+| Shrinking the pool and rings: both keep the most they grew to while any emitter draws | A game's peak of particles leaves memory it needs |
+| Bursts more often than a lifetime, or more than a ring's room in a frame: a ring holds one burst beside its births, so the oldest are recycled | A game bursts an emitter faster than its particles live |
+| An emitter that first draws with its count of bursts raised bursts at once, so that one spawned to burst does: a world loaded or restored with counts raised, as from a snapshot under `gg run` or a scene saved mid-run, bursts each emitter once as it first draws | Such a burst shows where it shouldn't, as after a restart |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | A layer's mirrored and unmirrored draws of one culling mesh, interleaved, draw a run each, since a run culls one way: the scene sorts the world's by how they wind, keeping them to two | A layer draws a culling mesh many times, some mirrored |
 | Drawing a pass's culled runs a draw for each pipeline, whose count the culling writes, as Vulkan's `*IndirectCount` draws take it, each draw reading its mesh, instances and parameters from a record the culling writes rather than from push constants, as games' shaders would then too: the CPU records a draw for each run, of its meshlets or of each of its levels, up to eight, whatever its instances, in each pass that draws it. In the 16 Bistros, recording them in eight passes a frame takes about 0.55 ms of the RTX 4090's render thread's 0.95, which is about as long a frame as the GPU's 1.0 ms | A game's distinct meshes make the render thread outlast the GPU's frame |
@@ -571,11 +601,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The last of a run's events through the API: `Exited cleanly` is logged once the API has stopped, so its file alone has it | A tool needs to know through the API how a run ended |
 
 ## Open questions
-
-- Which phase comes after Phase 14? Recommendation: particles and linked prefabs, what a game made
-  here reaches for next, as Foxball would for its kicks and goals and its arena's repeated walls,
-  before the upscalers and ray tracing, which change how a game looks rather than what it can do.
-  Decide before the next phase starts.
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the

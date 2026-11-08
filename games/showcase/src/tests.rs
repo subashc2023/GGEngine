@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 24, "{scenes:?}");
+    assert_eq!(scenes.len(), 25, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -365,6 +365,36 @@ fn a_chime_rings_from_its_entity_and_flashes() {
     }
     // Every second, 64 ticks, the first at the end of the first.
     assert_eq!(rang, [63, 127, 191]);
+}
+
+/// A burster raises its emitter's count of bursts once its seconds have passed, after its wait,
+/// and again each time they pass once more, which the frames after burst it by, as
+/// `particles.ron`'s sparks burst.
+#[test]
+fn a_burster_bursts_its_emitter_every_so_often() {
+    let (mut cx, mut showcase) = loaded();
+    let world = cx.world_mut();
+    let burster = Burster {
+        every: 1.0,
+        time: 0.5,
+    };
+    let sparks = world.spawn((Transform::IDENTITY, burster, ParticleEmitter::default()));
+    let mut raised = Vec::new();
+    let mut counted = 0;
+    for number in 0..160 {
+        showcase.tick(world, Tick { number });
+        let bursts = world
+            .get::<ParticleEmitter>(sparks)
+            .expect("its emitter")
+            .bursts;
+        if bursts != counted {
+            assert_eq!(bursts, counted + 1, "once at a time");
+            counted = bursts;
+            raised.push(number);
+        }
+    }
+    // Half a second in, a second apart: at the ends of ticks 31 and 95, of 64 a second.
+    assert_eq!(raised, [31, 95, 159]);
 }
 
 /// A HUD counts its ticks and the clicks on its button, which reach it as commands; and a plasma's

@@ -1538,12 +1538,13 @@ Layers add shaders, meshes and textures and draw them through their `Context`, a
 render data carries what's been added to them, replaced in them or removed from them since, in
 order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a `Transform`
-and a sprite, a circle, a `Text` or a `MeshDraw`, a mesh with its shader and parameters held without
-their types, after what the layers drew, children where their ancestors carry them: first the
-meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw in,
-which the renderer's scene holds, as below; then what blends, back to front by their z's in the
-world, those at one z drawing sprites, then circles, then text, under meshes; each z in the order of
-their IDs, which overlapping entities keep as others come and go. World z orders what blends rightly as seen
+and a sprite, a circle, a `Text`, a `MeshDraw`, a mesh with its shader and parameters held without
+their types, or a `ParticleEmitter`, after what the layers drew, children where their ancestors
+carry them: first the meshes whose shaders are opaque, whose depth hides what's behind them whatever
+order they draw in, which the renderer's scene holds, as below; then what blends, back to front by
+their z's in the world, those at one z drawing sprites, then circles, then text, then meshes, under
+emitters' particles, each emitter's as a whole, as below; each z in the order of their IDs, which
+overlapping entities keep as others come and go. World z orders what blends rightly as seen
 from in front of layers parallel to XY, as 2D cameras see them; from behind or the side, what blends
 draws in the wrong order among itself, though rightly against what's opaque. The view draws
 everything opaque, the layers' and the world's, before anything that blends, as culling, below,
@@ -1589,6 +1590,57 @@ Inspector set glides there over a tick, as a drag does. The world's camera sees 
 entity draws, so that one riding an entity moves with it, without juddering against it. Headless
 frames, a tick each, draw their tick as it leaves the world, and see it from where the tick left the
 camera.
+
+An entity with a `ParticleEmitter` and a `Transform` emits particles where it draws, ancestors
+carrying it, which belong to the frames rather than the world: the world holds the emitter, which
+scenes save, the Inspector and tools edit and the world's hash reads, but no hash, scene, snapshot,
+recording or rollback holds a particle, as none holds the frames' copies of where entities were.
+Each frame emits what the world's time as it draws, its ticks and the fraction of the latest it
+draws, owes each emitter since the frame before: births at its rate, birth n born n over the rate
+seconds after the end of the latest tick as a frame first drew the emitter, each where the emitter
+was then, between where the frame before drew it and where this one does, so that one that moves
+leaves a trail rather than clumps; and a burst for each step its count of bursts went up by
+since the frame before saw it, born as the latest tick ends, where that tick left the emitter, so
+that a rollback or a server's correction that runs the tick again bursts once, and one that takes
+the count back down bursts no more. The world's time stops while the simulation is paused or
+stopped, and so do its particles, and headless frames, a tick each, emit and draw the same every
+run. A rate that changes goes on from where its next birth was due; time that goes back a tick, as
+a pause's end draws it, holds births back until it's past them, and further back, as the tool API's
+`stop` takes it, starts the emitter's births again. What the frames emit an emitter from is kept by
+its entity's ID, outside the world, and let go of the frame after one that doesn't draw it. A
+particle's motion is a closed form of its age, its velocity at birth carried on under its emitter's
+constant acceleration and linear drag, and its size, color, turn and cell of its texture's sheet go
+by its age over its lifetime, so that a particle is its birth record, and draws alike whatever the
+frames between its birth and now; its randomness is a hash of its emitter's ID and its number, or
+its burst's and its own within that, so that it's born alike whatever the frames too. Its time is
+the world's ticks: a record holds the low 32 bits of the tick it was born in and the fraction into
+it, which the shader subtracts as integers first, so that its age stays exact however long the
+world has run.
+
+The renderer keeps the birth records in a pool on the GPU, a buffer of the graph's own of 32 bytes
+a particle, each emitter's in a ring of its own, kept by the emitter's ID while each frame draws
+it: a block of a power of two slots, at least as many as the emitter has alive at once, its rate
+times its longest lifetime and a burst, given by a buddy allocator, a block let go of free from the
+next frame on. The pool doubles as rings need more room, a frame that grows it copying the old into
+the new in a compute pass before the rest, the two taking the pool's two names by turns, up to 2^20
+particles, 32 MiB, past which an emitter that doesn't fit draws nothing, warned of once
+(`renderer.particles_full`). A ring made or grown is written whole, the particles of the ring it had
+first, so that drawing never reads a slot no frame wrote. A compute pass on the graphics queue,
+before the culling, writes each frame's births, a thread a birth, from a few numbers an emitter:
+when and where between the frames the first is born, and how many follow how far apart; births
+past what a ring holds drop the oldest. Each emitter's particles draw in its place among what
+blends, an instance of the engine's quad for each slot of its ring, from its oldest particle's,
+facing the view along its right and up, each placed, sized, colored and turned in the vertex shader
+from its record and the world's time, a slot whose particle isn't born yet or has died drawing
+nothing: a soft disc or a texture's cell, over what's behind it by premultiplied alpha, or adding
+its light by writing no alpha, through one pipeline, testing depth without writing it or motion,
+and writing its emitter's ID where it adds more than next to nothing. Within an emitter, particles
+draw in their ring's order, oldest first. They draw before temporal antialiasing resolves the view,
+with everything else that blends, so that an emitter sorts by its z among the world's other blended
+draws, which the canvas, after the resolve, couldn't; they write no motion, so the resolve takes
+what's behind them, and its clip to what the frame drew round each pixel keeps a moving particle
+from trailing, while their soft edges shimmer little under the jitter. A frame that renders no view,
+or renders nothing, lets go of every ring, and so of the particles before it.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
 doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer makes

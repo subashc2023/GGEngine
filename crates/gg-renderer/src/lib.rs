@@ -1,5 +1,7 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
-//! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
+//! sprites, circles, lines, grids, text and emitters' particles, born on the GPU into a pool of
+//! birth records that their age alone carries on from, drawn in the game's view, as its camera
+//! sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
 //! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
@@ -23,6 +25,7 @@ mod line;
 mod mesh;
 mod model;
 mod packed;
+mod particles;
 mod pick;
 mod shader;
 mod shadow;
@@ -42,7 +45,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gg_core::math::{Mat4, Vec2, Vec4};
+use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result, label};
 use gg_gpu::{
     ColorImage, ComputePass, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId,
@@ -67,6 +70,7 @@ pub use packed::{
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, Meshlets, ModelMesh, PackedVertex,
     Packing, SkinVertex,
 };
+pub use particles::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Particles};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sky::Sky;
@@ -83,6 +87,7 @@ pub use viewpoint::{Projection, Viewpoint};
 
 use cluster::{ClusterData, ClusterPlan, Lighting};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
+use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use skin::{SkinPlan, Skinning};
@@ -146,9 +151,10 @@ pub struct DrawCounts {
     /// Instanced draws of an instance or more: one for each run of consecutive draws of one mesh
     /// with one shader that draw the same faces, or, of a mesh with levels of detail, one for each
     /// level its run's instances drew at, or, if its shader blends or it's on the canvas, each
-    /// stretch of them in a row that did.
+    /// stretch of them in a row that did; and one for each emitter's particles.
     pub draws: usize,
-    /// The meshes they drew, one for each draw pushed to [`Draws`] that culling kept.
+    /// The meshes they drew, one for each draw pushed to [`Draws`] that culling kept, and one for
+    /// each slot of an emitter's ring, of its particle or of none.
     pub instances: usize,
     /// The triangles of those meshes, at the levels they drew, culled ones among them: the GPU's
     /// work in drawing them.
@@ -405,6 +411,8 @@ pub struct Renderer {
     lighting: Lighting,
     /// What moves skinned meshes' vertices before the frame draws them.
     skinning: Skinning,
+    /// What writes emitters' particles' births before the frame draws them, and draws them.
+    particles: ParticlePass,
 }
 
 enum Output {
@@ -418,6 +426,9 @@ struct ViewPasses {
     /// What moves skinned meshes' vertices before the passes that draw them, if the frame skins
     /// any.
     skin: Option<SkinPlan>,
+    /// What writes emitters' particles' births before the passes that draw them, if the frame
+    /// draws any.
+    particles: Option<ParticlePlan>,
     /// What culls the view's opaque runs and their shadows' casters, if it draws any.
     cull: Option<CullPlan>,
     /// What bins the lights into the view's clusters, if a light is binned.
@@ -489,6 +500,14 @@ fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
 fn skinned<'g>(skin: Option<&SkinPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     match skin {
         Some(skin) => pass.read_buffer(skin.buffer),
+        None => pass,
+    }
+}
+
+/// `pass`, reading the particles' pool, if the frame draws particles.
+fn particled<'g>(particles: Option<&ParticlePlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
+    match particles {
+        Some(particles) => particles.drawn(pass),
         None => pass,
     }
 }
@@ -618,6 +637,7 @@ impl Renderer {
             counted: [(0, DrawCounts::default(), false); 2],
             lighting: Lighting::new(device)?,
             skinning: Skinning::new(device)?,
+            particles: ParticlePass::new(device)?,
         })
     }
 
@@ -832,6 +852,9 @@ impl Renderer {
         }
         if renders_view {
             self.lighting.order(data.lights, &data.viewpoint);
+        } else {
+            // The pool goes undeclared, which the graph lets go of.
+            self.particles.forget();
         }
         // The frame's passes: the view, into images of its own, its size, so that it never shows
         // stretched, made again in the frame that changes its size, which a drag that resizes the
@@ -868,6 +891,7 @@ impl Renderer {
         };
         let meshes = &self.meshes;
         let skinning = &mut self.skinning;
+        let particles = &mut self.particles;
         let lighting = &self.lighting;
         let taa = &self.taa;
         let visibility_buffer = self.visibility_buffer;
@@ -877,9 +901,12 @@ impl Renderer {
             // and the cascades' casters, for the view's first pass; and after them, the binning of
             // the lights into the view's clusters, which its passes read. The culling and the
             // binning run on the compute queue where there's one, the binning beside the shadows.
-            // First, the skinned meshes' vertices moved, which every pass that draws reads.
+            // First, the skinned meshes' vertices moved, which every pass that draws reads, and the
+            // particles' births written, which the passes that draw what blends read.
             let skin_plan = skinning.plan(graph, data.draws, meshes);
             let skin = skin_plan.as_ref();
+            let particle_plan = particles.plan(graph, data.draws);
+            let born = particle_plan.as_ref();
             let aspect = data.viewport.aspect();
             let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
             let mut cull = (meshes.cull_bounds(data.draws))
@@ -935,7 +962,7 @@ impl Renderer {
                 }
                 None => {
                     let first = skinned(skin, graph.render(label!("view")));
-                    let first = culled(cull.as_ref(), first);
+                    let first = particled(born, culled(cull.as_ref(), first));
                     let first = binned(clusters.as_ref(), sampling(lit(), first));
                     first.clear(hdr, data.clear_color).ids(ids).motion(motion)
                 }
@@ -953,7 +980,7 @@ impl Renderer {
                     }
                     None => {
                         let second = skinned(skin, graph.render(label!("view second")));
-                        let second = cull.drawn(second);
+                        let second = particled(born, cull.drawn(second));
                         let second = binned(clusters.as_ref(), sampling(lit(), second));
                         second.keep(hdr).keep(motion)
                     }
@@ -969,6 +996,7 @@ impl Renderer {
                 };
                 let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
                 let rest = cull.drawn(skinned(skin, graph.render(label!("view rest"))));
+                let rest = particled(born, rest);
                 let rest = (binned(clusters.as_ref(), sampling(lit(), rest)).keep(hdr))
                     .keep(ids)
                     .keep(motion)
@@ -1017,6 +1045,7 @@ impl Renderer {
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
                 skin: skin_plan,
+                particles: particle_plan,
                 cull,
                 clusters,
                 shadows,
@@ -1061,6 +1090,8 @@ impl Renderer {
             .chain(history.into_iter().flatten())
             .chain(lit.into_iter().flatten());
         let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
+            // The births the frame planned aren't written.
+            self.particles.forget();
             return Ok(false);
         };
         // The frame two before has finished, and what it read with it.
@@ -1085,9 +1116,17 @@ impl Renderer {
         // culled drew, and whether the frame culled any.
         let (counts, view, culled) = match (view, pixels_shown) {
             (Some(view), _) => {
-                // The skinned meshes moved, before anything draws them.
+                // The skinned meshes moved, and the particles born, before anything draws them.
                 let (skinning, meshes) = (&self.skinning, &mut self.meshes);
                 skinning.record(&mut frame, view.skin.as_ref(), data.draws, meshes)?;
+                let emitted = (view.particles.as_ref())
+                    .map(|plan| self.particles.record(&mut frame, plan, data.draws))
+                    .transpose()?;
+                // Facing the view, along its right and its up.
+                let facing = data.viewpoint.rotation;
+                let (right, up) = (facing * Vec3::X, facing * Vec3::Y);
+                let born = emitted.map(|emitted| self.particles.draws(emitted, right, up));
+                let born = born.as_ref();
                 // Every pass's instances, copied once, culled for the view and the cascades.
                 let uploaded = MeshPass::upload_draws(&mut frame, data.draws)?;
                 let on_canvas = MeshPass::upload_draws(&mut frame, data.canvas)?;
@@ -1156,8 +1195,9 @@ impl Renderer {
                         // Each cascade's slot is 1 past its index.
                         let cascade = runs(1 + i);
                         let way = Way::Shadows;
-                        (self.meshes)
-                            .draw(&mut pass, clip, partial, map, draws, uploaded, cascade, way)?;
+                        (self.meshes).draw(
+                            &mut pass, clip, partial, map, draws, uploaded, cascade, way, None,
+                        )?;
                     }
                 }
                 let aspect = data.viewport.aspect();
@@ -1200,6 +1240,7 @@ impl Renderer {
                         uploaded,
                         first,
                         visible,
+                        None,
                     )?;
                     drop(pass);
                     self.meshes.cull_second(&mut frame, plan)?;
@@ -1216,6 +1257,7 @@ impl Renderer {
                         uploaded,
                         second,
                         visible,
+                        None,
                     )?;
                     drop(pass);
                     let mut shade = frame.compute(shaded.shade);
@@ -1261,6 +1303,7 @@ impl Renderer {
                     uploaded,
                     runs(FIRST),
                     way,
+                    born,
                 )?;
                 // What the first pass didn't draw, over it: after the depth pyramid, from the
                 // first's depth, and the culling's second pass, against it, in a pass of its own;
@@ -1282,6 +1325,7 @@ impl Renderer {
                         uploaded,
                         rest,
                         way,
+                        born,
                     )?;
                 }
                 // The canvas, over the view's last pass's; or, antialiased, over what the view
@@ -1291,8 +1335,9 @@ impl Renderer {
                     pass.begin_label(c"canvas");
                     let canvas = canvas_projection(size);
                     let on = data.canvas;
+                    let all = Runs::All;
                     let drawn =
-                        meshes.draw(pass, canvas, shared, size, on, on_canvas, Runs::All, way);
+                        meshes.draw(pass, canvas, shared, size, on, on_canvas, all, way, None);
                     pass.end_label();
                     drawn
                 };

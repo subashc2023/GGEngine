@@ -1,0 +1,401 @@
+(
+    entities: {
+        "0df99432f48d9da4": (
+            Name: ("Fountain"),
+            ParticleEmitter: (
+                rate: 600.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.25,
+                ],
+                speed: [
+                    4.6,
+                    5.3,
+                ],
+                shape: Cone(
+                    angle: 0.15707964,
+                    radius: 0.04,
+                ),
+                acceleration: (0.0, -9.81, 0.0),
+                drag: 0.15,
+                size: [
+                    0.07,
+                    0.05,
+                ],
+                color: [
+                    (0.55, 0.8, 1.0, 0.85),
+                    (0.35, 0.6, 1.0, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Alpha,
+            ),
+            Transform: (
+                translation: (-3.2, 0.55, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2dff90e17a433ff8": (
+            Name: ("Orbit"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 2.4,
+            ),
+            Transform: (
+                translation: (0.0, 2.9, -2.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "302ccc67f44ea70b": (
+            Name: ("Fire"),
+            ParticleEmitter: (
+                rate: 180.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    0.5,
+                    0.95,
+                ],
+                speed: [
+                    0.6,
+                    1.2,
+                ],
+                shape: Cone(
+                    angle: 0.17453292,
+                    radius: 0.28,
+                ),
+                acceleration: (0.0, 3.0, 0.0),
+                drag: 1.0,
+                size: [
+                    0.5,
+                    0.06,
+                ],
+                color: [
+                    (1.3, 0.45, 0.1, 0.55),
+                    (0.7, 0.08, 0.02, 0.0),
+                ],
+                spin: [
+                    -1.5,
+                    1.5,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.15, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "32c9c4e72be6c16b": (
+            Light: (
+                kind: Directional,
+                color: (0.6, 0.7, 1.0),
+                intensity: 6.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Moon"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.5, 0.0, 0.0, 0.8660254),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5407d8dbdda2665e": (
+            Environment: (
+                exposure: 4.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: None,
+                sky_luminance: 30000.0,
+            ),
+            Name: ("Environment"),
+        ),
+        "6740d06272d046d7": (
+            Name: ("Smoke"),
+            ParticleEmitter: (
+                rate: 30.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    2.5,
+                    3.5,
+                ],
+                speed: [
+                    0.5,
+                    0.8,
+                ],
+                shape: Cone(
+                    angle: 0.20943952,
+                    radius: 0.15,
+                ),
+                acceleration: (0.15, 0.25, 0.0),
+                drag: 0.3,
+                size: [
+                    0.3,
+                    1.4,
+                ],
+                color: [
+                    (0.14, 0.13, 0.13, 0.4),
+                    (0.08, 0.08, 0.09, 0.0),
+                ],
+                spin: [
+                    -0.5,
+                    0.5,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Alpha,
+            ),
+            Transform: (
+                translation: (0.0, 0.9, -0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6cb432502d81c76d": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.3, 8.5),
+                rotation: (-0.08715574, 0.0, 0.0, 0.9961947),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "78dfe98e04473018": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.5, 0.15),
+                intensity: 50.0,
+                range: Some(7.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Firelight"),
+            Transform: (
+                translation: (0.0, 0.7, 0.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8214a8814d786d92": (
+            Name: ("Comet"),
+            Parent: ("2dff90e17a433ff8"),
+            ParticleEmitter: (
+                rate: 260.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    0.9,
+                    1.3,
+                ],
+                speed: [
+                    0.05,
+                    0.3,
+                ],
+                shape: Point,
+                acceleration: (0.0, -0.3, 0.0),
+                drag: 1.0,
+                size: [
+                    0.16,
+                    0.01,
+                ],
+                color: [
+                    (0.5, 1.2, 3.2, 1.0),
+                    (1.6, 0.25, 2.2, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (1.2, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9f3927e4f8011d77": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.0, 1.5),
+            ),
+        ),
+        "9f689bd26b0fee5c": (
+            Name: ("Hint"),
+            Text: (
+                text: "Born on the GPU: a fountain by alpha, a fire adding its light, sparks bursting at ticks, and a comet's trail",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 4.55, -2.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c1d6b0a3e95f4472": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Plinth"),
+            Transform: (
+                translation: (-3.2, 0.25, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.5, 0.5, 0.5),
+            ),
+        ),
+        "e8eab72daa4adaf4": (
+            Name: ("Embers"),
+            ParticleEmitter: (
+                rate: 18.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.2,
+                    2.2,
+                ],
+                speed: [
+                    0.5,
+                    1.6,
+                ],
+                shape: Sphere(
+                    radius: 0.2,
+                ),
+                acceleration: (0.0, 0.8, 0.0),
+                drag: 0.4,
+                size: [
+                    0.05,
+                    0.02,
+                ],
+                color: [
+                    (4.0, 1.8, 0.4, 1.0),
+                    (2.0, 0.3, 0.05, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.4, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "efde34366dc4a8d1": (
+            Burster: (
+                every: 1.4,
+                time: 0.7,
+            ),
+            Name: ("Sparks"),
+            ParticleEmitter: (
+                rate: 0.0,
+                burst: 160,
+                bursts: 0,
+                lifetime: [
+                    0.8,
+                    1.6,
+                ],
+                speed: [
+                    1.5,
+                    2.6,
+                ],
+                shape: Sphere(
+                    radius: 0.05,
+                ),
+                acceleration: (0.0, -3.5, 0.0),
+                drag: 1.2,
+                size: [
+                    0.12,
+                    0.03,
+                ],
+                color: [
+                    (6.0, 3.5, 1.0, 1.0),
+                    (3.0, 0.5, 0.1, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (3.2, 2.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f8115306f80fa30e": (
+            Name: ("Title"),
+            Text: (
+                text: "Particles",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 5.0, -2.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

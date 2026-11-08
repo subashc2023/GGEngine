@@ -9,6 +9,7 @@ use crate::ecs::ComponentId;
 use crate::font::Fonts;
 use crate::interpolation::{self, Past};
 use crate::jobs;
+use crate::particles::{Clock, Emitters, ParticleEmitter};
 use crate::placed::Placed;
 use crate::{Entity, EntityId, Parent, Text, Transform, World};
 
@@ -37,6 +38,8 @@ pub(crate) struct Scratch {
     /// tick `meshes_seen` has, of the world of its serial.
     blending: Vec<(usize, Vec<u32>)>,
     meshes_seen: Option<(u64, u64)>,
+    /// What each frame emits each emitter's particles from.
+    emitters: Emitters,
 }
 
 /// A run of one table's rows at one z, of one kind, whose rows `sort` puts among the others of
@@ -70,13 +73,15 @@ impl PartialEq for Segment {
     }
 }
 
-/// What a row draws: at one z, sprites, then circles, then text, under the meshes that blend.
+/// What a row draws: at one z, sprites, then circles, then text, under the meshes that blend, under
+/// emitters' particles.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Sprite,
     Circle,
     Text,
     Mesh,
+    Particles,
 }
 
 /// A row drawn: its entity's ID, which orders it among the rows of its z and kind, and which it
@@ -96,11 +101,13 @@ struct Group {
 }
 
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], a [`Circle`],
-/// a [`Text`] or a [`MeshDraw`] whose shader blends, after where it has the renderer's scene draw,
-/// which holds the meshes whose shaders write depth, as [`OpaqueMeshes`] has them: back to front by
-/// z in the world, as the latest tick left them, -0.0 and 0.0 one z, at one z sprites, then
-/// circles, then text, under meshes; each z in the order of their entities' IDs, so that entities
-/// that overlap at one depth keep how they stack as others come and go. Of a table's meshes, it
+/// a [`Text`], a [`MeshDraw`] whose shader blends or a [`ParticleEmitter`], after where it has the
+/// renderer's scene draw, which holds the meshes whose shaders write depth, as [`OpaqueMeshes`] has
+/// them: back to front by z in the world, as the latest tick left them, -0.0 and 0.0 one z, at one
+/// z sprites, then circles, then text, then meshes, under particles; each z in the order of their
+/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
+/// go. An emitter's particles are those `scratch`'s emitters give for the frame, `alpha` of the way
+/// through the latest of `ticks` ticks, as [`Emitters::emit`] says. Of a table's meshes, it
 /// looks at those that blend alone, which it finds again as the table's meshes or rows change, so
 /// that a table of many meshes that write depth costs it little. Circles draw with the engine's circle shader
 /// and text with its text shader, which `shaders` adds the first time any do; text is laid out in
@@ -131,6 +138,7 @@ pub(crate) fn draw_world(
     past: &Past,
     placed: &Placed,
     alpha: f32,
+    ticks: u64,
     draws: &mut Draws,
     shaders: &mut Shaders,
     fonts: &mut Fonts,
@@ -148,7 +156,10 @@ pub(crate) fn draw_world(
         sorted,
         blending,
         meshes_seen,
+        emitters,
     } = scratch;
+    emitters.begin();
+    let clock = Clock::new(ticks, alpha);
     segments.clear();
     blends.clear();
     blends.resize(world.tables().len(), None);
@@ -160,6 +171,7 @@ pub(crate) fn draw_world(
     let circle = world.component::<Circle>();
     let text = world.component::<Text>();
     let mesh = world.component::<MeshDraw>();
+    let emitter = world.component::<ParticleEmitter>();
     let parent = world.component::<Parent>();
     let since = match *meshes_seen {
         Some((serial, tick)) if serial == world.serial() => Some(tick),
@@ -197,6 +209,7 @@ pub(crate) fn draw_world(
             (Kind::Circle, circle.is_some_and(|id| rows.has(id))),
             (Kind::Text, text.is_some_and(|id| rows.has(id))),
             (Kind::Mesh, !blending_rows.is_empty()),
+            (Kind::Particles, emitter.is_some_and(|id| rows.has(id))),
         ];
         if drawn.iter().all(|&(_, drawn)| !drawn) {
             continue;
@@ -285,7 +298,7 @@ pub(crate) fn draw_world(
     // Kept across groups, whose segments' indices differ.
     let mut sprites_at = [None; AT_HAND];
     let (mut circles_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
-    let mut texts_at = [None; AT_HAND];
+    let (mut texts_at, mut emitters_at) = ([None; AT_HAND], [None; AT_HAND]);
     for group in groups.iter() {
         let items = &items[group.items.start as usize..group.items.end as usize];
         match group.kind {
@@ -349,6 +362,30 @@ pub(crate) fn draw_world(
                     let row = item.row as usize;
                     let at = matrix(transforms, drawn, row);
                     draws.push_draw(at, &meshes[row], item.id.get());
+                }
+            }
+            Kind::Particles => {
+                let emitter = emitter.expect("a table has emitters");
+                let columns = |index: u32| {
+                    let (table, transforms, drawn) = placing(index);
+                    let emitters = table.column::<ParticleEmitter>(emitter);
+                    (transforms, emitters.expect("it has emitters"), drawn)
+                };
+                for item in items {
+                    let found = found(&mut emitters_at, item.segment, columns);
+                    let (transforms, emitted, drawn) = found;
+                    let row = item.row as usize;
+                    let at = matrix(transforms, drawn, row);
+                    // Where the latest tick left it, which its bursts are born at.
+                    let ticked = match drawn {
+                        Drawn::Placed(entities) => {
+                            let place = placed.kept(entities[row]);
+                            place.expect("a drawn entity is placed").matrix
+                        }
+                        Drawn::Transforms | Drawn::Blended(_) => transforms[row].matrix(),
+                    };
+                    let particles = emitters.emit(item.id, &emitted[row], at, ticked, clock);
+                    draws.push_particles(particles);
                 }
             }
         }
@@ -621,6 +658,7 @@ mod tests {
             sorted: _,
             blending,
             meshes_seen: _,
+            emitters: _,
         } = scratch;
         [
             (segments.as_ptr().addr(), segments.capacity()),
@@ -738,6 +776,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut draws,
             &mut Shaders::default(),
             &mut Fonts::new(&mut Textures::default()),
@@ -785,6 +824,7 @@ mod tests {
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
                 1.0,
+                0,
                 &mut draws,
                 shaders,
                 &mut Fonts::new(&mut Textures::default()),
@@ -887,6 +927,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut draws,
             shaders,
             &mut Fonts::new(&mut Textures::default()),
@@ -900,6 +941,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut again,
             shaders,
             &mut Fonts::new(&mut Textures::default()),
@@ -957,6 +999,7 @@ mod tests {
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
                 1.0,
+                0,
                 &mut draws,
                 shaders,
                 &mut Fonts::new(&mut Textures::default()),
@@ -968,6 +1011,7 @@ mod tests {
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
                 1.0,
+                0,
                 &mut fresh,
                 &mut Shaders::default(),
                 &mut Fonts::new(&mut Textures::default()),
@@ -1104,6 +1148,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut draws,
             &mut Shaders::default(),
             &mut Fonts::new(&mut Textures::default()),
@@ -1160,6 +1205,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut draws,
             &mut Shaders::default(),
             &mut Fonts::new(&mut Textures::default()),
@@ -1218,6 +1264,7 @@ mod tests {
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
             1.0,
+            0,
             &mut draws,
             &mut Shaders::default(),
             &mut fonts,
@@ -1243,6 +1290,7 @@ mod tests {
             past,
             &Placed::of(world, past, alpha),
             alpha,
+            0,
             &mut draws,
             &mut Shaders::default(),
             &mut Fonts::new(&mut Textures::default()),
