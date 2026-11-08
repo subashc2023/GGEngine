@@ -127,10 +127,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 14, 3D gameplay** (2026-11-08)
 - **Particles** (2026-11-08)
 - **Linked prefabs** (2026-11-08)
+- **Foxball's particles and prefabs** (2026-11-08)
 
 ## Now
 
-**Phase 15, particles and linked prefabs**, as Next has it. Its next milestone:
+**Phase 15, particles and linked prefabs**, as Next has it. Its last milestone:
 
 - **Prefabs in the editor.** The Inspector marking the fields where an instance's entity differs
   from its prefab, reverting each through the operations' `Revert`, and unlinking an instance; the
@@ -359,6 +360,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
 | Foxball shipped and run as it ships in CI, as Shards is: its tests cook its package and replay its live recording from it | A change could break its shipping alone |
 | A menu in Foxball, and a fox that plays a side for a player alone: alone, player 1's fox stands where it starts | Someone plays it alone and misses a match |
+| Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
+| Foxball's foxes as instances of a prefab: each fox, its model, animator and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
+| Foxball's goals' colors read from one place: each mouth's emitter has its scorer's color written in arena.ron, brightened, beside the game's `COLORS` | The players' colors change, or a game has more than two players |
+| Textures for Foxball's particles, as dust puffs and confetti: its emitters draw soft discs | Its look gets an art pass |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |

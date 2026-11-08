@@ -1,21 +1,8 @@
 (
     entities: {
         "05162738495a6b7c": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Near, right"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (-2.25, 0.8, -10.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -60,6 +47,42 @@
             Ball: (),
             ModelRoot: ("fbca002a5a685a47"),
             Name: ("Ball"),
+            ParticleEmitter: (
+                rate: 0.0,
+                burst: 36,
+                bursts: 0,
+                lifetime: [
+                    0.3,
+                    0.55,
+                ],
+                speed: [
+                    2.5,
+                    4.5,
+                ],
+                shape: Sphere(
+                    radius: 0.5,
+                ),
+                acceleration: (0.0, 0.8, 0.0),
+                drag: 5.0,
+                size: [
+                    0.2,
+                    0.55,
+                ],
+                color: [
+                    (1.0, 0.98, 0.92, 0.9),
+                    (1.0, 0.98, 0.92, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Alpha,
+            ),
             RigidBody3D: (
                 body_type: Dynamic,
                 fixed_rotation: false,
@@ -120,21 +143,8 @@
             ),
         ),
         "4f5a6b7c8d9eafb0": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Left"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (7.25, 0.6, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -142,21 +152,8 @@
             ),
         ),
         "5a6b7c8d9eafb0c1": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Right"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (-7.25, 0.6, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -164,21 +161,8 @@
             ),
         ),
         "6b7c8d9eafb0c1d2": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Far, left"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (4.5, 0.6, 10.25),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -186,43 +170,65 @@
             ),
         ),
         "7c8d9eafb0c1d2e3": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Far, right"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (-4.5, 0.6, 10.25),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (5.0, 1.2, 0.5),
             ),
         ),
+        "8d1330e49674ea47": (
+            Goal: (
+                player: 0,
+            ),
+            Name: ("Goal: Far, mouth"),
+            ParticleEmitter: (
+                rate: 0.0,
+                burst: 300,
+                bursts: 0,
+                lifetime: [
+                    1.4,
+                    2.2,
+                ],
+                speed: [
+                    6.0,
+                    9.0,
+                ],
+                shape: Cone(
+                    angle: 0.5,
+                    radius: 1.4,
+                ),
+                acceleration: (0.0, -9.81, 0.0),
+                drag: 0.6,
+                size: [
+                    0.24,
+                    0.14,
+                ],
+                color: [
+                    (0.3, 0.75, 1.4, 1.0),
+                    (0.15, 0.55, 1.0, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Alpha,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 10.25),
+                rotation: (-0.17364818, 0.0, 0.0, 0.9848077),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "8d9eafb0c1d2e3f4": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Near, left"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (4.5, 0.6, -10.25),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -230,21 +236,8 @@
             ),
         ),
         "9eafb0c1d2e3f405": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Wall: Near, right"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (-4.5, 0.6, -10.25),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -252,21 +245,8 @@
             ),
         ),
         "afb0c1d2e3f40516": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Far, back"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (0.0, 0.8, 11.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -274,21 +254,8 @@
             ),
         ),
         "b0c1d2e3f4051627": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Far, left"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (2.25, 0.8, 10.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -296,21 +263,8 @@
             ),
         ),
         "c1d2e3f405162738": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Far, right"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (-2.25, 0.8, 10.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -327,43 +281,65 @@
             ),
         ),
         "e3f405162738495a": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Near, back"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (0.0, 0.8, -11.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (5.0, 1.6, 0.5),
             ),
         ),
+        "ecd56f1a0d2c4708": (
+            Goal: (
+                player: 1,
+            ),
+            Name: ("Goal: Near, mouth"),
+            ParticleEmitter: (
+                rate: 0.0,
+                burst: 300,
+                bursts: 0,
+                lifetime: [
+                    1.4,
+                    2.2,
+                ],
+                speed: [
+                    6.0,
+                    9.0,
+                ],
+                shape: Cone(
+                    angle: 0.5,
+                    radius: 1.4,
+                ),
+                acceleration: (0.0, -9.81, 0.0),
+                drag: 0.6,
+                size: [
+                    0.24,
+                    0.14,
+                ],
+                color: [
+                    (1.4, 0.65, 0.18, 1.0),
+                    (1.0, 0.45, 0.1, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Alpha,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, -10.25),
+                rotation: (0.17364818, 0.0, 0.0, 0.9848077),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "f405162738495a6b": (
-            BoxCollider3D: (
-                offset: (0.0, 0.0, 0.0),
-                size: (1.0, 1.0, 1.0),
-                density: 1.0,
-                friction: 0.5,
-                restitution: 0.3,
-            ),
-            ModelRoot: ("f1335e6995be98d7"),
             Name: ("Goal: Near, left"),
-            RigidBody3D: (
-                body_type: Static,
-                fixed_rotation: false,
-                velocity: (0.0, 0.0, 0.0),
-                angular_velocity: (0.0, 0.0, 0.0),
-            ),
+            PrefabRoot: ("e675a64df84ed899"),
             Transform: (
                 translation: (2.25, 0.8, -10.75),
                 rotation: (0.0, 0.0, 0.0, 1.0),

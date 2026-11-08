@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use gg_api::Project;
 use gg_engine::cook::Kind;
 use gg_engine::math::libm::atan2f;
+use gg_engine::{BoxCollider3D, Prefab, PrefabRoot};
 
 use super::*;
 
@@ -41,6 +42,21 @@ fn ball(world: &World) -> (Vec3, Vec3) {
     (at.translation, body.velocity)
 }
 
+/// How many times the ball's emitter has burst.
+fn ball_bursts(world: &World) -> u32 {
+    let mut balls = world.query::<(&Ball, &ParticleEmitter)>();
+    balls.next().expect("the ball's emitter").1.bursts
+}
+
+/// How many times each goal's mouth's emitter has burst, by the player it scores for.
+fn goal_bursts(world: &World) -> [u32; 2] {
+    let mut bursts = [0; 2];
+    for (goal, emitter) in world.query::<(&Goal, &ParticleEmitter)>() {
+        bursts[usize::from(goal.player)] += emitter.bursts;
+    }
+    bursts
+}
+
 /// Puts the ball at `at`, still.
 fn put_ball(world: &mut World, at: Vec3) {
     for (_, transform, body) in world.query_mut::<(&Ball, &mut Transform, &mut RigidBody3D)>() {
@@ -50,8 +66,9 @@ fn put_ball(world: &mut World, at: Vec3) {
 }
 
 /// The game's project's manifest is canonical, writing back to its own bytes, and starts the game
-/// in the arena, which loads and saves to its own bytes, so that a type that changes under it
-/// fails here.
+/// in the arena, which loads and saves to its own bytes, as its walls' prefab does, so that a type
+/// that changes under either fails here; and every wall of the arena, each goal's pocket's too, is
+/// an instance of that one prefab, colliding as the prefab's box.
 #[test]
 fn the_arena_saves_as_it_is() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -67,11 +84,24 @@ fn the_arena_saves_as_it_is() {
     let roots = cx.load_scene_file(&path).expect("the arena loads");
     let saved = cx.world().save_scene(&roots).expect("saved");
     assert_eq!(saved, text);
+    let walls = cx.world().query::<(&PrefabRoot, &BoxCollider3D)>();
+    let prefabs: Vec<Prefab> = walls.map(|(&PrefabRoot(prefab), _)| prefab).collect();
+    assert_eq!(
+        prefabs.len(),
+        12,
+        "2 sides, 2 beside each mouth, 3 to each pocket"
+    );
+    assert!(prefabs.iter().all(|&prefab| prefab == prefabs[0]));
+    let path = dir.join("prefabs/wall.prefab");
+    let text = fs::read_to_string(&path).expect("the wall's prefab");
+    let roots = cx.load_scene_file(&path).expect("the prefab loads");
+    let saved = cx.world().save_scene(&roots).expect("saved");
+    assert_eq!(saved, text);
 }
 
-/// Each texture, model and font under the game's asset root has its ID file beside it, committed
-/// with it, each holding an ID of its own, and no ID file is left without its asset, so that every
-/// checkout gives each asset the ID the repository holds, which its scene names it by.
+/// Each texture, model, font and prefab under the game's asset root has its ID file beside it,
+/// committed with it, each holding an ID of its own, and no ID file is left without its asset, so
+/// that every checkout gives each asset the ID the repository holds, which its scene names it by.
 #[test]
 fn every_asset_has_its_id_file_beside_it() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -79,8 +109,8 @@ fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(&project.assets_dir(dir));
     assert_eq!(
         found.assets.len(),
-        7,
-        "the ball, the box, the tiles, the Fox and its texture, the sky and the font"
+        8,
+        "the ball, the box, the tiles, the Fox and its texture, the sky, the font and the wall"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -184,20 +214,23 @@ fn the_keys_and_the_mouse_queue_commands_for_the_runs_own_player() {
     assert_eq!(fox(world, 0).0.x, STARTS[0].0.x);
 }
 
-/// A kick sends the ball forward and up from in front of its fox, playing the kick's sound from
-/// it, and the fox kicks again only once its cooldown has passed; a ball out of reach isn't kicked.
+/// A kick sends the ball forward and up from in front of its fox, bursting the ball's emitter and
+/// playing the kick's sound from it, and the fox kicks again only once its cooldown has passed; a
+/// ball out of reach isn't kicked.
 #[test]
 fn a_kick_sends_the_ball_from_in_front_of_its_fox() {
     let (mut cx, mut game) = attached(0x5eed);
     let kick = game.assets.as_ref().expect("loaded").sounds.kick;
     let world = cx.world_mut();
     let (start, _) = STARTS[0];
+    assert_eq!(ball_bursts(world), 0);
     put_ball(world, start + Vec3::new(0.0, -0.15, 0.8));
     game.commands.push(Command::Kick { player: 0 });
     game.tick(world, Tick { number: 0 });
     let (_, velocity) = ball(world);
     assert!(velocity.z > KICK_SPEED * 0.9, "{velocity}");
     assert!(velocity.y > 0.0, "{velocity}");
+    assert_eq!(ball_bursts(world), 1);
     let ball_entity = world.query::<(Entity, &Ball)>().next().expect("the ball").0;
     let queued: Vec<_> = world.sounds_queued().collect();
     assert_eq!(queued, [(kick, Place::On(ball_entity))]);
@@ -214,11 +247,13 @@ fn a_kick_sends_the_ball_from_in_front_of_its_fox() {
     game.commands.push(Command::Kick { player: 0 });
     game.tick(world, Tick { number: 100 });
     assert!(ball(world).1.length() < 1.0, "out of reach");
+    assert_eq!(ball_bursts(world), 1, "a kick that misses bursts nothing");
 }
 
-/// A ball in the far goal scores for player 0, and in the near one for player 1, playing the goal's
-/// sound where it went in and putting the ball and the foxes back at their starts; the fifth goal
-/// wins the match, starting another; and a ball out of the arena goes back to its start alone.
+/// A ball in the far goal scores for player 0, and in the near one for player 1, bursting the
+/// emitter of the goal's mouth, playing the goal's sound where it went in and putting the ball and
+/// the foxes back at their starts; the fifth goal wins the match, starting another; and a ball out
+/// of the arena goes back to its start alone.
 #[test]
 fn goals_score_and_five_win_a_match() {
     let (mut cx, mut game) = attached(0x5eed);
@@ -233,6 +268,7 @@ fn goals_score_and_five_win_a_match() {
     put_ball(world, Vec3::new(0.5, 0.4, FIELD.y + 1.0));
     tick(&mut game, world);
     assert_eq!(score(world).scores, [1, 0]);
+    assert_eq!(goal_bursts(world), [1, 0]);
     assert_eq!(ball(world).0, BALL_START);
     assert_eq!(fox(world, 0).0, STARTS[0].0);
     let far =
@@ -241,6 +277,7 @@ fn goals_score_and_five_win_a_match() {
     put_ball(world, Vec3::new(-0.5, 0.4, -FIELD.y - 1.0));
     tick(&mut game, world);
     assert_eq!(score(world).scores, [1, 1]);
+    assert_eq!(goal_bursts(world), [1, 1]);
     for goals in 2..=WINS_AT {
         put_ball(world, Vec3::new(0.0, 0.4, FIELD.y + 1.0));
         tick(&mut game, world);
@@ -265,12 +302,16 @@ fn goals_score_and_five_win_a_match() {
     );
 }
 
-/// A fox's clips blend by how fast it goes: Survey alone standing, Run alone at its running speed;
-/// and the clips it doesn't play leave its animator.
+/// A fox's clips blend by how fast it goes: Survey alone standing, Run alone at its running speed,
+/// as its dust goes from none to its most; and the clips it doesn't play leave its animator.
 #[test]
 fn a_fox_runs_as_fast_as_it_goes() {
     let (mut cx, mut game) = attached(0x5eed);
     let world = cx.world_mut();
+    let dust = |world: &World| {
+        let dusts = world.query::<(&Parent, &ParticleEmitter)>();
+        dusts.map(|(_, dust)| dust.rate).collect::<Vec<_>>()
+    };
     let weights = |world: &World, index: usize| {
         let mut found = world.query::<&Animator>().skip(index);
         let clips = found.next().expect("a fox's animator");
@@ -282,6 +323,7 @@ fn a_fox_runs_as_fast_as_it_goes() {
     };
     game.tick(world, Tick { number: 0 });
     assert_eq!(weights(world, 0), [1.0, 0.0, 0.0]);
+    assert_eq!(dust(world), [0.0; 2]);
     game.commands.push(Command::Walk {
         player: 0,
         heading: Vec2::Y,
@@ -299,6 +341,7 @@ fn a_fox_runs_as_fast_as_it_goes() {
         let plays = found.next().expect("a fox's animator").0.len();
         assert_eq!(plays, 1, "Survey and Walk left");
     }
+    assert_eq!(dust(world), [DUST_RATE; 2]);
 }
 
 /// A world restored from a snapshot simulates as it did from there, through walks, turns, kicks
@@ -468,10 +511,10 @@ fn live_recording() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/live.recording")
 }
 
-/// The game's package, as `tools/cook` cooks it, holds what its runs load: its scene and sounds as
-/// they are, its sky and the Fox's texture compressed, its models cooked and its font baked, its
-/// assets by their IDs; and the live recording replays from it to its hashes, as a build without
-/// `dev` runs from it.
+/// The game's package, as `tools/cook` cooks it, holds what its runs load: its scene, its wall's
+/// prefab and its sounds as they are, its sky and the Fox's texture compressed, its models cooked
+/// and its font baked, its assets by their IDs; and the live recording replays from it to its
+/// hashes, as a build without `dev` runs from it.
 #[test]
 fn the_live_recording_replays_from_the_games_package() {
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
@@ -491,6 +534,7 @@ fn the_live_recording_replays_from_the_games_package() {
         ("models/fox/Fox.gltf", Kind::Model, true),
         ("models/fox/Texture.png", Kind::Texture, true),
         ("models/tiles.gltf", Kind::Model, true),
+        ("prefabs/wall.prefab", Kind::File, true),
         ("scenes/arena.ron", Kind::File, false),
         ("sounds/goal.wav", Kind::File, false),
         ("sounds/kick.wav", Kind::File, false),

@@ -11,11 +11,14 @@
 //! BY 4.0, as its README there says), skinned, blending Survey, Walk and Run by how fast each goes,
 //! characters that rapier3d's controller walks, which push the ball as they walk into it, under
 //! Poly Haven's Kloofendal 48d Partly Cloudy Puresky (`textures/sky.hdr`, CC0); the ball and the
-//! arena are 3D physics, the arena's walls and goals
-//! its scene file, `scenes/arena.ron`, which a development build applies as it's saved. Each run's
-//! view follows its own fox, a little above and behind it, the mouse looking up and down too. Its
-//! sounds, `sounds/*.wav`, play from where they happen, heard by their direction and distance from
-//! the view: a kick from the ball, a goal from where it went in, and a match won.
+//! arena are 3D physics, the arena's walls and goals its scene file, `scenes/arena.ron`, which a
+//! development build applies as it's saved, each wall, a goal's pocket's too, an instance of one
+//! prefab, `prefabs/wall.prefab`, placed and sized by its own transform. Each run's view follows
+//! its own fox, a little above and behind it, the mouse looking up and down too. A kick throws a
+//! puff of dust from the ball, a goal a fountain in its scorer's color from the goal's mouth, and a
+//! running fox kicks up dust behind it: emitters of the world, which the game bursts and sets at
+//! its ticks. Its sounds, `sounds/*.wav`, play from where they happen, heard by their direction and
+//! distance from the view: a kick from the ball, a goal from where it went in, and a match won.
 
 // A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
 // records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
@@ -32,9 +35,10 @@ use gg_engine::math::libm::expf;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, Animator, App, Binding, CapsuleCollider3D, Change, CharacterController3D,
-    Commands, Component, Context, Entity, Error, Event, Font, Key, Layer, Model, MouseButton, Name,
-    Owner, PadButton, Parent, Place, Play, Projection, Reflect, RigidBody3D, Sound, Source, Stick,
-    TextStyle, Tick, Toward, Transform, Viewpoint, World, step_animation, step_physics,
+    Commands, Component, Context, EmitterShape, Entity, Error, Event, Font, Key, Layer, Model,
+    MouseButton, Name, Owner, PadButton, Parent, ParticleBlend, ParticleEmitter, Place, Play,
+    Projection, Reflect, RigidBody3D, Sound, Source, Stick, TextStyle, Tick, Toward, Transform,
+    Viewpoint, World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -62,7 +66,8 @@ const GOAL: f32 = 2.0;
 /// How far past its end's wall the ball's middle goes into a goal to count.
 const GOAL_DEPTH: f32 = 0.45;
 
-/// Each player's color, in linear RGB: blue and orange.
+/// Each player's color, in linear RGB: blue and orange, which the emitters of the goals' mouths in
+/// `scenes/arena.ron` burst in too, brightened.
 const COLORS: [[f32; 3]; 2] = [[0.15, 0.55, 1.0], [1.0, 0.45, 0.1]];
 
 /// Where each player's fox starts, and goes back to after each goal, and the way it faces then: 0
@@ -84,6 +89,34 @@ const FOX_SCALE: f32 = 0.02;
 /// How fast a fox runs, in units a second, and how fast it walks as Walk alone plays.
 const RUN_SPEED: f32 = 5.0;
 const WALK_SPEED: f32 = 1.6;
+
+/// The dust a fox kicks up behind its feet as it runs: where its emitter is from the capsule's
+/// middle, the puffs a second it gives at the fox's running speed, fewer as it runs slower and none
+/// as it walks, as [`animate`] sets them, and how it looks.
+const DUST_AT: Vec3 = Vec3::new(0.0, -0.45, -0.3);
+const DUST_RATE: f32 = 24.0;
+const DUST: ParticleEmitter = ParticleEmitter {
+    rate: 0.0,
+    burst: 0,
+    bursts: 0,
+    lifetime: [0.45, 0.8],
+    speed: [0.3, 0.8],
+    shape: EmitterShape::Cone {
+        angle: 0.9,
+        radius: 0.15,
+    },
+    acceleration: Vec3::new(0.0, 0.4, 0.0),
+    drag: 2.5,
+    size: [0.2, 0.6],
+    color: [
+        Vec4::new(0.95, 0.92, 0.84, 0.45),
+        Vec4::new(0.95, 0.92, 0.84, 0.0),
+    ],
+    spin: [0.0; 2],
+    texture: None,
+    cells: [1, 1],
+    blend: ParticleBlend::Alpha,
+};
 
 /// How fast Q and E or a stick turn a fox, at full tilt, in radians a second.
 const TURN_SPEED: f32 = 3.0;
@@ -136,9 +169,15 @@ struct Player {
     cooldown: u32,
 }
 
-/// The ball, which the foxes push and kick.
+/// The ball, which the foxes push and kick, and whose emitter bursts as it's kicked.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Ball;
+
+/// A goal's mouth, whose emitter bursts as the ball goes in: the player that scores by it.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Goal {
+    player: u8,
+}
 
 /// The match: each player's goals in it, and matches won.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
@@ -427,6 +466,7 @@ impl Layer for Foxball {
 fn register(world: &mut World) {
     let registered = world.register::<Player>().and_then(|()| {
         world.register::<Ball>()?;
+        world.register::<Goal>()?;
         world.register::<Match>()
     });
     registered.expect("the game's components describe themselves");
@@ -434,7 +474,7 @@ fn register(world: &mut World) {
 
 /// Builds what the arena's scene doesn't hold: the match, and each player's fox at its start, a
 /// character's capsule with `fox`'s model under it, its feet at the capsule's bottom, its clips
-/// played by an animator, which [`animate`] blends.
+/// played by an animator, which [`animate`] blends, and its dust behind them.
 fn build(world: &mut World, fox: Model) {
     world.spawn((
         Match {
@@ -479,12 +519,19 @@ fn build(world: &mut World, fox: Model) {
         let played = named.and_then(|()| world.insert(model, Animator(vec![Play::new("Survey")])));
         let parented = played.and_then(|()| world.set_parent(model, Some(body)));
         parented.expect("the fox and its body, just spawned");
+        let behind = Transform {
+            translation: DUST_AT,
+            ..Transform::IDENTITY
+        };
+        let dust = world.spawn((behind, DUST, Name(format!("Dust {}", index + 1))));
+        let parented = world.set_parent(dust, Some(body));
+        parented.expect("the dust and its body, just spawned");
     }
 }
 
 /// Applies `command` to `world`: to its player's fox, which way it walks, how fast it turns, a turn
-/// or a kick, which sends the ball forward and up if it's in front of the fox, and plays `sounds`'
-/// kick from it.
+/// or a kick, which sends the ball forward and up if it's in front of the fox, bursts the ball's
+/// emitter and plays `sounds`' kick from it.
 fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
     let player = match *command {
         Command::Walk { player, .. }
@@ -523,7 +570,13 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
             kicked = Some(ball);
         }
     }
-    if let (Some(sounds), Some(ball)) = (sounds, kicked) {
+    let Some(ball) = kicked else {
+        return;
+    };
+    if let Some(emitter) = world.get_mut::<ParticleEmitter>(ball) {
+        emitter.bursts = emitter.bursts.wrapping_add(1);
+    }
+    if let Some(sounds) = sounds {
         world.play_sound(sounds.kick, Place::On(ball));
     }
 }
@@ -571,18 +624,26 @@ fn roll(world: &mut World, dt: Duration) {
 
 /// Sets each fox's clips' weights by how fast its character walks: Survey alone standing, Walk
 /// alone at [`WALK_SPEED`], and Run alone at [`RUN_SPEED`], blending between; a clip at no weight
-/// leaves its animator, joining again from its start once it has some.
+/// leaves its animator, joining again from its start once it has some. Its dust's rate goes with
+/// Run's weight, to [`DUST_RATE`] at its running speed.
 fn animate(world: &mut World) {
     let speeds: Vec<(Entity, f32)> = world
         .query::<(Entity, &Player, &CharacterController3D)>()
         .map(|(entity, _, character)| (entity, character.velocity.with_y(0.0).length()))
         .collect();
+    let speed_of = |body: Entity| speeds.iter().find(|(entity, _)| *entity == body);
+    let running = |speed: f32| ((speed - WALK_SPEED) / (RUN_SPEED - WALK_SPEED)).clamp(0.0, 1.0);
+    for (&Parent(body), dust) in world.query_mut::<(&Parent, &mut ParticleEmitter)>() {
+        if let Some(&(_, speed)) = speed_of(body) {
+            dust.rate = DUST_RATE * running(speed);
+        }
+    }
     for (&Parent(body), clips) in world.query_mut::<(&Parent, &mut Animator)>() {
-        let Some(&(_, speed)) = speeds.iter().find(|(entity, _)| *entity == body) else {
+        let Some(&(_, speed)) = speed_of(body) else {
             continue;
         };
         let walking = (speed / WALK_SPEED).min(1.0);
-        let running = ((speed - WALK_SPEED) / (RUN_SPEED - WALK_SPEED)).clamp(0.0, 1.0);
+        let running = running(speed);
         let weights = [
             ("Survey", 1.0 - walking),
             ("Walk", walking * (1.0 - running)),
@@ -603,9 +664,10 @@ fn animate(world: &mut World) {
 }
 
 /// Counts a goal once the ball has gone into one: to player 0 for the far goal, at +Z, and player 1
-/// for the near one, playing `sounds`' goal where it went in, and at the goal that wins a match,
-/// giving the match to its player and starting another, playing their fanfare; then puts the ball
-/// and the foxes back at their starts. A ball that has left the arena goes back to its start alone.
+/// for the near one, bursting the emitters of the scorer's goal's mouth and playing `sounds`' goal
+/// where it went in, and at the goal that wins a match, giving the match to its player and starting
+/// another, playing their fanfare; then puts the ball and the foxes back at their starts. A ball
+/// that has left the arena goes back to its start alone.
 fn score(world: &mut World, sounds: Option<Sounds>) {
     let ball = world.query::<(&Ball, &Transform)>().next();
     let Some(at) = ball.map(|(_, at)| at.translation) else {
@@ -623,6 +685,10 @@ fn score(world: &mut World, sounds: Option<Sounds>) {
                 found.wins[scorer] += 1;
                 won = true;
             }
+        }
+        let mouths = world.query_mut::<(&Goal, &mut ParticleEmitter)>();
+        for (_, emitter) in mouths.filter(|(goal, _)| usize::from(goal.player) == scorer) {
+            emitter.bursts = emitter.bursts.wrapping_add(1);
         }
         if let Some(sounds) = sounds {
             world.play_sound(sounds.goal, Place::At(at));
