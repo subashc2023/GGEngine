@@ -1,0 +1,726 @@
+(
+    entities: {
+        "0942dc06bc69f265": (
+            Name: ("Label: Linear"),
+            Text: (
+                text: "Linear",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, 2.7, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "0e11160004524a7c": (
+            Name: ("Label: Sine, in and out"),
+            Text: (
+                text: "Sine, in and out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, 1.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1dfc388c3d5df972": (
+            Name: ("Dot: Quad"),
+            Sprite: (
+                color: (0.54, 0.95, 0.38, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, 1.1, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Quad,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "25b2116aae6cff55": (
+            Name: ("Dot: Sine"),
+            Sprite: (
+                color: (0.95, 0.87, 0.38, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, 1.9, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "34d474c0db9b3642": (
+            Name: ("Dot: Back"),
+            Sprite: (
+                color: (0.38, 0.71, 0.95, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, -0.5, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Back,
+                    ease: Out,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "357fbc5af71a1bfc": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3d2bd371fc80be13": (
+            Name: ("Dot: Linear"),
+            Sprite: (
+                color: (0.95, 0.38, 0.38, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, 2.7, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Linear,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "4e3e52d639302a90": (
+            Name: ("Dot: Elastic"),
+            Sprite: (
+                color: (0.54, 0.38, 0.95, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, -1.3, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Elastic,
+                    ease: Out,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "50391192cc308fc0": (
+            Name: ("Track: Elastic"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, -1.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "50ae014491d255c0": (
+            Name: ("Label: Color"),
+            Text: (
+                text: "Color",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (3.8, -2.25, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5826a9974368903d": (
+            Name: ("Label: Back, out"),
+            Text: (
+                text: "Back, out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, -0.5, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5aec4989dfe15e78": (
+            Name: ("Label: Elastic, out"),
+            Text: (
+                text: "Elastic, out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, -1.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5b11bb37b54c3950": (
+            Name: ("Track: Cubic"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, 0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "5e06e22dfff3f4ec": (
+            Name: ("Track: Quad"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, 1.1, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "646c2d6447d43398": (
+            Name: ("Dot: Cubic"),
+            Sprite: (
+                color: (0.38, 0.95, 0.71, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, 0.3, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Cubic,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "6ba3be7682e92419": (
+            Name: ("Track: Bounce"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, -2.1, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "707620135c26a157": (
+            Name: ("Square, colored"),
+            Sprite: (
+                color: (1.0, 0.3, 0.25, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (3.8, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.3, 1.3, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Sprite",
+                    field: "color",
+                    from: Vec4((1.0, 0.3, 0.25, 1.0)),
+                    to: Vec4((0.25, 0.5, 1.0, 1.0)),
+                    seconds: 2.0,
+                    curve: Sine,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "7359c053a5442840": (
+            Name: ("Label: Alpha"),
+            Text: (
+                text: "Alpha",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (6.9, -2.25, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "760b19461436ad1a": (
+            Name: ("Bar, turned"),
+            Sprite: (
+                color: (1.0, 0.62, 0.2, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (6.9, 1.9, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 0.36, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "rotation",
+                    from: Quat((0.0, 0.0, 0.0, 1.0)),
+                    to: Quat((0.0, 0.0, 0.70710677, 0.70710677)),
+                    seconds: 1.6,
+                    curve: Elastic,
+                    ease: Out,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "77616364568c4396": (
+            Name: ("Label: Cubic, in and out"),
+            Text: (
+                text: "Cubic, in and out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, 0.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7d57d3926b7cf30c": (
+            Name: ("Label: Size, back and forth"),
+            Text: (
+                text: "Size, back and forth",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (3.8, 0.65, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8575062102fbcd4f": (
+            Name: ("Hint"),
+            Text: (
+                text: "Fields eased from one value to another: by each curve, a size, a turn, a color and an alpha, and from a script",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.9, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "93c012aa3b3c1aa1": (
+            Name: ("Dot: Bounce"),
+            Sprite: (
+                color: (0.95, 0.38, 0.87, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.8, -2.1, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.38, 0.38, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(-5.8),
+                    to: Number(0.6),
+                    seconds: 1.6,
+                    curve: Bounce,
+                    ease: Out,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "b1abac56ee22b9b5": (
+            Name: ("Glow, faded"),
+            Sprite: (
+                color: (0.55, 0.85, 1.0, 1.0),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (6.9, -1.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Sprite",
+                    field: "color.w",
+                    from: Number(1.0),
+                    to: Number(0.05),
+                    seconds: 1.2,
+                    curve: Quad,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "b1dcec40db7aca58": (
+            Name: ("Label: Quad, in and out"),
+            Text: (
+                text: "Quad, in and out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, 1.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ba03fc6fecc23398": (
+            Name: ("Label: Bounce, out"),
+            Text: (
+                text: "Bounce, out",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-8.2, -2.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c6e22ec667b4a948": (
+            Name: ("Crate, popped"),
+            Pulse: (
+                every: 1.5,
+                rest: (1.3, 1.3, 1.0),
+                size: (1.9, 1.9, 1.0),
+                time: 0.0,
+            ),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("d8c5ed37db09113b"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.6, -3.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.3, 1.3, 1.0),
+            ),
+        ),
+        "cc8dd3f2908fa0bb": (
+            Name: ("Label: Turn, elastic"),
+            Text: (
+                text: "Turn, elastic",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (6.9, 0.65, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ce0c3f08e12656f1": (
+            Name: ("Track: Sine"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, 1.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "cf439961dd132f51": (
+            Name: ("Label: Popped by a script, through gg.tween"),
+            Text: (
+                text: "Popped by a script, through gg.tween",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Start,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-3.4, -3.6, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d7369de5749e0f77": (
+            Name: ("Crate, sized"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("d8c5ed37db09113b"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (3.8, 1.9, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.3, 1.3, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "scale",
+                    from: Vec3((1.3, 1.3, 1.0)),
+                    to: Vec3((1.9, 1.9, 1.0)),
+                    seconds: 1.0,
+                    curve: Back,
+                    ease: InOut,
+                    playback: PingPong,
+                    time: 0.0,
+                ),
+            ]),
+        ),
+        "e9bb466a28738582": (
+            Name: ("Track: Linear"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, 2.7, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+        "ef5e7d7a3a862aac": (
+            Name: ("Track: Back"),
+            Sprite: (
+                color: (0.24, 0.27, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-2.6, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 0.04, 1.0),
+            ),
+        ),
+    },
+)

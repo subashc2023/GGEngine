@@ -2,7 +2,8 @@
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
 //! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
 //! own entities and spawn others in their place among them, and a Luau script that moves its
-//! entities and counts its ticks in its own component; before the job system's threads start,
+//! entities and counts its ticks in its own component, and sprites' flipbooks and tweens of their
+//! fields, looping and going back and forth; before the job system's threads start,
 //! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
 //! allocates the first time it does; and ticks that despawn entities and spawn others in their
 //! place, as a game's bullets and particles come and go.
@@ -23,10 +24,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{fs, process, thread};
 
-use gg_engine::math::Vec3;
+use gg_engine::math::{Quat, Vec3};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    Component, Context, Entity, Layer, Script, Scripts, Tick, Transform, World, run_scripts,
+    Component, Context, Curve, Entity, Flipbook, Layer, Playback, Script, Scripts, Sprite, Tick,
+    Transform, Tween, World, run_scripts, step_animation,
 };
 
 use crate::common::Counted;
@@ -88,6 +90,9 @@ impl Script for Ephemeral {
 /// The entities a Luau script moves.
 const DRIFTERS: u32 = 256;
 
+/// The sprites that flipbooks play and tweens ease.
+const ANIMATED: u32 = 256;
+
 /// Moves its entities along x, and counts its ticks in its own component.
 const DRIFT: &str = r#"
 local Transform = gg.component("Transform")
@@ -118,8 +123,9 @@ fn on_a_worker() -> bool {
 }
 
 /// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
-/// job system's threads, and whose heavy ones it turns back on the ticks' thread alone; and
-/// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs.
+/// job system's threads, and whose heavy ones it turns back on the ticks' thread alone;
+/// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs;
+/// and `ANIMATED` sprites, whose animation it steps.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
@@ -153,6 +159,37 @@ impl Layer for Movers {
             let drifter = world.spawn(Transform::default());
             world.add_default(drifter, "Drift").expect("a drifter");
         }
+        for i in 0..ANIMATED {
+            let flipbook = Flipbook {
+                columns: 4,
+                rows: 4,
+                frames: 16,
+                rate: 12.0,
+                playback: Playback::Loop,
+                time: i as f32 / 64.0,
+                ..Flipbook::default()
+            };
+            let animated = world.spawn((Transform::default(), Sprite::default(), flipbook));
+            let turned = Quat::from_rotation_z(1.0);
+            let tweens = [
+                Tween {
+                    playback: Playback::PingPong,
+                    ..Tween::new("Transform", "scale.x", 1.0, 2.0, 0.5)
+                },
+                Tween {
+                    curve: Curve::Elastic,
+                    playback: Playback::Loop,
+                    ..Tween::new("Sprite", "color.w", 1.0, 0.0, 0.75)
+                },
+                Tween {
+                    playback: Playback::PingPong,
+                    ..Tween::new("Transform", "rotation", Quat::IDENTITY, turned, 1.0)
+                },
+            ];
+            for tween in tweens {
+                world.tween(animated, tween).expect("fields of their kinds");
+            }
+        }
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -175,6 +212,7 @@ impl Layer for Movers {
         }
         run_scripts::<Ephemeral>(world, tick);
         self.scripts.run(world);
+        step_animation(world);
     }
 }
 

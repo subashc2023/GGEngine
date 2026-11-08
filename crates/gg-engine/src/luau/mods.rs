@@ -626,4 +626,49 @@ mod tests {
         let codes: Vec<String> = logged.codes.try_iter().collect();
         assert!(codes.iter().any(|code| code == "script.error"), "{codes:?}");
     }
+
+    /// A mod's script tweens a field only if its mod may write `Tweens`, which hold the tween, as
+    /// well as the field: one without fails at its tween, warning, and the game goes on.
+    #[test]
+    fn a_mod_tweens_only_writing_tweens() {
+        let logged = crate::testing::logged();
+        let dir = Scratch::new("mods-tweens");
+        let tweening = |name: &str| {
+            format!(
+                "local Counter = gg.component(\"Counter\")\n\
+                 local {name} = gg.declare(\"{name}\", {{ glow = 0 }}, {{ on = \"Counter\" }})\n\
+                 function {name}.tick(entity, dt)\n\
+                     gg.tween(entity, {name}.glow, 1, 1)\n\
+                     entity[Counter.count] = entity[Counter.count] + 1\n\
+                 end\n\
+                 return {name}\n"
+            )
+        };
+        let counting = "\"read:Counter\", \"write:Counter\"";
+        let granted = format!("{counting}, \"write:Tweens\"");
+        install(
+            &dir.0,
+            "a-tweener",
+            "Modded",
+            &granted,
+            &tweening("Tweener"),
+        );
+        install(&dir.0, "b-still", "Modded", counting, &tweening("Still"));
+        let (mut cx, counters) = modded(&dir.0, 1);
+        let limits = Grant::parse(["read:Counter", "write:Counter", "write:Tweens"]);
+        let mut mods = Mods::load(&mut cx, limits.expect("a grant"));
+        assert_eq!(names(&cx), ["a-tweener", "b-still"]);
+        mods.run(cx.world_mut());
+        let world = cx.world();
+        let counted = world.get::<Counter>(counters[0]).expect("a counter");
+        assert_eq!(counted.count, 1, "the tweener's tick alone ran through");
+        let tweens = &world.get::<crate::Tweens>(counters[0]).expect("tweens").0;
+        let tweened: Vec<_> = tweens
+            .iter()
+            .map(|tween| tween.component.as_str())
+            .collect();
+        assert_eq!(tweened, ["Tweener"]);
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        assert!(codes.iter().any(|code| code == "script.error"), "{codes:?}");
+    }
 }

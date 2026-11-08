@@ -1270,6 +1270,24 @@ caps' arcs, which draw over the rest of the view but where an opaque mesh is nea
 [Rendering](#rendering) says, rather than nudged toward the camera: so they show from behind a
 sprite as from in front of it, since sprites test depth without writing it.
 
+## Animation
+
+Animation is gg-engine's `animation` module, reached through components that hold its state, so
+that snapshots, replays and peers see it alike, and stepped by `step_animation`, a system a layer's
+tick runs after what starts tweens, such as scripts, and before physics, which takes bodies in where
+tweens put them. A `Flipbook` beside a `Sprite` plays the sprite through cells of its texture, cut
+evenly into columns and rows, as many a second as its rate says, looping, back and forth or once,
+a flipped sprite kept flipped; its cells are fractions of the texture, as the world doesn't know a
+texture's size, which is the renderer's. An entity's `Tweens` ease fields of its components, each
+tween one, named by its component's type and its own name, or one of a vector field's components,
+from one value to another over seconds, along one of Penner's curves eased at either end or both,
+played once, looped or back and forth. A tween finds its field by name at each step and reads and
+writes it through reflection by its index, as scripts' handles do, allocating nothing, and writes
+only a value that changed, so that the renderer's scene isn't handed rows at rest. Its curves are
+libm's functions and its rotations glam's slerp, which a reference hash in `animation/` checks on
+every platform. Scenes list tweens; code starts one with `World::tween` and scripts with
+`gg.tween`, each in place of a tween of the same field.
+
 ## Rendering
 
 Each frame the engine extracts that frame's render data, as plain data, which the render thread

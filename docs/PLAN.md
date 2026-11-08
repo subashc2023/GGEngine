@@ -121,14 +121,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 13, GPU-driven rendering** (2026-11-06)
 - **3D physics** (2026-11-07)
 - **Characters and queries** (2026-11-07)
+- **Flipbooks and tweens** (2026-11-07)
 
 ## Now
 
-**Phase 14, 3D gameplay**, as Next has it. Its milestones after characters and queries, in order:
+**Phase 14, 3D gameplay**, as Next has it. Its milestones after flipbooks and tweens, in order:
 
-- **Flipbooks and tweens.** A sprite animated through a sheet's cells at a rate, looping or once,
-  and tweens: a component's field eased from one value to another over a time, set from code,
-  scripts and scenes and stepped at the ticks, so that recordings and peers see them alike.
 - **Skeletal animation.** glTF's skins and animations: a model's joints its nodes' entities, which
   its clips move at the ticks, sampled, blended and cross-faded as a component on its root says; the
   joints' matrices handed to the renderer, which skins a mesh's vertices in a compute pass before
@@ -510,6 +508,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Mesh colliders' outlines: `MeshCollider3D` outlines nothing, as its model shows where it is, and Sponza's would draw some 790,000 lines | Someone needs to see a mesh collider apart from its model, as one of another model's |
 | Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; a character's rotation turned by its controller, toward where it goes; and a character's own collision filter, as one that passes through other characters | Each with its first game use; the platforms with the 3D demo's level, if it moves |
 | Casts that give every hit along their way, rather than the first; overlap queries, what's within a shape or at a point; casts that pass through colliders by component or group rather than an entity's; and casts in 2D | Each with its first game use |
+| Flipbooks of sheets whose cells don't fill their texture, or have space between them, by cells in pixels as `SpriteSheet` takes them; clips, named runs of cells a game switches between; and events at a flipbook's cells, as a footstep's sound at a foot's | Each with its first game use; clips and events with the 3D demo's animated characters, if they need them |
+| Tweens of another entity's fields, or of fields deeper than a vector's component, as a list's element; tweens one after another or together as a sequence; a tween's end told to code and scripts, as an event, and scripts asking whether a field is tweening; and tweens of integers, or of colors through a space other than linear's | Each with its first game use |
 | A 3D body's rotation locked about some axes alone, as one that turns about Y but never tips: `RigidBody3D::fixed_rotation` locks all three, and what sets its rotation turns it | A game's body tips about some axes but not others |
 | Continuous collision detection, rapier's CCD, for a body fast enough to pass through a thin collider within a tick: each step tests where the bodies are at its end | A game's fast bodies pass through what they should hit, as bullets would |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |

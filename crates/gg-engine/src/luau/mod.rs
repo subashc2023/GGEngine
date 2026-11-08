@@ -26,7 +26,9 @@ use tracing::{info, warn};
 use crate::ecs::{ComponentId, Kind};
 use crate::grant::{Capability, Grant};
 use crate::reflect::{Ident, Reflect, Type, Value, list};
-use crate::{Cast, Context, Entity, Hit3D, Shape3D, Tick, World};
+use crate::{
+    Cast, Context, Curve, Ease, Entity, Hit3D, Playback, Shape3D, Tick, Tween, TweenValue, World,
+};
 
 mod bytecode;
 #[cfg(feature = "dev")]
@@ -129,6 +131,13 @@ const REMOVED: [&str; 7] = [
 /// as `gg.cast_sphere(radius, from, toward, distance, exclude)`: each gives the entity hit, where,
 /// the surface's normal there and how far, or nil, without end for a distance of nil, through the
 /// colliders of `exclude` if it's given. A mod's scripts cast only if it may read the whole world.
+///
+/// `gg.tween(entity, field, to, seconds, options)` eases the field whose handle is `field` from
+/// what it holds to `to` over `seconds`, as [`World::tween`] does, in place of a tween of that
+/// field; `options`, if it's given, a table of `curve`, `ease` and `playback`, their variants'
+/// names, as `{ curve = "Back", ease = "Out", playback = "PingPong" }`, and `delay`, the seconds
+/// before it starts. A mod's scripts tween only fields they may write, and only if they may write
+/// `Tweens`.
 ///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
@@ -746,6 +755,7 @@ impl Host {
         gg.raw_set("cast_sphere", lua.create_function(cast_sphere)?)?;
         gg.raw_set("cast_box", lua.create_function(cast_box)?)?;
         gg.raw_set("cast_capsule", lua.create_function(cast_capsule)?)?;
+        gg.raw_set("tween", lua.create_function(tween)?)?;
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
@@ -1937,6 +1947,106 @@ fn cast(
     })
 }
 
+/// What a script gives `gg.tween`: the entity, the handle of its field, where the field goes, in
+/// how many seconds, and the table of the rest, if any.
+type TweenArgs = (LightUserData, Lua_, Lua_, f64, Option<Table>);
+
+/// `gg.tween(entity, field, to, seconds, options)`: starts a tween of `entity`'s field whose handle
+/// is `field` from what it holds to `to`, as the scripts' doc says.
+fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Result<()> {
+    shared(|shared| {
+        let entity = entity_of(entity)?;
+        let fields = shared.fields.borrow();
+        let field = &fields[field_of(&key)?];
+        let (component, name) = (&field.component, &field.name);
+        if !field.writes {
+            let what = format!("tweening `{component}.{name}`");
+            let capability = format!("write:{component}");
+            return Err(mlua::Error::runtime(ungranted(&capability, &what)));
+        }
+        if let Some(held) = &shared.held
+            && !held.grant.writes("Tweens")
+        {
+            let what = format!("tweening `{component}.{name}`, which its entity's `Tweens` holds,");
+            return Err(mlua::Error::runtime(ungranted("write:Tweens", &what)));
+        }
+        let mut world = shared.world.borrow_mut();
+        let reached = world.field_at(entity, missing(field)?, field.index);
+        let from = reached.map_err(|error| reaching(&world, entity, field, &error))?;
+        let from = TweenValue::of(&from.to_value()).ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "`{component}.{name}` isn't a number, a vector or a rotation, which tweens ease"
+            ))
+        })?;
+        let to = match (from, &to) {
+            (TweenValue::Number(_), &Lua_::Number(x)) => TweenValue::Number(x),
+            (TweenValue::Number(_), &Lua_::Integer(n)) => TweenValue::Number(n as f64),
+            (TweenValue::Vec2(_), Lua_::Vector(v)) => TweenValue::Vec2(Vec2::new(v.x(), v.y())),
+            (TweenValue::Vec3(_), Lua_::Vector(v)) => TweenValue::Vec3(vec3_of(*v)),
+            (TweenValue::Vec4(_), Lua_::Vector(v)) => {
+                TweenValue::Vec4(Vec4::new(v.x(), v.y(), v.z(), v.w()))
+            }
+            (TweenValue::Quat(_), Lua_::Vector(v)) => TweenValue::Quat(quat_of(*v)),
+            (TweenValue::Number(_), to) => {
+                let got = to.type_name();
+                let message = format!("`{component}.{name}` goes to a number, not a {got}");
+                return Err(mlua::Error::runtime(message));
+            }
+            (_, to) => {
+                let got = to.type_name();
+                let message = format!("`{component}.{name}` goes to a vector, not a {got}");
+                return Err(mlua::Error::runtime(message));
+            }
+        };
+        let mut tween = Tween::new(component, name, from, to, seconds as f32);
+        if let Some(options) = options {
+            for pair in options.pairs::<Lua_, Lua_>() {
+                let (key, value) = pair?;
+                let key = key.to_string()?;
+                let named = |kind: &str| match &value {
+                    Lua_::String(text) => {
+                        Ok(Value::Variant(text.to_str()?.to_owned().into(), Vec::new()))
+                    }
+                    other => Err(mlua::Error::runtime(format!(
+                        "a tween's `{key}` is the name of a {kind}, as a string, not a {}",
+                        other.type_name()
+                    ))),
+                };
+                let refused =
+                    |error: Error| mlua::Error::runtime(format!("a tween's `{key}`: {error:#}"));
+                match &*key {
+                    "curve" => {
+                        tween.curve = Curve::from_value(&named("Curve")?).map_err(refused)?
+                    }
+                    "ease" => tween.ease = Ease::from_value(&named("Ease")?).map_err(refused)?,
+                    "playback" => {
+                        tween.playback =
+                            Playback::from_value(&named("Playback")?).map_err(refused)?;
+                    }
+                    "delay" => match value {
+                        Lua_::Number(x) => tween.time = -(x as f32),
+                        Lua_::Integer(n) => tween.time = -(n as f32),
+                        ref other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "a tween's `delay` is a number of seconds, not a {}",
+                                other.type_name()
+                            )));
+                        }
+                    },
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a tween has no `{other}`: its options are `curve`, `ease`, \
+                             `playback` and `delay`"
+                        )));
+                    }
+                }
+            }
+        }
+        let started = world.tween(entity, tween);
+        started.map_err(|error| reaching(&world, entity, field, &error))
+    })
+}
+
 /// `v`'s X, Y and Z, as a script's vector holds a point or a direction.
 fn vec3_of(v: Vector) -> Vec3 {
     Vec3::new(v.x(), v.y(), v.z())
@@ -3037,5 +3147,77 @@ return Look
         near("ball", 3.0);
         near("boxed", 3.0);
         assert_eq!(field("missed"), Value::Bool(true));
+    }
+
+    /// Starts its entity's tweens at its first tick: its scale, eased in; its own size, looping
+    /// after a wait; and its rotation; and counts the tweens refused, of a scale to a number, a
+    /// curve and an option there are none of, and seconds less than none.
+    const PULSE: &str = r#"
+local Transform = gg.component("Transform")
+local Pulse = gg.declare("Pulse", { started = false, size = 1, refused = 0 })
+
+function Pulse.tick(entity, dt)
+    if entity[Pulse.started] then
+        return
+    end
+    entity[Pulse.started] = true
+    gg.tween(entity, Transform.scale, vector.create(2, 2, 2), 0.5, { curve = "Quad", ease = "In" })
+    gg.tween(entity, Pulse.size, 3, 1, { playback = "Loop", delay = 0.25 })
+    gg.tween(entity, Transform.rotation, gg.quat.from_rotation_y(math.pi / 2), 1)
+    local one = vector.create(1, 1, 1)
+    local refusals = {
+        function() gg.tween(entity, Transform.scale, 2, 1) end,
+        function() gg.tween(entity, Transform.scale, one, 1, { curve = "Wobbly" }) end,
+        function() gg.tween(entity, Transform.scale, one, 1, { speed = 2 }) end,
+        function() gg.tween(entity, Transform.scale, one, -1) end,
+    }
+    for _, refusal in refusals do
+        if not pcall(refusal) then
+            entity[Pulse.refused] += 1
+        end
+    end
+end
+
+return Pulse
+"#;
+
+    /// A script tweens its entity's fields, Rust's and its own, from what they hold, with the
+    /// curve, ease, playback and wait it names, as code does; and a tween it can't start is refused
+    /// where it asks, starting nothing.
+    #[test]
+    fn a_script_tweens_its_entity_s_fields() {
+        use crate::{Transform, Tweens, step_animation};
+
+        let dir = Scratch::new("luau-tweens");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/pulse.luau", PULSE)]);
+        let world = cx.world_mut();
+        let pulsing = world.spawn(Transform::IDENTITY);
+        world.add_default(pulsing, "Pulse").expect("added");
+        let mut run = |world: &mut World, ticks: usize| {
+            for _ in 0..ticks {
+                host.run(world);
+                step_animation(world);
+            }
+        };
+        run(cx.world_mut(), 16);
+        let world = cx.world();
+        let field = |name| world.get_field(pulsing, "Pulse", name).expect("a field");
+        assert_eq!(field("refused"), Value::F64(4.0));
+        let tweens = &world.get::<Tweens>(pulsing).expect("tweens").0;
+        assert_eq!(tweens.len(), 3, "{tweens:?}");
+        let transform = *world.get::<Transform>(pulsing).expect("placed");
+        // A quarter second, half of the scale's, eased in: a quarter of the way.
+        assert_eq!(transform.scale, Vec3::splat(1.25));
+        assert_eq!(field("size"), Value::F64(1.0), "waiting");
+        run(cx.world_mut(), 16);
+        let world = cx.world();
+        let field = |name| world.get_field(pulsing, "Pulse", name).expect("a field");
+        let transform = *world.get::<Transform>(pulsing).expect("placed");
+        assert_eq!(transform.scale, Vec3::splat(2.0));
+        assert_eq!(field("size"), Value::F64(1.5));
+        let eighth = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        assert!(transform.rotation.angle_between(eighth) < 1e-3);
+        let tweens = &world.get::<Tweens>(pulsing).expect("tweens").0;
+        assert_eq!(tweens.len(), 2, "the scale's ended");
     }
 }

@@ -1,0 +1,390 @@
+(
+    entities: {
+        "12979bfcbbeb508f": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 0,
+                frames: 8,
+                rate: 10.0,
+                playback: PingPong,
+                time: 0.0,
+            ),
+            Name: ("Coin, back and forth"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.0),
+                    (0.125, 0.5),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.7, 1.5, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "3f372617f0baef3a": (
+            Name: ("Label: Looping, 12 a second"),
+            Text: (
+                text: "Looping, 12 a second",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-5.1, 0.15, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4375d0341e4f6f2a": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 8,
+                frames: 8,
+                rate: 2.0,
+                playback: PingPong,
+                time: 0.0,
+            ),
+            Name: ("Numbers, back and forth"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.5),
+                    (0.125, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-1.7, -1.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "4a800646417a8105": (
+            Name: ("Label: Looping, 6 a second"),
+            Text: (
+                text: "Looping, 6 a second",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-1.7, 0.15, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "50cef798e6c648e7": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 8,
+                frames: 8,
+                rate: 2.0,
+                playback: Once,
+                time: -1.0,
+            ),
+            Name: ("Numbers, once"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.5),
+                    (0.125, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.7, -1.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "5c54e05b42a9ba21": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 10,
+                frames: 4,
+                rate: 3.0,
+                playback: Loop,
+                time: 0.0,
+            ),
+            Name: ("Numbers, 2 to 5"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.25, 0.5),
+                    (0.375, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (5.1, -1.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "64d0b50f658c6762": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 8,
+                frames: 8,
+                rate: 2.0,
+                playback: Loop,
+                time: 0.0,
+            ),
+            Name: ("Numbers, looping"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.5),
+                    (0.125, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.1, -1.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "732242fda8902e32": (
+            Name: ("Label: Back and forth"),
+            Text: (
+                text: "Back and forth",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (1.7, 0.15, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "77744cca4d909eb2": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 0,
+                frames: 8,
+                rate: 12.0,
+                playback: Loop,
+                time: 0.0,
+            ),
+            Name: ("Coin, flipped"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.125, 0.0),
+                    (0.0, 0.5),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (5.1, 1.5, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "86f0ce2ea6ec39c1": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 0,
+                frames: 8,
+                rate: 12.0,
+                playback: Loop,
+                time: 0.0,
+            ),
+            Name: ("Coin, looping"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.0),
+                    (0.125, 0.5),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-5.1, 1.5, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "9daa37e51b591d75": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a1fa7d4acde560db": (
+            Name: ("Label: Cells 2 to 5, looping"),
+            Text: (
+                text: "Cells 2 to 5, looping",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (5.1, -2.95, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bc3199944567ceb1": (
+            Flipbook: (
+                columns: 8,
+                rows: 2,
+                first: 0,
+                frames: 8,
+                rate: 6.0,
+                playback: Loop,
+                time: 0.0,
+            ),
+            Name: ("Coin, slower"),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                texture: Some("aed67537f9078aa3"),
+                rect: [
+                    (0.0, 0.0),
+                    (0.125, 0.5),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-1.7, 1.5, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.9, 1.9, 1.0),
+            ),
+        ),
+        "c15521b1b3dca50a": (
+            Name: ("Hint"),
+            Text: (
+                text: "Sprites played through a sheet's cells: looping, back and forth, once, at their own rates, and flipped",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "cecf4f4e5ba80780": (
+            Name: ("Label: Once, after a second"),
+            Text: (
+                text: "Once, after a second",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (1.7, -2.95, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "deeda8b23927f7d6": (
+            Name: ("Label: Back and forth"),
+            Text: (
+                text: "Back and forth",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-1.7, -2.95, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "df7142dcaf29e6f8": (
+            Name: ("Label: Flipped across: its G mirrored"),
+            Text: (
+                text: "Flipped across: its G mirrored",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (5.1, 0.15, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e8af30f7c70b53bf": (
+            Name: ("Label: Looping, 2 a second"),
+            Text: (
+                text: "Looping, 2 a second",
+                font: None,
+                size: 0.22,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-5.1, -2.95, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

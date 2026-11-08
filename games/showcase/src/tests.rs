@@ -33,8 +33,8 @@ fn every_asset_has_its_id_file_beside_it() {
     let project = Project::read(dir()).expect("the project reads");
     let found = gg_api::asset::scan(&project.assets_dir(dir()));
     assert!(
-        found.assets.len() >= 15,
-        "5 textures, a sky's among them, 9 models and a font"
+        found.assets.len() >= 16,
+        "6 textures, a sky's among them, 9 models and a font"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 16, "{scenes:?}");
+    assert_eq!(scenes.len(), 18, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -183,6 +183,39 @@ fn the_scripts_turn_and_bob_what_theyre_on() {
         .get_field(bobbed, "Bob", "time")
         .expect("its time");
     assert_eq!(time, Value::F64(2.0));
+}
+
+/// Pulse pops what it's on to its size once its seconds have passed, and a tween eases it back to
+/// its rest, springing past it as it settles, and there at its end.
+#[test]
+fn a_pulse_pops_and_a_tween_eases_it_back() {
+    let (mut cx, mut showcase) = loaded();
+    let world = cx.world_mut();
+    let popped = world.spawn(Transform::IDENTITY);
+    world
+        .add_default(popped, "Pulse")
+        .expect("its script loaded");
+    let mut ticks = (0..).map(|number| Tick { number });
+    let mut run = |showcase: &mut Showcase, world: &mut World| {
+        let tick = ticks.next().expect("ticks without end");
+        showcase.tick(world, tick);
+        world.get::<Transform>(popped).expect("placed").scale
+    };
+    // A second and a half, 96 ticks, before it pops.
+    for _ in 0..95 {
+        assert_eq!(run(&mut showcase, cx.world_mut()), Vec3::ONE);
+    }
+    let popped_to = run(&mut showcase, cx.world_mut());
+    assert!(popped_to.x > 1.0 && popped_to.x < 1.5, "{popped_to}");
+    let settling: Vec<Vec3> = (0..52)
+        .map(|_| run(&mut showcase, cx.world_mut()))
+        .collect();
+    let least = settling
+        .iter()
+        .map(|scale| scale.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!(least < 1.0, "springs past its rest: {least}");
+    assert_eq!(settling.last(), Some(&Vec3::ONE));
 }
 
 /// Walk walks its character the way the keys say, forward along its -Z, turning about Y, and

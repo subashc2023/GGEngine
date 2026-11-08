@@ -67,8 +67,8 @@ use crate::scene_files::{self, SceneFile, SceneFiles};
 use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::sync_test::SyncTest;
 use crate::{
-    App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, ModelNode, ModelRoot,
-    Name, Owner, RigidBody2D, Transform, Ui, World,
+    App, BoxCollider2D, Entity, EntityId, Event, Flipbook, Input, MeshDraw, Model, ModelNode,
+    ModelRoot, Name, Owner, RigidBody2D, Transform, Tweens, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -587,6 +587,8 @@ impl Context {
             world.register::<CapsuleCollider3D>()?;
             world.register::<MeshCollider3D>()?;
             world.register::<CharacterController3D>()?;
+            world.register::<Flipbook>()?;
+            world.register::<Tweens>()?;
             world.register::<ModelRoot>()?;
             world.register::<ModelNode>()?;
             world.register::<font::Text>()?;

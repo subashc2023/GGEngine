@@ -1,7 +1,12 @@
 //! The showcase: a scene for each of what the engine draws and simulates so far, in its scenes
 //! folder, which the editor's Scenes panel opens, each with a camera of its own: `welcome.ron`,
 //! where it starts; sprites, tinted, textured, cut from a sheet, tiled, sampled crisp or smooth,
-//! flipped and blended (`sprites.ron`); circles, discs and rings, crisp and faded (`shapes.ron`);
+//! flipped and blended (`sprites.ron`); sprites played through a sheet's cells, a coin spinning and
+//! numbered tiles, looping, back and forth and once, at their own rates and flipped
+//! (`flipbooks.ron`, its sheet `textures/flipbook.png`, written by a script outside the
+//! repository); fields eased by tweens, a dot along a track for each curve, a size, a turn, a color
+//! and an alpha, and a crate a script pops (`tweens.ron`); circles, discs and rings, crisp and
+//! faded (`shapes.ron`);
 //! text in the engine's font and the project's, aligned, sized, colored and turned (`text.ron`); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); glTF
@@ -23,8 +28,9 @@
 //! Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`,
 //! turn and bob what they're on at each tick, `scripts/walk.luau` walks a character the way the
 //! keys or a pad say, W and S or the arrows or the left stick forward and back, turning by A and D,
-//! jumping by Space or South, and `scripts/follow.luau` follows it with a camera, casting back
-//! from it so that walls don't come between them; and physics steps, so that each scene moves as
+//! jumping by Space or South, `scripts/follow.luau` follows it with a camera, casting back
+//! from it so that walls don't come between them, and `scripts/pulse.luau` pops what it's on every
+//! so often, a tween easing it back; and animation and physics step, so that each scene moves as
 //! it plays, in the editor from its Play, and in the reference player, which runs the game's
 //! package without its code, and so without the keys' walking.
 
@@ -40,7 +46,7 @@ use gg_engine::math::{Vec2, Vec3};
 use gg_engine::reflect::Value;
 use gg_engine::{
     Actions, App, Binding, Change, Commands, Context, Event, Key, Layer, PadButton, Reflect,
-    Scripts, Source, Stick, Tick, World, step_physics,
+    Scripts, Source, Stick, Tick, World, step_animation, step_physics,
 };
 
 #[cfg(test)]
@@ -59,9 +65,10 @@ fn app() -> App {
 }
 
 /// The game's scripts, by their paths from its directory: each declares the component it is.
-const SCRIPTS: [&str; 4] = [
+const SCRIPTS: [&str; 5] = [
     "scripts/bob.luau",
     "scripts/follow.luau",
+    "scripts/pulse.luau",
     "scripts/spin.luau",
     "scripts/walk.luau",
 ];
@@ -87,7 +94,7 @@ enum Command {
 /// The game's layer: it loads the scripts as it loads, which declares their components, so that
 /// its scenes, the Inspector's Add Component and the tool API know them before any entity has one;
 /// loads the start scene as it attaches; and at each tick applies what the keys did to its
-/// scenes' walkers, then runs the scripts and steps physics. A script or the start scene that
+/// scenes' walkers, then runs the scripts, steps animation and then physics. A script or the start scene that
 /// doesn't load ends the run with its error, through [`Context::fail`].
 struct Showcase {
     scripts: Scripts,
@@ -177,6 +184,7 @@ impl Layer for Showcase {
             walk(world, &command);
         }
         self.scripts.run(world);
+        step_animation(world);
         step_physics(world);
     }
 
