@@ -105,8 +105,9 @@ impl Wrap {
 
     /// Where shaders find, after every [`Sampler`], the anisotropic sampler that wraps this way: it
     /// filters linearly within and between a texture's mip levels, with up to 16 samples along the
-    /// way a surface recedes, as models' textures are sampled. Not for sprites, whose texels it
-    /// would read past, since its samples spread around the point a shader asks for.
+    /// way a surface recedes, as models' textures are sampled; on lavapipe, without those samples,
+    /// as `Candidate::anisotropy` in src/device/candidate.rs says why. Not for sprites, whose texels
+    /// it would read past, since its samples spread around the point a shader asks for.
     pub fn anisotropic(self) -> u32 {
         Sampler::ALL.len() as u32 + self as u32
     }
@@ -120,8 +121,9 @@ impl Wrap {
     }
 
     /// What its anisotropic sampler is made from: 16 samples at most, the least
-    /// `maxSamplerAnisotropy` a device with anisotropy may have, and every Vulkan 1.4 device has it.
-    fn anisotropic_info(self) -> vk::SamplerCreateInfo<'static> {
+    /// `maxSamplerAnisotropy` a device with anisotropy may have, and every Vulkan 1.4 device has it;
+    /// or, without `anisotropy`, linear filtering alone.
+    fn anisotropic_info(self, anisotropy: bool) -> vk::SamplerCreateInfo<'static> {
         let address = self.address();
         vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -130,7 +132,7 @@ impl Wrap {
             .address_mode_u(address)
             .address_mode_v(address)
             .address_mode_w(address)
-            .anisotropy_enable(true)
+            .anisotropy_enable(anisotropy)
             .max_anisotropy(16.0)
             .max_lod(vk::LOD_CLAMP_NONE)
     }
@@ -336,11 +338,14 @@ impl Slots {
 }
 
 impl Bindless {
+    /// The set, whose [`Wrap::anisotropic`] samplers filter anisotropically if `anisotropy` says
+    /// they do on the device.
+    ///
     /// # Safety
     ///
     /// The device must be live, with the bindless features enabled, and outlive the set, which
     /// it must [`destroy`](Bindless::destroy).
-    pub(crate) unsafe fn new(device: &ash::Device) -> Result<Self> {
+    pub(crate) unsafe fn new(device: &ash::Device, anisotropy: bool) -> Result<Self> {
         let mut bindless = Self {
             samplers: Vec::new(),
             layout: vk::DescriptorSetLayout::null(),
@@ -358,7 +363,7 @@ impl Bindless {
         };
         // SAFETY: the caller guarantees the device; on failure, what was made so far is
         // destroyed, null handles included, which Vulkan allows.
-        let made = unsafe { bindless.make(device) };
+        let made = unsafe { bindless.make(device, anisotropy) };
         if made.is_err() {
             // SAFETY: as above.
             unsafe { bindless.destroy(device) };
@@ -369,12 +374,12 @@ impl Bindless {
     /// # Safety
     ///
     /// As for [`Bindless::new`].
-    unsafe fn make(&mut self, device: &ash::Device) -> Result<()> {
+    unsafe fn make(&mut self, device: &ash::Device, anisotropy: bool) -> Result<()> {
         // SAFETY: the caller guarantees the device; every handle is made from live ones, and
         // the infos outlive the calls.
         unsafe {
             let infos = (Sampler::ALL.map(Sampler::info).into_iter())
-                .chain(Wrap::ALL.map(Wrap::anisotropic_info))
+                .chain(Wrap::ALL.map(|wrap| wrap.anisotropic_info(anisotropy)))
                 .chain(iter::once(comparison_info()));
             for (info, name) in infos.zip(sampler_names()) {
                 let sampler = device

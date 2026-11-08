@@ -375,7 +375,7 @@ impl Device {
             }
         };
         // SAFETY: the device has the bindless features, and `Device` destroys the set first.
-        let bindless = match unsafe { Bindless::new(&raw) } {
+        let bindless = match unsafe { Bindless::new(&raw, chosen.anisotropy) } {
             Ok(bindless) => bindless,
             Err(error) => {
                 drop(allocator);

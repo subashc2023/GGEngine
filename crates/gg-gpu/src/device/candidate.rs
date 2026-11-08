@@ -48,6 +48,13 @@ pub(super) struct Candidate {
     pub(super) memory_budget: bool,
     /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`), with `geometryShader`.
     pub(super) mesh_shaders: bool,
+    /// Whether its samplers filter anisotropically: on every GPU but lavapipe (llvmpipe), Mesa's
+    /// CPU driver, whose anisotropic filter returns NaN where a texture coordinate's derivatives
+    /// are 0, as across a triangle whose corners share their texture coordinates, as flat-colored
+    /// and palette-textured models' triangles do. Mesa 25.0's does, Debian 13's, which CI's GPU
+    /// tests run on: the skinned-mesh test's strips, whose texture coordinates are all 0, drew
+    /// black. To take out once a Mesa release filters them, Debian's among them.
+    pub(super) anisotropy: bool,
     pub(super) problem: Option<String>,
 }
 
@@ -99,16 +106,18 @@ impl Candidate {
             |_| format!("GPU {index}"),
             |name| name.to_string_lossy().into_owned(),
         );
-        let driver = if properties.api_version >= vk::API_VERSION_1_2 {
+        let (driver, driver_id) = if properties.api_version >= vk::API_VERSION_1_2 {
             let mut driver = vk::PhysicalDeviceDriverProperties::default();
             let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
             // SAFETY: as above; the driver properties are core in Vulkan 1.2.
             unsafe { raw.get_physical_device_properties2(physical, &mut properties2) };
             let name = driver.driver_name_as_c_str().map(CStr::to_string_lossy);
             let info = driver.driver_info_as_c_str().map(CStr::to_string_lossy);
-            format!("{} {}", name.unwrap_or_default(), info.unwrap_or_default())
+            let text = format!("{} {}", name.unwrap_or_default(), info.unwrap_or_default());
+            (text, driver.driver_id)
         } else {
-            format!("{:#x}", properties.driver_version)
+            let text = format!("{:#x}", properties.driver_version);
+            (text, vk::DriverId::default())
         };
         let vram_mib = memory
             .memory_heaps_as_slice()
@@ -233,6 +242,7 @@ impl Candidate {
             mesh_shaders: properties.api_version >= REQUIRED_VERSION
                 && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME)
                 && core.geometry_shader == vk::TRUE,
+            anisotropy: driver_id != vk::DriverId::MESA_LLVMPIPE,
             problem,
         }
     }
@@ -556,6 +566,7 @@ mod tests {
             memory: vk::PhysicalDeviceMemoryProperties::default(),
             memory_budget: false,
             mesh_shaders: false,
+            anisotropy: true,
             problem: None,
         }
     }
