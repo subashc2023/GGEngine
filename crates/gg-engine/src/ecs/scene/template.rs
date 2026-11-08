@@ -162,6 +162,19 @@ impl Expanding {
         }
     }
 
+    /// The template of a prefab of text `text` that isn't among the assets, as a save as a prefab
+    /// checks what it writes: none names it, so it links none of those it makes.
+    ///
+    /// Fails as the text fails to load, as [`World::load_scene`] says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn text_template(&mut self, world: &World, text: &str) -> Result<Rc<Template>> {
+        let scratch = world.scratch();
+        let loaded = read::parse(&scratch, text, true, self)?;
+        let parent_type = world.component::<Parent>();
+        let parent_type = parent_type.expect("every world has registered `Parent`");
+        Ok(Rc::new(Template::of(loaded, parent_type)))
+    }
+
     /// `prefab`'s template, as its text loads into a world of `world`'s types and assets, made the
     /// first time it's asked for: a stand-in's root alone.
     ///

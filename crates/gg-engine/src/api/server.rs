@@ -34,7 +34,8 @@ use gg_api::view::{Pacer, Writer};
 use gg_api::{
     Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, EntityList, Failure, Field,
     Hash, Hello, History, Input, InputEvent, Listed, ListedAsset, ListedOrphan, Looked, Patched,
-    Picked, Pulse, Request, Scene, SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
+    Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene, SceneAction, Session, Snapshotted,
+    Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -61,14 +62,42 @@ use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
     Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Name, Operation, Pose, Prefab,
-    Scroll, Texture, World, patch, snapshot,
+    PrefabRoot, Scroll, Texture, World, patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 30] = [
-    "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "scene", "capture",
-    "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "assets",
-    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "note", "debug", "quit",
+const METHODS: [&str; 31] = [
+    "hello",
+    "ping",
+    "status",
+    "pause",
+    "resume",
+    "play",
+    "stop",
+    "step",
+    "scene",
+    "capture",
+    "view",
+    "input",
+    "look",
+    "pick",
+    "entities",
+    "entity",
+    "get",
+    "types",
+    "hash",
+    "assets",
+    "snapshot",
+    "patch",
+    "apply",
+    "save_prefab",
+    "undo",
+    "redo",
+    "edits",
+    "logs",
+    "note",
+    "debug",
+    "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -198,8 +227,16 @@ struct Capturing {
 /// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
 enum Offer {
     Apply,
-    Step { author: String },
+    Step {
+        author: String,
+    },
     Patch,
+    /// A save as a prefab's link, of the prefab whose file's path from the asset root and name
+    /// these are.
+    Prefab {
+        path: String,
+        name: String,
+    },
 }
 
 /// What the main loop shares with the connections' threads.
@@ -274,6 +311,12 @@ enum Call {
     Patch(JumpTable),
     /// An edit's operations, and the gesture it's part of, if it's a set of one.
     Apply(Vec<gg_api::Operation>, Option<u64>),
+    /// The entity to save as a prefab and link to it, and the path of the prefab's file, as given,
+    /// checked to be a `.prefab` file's.
+    SavePrefab {
+        id: EntityId,
+        path: Option<PathBuf>,
+    },
     /// An undo, or a redo, of the edits of the author named, or else of the client's own.
     Undo {
         author: Option<String>,
@@ -805,6 +848,25 @@ impl Api {
                         Err(failure) => reply.send(Err(failure)),
                     }
                 }
+                Call::SavePrefab { id, path } => match save_prefab(cx, stack, id, path) {
+                    Ok(saved) => {
+                        let name = cx.world().assets().prefab_name(saved.prefab).to_owned();
+                        // Checked as the save wrote the file, in this world as it is: it applies.
+                        let link = Operation::Link {
+                            entity: id,
+                            prefab: saved.prefab,
+                        };
+                        let edit = Edit::Apply {
+                            author: client.to_string(),
+                            operations: vec![link],
+                        };
+                        let offered = stack.offer(cx, edit);
+                        let path = saved.path;
+                        let offer = Offer::Prefab { path, name };
+                        self.answer_offered(reply, offered, offer, stepper.ticks);
+                    }
+                    Err(error) => reply.send(Err(failure(&error))),
+                },
                 Call::Undo { author, redo } => {
                     let author = author.unwrap_or_else(|| client.to_string());
                     let edit = if redo {
@@ -1167,7 +1229,14 @@ fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<Done>) {
             reply.result(&edit);
         }
         (Offer::Patch, Ok(_)) => reply.result(&Patched { ticks }),
-        (Offer::Apply, Ok(Done::Stepped(_))) => unreachable!("an apply applies"),
+        (Offer::Prefab { path, name }, Ok(Done::Applied(_))) => reply.result(&SavedPrefab {
+            path: path.clone(),
+            name: name.clone(),
+            ticks,
+        }),
+        (Offer::Apply | Offer::Prefab { .. }, Ok(Done::Stepped(_))) => {
+            unreachable!("an apply applies")
+        }
         (Offer::Step { .. }, Ok(Done::Applied(_))) => unreachable!("an undo or a redo steps"),
     }
 }
@@ -1305,8 +1374,62 @@ fn entity(world: &World, id: EntityId) -> Result<String, Failure> {
     json::floats(&mut out, &space.matrix.to_cols_array());
     out.push_str(",\"rotation\":");
     json::floats(&mut out, &space.rotation.to_array());
-    out.push_str("}}");
+    out.push('}');
+    // An instance whose prefab's text no longer loads gives none, as its load warned.
+    if let Some(instanced) = instanced(world, entity) {
+        out.push_str(",\"instance\":");
+        out.push_str(&serde_json::to_string(&instanced).expect("an instance serializes"));
+    }
+    out.push('}');
     Ok(out)
+}
+
+/// Saves the entity of ID `id` and its descendants as a prefab at `path`, as `save_prefab` asks,
+/// as [`Context::save_prefab`] does, for its link to be offered.
+///
+/// Fails with `api.no_scene` in a game that runs from its package, which reads no file under its
+/// root, and in a networked one, whose files would part from the session's others', as `scene`'s
+/// `save` does; while a copy of the world as edited plays, whose entities would be saved and
+/// linked, though `stop` takes the copy away; and as `Context::save_prefab` does.
+fn save_prefab(
+    cx: &mut Context,
+    stack: &Stack,
+    id: EntityId,
+    path: Option<PathBuf>,
+) -> Result<crate::prefab::Saved> {
+    let why = if cx.reads_package() {
+        Some("it runs from its package, which holds no files under its root to write")
+    } else if stack.is_peer() {
+        Some("the run is networked, and its prefabs would part from the session's others'")
+    } else if cx.edited.is_some() {
+        Some(
+            "a copy of the world as edited plays, whose entities `stop` takes away, the link \
+             with them: stop it first",
+        )
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        let message = format!("the game can't save a prefab: {why}");
+        return Err(Error::new("api.no_scene", message));
+    }
+    cx.save_prefab(id, path.as_deref())
+}
+
+/// What of `entity`, which is alive, differs from its prefab, as `entity` answers it, if it's an
+/// instance's, as [`World::overrides`] finds it; `None` for any other, or one whose prefab's text no
+/// longer loads.
+pub(crate) fn instanced(world: &World, entity: Entity) -> Option<gg_api::Instanced> {
+    let overrides = world.overrides(entity).ok()??;
+    let assets = world.assets();
+    let link = world.get::<PrefabRoot>(entity);
+    Some(gg_api::Instanced {
+        root: overrides.root.to_string(),
+        prefab: assets.prefab_path(overrides.prefab).to_owned(),
+        link: link.map(|&PrefabRoot(prefab)| assets.prefab_path(prefab).to_owned()),
+        overrides: overrides.fields.into_iter().collect(),
+        added: overrides.added,
+    })
 }
 
 /// The field at `path` of the component `component` of the entity of ID `id` in `world`, as `get`
@@ -1857,6 +1980,7 @@ fn needs(call: &Call) -> Vec<Capability> {
                 _ => Write(None),
             })
             .collect(),
+        Call::SavePrefab { .. } => vec![Write(None), Scene],
         Call::Undo { .. } => vec![Write(None)],
         Call::Quit => vec![Quit],
     }
@@ -2315,8 +2439,9 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
 /// The call `request` makes of the main loop.
 ///
 /// Fails with `api.unknown_method` for a method there's none of, `api.bad_params` for parameters
-/// it doesn't take, a `look` that can't be, as [`look`] says, or a `scene` whose path is missing,
-/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`,
+/// it doesn't take, a `look` that can't be, as [`look`] says, a `scene` whose path is missing,
+/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`, or a
+/// `save_prefab` whose path isn't a `.prefab` file's,
 /// `api.bad_request` for a `hello` after the first, and `ecs.bad_id` for an ID that isn't one.
 fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
@@ -2360,6 +2485,21 @@ fn parse(request: &Request) -> Result<Call, Failure> {
                 return Err(bad_params(method, "takes one set as a gesture's"));
             }
             Call::Apply(operations, gesture)
+        }
+        "save_prefab" => {
+            let SavePrefab { id, path } = take(method, params)?;
+            let prefab = |ext: &std::ffi::OsStr| ext.eq_ignore_ascii_case("prefab");
+            if path
+                .as_deref()
+                .is_some_and(|path| !path.extension().is_some_and(prefab))
+            {
+                let what = "takes the path of a prefab's `.prefab` file";
+                return Err(bad_params(method, what));
+            }
+            Call::SavePrefab {
+                id: entity_id(&id)?,
+                path,
+            }
         }
         "undo" | "redo" => Call::Undo {
             author: take::<gg_api::Undo>(method, params)?.author,
@@ -3078,6 +3218,11 @@ mod tests {
             ("apply", set("Sprite"), None),
             ("apply", set("Transform"), Some("write:Transform")),
             ("apply", delete, Some("write")),
+            (
+                "save_prefab",
+                json!({"id": "00000000000000ff"}),
+                Some("write"),
+            ),
             ("undo", Value::Null, Some("write")),
             ("step", json!({"ticks": 1}), Some("play")),
             ("snapshot", Value::Null, Some("snapshot")),
@@ -4003,6 +4148,166 @@ mod tests {
         }
     }
 
+    /// What [`a_client_saves_an_entity_as_a_prefab_linked_in_its_place`]'s client gets.
+    struct Prefabbed {
+        saved: SavedPrefab,
+        root: Value,
+        bulb: Value,
+        renamed: Value,
+        reverted: Value,
+        refused: Vec<String>,
+        again: SavedPrefab,
+    }
+
+    /// A client saves an entity and its descendants as a prefab, which the game writes with its
+    /// ID file in its `prefabs` folder, named after the entity, and links the entity to, under the
+    /// IDs its subtree has, as an edit `undo` unlinks; `entity` answers what of an instance's
+    /// entities differs from its prefab, which `revert` sets back; and a save is refused, with a
+    /// code, for an instance's entity or root, a file that's there, a path outside the root or not a
+    /// prefab's, while one of the same name is numbered.
+    #[test]
+    fn a_client_saves_an_entity_as_a_prefab_linked_in_its_place() {
+        let (mut api, session) = started("Api Prefabs");
+        let dir = Scratch::new("api-prefabs");
+        scenes::project(&dir.0, 0);
+        let transform = "Transform: (translation: (2.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, \
+                         1.0), scale: (1.0, 1.0, 1.0))";
+        let main = format!(
+            "(entities: {{\"0000000000000a01\": (Name: (\"Big Lamp\"), {transform}), \
+             \"0000000000000a02\": (Name: (\"bulb\"), Parent: (\"0000000000000a01\"))}})\n"
+        );
+        scenes::save(&dir.0.join("scenes").join("main.ron"), &main, 0);
+        let mut cx = scenes::started(&dir.0);
+        let mut stack = Stack::default();
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let (root, bulb) = ("0000000000000a01", "0000000000000a02");
+        let client = move |mut client: Client| {
+            let entity = |client: &mut Client, id: &str| -> Value {
+                let answer = client.call("entity", json!({"id": id})).expect("an entity");
+                serde_json::from_str(answer.get()).expect("JSON")
+            };
+            let save = |client: &mut Client, params: Value| {
+                client.call_as::<SavedPrefab>("save_prefab", params)
+            };
+            let saved = save(&mut client, json!({"id": root})).expect("saved");
+            let (root_read, bulb_read) = (entity(&mut client, root), entity(&mut client, bulb));
+            let set = json!({"set": {"id": bulb, "component": "Name", "path": "0",
+                "value": "globe"}});
+            let apply = |client: &mut Client, operation: Value| {
+                let operations = json!({"operations": [operation]});
+                client
+                    .call_as::<Applied>("apply", operations)
+                    .expect("applied");
+            };
+            apply(&mut client, set);
+            let renamed = entity(&mut client, bulb);
+            apply(
+                &mut client,
+                json!({"revert": {"id": bulb, "component": "Name"}}),
+            );
+            let reverted = entity(&mut client, bulb);
+            let mut refused = vec![
+                save(&mut client, json!({"id": root})),
+                save(&mut client, json!({"id": bulb})),
+            ];
+            for _ in 0..3 {
+                client.call("undo", Value::Null).expect("undone");
+            }
+            for path in [
+                "prefabs/big_lamp.prefab",
+                "../outside.prefab",
+                "prefabs/x.ron",
+            ] {
+                refused.push(save(&mut client, json!({"id": root, "path": path})));
+            }
+            let refused = refused
+                .into_iter()
+                .map(|refused| refused.expect_err("refused").code);
+            let again = save(&mut client, json!({"id": root})).expect("saved again");
+            Prefabbed {
+                saved,
+                root: root_read,
+                bulb: bulb_read,
+                renamed,
+                reverted,
+                refused: refused.collect(),
+                again,
+            }
+        };
+        let got = serving(
+            &mut api,
+            &mut cx,
+            &mut stack,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        assert_eq!(got.saved.path, "prefabs/big_lamp.prefab");
+        let file = dir.0.join("prefabs").join("big_lamp.prefab");
+        let meta = gg_api::asset::Meta::read(&gg_api::asset::Meta::path(&file)).expect("its ID");
+        assert_eq!(got.saved.name, meta.id.to_string(), "named by its ID");
+        let instance = |read: &Value| -> gg_api::Instanced {
+            serde_json::from_value(read["instance"].clone()).expect("an instance's")
+        };
+        let linked = instance(&got.root);
+        assert_eq!(
+            (&*linked.root, linked.link.as_deref()),
+            (root, Some("prefabs/big_lamp.prefab"))
+        );
+        assert!(
+            linked.overrides.is_empty() && linked.added.is_empty(),
+            "{linked:?}"
+        );
+        let given = instance(&got.bulb);
+        assert_eq!(
+            (&*given.root, &*given.prefab),
+            (root, "prefabs/big_lamp.prefab")
+        );
+        assert_eq!(given.link, None);
+        let renamed = instance(&got.renamed).overrides;
+        assert_eq!(
+            renamed.get("Name").map(Vec::as_slice),
+            Some(&[String::new()][..])
+        );
+        assert!(instance(&got.reverted).overrides.is_empty());
+        let expected = [
+            "scene.prefab_variant",
+            "ecs.prefab_entity",
+            "asset.exists",
+            "asset.outside_root",
+            "api.bad_params",
+        ];
+        assert_eq!(got.refused, expected);
+        assert_eq!(got.again.path, "prefabs/big_lamp-2.prefab");
+        // Linked again, under the IDs the subtree has, the prefab's root at its origin.
+        let world = cx.world();
+        let [root, bulb] = [root, bulb].map(|id| world.entity(id.parse().unwrap()).unwrap());
+        assert!(world.get::<PrefabRoot>(root).is_some());
+        assert_eq!(world.parent(bulb).expect("alive"), Some(root));
+        let text = fs::read_to_string(&file).expect("written");
+        assert!(text.contains("translation: (0.0, 0.0, 0.0)"), "{text}");
+        assert!(text.contains("Name: (\"bulb\")"), "{text}");
+    }
+
+    /// A prefab isn't saved while a copy of the world as edited plays, whose entities `stop` takes
+    /// away with their link: nothing is written.
+    #[test]
+    fn a_prefab_isnt_saved_while_a_copy_plays() {
+        let dir = Scratch::new("api-prefab-playing");
+        scenes::project(&dir.0, 0);
+        let main = "(entities: {\"0000000000000a01\": (Name: (\"Lamp\"))})\n";
+        scenes::save(&dir.0.join("scenes").join("main.ron"), main, 0);
+        let mut cx = scenes::started(&dir.0);
+        let stack = Stack::default();
+        stack.play(&mut cx, 0);
+        let id = "0000000000000a01".parse().expect("an ID");
+        let refused = save_prefab(&mut cx, &stack, id, None).err();
+        assert_eq!(refused.expect("refused").code(), "api.no_scene");
+        assert!(!dir.0.join("prefabs").exists(), "nothing written");
+    }
+
     /// A client lists the assets under the game's root, a page of them, of a kind or all, each with
     /// its ID, which the game writes where its ID file is missing, as it scans first, and whether a
     /// layer added it; and the ID files whose assets aren't there. It's refused, with a code, in a
@@ -4853,6 +5158,34 @@ mod tests {
         assert_eq!(parse(&request("capture", json!({"own": true}))), Ok(own));
         let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
         assert_eq!(pick, Ok(Call::Pick([3.0, 4.5])));
+        let saved = |path: Option<&str>| {
+            Ok(Call::SavePrefab {
+                id: "00000000000000ff".parse().expect("an ID"),
+                path: path.map(PathBuf::from),
+            })
+        };
+        let given = json!({"id": "00000000000000ff"});
+        assert_eq!(parse(&request("save_prefab", given)), saved(None));
+        let given = json!({"id": "00000000000000ff", "path": "prefabs/Lamp.PREFAB"});
+        assert_eq!(
+            parse(&request("save_prefab", given)),
+            saved(Some("prefabs/Lamp.PREFAB"))
+        );
+        for (params, code) in [
+            (
+                json!({"id": "00000000000000ff", "path": "lamp.ron"}),
+                "api.bad_params",
+            ),
+            (json!({"path": "lamp.prefab"}), "api.bad_params"),
+            (json!({"id": "ff"}), "ecs.bad_id"),
+        ] {
+            let refused = parse(&request("save_prefab", params.clone())).err();
+            assert_eq!(
+                refused.map(|failure| failure.code),
+                Some(code.to_owned()),
+                "{params}"
+            );
+        }
         let scene = |action, path: Option<&str>, discard| {
             let path = path.map(PathBuf::from);
             Ok(Call::Scene(Scene {

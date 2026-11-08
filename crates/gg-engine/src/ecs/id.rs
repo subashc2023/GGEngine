@@ -86,9 +86,44 @@ pub(super) fn splitmix64(state: &mut u64) -> u64 {
 /// SplitMix64's mix, of xorshifts and multiplications by odd constants: a bijection of the 64-bit
 /// numbers, which spreads each bit of `z` over all of them.
 pub(crate) fn mix64(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z = (z ^ (z >> 30)).wrapping_mul(MIX[0]);
+    z = (z ^ (z >> 27)).wrapping_mul(MIX[1]);
     z ^ (z >> 31)
+}
+
+/// The odd constants [`mix64`] multiplies by, in turn.
+const MIX: [u64; 2] = [0xbf58_476d_1ce4_e5b9, 0x94d0_49bb_1331_11eb];
+
+/// The number [`mix64`] mixes to `z`: each of its steps undone, last first. An xorshift right by
+/// `k`, `y = x ^ (x >> k)`, is undone by `x = y ^ (y >> k) ^ (y >> 2k) ^ ...`, and a multiplication
+/// by an odd constant by one by its inverse modulo 2^64.
+#[cfg(feature = "dev")]
+fn unmix64(mut z: u64) -> u64 {
+    fn unshift(y: u64, k: u32) -> u64 {
+        let mut x = y;
+        let mut by = k;
+        while by < 64 {
+            x ^= y >> by;
+            by += k;
+        }
+        x
+    }
+    z = unshift(z, 31).wrapping_mul(inverse(MIX[1]));
+    z = unshift(z, 27).wrapping_mul(inverse(MIX[0]));
+    unshift(z, 30)
+}
+
+/// The inverse of odd `c` modulo 2^64, by Newton's iteration, `x = x(2 - cx)`, each step of which
+/// doubles the bits that are right: `c` is its own inverse modulo 8, which five steps take to 96.
+#[cfg(feature = "dev")]
+const fn inverse(c: u64) -> u64 {
+    let mut x = c;
+    let mut step = 0;
+    while step < 5 {
+        x = x.wrapping_mul(2u64.wrapping_sub(c.wrapping_mul(x)));
+        step += 1;
+    }
+    x
 }
 
 /// What a reseed mixes into the stream's state, what a placement mixes into its instance, and what
@@ -115,6 +150,16 @@ pub(super) fn placed(instance: EntityId, local: EntityId) -> Option<EntityId> {
 pub(super) fn linked(root: EntityId, local: EntityId) -> Option<EntityId> {
     let key = mix64(root.0.get() ^ LINK);
     NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
+}
+
+/// The local ID that [`linked`] mixes to `id` under `root`: since [`mix64`] is a bijection, each
+/// ID has one, so that a prefab saved from a subtree, its entities' local IDs these, gives each of
+/// them its ID again in the instance whose root is `root`. `None` for the one ID it would take 0
+/// to mix to.
+#[cfg(feature = "dev")]
+pub(super) fn unlinked(root: EntityId, id: EntityId) -> Option<EntityId> {
+    let key = mix64(root.0.get() ^ LINK);
+    NonZeroU64::new(unmix64(id.0.get()) ^ key).map(EntityId)
 }
 
 /// The stream a world draws its entities' IDs from: SplitMix64, from a seed. A stream never gives
@@ -383,6 +428,33 @@ pub(super) mod tests {
         assert_eq!(copies.len(), 1000);
         let instance: HashSet<EntityId> = locals.iter().filter_map(|&l| linked(id(9), l)).collect();
         assert_eq!(instance.len(), 1000);
+    }
+
+    /// SplitMix64's mix is undone, so that each ID an instance holds has a local ID that links to
+    /// it, and only one.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_mix_is_undone() {
+        let mut stream = IdStream::new(11);
+        let edges = [0, 1, u64::MAX, 1 << 63, GAMMA];
+        let numbers = edges
+            .into_iter()
+            .chain((0..1000).map(|_| stream.draw().get()));
+        for z in numbers {
+            assert_eq!(unmix64(mix64(z)), z, "{z:016x}");
+            assert_eq!(mix64(unmix64(z)), z, "{z:016x}");
+        }
+        for c in MIX {
+            assert_eq!(c.wrapping_mul(inverse(c)), 1);
+        }
+        let id = |n| EntityId(NonZeroU64::new(n).expect("not zero"));
+        for (root, held) in [(1, 1), (9, 0xab), (u64::MAX, 0x5f3a_9c0e_12b4_7d68)] {
+            let local = unlinked(id(root), id(held)).expect("not zero");
+            assert_eq!(linked(id(root), local), Some(id(held)));
+        }
+        // The one ID whose local ID would be 0.
+        let key = mix64(9 ^ LINK);
+        assert_eq!(unlinked(id(9), id(mix64(key))), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use gg_core::{Error, Result};
 use super::scene::{Expanding, Template};
 use super::table::{AnyColumn, ComponentId};
 use super::{Entity, EntityId, Parent, World};
-use crate::reflect::Value;
+use crate::reflect::{Shape, Type, Value};
 use crate::{ModelRoot, Prefab, PrefabRoot, Transform};
 
 /// An instance of a prefab in a world: its prefab's template, and the IDs its parts have in it,
@@ -111,6 +111,23 @@ impl Claims {
         }
         self.instances.push((root, instance));
     }
+}
+
+/// What of an instance's entity differs from its prefab, as [`World::overrides`] finds it: the
+/// instance whose prefab gives it, by its root and its prefab, the outermost, or the entity's own
+/// for the root of an instance none gives; each component the prefab gives it that differs, in the
+/// order of its table's, with the fields that differ, by name, for a struct of named fields, as a
+/// scene saves them, and else `""`, the whole component; and each component the entity has that the
+/// prefab doesn't give it, which a scene saves whole, but those that are the instance's own: a
+/// root's `Transform` and `PrefabRoot`, a `Parent`, and those opaque as a whole, which scenes don't
+/// save.
+#[cfg(feature = "dev")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Overrides {
+    pub(crate) root: EntityId,
+    pub(crate) prefab: Prefab,
+    pub(crate) fields: Vec<(String, Vec<String>)>,
+    pub(crate) added: Vec<String>,
 }
 
 /// What each instance in a world takes as its prefab's file changes, as [`World::refits`] finds
@@ -318,6 +335,166 @@ impl World {
             vec![(id, column)],
         );
         scratch.get_field(held, component, path)
+    }
+
+    /// What of `entity`, which is alive, differs from its prefab, as [`Overrides`] says, by the
+    /// comparison a scene's save makes; `None` for an entity no instance gives that's no instance's
+    /// root. Reading it changes nothing.
+    ///
+    /// Fails as [`claimer`](Self::claimer) does, as for a prefab whose text no longer loads.
+    #[cfg(feature = "dev")]
+    pub(crate) fn overrides(&self, entity: Entity) -> Result<Option<Overrides>> {
+        let mut expanding = Expanding::default();
+        let (root, instance, part) = match self.claimer(entity, &mut expanding)? {
+            Some(claimed) => claimed,
+            None => match self.instance(entity, &mut expanding)? {
+                Some(instance) => (entity, instance, 0),
+                None => return Ok(None),
+            },
+        };
+        let &PrefabRoot(prefab) = self.get::<PrefabRoot>(root).expect("an instance's root");
+        let given = instance.components(self, part);
+        let own = [
+            self.component::<Parent>(),
+            self.component::<Transform>().filter(|_| part == 0),
+            self.component::<PrefabRoot>().filter(|_| part == 0),
+        ];
+        let at = self.location(entity).expect("alive");
+        let table = &self.tables[at.table as usize];
+        let mut fields = Vec::new();
+        let mut added = Vec::new();
+        for (column, &component) in table.components().iter().enumerate() {
+            if own.contains(&Some(component))
+                || self.components.ty(component).is_opaque(self.types())
+            {
+                continue;
+            }
+            let name = self.components.name(component).to_owned();
+            if !given.contains(&component) {
+                added.push(name);
+                continue;
+            }
+            let now = table.column_at(column).value(at.row as usize);
+            let was = instance.value(self, part, component).expect("given");
+            if super::diff::same(&now, self, &was, self) {
+                continue;
+            }
+            let differ = match (&now, &was) {
+                (Value::Struct(now), Value::Struct(was))
+                    if self.named_fields(component) && now.len() == was.len() =>
+                {
+                    let differ = now.iter().zip(was);
+                    let differ = differ
+                        .filter(|((_, now), (_, was))| !super::diff::same(now, self, was, self));
+                    differ.map(|((field, _), _)| field.to_string()).collect()
+                }
+                _ => vec![String::new()],
+            };
+            fields.push((name, differ));
+        }
+        Ok(Some(Overrides {
+            root: self.id(root).expect("alive"),
+            prefab,
+            fields,
+            added,
+        }))
+    }
+
+    /// Whether component type `component` is a struct of named fields, which a scene saves of an
+    /// instance's entity field by field.
+    pub(super) fn named_fields(&self, component: ComponentId) -> bool {
+        let Type::Named(index) = self.components.ty(component) else {
+            return false;
+        };
+        let shape = &self.types().info(index).shape;
+        matches!(shape, Shape::Struct { tuple: false, .. })
+    }
+
+    /// Links `root`, which is alive, to `prefab`, as [`Operation::Link`](super::Operation::Link)
+    /// says: gives it a [`PrefabRoot`] of `prefab`, spawning nothing, its subtree holding the
+    /// entities the prefab gives already, under the IDs the instance mixes for them, as an unlink
+    /// left them, or a save as a prefab made them.
+    ///
+    /// Fails, changing nothing, with `reflect.has_component` for a root with a `PrefabRoot`
+    /// already; with `asset.no_prefab` for a prefab another context added; as the prefab's
+    /// template fails to load, as [`Expanding::template`] says; and as
+    /// [`linkable`](Self::linkable) does.
+    pub(super) fn link(&mut self, root: Entity, prefab: Prefab) -> Result<()> {
+        if self.get::<PrefabRoot>(root).is_some() {
+            return Err(Error::new(
+                "reflect.has_component",
+                "it has a `PrefabRoot` already: it's an instance's root, which an unlink makes an \
+                 entity of its own",
+            ));
+        }
+        if !self.assets.has_prefab(prefab) {
+            let message = "it names a prefab the world's assets haven't, as another context's";
+            return Err(Error::new("asset.no_prefab", message));
+        }
+        let template = Expanding::default().template(self, prefab)?;
+        let named = format!("prefab `{}`", self.assets.prefab_path(prefab));
+        self.linkable(root, template, &named)?;
+        self.put(root, PrefabRoot(prefab)).expect("alive");
+        Ok(())
+    }
+
+    /// Fails unless the subtree of `root`, which is alive, holds what an instance of the prefab of
+    /// template `template`, which messages call `prefab`, gives, so that linking `root` to it
+    /// spawns nothing: with `ecs.bad_id` for the one ID an entity of it mixes to zero; with
+    /// `ecs.prefab_missing` for an entity the prefab gives that isn't alive, or a component it
+    /// gives one, or the root, that it hasn't; with `ecs.prefab_parent` for an entity the prefab
+    /// gives that isn't under its prefab's parent; and with `ecs.prefab_entity` for one with a
+    /// `PrefabRoot` the prefab doesn't give it, which a scene saves and a load refuses.
+    pub(super) fn linkable(
+        &self,
+        root: Entity,
+        template: Rc<Template>,
+        prefab: &str,
+    ) -> Result<()> {
+        let ids = template.ids(self.id(root).expect("alive"))?;
+        let instance = Instance { template, ids };
+        let link = self.component::<PrefabRoot>();
+        for (part, &id) in instance.ids.iter().enumerate() {
+            let missing = |what: String| {
+                let message = format!(
+                    "{prefab} gives {what}, which isn't there to link: its subtree holds the \
+                     entities and components a prefab gives, under the IDs it mixes for them, to \
+                     link"
+                );
+                Error::new("ecs.prefab_missing", message)
+            };
+            let Some(entity) = self.entity(id) else {
+                return Err(missing(format!("entity {id}")));
+            };
+            if part > 0 && self.parent(entity).expect("alive") != instance.parent(self, part) {
+                let message = format!(
+                    "{prefab} gives entity {id} under another parent than it has: a prefab's \
+                     entities are linked under the parents it gives them"
+                );
+                return Err(Error::new("ecs.prefab_parent", message));
+            }
+            let at = self.location(entity).expect("alive");
+            let table = &self.tables[at.table as usize];
+            if let Some(&gone) =
+                (instance.components(self, part).iter()).find(|&&component| !table.has(component))
+            {
+                let name = self.components.name(gone);
+                return Err(missing(format!("entity {id} a `{name}`")));
+            }
+            if part > 0
+                && let Some(&held) = self.get::<PrefabRoot>(entity)
+                && (link.and_then(|link| instance.column(self, part, link)))
+                    .is_none_or(|given| given.vec::<PrefabRoot>()[0] != held)
+            {
+                let message = format!(
+                    "{prefab} gives entity {id} another `PrefabRoot` than it has, or none: an \
+                     instance's entities link the prefabs its prefab links them to, so take its \
+                     `PrefabRoot` away or unlink it first"
+                );
+                return Err(Error::new("ecs.prefab_entity", message));
+            }
+        }
+        Ok(())
     }
 
     /// Gives `root`, which is alive, of `instance`'s ID and with its `PrefabRoot`, each component
@@ -984,6 +1161,305 @@ mod tests {
             world.hash().content,
             "the same world"
         );
+    }
+
+    /// What of an instance's entity differs from its prefab is found as a scene's save finds it: by
+    /// the outermost instance whose prefab gives it, a struct of named fields field by field and
+    /// another type whole, with the components it adds; a root's transform is its own, and neither
+    /// a child of its own under an instance's entity nor an entity of no instance's has any.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn overrides_say_what_an_instances_entities_change() {
+        let post = post();
+        let (mut cx, [lamp, post]) = with([("lamp.prefab", LAMP), ("post.prefab", &post)]);
+        let world = cx.world_mut();
+        let root = post.spawn(world, Transform::IDENTITY).expect("spawned");
+        let inner = of(world, root, 0xd4);
+        let bulb = of(world, inner, 0xb2);
+        let none = Overrides {
+            root: world.id(root).expect("alive"),
+            prefab: post,
+            fields: Vec::new(),
+            added: Vec::new(),
+        };
+        let at = Value::Vec3(Vec3::new(4.0, 0.0, 0.0));
+        world
+            .set_field(root, "Transform", "translation", &at)
+            .expect("set");
+        for entity in [root, inner, bulb] {
+            let found = world.overrides(entity).expect("it loads");
+            assert_eq!(
+                found,
+                Some(none.clone()),
+                "the post's changes are its prefab's"
+            );
+        }
+        let bright = Value::F32(5.0);
+        world
+            .set_field(inner, "Lamp", "bright", &bright)
+            .expect("set");
+        world
+            .insert(bulb, Name("globe".to_owned()))
+            .expect("code may");
+        let held = Lamp {
+            color: Vec4::ONE,
+            bright: 1.0,
+            aim: None,
+        };
+        world.insert(bulb, held).expect("code may");
+        let changed = |fields: &[(&str, &str)], added: &[&str]| Overrides {
+            fields: (fields.iter())
+                .map(|&(component, field)| (component.to_owned(), vec![field.to_owned()]))
+                .collect(),
+            added: added.iter().map(|&added| added.to_owned()).collect(),
+            ..none.clone()
+        };
+        let found = world.overrides(inner).expect("it loads");
+        assert_eq!(found, Some(changed(&[("Lamp", "bright")], &[])));
+        let found = world.overrides(bulb).expect("it loads");
+        assert_eq!(
+            found,
+            Some(changed(&[("Name", "")], &["Lamp"])),
+            "a tuple's whole"
+        );
+
+        let alone = lamp.spawn(world, Transform::IDENTITY).expect("spawned");
+        let blue = Value::Vec4(Vec4::new(0.0, 0.0, 1.0, 1.0));
+        world.set_field(alone, "Lamp", "color", &blue).expect("set");
+        let expected = Overrides {
+            root: world.id(alone).expect("alive"),
+            prefab: lamp,
+            fields: vec![("Lamp".to_owned(), vec!["color".to_owned()])],
+            added: Vec::new(),
+        };
+        assert_eq!(world.overrides(alone).expect("it loads"), Some(expected));
+        let child = world.spawn(Transform::IDENTITY);
+        world.set_parent(child, Some(bulb)).expect("a child");
+        assert_eq!(world.overrides(child).expect("no instance's"), None);
+        let plain = world.spawn(Transform::IDENTITY);
+        assert_eq!(world.overrides(plain).expect("no instance's"), None);
+    }
+
+    /// A link gives a root whose subtree holds what its prefab gives, under the IDs its instance
+    /// mixes, its `PrefabRoot` back, spawning nothing, as an unlink's undo does: the world as it
+    /// was, each entity under its handle. It's refused for a root linked already, an entity an
+    /// instance gives, and a subtree that holds otherwise than its prefab gives.
+    #[test]
+    fn an_unlinked_instance_links_again_as_it_was() {
+        let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
+        let world = cx.world_mut();
+        let root = lamp.spawn(world, Transform::IDENTITY).expect("spawned");
+        let root_id = world.id(root).expect("alive");
+        let bulb = of(world, root, 0xb2);
+        let bulb_id = world.id(bulb).expect("alive");
+        let content = world.hash().content;
+        let mut log = Log::default();
+        let link = Operation::Link {
+            entity: root_id,
+            prefab: lamp,
+        };
+        let error = log.apply(world, link.clone()).expect_err("linked already");
+        assert_eq!(error.code(), "reflect.has_component", "{error:#}");
+        let given = Operation::Link {
+            entity: bulb_id,
+            prefab: lamp,
+        };
+        let error = log.apply(world, given).expect_err("the prefab's");
+        assert_eq!(error.code(), "ecs.prefab_entity", "{error:#}");
+        log.apply(world, Operation::Unlink { entity: root_id })
+            .expect("unlinked");
+        log.apply(world, link.clone()).expect("linked again");
+        assert_eq!(world.hash().content, content, "as it was");
+        assert_eq!(world.entity(bulb_id), Some(bulb), "under its handle");
+        check_ids(world);
+        log.undo(world).expect("unlinked again");
+        assert_eq!(world.get::<PrefabRoot>(root), None);
+        log.redo(world).expect("linked again");
+        assert_eq!(world.hash().content, content);
+
+        log.apply(world, Operation::Unlink { entity: root_id })
+            .expect("unlinked");
+        let mut refused = |world: &mut World| {
+            let error = log.apply(world, link.clone()).expect_err("refused");
+            error.code().to_owned()
+        };
+        world.remove::<Name>(bulb).expect("code may");
+        assert_eq!(refused(world), "ecs.prefab_missing", "a component gone");
+        world
+            .insert(bulb, Name("bulb".to_owned()))
+            .expect("code may");
+        world.set_parent(bulb, None).expect("a root");
+        assert_eq!(refused(world), "ecs.prefab_parent");
+        world.despawn(bulb).expect("code may");
+        assert_eq!(refused(world), "ecs.prefab_missing", "an entity gone");
+        assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
+    }
+
+    /// A link redone, or an unlink undone, is checked as a link is, as another author may have
+    /// changed the subtree since, and refused as a link would be, changing nothing, so that a scene
+    /// still saves; and a link is refused for an entity its prefab gives that links a prefab the
+    /// prefab doesn't link it to, as a scene's load would refuse it.
+    #[test]
+    fn a_link_undone_or_redone_is_checked_as_a_link_is() {
+        // A stand and its bulb, which nothing refers to, as a lamp's aim does, so that a scene
+        // saves without it.
+        let stand = "(entities: {\"00000000000000a1\": (Name: (\"stand\")), \"00000000000000b2\": \
+                     (Name: (\"bulb\"), Parent: (\"00000000000000a1\"))})\n";
+        let dot = "(entities: {\"00000000000000e1\": (Name: (\"dot\"))})\n";
+        let (mut cx, [stand, dot]) = with([("stand.prefab", stand), ("dot.prefab", dot)]);
+        let world = cx.world_mut();
+        let root = stand.spawn(world, Transform::IDENTITY).expect("spawned");
+        let root_id = world.id(root).expect("alive");
+        let bulb_id = world.id(of(world, root, 0xb2)).expect("alive");
+        let (mut mine, mut theirs) = (Log::default(), Log::default());
+        let link = Operation::Link {
+            entity: root_id,
+            prefab: stand,
+        };
+        let unlink = Operation::Unlink { entity: root_id };
+        let delete = Operation::Delete { entity: bulb_id };
+        mine.apply(world, unlink.clone()).expect("unlinked");
+        mine.apply(world, link.clone()).expect("linked");
+        mine.undo(world).expect("unlinked again");
+        theirs
+            .apply(world, delete.clone())
+            .expect("an entity of its own");
+        let error = mine.redo(world).expect_err("its bulb gone");
+        assert_eq!(error.code(), "ecs.prefab_missing", "{error:#}");
+        assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
+        world.save_scene(&[root]).expect("it saves");
+
+        theirs.undo(world).expect("the bulb back");
+        mine.apply(world, link.clone()).expect("linked again");
+        mine.apply(world, unlink).expect("unlinked");
+        theirs.apply(world, delete).expect("an entity of its own");
+        let error = mine.undo(world).expect_err("its bulb gone");
+        assert_eq!(error.code(), "ecs.prefab_missing", "{error:#}");
+        assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
+        world.save_scene(&[root]).expect("it saves");
+
+        theirs.undo(world).expect("the bulb back");
+        let add = Operation::Add {
+            entity: bulb_id,
+            component: "PrefabRoot".into(),
+            value: PrefabRoot(dot).to_value(),
+        };
+        theirs.apply(world, add).expect("an entity of its own");
+        let error = mine.apply(world, link).expect_err("its bulb linked");
+        assert_eq!(error.code(), "ecs.prefab_entity", "{error:#}");
+        assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
+    }
+
+    /// A subtree saved as a prefab gives each of its own entities the local ID that the instance
+    /// whose root is the subtree's mixes to its ID, and a nested instance's its ID mixed from its
+    /// root's, its root at its origin; linked, it's an instance of it that holds every entity under
+    /// its ID, model's nodes too, differing from its prefab in nothing, which a scene saves as the
+    /// link and the transform alone; undone, it's as it was. An instance's entity or root, a
+    /// model's node, and a subtree that refers outside itself are refused.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_subtree_saved_as_a_prefab_links_under_its_ids() {
+        use crate::ecs::id::unlinked;
+
+        let (mut cx, [_lamp]) = with([("lamp.prefab", LAMP)]);
+        crate::model::tests::added(&mut cx, "m", crate::model::tests::imported());
+        let world = cx.world_mut();
+        let globe = linked(id(0x40), id(0xb2)).expect("an ID");
+        let transform = |x: f32| {
+            format!(
+                "Transform: (translation: ({x:?}, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+                 scale: (1.0, 1.0, 1.0))"
+            )
+        };
+        let text = format!(
+            "(entities: {{\"0000000000000010\": (Name: (\"stand\"), {}), \
+             \"0000000000000020\": (Lamp: (color: (1.0, 1.0, 1.0, 1.0), bright: 1.0, aim: \
+             Some(\"0000000000000030\")), Parent: (\"0000000000000010\")), \
+             \"0000000000000030\": (Name: (\"b\"), Parent: (\"0000000000000020\")), \
+             \"0000000000000040\": (Parent: (\"0000000000000010\"), PrefabRoot: (\"lamp.prefab\"), \
+             {}), \"{globe}\": (Name: (\"globe\")), \
+             \"0000000000000050\": (ModelRoot: (\"m\"), Parent: (\"0000000000000010\"))}})\n",
+            transform(3.0),
+            transform(2.0)
+        );
+        let roots = world.load_scene(&text).expect("loaded");
+        let root = roots[0];
+        let root_id = id(0x10);
+        let node = world.children(world.entity(id(0x50)).expect("alive"));
+        let node = node.expect("alive").next().expect("a node");
+        let node_id = world.id(node).expect("alive");
+        let before = world.save_scene(&roots).expect("saved");
+        let content = world.hash().content;
+        let saved = world.save_prefab(root).expect("saved as a prefab");
+        let own = [0x10, 0x20, 0x30, 0x40, 0x50].map(|n| unlinked(root_id, id(n)).expect("an ID"));
+        let mut locals = own.to_vec();
+        locals.push(linked(own[3], id(0xb2)).expect("an ID"));
+        locals.sort();
+        assert_eq!(World::scene_ids(&saved).expect("its IDs"), locals);
+        assert!(saved.contains("translation: (0.0, 0.0, 0.0)"), "{saved}");
+        assert!(!saved.contains("ModelNode"), "{saved}");
+        let stand = world.assets_mut().add_prefab(
+            "stand.prefab".into(),
+            "stand.prefab".into(),
+            Some(saved.into()),
+        );
+
+        let mut log = Log::default();
+        let link = Operation::Link {
+            entity: root_id,
+            prefab: stand,
+        };
+        log.apply(world, link).expect("linked");
+        let ids = [0x10, 0x20, 0x30, 0x40, 0x50].map(id);
+        for held in ids.into_iter().chain([globe, node_id]) {
+            assert!(world.entity(held).is_some(), "{held} kept");
+        }
+        check_ids(world);
+        for held in ids.into_iter().chain([globe]) {
+            let found = world.overrides(world.entity(held).expect("alive"));
+            let found = found.expect("it loads").expect("an instance's");
+            assert_eq!((found.root, found.prefab), (root_id, stand), "{held}");
+            assert!(
+                found.fields.is_empty() && found.added.is_empty(),
+                "{held}: {found:?}"
+            );
+        }
+        let instance = world.save_scene(&roots).expect("saved");
+        let expected = "(\n    entities: {\n        \"0000000000000010\": (\n            \
+                        PrefabRoot: (\"stand.prefab\"),\n            Transform: (\n                \
+                        translation: (3.0, 0.0, 0.0),\n                rotation: (0.0, 0.0, 0.0, \
+                        1.0),\n                scale: (1.0, 1.0, 1.0),\n            ),\n        \
+                        ),\n    },\n)\n";
+        assert_eq!(instance, expected);
+        let mut loaded = world.emptied();
+        loaded.load_scene(&instance).expect("loaded");
+        assert_eq!(
+            loaded.hash().content,
+            world.hash().content,
+            "the same world"
+        );
+        log.undo(world).expect("unlinked");
+        assert_eq!(world.save_scene(&roots).expect("saved"), before);
+        assert_eq!(world.hash().content, content, "as it was");
+        log.redo(world).expect("linked again");
+        assert_eq!(world.save_scene(&roots).expect("saved"), instance);
+
+        let refused = |world: &World, held: Entity| {
+            let error = world.save_prefab(held).expect_err("refused");
+            error.code().to_owned()
+        };
+        assert_eq!(refused(world, root), "scene.prefab_variant");
+        let given = world.entity(id(0x20)).expect("alive");
+        assert_eq!(refused(world, given), "ecs.prefab_entity");
+        let node = world.entity(node_id).expect("alive");
+        assert_eq!(refused(world, node), "ecs.model_node");
+        let outside = world.spawn(Transform::IDENTITY);
+        let aimed = world.spawn(Lamp {
+            color: Vec4::ONE,
+            bright: 1.0,
+            aim: Some(outside),
+        });
+        assert_eq!(refused(world, aimed), "scene.outside");
     }
 
     /// A model's root in a prefab spawns its model's nodes in each instance, their IDs mixed from

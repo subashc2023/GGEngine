@@ -64,6 +64,17 @@ pub(super) trait Inspected {
     /// What a field of a texture, a model or a font holding `value` shows.
     fn asset_label(&self, value: &Value) -> String;
 
+    /// What of the entity differs from its prefab, as the tool API's `entity` answers it, if it's
+    /// an instance's: `None` for any other, and while that isn't known.
+    fn instance(&self, id: EntityId) -> Option<Cow<'_, gg_api::Instanced>>;
+
+    /// Whether the Entities panel saves an entity as a prefab, as the tool API's `save_prefab` does:
+    /// a game's, through the API, alone, since a save writes files, which neither a replay nor a
+    /// lockstep peer of a game's own Inspector's commands would have.
+    fn saves_prefabs(&self) -> bool {
+        false
+    }
+
     /// Why the world isn't shown yet, if it isn't, as while another process is reached.
     fn waiting(&self) -> Option<&str> {
         None
@@ -179,6 +190,12 @@ impl Inspected for World {
             Value::Prefab(prefab) => self.assets().prefab_path(prefab).to_owned(),
             _ => "?".to_owned(),
         }
+    }
+
+    /// Found again each frame it's asked, which parses the instance's prefab's text: for the
+    /// entity picked alone.
+    fn instance(&self, id: EntityId) -> Option<Cow<'_, gg_api::Instanced>> {
+        crate::api::instanced(self, self.entity(id)?).map(Cow::Owned)
     }
 }
 

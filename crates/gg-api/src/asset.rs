@@ -357,10 +357,28 @@ pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
     (found, unread)
 }
 
+/// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, with `/` between
+/// its parts, as far as the names on the way say: none hidden, and no folder one they skip, as
+/// built rather than an asset's; so that a game writing an asset there finds it in the next scan,
+/// and its package holds it. A link on the way, which they never go through, is the caller's to
+/// look for, as a path the disk resolved has none.
+pub fn reached(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    let (_, folders) = parts.split_last().expect("a split gives a part at least");
+    !parts.iter().any(|part| hidden(part.as_bytes()))
+        && !(folders.iter().enumerate()).any(|(at, name)| unbuilt(&parts[..at].join("/"), name))
+}
+
 /// Whether the folder `name`, of the folder at `at` from the root, `""` for the root itself, is
 /// one a scan skips, as built rather than an asset's: every `target`, and at the top [`UNBUILT`]'s.
 fn unbuilt(at: &str, name: &str) -> bool {
     name == "target" || (at.is_empty() && UNBUILT.contains(&name))
+}
+
+/// Whether an entry named `name` is hidden, which a scan skips, folder or file: its name starts
+/// with `.`.
+fn hidden(name: &[u8]) -> bool {
+    name.starts_with(b".")
 }
 
 /// What an entry of a folder is, as its listing tells without following links.
@@ -397,7 +415,7 @@ fn entries(dir: &Path, at: &str, unread: &mut Vec<Unread>) -> Option<BTreeMap<St
     let mut entries = BTreeMap::new();
     for entry in listed {
         let name = entry.file_name();
-        if name.as_encoded_bytes().starts_with(b".") {
+        if hidden(name.as_encoded_bytes()) {
             continue;
         }
         let name = match name.into_string() {
@@ -579,7 +597,8 @@ mod tests {
 
     /// A scan lists each texture, model and font with what its ID file holds, or why it doesn't,
     /// and the ID files left without their assets; but nothing in hidden folders, in `target`s, or
-    /// in a package's own tests, benches and examples, and never through a link.
+    /// in a package's own tests, benches and examples, and never through a link: as `reached` says
+    /// of a path by its names.
     #[test]
     fn a_scan_lists_assets_with_their_id_files_and_skips_what_it_should() {
         let root = std::env::temp_dir().join(format!("gg-api-scan-{}", std::process::id()));
@@ -669,6 +688,13 @@ mod tests {
             "ui/title.otf",
         ];
         assert_eq!(paths, walked);
+        // What they reach, by the names on the way alone, as a game that saves an asset asks.
+        assert!(paths.iter().all(|path| reached(path)), "{paths:?}");
+        for skipped in ["target", "sub/target", "tests", ".hidden"] {
+            let path = format!("{skipped}/x.png");
+            assert!(!reached(&path), "{path}");
+        }
+        assert!(!reached(".x.png") && reached("sub/tests/y.png"));
         assert_eq!(every[7].file, file);
         assert_eq!(unread, []);
         let Some(Err(misnamed)) = &found.assets[0].meta else {

@@ -54,19 +54,19 @@ impl Inspector {
             n => format!("{n} entities"),
         });
         let height = ui.spacing().interact_size.y;
-        let operations = &mut pass.operations;
+        let (operations, saves) = (&mut pass.operations, &mut pass.saves);
         let scroll = egui::ScrollArea::vertical();
         if self.with.is_some() {
             scroll.show_rows(ui, height, count, |ui, shown| {
                 for id in world.page(self.with.as_deref(), shown) {
-                    self.row(world, ui, id, None, operations);
+                    self.row(world, ui, id, None, operations, saves);
                 }
             });
         } else {
             let tree = Tree::new(world, &self.expanded);
             scroll.show_rows(ui, height, tree.len, |ui, shown| {
                 for (id, depth) in tree.page(world, shown) {
-                    self.row(world, ui, id, Some(depth), operations);
+                    self.row(world, ui, id, Some(depth), operations, saves);
                 }
             });
         }
@@ -85,8 +85,9 @@ impl Inspector {
 
     /// Draws the row of the entity of ID `id`: its label, across the rest of the row, which picks
     /// it, and whose context menu makes an empty child of it, duplicates it or deletes it, the
-    /// operation chosen going in `operations`; in the tree, at `depth`, after an arrow that shows
-    /// and hides its children's rows, if it has any.
+    /// operation chosen going in `operations`, or, where `world` saves prefabs, saves it and its
+    /// descendants as a prefab, linked in their place, the entity going in `saves`; in the tree, at
+    /// `depth`, after an arrow that shows and hides its children's rows, if it has any.
     fn row(
         &mut self,
         world: &dyn Inspected,
@@ -94,6 +95,7 @@ impl Inspector {
         id: EntityId,
         depth: Option<usize>,
         operations: &mut Vec<Command>,
+        saves: &mut Vec<EntityId>,
     ) {
         // The entity's own, not its row's, so that its widgets' IDs go with it as rows change, as
         // tables swap theirs: a context menu open on it acts on it, not on the entity that comes
@@ -124,6 +126,16 @@ impl Inspector {
                     }
                     if ui.button("Delete Entity").clicked() {
                         operations.push(Command::Delete(id));
+                    }
+                    if world.saves_prefabs() {
+                        let save = ui.button("Save as Prefab").on_hover_text(
+                            "Saves it and its descendants as a prefab in the project's prefabs \
+                             folder, named after it, and makes it an instance of that prefab, its \
+                             entities keeping their IDs",
+                        );
+                        if save.clicked() {
+                            saves.push(id);
+                        }
                     }
                 });
             });

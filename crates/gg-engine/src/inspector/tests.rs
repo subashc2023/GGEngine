@@ -1060,6 +1060,8 @@ fn its_commands_are_values_that_queue_them_again() {
         Command::Delete(picked),
         Command::Add(picked, "Sprite".to_owned(), Sprite::default().to_value()),
         Command::Remove(picked, "Everything".to_owned()),
+        Command::Revert(picked, "Everything".to_owned(), "count".to_owned()),
+        Command::Unlink(picked),
     ];
     inspector.queue(Pass {
         operations,
@@ -1086,7 +1088,9 @@ fn its_commands_are_values_that_queue_them_again() {
             "Duplicate",
             "Delete",
             "Add",
-            "Remove"
+            "Remove",
+            "Revert",
+            "Unlink"
         ]
     );
     let mut again = Queue::default();
@@ -1130,7 +1134,7 @@ fn its_commands_are_values_that_queue_them_again() {
     let error = again.push(&Value::Variant("Cut".into(), Vec::new()));
     let error = error.expect_err("no such command").to_string();
     assert!(
-        error.contains("`Create`, `Delete`, `Duplicate`, `Add` and `Remove`"),
+        error.contains("`Create`, `Delete`, `Duplicate`, `Add`, `Remove`, `Revert` and `Unlink`"),
         "{error}"
     );
     // The operations' values, refused where they're wrong.
@@ -1276,6 +1280,115 @@ fn components_are_added_and_removed_at_the_next_tick() {
     assert_eq!(inspector.not_done, None);
     assert_eq!(world.get::<Everything>(entity), Some(&everything()));
     assert!(world.get::<Sprite>(entity).is_none());
+}
+
+/// An entity an instance's prefab gives says which instance it's of, and marks the fields that
+/// differ from its prefab, whose context menu reverts one at the next tick, as an edit the Edit
+/// menu undoes; and an instance's root says its prefab, beside Unlink, which unlinks it, as one
+/// edit, which an undo links again.
+#[test]
+fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
+    let mut world = World::default();
+    world.register::<Name>().expect("registered");
+    world.register::<Transform>().expect("registered");
+    let text = "(\n    entities: {\n        \"00000000000000a1\": (\n            Name: \
+                (\"lamp\"),\n        ),\n        \"00000000000000b2\": (\n            Name: \
+                (\"bulb\"),\n            Parent: (\"00000000000000a1\"),\n            Transform: \
+                (\n                translation: (0.0, 1.0, 0.0),\n                rotation: (0.0, \
+                0.0, 0.0, 1.0),\n                scale: (1.0, 1.0, 1.0),\n            ),\n        \
+                ),\n    },\n)\n";
+    let lamp = world.assets_mut().add_prefab(
+        "lamp.prefab".into(),
+        "lamp.prefab".into(),
+        Some(text.into()),
+    );
+    let root = lamp
+        .spawn(&mut world, Transform::IDENTITY)
+        .expect("spawned");
+    let bulb = world
+        .children(root)
+        .expect("alive")
+        .next()
+        .expect("its bulb");
+    let up = Value::Vec3(Vec3::new(0.0, 5.0, 0.0));
+    world
+        .set_field(bulb, "Transform", "translation", &up)
+        .expect("set");
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.pick(id(&world, bulb));
+    let mut time = 0.0;
+    let mut painted = |inspector: &mut Inspector, world: &mut World, events| {
+        time += 1.0;
+        frame_shapes(inspector, world, &ctx, time, events, true).0
+    };
+    let mut shapes = Vec::new();
+    for _ in 0..3 {
+        shapes = painted(&mut inspector, &mut world, Vec::new());
+    }
+    let mut shown = |inspector: &mut Inspector, world: &mut World, events| {
+        texts_in(&painted(inspector, world, events))
+    };
+    let texts = texts_in(&shapes);
+    let root_id = id(&world, root);
+    let of = format!("Of the instance of lamp.prefab whose root is lamp, entity {root_id}");
+    // The bars of the selection's color just left of the field and the component that differ.
+    let selection = ctx.style_of(ctx.theme()).visuals.selection.bg_fill;
+    let bars = crate::testing::painted(&shapes).into_iter();
+    let bars: Vec<egui::Rect> = bars
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(bar) if bar.fill == selection && bar.rect.width() < 2.5 => {
+                Some(bar.rect)
+            }
+            _ => None,
+        })
+        .collect();
+    let marked = |label: egui::Rect| {
+        let left = |bar: &egui::Rect| bar.max.x <= label.min.x + 0.5;
+        let beside = |bar: &egui::Rect| bar.y_range().contains(label.center().y);
+        bars.iter().any(|bar| left(bar) && beside(bar))
+    };
+    assert!(marked(find(&texts, &of, "translation")), "{bars:?}");
+    assert!(
+        marked(find(&texts, &of, "Transform")),
+        "its header: {bars:?}"
+    );
+    assert!(
+        !marked(find(&texts, &of, "rotation")),
+        "as the prefab has it"
+    );
+    assert!(!marked(find(&texts, &of, "Name")), "as the prefab has it");
+    let label = find(&texts, &of, "translation");
+    shown(&mut inspector, &mut world, click(Secondary, label.center()));
+    let texts = shown(&mut inspector, &mut world, Vec::new());
+    let revert = find(&texts, &of, "Revert to Prefab");
+    shown(&mut inspector, &mut world, click(Primary, revert.center()));
+    let place = |world: &World| world.get::<Transform>(bulb).expect("alive").translation;
+    assert_eq!(place(&world), Vec3::new(0.0, 1.0, 0.0), "the prefab's");
+    assert_eq!(inspector.log.edits().len(), 1, "one edit");
+    let undo = |inspector: &mut Inspector, world: &mut World| {
+        inspector.queue(Pass {
+            chosen: Some(Step::Undo),
+            ..Pass::default()
+        });
+        Layer::tick(inspector, world, Tick { number: 0 });
+    };
+    undo(&mut inspector, &mut world);
+    assert_eq!(place(&world), Vec3::new(0.0, 5.0, 0.0), "undone");
+
+    inspector.pick(root_id);
+    let mut texts = Vec::new();
+    for _ in 0..2 {
+        texts = shown(&mut inspector, &mut world, Vec::new());
+    }
+    let unlink = find(&texts, "Instance of lamp.prefab", "Unlink");
+    shown(&mut inspector, &mut world, click(Primary, unlink.center()));
+    assert_eq!(world.get::<crate::PrefabRoot>(root), None, "unlinked");
+    undo(&mut inspector, &mut world);
+    assert!(
+        world.get::<crate::PrefabRoot>(root).is_some(),
+        "linked again"
+    );
 }
 
 #[test]

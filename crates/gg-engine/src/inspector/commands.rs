@@ -30,14 +30,19 @@ pub(super) enum Command {
     Add(EntityId, String, Value),
     /// Takes the component of the type named away from the entity with this ID.
     Remove(EntityId, String),
+    /// Sets the field at the path, or the whole component for an empty one, of the component of the
+    /// type named of the entity with this ID back to its prefab's.
+    Revert(EntityId, String, String),
+    /// Unlinks the instance whose root is the entity with this ID.
+    Unlink(EntityId),
 }
 
 /// The Inspector's commands, which a recording reads as values: variants `Set`, with the
 /// entity's ID as text, the component and the path, and the value; `Seal`; `Undo`; `Redo`;
 /// `Create`, with its parent's ID as text, if it has one, and its components as a struct, a field
-/// each named as its type; `Delete` and `Duplicate`, with the entity's ID as text; `Add`, with the
-/// entity's ID as text, the component and its value; and `Remove`, with the entity's ID as text
-/// and the component.
+/// each named as its type; `Delete`, `Duplicate` and `Unlink`, with the entity's ID as text; `Add`,
+/// with the entity's ID as text, the component and its value; `Remove`, with the entity's ID as
+/// text and the component; and `Revert`, with the entity's ID as text, the component and the path.
 #[derive(Default)]
 pub(super) struct Queue(pub(super) Vec<Command>);
 
@@ -79,6 +84,15 @@ impl Commands for Queue {
             }
             Command::Delete(id) => ("Delete", vec![entity(id)]),
             Command::Duplicate(id) => ("Duplicate", vec![entity(id)]),
+            Command::Unlink(id) => ("Unlink", vec![entity(id)]),
+            Command::Revert(id, component, path) => (
+                "Revert",
+                vec![
+                    entity(id),
+                    ("component".into(), text(component)),
+                    ("path".into(), text(path)),
+                ],
+            ),
             Command::Add(id, component, value) => (
                 "Add",
                 vec![
@@ -146,13 +160,20 @@ impl Commands for Queue {
                     components: components.clone(),
                 }
             }
-            "Delete" | "Duplicate" => {
+            "Delete" | "Duplicate" | "Unlink" => {
                 let [entity] = reflect::pick(fields, ["entity"])?;
                 let entity = id(entity, "entity")?;
                 match name {
                     "Delete" => Command::Delete(entity),
-                    _ => Command::Duplicate(entity),
+                    "Duplicate" => Command::Duplicate(entity),
+                    _ => Command::Unlink(entity),
                 }
+            }
+            "Revert" => {
+                let [entity, component, path] =
+                    reflect::pick(fields, ["entity", "component", "path"])?;
+                let entity = id(entity, "entity")?;
+                Command::Revert(entity, text(component, "component")?, text(path, "path")?)
             }
             "Add" => {
                 let names = ["entity", "component", "value"];
@@ -176,6 +197,8 @@ impl Commands for Queue {
                     "Duplicate",
                     "Add",
                     "Remove",
+                    "Revert",
+                    "Unlink",
                 ];
                 return Err(reflect::no_variant(other, &names));
             }

@@ -20,7 +20,7 @@ use super::scene::{Expanding, NO_HINTS, Template};
 use super::table::{AnyColumn, ComponentId, Row};
 use super::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Ident, Reflect, Value};
-use crate::{ModelNode, ModelRoot, PrefabRoot};
+use crate::{ModelNode, ModelRoot, Prefab, PrefabRoot};
 
 /// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies,
 /// and undoes. It names entities by their IDs, and carries values as reflection's, whose entities
@@ -53,7 +53,11 @@ use crate::{ModelNode, ModelRoot, PrefabRoot};
 /// `ops.bad_copies` for an ID it's given that an instance's copy gives one of its entities, mixed
 /// from the ID its root's copy is given. An unlink is refused with `ecs.no_prefab` for an entity
 /// without a `PrefabRoot`, and a revert for one no instance gives, or a component its prefab
-/// doesn't give it, or as a set of the prefab's value is.
+/// doesn't give it, or as a set of the prefab's value is. A link is refused with
+/// `reflect.has_component` for an entity with a `PrefabRoot`, with `ecs.prefab_missing` for an
+/// entity or a component the prefab gives that the subtree hasn't under the IDs it mixes, with
+/// `ecs.prefab_parent` for one under another parent than the prefab's, and with
+/// `ecs.prefab_entity` for one with a `PrefabRoot` the prefab doesn't give it.
 ///
 /// A create, an add or a set that makes a component's [exclusive](crate::Component::exclusive)
 /// field true on its entity makes it false on every other entity with the component, and its
@@ -105,6 +109,11 @@ pub enum Operation {
     /// its `PrefabRoot` away, and its entities stay as they are, under their IDs, its own from then
     /// on.
     Unlink { entity: EntityId },
+    /// Links `entity` to `prefab`, as an unlink's undo does: gives it a `PrefabRoot` of `prefab`
+    /// and spawns nothing, as its subtree holds the entities the prefab gives already, under the
+    /// IDs the instance mixes for them, each with the components the prefab gives it, as an unlink
+    /// leaves them and a save as a prefab makes them.
+    Link { entity: EntityId, prefab: Prefab },
     /// Sets the field at `path` of `entity`'s `component`, or the whole component for an empty
     /// path, to what the prefab of the instance that gives it has there, as `set_field` does: the
     /// instance's root's, but its `Transform`, which is its own; or the entity's, that the
@@ -129,6 +138,7 @@ impl Operation {
             | Self::Set { entity, .. }
             | Self::Reparent { entity, .. }
             | Self::Unlink { entity }
+            | Self::Link { entity, .. }
             | Self::Revert { entity, .. } => Some(*entity),
         }
     }
@@ -165,6 +175,7 @@ impl fmt::Display for Operation {
                 parent: None,
             } => write!(f, "make {entity} a root"),
             Self::Unlink { entity } => write!(f, "unlink {entity}"),
+            Self::Link { entity, .. } => write!(f, "link {entity}"),
             Self::Revert {
                 entity,
                 component,
@@ -236,7 +247,8 @@ enum Undo {
         spawned: Vec<EntityId>,
     },
     /// Gives instance root `entity` back the `PrefabRoot` an unlink took, in a one-row column of
-    /// its own.
+    /// its own: checked as a link of its prefab is, as the world may have changed since, but by a
+    /// [roll back](World::roll_back), which finds the world as the unlink left it.
     Link {
         entity: EntityId,
         column: Box<dyn AnyColumn>,
@@ -300,14 +312,15 @@ impl World {
     /// Applies `inverse`, undoing its operation, and leaves in its place what undoes that, which
     /// redoes it. Refused, it changes neither the world nor `inverse`: with `ops.other_world` for
     /// another world's inverse, as one from before the world was restored is; as its operation is
-    /// refused, if it's one; as it takes out what a create made, with `ecs.no_entity` for the
-    /// entity gone since, and `ecs.has_children` for children it has since, which the create didn't
-    /// make; and, as it gives back what a remove or a delete took, with `ecs.no_entity` for an
-    /// entity gone since, or a root's parent gone, `reflect.has_component` for a component the
-    /// entity has since, and `ecs.id_taken` for an ID a living entity has since, such as one a
-    /// scene loaded; and, as it sets an exclusive field of another entity's again, with
-    /// `ecs.no_entity` for the entity gone since, and `reflect.missing_component` for the
-    /// component taken away since.
+    /// refused, if it's one; as a link is refused, as it links again a root whose link an unlink
+    /// took, such as with `ecs.prefab_missing` for an entity its prefab gives gone since; as it
+    /// takes out what a create made, with `ecs.no_entity` for the entity gone since, and
+    /// `ecs.has_children` for children it has since, which the create didn't make; and, as it gives
+    /// back what a remove or a delete took, with `ecs.no_entity` for an entity gone since, or a
+    /// root's parent gone, `reflect.has_component` for a component the entity has since, and
+    /// `ecs.id_taken` for an ID a living entity has since, such as one a scene loaded; and, as it
+    /// sets an exclusive field of another entity's again, with `ecs.no_entity` for the entity gone
+    /// since, and `reflect.missing_component` for the component taken away since.
     pub(super) fn undo(&mut self, inverse: &mut Inverse) -> Result<()> {
         let _zone = gg_core::zone!();
         self.check_world(inverse)?;
@@ -378,8 +391,20 @@ impl World {
         if let Undo::Relink { .. } = undo {
             return self.relink_back(undo);
         }
+        // Checked as a link is, as the subtree may hold otherwise than the prefab gives since the
+        // unlink, as when another author took away one of its entities.
+        if !exact && let Undo::Link { entity, column } = undo {
+            let &PrefabRoot(prefab) = column.vec::<PrefabRoot>().first().expect("an unlink's");
+            let link = Operation::Link {
+                entity: *entity,
+                prefab,
+            };
+            *undo = self.applied(&link)?;
+            return Ok(());
+        }
         let redo = match &*undo {
             Undo::Exclusive { .. } | Undo::Relink { .. } => unreachable!("reverted above"),
+            // Rolled back, as the unlink left it.
             Undo::Link { entity, .. } => {
                 let id = self
                     .component::<PrefabRoot>()
@@ -585,7 +610,8 @@ impl World {
             | Operation::Delete { .. }
             | Operation::Remove { .. }
             | Operation::Reparent { .. }
-            | Operation::Unlink { .. } => {
+            | Operation::Unlink { .. }
+            | Operation::Link { .. } => {
                 return undo;
             }
         };
@@ -665,6 +691,7 @@ impl World {
             | Operation::Remove { entity, .. }
             | Operation::Set { entity, .. }
             | Operation::Unlink { entity }
+            | Operation::Link { entity, .. }
             | Operation::Revert { entity, .. } => [Some(*entity), None],
         };
         for touched in touched
@@ -816,6 +843,11 @@ impl World {
                     column: self.take_out(handle, at, id),
                 }
             }
+            Operation::Link { entity, prefab } => {
+                let handle = self.living(*entity).map_err(refused)?;
+                self.link(handle, *prefab).map_err(refused)?;
+                Undo::Apply(Operation::Unlink { entity: *entity })
+            }
             Operation::Revert {
                 entity,
                 component,
@@ -872,7 +904,8 @@ impl World {
         let (id, component) = match operation {
             Operation::Delete { entity }
             | Operation::Reparent { entity, .. }
-            | Operation::Unlink { entity } => (*entity, None),
+            | Operation::Unlink { entity }
+            | Operation::Link { entity, .. } => (*entity, None),
             Operation::Add {
                 entity, component, ..
             }

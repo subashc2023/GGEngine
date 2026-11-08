@@ -47,13 +47,14 @@
 //! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
 //! editor taking the parts another client, such as an agent, sets.
 //!
-//! A texture, a model or a font dragged from the Assets panel outlines the view while it's held
-//! over it, and is let go there as an edit of the editor's, through the Inspector's link, which
-//! names it by its asset ID: a texture sets the texture of the sprite the game's view shows there,
-//! as the API's `pick` finds it, and a font the font of the text there, which the panels show
-//! picked, and whose refusal, as of an entity without a sprite or a text, the Inspector shows; and
+//! A texture, a model, a font or a prefab dragged from the Assets panel outlines the view while it's
+//! held over it, and is let go there as an edit of the editor's, through the Inspector's link,
+//! which names it by its asset ID: a texture sets the texture of the sprite the game's view shows
+//! there, as the API's `pick` finds it, and a font the font of the text there, which the panels
+//! show picked, and whose refusal, as of an entity without a sprite or a text, the Inspector shows;
 //! a model is a root, named after its file, where the cursor shows the grid's plane, as
-//! [`landing`](Game::landing) says, which the panels show picked.
+//! [`landing`](Game::landing) says, and a prefab an instance's root there, linked, which the game
+//! spawns the prefab's entities under; each of which the panels show picked.
 //!
 //! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
 //! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, as a
@@ -1421,8 +1422,9 @@ impl Game {
     /// with the window at `scale` pixels a point, as the module says, naming it as [`asset_name`]
     /// does: a texture or a font asks the game for a pick there, whose answer
     /// [`take_picks`](Self::take_picks) takes; a model is a root the Inspector's link creates where
-    /// it [`lands`](Self::landing), named after its file, or where it can't land yet, before a
-    /// frame has come, is logged as taken by nothing.
+    /// it [`lands`](Self::landing), named after its file, and a prefab an instance's root there,
+    /// which takes its prefab's root's name; or where neither can land yet, before a frame has
+    /// come, is logged as taken by nothing.
     fn let_go(&mut self, dropped: &Dragged, at: [f64; 2], view: Option<Viewport>, scale: f32) {
         let root = self.folders.as_ref().map(|folders| folders.root.as_path());
         let name = asset_name(root, &dropped.path);
@@ -1440,29 +1442,32 @@ impl Game {
                     });
                 }
             }
-            AssetKind::Prefab => {
-                let why = "nothing places a prefab from the Assets panel yet";
-                self.log(Level::Info, format!("{file} was let go, but {why}"));
-            }
-            AssetKind::Model => {
+            kind @ (AssetKind::Model | AssetKind::Prefab) => {
                 let Some(landing) = self.landing(at, view, scale) else {
                     let why = "the view has shown no frame to place it in yet";
                     self.log(Level::Info, format!("{file} was let go, but {why}"));
                     return;
                 };
-                let stem = dropped.path.file_stem().unwrap_or_default();
-                let called = Name(stem.to_string_lossy().into_owned());
                 let transform = Transform {
                     translation: landing,
                     ..Transform::IDENTITY
                 };
                 // A tuple struct's field, `0`, as the game reads one.
                 let root = vec![("0".into(), reflect::Value::String(name))];
-                self.view.link.create(vec![
-                    ("Name".into(), called.to_value()),
-                    ("Transform".into(), transform.to_value()),
-                    ("ModelRoot".into(), reflect::Value::Struct(root)),
-                ]);
+                let (root, transform) = (reflect::Value::Struct(root), transform.to_value());
+                let components = if kind == AssetKind::Model {
+                    let stem = dropped.path.file_stem().unwrap_or_default();
+                    let called = Name(stem.to_string_lossy().into_owned());
+                    vec![
+                        ("Name".into(), called.to_value()),
+                        ("Transform".into(), transform),
+                        ("ModelRoot".into(), root),
+                    ]
+                } else {
+                    // Named as its prefab's root is, which it takes.
+                    vec![("Transform".into(), transform), ("PrefabRoot".into(), root)]
+                };
+                self.view.link.create(components);
             }
         }
     }
@@ -4061,5 +4066,51 @@ mod tests {
             game.view.camera.under([500.0, 200.0], screen)
         );
         assert_eq!(game.view.link.creates().len(), 3);
+    }
+
+    /// A prefab let go over the view is an instance's root the link creates where it lands, as a
+    /// model's is: its transform there and its link, by its asset ID where its ID file holds one,
+    /// without a name, which it takes from its prefab's root; and before a frame has come, nowhere.
+    #[test]
+    fn a_prefab_let_go_on_the_view_is_an_instance_where_it_lands() {
+        let scratch = Scratch::new("prefab-let-go");
+        let (mut game, _ends) = serving();
+        game.folders = Some(folders(&scratch.0));
+        let prefabs = scratch.0.join("prefabs");
+        fs::create_dir(&prefabs).expect("made");
+        let file = prefabs.join("lamp.prefab");
+        fs::write(&file, "(\n    entities: {},\n)\n").expect("written");
+        let id = "5f3c9a1e07b2d846";
+        fs::write(
+            Meta::path(&file),
+            Meta {
+                id: id.parse().expect("an ID"),
+            }
+            .text(),
+        )
+        .expect("written");
+        let lamp = Dragged {
+            path: file,
+            kind: AssetKind::Prefab,
+        };
+        game.let_go(&lamp, [560.0, 290.0], Some(VIEW), SCALE);
+        assert!(game.view.link.creates().is_empty(), "no frame yet");
+        game.seen = Some(game.view.camera.viewpoint());
+        game.size = Some(VIEW.size);
+        game.let_go(&lamp, [560.0, 290.0], Some(VIEW), SCALE);
+        let creates = game.view.link.creates();
+        let [(transform, placed), (root, linked)] = &creates[0][..] else {
+            panic!("a transform and a link: {creates:?}");
+        };
+        assert_eq!(
+            [transform, root].map(|i| i.as_ref()),
+            ["Transform", "PrefabRoot"]
+        );
+        let name = reflect::Value::String(id.to_owned());
+        assert_eq!(*linked, reflect::Value::Struct(vec![("0".into(), name)]));
+        let at = Transform::from_value(placed)
+            .expect("a transform")
+            .translation;
+        assert!(at.abs_diff_eq(Vec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
     }
 }

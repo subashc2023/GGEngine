@@ -382,6 +382,10 @@ fn operation_value(operation: &Operation) -> Value {
             vec![entity(of), ("parent".into(), maybe(parent))],
         ),
         Operation::Unlink { entity: of } => ("Unlink", vec![entity(of)]),
+        Operation::Link { entity: of, prefab } => (
+            "Link",
+            vec![entity(of), ("prefab".into(), Value::Prefab(*prefab))],
+        ),
         Operation::Revert {
             entity: of,
             component,
@@ -485,6 +489,17 @@ fn operation(value: &Value) -> Result<Operation> {
                 entity: entity(of)?,
             }
         }
+        "Link" => {
+            let [of, prefab] = reflect::pick(fields, ["entity", "prefab"])?;
+            let &Value::Prefab(prefab) = prefab else {
+                let error = reflect::wrong_kind("Prefab", prefab);
+                return Err(reflect::within(error, "prefab"));
+            };
+            Operation::Link {
+                entity: entity(of)?,
+                prefab,
+            }
+        }
         "Revert" => {
             let [of, named, path] = reflect::pick(fields, ["entity", "component", "path"])?;
             Operation::Revert {
@@ -503,6 +518,7 @@ fn operation(value: &Value) -> Result<Operation> {
                 "Set",
                 "Reparent",
                 "Unlink",
+                "Link",
                 "Revert",
             ];
             return Err(reflect::no_variant(other, &names));
@@ -617,6 +633,27 @@ mod tests {
         };
         fields[1].1 = Value::Int(3);
         let error = Edit::from_value(&Value::Variant(name, fields)).expect_err("refused");
+        assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
+    }
+
+    /// A link reads back with its prefab, as a recording keeps it, and one whose prefab isn't one,
+    /// as a name no prefab loaded has reads, is refused.
+    #[test]
+    fn a_link_reads_back_with_its_prefab() {
+        let (_, id) = world();
+        let prefab = crate::Prefab::new(2);
+        let apply = Edit::Apply {
+            author: "editor".to_owned(),
+            operations: vec![Operation::Link { entity: id, prefab }],
+        };
+        let value = apply.to_value();
+        assert_eq!(Edit::from_value(&value).expect("an edit"), apply);
+        let unloaded = operation_value(&Operation::Link { entity: id, prefab });
+        let Value::Variant(name, mut fields) = unloaded else {
+            panic!("a variant");
+        };
+        fields[1].1 = Value::Opaque;
+        let error = operation(&Value::Variant(name, fields)).expect_err("refused");
         assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
     }
 }

@@ -27,8 +27,9 @@ const BACK: f32 = 16.0;
 /// adds, removes or renames there shows, such as an agent's scene.
 const RELIST: Duration = Duration::from_secs(1);
 
-/// A texture, a model or a font dragged from the Assets panel, by its file, as egui's drag and drop
-/// holds it: what the game's view takes as it's let go there, as [`game`](crate::game) says.
+/// A texture, a model, a font or a prefab dragged from the Assets panel, by its file, as egui's drag
+/// and drop holds it: what the game's view takes as it's let go there, as [`game`](crate::game)
+/// says.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dragged {
     pub path: PathBuf,
@@ -38,9 +39,9 @@ pub struct Dragged {
 /// The Assets panel: the files in a folder, its root, and in the folders under it, one folder at a
 /// time, as a content browser shows them: folders first, then files, each by its name, in rows as
 /// many across as fit. A double click on a folder shows it, and Back the folder above, as far up as
-/// the root. A texture or a model drags, as a [`Dragged`], egui drawing its cell under the cursor;
-/// other files show dimmed, since nothing opens or drags them yet. An asset's ID file,
-/// `<file>.meta` beside it, doesn't show.
+/// the root. A texture, a model, a font or a prefab drags, as a [`Dragged`], egui drawing its cell
+/// under the cursor; other files show dimmed, since nothing opens or drags them yet. An asset's ID
+/// file, `<file>.meta` beside it, doesn't show.
 pub struct Assets {
     root: PathBuf,
     /// The folder shown: the root, or a folder under it.
@@ -68,7 +69,7 @@ struct Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Folder,
-    /// A texture or a model, by its file's extension, which drags.
+    /// A texture, a model, a font or a prefab, by its file's extension, which drags.
     Asset(AssetKind),
     File,
 }
@@ -153,7 +154,7 @@ impl Assets {
     }
 }
 
-/// The files and folders in `folder`, but each texture's, model's and font's ID file beside it,
+/// The files and folders in `folder`, but each asset's ID file beside it,
 /// folders first, then files, each by its name regardless of case, then as it's spelled. A link is
 /// what it leads to, and one that leads nowhere a file; a link to an asset is a file too, as the
 /// game's scan takes no asset through a link.
@@ -177,11 +178,10 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         if file_type.is_file() {
             files.insert(path.clone());
         }
-        // A texture, a model or a font a regular file, as the game's scan takes them; a prefab,
-        // which nothing places from here yet, a file.
+        // An asset a regular file, as the game's scan takes them.
         let kind = match AssetKind::of(&path) {
             _ if is_folder => Kind::Folder,
-            Some(asset) if file_type.is_file() && asset != AssetKind::Prefab => Kind::Asset(asset),
+            Some(asset) if file_type.is_file() => Kind::Asset(asset),
             _ => Kind::File,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -230,9 +230,9 @@ fn cells(ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> Option<PathBuf>
     chosen
 }
 
-/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. A texture's
-/// or a model's cell is a drag source, as [`Assets`] says. A name cut short to fit gives itself
-/// whole as the cell's tooltip.
+/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. An asset's
+/// cell is a drag source, as [`Assets`] says. A name cut short to fit gives itself whole as the
+/// cell's tooltip.
 fn cell(ui: &mut egui::Ui, entry: &Entry) -> Option<PathBuf> {
     // By its path, so that no two cells share one, however alike they look.
     let id = Id::unique(("gg editor asset", &entry.path));
@@ -388,7 +388,8 @@ pub(crate) mod tests {
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
     /// names that aren't Latin among them; a folder's name never makes it a file, nor an asset.
-    /// Textures, models and fonts are assets, by their extensions in any case. An asset's ID file
+    /// Textures, models, fonts and prefabs are assets, by their extensions in any case. An asset's ID
+    /// file
     /// beside it doesn't show; one named for it but for case does, as the game warns of it, and so
     /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
     /// file it's named for, and, where links can be made, one beside a link to a file, which the
@@ -408,6 +409,8 @@ pub(crate) mod tests {
             "E.png",
             "e.png.meta",
             "gone.png.meta",
+            "lamp.Prefab",
+            "lamp.Prefab.meta",
             "notes.meta",
             "old.png",
             "B.ron",
@@ -439,6 +442,7 @@ pub(crate) mod tests {
             ("E.png", texture),
             ("e.png.meta", Kind::File),
             ("gone.png.meta", Kind::File),
+            ("lamp.Prefab", Kind::Asset(AssetKind::Prefab)),
             ("notes.meta", Kind::File),
             ("old.png", texture),
             ("rock.GLB", Kind::Asset(AssetKind::Model)),

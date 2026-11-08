@@ -152,7 +152,9 @@ Talk to a running game, through its tool API:
   snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it
   entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
                                  List its entities, those with COMPONENT, N at a time (100)
-  entity <ID>                    An entity and its components' values
+  entity <ID>                    An entity and its components' values; for an instance's, its root
+                                 or one its prefab gives, `instance` too: what differs from its
+                                 prefab, each component's fields, and the components it adds
   get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
   types                          Its world's component types, each with the value `add` gives it
                                  without one, and the descriptions of the types they hold, which
@@ -180,6 +182,12 @@ Talk to a running game, through its tool API:
                                  entities of its own, and
                                  `{\"revert\":{\"id\":ID,\"component\":C,\"path\":P}}`, which sets a
                                  field of an instance's entity back to its prefab's
+  save-prefab <ID> [PATH]        Save entity ID and its descendants as a new prefab at PATH, in a
+                                 folder under the asset root that its scan reaches, or in its
+                                 `prefabs` folder named after the entity, with its ID file, writing
+                                 over nothing, refused while a copy plays; and link ID to
+                                 it, as one edit, which `undo` unlinks, leaving the file: its
+                                 entities keep their IDs. Prints the prefab's path and name
   set <ID> <COMPONENT> <PATH> <VALUE>
                                  Set a field, such as `translation.x`, or a whole component for an
                                  empty PATH, to VALUE: JSON, or else a string, as one edit
@@ -211,10 +219,10 @@ Serve agents:
   mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
                                  a tool for each command that talks to a game but `quit`, `call`,
                                  `logs --follow` and the PATHs of `capture` and `snapshot`, with
-                                 `scene`'s PATH from the game's asset root, which reaches the game
-                                 the options choose at each call, as the agent, its MCP client's
-                                 name, the author of the edits it applies, kept to what `--grant`
-                                 grants
+                                 `scene`'s and `save-prefab`'s PATHs from the game's asset root,
+                                 which reaches the game the options choose at each call, as the
+                                 agent, its MCP client's name, the author of the edits it applies,
+                                 kept to what `--grant` grants
 
 Options for talking to a game:
   --pid <PID>           The game in process PID, when more than one runs
@@ -797,6 +805,14 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 return Err(bad("OPERATIONS is a JSON array of operations".to_owned()));
             }
             call(&mut parsed, "apply", json!({"operations": operations}))?
+        }
+        "save-prefab" => {
+            let given = parsed.positional(1, 2, "save-prefab <ID> [PATH]")?;
+            let mut params = json!({"id": given[0]});
+            if let Some(path) = given.get(1) {
+                params["path"] = json!(absolute(path)?);
+            }
+            call(&mut parsed, "save_prefab", params)?
         }
         "set" => {
             let given = parsed.positional(4, 4, "set <ID> <COMPONENT> <PATH> <VALUE>")?;

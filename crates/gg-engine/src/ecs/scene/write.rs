@@ -243,7 +243,7 @@ impl Writer<'_> {
                 Some(base) if same(&value, world, base, world) => continue,
                 Some(base) => match (&value, base) {
                     (Value::Struct(fields), Value::Struct(was))
-                        if self.named_fields(component) && fields.len() == was.len() =>
+                        if world.named_fields(component) && fields.len() == was.len() =>
                     {
                         let fields = fields.iter().zip(was);
                         let differ =
@@ -301,16 +301,6 @@ impl Writer<'_> {
         }
         self.out.push_str("        ),\n");
         Ok(())
-    }
-
-    /// Whether component type `component` is a struct of named fields, which a scene writes of an
-    /// instance's entity field by field.
-    fn named_fields(&self, component: ComponentId) -> bool {
-        let Type::Named(index) = self.world.components.ty(component) else {
-            return false;
-        };
-        let shape = &self.types.info(index).shape;
-        matches!(shape, Shape::Struct { tuple: false, .. })
     }
 
     /// Whether `entity` is alive and saved.

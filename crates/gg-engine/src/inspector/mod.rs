@@ -57,8 +57,13 @@ use crate::{
 /// their defaults; each of a vector's components, set at its own path, and each of a rotation's
 /// angles has a button of its axis, which sets it to its default; the Add Component menu, below
 /// the components, adds one with its type's default; and the menu beside each one's header
-/// removes it. The Edit menu, Ctrl+Z (Cmd+Z on macOS) and Ctrl+Shift+Z or Ctrl+Y undo and redo
-/// them, a drag, or a number typed, as one edit. The panels queue each frame's edits,
+/// removes it. An entity of a prefab's instance, its root or one its prefab gives, says which
+/// instance it's of, and marks, strong and with a bar of the selection's color, each component
+/// and field of its own that differs from its prefab's, and each component the prefab doesn't
+/// give it, as the tool API's `entity` finds them: a marked field's context menu, and a marked
+/// component's menu, revert it to the prefab's, and an outermost instance's root has Unlink. The
+/// Edit menu, Ctrl+Z (Cmd+Z on macOS) and Ctrl+Shift+Z or Ctrl+Y undo and redo them, a drag, or
+/// a number typed, as one edit. The panels queue each frame's edits,
 /// operations, undos and redos, which the Inspector's next tick makes, so that the world changes
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
 /// Edit menu's names, show from the tick. A world cleared, replaced, restored or renewed, which is
@@ -77,7 +82,10 @@ use crate::{
 /// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
 /// a few times a second, and edits it as the panels do through the API, as the game's client: its
 /// sets of a gesture join as the log's do, its Edit menu undoes and redoes the client's edits, and
-/// the panels draw what waits for the game's answers as it will be.
+/// the panels draw what waits for the game's answers as it will be. A row's context menu of its
+/// Entities panel saves the entity and its descendants as a prefab, linked in their place, through
+/// the API's `save_prefab`, which a game's own Inspector doesn't offer: a save writes files, which
+/// neither a replay nor a lockstep peer of its commands would have.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
@@ -224,8 +232,11 @@ struct Edit {
 #[derive(Default)]
 struct Pass {
     sets: Vec<Edit>,
-    /// Creates, duplicates, deletes, adds and removes.
+    /// Creates, duplicates, deletes, adds, removes, reverts and unlinks.
     operations: Vec<Command>,
+    /// The entities the Entities panel's menus chose to save as prefabs, which a remote Inspector
+    /// alone offers, as `Inspected::saves_prefabs` says.
+    saves: Vec<EntityId>,
     cues: Cues,
     chosen: Option<Step>,
 }
@@ -515,11 +526,13 @@ impl Inspector {
     /// going on; then the step the Edit menu chose, or a key asks for. Each gesture's first set
     /// ends the other's edit going on, and the pass's input ends only its own.
     fn queue(&mut self, pass: Pass) {
+        // Its saves are a remote Inspector's alone.
         let Pass {
             sets,
             operations,
             cues,
             chosen,
+            saves: _,
         } = pass;
         let mut linked = mem::take(&mut self.link.borrow_mut().pending);
         for linking in linked.drain(..) {
@@ -618,6 +631,17 @@ impl Inspector {
                 let component = component.into();
                 self.operate(world, Operation::Remove { entity, component });
             }
+            Command::Revert(entity, component, path) => {
+                self.forget(entity, &component);
+                let component = component.into();
+                let revert = Operation::Revert {
+                    entity,
+                    component,
+                    path,
+                };
+                self.operate(world, revert);
+            }
+            Command::Unlink(entity) => self.operate(world, Operation::Unlink { entity }),
         }
     }
 
@@ -746,6 +770,10 @@ impl Inspector {
         if let Some(children) = children(world, id) {
             ui.label(children);
         }
+        let instance = world.instance(id);
+        if let Some(instance) = &instance {
+            instance_line(world, ui, id, instance, &mut pass.operations);
+        }
         // So that what's typed into a field of one entity never lands in the field of the next
         // one picked; and, being its own, so that the fields keep their widgets' IDs, and a drag
         // or a number being typed, as the labels above them come and go.
@@ -762,7 +790,16 @@ impl Inspector {
                 else {
                     continue;
                 };
-                let header = egui::CollapsingHeader::new(component)
+                let overrides = instance.as_ref().and_then(|i| i.overrides.get(component));
+                let overridden = overrides.map_or(&[][..], Vec::as_slice);
+                let added =
+                    (instance.as_ref()).is_some_and(|i| i.added.iter().any(|a| a == component));
+                let prefab = instance.as_ref().map_or("", |instance| &instance.prefab);
+                let title = match overrides.is_some() || added {
+                    true => egui::RichText::new(component).strong(),
+                    false => egui::RichText::new(component),
+                };
+                let header = egui::CollapsingHeader::new(title)
                     .id_salt(component)
                     .default_open(true)
                     .show(ui, |ui| {
@@ -781,6 +818,9 @@ impl Inspector {
                             refusals: &self.refusals,
                             edits: &mut pass.sets,
                             waiting: &pending.waiting,
+                            overridden,
+                            prefab,
+                            operations: &mut pass.operations,
                         };
                         let (ty, meta) = (Type::Named(index), Meta::default());
                         let slot = Slot {
@@ -795,11 +835,32 @@ impl Inspector {
                     })
                     .header_response;
                 if component != PARENT {
-                    component_menu(ui, header.rect, id, component, &mut pass.operations);
+                    let (rect, reverts) = (header.rect, overrides.is_some());
+                    component_menu(ui, rect, id, component, reverts, &mut pass.operations);
+                }
+                let said = match (added, overrides) {
+                    (true, _) => Some(format!("Added to this instance: {prefab} gives it none")),
+                    (false, Some(_)) => Some(format!(
+                        "Differs from {prefab}: its menu reverts it whole, a field's context menu \
+                         that field"
+                    )),
+                    (false, None) => None,
+                };
+                if said.is_some() {
+                    mark(ui, header.rect);
                 }
                 let doc = &types.info(index).doc;
-                if !doc.is_empty() {
-                    header.on_hover_text(doc.as_ref());
+                match (said, doc.is_empty()) {
+                    (Some(said), true) => {
+                        header.on_hover_text(said);
+                    }
+                    (Some(said), false) => {
+                        header.on_hover_text(format!("{said}\n\n{doc}"));
+                    }
+                    (None, false) => {
+                        header.on_hover_text(doc.as_ref());
+                    }
+                    (None, true) => {}
                 }
             }
             self.add_menu(world, ui, id, pending, &mut pass.operations);
@@ -925,15 +986,17 @@ const DOT: f32 = 1.0;
 const DOTS_APART: f32 = 4.0;
 
 /// The menu of `component`, at the right end of the row of its header, `header`, as it shows,
-/// whose Remove Component takes it away from the entity of ID `id`, the operation going in
-/// `operations`. A framed header is as wide as `ui`, and the menu is over its end, taking the
-/// clicks there from it, since it's made after it. It's in a child of `ui`, which leaves the
-/// cursor where the header's body left it, for the next header.
+/// whose Remove Component takes it away from the entity of ID `id`, and, if it `reverts`, as a
+/// component that differs from the entity's prefab's does, Revert to Prefab sets it whole back to
+/// the prefab's, the operation going in `operations`. A framed header is as wide as `ui`, and the
+/// menu is over its end, taking the clicks there from it, since it's made after it. It's in a child
+/// of `ui`, which leaves the cursor where the header's body left it, for the next header.
 fn component_menu(
     ui: &mut egui::Ui,
     header: egui::Rect,
     id: EntityId,
     component: &str,
+    reverts: bool,
     operations: &mut Vec<Command>,
 ) {
     let size = egui::Vec2::splat(ui.spacing().interact_size.y);
@@ -963,10 +1026,70 @@ fn component_menu(
     let config = egui::menu::MenuConfig::new().style(crate::menu_style);
     let button = egui::menu::MenuButton::from_button(button).config(config);
     button.ui(&mut menu, |ui| {
+        if reverts && ui.button("Revert to Prefab").clicked() {
+            let (component, path) = (component.to_owned(), String::new());
+            operations.push(Command::Revert(id, component, path));
+        }
         if ui.button("Remove Component").clicked() {
             operations.push(Command::Remove(id, component.to_owned()));
         }
     });
+}
+
+/// Says which instance of a prefab the entity of ID `id` is of, as `instance` has it: an
+/// outermost instance's root by its prefab, with Unlink, which unlinks it, the operation going in
+/// `operations`; a root of an instance inside another's prefab by its prefab and the outer
+/// instance's, which an unlink of the outer's alone takes; and an entity an instance's prefab gives
+/// by that instance's prefab and root.
+fn instance_line(
+    world: &dyn Inspected,
+    ui: &mut egui::Ui,
+    id: EntityId,
+    instance: &gg_api::Instanced,
+    operations: &mut Vec<Command>,
+) {
+    let root = instance
+        .root
+        .parse::<EntityId>()
+        .ok()
+        .filter(|&root| root != id);
+    let outer = root.map(|root| match world.name(root) {
+        Some(name) => format!("{} whose root is {name}, entity {root}", instance.prefab),
+        None => format!("{} whose root is entity {root}", instance.prefab),
+    });
+    ui.horizontal_wrapped(|ui| match (&instance.link, outer) {
+        (Some(link), None) => {
+            ui.label(format!("Instance of {link}"));
+            let unlink = ui.button("Unlink").on_hover_text(
+                "Makes the instance's entities its own, under their IDs: they follow the prefab's \
+                 file no more",
+            );
+            if unlink.clicked() {
+                operations.push(Command::Unlink(id));
+            }
+        }
+        (Some(link), Some(outer)) => {
+            ui.label(format!("Instance of {link}, in the instance of {outer}"));
+        }
+        (None, outer) => {
+            let outer = outer.unwrap_or_else(|| instance.prefab.clone());
+            ui.label(format!("Of the instance of {outer}"));
+        }
+    });
+}
+
+/// Marks a field's label or a component's header, where `rect` is, as differing from the
+/// entity's prefab's, or as a component the prefab doesn't give: a bar of the selection's color
+/// along its left edge, as Unity's Inspector marks an instance's overrides, just left of it, or
+/// over its edge where that's cut off, as a header's is, which is as wide as the panel.
+pub(super) fn mark(ui: &egui::Ui, rect: egui::Rect) {
+    let left = (rect.left() - 4.0).max(ui.clip_rect().left());
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(left, rect.top()),
+        egui::pos2(left + 2.0, rect.bottom()),
+    );
+    ui.painter()
+        .rect_filled(bar, 0.0, ui.visuals().selection.bg_fill);
 }
 
 /// Where what `ui` shows ends on the right: its end, but no further than where it's cut off, since

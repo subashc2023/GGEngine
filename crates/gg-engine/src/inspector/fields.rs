@@ -9,6 +9,7 @@ use egui::ecolor::{Hsva, HsvaGamma};
 use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
+use super::commands::Command;
 use super::inspected::Inspected;
 use super::{Edit, Refusal, shown_right};
 use crate::EntityId;
@@ -25,6 +26,12 @@ pub(super) struct Fields<'a> {
     pub(super) edits: &'a mut Vec<Edit>,
     /// The sets of the entity's fields that wait for a tick, in the order they were made.
     pub(super) waiting: &'a [Edit],
+    /// The component's own fields that differ from those of the prefab of the instance whose entity
+    /// it is, `prefab`, by name, each marked, its label's context menu reverting it, the revert
+    /// going in `operations`; none for an entity no instance gives.
+    pub(super) overridden: &'a [String],
+    pub(super) prefab: &'a str,
+    pub(super) operations: &'a mut Vec<Command>,
 }
 
 /// What's drawn at a path: its type; the hints of the field it's in, which its parts and elements
@@ -265,10 +272,16 @@ impl Fields<'_> {
             .num_columns(2)
             .show(ui, |ui| {
                 for (i, (field, (_, value))) in fields.iter().zip(given).enumerate() {
+                    let own = path.is_empty();
                     let path = reflect::join(path, &field.name);
-                    let name = ui.label(field.name.as_ref());
-                    if !field.meta.doc.is_empty() {
-                        name.on_hover_text(field.meta.doc.as_ref());
+                    let overridden = own && self.overridden.iter().any(|f| *f == *field.name);
+                    if overridden {
+                        self.overridden_label(ui, field, &path);
+                    } else {
+                        let name = ui.label(field.name.as_ref());
+                        if !field.meta.doc.is_empty() {
+                            name.on_hover_text(field.meta.doc.as_ref());
+                        }
                     }
                     let new = self.value(ui, Slot::of(field, defaults), value, &path, whole);
                     ui.end_row();
@@ -283,6 +296,28 @@ impl Fields<'_> {
                 }
             });
         changed
+    }
+
+    /// Draws the label of `field`, at `path`, one of the component's own that differs from its
+    /// prefab's: strong, marked, saying so on hover, above the field's doc, and with a context menu
+    /// whose Revert to Prefab sets it back to the prefab's.
+    fn overridden_label(&mut self, ui: &mut egui::Ui, field: &Field, path: &str) {
+        let text = egui::RichText::new(field.name.as_ref()).strong();
+        let label = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        super::mark(ui, label.rect);
+        let said = format!("Differs from {}: its context menu reverts it", self.prefab);
+        let label = match field.meta.doc.is_empty() {
+            true => label.on_hover_text(said),
+            false => label.on_hover_text(format!("{said}\n\n{}", field.meta.doc)),
+        };
+        let menu = egui::Popup::context_menu(&label).style(crate::menu_style);
+        menu.show(|ui| {
+            if ui.button("Revert to Prefab").clicked() {
+                let component = self.component.to_owned();
+                let revert = Command::Revert(self.entity, component, path.to_owned());
+                self.operations.push(revert);
+            }
+        });
     }
 
     /// Draws the only field of a tuple struct, `field`, with its value from `given`, and its

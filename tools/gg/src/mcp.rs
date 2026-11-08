@@ -417,7 +417,12 @@ fn tools() -> Value {
         ),
         tool(
             "entity",
-            "An entity: its ID, name, parent, children, and its components' values.",
+            "An entity: its ID, name, parent, children, and its components' values; and, for an \
+             instance's, its root or one its prefab gives, `instance`: the outermost instance's \
+             `root` and `prefab`, the entity's own prefab, `link`, if it's an instance's root, \
+             `overrides`, each component that differs from its prefab with the fields that \
+             differ, `\"\"` for the whole, as `revert` takes them, and `added`, the components it \
+             has that its prefab doesn't give.",
             json!({"id": id}),
             &["id"],
         ),
@@ -489,6 +494,24 @@ fn tools() -> Value {
              entities it made.",
             json!({"operations": {"type": "array", "items": {"type": "object"}}}),
             &["operations"],
+        ),
+        tool(
+            "save_prefab",
+            "Saves an entity and its descendants as a new prefab, with its ID file, writing over \
+             nothing, and links the entity to it as one edit, which `undo` unlinks, leaving the \
+             file: its entities keep their IDs, and the prefab's root sits at its origin. Answers \
+             the prefab's path from the asset root and its name, its asset ID.",
+            json!({
+                "id": id,
+                "path": {
+                    "type": "string",
+                    "description": "The prefab's file, from the game's asset root, in a folder \
+                                    there that its scan reaches (no hidden or `target` folder), \
+                                    ending in `.prefab`; by default in `prefabs/`, named after \
+                                    the entity",
+                },
+            }),
+            &["id"],
         ),
         tool(
             "set",
@@ -639,9 +662,12 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "snapshot" => {
             call(name, Value::Null)
         }
-        // `scene`'s path as given, from the game's asset root, as its status names scene files.
+        // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
+        // names scene files.
         "step" | "scene" | "look" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
-        | "undo" | "redo" | "edits" | "assets" | "debug" => call(name, Value::Object(arguments)),
+        | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
+            call(name, Value::Object(arguments))
+        }
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))

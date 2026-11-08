@@ -86,8 +86,14 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   colliders' outlines going to the game as the API's look, which it takes up from other clients
   too; the game's events in its Logs as the game logs them; and the project's assets in its Assets
   panel, an ID file beside its asset hidden, from which a texture dropped on the view sets the
-  texture of the sprite there, and a model is a root where the cursor shows the grid's plane,
-  each an edit of the editor's naming the asset by its ID. Its Play and Simulate are the API's
+  texture of the sprite there, a model is a root where the cursor shows the grid's plane, and a
+  prefab an instance's root there, linked, each an edit of the editor's naming the asset by its ID.
+  Its Inspector marks each field and component where an instance's entity differs from its prefab,
+  as the API's `entity` says, a field's context menu and a component's menu reverting it, and
+  unlinks an outermost instance's root; its Entities panel saves an entity and its descendants as
+  a prefab through the API's `save_prefab`, linked in their place, which a game's own Inspector
+  doesn't, as a save writes files that neither a replay nor a lockstep peer of its commands would
+  have; each an edit of the editor's. Its Play and Simulate are the API's
   `play`, and Stop its `stop`, which brings back the world as edited. Its File menu's New, Open
   and Save are the API's `scene`, on the game's open scene, which its title bar names, marked
   while unsaved; and since closing it ends the game, it asks before New, Open or closing loses
@@ -352,7 +358,9 @@ in the editor is out of an agent's reach.
   [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
   the token, which the game compares in constant time, so that only processes that can read the
   file reach the game: the user's own, as the file is the user's alone from before it holds the
-  token: on Unix of mode 0600, and on Windows of a protected DACL that allows its owner alone. A
+  token: on Unix of mode 0600, and on Windows of a protected DACL that allows its owner alone. It
+  says of an instance's entity what differs from its prefab, and saves a subtree as a prefab
+  linked in its place, as [Project state](#project-state)'s Prefabs says. A
   thread of the API's reads each connection, at most 16 requests ahead of the answers written to it,
   so that a client that sends faster than it reads or than the game answers is held back by the
   connection rather than filling the game's memory, and answers its pings itself,
@@ -572,7 +580,39 @@ A project's state is text that people and agents edit, diff and merge with ordin
   its own from then on; and set a field back to its prefab's (`revert`); but refuse to delete or
   move an entity its prefab gives, remove a component the prefab gives one, or give one a link, or
   change or take away a nested instance's (`ecs.prefab_entity`), and to revert what the prefab
-  doesn't give (`ecs.no_prefab`). In a development run that serves the tool API, neither recorded
+  doesn't give (`ecs.no_prefab`). A link (`Operation::Link`) is an unlink's inverse: it gives a
+  root a `PrefabRoot` and spawns nothing, its subtree holding each entity its prefab gives under
+  the ID the instance mixes, under its prefab's parent, with each component the prefab gives it,
+  and is refused otherwise (`ecs.prefab_missing`, `ecs.prefab_parent`), for one that links a
+  prefab its prefab doesn't link it to (`ecs.prefab_entity`), and for a root linked already
+  (`reflect.has_component`); an unlink's undo, and a link's redo, are checked and refused alike,
+  as another author may have changed the subtree since. The tool API's `entity` says of an
+  instance's entity what differs from its prefab, by the comparison a save makes: the outermost
+  instance's root and prefab, each component its prefab gives that differs, with the fields that
+  differ, a struct of named fields' by name and another type's whole, and the components it has
+  that its prefab doesn't give, but a root's `Transform` and `PrefabRoot` and a `Parent`, the
+  instance's own; a read parses the prefab's text and changes nothing. Its `save_prefab` saves an
+  entity and its descendants as a new prefab and links the entity to it, as one edit of the
+  client's, which an undo unlinks, leaving the file: its text written whole over nothing, at the
+  path given or in `prefabs/` under the root, named after the entity's `Name`, cut to 64
+  characters, numbered while that or its ID file is taken, with its ID file, as the game writes
+  an asset's, and the asset database taking it at once, a new prefab of the text written whatever
+  a file there gave before; everything checked before anything is written, the link too. Each of
+  the prefab's own entities' local IDs is `unmix64(id) ^ mix64(root ^ LINK)`, where `unmix64`
+  undoes `mix64`'s steps, its xorshifts and its multiplications by odd constants, so that the
+  instance gives each the ID it has, the root's own among them, and the link changes no ID,
+  references from elsewhere staying whole; a nested instance's entities' IDs mix again from its
+  root's local ID, as a prefab's text has them; and the prefab's root's `Transform` is the
+  identity, the instance's own being the entity's. A save is refused for an entity an instance gives (`ecs.prefab_entity`), an
+  instance's root, as a prefab whose root links another is (`scene.prefab_variant`), a model's
+  node (`ecs.model_node`), a file that's there, or the ID file of one deleted, whose ID scenes may
+  name (`asset.exists`), a path outside the root, whose folder isn't there, or that the asset scan
+  skips, as gg-api's `reached` says, so that no run would find it nor a package hold it
+  (`asset.outside_root`), a text of more than 16 MiB, which no load reads (`engine.bad_prefab`),
+  and as a scene of the subtree is, as one that refers outside it (`scene.outside`); and in a run
+  from a package or a networked one, or while a copy of the world as edited plays, which `stop`
+  takes away with the link (`api.no_scene`).
+  In a development run that serves the tool API, neither recorded
   nor in a lockstep session, as the prefab's file is saved, every instance takes what changed, in
   the world and the world as edited alike: each field it had as the prefab did takes what the
   prefab has now, and each that differed is kept; a component the prefab gives now is given, and
@@ -734,8 +774,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   [asset_watch.rs](crates/gg-engine/src/asset_watch.rs) have the rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
   inverse: create, duplicate or delete an entity, add or remove a component, set a field,
-  reparent, and unlink a prefab's instance or revert a field of one to its prefab's, as Prefabs
-  says above. An operation names entities by their IDs and carries values as reflection's, and
+  reparent, and unlink a prefab's instance, link one back or revert a field of one to its
+  prefab's, as Prefabs says above. An operation names entities by their IDs and carries values as reflection's, and
   applying one checks everything before anything changes. A delete's and a remove's inverses keep
   what they took out, typed, so that what's opaque comes back too; a set's keeps the component it
   changed, whole, until nothing can roll its edit back, so that an edit refused partway rolls back

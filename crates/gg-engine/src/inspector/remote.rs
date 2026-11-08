@@ -32,7 +32,7 @@ mod imp {
     use serde::Deserialize;
     use serde_json::{Map, Value as JsonValue, json};
     use tracing::field::display;
-    use tracing::warn;
+    use tracing::{info, warn};
 
     use super::super::commands::Command;
     use super::super::inspected::{Inspected, Pending};
@@ -146,6 +146,8 @@ mod imp {
         },
         Entity(EntityId),
         Edits,
+        /// A save of the entity with this ID as a prefab, which the Entities panel chose.
+        SavePrefab(EntityId),
         /// A set, its waiting one numbered `number`, of a gesture.
         Set {
             number: u64,
@@ -168,7 +170,7 @@ mod imp {
         fn edits(&self) -> bool {
             matches!(
                 self,
-                Self::Set { .. } | Self::Operation { .. } | Self::Step(_)
+                Self::Set { .. } | Self::Operation { .. } | Self::Step(_) | Self::SavePrefab(_)
             )
         }
     }
@@ -203,7 +205,8 @@ mod imp {
 
     /// An entity as the game gave it: its name, parent and children, and its components' types, in
     /// the order they registered; with, for the picked entity, their values, or why one can't be
-    /// read, and where the space its transform is in sits, if that was given, and finite.
+    /// read, where the space its transform is in sits, if that was given, and finite, and what of
+    /// it differs from its prefab, if it's an instance's.
     struct Known {
         id: EntityId,
         name: Option<String>,
@@ -212,10 +215,11 @@ mod imp {
         components: Vec<String>,
         values: Vec<Result<Value, String>>,
         space: Option<Pose>,
+        instance: Option<gg_api::Instanced>,
     }
 
-    /// The entity `entity` answers, its `space` as it came, which a game of an older engine
-    /// doesn't give.
+    /// The entity `entity` answers, its `space` and `instance` as they came, which a game of an
+    /// older engine doesn't give.
     #[derive(Deserialize)]
     struct Answered {
         name: Option<String>,
@@ -224,6 +228,8 @@ mod imp {
         components: Map<String, JsonValue>,
         #[serde(default)]
         space: Option<JsonValue>,
+        #[serde(default)]
+        instance: Option<gg_api::Instanced>,
     }
 
     impl Remote {
@@ -448,6 +454,10 @@ mod imp {
                             Command::Remove(id, component) => {
                                 ("remove", Some(*id), Some(component))
                             }
+                            Command::Revert(id, component, _) => {
+                                ("revert", Some(*id), Some(component))
+                            }
+                            &Command::Unlink(id) => ("unlink", Some(id), None),
                             Command::Set(..) | Command::Seal | Command::Step(_) => {
                                 unreachable!("the menus choose no sets, seals or steps")
                             }
@@ -466,6 +476,19 @@ mod imp {
                 },
                 Ask::Step(_) => {
                     inspector.not_done = answer.err().map(|failure| failure.message);
+                }
+                Ask::SavePrefab(id) => {
+                    match answer.and_then(|json| read::<gg_api::SavedPrefab>(&json)) {
+                        Ok(saved) => {
+                            inspector.not_done = None;
+                            info!(entity = %id, path = saved.path, "Saved as a prefab");
+                        }
+                        Err(failure) => {
+                            let code = failure.code.as_str();
+                            warn!(code, operation = "save as a prefab", entity = %id, "{failure}");
+                            inspector.not_done = Some(failure.message);
+                        }
+                    }
                 }
             }
         }
@@ -519,6 +542,7 @@ mod imp {
                     components: listed.components,
                     values: Vec::new(),
                     space: None,
+                    instance: None,
                 });
             }
             let described = |name: &String| self.types.find(name).is_some();
@@ -586,6 +610,7 @@ mod imp {
                     .space
                     .as_ref()
                     .and_then(|space| space_of(space, &names)),
+                instance: answered.instance,
             };
             self.types_due |= entity
                 .components
@@ -640,6 +665,7 @@ mod imp {
             let Pass {
                 sets,
                 operations,
+                saves,
                 cues,
                 chosen,
             } = pass;
@@ -667,6 +693,10 @@ mod imp {
             }
             for command in operations {
                 self.operation(command, inspector.picked);
+            }
+            for id in saves {
+                self.open = None;
+                self.queued.push_back(Ask::SavePrefab(id));
             }
             if cues.released || !cues.held {
                 self.end(Gesture::Panels);
@@ -866,6 +896,12 @@ mod imp {
                             id: id(of),
                             component: component.clone(),
                         },
+                        Command::Revert(of, component, path) => gg_api::Operation::Revert {
+                            id: id(of),
+                            component: component.clone(),
+                            path: path.clone(),
+                        },
+                        Command::Unlink(of) => gg_api::Operation::Unlink { id: id(of) },
                         Command::Set(..) | Command::Seal | Command::Step(_) => {
                             unreachable!("the menus choose no sets, seals or steps")
                         }
@@ -874,6 +910,7 @@ mod imp {
                 }
                 Ask::Step(Step::Undo) => Some(("undo".to_owned(), JsonValue::Null)),
                 Ask::Step(Step::Redo) => Some(("redo".to_owned(), JsonValue::Null)),
+                Ask::SavePrefab(of) => Some(("save_prefab".to_owned(), json!({"id": id(of)}))),
             }
         }
 
@@ -1008,6 +1045,20 @@ mod imp {
                 Value::String(name) => name.clone(),
                 _ => "none".to_owned(),
             }
+        }
+
+        /// As the last read of the picked entity gave it, while it's picked.
+        fn instance(&self, id: EntityId) -> Option<Cow<'_, gg_api::Instanced>> {
+            match &self.picked {
+                Some((of, Some(entity))) if *of == id => {
+                    entity.instance.as_ref().map(Cow::Borrowed)
+                }
+                _ => None,
+            }
+        }
+
+        fn saves_prefabs(&self) -> bool {
+            true
         }
 
         fn waiting(&self) -> Option<&str> {
@@ -1323,6 +1374,55 @@ mod imp {
             remote.update(&mut inspector);
             inspector.picked = Some(a);
             assert_eq!(remote.placed(Some(a)), None, "back, until a read of it");
+        }
+
+        /// A read of the picked entity gives what of it differs from its prefab, while it's picked;
+        /// and a save as a prefab, an unlink and a revert go to the game as the API's `save_prefab`
+        /// and `apply` take them, each an edit, after which the entity is read again.
+        #[test]
+        fn an_instances_read_and_its_prefabs_edits_go_as_the_api_has_them() {
+            let mut remote = Remote::new("editor");
+            let a = id(1);
+            let instance = format!(
+                r#"{{"root":"{a}","prefab":"prefabs/lamp.prefab","link":"prefabs/lamp.prefab",
+                "overrides":{{"Sprite":["color"]}},"added":["Bob"]}}"#
+            );
+            let answer = format!(
+                r#"{{"name":null,"parent":null,"children":[],"components":{{}},
+                "instance":{instance}}}"#
+            );
+            remote.entity(a, Ok(answer), Some(a));
+            let read = remote.instance(a).expect("an instance's");
+            assert_eq!(read.link.as_deref(), Some("prefabs/lamp.prefab"));
+            let color = ["color".to_owned()];
+            assert_eq!(
+                read.overrides.get("Sprite").map(Vec::as_slice),
+                Some(&color[..])
+            );
+            assert_eq!(read.added, ["Bob"]);
+            assert!(remote.instance(id(2)).is_none(), "not picked");
+            assert!(remote.saves_prefabs());
+            let ask = |ask: &Ask| remote.request(ask).expect("a request");
+            let save = ask(&Ask::SavePrefab(a));
+            assert_eq!(
+                save,
+                ("save_prefab".to_owned(), json!({"id": a.to_string()}))
+            );
+            assert!(Ask::SavePrefab(a).edits());
+            let operation = |command| Ask::Operation {
+                command,
+                picked: Some(a),
+                parent: None,
+                number: 1,
+            };
+            let unlink = ask(&operation(Command::Unlink(a)));
+            let operations = json!({"operations": [{"unlink": {"id": a.to_string()}}]});
+            assert_eq!(unlink, ("apply".to_owned(), operations));
+            let revert = Command::Revert(a, "Sprite".to_owned(), "color".to_owned());
+            let reverted = json!({"revert": {"id": a.to_string(), "component": "Sprite",
+                "path": "color"}});
+            let operations = json!({"operations": [reverted]});
+            assert_eq!(ask(&operation(revert)), ("apply".to_owned(), operations));
         }
 
         /// A set through the link waits, as the link says, until a read of its entity after the

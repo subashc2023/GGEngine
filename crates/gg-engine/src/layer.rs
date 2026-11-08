@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use bytemuck::NoUninit;
 #[cfg(feature = "dev")]
-use gg_api::asset::AssetId;
+use gg_api::asset::{AssetId, AssetKind};
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
@@ -3070,6 +3070,42 @@ impl Context {
     #[cfg(feature = "dev")]
     pub(crate) fn catalog(&self) -> &Catalog {
         self.assets.catalog()
+    }
+
+    /// Takes the asset of `kind` the run has just written at `path`, with its ID file holding `id`,
+    /// into the asset database, as [`Catalog::bind`] does, and asks the thread that watches the
+    /// root to look, so that its database takes it too.
+    #[cfg(feature = "dev")]
+    pub(crate) fn bind_asset(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
+        self.add_assets(|assets| assets.bind(path, kind, id));
+        self.ask_assets();
+    }
+
+    /// Adds the prefab of `text`, which the run has just written in a new file at `path` from the
+    /// asset root, with `/` between its parts, named `name`, its asset ID or else its path: as
+    /// [`add_prefab`](Self::add_prefab) adds one it reads, watched as its file changes, but a new
+    /// prefab whatever was loaded from a file there before, as one deleted since, which neither
+    /// `path` nor the file names from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn add_saved_prefab(&mut self, path: &str, name: &str, text: String) -> Prefab {
+        // The file holds the text from now on, as a read begun now would give it.
+        let read_at = SystemTime::now();
+        let file = match &self.root {
+            Some(root) => root.join(path),
+            None => PathBuf::from(path),
+        };
+        let text: Arc<str> = text.into();
+        let (path, name): (Arc<str>, Arc<str>) = (path.into(), name.into());
+        let (held, named) = (Arc::clone(&text), name.clone());
+        let prefab = self.add_assets(|assets| assets.add_saved_prefab(path.clone(), named, held));
+        self.watch_prefab(prefab, &path, &file, read_at, &name);
+        if let Some(resolved) = self.files.file_of(&file) {
+            self.loaded.prefabs.insert(resolved, prefab);
+        }
+        self.added("prefab", &path);
+        // What its text names, loaded already, as the entities it was saved from have it.
+        let _ = self.load_scene_assets(&text);
+        prefab
     }
 
     /// Whether a layer has added the file at `path` from the app's root, by whatever form of its

@@ -122,6 +122,70 @@ impl World {
         write::save(self, entities, false)
     }
 
+    /// `root` and its descendants as a prefab's canonical text, which linking `root` to, as
+    /// [`Operation::Link`](crate::Operation::Link) does, makes it an instance of it that holds its
+    /// entities as they are, under their IDs: each of the prefab's own entities given the local ID
+    /// that the instance whose root is `root` mixes to its ID, as [`id::unlinked`] finds it, `root`
+    /// too, and each an instance inside gives its ID mixed again from its root's, as a prefab's
+    /// text has those; each saved as [`save_scene`](Self::save_scene) saves it, but the root's
+    /// `Transform`, the instance's own, the identity, so that the prefab sits at its root.
+    ///
+    /// Fails as `save_scene` does, for one, as for an entity that refers to one outside the
+    /// subtree (`scene.outside`); with `ecs.prefab_entity` for a root an instance's prefab gives,
+    /// and `scene.prefab_variant` for one that's an instance's root, as a prefab whose root links
+    /// another is refused; with `ecs.bad_id` for the one ID that no local ID mixes to, and for
+    /// two entities that would have the same local ID, which only chance gives; and as a link of
+    /// `root` to the text is refused, as [`linkable`](Self::linkable) says, so that a save that
+    /// couldn't link writes nothing.
+    #[cfg(feature = "dev")]
+    pub(crate) fn save_prefab(&self, root: Entity) -> Result<String> {
+        let _zone = gg_core::zone!();
+        self.locate(root)?;
+        self.not_a_node(root)?;
+        self.not_a_prefabs(root)?;
+        if self.get::<crate::PrefabRoot>(root).is_some() {
+            return Err(Error::new(
+                "scene.prefab_variant",
+                format!(
+                    "entity {} is an instance's root, and a prefab whose root links another is \
+                     refused: unlink it first",
+                    self.name_of(root)
+                ),
+            ));
+        }
+        let text = write::save(self, &[root], true)?;
+        let mut scratch = self.scratch();
+        let entities = read::parse(&scratch, &text, true, &mut Expanding::default())?;
+        let held = self.id(root).expect("alive");
+        let unmixable = |id: EntityId| {
+            let message = format!(
+                "entity {id} has the one ID that no local ID mixes to under entity {held}: give it \
+                 another ID first"
+            );
+            Error::new("ecs.bad_id", message)
+        };
+        let ids = (0..entities.len())
+            .map(|at| local_id(&entities, held, at).ok_or_else(|| unmixable(entities[at].id)));
+        let ids: Vec<EntityId> = ids.collect::<Result<_>>()?;
+        let distinct: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
+        if distinct.len() != ids.len() {
+            let message = format!(
+                "two entities under entity {held} would have the same ID in the prefab, by chance \
+                 of about one in 2^64: give one another ID first"
+            );
+            return Err(Error::new("ecs.bad_id", message));
+        }
+        let roots = scratch.commit(entities, ids, None);
+        if scratch.get::<crate::Transform>(roots[0]).is_some() {
+            let identity = crate::reflect::Reflect::to_value(&crate::Transform::IDENTITY);
+            scratch.set_field(roots[0], "Transform", "", &identity)?;
+        }
+        let text = write::save(&scratch, &roots, true)?;
+        let template = Expanding::default().text_template(self, &text)?;
+        self.linkable(root, template, "the prefab saved")?;
+        Ok(text)
+    }
+
     /// The IDs the scene `text` gives its entities, as its syntax alone has them, which says what a
     /// text holds that no longer loads, as after a rebuild took away a field it holds.
     ///
@@ -311,4 +375,16 @@ fn copied_ids(entities: &[Loaded], instance: EntityId) -> Option<Vec<EntityId>> 
     (0..entities.len())
         .map(|at| id_of(entities, instance, at, &mut ids))
         .collect()
+}
+
+/// The ID in a prefab of the entity at `at` among `entities`, a subtree's whose root's ID is `root`,
+/// as [`World::save_prefab`] gives them: each of its own the local ID that the instance whose root
+/// is `root` mixes to its ID, as [`id::unlinked`] finds it, and each an instance in it gives mixed
+/// from its root's in the prefab, as the instance's own are; `None` where one would be 0.
+#[cfg(feature = "dev")]
+fn local_id(entities: &[Loaded], root: EntityId, at: usize) -> Option<EntityId> {
+    match entities[at].spawned {
+        None => id::unlinked(root, entities[at].id),
+        Some((by, local)) => id::linked(local_id(entities, root, by)?, local),
+    }
 }

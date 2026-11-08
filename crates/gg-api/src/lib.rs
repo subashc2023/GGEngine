@@ -90,7 +90,10 @@
 //!   components in the order their types registered; and `space`, where the space its `Transform`
 //!   is in sits in the world, as the last tick left it: its parent's pose, as a matrix of 16 floats,
 //!   column by column, and a rotation, `[x, y, z, w]`, without the parent's scales; the identity
-//!   for a root. Its floats are written as a value's are.
+//!   for a root. Its floats are written as a value's are. An instance's entity, its root or one its
+//!   prefab gives, has `instance` too, [`Instanced`]: what of it differs from its prefab, which
+//!   `revert` sets back, as a scene saves it; reading it parses the prefab's text, and changes
+//!   nothing.
 //! - `get`, [`Field`]: answers a component's field, as a value.
 //! - `types`: answers [`Types`], the world's component types and the descriptions of the types
 //!   they hold, which values are read and written by: a client draws and checks values by them, as
@@ -142,6 +145,32 @@
 //!   the code of the first refused, such as `ecs.no_entity`, which names it. A set of a gesture,
 //!   such as a drag, joins the client's last edit if that's a set of the same field in the same
 //!   gesture, so that the gesture undoes whole.
+//! - `save_prefab`, [`SavePrefab`]: saves an entity and its descendants as a new prefab, and links
+//!   the entity to it, as an edit of the client's, and answers [`SavedPrefab`]. The prefab's file
+//!   is `path`, absolute or from the asset root, in a folder there that [`asset::scan`] reaches,
+//!   ending in `.prefab`, or else in `prefabs/` under the root, which it makes, named after the
+//!   entity's `Name` in at most 64 lowercase letters, digits and `_`, or `prefab`, with `-2`, `-3`
+//!   and so on after it while a file of that name, or its ID file, is there; written whole, over
+//!   nothing, with its ID file beside it, as the game writes an asset's.
+//!   Each of its entities' IDs is the one the instance whose root is the entity mixes to the ID
+//!   the entity has, so that linking it, which `undo` unlinks, changes no entity's ID, nor anything
+//!   a scene saves but the entity's link; and the prefab's root's `Transform` is the identity, the
+//!   instance's own being the entity's. `undo` leaves the file. It fails, writing nothing, with:
+//!   - `engine.no_root`, in a game that names no asset root;
+//!   - `api.no_scene`, in a game that runs from its package, or a networked one, as `scene`'s
+//!     `save` does, and while a copy of the world as edited plays, whose entities `stop` takes
+//!     away;
+//!   - `ecs.no_entity`, for an ID no living entity has;
+//!   - `ecs.prefab_entity`, for an entity an instance's prefab gives, `scene.prefab_variant` for an
+//!     instance's root, and `ecs.model_node` for a model's node;
+//!   - `asset.outside_root`, for a path outside the asset root, whose folder isn't there, or that
+//!     the scan skips, as [`asset::reached`] says, as in a folder whose name starts with `.`, in a
+//!     `target` or in a top-level `tests`;
+//!   - `asset.exists`, for a path where a file is, or the ID file of one deleted, whose ID scenes
+//!     may name;
+//!   - `engine.bad_prefab`, for a prefab's text of more than 16 MiB, which no load reads;
+//!   - and as saving a scene of the entity fails, as with `scene.outside` for one that refers to an
+//!     entity outside its subtree.
 //! - `undo` and `redo`, [`Undo`]: undo the last edit of an author, the client's own by default,
 //!   such as a scene file's, which its path names, or redo the last it undid, and answer
 //!   [`Edit`], or `null` if there's none; an edit the world refuses to undo or redo, as when an
@@ -186,6 +215,7 @@
 //! `ping` and `status` need none; `logs`, `entities`, `entity`, `types`, `hash`, `assets` and
 //! `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the type
 //! each set, add and remove names, and `write` for any other operation, as `undo` and `redo` need;
+//! `save_prefab` needs `write` and `scene`, as it writes a file of the project's as `scene` does;
 //! `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and `pick`
 //! need `view`, a `pick` answering its entity's name only with `read` of `Name` too; `input`,
 //! `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and a `capture` or a
@@ -830,6 +860,48 @@ pub struct Listed {
 #[serde(deny_unknown_fields)]
 pub struct Entity {
     pub id: String,
+}
+
+/// What `entity` answers of an instance's entity, its root or one its prefab gives, under
+/// `instance`: the ID of the root of the outermost instance whose prefab gives it, or its own for
+/// the root of an instance none gives, and that instance's prefab, by its path from the asset
+/// root; the entity's own prefab, likewise, if it's an instance's root, nested or not, which alone
+/// an outermost instance's root unlinks; each component the prefab gives it that differs from what
+/// the prefab gives, by its type's name, with the fields that differ, a struct of named fields' by
+/// name, as a scene saves them, and else `""`, the whole component, each a path `revert` takes; and
+/// the components it has that the prefab doesn't give it, which a scene saves whole, but the
+/// instance's own: a root's `Transform` and `PrefabRoot`, and a `Parent`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Instanced {
+    pub root: String,
+    pub prefab: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub overrides: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub added: Vec<String>,
+}
+
+/// What `save_prefab` takes: the ID of the entity to save with its descendants, and the path of
+/// the prefab's file, absolute or from the asset root, or `None` for one in `prefabs/` named after
+/// the entity.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavePrefab {
+    pub id: String,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+/// What `save_prefab` answers: the prefab's file, by its path from the asset root, with `/` between
+/// its parts, as [`Status::scene`] names files; its name, its asset ID or else its path, as values
+/// name it; and the ticks the simulation had run as the link applied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPrefab {
+    pub path: String,
+    pub name: String,
+    pub ticks: u64,
 }
 
 /// What `get` takes: an entity's ID, one of its components' types, and the path of a field of it,

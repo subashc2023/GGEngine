@@ -343,6 +343,20 @@ impl Assets {
         self.prefab_names.entry(path).or_insert(prefab);
     }
 
+    /// Adds the next prefab, as [`add_prefab`](Self::add_prefab) does, of `text`, which the run has
+    /// just written in a new file at `path`: which `path` names from now on, in place of a prefab
+    /// loaded from a file there before, as one deleted since.
+    #[cfg(feature = "dev")]
+    pub(crate) fn add_saved_prefab(
+        &mut self,
+        path: Arc<str>,
+        name: Arc<str>,
+        text: Arc<str>,
+    ) -> Prefab {
+        self.prefab_names.remove(&path);
+        self.add_prefab(path, name, Some(text))
+    }
+
     /// Has `prefab` hold `text` from now on, as its file read again gives it.
     #[cfg(feature = "dev")]
     pub(crate) fn set_prefab_text(&mut self, prefab: Prefab, text: Arc<str>) {
@@ -624,6 +638,12 @@ impl Assets {
     pub(crate) fn set_catalog(&mut self, catalog: Catalog) {
         self.catalog = catalog;
     }
+
+    /// Takes an asset the run has just written into the database, as [`Catalog::bind`] does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn bind(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
+        self.catalog.bind(path, kind, id);
+    }
 }
 
 /// What the layers loaded from files, or was loaded where text named it, each by its file, as
@@ -766,6 +786,20 @@ impl Catalog {
     /// Why the root couldn't be listed at the last scan, if it couldn't.
     pub(crate) fn unlisted(&self) -> Option<&str> {
         self.unlisted.as_deref()
+    }
+
+    /// Takes in the asset of `kind` the run has just written at `path` from the root, with `/`
+    /// between its parts, and its ID file, holding `id`, which no asset has this run: as the next
+    /// scan would, so that what names it by its ID finds it at once.
+    pub(crate) fn bind(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
+        let cataloged = Cataloged {
+            kind,
+            id: Some(id),
+            present: true,
+            problem: None,
+        };
+        self.assets.insert(Arc::clone(&path), cataloged);
+        self.ids.insert(id, path);
     }
 }
 

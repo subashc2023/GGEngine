@@ -128,17 +128,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Particles** (2026-11-08)
 - **Linked prefabs** (2026-11-08)
 - **Foxball's particles and prefabs** (2026-11-08)
+- **Prefabs in the editor** (2026-11-08)
+- **Phase 15, particles and linked prefabs** (2026-11-08)
 
 ## Now
 
-**Phase 15, particles and linked prefabs**, as Next has it. Its last milestone:
-
-- **Prefabs in the editor.** The Inspector marking the fields where an instance's entity differs
-  from its prefab, reverting each through the operations' `Revert`, and unlinking an instance; the
-  Assets panel listing `.prefab` files as prefabs, one dropped in the view placed as an instance
-  where it's dropped, as a model is; and the Entities panel saving a subtree as a prefab, linked in
-  its place. Done when the showcase's prefabs.ron is edited so in the editor, each step undone and
-  redone.
+The next phase is the user's to choose, as Open questions has it.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -164,17 +159,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 14 are done, as Done has it, but for what Deferred holds.
-
-15. **Particles and linked prefabs.** Prefabs placed as links to their files, each instance's
-    fields overridden where they differ from its prefab's, every instance following its file as it's
-    saved; particles, emitters in the world whose particles the frames draw from the GPU, freezing
-    with the world and surviving rollback. *Done when* the showcase shows each, editing a prefab's
-    file reaches every instance as it's saved, and Foxball's kicks and goals throw particles and its
-    arena's walls are instances of one prefab, its reference hashes and live recording made again
-    and passing on every platform CI runs. Its milestones, in order: linked prefabs and particles,
-    side by side; prefabs in the editor, overrides marked and reverted in the Inspector, a prefab
-    dropped from the Assets panel and a subtree saved as one; and Foxball's particles and prefabs.
+Phases 11 to 15 are done, as Done has it, but for what Deferred holds.
 
 Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -527,10 +512,15 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Prefab variants: a prefab whose root links another, refused (`scene.prefab_variant`) | A game wants one prefab as another with changes |
 | Giving an instance's entity a link of its own, or changing or taking away a nested instance's link in one instance (`ecs.prefab_entity`, `scene.prefab_entity`) | One instance swaps a prefab nested in it |
 | Overrides finer than a component's top-level fields: a nested struct's field, a list's element, or a tuple struct's or enum's part is written whole where any of it differs | Instances often differ in one part of such a field |
-| Templates kept across loads, saves, operations and refits, each of which parses an instance's prefab text again | Scenes of many instances load, save or edit slowly |
+| Templates kept across loads, saves, operations, refits and reads of an instance's overrides, which the editor asks of the picked entity 20 times a second and a game's own Inspector each frame, each of which parses an instance's prefab text again | Scenes of many instances load, save or edit slowly, or picking an instance of a large prefab slows frames |
 | Spawning a prefab without parsing its text again: `Prefab::spawn` and `World::place_prefab` parse it each time, which allocates | A game spawns prefabs as it runs, rather than as it loads |
 | A prefab standing in for a following run with its entities: a replay or a joiner that can't read a prefab's file stands in with a root alone, which gives no entities, so a scene's overrides of the instance's entities load as roots of their own, the fields they leave out taking their types' defaults, which can refuse a load the recorded run took | A replay or a joiner runs without a game's prefab files, as a bug report's might |
 | Instances taking a prefab file's change in a recorded run or a lockstep session, which warn `asset.prefab_changed` and keep it until the run restarts | Someone edits prefabs while recording or in a lockstep session |
+| Save as Prefab in a game's own Inspector, which writes files that neither a replay nor a lockstep peer of its commands would have: the Entities panel offers it in the editor alone, through the API's `save_prefab` | A game's own Inspector authors prefabs, as a game without the editor would |
+| A place and a name chosen for Save as Prefab: the editor saves in the project's `prefabs/`, named after the entity and numbered while taken; only the API takes a path | Someone wants a prefab saved elsewhere, or named otherwise, from the editor |
+| Overrides marked inside a field: the Inspector marks a component's own fields, not the parts of a struct, list or vector within one, and a tuple of one field, as `Name`, or an enum, on its header, a revert setting each back whole | An instance's entity differs in one part of a large field |
+| A revert drawn as it will be while it waits: the field shows its value before until the next tick, or in the editor until the game's answer and the read after it, about 50 ms | That wait shows |
+| Instances told apart in the Entities panel's rows, as Unity colors them: the Inspector alone says an entity is an instance's | Picking through scenes of many instances gets confusing |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
@@ -616,6 +606,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The last of a run's events through the API: `Exited cleanly` is logged once the API has stopped, so its file alone has it | A tool needs to know through the API how a run ended |
 
 ## Open questions
+
+- Which phase comes after Phase 15? Recommendation: the built-in coding agent, v1's headline and
+  what sets the engine apart: an agent in the editor, modeled on the pi coding agent, working
+  through the tool API and the operations Claude Code drives today, before the upscalers and ray
+  tracing, which change how a game looks rather than how it's made, and before a flagship, which
+  that agent would help build. Decide before the next phase starts.
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
