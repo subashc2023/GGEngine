@@ -3,10 +3,10 @@
 //! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Sky, Texture, Tonemapper};
+use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Tonemapper};
 use tracing::warn;
 
-use crate::{Component, Entity, EntityId, World};
+use crate::{Component, Entity, EntityId, Sky, World};
 
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
@@ -33,19 +33,14 @@ pub struct Environment {
     /// of a pixel off and resolved against those before it, before it's tonemapped, which a game's
     /// canvas is drawn after; or none.
     pub antialiasing: Antialiasing,
-    /// The sky: an image of the world around, equirectangular, its middle column the way toward
-    /// +X and a quarter of the way across the way toward -Z, its top row straight up, as Khronos's
-    /// glTF Sample Viewer and three.js take one, which the view shows behind the world, in place of
-    /// the clear color, and lights its models by from all around: a texture of colors, as a
-    /// Radiance HDR's, `.hdr`, of high dynamic range, is. `None`, the default, for none. Its sun
-    /// lights once: in a world with a directional light that shines, which stands for the sun, the
-    /// sky's light keeps each of its texels to 10⁷ candela per square meter, leaving out the sun's
-    /// disk, so that the sun lights through that light alone, which should shine from where the
-    /// sky shows it.
-    pub sky: Option<Texture>,
-    /// The luminance, in candela per square meter, that a texel of the sky's of 1 stands for,
+    /// The sky, which the view shows behind the world, in place of the clear color, and lights its
+    /// models by from all around: an image of the world around, or an atmosphere made from its
+    /// sun, as [`Sky`] says. None, the default, for none.
+    pub sky: Sky,
+    /// The luminance, in candela per square meter, that a texel of an image sky's of 1 stands for,
     /// which its colors are multiplied by, before the exposure, as light is: 30,000 by default,
-    /// Filament's default for an environment's intensity, which suits a sunny day's exposure.
+    /// Filament's default for an environment's intensity, which suits a sunny day's exposure. An
+    /// atmosphere's is its sun's.
     #[reflect(default = 30_000.0)]
     pub sky_luminance: f32,
     /// How much the view blooms, light spreading round what's bright in it as through a camera's
@@ -77,7 +72,7 @@ impl Default for Environment {
             exposure: 15.0,
             tonemapper: Tonemapper::default(),
             antialiasing: Antialiasing::default(),
-            sky: None,
+            sky: Sky::ClearColor,
             sky_luminance: 30_000.0,
             bloom: 0.04,
             grade: Grade::IDENTITY,
@@ -96,12 +91,23 @@ impl Environment {
         1.0 / (1.2 * exp2f(self.exposure))
     }
 
-    /// The sky the view shows, as the renderer takes it, if it has one.
-    pub(crate) fn sky(&self) -> Option<Sky> {
-        self.sky.map(|texture| Sky {
-            texture,
-            luminance: self.sky_luminance,
-        })
+    /// The image sky the view shows, as the renderer takes it, if it has one.
+    pub(crate) fn sky(&self) -> Option<gg_renderer::Sky> {
+        match self.sky {
+            Sky::Image(texture) => Some(gg_renderer::Sky {
+                texture,
+                luminance: self.sky_luminance,
+            }),
+            Sky::ClearColor | Sky::Atmosphere(_) => None,
+        }
+    }
+
+    /// The atmosphere the view shows, as the renderer takes it, if it has one.
+    pub(crate) fn atmosphere(&self) -> Option<gg_renderer::Atmosphere> {
+        match self.sky {
+            Sky::Atmosphere(atmosphere) => Some(atmosphere.rendered()),
+            Sky::ClearColor | Sky::Image(_) => None,
+        }
     }
 }
 
@@ -187,6 +193,37 @@ mod tests {
         assert_eq!(made.expect("made"), foggy);
         let clear = Environment::from_value(&Environment::default().to_value());
         assert_eq!(clear.expect("made").fog, None);
+    }
+
+    /// An environment hands the renderer its image sky, at its luminance, or its atmosphere as it
+    /// has it, never both, and neither without a sky.
+    #[test]
+    fn an_environment_hands_the_renderer_its_image_sky_or_its_atmosphere() {
+        let with = |sky| Environment {
+            sky,
+            sky_luminance: 8000.0,
+            ..Environment::default()
+        };
+        let image = with(Sky::Image(gg_renderer::Texture::WHITE));
+        let shown = gg_renderer::Sky {
+            texture: gg_renderer::Texture::WHITE,
+            luminance: 8000.0,
+        };
+        assert_eq!((image.sky(), image.atmosphere()), (Some(shown), None));
+        let hazy = crate::Atmosphere {
+            mie: 20.0,
+            altitude: 300.0,
+            ..crate::Atmosphere::default()
+        };
+        let aired = with(Sky::Atmosphere(hazy));
+        let rendered = gg_renderer::Atmosphere {
+            mie: 20.0,
+            altitude: 300.0,
+            ..gg_renderer::Atmosphere::EARTH
+        };
+        assert_eq!((aired.sky(), aired.atmosphere()), (None, Some(rendered)));
+        let clear = Environment::default();
+        assert_eq!((clear.sky(), clear.atmosphere()), (None, None));
     }
 
     /// Of several environments the view renders with the one of the lowest ID, which a tie keeps

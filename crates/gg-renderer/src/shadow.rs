@@ -64,18 +64,20 @@ pub(crate) struct Cascades {
 }
 
 impl Cascades {
-    /// The cascades of the brightest of `lights` that casts shadows, a directional light that
-    /// shines some way, with a shadow distance, the first of those as bright, fitted to what
-    /// `viewpoint` sees of a view `aspect` times as wide as it's tall; `None` if none casts them, or
-    /// the view sees nothing within its shadow distance.
+    /// The cascades of the brightest of `lights` that casts shadows, a directional light of some
+    /// light that shines some way, with a shadow distance, the first of those as bright, fitted to
+    /// what `viewpoint` sees of a view `aspect` times as wide as it's tall; `None` if none casts
+    /// them, or the view sees nothing within its shadow distance.
     pub(crate) fn fit(lights: &[Light], viewpoint: &Viewpoint, aspect: f32) -> Option<Self> {
         let luminance = |light: &Light| light.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
         let (light, direction, distance) = (lights.iter().enumerate())
             .filter_map(|(i, light)| {
                 let distance = light.shadow_distance?;
                 let direction = light.direction.try_normalize()?;
-                let casts =
-                    light.kind == LightKind::Directional && distance > 0.0 && distance.is_finite();
+                let casts = light.kind == LightKind::Directional
+                    && light.color.cmpgt(Vec3::ZERO).any()
+                    && distance > 0.0
+                    && distance.is_finite();
                 casts.then_some((i, direction, distance))
             })
             .reduce(|best, next| {
@@ -298,7 +300,7 @@ mod tests {
 
     /// The brightest directional light with a shadow distance casts, the first of those as bright;
     /// point lights don't, nor directional ones without a distance, or with one of none or past
-    /// any, or shining no way.
+    /// any, or shining no way, or of no light.
     #[test]
     fn the_brightest_directional_light_with_a_distance_casts() {
         let view = looking(Vec3::ZERO, Quat::IDENTITY);
@@ -323,6 +325,7 @@ mod tests {
             "past the brighter one that shines no way"
         );
         assert_eq!(fit(&lights[..5]), None);
+        assert_eq!(fit(&[sun(down, Some(50.0), 0.0)]), None, "one of no light");
     }
 
     /// Each cascade holds its slice of the view's depth, every corner of it inside its box, as

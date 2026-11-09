@@ -1,0 +1,165 @@
+(
+    entities: {
+        "0b4f6e2a9d31c875": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.7, 7.0),
+                rotation: (0.01999867, 0.0, 0.0, 0.9998),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1c7a2e5f8b046d93": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Atmosphere((
+                    rayleigh: (5.802, 13.558, 33.1),
+                    mie: 3.996,
+                    mie_absorption: 0.444,
+                    mie_anisotropy: 0.8,
+                    ozone: (0.65, 1.881, 0.085),
+                    ground_albedo: (0.3, 0.3, 0.3),
+                    altitude: 0.0,
+                    sun_size: 0.00935,
+                )),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+            ),
+            Name: ("Environment"),
+        ),
+        "2e93b05d7c4a1f68": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Ground"),
+            Transform: (
+                translation: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (20000.0, 1.0, 20000.0),
+            ),
+        ),
+        "3a5d81c6e2f7b094": (
+            Name: ("Hint"),
+            Text: (
+                text: "Hillaire's atmosphere under a sun that a script turns through a day: the sky, its light from all around and the haze on the far towers all made from the sun",
+                font: None,
+                size: 0.14,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4f0c9a7e3b6d2851": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 1.0, 1.0),
+                intensity: 120000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 60.0,
+            ),
+            Name: ("Sun"),
+            Spin: (
+                axis: (0.8191521, 0.5735765, 0.0),
+                speed: -0.05235988,
+            ),
+            Transform: (
+                translation: (0.0, 10.0, 0.0),
+                rotation: (-0.3134759, -0.2194982, 0.0, 0.9238795),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5b8e2d4a9c07f136": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6d1f7c3e0a92b584": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Tower 300 m"),
+            Transform: (
+                translation: (-60.0, 40.0, -300.0),
+                rotation: (0.0, 0.25881904, 0.0, 0.9659258),
+                scale: (20.0, 80.0, 20.0),
+            ),
+        ),
+        "7e4a0b8d2c6f1395": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Tower 1.5 km"),
+            Transform: (
+                translation: (250.0, 100.0, -1500.0),
+                rotation: (0.0, 0.25881904, 0.0, 0.9659258),
+                scale: (60.0, 200.0, 60.0),
+            ),
+        ),
+        "8f2b6e1a4d0c7953": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Tower 5 km"),
+            Transform: (
+                translation: (-2500.0, 250.0, -5000.0),
+                rotation: (0.0, 0.25881904, 0.0, 0.9659258),
+                scale: (150.0, 500.0, 150.0),
+            ),
+        ),
+        "9a6c3f0e5b2d8147": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Tower 12 km"),
+            Transform: (
+                translation: (5000.0, 400.0, -12000.0),
+                rotation: (0.0, 0.25881904, 0.0, 0.9659258),
+                scale: (300.0, 800.0, 300.0),
+            ),
+        ),
+        "a0d7e4b1c8f36259": (
+            Name: ("Title"),
+            Text: (
+                text: "Atmosphere",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -38,9 +38,12 @@
 //! (`grading.ron`); glTF's metallic-roughness materials, plastic, metal,
 //! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); the
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
-//! shows behind them (`sky.ron`); models casting a sun's shadows (`shadows.ron`); crates, balls and
-//! shapes piled in a corner under that sky alone, its light darkened where they hide it from each
-//! other and the walls, by ambient occlusion (`ambient_occlusion.ron`); 3D physics,
+//! shows behind them (`sky.ron`); a sky made from its sun, Hillaire's atmosphere, under a sun that
+//! `scripts/spin.luau` turns through a day two minutes long, with its night, the haze deepening on
+//! towers from 300 m to 12 km off (`atmosphere.ron`); models casting a sun's shadows
+//! (`shadows.ron`); crates, balls and shapes piled in a corner under that sky alone, its light
+//! darkened where they hide it from each other and the walls, by ambient occlusion
+//! (`ambient_occlusion.ron`); 3D physics,
 //! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
 //! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
 //! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor

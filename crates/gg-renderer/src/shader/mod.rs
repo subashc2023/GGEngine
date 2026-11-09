@@ -229,7 +229,7 @@ impl Shaders {
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
     ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; uint
-    ///   ambient_occlusion; uint unused; Fog fog; }`,
+    ///   ambient_occlusion; uint unused; Fog fog; Aerial aerial; }`,
     ///   where the view sees from in the world, the time it shows, what lit shading multiplies
     ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
     ///   that light everywhere first, directional lights and those without a range, then the rest,
@@ -237,27 +237,30 @@ impl Shaders {
     ///   of the table of models' materials; where shading sees from, the camera's position and 1,
     ///   or for an orthographic projection the way back toward it and 0, so that the way to the eye
     ///   from `p` is `eye.xyz - p * eye.w`; the sky, as `shaders/mesh.slang` says, its texture,
-    ///   its prefiltered light, cubes, the split sum's table and its luminance, `specular_levels` 0
-    ///   in a frame without one; the shadows of the light that casts them, their cascades' shadow
-    ///   maps among them, `Shadows` as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in
-    ///   a frame without them; and which of the lights reach each cluster of the view, the view
-    ///   cut into tiles and those along its depth, `Clusters` as `shaders/mesh.slang` declares it,
-    ///   its `words` 0 in a frame without them, where each fragment shades by every light; the
-    ///   view's ambient occlusion, as [`AmbientOcclusion`](crate::AmbientOcclusion) says, a
-    ///   texture of the bindless set's of the view's size, whose red is the fraction of the light
-    ///   from all around that reaches what's opaque at each pixel, which a fragment of what's opaque
-    ///   loads at its pixel, `SV_Position`'s XY, and darkens the sky's light by, 0 for none, in a
-    ///   frame without it and in every pass but the view's own, the canvas's among them; and the
-    ///   fog the view is in, `Fog` as `shaders/mesh.slang` declares it, its `density` 0 in a frame
-    ///   without fog, which the view fogs what an opaque shader draws by, in a pass of its own once
-    ///   what's opaque has drawn, and which a shader that blends fogs itself by, if it likes, as
-    ///   `shaders/fog.slang` does, drawing unfogged otherwise; or a struct of as many of its first
-    ///   fields: the engine adds fields at its end. The eighth and
-    ///   the ninth are the engine's own model shaders', 0 for any other; the tenth, how many
-    ///   transforms past each instance's its transform the frame before is, which the motion is
-    ///   from: those of the world's opaque meshes, in the game's view, and 0 for the rest, which
-    ///   the engine knows none of, as a layer's draws, made each frame, so that they read their
-    ///   own and stand still. A shader that takes no parameters leaves out the fifth, and so those
+    ///   0 under an atmosphere, its prefiltered light, cubes, the split sum's table and its
+    ///   luminance, `specular_levels` 0 in a frame without one; the shadows of the light that
+    ///   casts them, their cascades' shadow maps among them, `Shadows` as `shaders/mesh.slang`
+    ///   declares it, its `light` 0xFFFFFFFF in a frame without them; and which of the lights
+    ///   reach each cluster of the view, the view cut into tiles and those along its depth,
+    ///   `Clusters` as `shaders/mesh.slang` declares it, its `words` 0 in a frame without them,
+    ///   where each fragment shades by every light; the view's ambient occlusion, as
+    ///   [`AmbientOcclusion`](crate::AmbientOcclusion) says, a texture of the bindless set's of
+    ///   the view's size, whose red is the fraction of the light from all around that reaches
+    ///   what's opaque at each pixel, which a fragment of what's opaque loads at its pixel,
+    ///   `SV_Position`'s XY, and darkens the sky's light by, 0 for none, in a frame without it and
+    ///   in every pass but the view's own, the canvas's among them; the fog the view is in, `Fog`
+    ///   as `shaders/mesh.slang` declares it, its `density` 0 in a frame without fog, which the
+    ///   view fogs what an opaque shader draws by, in a pass of its own once what's opaque has
+    ///   drawn, and which a shader that blends fogs itself by, if it likes, as `shaders/fog.slang`
+    ///   does, drawing unfogged otherwise; and the haze an atmosphere puts between the viewer and
+    ///   what's lit, the froxels of the view that hold it and where a point falls among them,
+    ///   `Aerial` as `shaders/mesh.slang` declares it, its `luminance` 0 in a frame without one
+    ///   and in the canvas's pass; or a struct of as many of its first fields: the engine adds
+    ///   fields at its end. The eighth and the ninth are the engine's own model shaders', 0 for any
+    ///   other; the tenth, how many transforms past each instance's its transform the frame before
+    ///   is, which the motion is from: those of the world's opaque meshes, in the game's view, and
+    ///   0 for the rest, which the engine knows none of, as a layer's draws, made each frame, so
+    ///   that they read their own and stand still. A shader that takes no parameters leaves out the fifth, and so those
     ///   after it. A shader may end the struct after the last of them it reads, and one that reads
     ///   none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
@@ -1128,7 +1131,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 532 bytes, past the 432 the engine's take",
+                "its frame's data, Frame, take 532 bytes, past the 504 the engine's take",
                 "it reads brightness from its push constants, past the 128 bytes",
             ],
         );
@@ -1273,6 +1276,7 @@ mod tests {
             "model.slang",
             "shading.slang",
             "mesh.slang",
+            "aerial.slang",
             "fog.slang",
         ];
         for file in files {

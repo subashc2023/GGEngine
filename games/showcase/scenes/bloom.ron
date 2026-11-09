@@ -20,7 +20,7 @@
                 exposure: 4.0,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
-                sky: None,
+                sky: ClearColor,
                 sky_luminance: 30000.0,
                 bloom: 0.04,
                 grade: (

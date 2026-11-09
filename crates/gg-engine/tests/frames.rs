@@ -11,11 +11,11 @@
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
 //! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
-//! by ambient occlusion and fogs it, run through the
-//! engine's main loop headless, without the tool API, whose development runs' watchers of the
-//! assets' files allocate as they look, three fifths of a tick apart, so that they draw between
-//! ticks, once its first frames have run, by which every image its attach added has decoded off
-//! the main thread
+//! by ambient occlusion and fogs it, its sky an atmosphere whose sun the ticks raise, its light
+//! prefiltered again each degree it rises, run through the engine's main loop headless, without
+//! the tool API, whose development runs' watchers of the assets' files allocate as they look,
+//! three fifths of a tick apart, so that they draw between ticks, once its first frames have run,
+//! by which every image its attach added has decoded off the main thread
 //! and everything has streamed to the GPU. Every frame picks what the view shows at its middle, as the frame before had
 //! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
 //! due: four frames after the one that asked, and two for the pick outside the view, which finds
@@ -48,12 +48,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Environment, Event, Fog, Font, GameUi, Grade, Key, Layer, Mesh,
-    MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source,
-    Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
+    Actions, Align, App, Atmosphere, Binding, Blend, BoxCollider2D, Camera, Change, Circle,
+    CircleCollider2D, Component, Context, Entity, Environment, Event, Fog, Font, GameUi, Grade,
+    Key, Layer, Light, Mesh, MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter, Pick,
+    Projection, Shader, Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick,
+    Transform, World,
 };
 use serde_json::json;
 
@@ -81,6 +82,9 @@ const REPLACED: usize = 16;
 const COPIES: usize = 8;
 /// The frames whose picks the app keeps, more than an answer takes to come back.
 const ASKED: usize = 8;
+/// The ticks the atmosphere's sun takes to rise a degree, past which its light is prefiltered
+/// again: a few times in the frames counted, as prefiltering is slow on lavapipe.
+const SUN_TICKS: u64 = 16;
 
 /// The answers that came back: to the picks at the view's middle, those that found an entity and
 /// those that found none; to those outside it, which find none; and those that came back in
@@ -163,6 +167,8 @@ struct Scene {
     pivot: Option<Entity>,
     /// The emitter the ticks burst.
     sparks: Option<Entity>,
+    /// The atmosphere's sun, which the ticks turn.
+    sun: Option<Entity>,
     subtrees: VecDeque<Entity>,
     copies: VecDeque<Entity>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
@@ -178,6 +184,15 @@ struct Scene {
     asked: [Option<[Pick; 2]>; ASKED],
     /// The text each frame draws, written again in its memory.
     text: String,
+}
+
+/// The atmosphere's sun at tick `tick`: 30° up, and a degree higher every [`SUN_TICKS`] ticks.
+fn sun_at(tick: u64) -> Transform {
+    let up = math::to_radians(30.0 + tick as f32 / SUN_TICKS as f32);
+    Transform {
+        rotation: Quat::from_rotation_x(-up),
+        ..Transform::IDENTITY
+    }
 }
 
 impl Scene {
@@ -344,11 +359,11 @@ impl Layer for Scene {
         self.pivot = Some(pivot);
         // The default environment's, which antialiases the view, resolving it against the frames
         // before, blooms it, and darkens its sky's light by ambient occlusion, but graded, which
-        // bakes its grade's table each frame, under a sky, the checker, which the occlusion
-        // needs, and in the default fog, which a pass of its own fogs what's opaque by and what
-        // blends draws over in another.
+        // bakes its grade's table each frame, under an atmosphere, whose sun the ticks turn and
+        // which the occlusion needs as a sky, and in the default fog, which a pass of its own fogs
+        // what's opaque by and what blends draws over in another.
         world.spawn(Environment {
-            sky: Some(assets.texture),
+            sky: Sky::Atmosphere(Atmosphere::default()),
             grade: Grade {
                 saturation: 1.2,
                 ..Grade::IDENTITY
@@ -356,6 +371,7 @@ impl Layer for Scene {
             fog: Some(Fog::default()),
             ..Environment::default()
         });
+        self.sun = Some(world.spawn((sun_at(0), Light::default())));
         // The pair, and a copy mirrored, which culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
         let mirrored = Transform {
@@ -405,6 +421,8 @@ impl Layer for Scene {
         let pivot = self.pivot.expect("attached");
         let transform = world.get_mut::<Transform>(pivot).expect("alive");
         transform.rotation = Quat::from_rotation_y(turn);
+        let sun = self.sun.expect("attached");
+        *world.get_mut::<Transform>(sun).expect("alive") = sun_at(tick.number + 1);
         if tick.number.is_multiple_of(16) {
             let sparks = self.sparks.expect("attached");
             let emitter = world.get_mut::<ParticleEmitter>(sparks).expect("alive");

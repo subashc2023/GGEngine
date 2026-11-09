@@ -1678,8 +1678,9 @@ from, the camera's position, or for an orthographic projection, which sees along
 back toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
 through the bindless set's sampler that compares; the clusters the lights are binned into; the
-view's ambient occlusion; and the fog the view is in. Fields are added at its end, so that games'
-shaders that read the fields before them keep to the contract.
+view's ambient occlusion; the fog the view is in; and an atmosphere's haze, its froxels and where
+a point falls among them. Fields are added at its end, so that games' shaders that read the fields
+before them keep to the contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1732,9 +1733,10 @@ parameters index: each written into it as it's added and again as it's replaced,
 commands before its passes, the table made again twice the size as it fills; a handle is never
 given out again, as a texture's isn't.
 
-An environment's sky is a texture of the world around, equirectangular, its middle column the way
-toward +X, a quarter of the way across the way toward -Z, and its top row straight up, as Khronos's
-glTF Sample Viewer and three.js take one, which a Radiance HDR's colors of high dynamic range suit;
+An environment's sky, if it has one, may be an image of the world around, equirectangular, its
+middle column the way toward +X, a quarter of the way across the way toward -Z, and its top row
+straight up, as Khronos's glTF Sample Viewer and three.js take one, a texture of colors, which a
+Radiance HDR's colors of high dynamic range suit;
 its colors times its luminance, in candela per square meter, 30,000 by default, as Filament's
 environments' intensity is, are light, which the exposure scales as it does lux and candela. The
 view draws it before anything else, at depth 0, writing no ID, in place of the clear color, each
@@ -1766,6 +1768,56 @@ as it crosses one, rather than in every frame it changes. A frame
 without one lights by the whole sky. The light should shine from where the sky shows its sun, its
 way and illuminance found from the sky's texels past that, as the showcase's Sponza's are; a sun low
 in its sky, dimmed through more air, can fall short of it, and then lights twice.
+
+An environment's sky may be an atmosphere instead, made from its sun, as Hillaire's "A Scalable and
+Production Ready Sky and Atmosphere Rendering Technique" (2020) makes it, after his reference
+implementation: Rayleigh's and Mie's scattering and ozone's absorption over a planet of Earth's
+radius, 6,360 km, up to a top 100 km above it, Earth's by default, as the paper's, the world's
+units taken as meters, its +Y up and its origin as high above the ground as the atmosphere says,
+the viewer as high as that and its own Y, kept 10 m above the ground and below the top. Its sun is
+the frame's brightest directional light that shines, the first of those as bright, whatever its
+shadows: where the light shines from is where the sky's sun is, so that turning the light, as a
+time of day does, moves the sun and its disk, which the view draws there, as wide as the
+atmosphere says, of the light's illuminance over the solid angle it spans. That illuminance is
+taken outside the atmosphere, and the light that reaches the world, its lit shading's, is the
+light's dimmed by the transmittance from the viewer toward the sun, once a frame, on the CPU, by
+the sums the GPU's table of it makes, and by the share of the sun's disk above the horizon, so that
+a low sun reddens and dims what it lights, a setting one fades out over its disk's height, and a
+set one lights nothing: at night the sky darkens through twilight to black, lighting nothing, and
+only the world's other lights and what glows show. Which light casts shadows is found by the
+lights' illuminance outside the air, so that the sun casts them while it's up, however dim, but
+for a set sun, which casts none, the next of those that cast them taking its place. In
+every frame that renders the view, compute passes before the view's, on the graphics queue, make
+its tables, each an image of colors of high dynamic range of the graph's own, each of the light of
+a sun of an illuminance of 1, its color in, which the sun's illuminance multiplies: the
+transmittance, 256 by 64, by the height and the cosine of the way's zenith angle, by Bruneton's
+map; the light scattered many times over, 32 by 32, by the sun's zenith angle and the height, a
+workgroup a texel, from 64 ways round it; the sky as the viewer sees it, 192 by 108, by the zenith
+angle, crowded toward the horizon, and the way round from the sun's, the planet's ground below the
+horizon lit by the sun at its albedo; and the aerial perspective, froxels of the view, 32 across
+and 32 down, in 32 slices along its depth crowded toward the viewer, the last reaching 128 km, the
+slices side by side in one image, each froxel the light scattered toward the viewer from as far as
+its slice and the transmittance from there. The view draws the sky from its table behind
+everything, as it draws an image sky, and the sun's disk through the transmittance, unless the
+ground is in the way; an orthographic view sees one way, so one color. Lit shading, the visibility
+buffer's and as models draw, hazes what it lights by how far it is from the camera: dimmed by the
+transmittance of the froxels round it and with their light added, between the two slices round
+it, fading to none at the camera within the first half slice, 2 km, as the paper's does. The sky's
+light from all around is prefiltered as an image sky's is, from a cube of 128 texels a side that
+its table makes without the sun's disk, kept for the next, by 64 samples a texel, which the smooth
+sky needs no more than: again only as the sun turns past an angle, the viewer rises or falls past
+100 m from what the light holds, or the atmosphere or the sun's color changes, but not as the
+sun's illuminance does, which multiplies that light as a sky's luminance does. The angle is a
+hundredth of a degree with the sun at the horizon or below, where the sky's light falls by half or
+more each degree the sun sinks, and grows by a factor of e every 5° up, as the light changes more
+slowly, to 1° from 23° up, and is 1° again past 18° below, once the sky is dark, so that the light
+changes in steps of 2% at most: a sun that turns 3° a second, through a day of two minutes, has
+it prefiltered in every frame at 60 a second while it's low, and about three times a second while
+it's high. In fog, as below, what's lit is hazed as it's shaded, and fogged after, as the sky drawn
+from the atmosphere's table is: the fog lights its light by the atmosphere's light from all around
+and the dimmed sun, so that a far wall in fog under an atmosphere shows its own light dimmed by the
+air's transmittance and the fog's, the air's light between it and the eye dimmed by the fog's, and
+the fog's light over both, the fog taken as nearer the eye than the air's haze.
 
 A directional light casts shadows, unless its `Light` says it doesn't, as far ahead of the camera as
 its shadow distance, 100 units by default, fading out over the last tenth: of a world's lights that

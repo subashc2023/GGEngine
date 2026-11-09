@@ -18,7 +18,8 @@
 // which the occlusion map and the view's ambient occlusion darken, as they darken nothing else, by
 // `ambient`. The light that casts the frame's
 // shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
-// then the material's emission, as the view shows it, make the color.
+// then the material's emission, as the view shows it, make the color, which an atmosphere's haze
+// dims and adds its light to, by how far it is (aerial.slang).
 //
 // Each point shades by the lights that light everywhere, then by those binned into its cluster
 // of the game's view, as clusters.slang bins them, each in the frame's order: those a cluster
@@ -27,6 +28,7 @@
 // same order.
 
 #include "mesh.slang"
+#include "aerial.slang"
 
 // A vertex as a model's mesh holds it, `PackedVertex` in src/packed.rs, read as words: its X and Y;
 // its Z and its bitangent's sign; its normal; its tangent; its texture coordinates; and its color.
@@ -473,6 +475,6 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
                                view, n_dot_v)
             * occlusion;
     }
-    float3 shaded = light_sum * frame.exposure + emission;
+    float3 shaded = hazed(frame, world, light_sum * frame.exposure + emission);
     return float4(min(shaded, BRIGHTEST), color.a);
 }

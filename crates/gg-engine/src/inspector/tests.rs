@@ -2808,6 +2808,48 @@ fn variants_switch_to_the_fields_they_had_or_their_defaults() {
     assert_eq!(projection(&world, second), defaults);
 }
 
+/// An environment's sky switches from its clear color to Earth's atmosphere in its choice, and
+/// back; an image sky, whose texture has no default, shows disabled there, saying why on hover.
+#[test]
+fn an_environments_sky_switches_to_the_atmosphere() {
+    let mut world = World::default();
+    let entity = world.spawn(crate::Environment::default());
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.pick(id(&world, entity));
+    let mut time = 0.0;
+    let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let sky = |world: &World| world.get::<crate::Environment>(entity).expect("one").sky;
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let choice = click(Primary, find(&texts, "sky", "ClearColor").center());
+    let texts = run(&mut inspector, &mut world, choice);
+    let image = in_menu(&ctx, &texts, "Image");
+    let texts = run(
+        &mut inspector,
+        &mut world,
+        vec![egui::Event::PointerMoved(image)],
+    );
+    let why = (texts.iter()).any(|(text, _)| text.contains("a texture has no default"));
+    assert!(why, "{texts:?}");
+    let atmosphere = in_menu(&ctx, &texts, "Atmosphere");
+    run(&mut inspector, &mut world, click(Primary, atmosphere));
+    let earth = crate::Sky::Atmosphere(crate::Atmosphere::default());
+    assert_eq!(sky(&world), earth);
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let choice = click(Primary, find(&texts, "sky", "Atmosphere").center());
+    let texts = run(&mut inspector, &mut world, choice);
+    let clear = in_menu(&ctx, &texts, "ClearColor");
+    run(&mut inspector, &mut world, click(Primary, clear));
+    assert_eq!(sky(&world), crate::Sky::ClearColor);
+}
+
 /// A variant that holds what's opaque, which no value makes, shows disabled in its enum's
 /// choice, saying why on hover, and isn't switched to.
 #[test]

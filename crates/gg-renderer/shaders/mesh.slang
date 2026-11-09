@@ -1,13 +1,13 @@
 // What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, shading.slang
 // and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
 // its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades,
-// the clusters its lights are binned into, its ambient occlusion and its fog, and the push
-// constants, for a shader's types of vertices and parameters, and what the fragment stage returns.
-// `Corner` in
-// src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs, `ShadowData` in
-// src/shadow.rs, `ClusterData` in src/cluster.rs, `FogData` in src/fog.rs and `Push` and
-// `FrameData` in src/mesh.rs, which `Corner`, `Light`, `Material`, `Shadows`, `Clusters`, `Fog`,
-// `Push` and `Frame` here match field for field.
+// the clusters its lights are binned into, its ambient occlusion, its fog and its atmosphere's
+// haze, and the push constants, for a shader's types of vertices and parameters, and what the
+// fragment stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in
+// src/model.rs, `ShadowData` in src/shadow.rs, `ClusterData` in src/cluster.rs, `FogData` in
+// src/fog.rs, `AerialData` in src/atmosphere.rs and `Push` and `FrameData` in src/mesh.rs, which
+// `Corner`, `Light`, `Material`, `Shadows`, `Clusters`, `Fog`, `Aerial`, `Push` and `Frame` here
+// match field for field.
 
 // The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
 // second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
@@ -152,6 +152,18 @@ struct Fog {
     uint unused;
 };
 
+// The atmosphere's aerial perspective, as aerial.slang reads it: `AerialData` in
+// src/atmosphere.rs, field for field.
+struct Aerial {
+    // From the world to clip space, unjittered, where a point falls among the froxels.
+    float4x4 clip_from_world;
+    // The froxels, a texture of the bindless set's, their slices side by side.
+    uint texture;
+    // What their light is multiplied by, before the exposure: the sun's illuminance; 0 in a frame
+    // without an atmosphere.
+    float luminance;
+};
+
 // What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
 struct Frame {
     // Where the view sees from, in the world.
@@ -170,7 +182,8 @@ struct Frame {
     // `eye.xyz - p * eye.w`.
     float4 eye;
     // The sky's image, equirectangular, a texture of the bindless set's, which the view shows
-    // behind the world.
+    // behind the world; 0 under an atmosphere, which the view draws from its own tables, though
+    // its light below is the atmosphere's.
     uint sky;
     // The sky's light from all around, prefiltered, cubes of the bindless set's: what Lambert's
     // diffuse takes the way of a normal, the irradiance over π; and what GGX's specular takes the
@@ -196,6 +209,8 @@ struct Frame {
     uint unused;
     // The height fog its view is in.
     Fog fog;
+    // The haze its atmosphere puts between the viewer and what's lit.
+    Aerial aerial;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

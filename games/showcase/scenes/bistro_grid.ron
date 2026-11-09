@@ -83,7 +83,7 @@
                 exposure: 14.5,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
-                sky: Some("93955ed372497870"),
+                sky: Image("93955ed372497870"),
                 sky_luminance: 16000.0,
                 bloom: 0.04,
                 grade: (

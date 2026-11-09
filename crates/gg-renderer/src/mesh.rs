@@ -2252,6 +2252,8 @@ pub(crate) struct FrameData {
     pub(crate) unused: u32,
     /// The height fog the view is in, as [`FogData`](crate::fog::FogData) has it.
     pub(crate) fog: crate::fog::FogData,
+    /// The atmosphere's haze, as [`AerialData`](crate::atmosphere::AerialData) has it.
+    pub(crate) aerial: crate::atmosphere::AerialData,
 }
 
 #[cfg(test)]

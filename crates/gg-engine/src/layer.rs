@@ -3814,6 +3814,7 @@ impl Context {
         frame.grade = self.environment.map_or(Grade::IDENTITY, |seen| seen.grade);
         frame.ambient_occlusion = self.environment.and_then(|seen| seen.ambient_occlusion);
         frame.fog = self.environment.and_then(|seen| seen.fog);
+        frame.atmosphere = self.environment.and_then(|seen| seen.atmosphere());
         frame.lights.clear();
         frame.lights.extend_from_slice(self.lit.lights());
         frame.time = self.time;

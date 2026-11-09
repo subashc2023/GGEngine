@@ -4,9 +4,10 @@
 //! sees them, with
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
 //! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
-//! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
-//! behind them, prefiltered on the GPU, its light darkened by ambient occlusion from the view's
-//! depth, opaque and masked ones drawn by their meshlets shaded from
+//! lights, a directional light's shadows, in cascades fitted to the view, and its sky, an image or
+//! an atmosphere made from its sun, which shows behind them, prefiltered on the GPU, its light
+//! darkened by ambient occlusion from the view's depth, the atmosphere hazing what's far, opaque
+//! and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
 //! view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, antialiased against the frames before it,
@@ -19,6 +20,7 @@
 //! can run on its own thread, a frame behind simulation.
 
 mod ao;
+mod atmosphere;
 mod bloom;
 mod circle;
 mod cluster;
@@ -60,6 +62,7 @@ use gg_gpu::{
 use tracing::info;
 
 pub use ao::AmbientOcclusion;
+pub use atmosphere::Atmosphere;
 pub use circle::Circle;
 pub use draws::Draws;
 pub use fog::Fog;
@@ -95,6 +98,7 @@ pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
 use ao::AoPass;
+use atmosphere::{AerialData, AtmospherePass};
 use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
 use fog::{FogData, FogPass};
@@ -103,7 +107,7 @@ use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use skin::{SkinPlan, Skinning};
-use sky::{SkyData, SkyLight, SkyPass};
+use sky::{SkyData, SkyLight, SkyPass, Source};
 use taa::TaaPass;
 use tonemap::TonemapPass;
 use ui::UiPass;
@@ -296,6 +300,16 @@ pub struct RenderData<'a> {
     /// models, particles, sprites, circles and text, but not lines or grids, which are for seeing
     /// by, nor the canvas. `None`, or fog of no density, fogs nothing.
     pub fog: Option<Fog>,
+    /// The atmosphere, which the view shows behind the world in place of `sky`, and lights it by
+    /// from all around, as it would an image sky, under its sun, the brightest of the directional
+    /// lights that shine, the first of those as bright: its tables made in every frame that renders
+    /// the view, and its light prefiltered again as the sun turns, past a hundredth of a degree at
+    /// the horizon to 1° high in the sky, or the viewer rises or falls past 100 m, rather than as
+    /// the sun brightens. The sun's illuminance is taken outside the atmosphere, and the light that
+    /// reaches the view's lit shading is dimmed by the transmittance from the viewer toward the
+    /// sun, and once it's set is none, when it casts no shadows either. What it lights is hazed by
+    /// how far it is from the viewer, in the world's units, meters.
+    pub atmosphere: Option<Atmosphere>,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -411,6 +425,10 @@ pub struct Renderer {
     /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
     /// targets while they record its passes.
     sky_light: SkyLight,
+    /// Made by the first frame with an atmosphere to show.
+    atmosphere: Option<AtmospherePass>,
+    /// The frame's lights, an atmosphere's sun dimmed by the air, kept from frame to frame.
+    sunlit: Vec<Light>,
     /// The passes of the frame being rendered, declared afresh each frame in the memory of the
     /// last's.
     graph: Graph,
@@ -690,6 +708,8 @@ impl Renderer {
             history: taa::History::default(),
             sky: None,
             sky_light: SkyLight::default(),
+            atmosphere: None,
+            sunlit: Vec::new(),
             graph: Graph::default(),
             window_passes: Vec::new(),
             pixels: None,
@@ -911,15 +931,43 @@ impl Renderer {
         {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
-        // The sky the view shows, while its texture's slot shows an image of its own, with that
-        // image's size, how many times the slot has come to show another, and what its light
-        // keeps each texel to, leaving out a sun that a directional light stands for.
-        let sky = data.sky.filter(|_| renders_view).and_then(|sky| {
-            let (size, shown) = self.meshes.texture_shown(sky.texture)?;
-            Some((sky, size, shown, sky::cutoff(sky, data.lights)))
-        });
+        // The atmosphere the view shows in place of an image sky, if any, under its sun, and the
+        // lights the frame shades with: its sun's dimmed by the air between it and the viewer.
+        let atmosphere = (data.atmosphere.filter(|_| renders_view))
+            .map(|atmosphere| atmosphere::Seen::new(atmosphere, data.lights, &data.viewpoint));
+        let shining = match &atmosphere {
+            Some(seen) if seen.dims() => {
+                self.sunlit.clear();
+                self.sunlit.extend_from_slice(data.lights);
+                seen.dim(&mut self.sunlit);
+                &self.sunlit[..]
+            }
+            _ => data.lights,
+        };
+        // What the sky's light is prefiltered from, and what a texel of it of 1 stands for: the
+        // atmosphere, of a sun of an illuminance of 1; or the sky the view shows, while its
+        // texture's slot shows an image of its own, with that image's size, how many times the
+        // slot has come to show another, and what its light keeps each texel to, leaving out a
+        // sun that a directional light stands for.
+        let sky = match &atmosphere {
+            Some(seen) => Some((Source::Atmosphere(seen.lit()), seen.illuminance())),
+            None => data.sky.filter(|_| renders_view).and_then(|sky| {
+                let (size, shown) = self.meshes.texture_shown(sky.texture)?;
+                let cutoff = sky::cutoff(sky, shining);
+                let source = Source::Image {
+                    sky,
+                    size,
+                    shown,
+                    cutoff,
+                };
+                Some((source, sky.luminance))
+            }),
+        };
         if sky.is_some() && self.sky.is_none() {
             self.sky = Some(SkyPass::new(&self.device)?);
+        }
+        if atmosphere.is_some() && self.atmosphere.is_none() {
+            self.atmosphere = Some(AtmospherePass::new(&self.device)?);
         }
         // The view's ambient occlusion, where it darkens anything: of the light from all around,
         // which only a sky gives, under a perspective, whose depth it reads.
@@ -927,7 +975,7 @@ impl Renderer {
         let occluded = (data.ambient_occlusion)
             .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
         if renders_view {
-            self.lighting.order(data.lights, &data.viewpoint);
+            self.lighting.order(shining, &data.viewpoint);
         } else {
             // The pool goes undeclared, which the graph lets go of.
             self.particles.forget();
@@ -948,21 +996,26 @@ impl Renderer {
         // windows'.
         let resolved = 1 + windows_drawn;
         let resolves = if antialiased { 2 } else { 0 };
-        // First, the sky's prefiltering, if this frame prefilters it: the first to render the view
+        // First, the atmosphere's tables, if the frame shows one, which the view samples and its
+        // sky's cube is made from.
+        let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
+        // Then the sky's prefiltering, if this frame prefilters it: the first to render the view
         // since its texture came to show the image it shows, or since a directional light came to
         // stand for its sun or ceased to, or, while one stands for it, its luminance crossed a
-        // power of two that changes what its light keeps texels to. Its images are the targets
-        // after those. A frame that doesn't takes the light from those before.
+        // power of two that changes what its light keeps texels to; or, of the atmosphere, since
+        // its sun turned or the viewer rose or fell past what the light holds. Its images are the
+        // targets after those. A frame that doesn't takes the light from those before.
         let plan = match sky {
-            Some((sky, sky_size, shown, cutoff)) if !self.sky_light.holds(sky, shown, cutoff) => {
+            Some((source, _)) if !self.sky_light.holds(&source) => {
                 let first = resolved + resolves;
+                let sampled = tables.as_ref().map(atmosphere::Plan::sky_view);
                 let sky_light = &mut self.sky_light;
-                Some(sky_light.plan(&self.device, graph, first, sky, sky_size, cutoff)?)
+                Some(sky_light.plan(&self.device, graph, first, source, sampled)?)
             }
             _ => None,
         };
         let held = match (sky, &plan) {
-            (Some((sky, _, shown, cutoff)), None) => self.sky_light.data(sky, shown, cutoff),
+            (Some((source, luminance)), None) => self.sky_light.data(&source, luminance),
             _ => None,
         };
         let meshes = &self.meshes;
@@ -985,7 +1038,13 @@ impl Renderer {
             let particle_plan = particles.plan(graph, data.draws);
             let born = particle_plan.as_ref();
             let aspect = data.viewport.aspect();
-            let cascades = Cascades::fit(data.lights, &data.viewpoint, aspect);
+            // Of the lights as they shine outside an atmosphere, so that its sun casts them while
+            // it's up however dim, and none once it's set.
+            let casters = match &atmosphere {
+                Some(seen) if seen.set() => shining,
+                _ => data.lights,
+            };
+            let cascades = Cascades::fit(casters, &data.viewpoint, aspect);
             let mut cull = (meshes.cull_bounds(data.draws))
                 .map(|bounds| CullPlan::new(graph, bounds, cascades.is_some()));
             let shadows = cascades.map(|cascades| {
@@ -1019,11 +1078,15 @@ impl Renderer {
             // ARCHITECTURE.md's Rendering gives: so that one pipeline draws each shader.
             let motion = graph.motion("view motion", size);
             let depth = graph.depth("view depth", size);
-            // What the draws light by, as the frame that prefilters it leaves it, and the shadows
-            // they're in.
+            // What the draws light by, as the frame that prefilters it leaves it, the atmosphere's
+            // tables, and the shadows they're in.
             let lit = || {
                 let maps = shadows.iter().flat_map(|shadows| shadows.maps);
-                plan.iter().flat_map(sky::Plan::sampled).chain(maps)
+                let tables = tables.iter().flat_map(atmosphere::Plan::sampled);
+                plan.iter()
+                    .flat_map(sky::Plan::sampled)
+                    .chain(tables)
+                    .chain(maps)
             };
             // A pass of the view's, named `label`, that draws over what the passes before it drew,
             // shading as it draws: taking what `kept` keeps, if it's given a culling, and reading
@@ -1259,8 +1322,30 @@ impl Renderer {
         debug_assert_eq!(number, frame.number(), "the frame begun is the one planned");
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
+        // The atmosphere's tables, and where its data is, which its sky's draw and cube read too.
+        let air = match (&atmosphere, &tables) {
+            (Some(seen), Some(tables)) => {
+                let pass = self
+                    .atmosphere
+                    .as_ref()
+                    .expect("made for an atmosphere to show");
+                let ways = data.viewpoint.ways_from_clip(data.viewport.aspect());
+                Some(pass.record(&mut frame, tables, &seen.data(ways))?)
+            }
+            _ => None,
+        };
         if let Some(plan) = &plan {
             let pass = self.sky.as_ref().expect("made for a sky to show");
+            match (&tables, air) {
+                (Some(tables), Some(air)) => {
+                    let made = self
+                        .atmosphere
+                        .as_ref()
+                        .expect("made for an atmosphere to show");
+                    made.cube(&mut frame, plan, tables, air);
+                }
+                _ => pass.image_to_cube(&mut frame, plan),
+            }
             pass.prefilter(&mut frame, plan);
         }
         // What the view shows, how much of its area that covers, what its draws that weren't
@@ -1334,6 +1419,7 @@ impl Renderer {
                     ambient_occlusion: 0,
                     unused: 0,
                     fog: FogData::default(),
+                    aerial: AerialData::default(),
                 };
                 // What the casters and what's drawn into the visibility buffer read of the frame's
                 // data, all but what the view alone samples.
@@ -1363,19 +1449,27 @@ impl Renderer {
                 let occlusion = view.ao.as_ref().map(|ao| ao.plan.image());
                 let view_data = |sampled: &dyn Fn(ImageId) -> u32| {
                     let lit = match (&plan, sky) {
-                        (Some(plan), Some((sky, ..))) => Some(plan.data(sampled, sky)),
+                        (Some(plan), Some((_, luminance))) => Some(plan.data(sampled, luminance)),
                         _ => held,
                     };
                     let shadows = (view.shadows.as_ref())
                         .map(|shadows| shadows.cascades.data(shadows.maps.map(sampled)));
                     let sky = lit.map(|sky| sky.luminance);
+                    let aerial = atmosphere
+                        .as_ref()
+                        .zip(tables.as_ref())
+                        .map(|(seen, tables)| {
+                            let froxels = sampled(tables.aerial());
+                            AerialData::new(unjittered, froxels, seen.illuminance())
+                        });
                     let shared = FrameData {
                         lights: view_lights,
                         sky: lit.unwrap_or_default(),
                         shadows: shadows.unwrap_or_default(),
                         clusters,
                         ambient_occlusion: occlusion.map_or(0, sampled),
-                        fog: FogData::new(data.fog, sky, data.lights, data.exposure),
+                        fog: FogData::new(data.fog, sky, shining, data.exposure),
+                        aerial: aerial.unwrap_or_default(),
                         ..shared
                     };
                     (shared, lit)
@@ -1492,10 +1586,24 @@ impl Renderer {
                     let shared = pass.upload(bytemuck::bytes_of(&frame_data))?.address();
                     (pass, shared, frame_data, lit)
                 };
-                // Behind everything, in place of the clear color.
-                if let Some(SkyData { sky, luminance, .. }) = lit {
+                // Behind everything, in place of the clear color: the atmosphere's sky, or the
+                // image sky.
+                let aspect = data.viewport.aspect();
+                if let (Some(seen), Some(tables), Some(air)) = (&atmosphere, &tables, air) {
+                    let made = self
+                        .atmosphere
+                        .as_ref()
+                        .expect("made for an atmosphere to show");
+                    let drawn = atmosphere::Drawn {
+                        atmosphere: air,
+                        transmittance: pass.sampled(tables.transmittance()),
+                        sky_view: pass.sampled(tables.sky_view()),
+                        scale: seen.illuminance() * data.exposure,
+                        disk: seen.disk(),
+                    };
+                    made.draw(&mut pass, &data.viewpoint, aspect, jitter, &drawn);
+                } else if let Some(SkyData { sky, luminance, .. }) = lit {
                     let drawn = self.sky.as_ref().expect("made for a sky to show");
-                    let aspect = data.viewport.aspect();
                     let scale = luminance * data.exposure;
                     drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, sky, scale);
                 }
@@ -1574,14 +1682,18 @@ impl Renderer {
                 }
                 // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
                 // what the view shows, in its own pass, if it has one; without the view's ambient
-                // occlusion, which is of the depth the view's own passes draw, or its fog, as it's
-                // drawn in the view's own space.
-                let canvas_data = if frame_data.ambient_occlusion == 0 && view.fog.is_none() {
+                // occlusion, which is of the depth the view's own passes draw, or its fog or its
+                // atmosphere's haze, as it's drawn in the view's own space.
+                let canvas_data = if frame_data.ambient_occlusion == 0
+                    && view.fog.is_none()
+                    && frame_data.aerial == AerialData::default()
+                {
                     shared
                 } else {
                     let unoccluded = FrameData {
                         ambient_occlusion: 0,
                         fog: FogData::default(),
+                        aerial: AerialData::default(),
                         ..frame_data
                     };
                     pass.upload(bytemuck::bytes_of(&unoccluded))?.address()
@@ -1715,8 +1827,8 @@ impl Renderer {
         }
         self.ui.free_textures();
         frame.submit()?;
-        if let (Some(plan), Some((sky, _, shown, _))) = (&plan, sky) {
-            self.sky_light.prefiltered(sky, shown, plan);
+        if let Some(plan) = &plan {
+            self.sky_light.prefiltered(plan);
         }
         self.waited = self.frames.waited();
         Ok(true)

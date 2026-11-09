@@ -124,6 +124,7 @@ mod renderer_components;
 mod scene_files;
 mod script;
 mod skins;
+mod sky;
 mod snapshot;
 mod sync_test;
 // What tests share, in tests alone.
@@ -240,6 +241,7 @@ use recording::Recorder;
 pub use recording::Replay;
 pub use reflect::Reflect;
 pub use script::{Script, run_scripts};
+pub use sky::{Atmosphere, Sky};
 use snapshot::Snapshot;
 pub use transform::Transform;
 

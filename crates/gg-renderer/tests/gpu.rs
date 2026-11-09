@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, AmbientOcclusion, Antialiasing, Births, Blend, Bursts, Circle,
+    AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts, Circle,
     DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines, Light,
     LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
     Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
@@ -100,6 +100,11 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
+        atmospheres_match_their_references,
+        the_suns_disk_shows_the_transmittance,
+        the_haze_dims_and_lights_what_is_far,
+        the_skys_light_falls_smoothly_through_dusk,
+        an_image_sky_renders_as_it_did_before_an_atmosphere,
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
@@ -151,6 +156,7 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
+        atmospheres_match_their_references,
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
@@ -348,6 +354,7 @@ struct Stores {
     uploads: Uploads,
     lights: Vec<Light>,
     sky: Option<Sky>,
+    atmosphere: Option<Atmosphere>,
     ambient_occlusion: Option<AmbientOcclusion>,
     none: Draws,
 }
@@ -373,6 +380,7 @@ impl Stores {
             uploads,
             lights,
             sky,
+            atmosphere,
             ambient_occlusion,
             none,
         } = self;
@@ -386,6 +394,7 @@ impl Stores {
             time: 0.0,
             lights,
             sky: *sky,
+            atmosphere: *atmosphere,
             bloom: 0.0,
             grade: Grade::IDENTITY,
             ambient_occlusion: *ambient_occlusion,
@@ -6842,6 +6851,500 @@ fn fogged_scenes_match_their_reference() {
     };
     scene.render(Some(fog));
     check(scene.renderer, "fog", WIDTH, HEIGHT);
+}
+
+/// The unit way toward a sun `elevation` above the horizon, `azimuth` round from -Z toward +X.
+fn toward_sun(elevation: f32, azimuth: f32) -> Vec3 {
+    let (sin, cos) = (math::libm::sinf, math::libm::cosf);
+    Vec3::new(
+        cos(elevation) * sin(azimuth),
+        sin(elevation),
+        -cos(elevation) * cos(azimuth),
+    )
+}
+
+/// Earth's atmosphere at noon and at sunset, seen from 2 m above a gray floor 20 km across, which
+/// its haze hides toward the horizon, under a sun of 120,000 lux outside the air, which casts
+/// shadows of three spheres before the view, a dielectric, a metal and a rough white one, with a
+/// white wall 600 m off, hazed, tonemapped by PBR Neutral, against their reference images: at noon
+/// a blue sky, paler toward the horizon, the world lit white; at sunset an orange glow round the
+/// sun, low ahead, the world lit red and dim, and the sky's light from all around bluer than the
+/// sun's. The view's ambient occlusion darkens the atmosphere's light from all around, as it does
+/// an image sky's.
+fn atmospheres_match_their_references() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 108;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores {
+        atmosphere: Some(Atmosphere::EARTH),
+        ..Stores::default()
+    };
+    let square = model_square(&mut stores.meshes);
+    let sphere = sphere(&mut stores.meshes, 0.5, 24, 48);
+    let [gray, red, gold, white] = [
+        (Vec4::new(0.5, 0.5, 0.5, 1.0), 0.0, 0.9),
+        (Vec4::new(0.8, 0.1, 0.1, 1.0), 0.0, 0.3),
+        (Vec4::new(1.0, 0.78, 0.34, 1.0), 1.0, 0.25),
+        (Vec4::ONE, 0.0, 1.0),
+    ]
+    .map(|(color, metal, roughness)| {
+        stores.materials.add(&Material {
+            color,
+            workflow: metallic(metal, roughness),
+            ..Material::default()
+        })
+    });
+    let mut draw = |mesh, material| {
+        MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders)
+    };
+    let floor = draw(square, gray);
+    let plastic = draw(sphere, red);
+    let metal = draw(sphere, gold);
+    let rough = draw(sphere, white);
+    // A wall facing the view, as the square faces +Z.
+    let wall = draw(square, white);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(20_000.0, Vec3::ZERO), &floor, 0);
+    for (x, draw) in [(-1.3, &plastic), (0.0, &metal), (1.3, &rough)] {
+        let at = Vec3::new(x, 0.5, -4.0 - x.abs() * 0.5);
+        draws.push_draw(Mat4::from_translation(at), draw, 0);
+    }
+    let tall = Mat4::from_scale_rotation_translation(
+        Vec3::new(60.0, 160.0, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(-150.0, 80.0, -600.0),
+    );
+    draws.push_draw(tall, &wall, 0);
+    let viewport = filling([WIDTH, HEIGHT]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        rotation: Quat::from_rotation_x(0.12),
+        projection: Projection::Perspective {
+            fov: 1.3,
+            near: 0.1,
+        },
+    };
+    let skies = [
+        ("atmosphere_noon", toward_sun(1.1, -0.9), 15.0),
+        ("atmosphere_sunset", toward_sun(0.03, 0.3), 12.0),
+    ];
+    for (name, to_sun, ev100) in skies {
+        stores.lights = vec![Light {
+            color: Vec3::splat(120_000.0),
+            ..sun(-to_sun, Some(30.0))
+        }];
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            tonemapper: Tonemapper::PbrNeutral,
+            exposure: 1.0 / (1.2 * math::libm::exp2f(ev100)),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let plain = frame_pixels(&mut renderer);
+        compare(name, WIDTH, HEIGHT, &plain);
+        // The view's ambient occlusion darkens the atmosphere's light too, as an image sky's.
+        let data = RenderData {
+            tonemapper: Tonemapper::PbrNeutral,
+            exposure: 1.0 / (1.2 * math::libm::exp2f(ev100)),
+            ambient_occlusion: Some(AmbientOcclusion::default()),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let occluded = frame_pixels(&mut renderer);
+        let darker = (plain.iter().zip(&occluded))
+            .filter(|(was, now)| now < was)
+            .count();
+        assert!(
+            darker > 100,
+            "{name}: ambient occlusion darkened {darker} channels"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// The optical depth of Earth's atmosphere, as the paper models it, from `height` meters up along
+/// a way of zenith cosine `mu` out of the air: its Rayleigh scattering, Mie extinction and ozone
+/// absorption, in millionths per meter, thinning with height as `Atmosphere` says, summed by the
+/// midpoints of 20,000 steps.
+fn optical_depth(height: f32, mu: f32) -> Vec3 {
+    let (ground, top) = (6_360_000.0_f64, 6_460_000.0_f64);
+    let earth = Atmosphere::EARTH;
+    let from = ground + f64::from(height);
+    let mu = f64::from(mu);
+    // To where the way leaves the atmosphere's top.
+    let reach = -from * mu + (from * from * (mu * mu - 1.0) + top * top).sqrt();
+    let steps = 20_000;
+    let step = reach / f64::from(steps);
+    let mut depth = [0.0_f64; 3];
+    for i in 0..steps {
+        let t = (f64::from(i) + 0.5) * step;
+        let radius = (from * from + t * t + 2.0 * from * t * mu).sqrt();
+        let up = (radius - ground) / 1000.0;
+        let rayleigh = math::libm::exp(-up / 8.0);
+        let mie = math::libm::exp(-up / 1.2);
+        let ozone = (1.0 - (up - 25.0).abs() / 15.0).clamp(0.0, 1.0);
+        for (channel, depth) in depth.iter_mut().enumerate() {
+            let haze = f64::from(earth.mie + earth.mie_absorption);
+            *depth += (f64::from(earth.rayleigh[channel]) * rayleigh
+                + haze * mie
+                + f64::from(earth.ozone[channel]) * ozone)
+                * 1.0e-6
+                * step;
+        }
+    }
+    Vec3::new(depth[0] as f32, depth[1] as f32, depth[2] as f32)
+}
+
+/// The sun's disk, seen through a view narrower than it from 1 km up, at the zenith, 60° from it
+/// and 85°, under a light of the illuminance that makes the disk's luminance 1 outside the air:
+/// shows the transmittance toward it, as the paper's model gives it, which the GPU's table holds.
+fn the_suns_disk_shows_the_transmittance() {
+    const SIZE: u32 = 4;
+    let mut renderer = renderer(SIZE, SIZE);
+    let earth = Atmosphere::EARTH;
+    let mut stores = Stores {
+        atmosphere: Some(earth),
+        ..Stores::default()
+    };
+    let half = earth.sun_size / 2.0;
+    let solid_angle = 2.0 * PI * (1.0 - math::libm::cosf(half));
+    let draws = Draws::default();
+    let viewport = filling([SIZE, SIZE]);
+    for zenith in [0.0_f32, 60.0, 85.0] {
+        let to_sun = toward_sun(FRAC_PI_2 - math::to_radians(zenith), 0.0);
+        stores.lights = vec![Light {
+            color: Vec3::splat(solid_angle),
+            ..sun(-to_sun, None)
+        }];
+        let viewpoint = Viewpoint {
+            position: Vec3::new(0.0, 1000.0, 0.0),
+            rotation: Quat::from_rotation_arc(Vec3::NEG_Z, to_sun),
+            projection: Projection::Perspective {
+                fov: half / 2.0,
+                near: 0.5,
+            },
+        };
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let depth = optical_depth(1000.0, to_sun.y);
+        let through = [depth.x, depth.y, depth.z].map(|depth| math::libm::expf(-depth));
+        let got = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+        let [r, g, b] = through.map(encoded);
+        let near = (got.iter().zip([r, g, b, 255])).all(|(&got, want)| got.abs_diff(want) <= 2);
+        assert!(
+            near,
+            "{zenith}° from the zenith, the sun's disk shows {got:?}, not the transmittance \
+             {through:?} encoded, {:?}",
+            [r, g, b]
+        );
+    }
+    shut_down(renderer);
+}
+
+/// Along a level way from 2 m up, `far` meters through Earth's atmosphere as the paper models it,
+/// summed in doubles by the midpoints of 20,000 steps: the mean of the channels' transmittance;
+/// the light scattered once toward the start, of each channel, from a sun of an illuminance of 1
+/// at the zenith, a quarter turn from the way, by Rayleigh's and Mie's phase functions, the sun's
+/// light dimmed along the way down to each point as it is straight up from the ground; and the
+/// light of the ground below, of the atmosphere's albedo, lit by that sun, scattered once toward
+/// the start, half of every way round it, whatever the phase function.
+fn level_way(far: f32) -> (f32, Vec3, Vec3) {
+    let (ground, earth) = (6_360_000.0_f64, Atmosphere::EARTH);
+    let from = ground + 2.0;
+    let steps = 20_000;
+    let step = f64::from(far) / f64::from(steps);
+    let down = optical_depth(2.0, 1.0);
+    let anisotropy = f64::from(earth.mie_anisotropy);
+    let albedo = f64::from(earth.ground_albedo.x);
+    let rayleigh_phase = 3.0 / (16.0 * std::f64::consts::PI);
+    let mie_phase = (1.0 - anisotropy * anisotropy)
+        / (4.0 * std::f64::consts::PI * math::libm::pow(1.0 + anisotropy * anisotropy, 1.5));
+    let mut depth = [0.0_f64; 3];
+    let (mut from_sun, mut from_ground) = ([0.0_f64; 3], [0.0_f64; 3]);
+    for i in 0..steps {
+        let t = (f64::from(i) + 0.5) * step;
+        let up = ((from * from + t * t).sqrt() - ground) / 1000.0;
+        let rayleigh = math::libm::exp(-up / 8.0);
+        let mie = math::libm::exp(-up / 1.2);
+        let ozone = (1.0 - (up - 25.0).abs() / 15.0).clamp(0.0, 1.0);
+        for channel in 0..3 {
+            let haze = f64::from(earth.mie + earth.mie_absorption);
+            let extinction = (f64::from(earth.rayleigh[channel]) * rayleigh
+                + haze * mie
+                + f64::from(earth.ozone[channel]) * ozone)
+                * 1.0e-6;
+            let through = math::libm::exp(-depth[channel] - extinction * step / 2.0);
+            let sunlit = math::libm::exp(-f64::from(down[channel]));
+            let (rayleigh, mie) = (
+                f64::from(earth.rayleigh[channel]) * 1.0e-6 * rayleigh,
+                f64::from(earth.mie) * 1.0e-6 * mie,
+            );
+            let phased = rayleigh * rayleigh_phase + mie * mie_phase;
+            // The ground's light, from below, half of every way round the level way, whatever
+            // the phase function.
+            let ground = albedo / std::f64::consts::PI * sunlit * 0.5 * (rayleigh + mie);
+            from_sun[channel] += through * phased * sunlit * step;
+            from_ground[channel] += through * ground * step;
+            depth[channel] += extinction * step;
+        }
+    }
+    let mean = depth
+        .iter()
+        .map(|depth| math::libm::exp(-depth))
+        .sum::<f64>()
+        / 3.0;
+    let light = |light: [f64; 3]| Vec3::from_array(light.map(|light| light as f32));
+    (mean as f32, light(from_sun), light(from_ground))
+}
+
+/// The haze over what's far, through views narrower than walls 5 and 20 km off from 2 m up: an
+/// emissive white wall under a sun set far below the horizon, whose sky is dark, shows the mean of
+/// the transmittance's channels to it, as the paper's model gives it, within 8%; and a black wall
+/// under a sun at the zenith shows the light scattered toward the eye on the way, bluest and
+/// brighter the farther it is: more than the light scattered once from the sun, as the model gives
+/// it, as the light scattered many times over adds to it, but within a tenth past that and the
+/// sunlit ground's light scattered once, which the paper's light scattered many times over holds.
+fn the_haze_dims_and_lights_what_is_far() {
+    const SIZE: u32 = 4;
+    const SUN: f32 = 120_000.0;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores {
+        atmosphere: Some(Atmosphere::EARTH),
+        ..Stores::default()
+    };
+    let square = model_square(&mut stores.meshes);
+    let [glowing, black] = [
+        Material {
+            color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            workflow: metallic(0.0, 1.0),
+            emissive: Vec3::ONE,
+            ..Material::default()
+        },
+        // A metal of no color, which reflects nothing either way.
+        Material {
+            color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            workflow: metallic(1.0, 1.0),
+            ..Material::default()
+        },
+    ]
+    .map(|material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+    });
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        rotation: Quat::IDENTITY,
+        projection: Projection::Perspective {
+            fov: 0.05,
+            near: 0.5,
+        },
+    };
+    let mut shows = |stores: &mut Stores, wall: &MeshDraw, far: f32, exposure: f32| {
+        let mut draws = Draws::default();
+        let placed = Mat4::from_scale_rotation_translation(
+            Vec3::new(far, far, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 2.0, -far),
+        );
+        draws.push_draw(placed, wall, 0);
+        settle(&mut renderer, stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            exposure,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let pixel = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+        Vec3::from_array([pixel[0], pixel[1], pixel[2]].map(decoded))
+    };
+    let mut lights = Vec::new();
+    for far in [5000.0, 20_000.0] {
+        let (through, from_sun, from_ground) = level_way(far);
+        stores.lights = vec![Light {
+            color: Vec3::splat(SUN),
+            ..sun(-toward_sun(-0.5, 0.0), None)
+        }];
+        let shown = shows(&mut stores, &glowing, far, 1.0);
+        let mean = shown.element_sum() / 3.0;
+        assert!(
+            (mean / through - 1.0).abs() < 0.08,
+            "{far} m off, the glowing wall shows {shown}, not the transmittance {through}"
+        );
+        stores.lights = vec![Light {
+            color: Vec3::splat(SUN),
+            ..sun(Vec3::NEG_Y, None)
+        }];
+        // Exposed to show the light scattered once from the sun and the ground at a half.
+        let most = from_sun + from_ground;
+        let exposure = 0.5 / (most.max_element() * SUN);
+        let scattered = shows(&mut stores, &black, far, exposure) / (exposure * SUN);
+        assert!(
+            scattered.cmpge(from_sun).all() && scattered.cmple(1.1 * most).all(),
+            "{far} m off, the black wall shows {scattered} of the light scattered toward it, not \
+             between the light scattered once from the sun, {from_sun}, and that and the sunlit \
+             ground's, {most}"
+        );
+        assert!(
+            scattered.z > scattered.y && scattered.y > scattered.x,
+            "{scattered}"
+        );
+        lights.push(scattered);
+    }
+    assert!(lights[1].cmpgt(lights[0]).all(), "{lights:?}");
+    shut_down(renderer);
+}
+
+/// A white floor seen from above, lit by the sky's light alone through dusk, its sun 0.5° to 4.5°
+/// below the horizon in steps of 0.05°, as `atmosphere.ron`'s sun, turning 3° a second, goes in
+/// frames of 60 a second: its light, which falls by about half each degree, falls frame by frame
+/// as smoothly as the sun goes, each frame's fall within 6% of the light of the one before's, which
+/// allows for the steps of about 1% of the 8-bit image it's read from, and for the bends in the
+/// light as the sun crosses the multiple scattering table's texels, rather than in steps of tens of
+/// percent where the light would be prefiltered again too seldom. Each frame is exposed for the
+/// light the frame before showed, and its light found by its exposure.
+fn the_skys_light_falls_smoothly_through_dusk() {
+    const SIZE: u32 = 4;
+    const STEPS: u32 = 80;
+    const STEP: f32 = 0.05;
+    // What each frame's exposure is for, where the 8-bit image's steps are finest, relatively.
+    const SHOWN: f32 = 0.8;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores {
+        atmosphere: Some(Atmosphere::EARTH),
+        ..Stores::default()
+    };
+    let square = model_square(&mut stores.meshes);
+    let white = stores.materials.add(&Material {
+        color: Vec4::ONE,
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    });
+    let floor = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(20.0, Vec3::ZERO), &floor, 0);
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 3.0, 0.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_2),
+        projection: Projection::Perspective {
+            fov: 0.2,
+            near: 0.1,
+        },
+    };
+    let at = |stores: &mut Stores, elevation: f32| {
+        let to_sun = toward_sun(math::to_radians(elevation), 0.0);
+        stores.lights = vec![Light {
+            color: Vec3::splat(120_000.0),
+            ..sun(-to_sun, None)
+        }];
+    };
+    at(&mut stores, -0.5);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut exposure = 1.0e-3;
+    let mut lights = Vec::new();
+    for step in 0..=STEPS {
+        let elevation = -0.5 - STEP * step as f32;
+        at(&mut stores, elevation);
+        // The first exposed afresh until it shows.
+        let tries = if step == 0 { 6 } else { 1 };
+        let mut shown = 0.0;
+        for _ in 0..tries {
+            let data = RenderData {
+                exposure,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+            let pixel = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+            shown = decoded(pixel[1]);
+            if tries > 1 {
+                exposure *= SHOWN / shown.clamp(1.0e-3, 1.0);
+            }
+        }
+        assert!(
+            (0.3..0.99).contains(&shown),
+            "at {elevation}°, the floor shows {shown}, out of the range its exposure was for"
+        );
+        lights.push(shown / exposure);
+        exposure *= SHOWN / shown;
+    }
+    let falls: Vec<f32> = (lights.windows(2))
+        .map(|pair| math::libm::logf(pair[1] / pair[0]))
+        .collect();
+    for (i, pair) in falls.windows(2).enumerate() {
+        let elevation = -0.5 - STEP * (i + 2) as f32;
+        assert!(
+            (pair[1] - pair[0]).abs() < 0.06,
+            "at {elevation}°, the floor's light fell by {:.1}% where the frame before it fell by \
+             {:.1}%: it stepped",
+            100.0 * (1.0 - math::libm::expf(pair[1])),
+            100.0 * (1.0 - math::libm::expf(pair[0]))
+        );
+    }
+    shut_down(renderer);
+}
+/// An image sky lights and shows its world byte for byte as it did before an atmosphere took its
+/// place, under the same sun, once the atmosphere gives it back: its light is prefiltered from the
+/// image again, and the sun's light is no longer dimmed by the air.
+fn an_image_sky_renders_as_it_did_before_an_atmosphere() {
+    const SIZE: u32 = 32;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, y| {
+        if y < 16 {
+            [0.4, 0.6, 1.0]
+        } else {
+            [0.15, 0.1, 0.05]
+        }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 8000.0,
+    });
+    stores.lights = vec![Light {
+        color: Vec3::splat(100_000.0),
+        ..sun(Vec3::new(1.0, -1.0, -1.0), Some(20.0))
+    }];
+    let sphere = sphere(&mut stores.meshes, 0.6, 16, 32);
+    let white = Material {
+        color: Vec4::ONE,
+        workflow: metallic(0.0, 0.5),
+        ..Material::default()
+    };
+    let white = stores.materials.add(&white);
+    let ball = MeshDraw::with_material(sphere, white, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(Mat4::IDENTITY, &ball, 0);
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.5, 3.0),
+        projection: Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let frame = |renderer: &mut Renderer, stores: &mut Stores| {
+        let data = RenderData {
+            tonemapper: Tonemapper::PbrNeutral,
+            exposure: 1.0 / (1.2 * math::libm::exp2f(15.0)),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(renderer, data);
+        frame_pixels(renderer)
+    };
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let before = frame(&mut renderer, &mut stores);
+    stores.atmosphere = Some(Atmosphere::EARTH);
+    frame(&mut renderer, &mut stores);
+    let aired = frame(&mut renderer, &mut stores);
+    assert_ne!(aired, before, "the atmosphere shows nothing of its own");
+    stores.atmosphere = None;
+    frame(&mut renderer, &mut stores);
+    let after = frame(&mut renderer, &mut stores);
+    assert!(
+        after == before,
+        "the image sky's frame differs after the atmosphere gave it back"
+    );
+    shut_down(renderer);
 }
 
 /// The bytes of a shadow map of a light's cascade: 2048 texels across and down, of 32-bit depth.

@@ -8,6 +8,9 @@
 //! shadows where the sky's light can't, the sky's light keeps each of its texels to [`SUN`]'s
 //! luminance, or as little as half it, as [`cutoff`] rounds it, so that the sun lights through the
 //! directional light alone; in one without, the sky lights by all of it.
+//!
+//! The atmosphere's sky is prefiltered alike, from a cube its sky's table makes without the sun's
+//! disk, as `atmosphere.rs` says.
 
 use std::sync::Arc;
 
@@ -19,6 +22,7 @@ use gg_gpu::{
     Pipeline, StorageImage, Target,
 };
 
+use crate::atmosphere::{self, Lit};
 use crate::{Light, LightKind, Texture, Viewpoint, taa};
 
 static PREFILTER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.spv"));
@@ -31,6 +35,9 @@ static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.spv"));
 const MOST_CUBE: u32 = 512;
 const LEAST_CUBE: u32 = 8;
 
+/// The most levels the cube has: its full chain at [`MOST_CUBE`].
+const CUBE_LEVELS: u32 = MOST_CUBE.ilog2() + 1;
+
 /// The most texels a side of the specular light's first level has, its roughness 0: the cube's,
 /// up to this. Its last level, of roughness 1, has this many, or its first's.
 const MOST_SPECULAR: u32 = 256;
@@ -40,7 +47,8 @@ const LEAST_SPECULAR: u32 = 8;
 const IRRADIANCE: u32 = 32;
 const TABLE: u32 = 128;
 
-/// How many samples each texel of the specular light, the diffuse light and the table takes.
+/// How many samples each texel of an image sky's specular light and diffuse light, and of the
+/// table, takes; the atmosphere's take [`atmosphere::SAMPLES`].
 const SPECULAR_SAMPLES: u32 = 512;
 const IRRADIANCE_SAMPLES: u32 = 512;
 const TABLE_SAMPLES: u32 = 512;
@@ -94,6 +102,56 @@ pub struct Sky {
     /// colors are multiplied by, before the exposure, as lit shading multiplies light, in lux and
     /// candela.
     pub luminance: f32,
+}
+
+/// What the sky's light is prefiltered from, as a frame finds it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Source {
+    /// An image sky, its texture shown for the `shown`th time, `size` texels across and down, each
+    /// texel kept to `cutoff`, as [`cutoff`] gives it.
+    Image {
+        sky: Sky,
+        size: [u32; 2],
+        shown: u64,
+        cutoff: f32,
+    },
+    /// The atmosphere, as the frame lights it and sees it.
+    Atmosphere(Lit),
+}
+
+impl Source {
+    /// Whether light prefiltered from `held` stands for this: the same image as it showed then,
+    /// each texel kept alike, or an atmosphere [near](Lit::near) it.
+    fn held_by(&self, held: &Source) -> bool {
+        match (self, held) {
+            (
+                Source::Image {
+                    sky, shown, cutoff, ..
+                },
+                Source::Image {
+                    sky: was,
+                    shown: then,
+                    cutoff: kept,
+                    ..
+                },
+            ) => {
+                sky.texture.index == was.texture.index
+                    && shown == then
+                    && cutoff.to_bits() == kept.to_bits()
+            }
+            (Source::Atmosphere(lit), Source::Atmosphere(was)) => lit.near(was),
+            _ => false,
+        }
+    }
+
+    /// The texture the view shows as the sky: an image sky's, and 0 for the atmosphere, which the
+    /// view draws otherwise.
+    fn texture(&self) -> u32 {
+        match self {
+            Source::Image { sky, .. } => sky.texture.index,
+            Source::Atmosphere(_) => 0,
+        }
+    }
 }
 
 /// The sky's part of the frame's data: `Frame`'s fields from `sky` on in `shaders/mesh.slang`,
@@ -175,27 +233,42 @@ impl SkyPass {
         })
     }
 
-    /// Records `plan`'s passes, the next of `frame`'s graph to record, which prefilter the sky into
-    /// the light the plan's images hold.
-    pub(crate) fn prefilter(&self, frame: &mut Frame<'_>, plan: &Plan) {
-        let groups = |side: u32, layers: u32| [side.div_ceil(GROUP), side.div_ceil(GROUP), layers];
-        let [cube, specular, irradiance, table] = plan.images;
+    /// Records `plan`'s pass that turns an image sky into the cube's first level, the next of
+    /// `frame`'s graph to record.
+    ///
+    /// # Panics
+    ///
+    /// If the plan's sky isn't an image.
+    pub(crate) fn image_to_cube(&self, frame: &mut Frame<'_>, plan: &Plan) {
+        let Source::Image {
+            sky, size, cutoff, ..
+        } = plan.source
+        else {
+            panic!("an image sky is turned into a cube, and the plan's isn't one");
+        };
         let face = plan.cube_face;
         let mut pass = frame.compute(plan.to_cube);
         pass.set_pipeline(&self.cube);
         let push = PrefilterPush {
-            source_size: plan.sky_size,
-            source: plan.sky,
-            target: pass.storage(cube, 0),
+            source_size: size,
+            source: sky.texture.index,
+            target: pass.storage(plan.images[0], 0),
             size: face,
             roughness: 0.0,
             samples: 0,
-            cutoff: plan.cutoff,
+            cutoff,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
-        pass.dispatch(groups(face, 6));
-        drop(pass);
-        for (level, &levels) in (1..).zip(&plan.levels) {
+        pass.dispatch([face.div_ceil(GROUP), face.div_ceil(GROUP), 6]);
+    }
+
+    /// Records `plan`'s passes after the one that makes the cube's first level, the next of
+    /// `frame`'s graph to record, which prefilter the cube into the light the plan's images hold.
+    pub(crate) fn prefilter(&self, frame: &mut Frame<'_>, plan: &Plan) {
+        let groups = |side: u32, layers: u32| [side.div_ceil(GROUP), side.div_ceil(GROUP), layers];
+        let [cube, specular, irradiance, table] = plan.images;
+        let face = plan.cube_face;
+        for (level, &levels) in (1..).zip(plan.levels.iter().flatten()) {
             let mut pass = frame.compute(levels);
             pass.set_pipeline(&self.downsample);
             let size = face >> level;
@@ -229,7 +302,7 @@ impl SkyPass {
                 target: pass.storage(specular, level),
                 size,
                 roughness,
-                samples: SPECULAR_SAMPLES,
+                samples: plan.samples[0],
                 cutoff: f32::MAX,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
@@ -242,7 +315,7 @@ impl SkyPass {
             target: pass.storage(irradiance, 0),
             size: IRRADIANCE,
             roughness: 0.0,
-            samples: IRRADIANCE_SAMPLES,
+            samples: plan.samples[1],
             cutoff: f32::MAX,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
@@ -297,20 +370,20 @@ impl SkyPass {
 
 /// What a frame that prefilters the sky runs, as [`SkyLight::plan`] adds it to its graph.
 pub(crate) struct Plan {
-    /// The sky's texture, and its size.
-    sky: u32,
-    sky_size: [u32; 2],
-    /// What the light keeps each of the sky's texels to, as [`cutoff`] gives it.
-    cutoff: f32,
+    /// What it prefilters.
+    source: Source,
     /// The cube's side, and the specular light's first level's, and how many levels it has.
     cube_face: u32,
+    /// How many samples each texel of the specular light and of the diffuse light takes.
+    samples: [u32; 2],
     specular_face: u32,
     specular_levels: u32,
     /// The cube, the specular light, the diffuse light and the table, among the frame's targets.
     images: [ImageId; 4],
     to_cube: PassId,
-    /// Each of the cube's levels after its first.
-    levels: Vec<PassId>,
+    /// Each of the cube's levels after its first, as many as it has, so that a frame that
+    /// prefilters again, as the atmosphere's sun turns, allocates nothing.
+    levels: [Option<PassId>; CUBE_LEVELS as usize - 1],
     /// The light from all around.
     light: PassId,
     /// The table, in the first frame that prefilters.
@@ -325,25 +398,31 @@ impl Plan {
         [specular, irradiance, table]
     }
 
-    /// The sky's part of the frame's data for a frame that prefilters the sky as this plans, of
-    /// `sky`, its light sampled through the indices `sampled` gives, a pass's that samples it.
-    pub(crate) fn data(&self, sampled: impl Fn(ImageId) -> u32, sky: Sky) -> SkyData {
+    /// The sky's part of the frame's data for a frame that prefilters the sky as this plans, its
+    /// light sampled through the indices `sampled` gives, a pass's that samples it, a texel of 1
+    /// standing for `luminance`.
+    pub(crate) fn data(&self, sampled: impl Fn(ImageId) -> u32, luminance: f32) -> SkyData {
         let [specular, irradiance, table] = self.sampled();
         SkyData {
-            sky: sky.texture.index,
+            sky: self.source.texture(),
             irradiance: sampled(irradiance),
             specular: sampled(specular),
             specular_levels: self.specular_levels,
             brdf: sampled(table),
-            luminance: sky.luminance,
+            luminance,
         }
+    }
+
+    /// The pass that makes the cube's first level, the cube, and its side.
+    pub(crate) fn to_cube(&self) -> (PassId, ImageId, u32) {
+        (self.to_cube, self.images[0], self.cube_face)
     }
 }
 
 /// The sky's light, prefiltered, in storage images that frames take as targets as they prefilter
-/// it, and sample after: the cube a frame turns the sky into, made for the frame that prefilters,
-/// which drops it once it's submitted; the light from all around; and the split sum's table, made
-/// once.
+/// it, and sample after: the cube a frame turns the sky into, made for the frame that prefilters
+/// an image sky, which drops it once it's submitted, or kept for the atmosphere's; the light from
+/// all around; and the split sum's table, made once.
 #[derive(Default)]
 pub(crate) struct SkyLight {
     cube: Option<StorageImage>,
@@ -352,56 +431,59 @@ pub(crate) struct SkyLight {
     table: Option<StorageImage>,
     /// Whether a frame has written the table.
     tabled: bool,
-    /// The texture, how many times its slot had come to show another image, and the bits of what
-    /// each texel was kept to, as [`cutoff`] gives it, that the light holds, once a frame has
-    /// prefiltered it.
-    from: Option<(u32, u64, u32)>,
+    /// What the light was prefiltered from, once a frame has prefiltered it.
+    from: Option<Source>,
 }
 
 impl SkyLight {
-    /// Whether the light holds `sky`'s texture as it's shown for the `shown`th time, each texel
-    /// kept to `cutoff`.
-    pub(crate) fn holds(&self, sky: Sky, shown: u64, cutoff: f32) -> bool {
-        self.from == Some((sky.texture.index, shown, cutoff.to_bits()))
+    /// Whether the light holds what `source` stands for, as [`Source::held_by`] says.
+    pub(crate) fn holds(&self, source: &Source) -> bool {
+        (self.from.as_ref()).is_some_and(|held| source.held_by(held))
     }
 
-    /// The sky's part of the frame's data for a frame that doesn't prefilter `sky`, its texture
-    /// shown for the `shown`th time, each texel kept to `cutoff`, if the light holds it and the
-    /// frames have left it to sample.
-    pub(crate) fn data(&self, sky: Sky, shown: u64, cutoff: f32) -> Option<SkyData> {
-        if !self.holds(sky, shown, cutoff) {
+    /// The sky's part of the frame's data for a frame that doesn't prefilter `source`, a texel of
+    /// 1 standing for `luminance`, if the light holds it and the frames have left it to sample.
+    pub(crate) fn data(&self, source: &Source, luminance: f32) -> Option<SkyData> {
+        if !self.holds(source) {
             return None;
         }
         let specular = self.specular.as_ref()?;
         Some(SkyData {
-            sky: sky.texture.index,
+            sky: source.texture(),
             irradiance: self.irradiance.as_ref()?.sampled()?,
             specular: specular.sampled()?,
             specular_levels: specular.levels(),
             brdf: self.table.as_ref()?.sampled()?,
-            luminance: sky.luminance,
+            luminance,
         })
     }
 
-    /// Makes what a frame needs to prefilter `sky`, `size` texels across and down, each texel kept
-    /// to `cutoff`, and adds the passes that prefilter it to `graph`, its images the frame's
-    /// targets from `first` on, in the order [`SkyLight::targets`] gives them: the cube, of
-    /// [`MOST_CUBE`] texels a side at most, with its full chain of levels; the specular light, with
-    /// a level for each step of roughness; the diffuse light; and the table, if no frame has
-    /// written it.
+    /// Makes what a frame needs to prefilter `source`, and adds the passes that prefilter it to
+    /// `graph`, its images the frame's targets from `first` on, in the order
+    /// [`SkyLight::targets`] gives them: the cube, of a quarter of an image's width, to the next
+    /// power of two, up to [`MOST_CUBE`] texels a side, or [`atmosphere::CUBE`]'s for the
+    /// atmosphere, with its full chain of levels, whose first level's pass samples `sampled`, if
+    /// given, as the atmosphere's does its sky's table; the specular light, with a level for each
+    /// step of roughness; the diffuse light; and the table, if no frame has written it.
     pub(crate) fn plan(
         &mut self,
         device: &Arc<Device>,
         graph: &mut Graph,
         first: usize,
-        sky: Sky,
-        size: [u32; 2],
-        cutoff: f32,
+        source: Source,
+        sampled: Option<ImageId>,
     ) -> Result<Plan> {
-        let face = (size[0] / 4)
-            .max(1)
-            .next_power_of_two()
-            .clamp(LEAST_CUBE, MOST_CUBE);
+        let face = match source {
+            Source::Image { size, .. } => (size[0] / 4)
+                .max(1)
+                .next_power_of_two()
+                .clamp(LEAST_CUBE, MOST_CUBE),
+            Source::Atmosphere(_) => atmosphere::CUBE,
+        };
+        let samples = match source {
+            Source::Image { .. } => [SPECULAR_SAMPLES, IRRADIANCE_SAMPLES],
+            Source::Atmosphere(_) => [atmosphere::SAMPLES; 2],
+        };
         let cube_levels = face.ilog2() + 1;
         let specular_face = face.min(MOST_SPECULAR);
         let specular_levels = (specular_face / LEAST_SPECULAR.min(specular_face)).ilog2() + 1;
@@ -426,10 +508,16 @@ impl SkyLight {
         }
         let images = [0, 1, 2, 3].map(|i| graph.target(first + i));
         let [cube, specular, irradiance, table] = images;
-        let to_cube = graph.compute(label!("sky cube")).write(cube).add();
-        let levels = (1..cube_levels)
-            .map(|_| graph.compute(label!("sky levels")).write(cube).add())
-            .collect();
+        let to_cube = graph.compute(label!("sky cube")).write(cube);
+        let to_cube = match sampled {
+            Some(image) => to_cube.sample(image),
+            None => to_cube,
+        }
+        .add();
+        let levels = std::array::from_fn(|level| {
+            let below = level as u32 + 1 < cube_levels;
+            below.then(|| graph.compute(label!("sky levels")).write(cube).add())
+        });
         let light = (graph.compute(label!("sky light")))
             .sample(cube)
             .write(specular)
@@ -437,10 +525,9 @@ impl SkyLight {
             .add();
         let table = (!self.tabled).then(|| graph.compute(label!("split sum")).write(table).add());
         Ok(Plan {
-            sky: sky.texture.index,
-            sky_size: size,
-            cutoff,
+            source,
             cube_face: face,
+            samples,
             specular_face,
             specular_levels,
             images,
@@ -469,12 +556,15 @@ impl SkyLight {
         .map(Target::Storage)
     }
 
-    /// Notes that a frame has prefiltered `sky`, its texture shown for the `shown`th time, into
-    /// the light, by `plan`, and drops the cube, which retires until the GPU is done with it.
-    pub(crate) fn prefiltered(&mut self, sky: Sky, shown: u64, plan: &Plan) {
-        self.from = Some((sky.texture.index, shown, plan.cutoff.to_bits()));
+    /// Notes that a frame has prefiltered the light by `plan`, and drops an image sky's cube, which
+    /// retires until the GPU is done with it; the atmosphere's, of a megabyte, is kept for the
+    /// frames that prefilter again as its sun turns.
+    pub(crate) fn prefiltered(&mut self, plan: &Plan) {
+        self.from = Some(plan.source);
         self.tabled |= plan.table.is_some();
-        self.cube = None;
+        if let Source::Image { .. } = plan.source {
+            self.cube = None;
+        }
     }
 }
 

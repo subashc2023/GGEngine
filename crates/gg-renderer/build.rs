@@ -26,7 +26,7 @@ const SHADERS: [&str; 14] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 13] = [
+const COMPUTE: [(&str, &[&str]); 14] = [
     (
         "ao",
         &[
@@ -34,6 +34,16 @@ const COMPUTE: [(&str, &[&str]); 13] = [
             "occlusion_main",
             "denoise_main",
             "denoise_last_main",
+        ],
+    ),
+    (
+        "atmosphere",
+        &[
+            "transmittance_main",
+            "multiple_main",
+            "sky_view_main",
+            "aerial_main",
+            "cube_main",
         ],
     ),
     (
@@ -80,6 +90,8 @@ fn main() {
     for shader in SHADERS {
         compile(&slangc, &out, shader, shader, drawing);
     }
+    // The atmosphere's sky, drawn, apart from its tables' compute shaders.
+    compile(&slangc, &out, "atmosphere", "atmosphere_sky", drawing);
     // The masked model shader's shadows, cut out as it is, apart from it, which keeps to the
     // contract games' shaders keep, of two entry points.
     let shadow = &[("vertex_main", "vertex"), ("shadow_main", "fragment")];
