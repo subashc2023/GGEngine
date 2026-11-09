@@ -615,6 +615,7 @@ fn run_args(
         embedded = args.embedded,
         supervised = args.supervised,
         frames = args.frames,
+        size = args.size.map(|[width, height]| format!("{width}x{height}")),
         capture = args.capture.map(|frame| frame.get()),
         gpu = args.gpu.as_deref(),
         validation = args.validation,

@@ -182,29 +182,32 @@ jobs:
       # slow link, the host rolling back, and a server and two clients over one, each correcting
       # toward its states, each run exiting 0 and no `net.desync` in any log; and its ticks run again
       # as a SyncTest, headless and replaying its live recording, which walks, turns, kicks and edits.
+      # Its runs render 320 by 180: lavapipe draws its arena's frames on the runner's two CPUs, at
+      # 1280 by 720 in about 265 ms each, which made the step the job's longest.
       - name: Run the 3D demo networked, and as a SyncTest
         if: matrix.container
         run: |
           cargo build -p foxball --locked
           fox=target/debug/gg-foxball
+          headless="$fox --headless --size 320x180"
           logs="target/debug/logs/foxball-*.jsonl"
-          $fox --headless --frames 600 --host 127.0.0.1:7710 &
+          $headless --frames 600 --host 127.0.0.1:7710 &
           host=$!
-          $fox --headless --frames 300 --join 127.0.0.1:7710
+          $headless --frames 300 --join 127.0.0.1:7710
           wait $host
-          $fox --headless --frames 600 --host 127.0.0.1:7711 --rollback --link 100,20,5 &
+          $headless --frames 600 --host 127.0.0.1:7711 --rollback --link 100,20,5 &
           host=$!
-          $fox --headless --frames 300 --join 127.0.0.1:7711 --rollback --link 100,20,5
+          $headless --frames 300 --join 127.0.0.1:7711 --rollback --link 100,20,5
           wait $host
           $fox --serve 127.0.0.1:7712 --link 100,20,5 &
           server=$!
-          $fox --headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5 &
+          $headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5 &
           client=$!
-          $fox --headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5
+          $headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5
           wait $client
           kill -INT $server
           wait $server
-          $fox --headless --frames 300 --sync-test
+          $headless --frames 300 --sync-test
           $fox --replay games/foxball/tests/references/live.recording --sync-test
           test "$(grep -h '"message":"The joiner joined the lockstep session"' $logs | wc -l)" = 2
           grep -q '"code":"net.rollback","rollbacks":[1-9]' $logs

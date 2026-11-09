@@ -25,14 +25,14 @@ use crate::render_thread::{Drawn, Render, RenderThread, TextureChanges};
 use crate::snapshot::Snapshot;
 use crate::{App, BUILD};
 
-/// Renders offscreen, without a window, as fast as the GPU allows, with a tick of the simulation
-/// each frame, so that a run of a set number of frames runs as many ticks on any machine. Frames
-/// render on the render thread, as a windowed run's do, the last as the run ends. `api` serves
-/// tools as each frame starts; while it has paused or stopped the simulation with nothing asked of
-/// the frames, each waits up to a tick's time for a request, rather than spinning. The run starts
-/// as [`start`] says, and ends at `--frames`, at Ctrl+C, or, under `--supervised`, as stdin ends. A
-/// server's client (`--connect`) steps its simulation in real time, its frames a tick apart, as its
-/// server's go.
+/// Renders offscreen, without a window, at 1280 by 720 pixels or the size `--size` gives, as fast
+/// as the GPU allows, with a tick of the simulation each frame, so that a run of a set number of
+/// frames runs as many ticks on any machine. Frames render on the render thread, as a windowed
+/// run's do, the last as the run ends. `api` serves tools as each frame starts; while it has
+/// paused or stopped the simulation with nothing asked of the frames, each waits up to a tick's
+/// time for a request, rather than spinning. The run starts as [`start`] says, and ends at
+/// `--frames`, at Ctrl+C, or, under `--supervised`, as stdin ends. A server's client
+/// (`--connect`) steps its simulation in real time, its frames a tick apart, as its server's go.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
 /// with no UI, playing sound as one does, and its view fills its image, at the size the client
@@ -48,7 +48,7 @@ pub(crate) fn run_headless(
     let embedded = args.embedded;
     // A client's ticks keep pace with its server's, in real time.
     let real_time = embedded || matches!(args.net, Some(Net::Connect(_)));
-    let (mut width, mut height) = (1280, 720);
+    let [mut width, mut height] = args.size.unwrap_or([1280, 720]);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
     // An embedded run is the game a tool shows, as the editor plays it, which plays its sounds.

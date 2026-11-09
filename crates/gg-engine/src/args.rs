@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gg_core::{Error, Result};
+use gg_renderer::MAX_TEXTURE_SIZE;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Args {
@@ -17,6 +18,8 @@ pub(crate) struct Args {
     /// `gg run`, ends, however it ends.
     pub(crate) supervised: bool,
     pub(crate) frames: Option<u64>,
+    /// A headless run's view, its width and height in pixels, if not 1280 by 720.
+    pub(crate) size: Option<[u32; 2]>,
     /// The frame captured through RenderDoc, counting from 1.
     pub(crate) capture: Option<NonZeroU64>,
     pub(crate) gpu: Option<String>,
@@ -81,12 +84,13 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 19] = [
+const NOT_REPLAYED: [&str; 20] = [
     "--record",
     "--restore",
     "--headless",
     "--embedded",
     "--frames",
+    "--size",
     "--capture",
     "--gpu",
     "--validation",
@@ -117,6 +121,8 @@ Options:
                     supervisor that holds it, such as `gg run`, ends, however it ends; a replay
                     ends at its recording's end alone
   --frames <N>      Exit after N frames
+  --size <WxH>      With --headless, render the view W by H pixels, such as `--size 320x180`,
+                    rather than 1280 by 720
   --capture <N>     Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
   --validation      Run under Vulkan validation (the default in debug builds)
@@ -176,6 +182,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         embedded: false,
         supervised: false,
         frames: None,
+        size: None,
         capture: None,
         gpu: None,
         validation: cfg!(debug_assertions),
@@ -248,6 +255,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                     ))
                 })?;
                 parsed.frames = Some(frames);
+            }
+            "--size" => {
+                let size = value_of(flag)?;
+                parsed.size = Some(sides(&size).ok_or_else(|| {
+                    bad(format!(
+                        "`--size` takes the view's width and height in pixels, each from 1 to \
+                         {MAX_TEXTURE_SIZE}, such as `320x180`, not `{size}`"
+                    ))
+                })?);
             }
             "--capture" => {
                 let frame = value_of(flag)?;
@@ -336,6 +352,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             (parsed.record.is_some(), "--record"),
             (parsed.embedded, "--embedded"),
             (parsed.capture.is_some(), "--capture"),
+            (parsed.size.is_some(), "--size"),
             (parsed.gpu.is_some(), "--gpu"),
             (parsed.vsync, "--vsync"),
         ];
@@ -352,6 +369,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         return Err(bad(
             "`--headless` and `--embedded` each run without a window, a tick a frame or in real \
              time, so a run takes one"
+                .to_owned(),
+        ));
+    }
+    if parsed.size.is_some() && !parsed.headless {
+        return Err(bad(
+            "`--size` is of a headless run's view, as a window's view is the window's and an \
+             embedded run's the size its tool asks, so it needs `--headless`"
                 .to_owned(),
         ));
     }
@@ -426,6 +450,18 @@ fn bad(message: String) -> Error {
     Error::new("engine.args", message)
 }
 
+/// What `--size`'s `text` says, as `320x180` does: a width and a height in pixels, each from 1 to
+/// the largest side a texture takes on every device.
+fn sides(text: &str) -> Option<[u32; 2]> {
+    let (width, height) = text.split_once('x')?;
+    let side = |text: &str| {
+        text.parse()
+            .ok()
+            .filter(|side| (1..=MAX_TEXTURE_SIZE).contains(side))
+    };
+    Some([side(width)?, side(height)?])
+}
+
 /// What `--link`'s `text` says, as `100,20,5` does: the whole milliseconds each packet is held,
 /// the most more, and the percent lost, from 0 to less than 100, which would lose them all.
 fn conditions(text: &str) -> Option<Conditions> {
@@ -470,6 +506,11 @@ mod tests {
             parse_strs(&["--frames=60"]).unwrap().unwrap().frames,
             Some(60)
         );
+        assert_eq!(args.size, None);
+        for (size, expected) in [("320x180", [320, 180]), ("1x8192", [1, 8192])] {
+            let args = parse_strs(&["--headless", "--size", size]);
+            assert_eq!(args.unwrap().unwrap().size, Some(expected), "{size}");
+        }
         // A CPU for each but the render thread's.
         let cpus = std::thread::available_parallelism().unwrap().get();
         assert_eq!(
@@ -575,9 +616,11 @@ mod tests {
     #[test]
     fn a_replay_refuses_the_flags_of_a_run() {
         for flag in NOT_REPLAYED {
-            let args = ["--replay", "run.recording", flag, "1"];
+            let value = if flag == "--size" { "320x180" } else { "1" };
+            let args = ["--replay", "run.recording", flag, value];
             let takes_value = [
                 "--frames",
+                "--size",
                 "--capture",
                 "--gpu",
                 "--record",
@@ -613,6 +656,14 @@ mod tests {
             &["--frames", "2", "--capture", "3"],
             &["--threads", "0"],
             &["--threads", "x"],
+            &["--size", "320x180"],
+            &["--embedded", "--size", "320x180"],
+            &["--headless", "--size"],
+            &["--headless", "--size", "320"],
+            &["--headless", "--size", "0x180"],
+            &["--headless", "--size", "320x8193"],
+            &["--headless", "--size", "320x180x1"],
+            &["--headless", "--size", "-320x180"],
             &["--headless=yes"],
             &["--supervised=yes"],
             &["--dump", "attach"],
@@ -655,6 +706,7 @@ mod tests {
             &["--serve", "0.0.0.0:7700", "--capture", "3"],
             &["--serve", "0.0.0.0:7700", "--gpu", "amd"],
             &["--serve", "0.0.0.0:7700", "--vsync"],
+            &["--serve", "0.0.0.0:7700", "--headless", "--size", "320x180"],
             &["--stopped", "--serve", "0.0.0.0:7700"],
             &["--stopped", "--connect", "127.0.0.1:7700"],
         ] {
