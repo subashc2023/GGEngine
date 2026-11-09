@@ -3783,8 +3783,9 @@ impl Context {
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
-    /// antialiasing, exposure, sky, ambient occlusion and fog, or none, none, the default's, none,
-    /// none and none, and its lights, as the world was last drawn, and the time it was drawn at;
+    /// antialiasing, exposure, sky, ambient occlusion, fog and reflections, or none, none, the
+    /// default's, none, none, none and none, and its lights, as the world was last drawn, and the
+    /// time it was drawn at;
     /// its draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
@@ -3814,6 +3815,7 @@ impl Context {
         frame.grade = self.environment.map_or(Grade::IDENTITY, |seen| seen.grade);
         frame.ambient_occlusion = self.environment.and_then(|seen| seen.ambient_occlusion);
         frame.fog = self.environment.and_then(|seen| seen.fog);
+        frame.reflections = self.environment.and_then(|seen| seen.reflections);
         frame.atmosphere = self.environment.and_then(|seen| seen.atmosphere());
         frame.lights.clear();
         frame.lights.extend_from_slice(self.lit.lights());

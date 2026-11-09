@@ -16,7 +16,10 @@
 // many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
 // 2019), as the sample viewer's ibl.glsl and pbr.frag have it (glTF-Sample-Renderer at df3e51cb),
 // which the occlusion map and the view's ambient occlusion darken, as they darken nothing else, by
-// `ambient`. The light that casts the frame's
+// `ambient`: its diffuse light by that, and its specular light by the specular occlusion Lagarde and
+// de Rousiers derive from it and the way to the eye. Where the view's reflections found what a
+// point's mirror shows, they take the place of the sky's specular light, by `reflection`. The light
+// that casts the frame's
 // shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
 // then the material's emission, as the view shows it, make the color, which an atmosphere's haze
 // dims and adds its light to, by how far it is (aerial.slang).
@@ -198,19 +201,39 @@ float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) 
     return once + missed * once * average / (1.0 - average * missed);
 }
 
+// How much of the sky's specular light reaches a surface of `roughness`, seen at a cosine of
+// `n_dot_v`, of which `occlusion` of its light from all around does: Lagarde and de Rousiers'
+// ("Moving Frostbite to Physically Based Rendering", 2014, listing 26), of GGX's alpha, as Filament
+// takes it. A rough lobe, which gathers from all around as the diffuse does, takes `occlusion`; a
+// smooth one less where it looks along the surface, toward what hides its light, and more head-on.
+float specular_occlusion(float n_dot_v, float occlusion, float roughness) {
+    float alpha = roughness * roughness;
+    return saturate(pow(n_dot_v + occlusion, exp2(-16.0 * alpha - 1.0)) - 1.0 + occlusion);
+}
+
 // The sky's light from all around reflected by a surface of `roughness`, facing `normal` and seen
 // along `view` at a cosine of `n_dot_v`, as luminance before the exposure: a surface that diffuses
-// `diffuse_color` and reflects `f0` head-on, mixed by `metallic` with a metal of `metal` color.
+// `diffuse_color` and reflects `f0` head-on, mixed by `metallic` with a metal of `metal` color, of
+// which `occlusion` of the light reaches it, its specular light by `specular_occlusion`, and that
+// by 1 less `taken`, the share of it the view's reflection takes the place of. And, in
+// `reflectance`, how much of the light a reflection brings it reflects: the dielectric's specular
+// reflectance and the metal's, mixed by `metallic`, as its specular light is.
 float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
-                 float roughness, float3 normal, float3 view, float n_dot_v) {
+                 float roughness, float3 normal, float3 view, float n_dot_v, float occlusion,
+                 float taken, out float3 reflectance) {
     SamplerState clamp_ = samplers[LINEAR_CLAMP];
-    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * diffuse_color;
+    float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * diffuse_color
+        * occlusion;
     float level = roughness * float(frame.specular_levels - 1);
     float3 reflected = reflect(-view, normal);
-    float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb;
+    float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb
+        * (specular_occlusion(n_dot_v, occlusion, roughness) * (1.0 - taken));
     float2 table = textures[frame.brdf].SampleLevel(clamp_, float2(n_dot_v, roughness), 0.0).rg;
-    float3 dielectric = lerp(diffuse, specular, sky_reflectance(f0, roughness, n_dot_v, table));
-    float3 metal_light = sky_reflectance(metal, roughness, n_dot_v, table) * specular;
+    float3 dielectric_reflectance = sky_reflectance(f0, roughness, n_dot_v, table);
+    float3 metal_reflectance = sky_reflectance(metal, roughness, n_dot_v, table);
+    reflectance = lerp(dielectric_reflectance, metal_reflectance, metallic);
+    float3 dielectric = lerp(diffuse, specular, dielectric_reflectance);
+    float3 metal_light = metal_reflectance * specular;
     return lerp(dielectric, metal_light, metallic) * frame.sky_luminance;
 }
 
@@ -354,6 +377,49 @@ float ambient(Frame frame, uint2 pixel, float occlusion) {
     return min(occlusion, textures[frame.ambient_occlusion].Load(int3(int2(pixel), 0)).r);
 }
 
+// How rough a point of `material` is, its `surface`'s map's there, as `lit` shades it.
+float roughness_of(Material material, float4 surface) {
+    if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
+        return clamp(1.0 - material.glossiness * surface.a, LEAST_ROUGHNESS, 1.0);
+    }
+    return clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
+}
+
+// The share of the roughness past which a surface takes the sky's specular light alone, below it,
+// over which the view's reflections fade into it.
+static const float ROUGHNESS_FADE = 0.25;
+
+// The view's reflection at `pixel`, as reflections.slang traced it, for a surface of `roughness`
+// there: the light its mirror ray found, exposed, in RGB, blurred as the lobe spreads it, and how
+// much of the sky's specular light it takes the place of, in alpha, faded out toward the roughness
+// past which it takes none; 0 where its ray found nothing, and in a frame without reflections. The
+// lobe is a cone, of the angle Uludag gives Blinn-Phong's of the power GGX's alpha matches
+// ("Hi-Z Screen-Space Cone-Traced Reflections", GPU Pro 5, 2014), whose footprint where the ray
+// found what it reflects is as wide, on screen, as the level of the reflections it reads.
+float4 reflection(Frame frame, uint2 pixel, float roughness) {
+    Reflected reflected = frame.reflections;
+    if (reflected.colors == 0) {
+        return float4(0.0);
+    }
+    float fade = saturate((reflected.roughness - roughness) / (reflected.roughness * ROUGHNESS_FADE));
+    float alpha = roughness * roughness;
+    float power = 2.0 / (alpha * alpha) - 2.0;
+    float cosine = pow(0.244, 1.0 / (power + 1.0));
+    float tangent = sqrt(max(1.0 - cosine * cosine, 0.0)) / cosine;
+    float spread = textures[reflected.spread].Load(int3(int2(pixel), 0)).r;
+    float level = log2(max(2.0 * spread * tangent, 1.0));
+    Texture2D colors = textures[reflected.colors];
+    uint width;
+    uint height;
+    colors.GetDimensions(width, height);
+    float2 uv = (float2(pixel) + 0.5) / float2(width, height);
+    float4 found = colors.SampleLevel(samplers[LINEAR_CLAMP], uv, level);
+    if (!(found.a > 0.0)) {
+        return float4(0.0);
+    }
+    return float4(found.rgb / found.a, found.a * fade);
+}
+
 // Where a point is in no cluster.
 static const uint NO_CLUSTER = 0xFFFFFFFF;
 
@@ -384,10 +450,10 @@ uint cluster(Clusters clusters, float3 world) {
 // side its corners wind counterclockwise from in its mesh, which a transform that mirrors shows
 // winding the other way, and what its maps hold there: its base `color`, its vertices' and its
 // factor's in, its `surface`'s map, its normal map's X and Y, from -1 to 1, its occlusion and its
-// emission.
+// emission; and the view's `reflection` there, as `reflection` gives it, or 0 for none.
 float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
            bool front, float4 color, float4 surface, float2 mapped, float occlusion,
-           float3 emission) {
+           float3 emission, float4 reflection) {
     if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
         return color;
     }
@@ -411,20 +477,18 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
     // What it diffuses and reflects head-on, which the frame's lights shade; and for the sky's
     // light, a dielectric's, which it mixes with a metal's by how metallic it is.
     float metallic = 0.0;
-    float roughness;
+    float roughness = roughness_of(material, surface);
     float3 diffuse_color;
     float3 f0;
     float3 sky_diffuse;
     float3 sky_f0;
     if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
         f0 = material.specular * surface.rgb;
-        roughness = clamp(1.0 - material.glossiness * surface.a, LEAST_ROUGHNESS, 1.0);
         diffuse_color = color.rgb * (1.0 - max(max(f0.r, f0.g), f0.b));
         sky_diffuse = diffuse_color;
         sky_f0 = f0;
     } else {
         metallic = saturate(material.metallic * surface.b);
-        roughness = clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
         diffuse_color = color.rgb * (1.0 - metallic);
         f0 = lerp(float3(0.04), color.rgb, metallic);
         sky_diffuse = color.rgb;
@@ -470,11 +534,16 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         }
     }
     float n_dot_v = lit.n_dot_v;
+    // The view's reflection, exposed already, as the colors it was found in are, so that neither
+    // the sky's luminance nor the exposure scales it: in place of the share of the sky's specular
+    // light it takes, as much of it as that light's reflectance reflects.
+    float3 mirrored = float3(0.0);
     if (frame.specular_levels > 0) {
+        float3 reflectance;
         light_sum += sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
-                               view, n_dot_v)
-            * occlusion;
+                               view, n_dot_v, occlusion, reflection.a, reflectance);
+        mirrored = reflection.rgb * reflection.a * reflectance;
     }
-    float3 shaded = hazed(frame, world, light_sum * frame.exposure + emission);
+    float3 shaded = hazed(frame, world, light_sum * frame.exposure + mirrored + emission);
     return float4(min(shaded, BRIGHTEST), color.a);
 }

@@ -57,6 +57,8 @@ pub(crate) struct Extracted {
     pub(crate) ambient_occlusion: Option<gg_renderer::AmbientOcclusion>,
     /// The world's fog, as its environment has it.
     pub(crate) fog: Option<gg_renderer::Fog>,
+    /// The view's reflections, as the world's environment has them.
+    pub(crate) reflections: Option<gg_renderer::Reflections>,
     /// The world's atmosphere, as its environment has it.
     pub(crate) atmosphere: Option<gg_renderer::Atmosphere>,
     /// The simulation's time in seconds as the world was drawn.
@@ -148,6 +150,7 @@ impl Default for Extracted {
             grade: gg_renderer::Grade::IDENTITY,
             ambient_occlusion: None,
             fog: None,
+            reflections: None,
             atmosphere: None,
             time: 0.0,
             viewport: Viewport {
@@ -254,6 +257,7 @@ impl Render for Renderer {
             grade: frame.grade,
             ambient_occlusion: frame.ambient_occlusion,
             fog: frame.fog,
+            reflections: frame.reflections,
             atmosphere: frame.atmosphere,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,

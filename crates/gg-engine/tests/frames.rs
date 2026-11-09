@@ -11,7 +11,8 @@
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
 //! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
-//! by ambient occlusion and fogs it, its sky an atmosphere whose sun the ticks raise, its light
+//! by ambient occlusion, fogs it and reflects what it shows, its sky an atmosphere whose sun the
+//! ticks raise, its light
 //! prefiltered again each degree it rises, run through the engine's main loop headless, without
 //! the tool API, whose development runs' watchers of the assets' files allocate as they look,
 //! three fifths of a tick apart, so that they draw between ticks, once its first frames have run,
@@ -53,8 +54,8 @@ use gg_engine::{
     Actions, Align, App, Atmosphere, Binding, Blend, BoxCollider2D, Camera, Change, Circle,
     CircleCollider2D, Component, Context, Entity, Environment, Event, Fog, Font, GameUi, Grade,
     Key, Layer, Light, Mesh, MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter, Pick,
-    Projection, Shader, Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick,
-    Transform, World,
+    Projection, Reflections, Shader, Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture,
+    Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -360,8 +361,9 @@ impl Layer for Scene {
         // The default environment's, which antialiases the view, resolving it against the frames
         // before, blooms it, and darkens its sky's light by ambient occlusion, but graded, which
         // bakes its grade's table each frame, under an atmosphere, whose sun the ticks turn and
-        // which the occlusion needs as a sky, and in the default fog, which a pass of its own fogs
-        // what's opaque by and what blends draws over in another.
+        // which the occlusion needs as a sky, in the default fog, which a pass of its own fogs
+        // what's opaque by and what blends draws over in another, and reflecting, which traces
+        // the view's depth against the colors each frame keeps for the next.
         world.spawn(Environment {
             sky: Sky::Atmosphere(Atmosphere::default()),
             grade: Grade {
@@ -369,6 +371,7 @@ impl Layer for Scene {
                 ..Grade::IDENTITY
             },
             fog: Some(Fog::default()),
+            reflections: Some(Reflections::default()),
             ..Environment::default()
         });
         self.sun = Some(world.spawn((sun_at(0), Light::default())));

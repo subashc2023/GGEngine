@@ -70,13 +70,14 @@ impl AmbientOcclusion {
 /// What takes the view's pixels back into its space, as `Push` in `shaders/ao.slang` has it: a
 /// point's X and Y there over its depth, from its texture coordinates in the view, from its top
 /// left, `(view_mul * uv + view_add) * depth`; and its view-space depth, its distance ahead of the
-/// view, from the view's depth, `z`, `depth_mul / (depth_add + z)`.
+/// view, from the view's depth, `z`, `depth_mul / (depth_add + z)`; as the reflections' trace takes
+/// it too.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Unprojection {
-    view_mul: Vec2,
-    view_add: Vec2,
-    depth_mul: f32,
-    depth_add: f32,
+pub(crate) struct Unprojection {
+    pub(crate) view_mul: Vec2,
+    pub(crate) view_add: Vec2,
+    pub(crate) depth_mul: f32,
+    pub(crate) depth_add: f32,
 }
 
 impl Unprojection {
@@ -86,7 +87,7 @@ impl Unprojection {
     /// `(row0.x * x - row0.z * d) / d`, and Y alike, and its depth `(row2.w - row2.z * d) / d`,
     /// which this solves for X, Y and `d`. A view's normalized coordinates are `uv * 2 - 1`, Y down
     /// as Vulkan's clip space has it, so that the Y found is the view space's, up.
-    fn new(clip_from_view: Mat4) -> Self {
+    pub(crate) fn new(clip_from_view: Mat4) -> Self {
         let [row0, row1, row2] = [0, 1, 2].map(|row| clip_from_view.row(row));
         Self {
             view_mul: Vec2::new(2.0 / row0.x, 2.0 / row1.y),

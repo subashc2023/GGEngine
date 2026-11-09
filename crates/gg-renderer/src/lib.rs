@@ -6,8 +6,9 @@
 //! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, an image or
 //! an atmosphere made from its sun, which shows behind them, prefiltered on the GPU, its light
-//! darkened by ambient occlusion from the view's depth, the atmosphere hazing what's far, opaque
-//! and masked ones drawn by their meshlets shaded from
+//! darkened by ambient occlusion from the view's depth, and its specular light given way to the
+//! reflections of what the view shows, traced through that depth, the atmosphere hazing what's
+//! far, opaque and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
 //! view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, antialiased against the frames before it,
@@ -35,6 +36,7 @@ mod model;
 mod packed;
 mod particles;
 mod pick;
+mod reflections;
 mod shader;
 mod shadow;
 mod skin;
@@ -84,6 +86,7 @@ pub use packed::{
 };
 pub use particles::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Particles};
 pub use pick::{MAX_PICKS, Pick};
+pub use reflections::Reflections;
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sky::Sky;
 pub use sprite::{Sprite, SpriteSheet};
@@ -105,6 +108,7 @@ use fog::{FogData, FogPass};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
+use reflections::{ReflectionData, ReflectionPass};
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use skin::{SkinPlan, Skinning};
 use sky::{SkyData, SkyLight, SkyPass, Source};
@@ -300,6 +304,13 @@ pub struct RenderData<'a> {
     /// models, particles, sprites, circles and text, but not lines or grids, which are for seeing
     /// by, nor the canvas. `None`, or fog of no density, fogs nothing.
     pub fog: Option<Fog>,
+    /// How the view reflects what it shows, if at all, as [`Reflections`] says: in place of the
+    /// sky's specular light on what's opaque, traced through the view's depth against the colors
+    /// the frame before showed, antialiased, before its bloom, its grade and its canvas, which each
+    /// frame that reflects keeps; in a frame whose view a sky lights, seen through a perspective,
+    /// that the frame before kept those colors for, at its size, where something opaque draws, and
+    /// in no other, which keeps them alone, or, without a sky or a perspective, runs none of it.
+    pub reflections: Option<Reflections>,
     /// The atmosphere, which the view shows behind the world in place of `sky`, and lights it by
     /// from all around, as it would an image sky, under its sun, the brightest of the directional
     /// lights that shine, the first of those as bright: its tables made in every frame that renders
@@ -468,6 +479,10 @@ pub struct Renderer {
     particles: ParticlePass,
     /// What computes the view's ambient occlusion.
     ao: AoPass,
+    /// What traces the view's reflections and keeps its colors for them, and the images it keeps
+    /// them in, apart from it, as frames take them as targets while they record its passes.
+    reflections: ReflectionPass,
+    reflected: reflections::Images,
 }
 
 enum Output {
@@ -505,12 +520,15 @@ struct ViewPasses {
     /// What shades the view from its visibility buffer, and draws the rest over that, if it has
     /// one.
     shaded: Option<ShadedPasses>,
-    /// What computes its ambient occlusion, if it has any.
-    ao: Option<AoPasses>,
+    /// What computes its ambient occlusion and traces its reflections, if it has either.
+    early: Option<EarlyPasses>,
     /// What fogs what's opaque in it, and draws what blends over that, if it's in fog.
     fog: Option<FogPasses>,
     /// What resolves it, antialiased, if it's antialiased.
     taa: Option<taa::Plan>,
+    /// What keeps its colors, as drawn and resolved, for the next frame's reflections, if it
+    /// reflects.
+    keep: Option<reflections::Keep>,
     /// What blooms and grades it, if it does either.
     bloom: Option<bloom::Plan>,
     /// What draws its canvas, if it has one, in a pass of its own, if the view is antialiased,
@@ -540,16 +558,28 @@ struct ShadedPasses {
     rest: PassId,
 }
 
-/// The game's view's ambient occlusion, in a frame's graph, which needs the depth of what's opaque
-/// in the view before any of it shades: beside a visibility buffer, which has the depth of what
-/// it draws, the pass that draws the depth alone of the culled runs drawn otherwise, if any may be,
-/// into an image of its own; the occlusion, from the depths; and without a visibility buffer, whose
-/// view's first and second passes draw the depth alone of every culled run, the pass that draws the
-/// view after, shaded, as those would have.
-struct AoPasses {
+/// The game's view's ambient occlusion and reflections, in a frame's graph, which need the depth of
+/// what's opaque in the view before any of it shades: beside a visibility buffer, which has the
+/// depth of what it draws, the pass that draws the depth alone of the culled runs drawn otherwise,
+/// if any may be, into an image of its own; the occlusion and the reflections, if the view has
+/// them, from the depths; and without a visibility buffer, whose view's first and second passes
+/// draw the depth alone of every culled run, the pass that draws the view after, shaded, as those
+/// would have.
+struct EarlyPasses {
     depth: Option<PassId>,
-    plan: ao::Plan,
+    ao: Option<ao::Plan>,
+    reflections: Option<reflections::Plan>,
     view: Option<PassId>,
+}
+
+impl EarlyPasses {
+    /// What the passes that shade the view sample of them: the ambient occlusion and the
+    /// reflections, those the view has.
+    fn sampled(&self) -> [Option<ImageId>; 3] {
+        let reflected = (self.reflections.as_ref()).map(reflections::Plan::sampled);
+        let [colors, spread] = [0, 1].map(|i| reflected.map(|images| images[i]));
+        [self.ao.as_ref().map(ao::Plan::image), colors, spread]
+    }
 }
 
 /// The game's view's fog, in a frame's graph: the pass that fogs its colors once what's opaque has
@@ -729,6 +759,8 @@ impl Renderer {
             skinning: Skinning::new(device)?,
             particles: ParticlePass::new(device)?,
             ao: AoPass::new(device)?,
+            reflections: ReflectionPass::new(device)?,
+            reflected: reflections::Images::default(),
         })
     }
 
@@ -974,6 +1006,20 @@ impl Renderer {
         let perspective = matches!(data.viewpoint.projection, Projection::Perspective { .. });
         let occluded = (data.ambient_occlusion)
             .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
+        // The view's reflections, where they show anything: in place of the sky's specular light,
+        // under a perspective, whose depth they're traced through, against the colors the frame
+        // before kept, which each frame that reflects keeps for the next, in images of the view's
+        // size, let go of by a frame that renders the view without.
+        let reflected = (data.reflections)
+            .filter(|reflections| reflections.reflects() && sky.is_some() && perspective);
+        if reflected.is_some() {
+            self.reflected.prepare(&self.device, data.viewport.size)?;
+        } else if renders_view {
+            self.reflected.forget();
+        }
+        // Traced against the colors the frame before kept, if it kept them at this size, and how
+        // that frame drew them.
+        let traced = reflected.zip(self.reflected.traced_against(number, data.viewport.size));
         if renders_view {
             self.lighting.order(shining, &data.viewpoint);
         } else {
@@ -996,6 +1042,9 @@ impl Renderer {
         // windows'.
         let resolved = 1 + windows_drawn;
         let resolves = if antialiased { 2 } else { 0 };
+        // The reflections' images are the targets after those.
+        let reflections_first = resolved + resolves;
+        let reflects = if reflected.is_some() { 2 } else { 0 };
         // First, the atmosphere's tables, if the frame shows one, which the view samples and its
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
@@ -1007,7 +1056,7 @@ impl Renderer {
         // targets after those. A frame that doesn't takes the light from those before.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
-                let first = resolved + resolves;
+                let first = reflections_first + reflects;
                 let sampled = tables.as_ref().map(atmosphere::Plan::sky_view);
                 let sky_light = &mut self.sky_light;
                 Some(sky_light.plan(&self.device, graph, first, source, sampled)?)
@@ -1091,12 +1140,13 @@ impl Renderer {
             // A pass of the view's, named `label`, that draws over what the passes before it drew,
             // shading as it draws: taking what `kept` keeps, if it's given a culling, and reading
             // the skinned meshes' vertices, the particles' pool and the lights' clusters, and
-            // sampling what the draws light by, and the view's ambient occlusion, `occlusion`, if
-            // it has any for what the pass draws.
+            // sampling what the draws light by, and the view's ambient occlusion and reflections,
+            // `early`, those it has for what the pass draws.
             let shading =
-                |graph: &mut Graph, label, kept: Option<&CullPlan>, occlusion: Option<ImageId>| {
+                |graph: &mut Graph, label, kept: Option<&CullPlan>, early: [Option<ImageId>; 3]| {
                     let pass = particled(born, culled(kept, skinned(skin, graph.render(label))));
-                    let pass = binned(clusters.as_ref(), sampling(lit().chain(occlusion), pass));
+                    let sampled = lit().chain(early.into_iter().flatten());
+                    let pass = binned(clusters.as_ref(), sampling(sampled, pass));
                     pass.keep(hdr).keep(ids).keep(motion).keep(depth).add()
                 };
             // Where the view culls runs drawn by their meshlets, those of the opaque and masked
@@ -1105,24 +1155,25 @@ impl Renderer {
             let visibility = (cull.as_ref())
                 .filter(|cull| visibility_buffer && cull.by_meshlets())
                 .map(|_| graph.visibility("view visibility", size));
-            // The ambient occlusion takes the depth of what's opaque before any of it shades, where
-            // something is: what's drawn otherwise than into a visibility buffer, if anything may
-            // be, draws its depth alone first, into an image of its own; without one, in the view's
-            // first and second passes, and the view then draws all again, shaded, in one pass.
-            let occluding = occluded.filter(|_| cull.is_some());
+            // The ambient occlusion and the reflections take the depth of what's opaque before any
+            // of it shades, where something is: what's drawn otherwise than into a visibility
+            // buffer, if anything may be, draws its depth alone first, into an image of its own;
+            // without one, in the view's first and second passes, and the view then draws all
+            // again, shaded, in one pass.
+            let early = cull.is_some() && (occluded.is_some() || traced.is_some());
             let by_indices = (cull.as_ref()).is_some_and(CullPlan::by_indices);
-            let occlusion_depth = (occluding.filter(|_| visibility.is_none() || by_indices))
-                .map(|_| graph.depth("ambient occlusion depth", size));
-            let forward_depth = occlusion_depth.filter(|_| visibility.is_none());
+            let opaque_depth = (early && (visibility.is_none() || by_indices))
+                .then(|| graph.depth("opaque depth", size));
+            let forward_depth = opaque_depth.filter(|_| visibility.is_none());
             let first = match (visibility, forward_depth) {
                 (Some(visibility), _) => {
                     let first = skinned(skin, graph.render(label!("view visibility")));
                     let first = culled(cull.as_ref(), first);
                     first.visibility(visibility).ids(ids).depth(depth)
                 }
-                (None, Some(occlusion_depth)) => {
-                    let first = skinned(skin, graph.render(label!("ambient occlusion depth")));
-                    culled(cull.as_ref(), first).depth(occlusion_depth)
+                (None, Some(opaque_depth)) => {
+                    let first = skinned(skin, graph.render(label!("opaque depth")));
+                    culled(cull.as_ref(), first).depth(opaque_depth)
                 }
                 (None, None) => {
                     let first = skinned(skin, graph.render(label!("view")));
@@ -1150,49 +1201,54 @@ impl Renderer {
                             .keep(depth)
                             .add()
                     }
-                    (None, Some(occlusion_depth)) => {
-                        let label = label!("ambient occlusion depth second");
+                    (None, Some(opaque_depth)) => {
+                        let label = label!("opaque depth second");
                         let second = cull.drawn(skinned(skin, graph.render(label)));
-                        second.keep(occlusion_depth).add()
+                        second.keep(opaque_depth).add()
                     }
-                    (None, None) => shading(graph, label!("view second"), Some(&*cull), None),
+                    (None, None) => shading(graph, label!("view second"), Some(&*cull), [None; 3]),
                 }
             });
             // Beside a visibility buffer, the depth of the culled runs drawn otherwise, if any may
-            // be; then the occlusion, from the nearer of the two depths; and without one, the view,
-            // shaded.
-            let ao = occluding.map(|_| {
-                let rest = visibility.zip(occlusion_depth).map(|(_, occlusion_depth)| {
-                    let rest = skinned(skin, graph.render(label!("ambient occlusion depth")));
-                    culled(cull.as_ref(), rest).depth(occlusion_depth).add()
+            // be; then the occlusion and the reflections, from the nearer of the two depths; and
+            // without one, the view, shaded.
+            let early = early.then(|| {
+                let rest = visibility.zip(opaque_depth).map(|(_, opaque_depth)| {
+                    let rest = skinned(skin, graph.render(label!("opaque depth")));
+                    culled(cull.as_ref(), rest).depth(opaque_depth).add()
                 });
-                let alone = occlusion_depth.unwrap_or(depth);
+                let alone = opaque_depth.unwrap_or(depth);
                 let depths = [if visibility.is_some() { depth } else { alone }, alone];
-                let plan = AoPass::plan(graph, depths, size, antialiased);
-                let occlusion = iter::once(plan.image());
-                let view = visibility.is_none().then(|| {
+                let ao = occluded.map(|_| AoPass::plan(graph, depths, size, antialiased));
+                let reflections =
+                    (traced).map(|_| ReflectionPass::plan(graph, reflections_first, depths, size));
+                let mut early = EarlyPasses {
+                    depth: rest,
+                    ao,
+                    reflections,
+                    view: None,
+                };
+                let sampled = early.sampled().into_iter().flatten();
+                early.view = visibility.is_none().then(|| {
                     let view = skinned(skin, graph.render(label!("view")));
                     let view = particled(born, culled(cull.as_ref(), view));
-                    let view = binned(clusters.as_ref(), sampling(lit().chain(occlusion), view));
+                    let view = binned(clusters.as_ref(), sampling(lit().chain(sampled), view));
                     let view = view.clear(hdr, data.clear_color).ids(ids).motion(motion);
                     view.depth(depth).add()
                 });
-                AoPasses {
-                    depth: rest,
-                    plan,
-                    view,
-                }
+                early
             });
-            let occlusion = ao.as_ref().map(|ao| ao.plan.image());
+            let sampled_early = early.as_ref().map_or([None; 3], EarlyPasses::sampled);
             let shaded = visibility.zip(cull.as_ref()).map(|(visibility, cull)| {
                 let shade = graph.compute(label!("view shading")).sample(visibility);
-                let shade = lit().chain(occlusion).fold(shade, ComputePass::sample);
+                let shade = (lit().chain(sampled_early.into_iter().flatten()))
+                    .fold(shade, ComputePass::sample);
                 let shade = match &clusters {
                     Some(clusters) => shade.read_buffer(clusters.buffer),
                     None => shade,
                 };
                 let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
-                let rest = shading(graph, label!("view rest"), Some(cull), occlusion);
+                let rest = shading(graph, label!("view rest"), Some(cull), sampled_early);
                 ShadedPasses {
                     visibility,
                     shade,
@@ -1207,7 +1263,7 @@ impl Renderer {
                 let sky_light = plan.iter().flat_map(sky::Plan::sampled);
                 FogPasses {
                     plan: FogPass::plan(graph, size, depth, hdr, sky_light),
-                    blended: shading(graph, label!("view blended"), None, None),
+                    blended: shading(graph, label!("view blended"), None, [None; 3]),
                 }
             });
             // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
@@ -1217,7 +1273,8 @@ impl Renderer {
             // the colors the view shows, before the canvas, so that a game's UI neither blooms nor
             // is graded; then the canvas, if there is one, which isn't antialiased, in a pass of
             // its own over what the view shows, where the view's last pass doesn't draw it, as when
-            // the resolve, bloom or the grade follows it.
+            // the resolve, bloom or the grade follows it. Reflecting, the colors as resolved, before
+            // bloom, the grade and the canvas, are kept for the next frame's reflections.
             let blooms = bloom::blooms(data.bloom, size);
             let grades = !data.grade.is_identity();
             let taa = antialiased.then(|| {
@@ -1226,14 +1283,16 @@ impl Renderer {
                 taa.plan(graph, resolved, number, size, drawn, apart)
             });
             let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
+            let keep = (reflected)
+                .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
             let bloom =
                 (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
-            let canvas =
-                (!data.canvas.is_empty() && (taa.is_some() || bloom.is_some())).then(|| {
-                    let canvas = graph.render(label!("canvas"));
-                    let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
-                    (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
-                });
+            let apart = taa.is_some() || bloom.is_some() || keep.is_some();
+            let canvas = (!data.canvas.is_empty() && apart).then(|| {
+                let canvas = graph.render(label!("canvas"));
+                let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
+                (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
+            });
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
@@ -1265,9 +1324,10 @@ impl Renderer {
                 first,
                 second,
                 shaded,
-                ao,
+                early,
                 fog,
                 taa,
+                keep,
                 bloom,
                 canvas,
                 shown,
@@ -1298,10 +1358,12 @@ impl Renderer {
             .filter(|(key, _)| has_ui(key))
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
         let history = antialiased.then(|| self.history.targets());
+        let kept = reflected.is_some().then(|| self.reflected.targets());
         let lit = (plan.is_some()).then(|| self.sky_light.targets());
         let targets = iter::once(target)
             .chain(others)
             .chain(history.into_iter().flatten())
+            .chain(kept.into_iter().flatten())
             .chain(lit.into_iter().flatten());
         let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
             // The births the frame planned aren't written.
@@ -1348,6 +1410,9 @@ impl Renderer {
             }
             pass.prefilter(&mut frame, plan);
         }
+        // Whether the frame keeps the view's colors for the next frame's reflections, which it
+        // notes once it's submitted.
+        let keeps = (view.as_ref()).is_some_and(|view| view.keep.is_some());
         // What the view shows, how much of its area that covers, what its draws that weren't
         // culled drew, and whether the frame culled any.
         let (counts, view, culled) = match (view, pixels_shown) {
@@ -1420,6 +1485,7 @@ impl Renderer {
                     unused: 0,
                     fog: FogData::default(),
                     aerial: AerialData::default(),
+                    reflections: ReflectionData::default(),
                 };
                 // What the casters and what's drawn into the visibility buffer read of the frame's
                 // data, all but what the view alone samples.
@@ -1445,8 +1511,13 @@ impl Renderer {
                 let (view_lights, clusters) =
                     (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
                 // The view's data, as the pass that shades it samples the sky's light, the
-                // shadows' maps and the ambient occlusion through the indices `sampled` gives.
-                let occlusion = view.ao.as_ref().map(|ao| ao.plan.image());
+                // shadows' maps, the ambient occlusion and the reflections through the indices
+                // `sampled` gives.
+                let early = view.early.as_ref();
+                let occlusion = early
+                    .and_then(|early| early.ao.as_ref())
+                    .map(ao::Plan::image);
+                let reflections = early.and_then(|early| early.reflections.as_ref());
                 let view_data = |sampled: &dyn Fn(ImageId) -> u32| {
                     let lit = match (&plan, sky) {
                         (Some(plan), Some((_, luminance))) => Some(plan.data(sampled, luminance)),
@@ -1470,19 +1541,47 @@ impl Renderer {
                         ambient_occlusion: occlusion.map_or(0, sampled),
                         fog: FogData::new(data.fog, sky, shining, data.exposure),
                         aerial: aerial.unwrap_or_default(),
+                        reflections: (reflections.zip(traced))
+                            .map(|(plan, (settings, _))| plan.data(sampled, &settings))
+                            .unwrap_or_default(),
                         ..shared
                     };
                     (shared, lit)
                 };
-                // The ambient occlusion's view, from its space to its clip space, offset as the
-                // frame draws it.
+                // The ambient occlusion's and the reflections' view, from its space to its clip
+                // space, offset as the frame draws it; and the reflections', from its space to the
+                // world.
+                let clip_from_view = taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect);
                 let occlusion_seen = occluded.map(|settings| ao::Seen {
-                    clip_from_view: taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect),
+                    clip_from_view,
                     settings,
                     frame: number,
                 });
-                // The depth alone of the culled runs `runs` keeps, for the ambient occlusion: all
-                // of them, or, `beside_visibility`, those drawn otherwise than into it.
+                let reflections_seen =
+                    traced.map(|(settings, kept_clip_from_world)| reflections::Seen {
+                        clip_from_view,
+                        world_from_view: Mat4::from_rotation_translation(
+                            data.viewpoint.rotation,
+                            data.viewpoint.position,
+                        ),
+                        kept_clip_from_world,
+                        settings,
+                    });
+                // The occlusion and the reflections, those `early` has, the next of the frame's
+                // passes.
+                let (ao_pass, reflection_pass) = (&self.ao, &self.reflections);
+                let record_early = |frame: &mut gg_gpu::Frame<'_>, early: &EarlyPasses| {
+                    if let (Some(plan), Some(seen)) = (&early.ao, &occlusion_seen) {
+                        ao_pass.record(frame, plan, seen)?;
+                    }
+                    if let (Some(plan), Some(seen)) = (&early.reflections, &reflections_seen) {
+                        reflection_pass.record(frame, plan, seen)?;
+                    }
+                    Ok::<_, Error>(())
+                };
+                // The depth alone of the culled runs `runs` keeps, for the ambient occlusion and the
+                // reflections: all of them, or, `beside_visibility`, those drawn otherwise than
+                // into it.
                 let meshes = &self.meshes;
                 let draw_depth = |pass: &mut gg_gpu::Pass<'_, '_>, runs, beside_visibility| {
                     let way = Way::Depth { beside_visibility };
@@ -1491,11 +1590,11 @@ impl Renderer {
                 };
                 let shades = view.shaded.as_ref().zip(view.cull.as_ref());
                 // Beside a visibility buffer, what's drawn into it, in the view's two passes, then
-                // the ambient occlusion, if any, and the view's shading, which the view's data is
-                // uploaded in, then the pass the rest draws in; or else, with ambient occlusion, the
-                // depth of what the view's two passes keep, the occlusion, and the pass that draws
-                // all of it, shaded; or else the view's first pass, which takes the culled runs it
-                // kept.
+                // the ambient occlusion and the reflections, if any, and the view's shading, which
+                // the view's data is uploaded in, then the pass the rest draws in; or else, with
+                // ambient occlusion or reflections, the depth of what the view's two passes keep,
+                // the occlusion and the reflections, and the pass that draws all of it, shaded; or
+                // else the view's first pass, which takes the culled runs it kept.
                 let (mut pass, shared, frame_data, lit) = if let Some((shaded, plan)) = shades {
                     let mut pass = (frame.render(view.first))
                         .expect("the graph's own images are always there");
@@ -1530,15 +1629,15 @@ impl Renderer {
                         None,
                     )?;
                     drop(pass);
-                    if let (Some(ao), Some(seen)) = (&view.ao, &occlusion_seen) {
-                        if let Some(rest) = ao.depth {
+                    if let Some(early) = &view.early {
+                        if let Some(rest) = early.depth {
                             let mut pass = (frame.render(rest))
                                 .expect("the graph's own images are always there");
                             for slot in [FIRST, plan.second()] {
                                 draw_depth(&mut pass, Runs::Culled(plan, slot), true)?;
                             }
                         }
-                        self.ao.record(&mut frame, &ao.plan, seen)?;
+                        record_early(&mut frame, early)?;
                     }
                     let mut shade = frame.compute(shaded.shade);
                     let (frame_data, lit) = view_data(&|image| shade.sampled(image));
@@ -1557,9 +1656,7 @@ impl Renderer {
                     let pass = (frame.render(shaded.rest))
                         .expect("the graph's own images are always there");
                     (pass, shared, frame_data, lit)
-                } else if let (Some(ao), Some(plan), Some(seen)) =
-                    (&view.ao, &view.cull, &occlusion_seen)
-                {
+                } else if let (Some(early), Some(plan)) = (&view.early, &view.cull) {
                     let mut pass = (frame.render(view.first))
                         .expect("the graph's own images are always there");
                     draw_depth(&mut pass, Runs::Culled(plan, FIRST), false)?;
@@ -1570,10 +1667,11 @@ impl Renderer {
                         (frame.render(second)).expect("the graph's own images are always there");
                     draw_depth(&mut pass, Runs::Culled(plan, plan.second()), false)?;
                     drop(pass);
-                    self.ao.record(&mut frame, &ao.plan, seen)?;
-                    let shading = ao
-                        .view
-                        .expect("the view draws after the occlusion without a visibility buffer");
+                    record_early(&mut frame, early)?;
+                    let shading = early.view.expect(
+                        "the view draws after the occlusion and the reflections without a \
+                         visibility buffer",
+                    );
                     let mut pass =
                         (frame.render(shading)).expect("the graph's own images are always there");
                     let (frame_data, lit) = view_data(&|image| pass.sampled(image));
@@ -1632,7 +1730,7 @@ impl Renderer {
                 // or, beside a visibility buffer or after the ambient occlusion, in the same pass,
                 // as its culling has run.
                 if let (Some(plan), Some(second)) = (&view.cull, view.second) {
-                    if shades.is_none() && view.ao.is_none() {
+                    if shades.is_none() && view.early.is_none() {
                         drop(pass);
                         self.meshes.cull_second(&mut frame, plan)?;
                         pass = (frame.render(second))
@@ -1682,11 +1780,12 @@ impl Renderer {
                 }
                 // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
                 // what the view shows, in its own pass, if it has one; without the view's ambient
-                // occlusion, which is of the depth the view's own passes draw, or its fog or its
-                // atmosphere's haze, as it's drawn in the view's own space.
+                // occlusion or reflections, which are of the depth the view's own passes draw, or
+                // its fog or its atmosphere's haze, as it's drawn in the view's own space.
                 let canvas_data = if frame_data.ambient_occlusion == 0
                     && view.fog.is_none()
                     && frame_data.aerial == AerialData::default()
+                    && frame_data.reflections == ReflectionData::default()
                 {
                     shared
                 } else {
@@ -1694,6 +1793,7 @@ impl Renderer {
                         ambient_occlusion: 0,
                         fog: FogData::default(),
                         aerial: AerialData::default(),
+                        reflections: ReflectionData::default(),
                         ..frame_data
                     };
                     pass.upload(bytemuck::bytes_of(&unoccluded))?.address()
@@ -1728,6 +1828,9 @@ impl Renderer {
                         jitter,
                     };
                     self.taa.resolve(&mut frame, plan, drawn)?;
+                }
+                if let Some(keep) = &view.keep {
+                    self.reflections.keep(&mut frame, keep);
                 }
                 if let Some(plan) = &view.bloom {
                     self.bloom.record(&mut frame, plan, data.bloom, &data.grade);
@@ -1829,6 +1932,9 @@ impl Renderer {
         frame.submit()?;
         if let Some(plan) = &plan {
             self.sky_light.prefiltered(plan);
+        }
+        if keeps {
+            self.reflected.kept(number, size, unjittered);
         }
         self.waited = self.frames.waited();
         Ok(true)

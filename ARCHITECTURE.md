@@ -1665,7 +1665,8 @@ as they're colored. Its antialiasing is temporal, as below, by default, or none,
 without an environment gets too, each pixel what's at its center. It blooms the view, subtly by
 default, and grades its light, by the identity by default, as below, and a world without one does
 neither. Its ambient occlusion, on by default, darkens the sky's light where what's near a point
-hides it, as below. The clear color, which a sky takes the place of, is tonemapped with what's
+hides it, and its reflections, off by default, show in what's opaque what the view shows, as
+below. The clear color, which a sky takes the place of, is tonemapped with what's
 drawn, as the sky is. Its exposure, in EV100, scales
 light: lit shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades,
 which keeps a sunny day's light within 16-bit floats, and a world without an environment is
@@ -1678,8 +1679,9 @@ from, the camera's position, or for an orthographic projection, which sees along
 back toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
 through the bindless set's sampler that compares; the clusters the lights are binned into; the
-view's ambient occlusion; the fog the view is in; and an atmosphere's haze, its froxels and where
-a point falls among them. Fields are added at its end, so that games' shaders that read the fields
+view's ambient occlusion; the fog the view is in; an atmosphere's haze, its froxels and where a
+point falls among them; and the view's reflections. Fields are added at its end, so that games'
+shaders that read the fields
 before them keep to the contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
@@ -1713,7 +1715,8 @@ its diffuse color times 1 less that color's strongest channel, and is as rough a
 glossiness, its map's specular color sRGB-encoded and its glossiness, in alpha, as stored. Light times
 the exposure, then the material's emission, as the view shows it rather than exposed, make the
 color, so that an emissive white shows as white under any light. Occlusion, a material's map's and
-the view's ambient occlusion, as below, darkens only light from all around, the sky's. A material
+the view's ambient occlusion, as below, darkens only light from all around, the sky's, and the
+view's reflections, as below, take the place of only its specular light. A material
 that KHR_materials_unlit makes unlit, and every material in a
 frame without lights or a sky, draws its base color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
 corners apart, as glTF says, but one whose material is unlit, which reads none; a lit material's
@@ -2404,7 +2407,13 @@ image of the graph's own of a float a pixel, the fraction of the light from all 
 reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
 light, never the lights', by the less of that and the material's occlusion map: both estimate how
 much of the same light reaches the point, the map at its texels' scale, so that their product would
-darken twice where both see one occluder, as Filament takes them. What blends shows over what's
+darken twice where both see one occluder, as Filament takes them. That darkens the sky's diffuse
+light; its specular light is darkened by the specular occlusion Lagarde and de Rousiers derive from
+it, of the way to the eye and GGX's alpha, as Filament takes it ("Moving Frostbite to Physically
+Based Rendering", 2014): a rough lobe, which gathers from all around as the diffuse does, as much
+as the diffuse, and a smooth one less head-on and more where it looks along the surface, toward
+what hides its light; so too where there's no ambient occlusion and a material's map alone darkens
+it. What blends shows over what's
 opaque, whose occlusion this is, and takes none. Games' shaders can read it, through the frame's
 data, a texture loaded at a fragment's pixel, in the view's own passes; the canvas's frame data
 names none.
@@ -2414,7 +2423,8 @@ alone of the culled runs drawn otherwise, where any may be, games' opaque shader
 and those without meshlets, into a depth image of its own, through a pipeline of each shader's
 vertex shader alone,
 as its shadows are drawn but neither clamped nor set back, the masked model shader's cut out as
-what it draws is, and the occlusion takes the nearer of the two depths at each pixel. Without one,
+what it draws is, and the occlusion, and the reflections, below, which need the depth too, take
+the nearer of the two depths at each pixel. Without one,
 the view's first and second passes draw that depth alone of every culled run, the depth pyramid
 built from the first's, and the view then draws all of it again, shaded, in one pass that clears
 its depth, in fog all but what blends, which draws after the fog's pass, rather than over the depth
@@ -2423,6 +2433,51 @@ alone doesn't, and two pipelines aren't bound to place a vertex alike. So what's
 as every model of a development run is, has its opaque vertices drawn twice. A frame without a
 sky, or under an orthographic projection, or whose environment has none, or a radius or a strength
 that isn't positive, runs none of it and takes none of its memory.
+
+A view that its environment gives reflections, which it doesn't by default, seen through a
+perspective and lit by a sky, shows in what's opaque what the view shows, each point's mirror ray
+traced through the view's depth, in place of the sky's specular light where the ray finds
+something: screen-space reflections, in compute passes once the depth of what's opaque is drawn,
+as the ambient occlusion's is, and before any of it shades. The first build a pyramid of the
+nearer of the two depths, the nearest of the 2 by 2 texels under each texel, its first level the
+view's size and each after half the one before, rounded up, in a buffer of the graph's own. The
+trace finds each pixel's normal from the depth round it, reflects the way from the eye about it,
+and follows the ray through the pyramid as AMD's FidelityFX SSSR does, climbing a level each time
+it crosses a texel wholly in front of what that holds and stepping down where it meets it, until
+it's behind what the first level holds, as far as the environment's distance, 100 units by default,
+short of the near plane. It trusts what it found less the farther behind it the ray passed, as
+thick as the environment's thickness takes what the depth shows to be, 0.25 units by default,
+toward the view's edges and the ray's reach, and as the ray turns back toward the view, which shows
+nothing behind it; nor does it find the sky, which the sky's own light stands for, or what it meets
+from behind. What it found is the colors the frame before showed, antialiased, before bloom, the
+grade and the canvas, where it showed then, as that frame's camera saw it: each frame that reflects
+keeps them, by a pass of its own, in an image of the view's size, and a frame after one that kept
+none, or kept them at another size, traces nothing, as the first that reflects. The trace writes,
+into the first level of the view's reflections, an image of the view's size of up to seven levels,
+the last's texels 64 pixels a side, what
+it found times its trust, and its trust, and how far a reflection of it spreads on screen, for a
+lobe of each width, into an image of the graph's own; each level after averages the 2 by 2 under
+it. Shading, which knows each point's roughness, samples the level as wide as its lobe's footprint
+on screen, the cone Uludag gives Blinn-Phong's lobe of the power GGX's alpha matches, takes its
+trust off the sky's specular light, and adds the reflection by its trust, times what the specular
+light's reflectance reflects of it, as light exposed already, as the colors it was found in were,
+so that neither the sky's luminance nor the exposure scales it, and a sky that gives no light, as
+an atmosphere's after its sun has set, still shows what lamps light; the trust faded out toward the
+environment's roughness, 0.6 by default, past which a surface takes the sky's light alone. What blends takes
+none, as it takes no occlusion; the canvas none either, and a canvas that would draw in the view's
+last pass draws in a pass of its own after the colors are kept, so that the reflections hold no UI.
+The two images last while the view reflects, and a frame that renders it without reflections lets
+them go.
+
+So that both the visibility buffer's shading and the forward model shaders take reflections alike,
+by one sample at a pixel, as they take the occlusion, the trace runs before shading, from the depth
+alone: rays follow the depth's normal, not a normal map's, and blur by roughness on screen round the
+point that reflects, which bleeds a little across where surfaces meet. A composite after shading
+would have the shading's normal and roughness, but needs them, and the specular light's weight, in
+images that every pipeline drawing into the view, games' among them, would draw; rays sampled from
+GGX by roughness (Stachowiak, "Stochastic Screen-Space Reflections", 2015) need the roughness before
+the trace, and a resolve to denoise them. The kept colors are reprojected by the camera alone: what
+moves shows in a reflection where it was a frame before.
 
 A view that its environment antialiases, as by default, is antialiased temporally: each frame draws
 it a fraction of a pixel off, by the next of eight offsets, the Halton sequence of bases 2 and 3,

@@ -1,0 +1,130 @@
+(
+    entities: {
+        "1a6f3c8e2b9d4057": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.5, 4.4),
+                rotation: (-0.069943, 0.0, 0.0, 0.997551),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2b7a4d9f3c0e5168": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Image("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: Some((
+                    distance: 100.0,
+                    thickness: 0.25,
+                    roughness: 0.6,
+                )),
+            ),
+            Name: ("Environment"),
+        ),
+        "3c8b5e0a4d1f6279": (
+            ModelRoot: ("a83bca231330bad8"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4d9c6f1b5e2a7380": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, -0.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5e0d7a2c6f3b8491": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Back wall"),
+            Transform: (
+                translation: (0.0, 1.5, -3.15),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (8.0, 3.0, 0.3),
+            ),
+        ),
+        "6f1e8b3d7a4c95a2": (
+            ModelRoot: ("cb44b1a97866f432"),
+            Name: ("Cube"),
+            Transform: (
+                translation: (-2.6, 0.5, -2.1),
+                rotation: (0.0, 0.38268343, 0.0, 0.9238795),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7a2f9c4e8b5da6b3": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Transform: (
+                translation: (1.9, 0.2, 1.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8b3a0d5f9c6eb7c4": (
+            Name: ("Hint"),
+            Text: (
+                text: "Screen-space reflections, traced through the view's depth, in place of the sky's light where they find what a mirror shows, blurred as the floor's roughness spreads them",
+                font: None,
+                size: 0.13,
+                color: (0.22, 0.25, 0.33, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.75, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9c4b1e6a0d7fc8d5": (
+            Name: ("Title"),
+            Text: (
+                text: "Reflections",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.2, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

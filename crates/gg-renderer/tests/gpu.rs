@@ -26,10 +26,10 @@ use gg_renderer::{
     DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines, Light,
     LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
     Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
-    PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, RenderData, Renderer,
-    Sampled, Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels,
-    Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
-    Workflow, Wrap,
+    PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, Reflections, RenderData,
+    Renderer, Sampled, Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet,
+    Texels, Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint,
+    Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -108,6 +108,10 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
+        specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
+        reflections_mirror_what_the_view_shows,
+        reflections_mirror_what_lights_light_under_a_dark_sky,
+        reflections_leave_what_they_dont_take_as_it_is,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -160,6 +164,10 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
+        specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
+        reflections_mirror_what_the_view_shows,
+        reflections_mirror_what_lights_light_under_a_dark_sky,
+        reflections_leave_what_they_dont_take_as_it_is,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -356,6 +364,7 @@ struct Stores {
     sky: Option<Sky>,
     atmosphere: Option<Atmosphere>,
     ambient_occlusion: Option<AmbientOcclusion>,
+    reflections: Option<Reflections>,
     none: Draws,
 }
 
@@ -382,6 +391,7 @@ impl Stores {
             sky,
             atmosphere,
             ambient_occlusion,
+            reflections,
             none,
         } = self;
         uploads.take(meshes, shaders, textures, materials);
@@ -399,6 +409,7 @@ impl Stores {
             grade: Grade::IDENTITY,
             ambient_occlusion: *ambient_occlusion,
             fog: None,
+            reflections: *reflections,
             viewport,
             viewpoint,
             uploads,
@@ -5882,6 +5893,409 @@ fn ambient_occlusion_leaves_the_lights_alone() {
     let occluded = frame_pixels(&mut renderer);
     let differ = (lit.iter().zip(&occluded)).filter(|(a, b)| a != b).count();
     assert_eq!(differ, 0, "ambient occlusion changes the lights' light");
+    shut_down(renderer);
+}
+
+/// The scene the tests of reflections see, under a sky of a gradient from a blue zenith to a pale
+/// horizon over dark ground, of a luminance of 1, as `viewpoint` sees it, a camera with perspective
+/// low in front of it: a floor, models' squares, of a metal of 0.9 gray, in three strips along Z
+/// 2.4 units across each, from -3.6 along X, rough `roughness` each, from Z of 3 to -5; a red sphere
+/// of 0.5 on the first, a green one on the second and a blue panel a unit across and 1.6 high
+/// standing on the third, facing the camera. And the world's points where the red sphere's middle
+/// is, mirrored in the floor, and a point of the first strip whose mirror shows the sky alone.
+struct ReflectionScene {
+    draws: Draws,
+    viewpoint: Viewpoint,
+    mirrored: Vec3,
+    open: Vec3,
+}
+
+fn reflection_scene(stores: &mut Stores, roughness: [f32; 3]) -> ReflectionScene {
+    let [width, height] = [128, 64];
+    let sky = sky_texture(&mut stores.textures, [width, height], |_, y| {
+        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
+        if up > 0.0 {
+            let pale = 1.0 - up;
+            [0.25 + 0.45 * pale, 0.4 + 0.35 * pale, 0.9 - 0.05 * pale]
+        } else {
+            [0.12, 0.09, 0.06]
+        }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let square = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 0.5, 24, 48);
+    let add = |materials: &mut Materials, color: Vec4, workflow| {
+        materials.add(&Material {
+            color,
+            workflow,
+            ..Material::default()
+        })
+    };
+    let mut draws = Draws::default();
+    let turned = Quat::from_rotation_x(-FRAC_PI_2);
+    for (i, roughness) in (0..).zip(roughness) {
+        let gray = Vec4::new(0.9, 0.9, 0.9, 1.0);
+        let floor = add(&mut stores.materials, gray, metallic(1.0, roughness));
+        let floor = MeshDraw::with_material(square, floor, &stores.materials, &mut stores.shaders);
+        let at = Vec3::new(-2.4 + 2.4 * i as f32, 0.0, -1.0);
+        let strip = Mat4::from_scale_rotation_translation(Vec3::new(2.4, 8.0, 1.0), turned, at);
+        draws.push_draw(strip, &floor, 0);
+    }
+    let shapes = [
+        (Vec4::new(0.8, 0.1, 0.1, 1.0), Vec3::new(-2.4, 0.5, -1.0)),
+        (Vec4::new(0.1, 0.7, 0.15, 1.0), Vec3::new(0.0, 0.5, -1.5)),
+    ];
+    for (color, at) in shapes {
+        let material = add(&mut stores.materials, color, metallic(0.0, 0.4));
+        let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(Mat4::from_translation(at), &draw, 0);
+    }
+    let blue = add(
+        &mut stores.materials,
+        Vec4::new(0.1, 0.2, 0.85, 1.0),
+        metallic(0.0, 0.5),
+    );
+    let panel = MeshDraw::with_material(square, blue, &stores.materials, &mut stores.shaders);
+    let standing = Mat4::from_scale_rotation_translation(
+        Vec3::new(1.0, 1.6, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(2.4, 0.8, -1.2),
+    );
+    draws.push_draw(standing, &panel, 0);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 1.2, 4.0),
+        rotation: Quat::from_rotation_x(-0.2),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+    };
+    ReflectionScene {
+        draws,
+        viewpoint,
+        mirrored: Vec3::new(-2.4, -0.5, -1.0),
+        open: Vec3::new(-1.6, 0.0, 1.5),
+    }
+}
+
+/// [`reflection_scene`], its floor's strips mirror-smooth, glossy and less so, under its sky alone,
+/// with reflections and without. A frame with reflections after one without has no colors kept to
+/// trace against, and renders as one without; the frame after shows, where the red sphere's middle
+/// is mirrored in the floor, the red sphere, where a frame without shows the sky's light; and where
+/// the floor's mirror shows the sky alone, the sky's light as a frame without does. Against its
+/// reference image, without antialiasing; and antialiased, the frames after still mirror the
+/// sphere.
+fn reflections_mirror_what_the_view_shows() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, draws));
+    let without = frame_pixels(&mut renderer);
+    let on = Some(Reflections::default());
+    let reflecting = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
+        let data = RenderData {
+            reflections: on,
+            antialiasing,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(renderer, data);
+        frame_pixels(renderer)
+    };
+    let first = reflecting(&mut renderer, &mut stores, Antialiasing::None);
+    assert!(
+        first == without,
+        "a frame without colors kept to trace against renders as one without reflections"
+    );
+    let with = reflecting(&mut renderer, &mut stores, Antialiasing::None);
+    let shown = |frame: &[u8], at: Vec3| {
+        pixel_at(frame, WIDTH, pixel_of(viewpoint, [WIDTH, HEIGHT], at)).map(i32::from)
+    };
+    let [r, g, b, _] = shown(&with, scene.mirrored);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "the mirrored sphere shows [{r}, {g}, {b}], not red"
+    );
+    let [r, _, b, _] = shown(&without, scene.mirrored);
+    assert!(
+        b > r,
+        "without reflections, the mirror shows [{r}, _, {b}], not the sky"
+    );
+    let (open, sky) = (shown(&with, scene.open), shown(&without, scene.open));
+    let near = open.iter().zip(sky).all(|(a, b)| (a - b).abs() <= 2);
+    assert!(
+        near,
+        "the sky's mirror shows {open:?} with reflections, not {sky:?}"
+    );
+    compare("reflections", WIDTH, HEIGHT, &with);
+    for _ in 0..12 {
+        reflecting(&mut renderer, &mut stores, Antialiasing::Taa);
+    }
+    let resolved = frame_pixels(&mut renderer);
+    let [r, g, b, _] = shown(&resolved, scene.mirrored);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "antialiased, the mirrored sphere shows [{r}, {g}, {b}], not red"
+    );
+    // The camera moved since the frame before, farther than the sphere is wide on screen: what a
+    // ray finds is taken from where it showed then.
+    let moved = Viewpoint {
+        position: viewpoint.position + Vec3::new(0.6, 0.0, 0.0),
+        ..viewpoint
+    };
+    let data = RenderData {
+        reflections: on,
+        ..stores.data(viewport, moved, draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let after = frame_pixels(&mut renderer);
+    let pixel = pixel_of(moved, [WIDTH, HEIGHT], scene.mirrored);
+    let [r, g, b, _] = pixel_at(&after, WIDTH, pixel).map(i32::from);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "the camera moved, the mirrored sphere shows [{r}, {g}, {b}], not red"
+    );
+    // The sky twice as bright and the exposure an eighth: the view's light a quarter of what it
+    // was, the mirrored sphere's too, as reflections take the colors kept, exposed, as they are.
+    let sky = stores.sky.expect("the scene's sky");
+    stores.sky = Some(Sky {
+        luminance: 2.0,
+        ..sky
+    });
+    for _ in 0..2 {
+        let data = RenderData {
+            reflections: on,
+            exposure: 0.125,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    let quartered = frame_pixels(&mut renderer);
+    let mirrored = pixel_of(viewpoint, [WIDTH, HEIGHT], scene.mirrored);
+    let (was, now) = (
+        pixel_at(&with, WIDTH, mirrored),
+        pixel_at(&quartered, WIDTH, mirrored),
+    );
+    for channel in 0..3 {
+        let [was, now] = [was[channel], now[channel]].map(decoded);
+        assert!(
+            (now - was / 4.0).abs() < 0.005,
+            "a quarter of the light, the mirrored sphere's channel {channel} is {now}, not a \
+             quarter of {was}"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// [`reflection_scene`] under a sky of a luminance of 0, as an atmosphere's is once its sun has set,
+/// lit by a sun alone, exposed at a half: the floor's mirror shows the red sphere, lit, though the
+/// sky's specular light that reflections take the place of is none, where a frame without
+/// reflections shows next to nothing.
+fn reflections_mirror_what_lights_light_under_a_dark_sky() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let sky = stores.sky.expect("the scene's sky");
+    stores.sky = Some(Sky {
+        luminance: 0.0,
+        ..sky
+    });
+    // From above and behind the camera, onto the spheres' fronts.
+    stores.lights = vec![Light {
+        color: Vec3::splat(6.0),
+        ..sun(Vec3::new(0.3, -1.0, -0.6), None)
+    }];
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    let mut frame = |reflections| {
+        let data = RenderData {
+            reflections,
+            exposure: 0.5,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(&mut renderer, data);
+        frame_pixels(&mut renderer)
+    };
+    let without = frame(None);
+    // The first frame keeps the colors the second traces against.
+    frame(Some(Reflections::default()));
+    let with = frame(Some(Reflections::default()));
+    let pixel = pixel_of(viewpoint, [WIDTH, HEIGHT], scene.mirrored);
+    let [r, g, b, _] = pixel_at(&with, WIDTH, pixel).map(i32::from);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "under a dark sky, the mirrored sphere shows [{r}, {g}, {b}], not red"
+    );
+    let [r, g, b, _] = pixel_at(&without, WIDTH, pixel);
+    assert!(
+        r.max(g).max(b) < 24,
+        "without reflections, the mirror under a dark sky shows [{r}, {g}, {b}]"
+    );
+    shut_down(renderer);
+}
+
+/// [`reflection_scene`] reflecting what it shows renders as it does without reflections: every
+/// surface of it rougher than reflections' roughness, its floor's strips 0.8 and its shapes 0.4
+/// and 0.5 against 0.3, which take the sky's light alone; under an orthographic projection, which
+/// reflections don't take; and without a sky, whose specular light they'd take the place of.
+fn reflections_leave_what_they_dont_take_as_it_is() {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let scene = reflection_scene(&mut stores, [0.8; 3]);
+    let reflections = Reflections {
+        roughness: 0.3,
+        ..Reflections::default()
+    };
+    let draws = &scene.draws;
+    let viewport = filling([WIDTH, HEIGHT]);
+    let sky = stores.sky;
+    settle(&mut renderer, &mut stores, viewport, scene.viewpoint, draws);
+    let above = looking_down(Vec3::new(0.0, 6.0, 0.0), 8.0, 10.0);
+    for (name, viewpoint, sky) in [
+        (
+            "on a floor rougher than their roughness",
+            scene.viewpoint,
+            sky,
+        ),
+        ("under an orthographic projection", above, sky),
+        ("without a sky", scene.viewpoint, None),
+    ] {
+        let mut frame = |reflections| {
+            let data = RenderData {
+                reflections,
+                sky,
+                ..stores.data(viewport, viewpoint, draws)
+            };
+            render_without_ui(&mut renderer, data);
+            frame_pixels(&mut renderer)
+        };
+        let without = frame(None);
+        // The first frame keeps the colors the second traces against.
+        frame(Some(reflections));
+        let with = frame(Some(reflections));
+        assert!(with == without, "reflections change the frame {name}");
+    }
+    shut_down(renderer);
+}
+
+/// Squares of a white metal, smooth, and of a white dielectric, rough, whose occlusion maps hold a
+/// half, under a sky of 0.5 every way, without perspective: the sky's diffuse light darkened by the
+/// map's half, and its specular light by Lagarde and de Rousiers' specular occlusion of it, of the
+/// way to the eye and the roughness. The rough one, whose lobe gathers from all around as the
+/// diffuse does, shows the sky's light darkened by a half; the smooth metal, head-on, less
+/// darkened, and turned to face the view at a grazing angle, more. And a smooth white dielectric
+/// whose map holds a half, head-on, shows its diffuse light darkened by the half and its specular
+/// light by the specular occlusion, each by its share: the share it reflects, `f`, which a smooth
+/// black dielectric without a map shows, diffusing nothing, as `f` of the sky's light.
+fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
+    const SIDE: u32 = 16;
+    const SQUARES: u32 = 5;
+    const WIDTH: u32 = SIDE * SQUARES;
+    let mut renderer = renderer(WIDTH, SIDE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [2.0; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 0.25,
+    });
+    let half = stores.textures.add(
+        "occlusion",
+        [4, 4],
+        [[128, 255, 255, 255]; 16].as_flattened(),
+        Texels::Map(Map::Surface),
+    );
+    let half = Sampled::of(half.expect("an occlusion map"));
+    let square = model_square(&mut stores.meshes);
+    let occluded = |workflow| Material {
+        color: Vec4::ONE,
+        workflow,
+        occlusion_texture: half,
+        ..Material::default()
+    };
+    // Turned about X to face the view at a cosine of a quarter, its height on screen a quarter.
+    let grazing = 0.25_f32;
+    let turned = Quat::from_rotation_x(math::libm::acosf(grazing));
+    let black = Material {
+        color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        workflow: metallic(0.0, 0.0),
+        ..Material::default()
+    };
+    let squares = [
+        (occluded(metallic(0.0, 1.0)), Quat::IDENTITY),
+        (occluded(metallic(1.0, 0.0)), Quat::IDENTITY),
+        (occluded(metallic(1.0, 0.0)), turned),
+        (black, Quat::IDENTITY),
+        (occluded(metallic(0.0, 0.0)), Quat::IDENTITY),
+    ];
+    let mut draws = Draws::default();
+    for (i, (material, rotation)) in (0..).zip(&squares) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        let at = Vec3::new(i as f32 - (SQUARES - 1) as f32 / 2.0, 0.0, 0.0);
+        draws.push_draw(Mat4::from_rotation_translation(*rotation, at), &draw, 0);
+    }
+    let viewport = filling([WIDTH, SIDE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let frame = frame_pixels(&mut renderer);
+    // The shader's, in f64: a smooth surface is as rough as the least roughness shading takes.
+    let occlusion = 128.0 / 255.0;
+    let specular = |n_dot_v: f64, roughness: f64| {
+        let alpha = roughness * roughness;
+        let power = math::libm::exp2(-16.0 * alpha - 1.0);
+        (math::libm::pow(n_dot_v + occlusion, power) - 1.0 + occlusion).clamp(0.0, 1.0)
+    };
+    let pixel = |i: u32| pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
+    // What a dielectric reflects head-on of the sky's light, which the black square shows of its
+    // 0.5: a few hundredths, Fresnel's 0.04 and its scattering many times over.
+    let f = f64::from(decoded(pixel(3)[0])) / 0.5;
+    assert!(
+        (0.03..0.06).contains(&f),
+        "a dielectric reflects {f} head-on"
+    );
+    let head_on = specular(1.0, 0.045);
+    let expected = [
+        occlusion,
+        head_on,
+        specular(f64::from(grazing), 0.045),
+        f,
+        (1.0 - f) * occlusion + f * head_on,
+    ];
+    assert!(expected[1] > occlusion + 0.15 && expected[2] < occlusion - 0.1);
+    for (i, share) in (0..).zip(expected) {
+        let value = encoded(0.5 * share as f32);
+        let got = pixel(i);
+        let near = got
+            .iter()
+            .zip([value, value, value, 255])
+            .all(|(&a, b)| a.abs_diff(b) <= 2);
+        assert!(
+            near,
+            "square {i} shows {got:?}, not 0.5 times {share} encoded, {value}"
+        );
+    }
     shut_down(renderer);
 }
 

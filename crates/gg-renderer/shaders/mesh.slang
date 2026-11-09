@@ -1,13 +1,14 @@
 // What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, shading.slang
 // and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
 // its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades,
-// the clusters its lights are binned into, its ambient occlusion, its fog and its atmosphere's
-// haze, and the push constants, for a shader's types of vertices and parameters, and what the
-// fragment stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in
-// src/model.rs, `ShadowData` in src/shadow.rs, `ClusterData` in src/cluster.rs, `FogData` in
-// src/fog.rs, `AerialData` in src/atmosphere.rs and `Push` and `FrameData` in src/mesh.rs, which
-// `Corner`, `Light`, `Material`, `Shadows`, `Clusters`, `Fog`, `Aerial`, `Push` and `Frame` here
-// match field for field.
+// the clusters its lights are binned into, its ambient occlusion, its fog, its atmosphere's haze
+// and its reflections, and the push constants, for a shader's types of vertices and parameters,
+// and what the fragment stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs,
+// `Entry` in src/model.rs, `ShadowData` in src/shadow.rs, `ClusterData` in src/cluster.rs,
+// `FogData` in src/fog.rs, `AerialData` in src/atmosphere.rs, `ReflectionData` in
+// src/reflections.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`, `Light`,
+// `Material`, `Shadows`, `Clusters`, `Fog`, `Aerial`, `Reflected`, `Push` and `Frame` here match
+// field for field.
 
 // The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
 // second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
@@ -164,6 +165,22 @@ struct Aerial {
     float luminance;
 };
 
+// The game's view's reflections, as reflections.slang traces them and shading.slang's `reflection`
+// reads them: `ReflectionData` in src/reflections.rs, field for field.
+struct Reflected {
+    // The view's reflections, a texture of the bindless set's of the view's size, in levels: at
+    // each pixel, the light its mirror ray found, exposed, times how much it's trusted, and that
+    // trust in alpha, each level the mean of the 2 by 2 under it; 0 in a frame without them, and in
+    // every pass but those that shade the view.
+    uint colors;
+    // How far a reflection at each pixel spreads, in pixels, for each unit of the tangent of a
+    // lobe's angle, a texture of the bindless set's of the view's size, in red.
+    uint spread;
+    // The roughness past which a surface takes the sky's specular light alone.
+    float roughness;
+    uint unused;
+};
+
 // What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
 struct Frame {
     // Where the view sees from, in the world.
@@ -211,6 +228,8 @@ struct Frame {
     Fog fog;
     // The haze its atmosphere puts between the viewer and what's lit.
     Aerial aerial;
+    // The game's view's reflections.
+    Reflected reflections;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

@@ -1,14 +1,14 @@
 //! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing, grade, ambient
-//! occlusion and fog an environment holds, which it does too, and the sampler a sprite holds, which
-//! `gg-gpu` does, described to reflection here, since neither crate can derive it.
+//! occlusion, fog and reflections an environment holds, which it does too, and the sampler a sprite
+//! holds, which `gg-gpu` does, described to reflection here, since neither crate can derive it.
 
 use std::fmt::Write as _;
 
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
 use gg_renderer::{
-    AmbientOcclusion, Antialiasing, Circle, Fog, Grade, MeshDraw, Sampler, Sprite, Texture,
-    Tonemapper,
+    AmbientOcclusion, Antialiasing, Circle, Fog, Grade, MeshDraw, Reflections, Sampler, Sprite,
+    Texture, Tonemapper,
 };
 
 use crate::reflect::{
@@ -1048,6 +1048,123 @@ impl Reflect for AmbientOcclusion {
 
 /// Ambient occlusion's fields, in the order its description gives them.
 const AMBIENT_OCCLUSION_FIELDS: [&str; 2] = ["radius", "strength"];
+
+/// Taken apart whole, as ambient occlusion is, so that a field `gg-renderer` adds fails to compile
+/// here until it's described. Its fields' defaults are the default reflections', each no less than
+/// 0, and its roughness no more than 1.
+impl Reflect for Reflections {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let field =
+            |name: &'static str, most: Option<f64>, default: f32, doc: &'static str| Field {
+                name: name.into(),
+                ty: Type::F32,
+                meta: Meta {
+                    min: Some(Bound::Float(0.0)),
+                    max: most.map(Bound::Float),
+                    doc: doc.into(),
+                    ..Meta::default()
+                },
+                default: Some(default.to_value()),
+            };
+        let base = Reflections::default();
+        let doc = "How what's opaque reflects what the view shows: each point seen in its mirror, \
+                   by a ray traced through the view's depth, in place of the sky's specular light \
+                   where it finds something, blurred as the point's roughness spreads it.";
+        types.add::<Self>("Reflections".into(), doc.into(), |_| {
+            let fields = vec![
+                field(
+                    "distance",
+                    None,
+                    base.distance,
+                    "How far a ray reaches, in the world's units, fading over its last quarter.",
+                ),
+                field(
+                    "thickness",
+                    None,
+                    base.thickness,
+                    "How far behind what the view shows a ray may pass and still find it, in the \
+                     world's units: how thick what the view's depth shows is taken to be.",
+                ),
+                field(
+                    "roughness",
+                    Some(1.0),
+                    base.roughness,
+                    "The roughness past which a surface takes the sky's specular light alone, \
+                     fading over its last quarter.",
+                ),
+            ];
+            Ok(Shape::Struct {
+                fields,
+                tuple: false,
+            })
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let parts = REFLECTIONS_FIELDS.into_iter().zip(reflections_parts(self));
+        Value::Struct(
+            parts
+                .map(|(name, part)| (name.into(), part.to_value()))
+                .collect(),
+        )
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        Self::default().with_value(value)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let given = reflect::fields(value, REFLECTIONS_FIELDS)?;
+        let mut reflections = *self;
+        for (i, (name, given)) in (0..).zip(REFLECTIONS_FIELDS.into_iter().zip(given)) {
+            let part = reflections.part_mut(i).expect("a part for each field");
+            (part.set_value(given)).map_err(|error| reflect::within(error, name))?;
+        }
+        Ok(reflections)
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        reflections_parts(self).into_iter().nth(index as usize)
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        let Reflections {
+            distance,
+            thickness,
+            roughness,
+        } = self;
+        let parts: [&mut dyn Reflect; 3] = [distance, thickness, roughness];
+        parts.into_iter().nth(index as usize)
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        for part in reflections_parts(self) {
+            part.digest(to);
+        }
+    }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// Reflections' fields, in the order their description gives them.
+const REFLECTIONS_FIELDS: [&str; 3] = ["distance", "thickness", "roughness"];
+
+/// `reflections`' fields, in the order of [`REFLECTIONS_FIELDS`], taken apart whole, so that a field
+/// `gg-renderer` adds fails to compile here until it's described.
+fn reflections_parts(reflections: &Reflections) -> [&dyn Reflect; 3] {
+    let Reflections {
+        distance,
+        thickness,
+        roughness,
+    } = reflections;
+    [distance, thickness, roughness]
+}
 
 /// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
 /// it culls, and its parameters' bytes in hex, as `1 2 true false x0a0b`: what a restart takes back

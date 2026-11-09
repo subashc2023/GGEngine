@@ -113,6 +113,7 @@
                     strength: 1.0,
                 )),
                 fog: None,
+                reflections: None,
             ),
             Name: ("Environment"),
         ),

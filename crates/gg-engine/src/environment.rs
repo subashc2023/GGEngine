@@ -3,7 +3,7 @@
 //! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Tonemapper};
+use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Reflections, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, Entity, EntityId, Sky, World};
@@ -12,7 +12,8 @@ use crate::{Component, Entity, EntityId, Sky, World};
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
 /// that maps the view's colors, drawn in high dynamic range, into the range it shows, how it's
 /// antialiased, the sky it shows behind the world and lights it by, how much it blooms, how it's
-/// graded, and how what's near a point hides that light from it. A world has one, on an entity of
+/// graded, how what's near a point hides that light from it, and how what's opaque reflects what
+/// the view shows. A world has one, on an entity of
 /// its own; of several, the view renders with the one of the lowest ID, warning
 /// (`engine.environment_tie`). A world without one isn't tonemapped, antialiased, bloomed or
 /// graded, so that what's in the range a view shows, as a 2D game's sprites, shows as it's drawn,
@@ -64,6 +65,13 @@ pub struct Environment {
     /// from all around, or without one by a luminance of its own, and by the sun, the brightest
     /// directional light, as [`Fog`] says: `None`, the default, for none.
     pub fog: Option<Fog>,
+    /// How what's opaque reflects what the view shows: each point seen in its mirror, by a ray
+    /// traced through the view's depth, in place of the sky's specular light where it finds
+    /// something, blurred as the point's roughness spreads it, as [`Reflections`] says. Under a
+    /// perspective with a sky alone, as without one there's no specular light from all around for
+    /// it to take the place of. `None`, the default, for none: it costs a trace of every pixel and
+    /// two images of the view's size, which only a glossy surface makes worth it.
+    pub reflections: Option<Reflections>,
 }
 
 impl Default for Environment {
@@ -78,6 +86,7 @@ impl Default for Environment {
             grade: Grade::IDENTITY,
             ambient_occlusion: Some(AmbientOcclusion::default()),
             fog: None,
+            reflections: None,
         }
     }
 }
@@ -193,6 +202,32 @@ mod tests {
         assert_eq!(made.expect("made"), foggy);
         let clear = Environment::from_value(&Environment::default().to_value());
         assert_eq!(clear.expect("made").fog, None);
+    }
+
+    /// Reflections, none by default, reflect whole: their description's default is the default
+    /// reflections, which an environment's reflections switched on take, and an environment that
+    /// reflects comes back from its value as it was, every field of its reflections' among it.
+    #[test]
+    fn reflections_reflect_whole() {
+        use crate::reflect::{Meta, Reflect, Types};
+
+        let mut types = Types::default();
+        let reflections = Reflections::describe(&mut types).expect("described");
+        let default = (types.default_value(&reflections, &Meta::default())).expect("a default");
+        let made = Reflections::from_value(&default).expect("made");
+        assert_eq!(made, Reflections::default());
+        let glossy = Environment {
+            reflections: Some(Reflections {
+                distance: 30.0,
+                thickness: 0.5,
+                roughness: 0.4,
+            }),
+            ..Environment::default()
+        };
+        let made = Environment::from_value(&glossy.to_value());
+        assert_eq!(made.expect("made"), glossy);
+        let plain = Environment::from_value(&Environment::default().to_value());
+        assert_eq!(plain.expect("made").reflections, None);
     }
 
     /// An environment hands the renderer its image sky, at its luminance, or its atmosphere as it

@@ -2254,6 +2254,10 @@ pub(crate) struct FrameData {
     pub(crate) fog: crate::fog::FogData,
     /// The atmosphere's haze, as [`AerialData`](crate::atmosphere::AerialData) has it.
     pub(crate) aerial: crate::atmosphere::AerialData,
+    /// The game's view's reflections, as
+    /// [`ReflectionData`](crate::reflections::ReflectionData) has them: none but in the passes that
+    /// shade the view.
+    pub(crate) reflections: crate::reflections::ReflectionData,
 }
 
 #[cfg(test)]

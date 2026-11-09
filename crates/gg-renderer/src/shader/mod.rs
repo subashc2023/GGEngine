@@ -229,7 +229,7 @@ impl Shaders {
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
     ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; uint
-    ///   ambient_occlusion; uint unused; Fog fog; Aerial aerial; }`,
+    ///   ambient_occlusion; uint unused; Fog fog; Aerial aerial; Reflected reflections; }`,
     ///   where the view sees from in the world, the time it shows, what lit shading multiplies
     ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
     ///   that light everywhere first, directional lights and those without a range, then the rest,
@@ -252,10 +252,15 @@ impl Shaders {
     ///   as `shaders/mesh.slang` declares it, its `density` 0 in a frame without fog, which the
     ///   view fogs what an opaque shader draws by, in a pass of its own once what's opaque has
     ///   drawn, and which a shader that blends fogs itself by, if it likes, as `shaders/fog.slang`
-    ///   does, drawing unfogged otherwise; and the haze an atmosphere puts between the viewer and
+    ///   does, drawing unfogged otherwise; the haze an atmosphere puts between the viewer and
     ///   what's lit, the froxels of the view that hold it and where a point falls among them,
     ///   `Aerial` as `shaders/mesh.slang` declares it, its `luminance` 0 in a frame without one
-    ///   and in the canvas's pass; or a struct of as many of its first fields: the engine adds
+    ///   and in the canvas's pass; and the view's reflections, as
+    ///   [`Reflections`](crate::Reflections) says, `Reflected` as `shaders/mesh.slang` declares
+    ///   it, textures of the bindless set's of the view's size, which a fragment of what's opaque
+    ///   loads and samples at its pixel and takes in place of the sky's specular light, 0 in a frame
+    ///   without them and in every pass but the view's own; or a struct of as many of its first
+    ///   fields: the engine adds
     ///   fields at its end. The eighth and the ninth are the engine's own model shaders', 0 for any
     ///   other; the tenth, how many transforms past each instance's its transform the frame before
     ///   is, which the motion is from: those of the world's opaque meshes, in the game's view, and
@@ -1131,7 +1136,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 532 bytes, past the 504 the engine's take",
+                "its frame's data, Frame, take 532 bytes, past the 520 the engine's take",
                 "it reads brightness from its push constants, past the 128 bytes",
             ],
         );

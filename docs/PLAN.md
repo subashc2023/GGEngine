@@ -142,10 +142,26 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A sky made from its sun** (2026-11-09)
 - **Foxball and Sponza on the rendering looks** (2026-11-09)
 - **Phase 17, rendering looks** (2026-11-09)
+- **Screen-space reflections** (2026-11-09)
 
 ## Now
 
-The next phase is the user's to choose, as Open questions has it.
+18. **The frame's finish and a game's widgets.** What a modern frame has beyond Phase 17's looks,
+    each a pass or a few on the render graph that a world's `Environment` turns on and sets, alike
+    in development runs and cooked ones: SMAA, antialiasing without a history, for games that
+    can't take TAA's softness or its ghosts; exposure that adapts to what the view sees, from a
+    histogram of its luminance, as eyes adapt between sunlight and shade; screen-space reflections,
+    traced through the view's depth and falling back to the sky's light where they miss, with the
+    sky's reflections hidden where ambient occlusion says they're hidden; and depth of field and
+    motion blur, from a focus and an aperture and from the view's motion, with a vignette,
+    chromatic aberration and film grain. And a game's UI's widgets beyond buttons: sliders,
+    toggles, drop-downs, text fields and lists that scroll, clipped to their rectangles, which take
+    the focus, keys, a pad and the mouse. *Done when* the showcase has a scene for each look and one
+    of the widgets, each look a GPU test's reference image with its time on the GPU measured, and
+    Foxball has an options menu of the widgets, setting its bot's difficulty, its volumes and its
+    antialiasing. Its milestones: SMAA; exposure that adapts; screen-space reflections; depth of
+    field and motion blur; a game's UI's widgets; and, once they're in, Foxball and the showcase on
+    them.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -172,6 +188,11 @@ Each phase ends in something you can run and check.
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
 Phases 11 to 17 are done, as Done has it, but for what Deferred holds.
+
+19. **World streaming**, to be decided, as Open questions has it: a world of cells, each a scene,
+    loaded and unloaded around its viewers as they move, off the main thread, with a world far
+    larger than f32's reach from its origin, and in step for lockstep and rollback peers and a
+    server's clients.
 
 Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -302,13 +323,19 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Finding a sky's sun by its contrast with the sky round it, rather than by 10⁷ candela per square meter, which a sun low in its sky can fall short of, lighting both through the sky's light and through the directional light that stands for it; and its way and illuminance, for that light, which the sun of the showcase's Sponza in fog was given by hand from its sky's texels | A scene under a low sun lights twice, or skies change often enough that setting their suns by hand matters |
 | Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
 | Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, and one that prefilters an atmosphere's, as its sun turns, by 64 samples a texel, about 35 µs at the median, every frame while a sun of a fast day is low, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes every few frames, as a day passing in seconds, or a hitch that shows |
-| Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
+| A normal map's horizon hiding its own reflections, where a bump's normal faces from the eye, as Jimenez's horizon occlusion of normal maps: the sky's specular light is taken the way the bumped normal reflects, whatever the surface round it hides | Reflections show through a normal map's bumps |
 | Bent normals from ambient occlusion's horizons, as XeGTAO gives them, so that the sky's diffuse light is taken the way the open part of a point's hemisphere faces, and its specular light by the cone they leave: the occlusion darkens the sky's light whole, the way the normal faces | Light from the sky shows coming through what hides it, as in creases |
 | Ambient occlusion of what blends, as glass and particles, which takes none: the view's occlusion is of what's opaque, as its depth has it | A game's blended surfaces show lit where what's near should hide their light |
 | Ambient occlusion under an orthographic projection, whose depth XeGTAO's reach in pixels and its edges by the depth's scale take as a perspective's: such a view runs none of it | A game seen without perspective is lit by a sky, as an isometric one |
 | Ambient occlusion's quality and size set by a game or by quality settings: XeGTAO's high quality, 3 slices of 3 steps each way, at the view's size, and its noise and denoise as antialiasing picks them | A device is too slow for it, or a game's look needs another |
 | Drawing the view over the depth alone it draws for ambient occlusion without a visibility buffer, testing depth for equality, rather than drawing depth again as it shades: a game's opaque shader that discards draws whole triangles' depth alone, and the two pipelines would need to place each vertex alike | A development run's frames are measured to lose much to drawing their opaque vertices twice |
 | Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
+| Reflections' rays sampled from GGX by roughness, as Stochastic Screen-Space Reflections (Stachowiak, 2015), resolved over neighbors and frames, along the shading's normal, a normal map's among it: the trace runs before shading, from the depth alone, so each ray is the mirror of the depth's normal, and a rough surface's reflection is blurred on screen round the point, which bleeds a little across where surfaces meet | A rough or normal-mapped glossy surface's reflections look wrong, flat where its bumps should show or bleeding across its edges |
+| Reflections of what moves taken from where its motion says it was, rather than by the camera alone: the frame before's colors are found where the camera saw what a ray found, so a reflection of something moving shows where it was a frame before | A game's fast movers show their reflections lagging |
+| Reflections at half the view's size, in a cheaper trace, or set by quality settings: every pixel of what's opaque traces at the view's size, up to 64 steps | A device is too slow for them, as a handheld or lavapipe |
+| Reflections of what blends, as water or glass, which takes none: the trace is of what's opaque, as the view's depth has it | A game's water or glass should mirror what's round it |
+| Reflections reading TAA's history rather than colors of their own: each frame that reflects keeps the view's resolved colors in an image of its own, a full-screen copy, so that a view without TAA, or antialiased otherwise, reflects too | A view's memory is measured to matter, as at 4K |
+| Reflections under an orthographic projection, whose depth the trace takes as a perspective's: such a view runs none of them, as it runs no ambient occlusion | A game seen without perspective has glossy surfaces under a sky |
 | Point and spot lights' shadows, as cubes and maps in an atlas: a directional light alone casts them | A game lit by them needs their shadows |
 | More than one directional light's shadows: of those that cast them, the brightest does | A scene with two suns, or a sun and a moon at once |
 | Leaving a model's lights out where a scene places it: each root spawns all of the model's nodes, lights among them, so the showcase's 16 Bistros shine 16 suns, exposed 4 stops down, the one that casts shadows among 15 that fill them in, and their point lights a 16th as bright | A scene places a model that holds a sun more than once for its look, not its cost |
@@ -676,6 +703,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- Which phase comes after Phase 17? Recommendation: the built-in coding agent, v1's headline, in
-  the editor, modeled on the pi coding agent: it edits a project's files and works on the running
-  game through the tool API, as Claude Code does now. Decide before the next phase starts.
+- Which phase comes after Phase 18, world streaming or the built-in coding agent? Recommendation:
+  the built-in coding agent, v1's headline, in the editor, modeled on the pi coding agent: it edits
+  a project's files and works on the running game through the tool API, as Claude Code does now;
+  world streaming once a game's world outgrows a scene, since how its cells stay in step across
+  peers and a server is a design of its own. Decide before Phase 18 ends.

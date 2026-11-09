@@ -43,7 +43,10 @@
 //! towers from 300 m to 12 km off (`atmosphere.ron`); models casting a sun's shadows
 //! (`shadows.ron`); crates, balls and shapes piled in a corner under that sky alone, its light
 //! darkened where they hide it from each other and the walls, by ambient occlusion
-//! (`ambient_occlusion.ron`); 3D physics,
+//! (`ambient_occlusion.ron`); spheres, a cube and a torus mirrored in a floor of polished steel,
+//! black stone and brushed bronze under that sky, the bronze's reflections blurred as its roughness
+//! spreads them, by screen-space reflections (`reflections.ron`, its floor `models/gloss.gltf`); 3D
+//! physics,
 //! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
 //! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
 //! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor

@@ -74,6 +74,7 @@
                     sun: 0.4,
                     sharpness: 0.65,
                 )),
+                reflections: None,
             ),
             Name: ("Environment"),
         ),
