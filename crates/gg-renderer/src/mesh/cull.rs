@@ -360,7 +360,7 @@ impl CullPlan {
             "culling",
             bounds.instances * 4 + count * bounds.scratch_bytes(),
         );
-        let counts = graph.buffer("culled counts", 16);
+        let counts = graph.buffer(COUNTS, 16);
         let gather = (graph.compute(label!("cull gather")).on_compute_queue())
             .write_buffer(gathered)
             .add();
@@ -544,6 +544,9 @@ pub(crate) struct CullView {
     /// nearer than that side draws there, and isn't culled.
     pub(crate) clamped: bool,
 }
+
+/// The name of the buffer the culling counts what the game's view drew in, which frames read back.
+pub(crate) const COUNTS: &str = "culled counts";
 
 /// What a frame drew in the game's view, as `shaders/cull.slang` counts it: draws, instances, and
 /// the low and the high word of the triangles.

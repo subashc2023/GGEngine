@@ -30,7 +30,7 @@ mod visibility;
 
 #[cfg(test)]
 pub(crate) use cull::SPIRV as CULL_SPIRV;
-pub(crate) use cull::{CullPlan, CullView, FIRST, counts};
+pub(crate) use cull::{COUNTS, CullPlan, CullView, FIRST, counts};
 #[cfg(test)]
 pub(crate) use cull::{GATHER_SPIRV, PYRAMID_SPIRV};
 pub(crate) use scene::Change as SceneChange;

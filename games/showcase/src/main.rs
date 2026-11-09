@@ -43,7 +43,10 @@
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
 //! shows behind them (`sky.ron`); a sky made from its sun, Hillaire's atmosphere, under a sun that
 //! `scripts/spin.luau` turns through a day two minutes long, with its night, the haze deepening on
-//! towers from 300 m to 12 km off (`atmosphere.ron`); models casting a sun's shadows
+//! towers from 300 m to 12 km off (`atmosphere.ron`); under that sky turned through a day a minute
+//! long, an exposure that adapts to what the view sees, as eyes do, from the noon sun, through
+//! dusk, to two lamps at night, faster to the light than to the dark (`exposure.ron`); models
+//! casting a sun's shadows
 //! (`shadows.ron`); crates, balls and shapes piled in a corner under that sky alone, its light
 //! darkened where they hide it from each other and the walls, by ambient occlusion
 //! (`ambient_occlusion.ron`); spheres, a cube and a torus mirrored in a floor of polished steel,

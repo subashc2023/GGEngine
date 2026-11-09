@@ -2,11 +2,10 @@
 //! around it, whatever viewpoint it sees from, and which of a world's environments the view renders
 //! with.
 
-use gg_core::math::libm::exp2f;
 use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Reflections, Tonemapper};
 use tracing::warn;
 
-use crate::{Component, Entity, EntityId, Sky, World};
+use crate::{Component, Entity, EntityId, Reflect, Sky, World};
 
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
@@ -27,6 +26,10 @@ pub struct Environment {
     /// room about 7. What isn't lit, as sprites, text and unlit materials, shows its colors at any.
     #[reflect(default = 15.0)]
     pub exposure: f32,
+    /// How the exposure adapts to what the view sees, as eyes adapt between sunlight and shade, if
+    /// it does, as [`Adaptation`] says: from `exposure` until the view's light is first metered,
+    /// then toward what the meter calls for. `None`, the default, keeps `exposure`.
+    pub adaptation: Option<Adaptation>,
     /// How the view's colors, drawn in high dynamic range, map into the range it shows: Khronos PBR
     /// Neutral by default.
     pub tonemapper: Tonemapper,
@@ -78,6 +81,7 @@ impl Default for Environment {
     fn default() -> Self {
         Self {
             exposure: 15.0,
+            adaptation: None,
             tonemapper: Tonemapper::default(),
             antialiasing: Antialiasing::default(),
             sky: Sky::ClearColor,
@@ -92,12 +96,10 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// What lit shading multiplies light by at its exposure: 1 over the largest luminance that
-    /// doesn't saturate a camera of that exposure value, 1.2 × 2^EV100, as Frostbite's and
-    /// Filament's do (Lagarde and de Rousiers, "Moving Frostbite to Physically Based Rendering",
-    /// 2014).
+    /// What lit shading multiplies light by at its exposure, as [`gg_renderer::light_scale`] has
+    /// it: 1 over 1.2 × 2^EV100. An exposure that adapts starts from it.
     pub fn light_scale(&self) -> f32 {
-        1.0 / (1.2 * exp2f(self.exposure))
+        gg_renderer::light_scale(self.exposure)
     }
 
     /// The image sky the view shows, as the renderer takes it, if it has one.
@@ -116,6 +118,101 @@ impl Environment {
         match self.sky {
             Sky::Atmosphere(atmosphere) => Some(atmosphere.rendered()),
             Sky::ClearColor | Sky::Image(_) => None,
+        }
+    }
+}
+
+/// The renderer's default adaptation, which the fields' defaults are.
+fn adapted() -> gg_renderer::Adaptation {
+    gg_renderer::Adaptation::default()
+}
+
+/// How an [`Environment`]'s exposure adapts to what the view sees, as eyes adapt between sunlight
+/// and shade. Each frame meters the view's light, before it blooms and before a game's canvas, from
+/// a histogram of its luminance, as Unreal's histogram exposure does: the mean log2 of the luminance
+/// of its pixels between two percentiles of it, from 2^-12 candela per square meter, darker than
+/// starlight, to 2^20, in eighths of a stop, what's darker, as a black sky, left out. The exposure
+/// it calls for, log2(luminance × 100 / 12.5) as a reflected-light meter's at ISO 100, less the
+/// compensation and kept between the bounds, is what the exposure moves toward, at speeds of its
+/// own, by the simulation's time, so that a paused game's holds. The first frames, until a
+/// metering comes back two frames later, shade at the environment's `exposure`, and that metering
+/// is taken at once rather than moved toward. A change to the bounds, the compensation or the speeds
+/// shows in the frame it's made, as a script easing the compensation each tick wants, the exposure
+/// adapting on; one to the percentiles waits for a metering by them, taken at once. The tool API's
+/// look adapts apart from the game's own view, so that a look round a dark room exposes neither
+/// the game's view nor a capture of it for the room. What isn't lit, as sprites, text and unlit
+/// materials, still shows its colors at any exposure, and is metered as though it were lit,
+/// brighter the darker the exposure, so a view of little else runs to one bound or the other.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct Adaptation {
+    /// The lowest exposure value, EV100, it adapts to, at which what calls for a lower one shows
+    /// darker: 0, about a street at night, so that a moonlit world shows as dark as it is.
+    #[reflect(default = adapted().min)]
+    pub min: f32,
+    /// The highest, at which what calls for a higher one shows brighter: 18, past snow in sunlight.
+    #[reflect(default = adapted().max)]
+    pub max: f32,
+    /// How many stops brighter than the meter calls for the view is exposed, as a camera's exposure
+    /// compensation: 1 brightens it twice over, and -1 darkens it by half.
+    pub compensation: f32,
+    /// How fast the exposure rises toward a brighter view's, in stops a second: 3, as Unreal's.
+    #[reflect(min = 0.0, default = adapted().speed_up)]
+    pub speed_up: f32,
+    /// How fast it falls toward a darker view's: 1, slower, as eyes adapt to the dark.
+    #[reflect(min = 0.0, default = adapted().speed_down)]
+    pub speed_down: f32,
+    /// The percentile of the view's pixels by their luminance, as a fraction, below which they
+    /// aren't metered: 0.1, leaving out the darkest tenth.
+    #[reflect(min = 0.0, max = 1.0, default = adapted().low_percentile)]
+    pub low_percentile: f32,
+    /// The percentile above which they aren't: 0.9, leaving out the brightest tenth.
+    #[reflect(min = 0.0, max = 1.0, default = adapted().high_percentile)]
+    pub high_percentile: f32,
+}
+
+impl Default for Adaptation {
+    fn default() -> Self {
+        let gg_renderer::Adaptation {
+            min,
+            max,
+            compensation,
+            speed_up,
+            speed_down,
+            low_percentile,
+            high_percentile,
+        } = adapted();
+        Self {
+            min,
+            max,
+            compensation,
+            speed_up,
+            speed_down,
+            low_percentile,
+            high_percentile,
+        }
+    }
+}
+
+impl Adaptation {
+    /// It as the renderer takes it.
+    pub(crate) fn rendered(&self) -> gg_renderer::Adaptation {
+        let &Self {
+            min,
+            max,
+            compensation,
+            speed_up,
+            speed_down,
+            low_percentile,
+            high_percentile,
+        } = self;
+        gg_renderer::Adaptation {
+            min,
+            max,
+            compensation,
+            speed_up,
+            speed_down,
+            low_percentile,
+            high_percentile,
         }
     }
 }
@@ -228,6 +325,47 @@ mod tests {
         assert_eq!(made.expect("made"), glossy);
         let plain = Environment::from_value(&Environment::default().to_value());
         assert_eq!(plain.expect("made").reflections, None);
+    }
+
+    /// An adaptation, none by default, reflects whole: its description's default is the renderer's
+    /// default, which an environment's adaptation switched on takes, and an environment that adapts
+    /// comes back from its value as it was, handing the renderer each field as it has it.
+    #[test]
+    fn adaptation_reflects_whole() {
+        use crate::reflect::{Meta, Reflect, Types};
+
+        let mut types = Types::default();
+        let described = Adaptation::describe(&mut types).expect("described");
+        let default = (types.default_value(&described, &Meta::default())).expect("a default");
+        let made = Adaptation::from_value(&default).expect("made");
+        assert_eq!(made, Adaptation::default());
+        assert_eq!(made.rendered(), gg_renderer::Adaptation::default());
+        let adaptation = Adaptation {
+            min: -3.0,
+            max: 14.0,
+            compensation: 0.5,
+            speed_up: 2.5,
+            speed_down: 0.75,
+            low_percentile: 0.2,
+            high_percentile: 0.95,
+        };
+        let adapting = Environment {
+            adaptation: Some(adaptation),
+            ..Environment::default()
+        };
+        let made = Environment::from_value(&adapting.to_value()).expect("made");
+        assert_eq!(made, adapting);
+        let rendered = gg_renderer::Adaptation {
+            min: -3.0,
+            max: 14.0,
+            compensation: 0.5,
+            speed_up: 2.5,
+            speed_down: 0.75,
+            low_percentile: 0.2,
+            high_percentile: 0.95,
+        };
+        assert_eq!(adaptation.rendered(), rendered);
+        assert_eq!(Environment::default().adaptation, None);
     }
 
     /// An environment hands the renderer its image sky, at its luminance, or its atmosphere as it

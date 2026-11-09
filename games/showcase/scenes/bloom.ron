@@ -18,6 +18,7 @@
         "07559a52a4d5ee8e": (
             Environment: (
                 exposure: 4.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: ClearColor,

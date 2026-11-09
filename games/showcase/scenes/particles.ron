@@ -123,6 +123,7 @@
         "5407d8dbdda2665e": (
             Environment: (
                 exposure: 4.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: ClearColor,

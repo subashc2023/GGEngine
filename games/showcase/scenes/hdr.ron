@@ -3,6 +3,7 @@
         "180776407825f8b1": (
             Environment: (
                 exposure: 15.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: ClearColor,

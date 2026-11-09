@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts, Circle,
-    DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines, Light,
-    LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
+    Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
+    Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines,
+    Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
     Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
     PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, Reflections, RenderData,
     Renderer, Sampled, Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet,
@@ -90,6 +90,11 @@ fn main() -> ExitCode {
         a_lone_bright_pixel_blooms_less_than_a_square_of_its_light,
         grades_transform_as_they_say,
         dithering_keeps_a_gradients_mean_and_breaks_its_bands,
+        exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one,
+        exposure_meters_between_its_percentiles,
+        a_looks_exposure_adapts_apart_from_the_games_own,
+        an_exposure_jump_under_antialiasing_leaves_no_ghost,
+        adapted_frames_match_their_reference,
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         back_faces_flip_their_normal_maps,
@@ -110,6 +115,7 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
         specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
         reflections_mirror_what_the_view_shows,
+        reflections_follow_an_exposures_jump,
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
         fog_dims_and_lights_as_its_integral_says,
@@ -171,6 +177,7 @@ fn main() -> ExitCode {
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
+        adapted_frames_match_their_reference,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
         models_match_their_reference,
@@ -371,9 +378,9 @@ struct Stores {
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
     /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased, bloomed,
-    /// graded or tonemapped, at time 0 with an exposure of 1 and the stores' lights, sky and
-    /// ambient occlusion, with the uploads of what's been added, and what's changed in the scene,
-    /// since the last frame's.
+    /// graded or tonemapped, at time 0 with an exposure of 1 that doesn't adapt and the stores'
+    /// lights, sky and ambient occlusion, with the uploads of what's been added, and what's changed
+    /// in the scene, since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -401,6 +408,8 @@ impl Stores {
             tonemapper: Tonemapper::None,
             antialiasing: Antialiasing::None,
             exposure: 1.0,
+            adaptation: None,
+            looked: false,
             time: 0.0,
             lights,
             sky: *sky,
@@ -4639,8 +4648,556 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
     );
 }
 
+/// A view of a uniform sky alone, whose exposure adapts, frame by frame a tenth of a second apart:
+/// its first two frames, before a metering comes back, at the exposure given, within the bounds;
+/// the third at what the first's metering called for, at once: the sky's luminance, in the middle of
+/// one of the meter's bins, 3 stops on. The sky 8 stops darker, two more frames at that, whose
+/// meterings were of the bright sky, then down at its speed, 2 stops a second, until it holds at
+/// what the dark sky calls for; then back up at 4, faster. A change of compensation shows in the
+/// frame it's made, a stop brighter; a change of percentiles, whose meter finds the same of a uniform
+/// sky, takes the compensation back at once too; and turned off, the exposure is the one given.
+/// Each frame's exposure is within a thousandth of a
+/// stop of what that makes it, and its sky shows the sky's luminance times it, as lit shading would
+/// multiply light by it.
+fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
+    const SIZE: u32 = 32;
+    const DT: f32 = 0.1;
+    // The middles of two of the meter's bins, in eighths of a stop from 2^-12, 8 stops apart.
+    const BRIGHT: f32 = 12.0625;
+    const DARK: f32 = 4.0625;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [1.0; 3]);
+    let lit = |stores: &mut Stores, log2: f32| {
+        stores.sky = Some(Sky {
+            texture: sky,
+            luminance: math::libm::exp2f(log2),
+        });
+    };
+    lit(&mut stores, BRIGHT);
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint::default();
+    let draws = Draws::default();
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let adaptation = Adaptation {
+        min: -6.0,
+        max: 22.0,
+        compensation: 0.0,
+        speed_up: 4.0,
+        speed_down: 2.0,
+        low_percentile: 0.1,
+        high_percentile: 0.9,
+    };
+    let given = gg_renderer::light_scale(10.0);
+    let mut time = 0.0;
+    // A frame's exposure value, checked against `expected`, and its sky against the luminance it
+    // shows, its log2 `shown`, times its exposure.
+    let mut frame = |stores: &mut Stores, adaptation, shown: f32, expected: f32| {
+        time += DT;
+        let data = RenderData {
+            exposure: given,
+            adaptation,
+            time,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let exposure = renderer.exposure();
+        let ev100 = -math::libm::log2f(1.2 * exposure);
+        assert!(
+            (ev100 - expected).abs() < 1e-3,
+            "at {time}s, the exposure value is {ev100}, not {expected}"
+        );
+        let sky = (math::libm::exp2f(shown) * exposure).min(1.0);
+        let pixel = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+        let expected = encoded(sky);
+        assert!(
+            pixel[..3]
+                .iter()
+                .all(|&channel| channel.abs_diff(expected) <= 1),
+            "at {time}s, the sky shows {pixel:?}, not {expected}"
+        );
+    };
+    let on = Some(adaptation);
+    for _ in 0..2 {
+        frame(&mut stores, on, BRIGHT, 10.0);
+    }
+    let bright = BRIGHT + 3.0;
+    for _ in 0..3 {
+        frame(&mut stores, on, BRIGHT, bright);
+    }
+    lit(&mut stores, DARK);
+    for _ in 0..2 {
+        frame(&mut stores, on, DARK, bright);
+    }
+    let dark = DARK + 3.0;
+    let mut expected = bright;
+    while expected > dark {
+        expected = (expected - adaptation.speed_down * DT).max(dark);
+        frame(&mut stores, on, DARK, expected);
+    }
+    frame(&mut stores, on, DARK, dark);
+    lit(&mut stores, BRIGHT);
+    for _ in 0..2 {
+        frame(&mut stores, on, BRIGHT, dark);
+    }
+    while expected < bright {
+        expected = (expected + adaptation.speed_up * DT).min(bright);
+        frame(&mut stores, on, BRIGHT, expected);
+    }
+    let brighter = Some(Adaptation {
+        compensation: 1.0,
+        ..adaptation
+    });
+    for _ in 0..3 {
+        frame(&mut stores, brighter, BRIGHT, bright - 1.0);
+    }
+    let narrower = Some(Adaptation {
+        low_percentile: 0.3,
+        ..adaptation
+    });
+    frame(&mut stores, narrower, BRIGHT, bright);
+    frame(&mut stores, None, BRIGHT, 10.0);
+    shut_down(renderer);
+}
+
+/// A view half a bright sky above the horizon and half a dark one below, each of luminances in the
+/// middle of one of the meter's bins, 8 stops apart, whose exposure adapts as fast as can be: it
+/// takes the mean of the two, between its tenth and ninetieth percentiles, each half 40% of the
+/// pixels; the bright half alone between its sixtieth and its ninetieth; the dark alone below its
+/// fortieth. A canvas of white over the whole view, which draws after the meter, changes nothing
+/// of it. Over a sky black above the horizon, the dark half alone, as what's darker than the
+/// meter's bins isn't metered.
+fn exposure_meters_between_its_percentiles() {
+    const SIZE: u32 = 32;
+    // The middles of two of the meter's bins, 8 stops apart.
+    const BRIGHT: f32 = 10.0625;
+    const DARK: f32 = 2.0625;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let [bright, dark] = [BRIGHT, DARK].map(math::libm::exp2f);
+    // Fine enough that the horizon's texels blend within no pixel.
+    let size = [512, 256];
+    let halves = sky_texture(&mut stores.textures, size, |_, y| {
+        [if y < size[1] / 2 { bright } else { dark }; 3]
+    });
+    let black = sky_texture(&mut stores.textures, size, |_, y| {
+        [if y < size[1] / 2 { 0.0 } else { dark }; 3]
+    });
+    let shown = |stores: &mut Stores, texture| {
+        stores.sky = Some(Sky {
+            texture,
+            luminance: 1.0,
+        });
+    };
+    shown(&mut stores, black);
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint {
+        projection: Projection::Perspective {
+            fov: 1.5,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let draws = Draws::default();
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    shown(&mut stores, halves);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let instant = Adaptation {
+        min: -6.0,
+        max: 22.0,
+        speed_up: 1000.0,
+        speed_down: 1000.0,
+        ..Adaptation::default()
+    };
+    let mut time = 0.0;
+    let none = Draws::default();
+    // The exposure value of the third frame of `adaptation`, with `canvas` over the view, which the
+    // first's metering sets, and that frame's middle pixel.
+    let mut metered = |stores: &mut Stores, adaptation: Adaptation, canvas: &Draws| {
+        for _ in 0..3 {
+            time += 0.1;
+            let data = RenderData {
+                adaptation: Some(adaptation),
+                time,
+                canvas,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        let ev100 = -math::libm::log2f(1.2 * renderer.exposure());
+        let middle = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+        (ev100, middle)
+    };
+    let cases = [
+        (0.1, 0.9, (BRIGHT + DARK) / 2.0),
+        (0.6, 0.9, BRIGHT),
+        (0.0, 0.4, DARK),
+    ];
+    for (low_percentile, high_percentile, mean) in cases {
+        let adaptation = Adaptation {
+            low_percentile,
+            high_percentile,
+            ..instant
+        };
+        let (ev100, _) = metered(&mut stores, adaptation, &none);
+        assert!(
+            (ev100 - (mean + 3.0)).abs() < 1e-3,
+            "between {low_percentile} and {high_percentile}, {ev100}, not {}",
+            mean + 3.0
+        );
+    }
+    // A canvas of white over the whole view, which draws after the meter, meters nothing.
+    let mut canvas = Draws::default();
+    let whole = Mat4::from_scale_rotation_translation(
+        Vec3::new(SIZE as f32, SIZE as f32, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(SIZE as f32 / 2.0, SIZE as f32 / 2.0, 0.0),
+    );
+    canvas.push_sprite(whole, Sprite::default());
+    let (ev100, pixel) = metered(&mut stores, instant, &canvas);
+    let mean = (BRIGHT + DARK) / 2.0;
+    assert!(
+        (ev100 - (mean + 3.0)).abs() < 1e-3,
+        "under a canvas of white, {ev100}, not {}",
+        mean + 3.0
+    );
+    assert_eq!(pixel, [255; 4], "the canvas shows over the view");
+    shown(&mut stores, black);
+    let (ev100, _) = metered(&mut stores, instant, &none);
+    assert!(
+        (ev100 - (DARK + 3.0)).abs() < 1e-3,
+        "under a black sky, {ev100}, not {}",
+        DARK + 3.0
+    );
+    shut_down(renderer);
+}
+
+/// The game's own view of a bright sky and a tool's look of a dark one, as the tool API's look
+/// round a dark room while the game's camera is outdoors, each exposure adapting as fast as can
+/// be: each settles at what its own sky calls for; a frame of the game's own view while the look
+/// stays, as a capture of it is, shows the bright sky at the game's own exposure; and what that
+/// frame metered, back two frames later, leaves the look's exposure where it was.
+fn a_looks_exposure_adapts_apart_from_the_games_own() {
+    const SIZE: u32 = 32;
+    // The middles of two of the meter's bins, 8 stops apart.
+    const BRIGHT: f32 = 12.0625;
+    const DARK: f32 = 4.0625;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [1.0; 3]);
+    let lit = |stores: &mut Stores, log2: f32| {
+        stores.sky = Some(Sky {
+            texture: sky,
+            luminance: math::libm::exp2f(log2),
+        });
+    };
+    lit(&mut stores, BRIGHT);
+    let viewport = filling([SIZE, SIZE]);
+    let draws = Draws::default();
+    settle(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        Viewpoint::default(),
+        &draws,
+    );
+    let instant = Adaptation {
+        min: -6.0,
+        max: 22.0,
+        speed_up: 1000.0,
+        speed_down: 1000.0,
+        ..Adaptation::default()
+    };
+    let mut time = 0.0;
+    // The exposure value of a frame of the game's own view of the bright sky, or of the look's of
+    // the dark one, and its sky's pixel.
+    let mut frame = |stores: &mut Stores, looked: bool| {
+        time += 0.1;
+        lit(stores, if looked { DARK } else { BRIGHT });
+        let data = RenderData {
+            exposure: gg_renderer::light_scale(10.0),
+            adaptation: Some(instant),
+            looked,
+            time,
+            ..stores.data(viewport, Viewpoint::default(), &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let ev100 = -math::libm::log2f(1.2 * renderer.exposure());
+        let pixel = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+        (ev100, pixel)
+    };
+    let near = |got: f32, want: f32| (got - want).abs() < 1e-3;
+    for _ in 0..4 {
+        frame(&mut stores, false);
+    }
+    let (own, shown) = frame(&mut stores, false);
+    assert!(
+        near(own, BRIGHT + 3.0),
+        "the game's own view settles at {own}"
+    );
+    for _ in 0..4 {
+        frame(&mut stores, true);
+    }
+    let (looked, _) = frame(&mut stores, true);
+    assert!(near(looked, DARK + 3.0), "the look settles at {looked}");
+    let (captured, pixel) = frame(&mut stores, false);
+    assert!(
+        near(captured, own),
+        "a frame of the game's own view takes {captured}, not {own}"
+    );
+    assert!(
+        close(pixel, shown),
+        "it shows the sky as {pixel:?}, not {shown:?}"
+    );
+    for i in 0..3 {
+        let (after, _) = frame(&mut stores, true);
+        assert!(
+            near(after, looked),
+            "{i} frames on, the look takes {after}, not {looked}"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// A sky of fine checkers, one a hundredth as bright as the other, under temporal antialiasing,
+/// whose clipping lets much of the history through where what's round a pixel differs that much:
+/// settled at the exposure it
+/// adapts to; then settled at a quarter of that, without adapting; then adapting again, whose third
+/// frame takes the first metering at once, 4 times brighter. That frame shows what the view settled
+/// at before, as near as one settled frame is to the one before it, as the resolve scales its
+/// history by the change of exposure, rather than a blend of mostly the dimmer history, a ghost.
+fn an_exposure_jump_under_antialiasing_leaves_no_ghost() {
+    const SIZE: u32 = 32;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [256, 128], |x, y| {
+        [if (x + y) % 2 == 0 { 1.0 } else { 0.01 }; 3]
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 4000.0,
+    });
+    let viewport = filling([SIZE, SIZE]);
+    // About a texel a pixel.
+    let viewpoint = Viewpoint {
+        projection: Projection::Perspective {
+            fov: 0.8,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let draws = Draws::default();
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut time = 0.0;
+    let mut frame = |stores: &mut Stores, exposure: f32, adaptation: Option<Adaptation>| {
+        time += 0.1;
+        let data = RenderData {
+            antialiasing: Antialiasing::Taa,
+            exposure,
+            adaptation,
+            time,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        (frame_pixels(&mut renderer), renderer.exposure())
+    };
+    let adapting = Some(Adaptation::default());
+    let given = gg_renderer::light_scale(12.0);
+    let mut last = frame(&mut stores, given, adapting);
+    let mut before = last.clone();
+    for _ in 0..40 {
+        before = last;
+        last = frame(&mut stores, given, adapting);
+    }
+    let (settled, adapted) = last;
+    let still = linear_distance(&before.0, &settled);
+    for _ in 0..30 {
+        frame(&mut stores, adapted / 4.0, None);
+    }
+    for _ in 0..2 {
+        frame(&mut stores, adapted / 4.0, adapting);
+    }
+    let (jumped, exposure) = frame(&mut stores, adapted / 4.0, adapting);
+    let ratio = exposure / adapted;
+    assert!(
+        (ratio - 1.0).abs() < 0.02,
+        "it jumped to {ratio} of what it settled at"
+    );
+    let ghost = linear_distance(&jumped, &settled);
+    assert!(
+        ghost < 2.0 * still + 0.002,
+        "the frame of the jump is {ghost} from what it settled at, one settled frame {still} from \
+         the one before"
+    );
+    shut_down(renderer);
+}
+
+/// A white floor, three spheres on it, white, red and blue, and an unlit square of orange over
+/// them, under a sun and a sky, whose exposure adapts, against its reference of four frames side by
+/// side: settled under a sun of 100,000 lux and a sky of 4,000 candela per square meter; the first
+/// with both 8 stops darker, its lit pixels dark and its unlit square as bright as ever; a second
+/// later, coming down at its speed, 4 stops a second; and settled. Everything lit 8 stops darker,
+/// its meter's mean is 8 stops lower, so that it settles 8 stops lower, showing what it showed:
+/// within a step of 8 bits of the first. And a frame drawn at the exposure it settled at, without
+/// adapting, shows the same.
+fn adapted_frames_match_their_reference() {
+    const SIZE: u32 = 64;
+    const DT: f32 = 0.1;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, y| {
+        if y < 16 {
+            [0.6, 0.8, 1.0]
+        } else {
+            [0.3, 0.25, 0.2]
+        }
+    });
+    let at = |stores: &mut Stores, darker: f32| {
+        let dimmed = math::libm::exp2f(-darker);
+        stores.sky = Some(Sky {
+            texture: sky,
+            luminance: 4000.0 * dimmed,
+        });
+        stores.lights = vec![Light {
+            color: Vec3::splat(100_000.0 * dimmed),
+            ..sun(Vec3::new(1.0, -2.0, -1.0), None)
+        }];
+    };
+    at(&mut stores, 0.0);
+    let square = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 0.5, 16, 32);
+    let mut draws = Draws::default();
+    let mut drawn = |stores: &mut Stores, mesh, color: Vec4, unlit, at: Mat4| {
+        let material = stores.materials.add(&Material {
+            color,
+            workflow: metallic(0.0, 0.6),
+            unlit,
+            ..Material::default()
+        });
+        let draw = MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(at, &draw, 0);
+    };
+    drawn(
+        &mut stores,
+        square,
+        Vec4::ONE,
+        false,
+        facing_up(8.0, Vec3::ZERO),
+    );
+    for (x, color) in [
+        (-1.2, [0.9; 3]),
+        (0.0, [0.8, 0.1, 0.1]),
+        (1.2, [0.1, 0.2, 0.8]),
+    ] {
+        let color = Vec3::from(color).extend(1.0);
+        let at = Mat4::from_translation(Vec3::new(x, 0.5, 0.0));
+        drawn(&mut stores, ball, color, false, at);
+    }
+    let orange = Vec4::new(0.8, 0.4, 0.1, 1.0);
+    let over = Mat4::from_scale_rotation_translation(
+        Vec3::splat(0.6),
+        Quat::IDENTITY,
+        Vec3::new(0.0, 1.8, 0.5),
+    );
+    drawn(&mut stores, square, orange, true, over);
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.0, 5.0),
+        rotation: Quat::from_rotation_x(-0.3),
+        projection: Projection::Perspective {
+            fov: 0.9,
+            near: 0.1,
+        },
+    };
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let adaptation = Adaptation {
+        speed_down: 4.0,
+        ..Adaptation::default()
+    };
+    let mut time = 0.0;
+    let mut frame = |stores: &mut Stores| {
+        time += DT;
+        let data = RenderData {
+            tonemapper: Tonemapper::PbrNeutral,
+            exposure: gg_renderer::light_scale(15.0),
+            adaptation: Some(adaptation),
+            time,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        (frame_pixels(&mut renderer), renderer.exposure())
+    };
+    let (bright, bright_exposure) = settled(&mut stores, &mut frame);
+    at(&mut stores, 8.0);
+    let (first, _) = frame(&mut stores);
+    for _ in 1..10 {
+        frame(&mut stores);
+    }
+    let (second, _) = frame(&mut stores);
+    let (dark, dark_exposure) = settled(&mut stores, &mut frame);
+    let stops = math::libm::log2f(dark_exposure / bright_exposure);
+    assert!((stops - 8.0).abs() < 1e-3, "settled {stops} stops apart");
+    let unlit = pixel_of(viewpoint, [SIZE, SIZE], Vec3::new(0.0, 1.8, 0.5));
+    let shown = pixel_at(&bright, SIZE, unlit);
+    for frame in [&first, &second, &dark] {
+        let pixel = pixel_at(frame, SIZE, unlit);
+        assert_eq!(
+            pixel, shown,
+            "the unlit square shows otherwise at another exposure"
+        );
+    }
+    let floor = pixel_of(viewpoint, [SIZE, SIZE], Vec3::new(2.5, 0.0, 1.5));
+    let [lit, dimmed] = [&bright, &first].map(|frame| decoded(pixel_at(frame, SIZE, floor)[1]));
+    assert!(
+        dimmed < lit / 8.0,
+        "the floor shows {dimmed} 8 stops darker, against {lit}"
+    );
+    let apart = (bright.iter().zip(&dark))
+        .filter(|(a, b)| a.abs_diff(**b) > 1)
+        .count();
+    assert_eq!(apart, 0, "settled lit 8 stops darker, it shows otherwise");
+    let unadapted = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        exposure: dark_exposure,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, unadapted);
+    assert!(
+        frame_pixels(&mut renderer) == dark,
+        "adapting shows otherwise than the exposure"
+    );
+    let frames = side_by_side(&[&bright, &first, &second, &dark], SIZE);
+    shut_down(renderer);
+    compare("adapted", SIZE * 4, SIZE, &frames);
+}
+
+/// What `frame` renders of `stores` once the exposure it gives, after its pixels, moves less than a
+/// ten-thousandth of a stop over three frames, as an adapting exposure that has settled does, whose
+/// meterings come back two frames later: within 100 frames.
+fn settled(
+    stores: &mut Stores,
+    frame: &mut impl FnMut(&mut Stores) -> (Vec<u8>, f32),
+) -> (Vec<u8>, f32) {
+    let mut last = frame(stores).1;
+    let mut still = 0;
+    for _ in 0..100 {
+        let next = frame(stores);
+        still = if math::libm::log2f(next.1 / last).abs() < 1e-4 {
+            still + 1
+        } else {
+            0
+        };
+        if still == 2 {
+            return next;
+        }
+        last = next.1;
+    }
+    panic!("the exposure still moves after 100 frames: {last}");
+}
+
 /// A square that covers a view, with a shader that shows the frame's data as colors: where the
-/// camera is, left of it, and the time and the exposure, right of it.
+/// camera is, left of it, and the time and the exposure, right of it. Its exposure adapting, from
+/// the same, the shader shows what the first frame's metering, back two frames later, calls for.
 fn shaders_read_the_frames_data() {
     const SIZE: u32 = 16;
     let mut renderer = renderer(SIZE, SIZE);
@@ -4672,6 +5229,25 @@ fn shaders_read_the_frames_data() {
             close(got, expected),
             "{got:?} at {pixel:?}, not {expected:?}"
         );
+    }
+    // The first two frames before a metering comes back, the third after.
+    for i in 0..3 {
+        let data = RenderData {
+            time: 0.4,
+            exposure: 0.6,
+            adaptation: Some(Adaptation::default()),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let exposure = renderer.exposure();
+        let moved = (exposure / 0.6 - 1.0).abs();
+        assert!(
+            if i < 2 { moved < 1e-5 } else { moved > 0.5 },
+            "frame {i} exposed at {exposure}"
+        );
+        let expected = [encoded(0.4), encoded(exposure), encoded(0.0), 255];
+        let got = pixel_at(&frame_pixels(&mut renderer), SIZE, [12, 8]);
+        assert!(close(got, expected), "{got:?}, not {expected:?}");
     }
     shut_down(renderer);
 }
@@ -6091,6 +6667,59 @@ fn reflections_mirror_what_the_view_shows() {
              quarter of {was}"
         );
     }
+    shut_down(renderer);
+}
+
+/// [`reflection_scene`] reflecting what it shows, its exposure adapting as fast as can be from 1,
+/// at which the frames before it were drawn and their colors kept: its third frame takes the first
+/// metering at once, about 2 stops darker, and shows the mirrored sphere as the frames settled after
+/// it do, the colors the frame before kept scaled by the exposure's change, rather than as bright
+/// as the frame before kept it.
+fn reflections_follow_an_exposures_jump() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    let instant = Adaptation {
+        speed_up: 1000.0,
+        speed_down: 1000.0,
+        ..Adaptation::default()
+    };
+    let mirrored = pixel_of(viewpoint, [WIDTH, HEIGHT], scene.mirrored);
+    let mut time = 0.0;
+    let mut frame = |stores: &mut Stores, adaptation| {
+        time += 0.1;
+        let data = RenderData {
+            reflections: Some(Reflections::default()),
+            adaptation,
+            time,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let pixel = pixel_at(&frame_pixels(&mut renderer), WIDTH, mirrored);
+        (renderer.exposure(), pixel.map(decoded))
+    };
+    for _ in 0..2 {
+        frame(&mut stores, None);
+    }
+    let shown: Vec<_> = (0..6).map(|_| frame(&mut stores, Some(instant))).collect();
+    let (before, jumped, settled) = (shown[1], shown[2], shown[5]);
+    assert!(
+        jumped.0 < before.0 / 2.0 && (jumped.0 / settled.0 - 1.0).abs() < 0.01,
+        "the exposures {:?}",
+        shown.iter().map(|frame| frame.0).collect::<Vec<_>>()
+    );
+    let off = (jumped.1.iter().zip(settled.1)).map(|(a, b)| (a - b).abs());
+    assert!(
+        off.clone().all(|off| off < 0.005),
+        "the mirrored sphere shows {:?} as the exposure jumps, not {:?}",
+        jumped.1,
+        settled.1
+    );
     shut_down(renderer);
 }
 

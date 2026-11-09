@@ -4871,6 +4871,8 @@ mod tests {
         );
         assert_eq!((frame.look, cx.look.seen), (1, Some(viewpoint)));
         assert!(!cx.colliders_shown(), "as the layers set");
+        // Seen from the look's viewpoint, whose exposure adapts apart, as the layer's own isn't.
+        assert!(frame.looked && !expected.looked);
         // Bare, as the layers set alone.
         cx.look.bare = true;
         set(&mut cx);
@@ -4881,6 +4883,7 @@ mod tests {
         let expected = drawn(&mut twin);
         assert_eq!(frame.draws, expected.draws);
         assert_eq!((frame.viewpoint, frame.outline), (theirs, expected.outline));
+        assert!(!frame.looked, "a bare frame is the game's own view");
     }
 
     /// A capture of the game's own view rides with a bare frame, which isn't published nor paced

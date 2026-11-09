@@ -34,7 +34,7 @@ pub use capture::Capture;
 pub use device::{Device, MemoryBudget, SHADER_CAPABILITIES, UploadPath};
 pub use frame::{
     Arenas, BufferId, Compute, ComputePass, Frame, Frames, Graph, ImageId, ImageRead, Indices,
-    MAX_BUFFER_READ, MAX_READS, Pass, PassId, RenderPass, Target, Upload,
+    MAX_BUFFER_READ, MAX_BUFFER_READS, MAX_READS, Pass, PassId, RenderPass, Target, Upload,
 };
 pub use image::ColorImage;
 pub use instance::{Instance, InstanceDesc, Validation};

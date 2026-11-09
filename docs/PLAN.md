@@ -144,6 +144,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 17, rendering looks** (2026-11-09)
 - **Screen-space reflections** (2026-11-09)
 - **A game's UI's widgets** (2026-11-09)
+- **Exposure that adapts** (2026-11-09)
 
 ## Now
 
@@ -299,7 +300,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A model standing in for a following run with its nodes, so that the hash still matches: a replay or a joiner that can't load a model stands in with one of no nodes, and its hash parts from its run's where the nodes were | A replay or a joiner runs without a game's model files, as a bug report's might |
 | A sprite sheet's texture reloaded at another size, which keeps drawing as it did (`asset.sheet_resized`): its sprites hold its cells as fractions of its size, which a layer cut it by as it added it | A game's sheets grow as they're drawn, as frames added to an animation's |
 | Following a texture's, a model's or a font's file outside the asset root, or a sound's or music's anywhere, none of which has an asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
-| Exposure that adapts to what the view sees, from its luminance, as eyes adapt: an environment's exposure is set by hand | A game's light changes more than one exposure suits, as from sunlight indoors |
+| An adapting exposure's metering weighted toward the view's middle or a spot, and local exposure, which brightens what's dark in a view apart from what's bright: the meter weighs every pixel alike, and one exposure takes the whole view | A game's subject is lost against a bright sky or a dark room, or a view must show both sunlight and deep shade |
+| An adapting exposure that moves in real time while the simulation is paused or stopped, as the editor's view before Play: it moves by the time the view shows, the simulation's, so that captures of the same frames match, and holds while that does, though a change to its bounds or compensation shows at once, and one to its percentiles takes what the meter calls for at once | Someone looks round a stopped game in the editor and expects it to adapt |
+| The adapted exposure in `engine.perf` and the tool API's `status`, for agents: `Renderer::exposure` gives what the last frame shaded at, which reaches neither | An agent checks how a game's exposure adapts without reading its pixels |
+| Metering an adapting exposure a frame sooner, the adapted exposure kept on the GPU, which every reader of it reads, games' shaders through the frame's data among them: the meter's mean comes back to the CPU two frames later, so that every reader takes the exposure as a fixed one | A game's light changes so fast that two frames' lag shows, as a flash |
 | Showing the frame on HDR displays, through HDR10 or scRGB swapchains: frames are 8-bit sRGB | A game targets HDR displays |
 | Bloom's radius and a threshold, set by a game: each of the chain's levels lerps 0.7 of the way toward the one below, and light blooms from everything, as in a lens | A game needs a wider or tighter glow, or bloom from its brightest light alone |
 | Lens dirt, flares and streaks over bloom, and each of its levels tinted and sized apart, as Unreal's are: bloom is one weighted mean of its levels | A game's look needs them |

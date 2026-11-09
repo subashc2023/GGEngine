@@ -188,7 +188,7 @@ pub use ecs::{
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version. A build without `dev`, which has no UI, keeps it for its types.
 pub use egui;
-pub use environment::Environment;
+pub use environment::{Adaptation, Environment};
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 pub use font::{Align, Font, Text, TextStyle};
 pub use game_ui::{GameUi, UiEvent, UiValue};

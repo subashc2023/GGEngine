@@ -98,7 +98,8 @@ struct Trace {
     distance: f32,
     thickness: f32,
     starts: [u32; MOST_LEVELS],
-    unused: [u32; 2],
+    scale: f32,
+    unused: u32,
 }
 
 /// What every pass pushes: `Push` in `shaders/reflections.slang`, field for field.
@@ -157,13 +158,15 @@ pub(crate) struct Images {
     last: Option<Kept>,
 }
 
-/// The last frame that kept the view's colors: its number, the view's size, and the matrix from the
-/// world to the view's clip space it drew by, without its offset, as they were resolved.
+/// The last frame that kept the view's colors: its number, the view's size, the matrix from the
+/// world to the view's clip space it drew by, without its offset, as they were resolved, and what
+/// lit shading multiplied light by in it.
 #[derive(Clone, Copy)]
 struct Kept {
     frame: u64,
     size: [u32; 2],
     clip_from_world: Mat4,
+    exposure: f32,
 }
 
 impl Images {
@@ -191,20 +194,29 @@ impl Images {
 
     /// The matrix from the world to the view's clip space, without antialiasing's offset, that the
     /// colors kept for frame `frame` were drawn by, if the frame before it kept them, of a view of
-    /// `size` pixels, in the images there are: what its reflections are traced against.
-    pub(crate) fn traced_against(&self, frame: u64, size: [u32; 2]) -> Option<Mat4> {
+    /// `size` pixels, in the images there are, and the exposure they were drawn at: what its
+    /// reflections are traced against.
+    pub(crate) fn traced_against(&self, frame: u64, size: [u32; 2]) -> Option<(Mat4, f32)> {
         (self.last)
             .filter(|last| last.frame + 1 == frame && last.size == size)
-            .map(|last| last.clip_from_world)
+            .map(|last| (last.clip_from_world, last.exposure))
     }
 
     /// Notes that frame `frame`, submitted, kept the view's colors, of `size` pixels, drawn
-    /// without antialiasing's offset by `clip_from_world`, for the next frame's reflections.
-    pub(crate) fn kept(&mut self, frame: u64, size: [u32; 2], clip_from_world: Mat4) {
+    /// without antialiasing's offset by `clip_from_world`, at `exposure`, for the next frame's
+    /// reflections.
+    pub(crate) fn kept(
+        &mut self,
+        frame: u64,
+        size: [u32; 2],
+        clip_from_world: Mat4,
+        exposure: f32,
+    ) {
         self.last = Some(Kept {
             frame,
             size,
             clip_from_world,
+            exposure,
         });
     }
 
@@ -276,11 +288,13 @@ pub(crate) struct Keep {
 /// What a frame's reflections take of how it draws the view: from the view's space to its clip space,
 /// with antialiasing's offset, under perspective; from the view's space to the world; from the world
 /// to the clip space the colors it traces against were drawn in, as
-/// [`Images::traced_against`] gives it; and the settings.
+/// [`Images::traced_against`] gives it; what those colors are multiplied by to be of this frame's
+/// light, its exposure over theirs, as an adapting exposure changes; and the settings.
 pub(crate) struct Seen {
     pub(crate) clip_from_view: Mat4,
     pub(crate) world_from_view: Mat4,
     pub(crate) kept_clip_from_world: Mat4,
+    pub(crate) kept_scale: f32,
     pub(crate) settings: Reflections,
 }
 
@@ -427,7 +441,8 @@ impl ReflectionPass {
             distance: seen.settings.distance,
             thickness: seen.settings.thickness,
             starts,
-            unused: [0; 2],
+            scale: seen.kept_scale,
+            unused: 0,
         };
         let push = Push {
             pyramid: pass.address(plan.pyramid),
@@ -505,17 +520,18 @@ mod tests {
         assert_eq!(reflected_levels([4, 16]), 5);
     }
 
-    /// A frame traces against the colors the frame just before it kept, at its size alone; and not
-    /// once the images are let go of, as a frame that renders the view without reflections does,
-    /// and as making them again at another size does first, though a frame of the next number
-    /// comes, as after a frame that had nothing to render into: the images made again hold nothing.
+    /// A frame traces against the colors the frame just before it kept, at its size alone, knowing
+    /// the exposure they were kept at; and not once the images are let go of, as a frame that
+    /// renders the view without reflections does, and as making them again at another size does
+    /// first, though a frame of the next number comes, as after a frame that had nothing to render
+    /// into: the images made again hold nothing.
     #[test]
     fn colors_are_traced_against_by_the_next_frame_alone_until_their_images_go() {
         let mut images = Images::default();
         let drawn = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(images.traced_against(1, [8, 4]), None);
-        images.kept(5, [8, 4], drawn);
-        assert_eq!(images.traced_against(6, [8, 4]), Some(drawn));
+        images.kept(5, [8, 4], drawn, 0.25);
+        assert_eq!(images.traced_against(6, [8, 4]), Some((drawn, 0.25)));
         assert_eq!(images.traced_against(7, [8, 4]), None);
         assert_eq!(images.traced_against(5, [8, 4]), None);
         assert_eq!(images.traced_against(6, [8, 5]), None);

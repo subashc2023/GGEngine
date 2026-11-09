@@ -768,9 +768,10 @@ fn compute_passes_write_cubes_that_passes_sample() {
 /// A compute pass writes two commands of indirect draws into a buffer of the graph's own, the
 /// instances' colors into another and two counts into a third, the second by an atomic add; a
 /// render pass draws by the commands, the first of two instances from the second, the other of
-/// none, each instance over a pixel of its own in the color it reads; and the counts come back
-/// as the frame two later begins. Three frames, so that synchronization validation sees each
-/// frame's writes wait for the frame before's reads, of the commands and of the copy.
+/// none, each instance over a pixel of its own in the color it reads; and the counts and the colors
+/// come back as the frame two later begins, each by its buffer's name. Three frames, so that
+/// synchronization validation sees each frame's writes wait for the frame before's reads, of the
+/// commands and of the copies.
 fn compute_passes_write_buffers_that_draws_take_commands_from() {
     let instance = instance();
     let validation = instance.validation();
@@ -815,6 +816,7 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         .write_buffer(colors)
         .add();
     let read = graph.read_back(label!("read counts"), counts);
+    let read_colors = graph.read_back(label!("read colors"), colors);
     let drawn = (graph.render(label!("draw")))
         .clear(color, [0.0; 4])
         .indirect(commands)
@@ -826,7 +828,13 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
             .begin([Target::Image(&mut image)], &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        reads.push((frame.buffer_read().0, frame.buffer_read().1.to_vec()));
+        let (number, counted) = frame.buffer_read("test counts");
+        let colored = frame.buffer_read("test colors").1.to_vec();
+        assert!(
+            frame.buffer_read("test commands").1.is_empty(),
+            "never read back"
+        );
+        reads.push((number, counted.to_vec(), colored));
         let indices = frame
             .upload(&[0u32, 1, 2].map(u32::to_ne_bytes).concat())
             .expect("indices");
@@ -845,6 +853,7 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         pass.dispatch([1, 1, 1]);
         drop(pass);
         frame.read_back(read).expect("a read back");
+        frame.read_back(read_colors).expect("a read back");
         let mut pass = frame
             .render(drawn)
             .expect("an offscreen image is always there");
@@ -857,7 +866,14 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         frame.submit().expect("the frame's submission");
     }
     let counted = [2u32, 7].map(u32::to_ne_bytes).concat();
-    assert_eq!(reads, [(0, Vec::new()), (0, Vec::new()), (1, counted)]);
+    // Blue, which no command draws, then red and green.
+    let colored = [
+        0.0f32, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+    ]
+    .map(f32::to_ne_bytes)
+    .concat();
+    let none = || (0, Vec::new(), Vec::new());
+    assert_eq!(reads, [none(), none(), (1, counted, colored)]);
     let pixels = image.read_back().expect("the image's pixels");
     assert_eq!(pixels, [255, 0, 0, 255, 0, 255, 0, 255], "red, then green");
 
@@ -878,6 +894,15 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
         let _ = graph.read_back(label!("read"), large);
     });
     assert!(refused.contains("reads back"), "{refused}");
+    let refused = panics(|| {
+        let mut graph = Graph::default();
+        let small = graph.buffer("small", 4);
+        let _ = graph.compute(label!("write")).write_buffer(small).add();
+        for _ in 0..=gg_gpu::MAX_BUFFER_READS {
+            let _ = graph.read_back(label!("read"), small);
+        }
+    });
+    assert!(refused.contains("at most"), "{refused}");
     let refused = tries(|| {
         let mut frame = frames
             .begin([Target::Image(&mut image)], &graph)
@@ -888,6 +913,7 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
             .expect("indices");
         drop(frame.compute(written));
         frame.read_back(read).expect("a read back");
+        frame.read_back(read_colors).expect("a read back");
         let mut pass = frame
             .render(drawn)
             .expect("an offscreen image is always there");
@@ -966,7 +992,7 @@ fn compute_queue_passes_run_beside_the_graphics_queues() {
             .begin([Target::Image(&mut image)], &graph)
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        reads.push(frame.buffer_read().0);
+        reads.push(frame.buffer_read("test counts").0);
         let shown = if number % 2 == 0 {
             [red, green]
         } else {

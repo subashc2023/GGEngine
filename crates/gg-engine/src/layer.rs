@@ -3783,9 +3783,9 @@ impl Context {
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
-    /// antialiasing, exposure, sky, ambient occlusion, fog and reflections, or none, none, the
-    /// default's, none, none, none and none, and its lights, as the world was last drawn, and the
-    /// time it was drawn at;
+    /// antialiasing, exposure and its adaptation, sky, ambient occlusion, fog and reflections, or
+    /// none, none, the default's and none, none, none, none and none, and its lights, as the world
+    /// was last drawn, and the time it was drawn at;
     /// its draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
@@ -3797,10 +3797,11 @@ impl Context {
     /// it, and how many it's still decoding; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
     /// those outside the view, which the next answers to come back answer `None`. In a development
-    /// build, the look's viewpoint and outline go in place of the layers', and the frame carries
-    /// the look's revision; but a bare frame leaves the look out, and the picks to the next frame
-    /// that isn't bare, both those asked this frame and those the renderer holds, so that none
-    /// reads a view a client isn't shown.
+    /// build, the look's viewpoint and outline go in place of the layers', the frame carries the
+    /// look's revision, and whether it's seen from the look's viewpoint, whose exposure adapts
+    /// apart from the game's own; but a bare frame leaves the look out, and the picks to the next
+    /// frame that isn't bare, both those asked this frame and those the renderer holds, so that
+    /// none reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         // A world without an environment isn't tonemapped or antialiased, and its light is exposed
@@ -3809,6 +3810,9 @@ impl Context {
         frame.antialiasing =
             (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing);
         frame.exposure = self.environment.unwrap_or_default().light_scale();
+        frame.adaptation = (self.environment)
+            .and_then(|seen| seen.adaptation)
+            .map(|adaptation| adaptation.rendered());
         frame.sky = self.environment.and_then(|seen| seen.sky());
         // Nor bloomed or graded.
         frame.bloom = self.environment.map_or(0.0, |seen| seen.bloom);
@@ -3840,6 +3844,7 @@ impl Context {
             self.look.seen = Some(frame.viewpoint);
             frame.look = self.look.revision;
             frame.bare = self.look.bare;
+            frame.looked = !self.look.bare && self.look.viewpoint.is_some();
         }
         frame.pixels = self.shown;
         if mem::take(&mut self.shown_new) {

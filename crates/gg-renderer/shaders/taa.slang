@@ -13,8 +13,9 @@
 // uncovered or lit otherwise, doesn't linger as a ghost, nor the filter's undershoot at an edge as
 // a dark fringe. Colors are weighed by 1 over 1 plus their luminance as they're clipped and
 // blended, so that a lone bright pixel doesn't flicker as the offsets move it in and out of a
-// pixel. Where the frame before resolved nothing, or the point showed outside it or behind its
-// camera, the pixel takes this frame's alone.
+// pixel. The history is scaled by how the exposure changed since the frame before, as an adapting
+// one does, so that what it holds is of this frame's light. Where the frame before resolved
+// nothing, or the point showed outside it or behind its camera, the pixel takes this frame's alone.
 //
 // `Resolve` and `Push` match `Resolve` and `ResolvePush` in src/taa.rs, field for field.
 
@@ -58,6 +59,9 @@ struct Resolve {
     // Whether there's a history to take, and whether the resolved colors are written apart.
     uint has_history;
     uint writes_resolved;
+    // What the history is multiplied by: this frame's exposure over the frame before's, which an
+    // adapting exposure changes, so that it's of the same light as this frame's colors.
+    float history_scale;
 };
 
 struct Push {
@@ -192,7 +196,8 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
         float2 uv = (float2(at) + 0.5) / size - motion * 0.5;
         bool inside = all(uv >= 0.0) && all(uv <= 1.0);
         if (before.w > 0.0 && inside) {
-            float3 history = weighed(catmull_rom(textures[resolve.history], uv, size));
+            float3 sampled = catmull_rom(textures[resolve.history], uv, size);
+            float3 history = weighed(sampled * resolve.history_scale);
             if (!any(isnan(history))) {
                 history = clipped(history, least, most);
                 resolved = lerp(history, current, CURRENT);

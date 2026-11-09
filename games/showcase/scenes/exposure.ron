@@ -1,0 +1,202 @@
+(
+    entities: {
+        "0c3e8a1f5b7d2946": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.7, 7.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1d4f9b2a6c8e3057": (
+            Environment: (
+                exposure: 15.0,
+                adaptation: Some((
+                    min: 0.0,
+                    max: 18.0,
+                    compensation: 0.0,
+                    speed_up: 3.0,
+                    speed_down: 1.0,
+                    low_percentile: 0.1,
+                    high_percentile: 0.9,
+                )),
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Atmosphere((
+                    rayleigh: (5.802, 13.558, 33.1),
+                    mie: 3.996,
+                    mie_absorption: 0.444,
+                    mie_anisotropy: 0.8,
+                    ozone: (0.65, 1.881, 0.085),
+                    ground_albedo: (0.3, 0.3, 0.3),
+                    altitude: 0.0,
+                    sun_size: 0.00935,
+                )),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: None,
+            ),
+            Name: ("Environment"),
+        ),
+        "2e5a0c3b7d9f4168": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Ground"),
+            Transform: (
+                translation: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (20000.0, 1.0, 20000.0),
+            ),
+        ),
+        "3f6b1d4c8e0a5279": (
+            Name: ("Hint"),
+            Text: (
+                text: "The exposure adapts to what the view sees, as eyes do: through a day a minute long, from the noon sun, through dusk, to the lamps at night, faster to the light than to the dark",
+                font: None,
+                size: 0.14,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.2, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4a7c2e5d9f1b6380": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 1.0, 1.0),
+                intensity: 120000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 60.0,
+            ),
+            Name: ("Sun"),
+            Spin: (
+                axis: (0.8191521, 0.5735765, 0.0),
+                speed: -0.10471976,
+            ),
+            Transform: (
+                translation: (0.0, 10.0, 0.0),
+                rotation: (-0.3134759, -0.2194982, 0.0, 0.9238795),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5b8d3f6e0a2c7491": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6c9e4a7f1b3d85a2": (
+            ModelRoot: ("963ad8b306ccadf8"),
+            Name: ("Capsule"),
+            Transform: (
+                translation: (-4.5, 1.0, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7d0f5b8a2c4e96b3": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.7, 0.4),
+                intensity: 400.0,
+                range: Some(10.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Lamp"),
+            Transform: (
+                translation: (-3.0, 2.6, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8e1a6c9b3d5fa7c4": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.7, 0.4),
+                intensity: 400.0,
+                range: Some(10.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Lamp"),
+            Transform: (
+                translation: (3.0, 2.6, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9f2b7d0c4e6ab8d5": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Post"),
+            Transform: (
+                translation: (-3.0, 1.2, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.12, 2.4, 0.12),
+            ),
+        ),
+        "a03c8e1d5f7bc9e6": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Post"),
+            Transform: (
+                translation: (3.0, 1.2, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.12, 2.4, 0.12),
+            ),
+        ),
+        "b14d9f2e6a8cdaf7": (
+            Name: ("Title"),
+            Text: (
+                text: "Exposure",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.8, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

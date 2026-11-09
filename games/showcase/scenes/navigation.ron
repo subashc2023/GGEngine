@@ -432,6 +432,7 @@
         "7a4c9e1d3f2b6085": (
             Environment: (
                 exposure: 15.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: Image("93955ed372497870"),

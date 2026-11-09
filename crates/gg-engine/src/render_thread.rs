@@ -44,8 +44,13 @@ pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) tonemapper: Tonemapper,
     pub(crate) antialiasing: Antialiasing,
-    /// What lit shading multiplies light by, as [`RenderData::exposure`] has it.
+    /// What lit shading multiplies light by, as [`RenderData::exposure`] has it, and how it adapts,
+    /// as the world's environment has it.
     pub(crate) exposure: f32,
+    pub(crate) adaptation: Option<gg_renderer::Adaptation>,
+    /// Whether the view is seen from where the tool API's look sets, as [`RenderData::looked`]
+    /// has it: never in a build without `dev`, which has no look.
+    pub(crate) looked: bool,
     /// The world's lights as it was drawn, which keep their memory.
     pub(crate) lights: Vec<gg_renderer::Light>,
     /// The world's sky, as its environment has it.
@@ -144,6 +149,8 @@ impl Default for Extracted {
             tonemapper: Tonemapper::None,
             antialiasing: Antialiasing::None,
             exposure: 1.0,
+            adaptation: None,
+            looked: false,
             lights: Vec::new(),
             sky: None,
             bloom: 0.0,
@@ -250,6 +257,8 @@ impl Render for Renderer {
             tonemapper: frame.tonemapper,
             antialiasing: frame.antialiasing,
             exposure: frame.exposure,
+            adaptation: frame.adaptation,
+            looked: frame.looked,
             time: frame.time,
             lights: &frame.lights,
             sky: frame.sky,

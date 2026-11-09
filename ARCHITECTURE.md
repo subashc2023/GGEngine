@@ -1707,7 +1707,8 @@ drawn, as the sky is. Its exposure, in EV100, scales
 light: lit shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades,
 which keeps a sunny day's light within 16-bit floats, and a world without an environment is
 exposed as the default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and
-unlit materials, draws its colors as they are. Every draw's shader can read the frame's data
+unlit materials, draws its colors as they are. Its exposure may adapt to what the view sees
+instead, as below, off by default. Every draw's shader can read the frame's data
 through an address among its push constants: where the view sees from, the time, the simulation's
 as the world draws, which stops with it and draws alike in a replay, and the exposure; the frame's
 lights, how many and where; the address of the table of models' materials; where shading sees
@@ -2518,7 +2519,9 @@ would have the shading's normal and roughness, but needs them, and the specular 
 images that every pipeline drawing into the view, games' among them, would draw; rays sampled from
 GGX by roughness (Stachowiak, "Stochastic Screen-Space Reflections", 2015) need the roughness before
 the trace, and a resolve to denoise them. The kept colors are reprojected by the camera alone: what
-moves shows in a reflection where it was a frame before.
+moves shows in a reflection where it was a frame before. The trace scales them by this frame's
+exposure over theirs, so that what they reflect is of this frame's light as an adapting exposure
+changes.
 
 A view that its environment antialiases, as by default, is antialiased temporally: each frame draws
 it a fraction of a pixel off, by the next of eight offsets, the Halton sequence of bases 2 and 3,
@@ -2542,13 +2545,45 @@ nearest of the 3 by 3 pixels round it, so that an edge that moves over what's be
 own motion; samples the history there by a Catmull-Rom filter; clips it to a box of this frame's
 pixels round it, their mean give or take their deviation within their least and most, in YCoCg,
 weighing colors by 1 over 1 plus their luminance, so that a lone bright pixel doesn't flicker; and
-blends a tenth of this frame's in. Its history is one of two images of the view's size, each frame
+blends a tenth of this frame's in, the history first scaled by this frame's exposure over the frame
+before's, so that a change of exposure, as an adapting one's, leaves no ghost where the clipping
+lets much of the history through. Its history is one of two images of the view's size, each frame
 resolving into the one the frame before didn't, against the other, which a frame at another size,
 or after one that resolved no view, starts afresh. The canvas draws after the resolve, in a pass of
 its own over the view's resolved colors, which the resolve then writes apart from its history, so
 that a game's UI stays sharp and out of the history. The view's IDs are drawn off by the frame's
 offset too, so that a pick at an edge, and the editor's outline of the pick, can move a pixel from
 frame to frame.
+
+An environment's exposure may adapt to what the view sees, as eyes adapt between sunlight and
+shade, by its adaptation, none by default. Each frame meters the view's light after antialiasing
+resolves it and before it blooms and the canvas draws, as Unreal's histogram exposure does, in three
+compute passes: one empties a histogram of 256 bins, eighths of a stop of luminance from 2^-12
+candela per square meter to 2^20; one counts each pixel into it, its color taken back through the
+exposure the frame shaded at to the luminance lit shading exposed, a workgroup's own bins first and
+then the histogram's by an atomic add each, what's darker than the lowest bin, as a black sky,
+left out; and one ranks the pixels and takes the mean log2 of their luminance between the
+adaptation's two percentiles, a bin a percentile cuts counting for its share inside. The frame two
+later reads the mean back as it begins, as it reads the culling's counts, so that no frame waits
+for it, and the exposure a frame shades at is the frame before's moved toward what a
+reflected-light meter of ISO 100 calibrated to K = 12.5 calls for, log2(luminance × 100 / 12.5),
+less the adaptation's compensation and kept between its bounds, by at most its speed up or down in
+stops a second over how far the time the view shows moved on, the simulation's, so that the same
+frames show the same and a paused game's exposure holds. The frames before the first metering
+comes back shade at the environment's exposure, within the bounds, and the first metering is
+taken at once rather than moved toward. What adapts is the exposure the meter calls for, before
+the compensation and from the mean last metered, which the bounds, the compensation and the speeds
+are applied to in each frame, so that a change to them, as a script easing the compensation each
+tick makes, shows at once and leaves the adapting going; only a change to the percentiles, which
+the meter's passes take, leaves out what frames before it metered, until a frame metered by them
+comes back, which is taken at once. The tool API's look adapts apart from the game's own view,
+each metering into a buffer of its own, so that a look round a dark room exposes neither the game's
+view nor a capture of it, a bare frame, for the room. Kept on the CPU, the exposure reaches every
+reader as a fixed one does, lit shading, the sky, the fog and games' shaders through the frame's
+data, so that what isn't lit still shows its colors at any exposure; antialiasing's history and
+the colors reflections trace against, kept from the frame before, are scaled by the exposure's
+change. But the meter can't tell what isn't lit from the view's pixels, and meters it as though it
+were, as DEFECTS.md says.
 
 A view that its environment blooms, as by default, spreads the light of what's bright round it, as
 a camera's lens does: after temporal antialiasing resolves it, or after its last pass without, and

@@ -66,7 +66,10 @@ struct Trace {
     float thickness;
     // Where each level starts among the pyramid's, in texels.
     uint starts[MOST_LEVELS];
-    uint2 unused;
+    // What the colors the frame before kept are multiplied by to be of this frame's light: this
+    // frame's exposure over theirs, which an adapting exposure changes.
+    float scale;
+    uint unused;
 };
 
 struct Push {
@@ -331,12 +334,13 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
             trust = behind * behind * border.x * border.y * far * away;
             reached = seen;
             // Where what it found showed in the frame before, as the camera saw it then: what it
-            // kept there, but nothing where it was out of that view.
+            // kept there, at this frame's exposure, but nothing where it was out of that view.
             float4 then = mul(trace.previous_clip_from_view, float4(seen, 1.0));
             float2 kept = then.xy / then.w * 0.5 + 0.5;
             if (then.w > 0.0 && all(kept >= 0.0) && all(kept <= 1.0)) {
                 SamplerState clamp_ = samplers[LINEAR_CLAMP];
-                color = finite(textures[trace.colors].SampleLevel(clamp_, kept, 0.0).rgb);
+                float3 found = textures[trace.colors].SampleLevel(clamp_, kept, 0.0).rgb;
+                color = finite(found * trace.scale);
             } else {
                 trust = 0.0;
             }

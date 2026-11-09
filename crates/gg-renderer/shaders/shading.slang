@@ -534,8 +534,9 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         }
     }
     float n_dot_v = lit.n_dot_v;
-    // The view's reflection, exposed already, as the colors it was found in are, so that neither
-    // the sky's luminance nor the exposure scales it: in place of the share of the sky's specular
+    // The view's reflection, exposed already, as the colors it was found in are, the trace taking
+    // them to this frame's exposure, so that neither the sky's luminance nor the exposure scales
+    // it here: in place of the share of the sky's specular
     // light it takes, as much of it as that light's reflectance reflects.
     float3 mirrored = float3(0.0);
     if (frame.specular_levels > 0) {

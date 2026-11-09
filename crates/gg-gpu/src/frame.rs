@@ -5,7 +5,7 @@
 //! its later passes can sample what its earlier ones rendered offscreen. Passes added to run on the
 //! compute queue run there, on a device that has one, in batches of their own, which semaphores
 //! order against the graphics queue's, as `batches` says. It reads back a few pixels of the IDs
-//! its passes render, and a small buffer its compute shaders write, which the frame two later,
+//! its passes render, and small buffers its compute shaders write, which the frame two later,
 //! which reuses its resources once it has finished, finds read, with the times its passes took on
 //! the GPU. On a device that uploads through a transfer queue, a frame's copies go in a submission
 //! of their own, which another timeline paces, and no frame waits for.
@@ -33,13 +33,15 @@ use crate::buffer::Buffer;
 use crate::vma::Memory;
 use crate::{COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error};
 use batches::{Plan, Timelines};
-use graph::{Hazard, ImageDecl, PassKind, Queue, Use};
+use graph::{BufferDecl, Hazard, ImageDecl, PassKind, Queue, Use};
 use timer::Timer;
 use transients::Transients;
 use upload::Arena;
 
 pub use compute::Compute;
-pub use graph::{BufferId, ComputePass, Graph, ImageId, MAX_BUFFER_READ, PassId, RenderPass};
+pub use graph::{
+    BufferId, ComputePass, Graph, ImageId, MAX_BUFFER_READ, MAX_BUFFER_READS, PassId, RenderPass,
+};
 pub use pass::{Indices, Pass};
 pub use upload::Upload;
 
@@ -119,11 +121,16 @@ pub struct Frames {
     /// it: [`Frame::ids_read`]'s.
     read: Read,
     /// What frames read buffers back into ([`Frame::read_back`]), [`MAX_BUFFER_READ`] bytes for
-    /// each slot, in the slots' order: made by the first read.
+    /// each of a frame's [`MAX_BUFFER_READS`], each slot's after the one before's: made by the
+    /// first read.
     buffer_reads: Option<Buffer>,
-    /// The number of the frame whose buffer read the frame being begun gives, 0 for none, how
-    /// many bytes it read, and its bytes: [`Frame::buffer_read`]'s.
-    buffer_read: (u64, usize, [u8; MAX_BUFFER_READ as usize]),
+    /// The number of the frame whose buffer reads the frame being begun gives, 0 for none, what it
+    /// read, and the bytes of each read: [`Frame::buffer_read`]'s.
+    buffer_read: (
+        u64,
+        BufferReads,
+        [[u8; MAX_BUFFER_READ as usize]; MAX_BUFFER_READS],
+    ),
     /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in the
     /// slots' order.
     image_reads: Vec<ImageReads>,
@@ -176,8 +183,16 @@ struct Slot {
     /// The number of the frame that last began in the slot, 0 for none, and how many IDs it read
     /// back into the slot's part of `Frames::reads`.
     reads: (u64, usize),
-    /// How many bytes that frame read back into the slot's part of `Frames::buffer_reads`.
-    buffer_read: usize,
+    /// The buffers that frame read back into the slot's part of `Frames::buffer_reads`.
+    buffer_reads: BufferReads,
+}
+
+/// The buffers a frame read back, in the order it read them, each into a part of its own of its
+/// slot's: each one's name and how many bytes it read, and how many it read.
+#[derive(Clone, Copy, Debug, Default)]
+struct BufferReads {
+    reads: [(&'static str, usize); MAX_BUFFER_READS],
+    count: usize,
 }
 
 /// A command buffer that copies on the transfer queue record into, for one submission at a time.
@@ -308,7 +323,11 @@ impl Frames {
                 values: [[0; 2]; MAX_READS],
             },
             buffer_reads: None,
-            buffer_read: (0, 0, [0; MAX_BUFFER_READ as usize]),
+            buffer_read: (
+                0,
+                BufferReads::default(),
+                [[0; MAX_BUFFER_READ as usize]; MAX_BUFFER_READS],
+            ),
             image_reads: (0..FRAMES_IN_FLIGHT)
                 .map(|_| ImageReads::default())
                 .collect(),
@@ -360,7 +379,7 @@ impl Frames {
                 commands: [Vec::new(), Vec::new()],
                 acquired: Vec::new(),
                 reads: (0, 0),
-                buffer_read: 0,
+                buffer_reads: BufferReads::default(),
             });
             let slot = frames.slots.last_mut().expect("just pushed");
             let families = [Some(device.graphics_family()), compute_family];
@@ -514,7 +533,7 @@ impl Frames {
         self.buffers_written = false;
         self.recording = true;
         self.slots[slot].reads = (self.submitted + 1, 0);
-        self.slots[slot].buffer_read = 0;
+        self.slots[slot].buffer_reads = BufferReads::default();
         Ok(Some(Frame {
             frames: self,
             targets: list,
@@ -636,14 +655,14 @@ impl Frames {
     /// in the slot to give.
     fn find_read(&mut self, slot: usize) -> Result<()> {
         let (frame, count) = self.slots[slot].reads;
-        let bytes = self.slots[slot].buffer_read;
+        let buffers = self.slots[slot].buffer_reads;
         self.buffer_read.0 = frame;
-        self.buffer_read.1 = bytes;
-        if bytes > 0 {
+        self.buffer_read.1 = buffers;
+        let read = buffers.reads[..buffers.count].iter();
+        for ((i, &(_, bytes)), out) in read.enumerate().zip(&mut self.buffer_read.2) {
             let reads = (self.buffer_reads.as_ref())
                 .expect("a frame that read a buffer back made what it read into");
-            let out = &mut self.buffer_read.2[..bytes];
-            reads.read_into(slot as u64 * MAX_BUFFER_READ, out)?;
+            reads.read_into(buffer_read_offset(slot, i), &mut out[..bytes])?;
         }
         self.read.frame = frame;
         self.read.count = count;
@@ -747,6 +766,11 @@ fn wait_on(device: &Device, timeline: vk::Semaphore, name: &str, value: u64) -> 
 /// Where the `read`th ID that slot `slot`'s frame reads back goes in `Frames::reads`.
 fn read_offset(slot: usize, read: usize) -> u64 {
     ((slot * MAX_READS + read) * ID_BYTES) as u64
+}
+
+/// Where the `read`th buffer that slot `slot`'s frame reads back goes in `Frames::buffer_reads`.
+fn buffer_read_offset(slot: usize, read: usize) -> u64 {
+    (slot * MAX_BUFFER_READS + read) as u64 * MAX_BUFFER_READ
 }
 
 /// Checks that `graph` uses only targets of `targets`, swapchains' only to draw into, storage
@@ -937,13 +961,18 @@ impl<'a> Frame<'a> {
         (read.frame, &read.values[..read.count])
     }
 
-    /// What the frame that last used this one's resources, two before it, read back of a buffer
-    /// ([`Frame::read_back`]), which has finished: its number, and the buffer's bytes; none if it
-    /// read none, and 0 for the number of no frame, as [`Frame::ids_read`] gives what it read of
-    /// IDs.
-    pub fn buffer_read(&self) -> (u64, &[u8]) {
-        let (frame, bytes, read) = &self.frames.buffer_read;
-        (*frame, &read[..*bytes])
+    /// What the frame that last used this one's resources, two before it, read back of the buffer
+    /// named `name` ([`Frame::read_back`]), which has finished: its number, and the buffer's bytes,
+    /// as its last read of one of that name found them; none if it read none of that name, and 0
+    /// for the number of no frame, as [`Frame::ids_read`] gives what it read of IDs.
+    pub fn buffer_read(&self, name: &str) -> (u64, &[u8]) {
+        let (frame, buffers, bytes) = &self.frames.buffer_read;
+        let reads = buffers.reads[..buffers.count].iter().zip(bytes);
+        let read = reads.rev().find(|((read, _), _)| *read == name);
+        (
+            *frame,
+            read.map_or(&[][..], |((_, size), bytes)| &bytes[..*size]),
+        )
     }
 
     /// Checks that no pass is open: only outside one does the frame record its own commands, or
@@ -1296,9 +1325,9 @@ impl<'a> Frame<'a> {
     /// Records `pass`, a pass of the frame's graph that reads a buffer back, which must be the
     /// next of its passes to record: the buffer, as the passes before left it, read once the frame
     /// has finished, which the frame that next uses its resources, two later, waits for as it
-    /// begins: [`Frame::buffer_read`] gives it there. A frame reads one buffer back; a later read
-    /// takes the place of an earlier one's. The first read makes the buffer the frames read into,
-    /// and fails if it can't be made.
+    /// begins: [`Frame::buffer_read`] gives it there, by the buffer's name. A frame reads up to
+    /// [`MAX_BUFFER_READS`] buffers back, each into a part of its own. The first read makes the
+    /// buffer the frames read into, and fails if it can't be made.
     ///
     /// # Panics
     ///
@@ -1311,14 +1340,18 @@ impl<'a> Frame<'a> {
         };
         if self.frames.buffer_reads.is_none() {
             let (device, memory) = (&self.frames.device, Memory::Readback);
-            let size = MAX_BUFFER_READ * FRAMES_IN_FLIGHT;
+            let size = MAX_BUFFER_READ * MAX_BUFFER_READS as u64 * FRAMES_IN_FLIGHT;
             let usage = vk::BufferUsageFlags::TRANSFER_DST;
             let reads = Buffer::new(device, size, usage, memory, "buffers read")?;
             self.frames.buffer_reads = Some(reads);
         }
         self.open_pass(pass);
-        let size = self.graph.buffers[buffer.0 as usize].size;
-        let offset = self.slot as u64 * MAX_BUFFER_READ;
+        let BufferDecl { name, size } = self.graph.buffers[buffer.0 as usize];
+        // The graph reads back no more buffers than that, as it checked.
+        let read = &mut self.frames.slots[self.slot].buffer_reads;
+        let offset = buffer_read_offset(self.slot, read.count);
+        read.reads[read.count] = (name, size as usize);
+        read.count += 1;
         let source = self.frames.transients.buffer(buffer).raw();
         let read = (self.frames.buffer_reads.as_ref())
             .map(Buffer::raw)
@@ -1340,9 +1373,10 @@ impl<'a> Frame<'a> {
         let raw = self.frames.device.raw();
         // SAFETY: the commands are recording outside a pass, after the barrier that lets the copy
         // read the buffer; the region lies within the graph's buffer, which the graph checked holds
-        // at most `MAX_BUFFER_READ` bytes, and within the slot's part of what it reads into; and
-        // both live until the frame has finished: the graph's buffer retires until then, and what
-        // it reads into lives as long as the frames, which wait for theirs before they go.
+        // at most `MAX_BUFFER_READ` bytes, and within the read's part of the slot's part of what it
+        // reads into; and both live until the frame has finished: the graph's buffer retires until
+        // then, and what it reads into lives as long as the frames, which wait for theirs before
+        // they go.
         unsafe {
             raw.cmd_copy_buffer(commands, source, read, slice::from_ref(&region));
             raw.cmd_pipeline_barrier2(
@@ -1350,7 +1384,6 @@ impl<'a> Frame<'a> {
                 &vk::DependencyInfo::default().buffer_memory_barriers(slice::from_ref(&to_host)),
             );
         }
-        self.frames.slots[self.slot].buffer_read = size as usize;
         self.close_pass();
         Ok(())
     }

@@ -12,6 +12,8 @@ use gg_core::math::{Mat4, Vec2, Vec4};
 use gg_core::{Result, label};
 use gg_gpu::{ComputePipeline, Device, Frame, Graph, ImageId, PassId, StorageImage, Target};
 
+use crate::exposure::rescale;
+
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/taa.spv"));
 
 /// How many pixels across and down a workgroup takes: `GROUP` in `shaders/taa.slang`.
@@ -96,6 +98,7 @@ struct Resolve {
     resolved: u32,
     has_history: u32,
     writes_resolved: u32,
+    history_scale: f32,
 }
 
 /// What the resolve pushes: `Push` in `shaders/taa.slang`.
@@ -105,13 +108,14 @@ struct ResolvePush {
     resolve: u64,
 }
 
-/// The last frame that resolved the view: its number, the view's size, and the matrix from the
-/// world to the view's clip space it drew by, without its offset.
+/// The last frame that resolved the view: its number, the view's size, the matrix from the world to
+/// the view's clip space it drew by, without its offset, and what lit shading multiplied light by.
 #[derive(Clone, Copy)]
 struct Resolved {
     frame: u64,
     size: [u32; 2],
     clip_from_world: Mat4,
+    exposure: f32,
 }
 
 /// What resolves the game's view, how many frames have, which the next one's offset follows, and
@@ -174,12 +178,13 @@ impl Plan {
 }
 
 /// How a frame drew its view: from the world to its clip space, without its offset and with it,
-/// and the offset, in its normalized coordinates.
+/// the offset, in its normalized coordinates, and what lit shading multiplied light by.
 #[derive(Clone, Copy)]
 pub(crate) struct Drawn {
     pub(crate) unjittered: Mat4,
     pub(crate) clip_from_world: Mat4,
     pub(crate) jitter: Vec2,
+    pub(crate) exposure: f32,
 }
 
 impl TaaPass {
@@ -245,8 +250,10 @@ impl TaaPass {
     ) -> Result<()> {
         let number = frame.number();
         let mut pass = frame.compute(plan.pass);
-        let previous = (self.last.filter(|_| plan.history.is_some()))
-            .map_or(drawn.unjittered, |last| last.clip_from_world);
+        let last = self.last.filter(|_| plan.history.is_some());
+        let previous = last.map_or(drawn.unjittered, |last| last.clip_from_world);
+        // The history at this frame's exposure, as it changes, as an adapting one does.
+        let history_scale = last.map_or(1.0, |last| rescale(drawn.exposure, last.exposure));
         let [colors, depth, motion] = plan.drawn.map(|image| pass.sampled(image));
         let resolve = Resolve {
             world_from_clip: drawn.clip_from_world.inverse(),
@@ -263,6 +270,7 @@ impl TaaPass {
                 .map_or(0, |resolved| pass.storage(resolved, 0)),
             has_history: u32::from(plan.history.is_some()),
             writes_resolved: u32::from(plan.resolved.is_some()),
+            history_scale,
         };
         let push = ResolvePush {
             resolve: pass.upload(bytemuck::bytes_of(&resolve))?.address(),
@@ -276,6 +284,7 @@ impl TaaPass {
             frame: number,
             size: plan.size,
             clip_from_world: drawn.unjittered,
+            exposure: drawn.exposure,
         });
         Ok(())
     }

@@ -27,6 +27,9 @@ pub struct PassId(pub(crate) u32);
 /// The most bytes of a buffer a pass reads back ([`Graph::read_back`]).
 pub const MAX_BUFFER_READ: u64 = 256;
 
+/// The most buffers a frame reads back ([`Graph::read_back`]).
+pub const MAX_BUFFER_READS: usize = 4;
+
 /// What a frame runs: its passes, in order, each with the images it uses and how. A frame places
 /// the barriers and layout transitions between passes from those uses, the image's last use before
 /// a pass and the pass's own, so that no pass records one itself. Clear it and add the frame's
@@ -551,8 +554,15 @@ impl Graph {
     /// # Panics
     ///
     /// If `buffer` isn't the graph's, holds more than [`MAX_BUFFER_READ`] bytes, or no earlier
-    /// pass wrote it.
+    /// pass wrote it, or the graph reads back [`MAX_BUFFER_READS`] buffers already.
     pub fn read_back(&mut self, label: Label, buffer: BufferId) -> PassId {
+        let reads = (self.passes.iter())
+            .filter(|pass| pass.kind == PassKind::ReadBack)
+            .count();
+        assert!(
+            reads < MAX_BUFFER_READS,
+            "pass {label:?} reads back a buffer, but a frame reads back {MAX_BUFFER_READS} at most"
+        );
         let size = (self.buffers.get(buffer.0 as usize))
             .map(|decl| decl.size)
             .unwrap_or_else(|| {

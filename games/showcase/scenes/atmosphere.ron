@@ -18,6 +18,7 @@
         "1c7a2e5f8b046d93": (
             Environment: (
                 exposure: 15.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: Atmosphere((

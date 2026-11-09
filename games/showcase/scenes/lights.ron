@@ -63,6 +63,7 @@
         "5c83328f1b2ef716": (
             Environment: (
                 exposure: 11.0,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: ClearColor,

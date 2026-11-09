@@ -12,6 +12,7 @@
         "7e4ec6345a1db5dc": (
             Environment: (
                 exposure: 10.5,
+                adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: Image("93955ed372497870"),

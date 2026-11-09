@@ -11,8 +11,9 @@
 //! far, opaque and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
 //! view's own space, and the UI over the view;
-//! the view drawn in colors of high dynamic range, antialiased against the frames before it,
-//! bloomed, and graded and mapped by a tonemapper into the range it shows; picks, which read back
+//! the view drawn in colors of high dynamic range, its exposure adapting to the light it meters,
+//! antialiased against the frames before it, bloomed, and graded and mapped by a tonemapper into
+//! the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
@@ -26,6 +27,7 @@ mod bloom;
 mod circle;
 mod cluster;
 mod draws;
+mod exposure;
 mod fog;
 mod grade;
 mod grid;
@@ -67,6 +69,7 @@ pub use ao::AmbientOcclusion;
 pub use atmosphere::Atmosphere;
 pub use circle::Circle;
 pub use draws::Draws;
+pub use exposure::{Adaptation, light_scale};
 pub use fog::Fog;
 pub use gg_gpu::{
     Arenas, Blend, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath, Validation,
@@ -104,6 +107,7 @@ use ao::AoPass;
 use atmosphere::{AerialData, AtmospherePass};
 use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
+use exposure::{Adapting, ExposurePass};
 use fog::{FogData, FogPass};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use particles::{ParticlePass, ParticlePlan};
@@ -267,9 +271,28 @@ pub struct RenderData<'a> {
     pub antialiasing: Antialiasing,
     /// What lit shading multiplies light by, which shaders read from the frame's data, as
     /// [`Shaders::add`] describes: light in physical units, as lux and candela, times this, is what
-    /// the tonemapper maps. What isn't lit, as sprites, text and unlit materials, draws its colors
-    /// as they are.
+    /// the tonemapper maps, unless `adaptation` adapts it. What isn't lit, as sprites, text and
+    /// unlit materials, draws its colors as they are.
     pub exposure: f32,
+    /// How the exposure adapts to what the view sees, if it does, as [`Adaptation`] says: each
+    /// frame that renders the view meters it, after it's antialiased and before it blooms and its
+    /// canvas draws, and the frame two later reads that back as it begins, so that none waits for
+    /// it, and shades at what the frame before shaded at moved toward what the meter last called
+    /// for, by how far `time` moved on since the frame before. Frames shade at `exposure`, within
+    /// its bounds, until a metering comes back, whose exposure they take at once. A change to the
+    /// bounds, the compensation or the speeds takes effect in the frame it's made, the exposure
+    /// adapting on; one to the percentiles, which the meter's passes take, leaves out what frames
+    /// before it metered, until one metered by them comes back, which is taken at once. Every
+    /// reader of the exposure takes what it moved to, shaders through the frame's data among them,
+    /// and antialiasing's history and the colors reflections trace against are scaled by its
+    /// change. `None` exposes every frame at `exposure`.
+    pub adaptation: Option<Adaptation>,
+    /// Whether the view is seen from where a tool looks, as the tool API's look sets a viewpoint,
+    /// rather than from where the game sees it. An exposure that adapts adapts apart for each, so
+    /// that a tool looking round a dark room exposes neither the game's own view nor a capture of
+    /// it for the room: a frame of the game's own view while a tool looks, as a capture's, takes
+    /// the game's own exposure as it last adapted, moved toward what it last metered.
+    pub looked: bool,
     /// The time the view shows, in seconds, which shaders read from the frame's data, as
     /// [`Shaders::add`] describes.
     pub time: f32,
@@ -483,6 +506,12 @@ pub struct Renderer {
     /// them in, apart from it, as frames take them as targets while they record its passes.
     reflections: ReflectionPass,
     reflected: reflections::Images,
+    /// What meters the view, for its exposure to adapt; what adapts the game's own view's exposure
+    /// and a tool's look's, apart, as [`RenderData::looked`] says; and what lit shading multiplied
+    /// light by in the last frame rendered, 0 before the first.
+    exposure: ExposurePass,
+    adapting: [Adapting; 2],
+    exposed: f32,
 }
 
 enum Output {
@@ -529,10 +558,12 @@ struct ViewPasses {
     /// What keeps its colors, as drawn and resolved, for the next frame's reflections, if it
     /// reflects.
     keep: Option<reflections::Keep>,
+    /// What meters it, if its exposure adapts.
+    exposure: Option<exposure::Plan>,
     /// What blooms and grades it, if it does either.
     bloom: Option<bloom::Plan>,
     /// What draws its canvas, if it has one, in a pass of its own, if the view is antialiased,
-    /// bloomed or graded; otherwise the view's last pass draws the canvas.
+    /// metered, bloomed or graded; otherwise the view's last pass draws the canvas.
     canvas: Option<PassId>,
     /// What it shows, drawn, antialiased, bloomed and graded, with its canvas over that, which the
     /// tonemap pass samples.
@@ -761,6 +792,9 @@ impl Renderer {
             ao: AoPass::new(device)?,
             reflections: ReflectionPass::new(device)?,
             reflected: reflections::Images::default(),
+            exposure: ExposurePass::new(device)?,
+            adapting: [Adapting::default(), Adapting::default()],
+            exposed: 0.0,
         })
     }
 
@@ -1273,8 +1307,9 @@ impl Renderer {
             // the colors the view shows, before the canvas, so that a game's UI neither blooms nor
             // is graded; then the canvas, if there is one, which isn't antialiased, in a pass of
             // its own over what the view shows, where the view's last pass doesn't draw it, as when
-            // the resolve, bloom or the grade follows it. Reflecting, the colors as resolved, before
-            // bloom, the grade and the canvas, are kept for the next frame's reflections.
+            // the resolve, the meter, bloom or the grade follows it. Reflecting, the colors as
+            // resolved, before bloom, the grade and the canvas, are kept for the next frame's
+            // reflections.
             let blooms = bloom::blooms(data.bloom, size);
             let grades = !data.grade.is_identity();
             let taa = antialiased.then(|| {
@@ -1285,9 +1320,14 @@ impl Renderer {
             let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
             let keep = (reflected)
                 .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
+            // Where its exposure adapts, the view's light is metered before bloom spreads it and
+            // the canvas, whose UI isn't lit, draws over it.
+            let looked = data.looked;
+            let exposure =
+                (data.adaptation.is_some()).then(|| ExposurePass::plan(graph, shown, size, looked));
             let bloom =
                 (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
-            let apart = taa.is_some() || bloom.is_some() || keep.is_some();
+            let apart = taa.is_some() || keep.is_some() || exposure.is_some() || bloom.is_some();
             let canvas = (!data.canvas.is_empty() && apart).then(|| {
                 let canvas = graph.render(label!("canvas"));
                 let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
@@ -1328,6 +1368,7 @@ impl Renderer {
                 fog,
                 taa,
                 keep,
+                exposure,
                 bloom,
                 canvas,
                 shown,
@@ -1372,7 +1413,7 @@ impl Renderer {
         };
         // The frame two before has finished, and what it read with it.
         self.picks.answer(frame.ids_read());
-        let (finished, read) = frame.buffer_read();
+        let (finished, read) = frame.buffer_read(mesh::COUNTS);
         if let Some(&(_, counted, culled)) =
             (self.counted.iter()).find(|&&(number, ..)| number == finished && finished > 0)
         {
@@ -1381,6 +1422,17 @@ impl Renderer {
                 self.drawn += culled;
             }
         }
+        // What the meter found in that one, if it metered the view, for the exposure of the view it
+        // metered, the game's own or a look's; and what lit shading multiplies light by in this
+        // frame, as the exposure of the view it renders adapts.
+        for (adapting, name) in self.adapting.iter_mut().zip(exposure::METERED) {
+            if let Some((metered, mean)) = exposure::metered(frame.buffer_read(name)) {
+                adapting.meter(metered, mean);
+            }
+        }
+        let adapting = &mut self.adapting[usize::from(data.looked)];
+        let exposure = adapting.step(data.adaptation, data.exposure, number, data.time);
+        self.exposed = exposure;
         debug_assert_eq!(number, frame.number(), "the frame begun is the one planned");
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
@@ -1473,7 +1525,7 @@ impl Renderer {
                 let shared = FrameData {
                     camera: data.viewpoint.position,
                     time: data.time,
-                    exposure: data.exposure,
+                    exposure,
                     light_count: gpu_lights.len() as u32,
                     lights,
                     materials: self.meshes.materials_address(),
@@ -1539,7 +1591,7 @@ impl Renderer {
                         shadows: shadows.unwrap_or_default(),
                         clusters,
                         ambient_occlusion: occlusion.map_or(0, sampled),
-                        fog: FogData::new(data.fog, sky, shining, data.exposure),
+                        fog: FogData::new(data.fog, sky, shining, exposure),
                         aerial: aerial.unwrap_or_default(),
                         reflections: (reflections.zip(traced))
                             .map(|(plan, (settings, _))| plan.data(sampled, &settings))
@@ -1558,15 +1610,18 @@ impl Renderer {
                     frame: number,
                 });
                 let reflections_seen =
-                    traced.map(|(settings, kept_clip_from_world)| reflections::Seen {
-                        clip_from_view,
-                        world_from_view: Mat4::from_rotation_translation(
-                            data.viewpoint.rotation,
-                            data.viewpoint.position,
-                        ),
-                        kept_clip_from_world,
-                        settings,
-                    });
+                    traced.map(
+                        |(settings, (kept_clip_from_world, kept))| reflections::Seen {
+                            clip_from_view,
+                            world_from_view: Mat4::from_rotation_translation(
+                                data.viewpoint.rotation,
+                                data.viewpoint.position,
+                            ),
+                            kept_clip_from_world,
+                            kept_scale: exposure::rescale(exposure, kept),
+                            settings,
+                        },
+                    );
                 // The occlusion and the reflections, those `early` has, the next of the frame's
                 // passes.
                 let (ao_pass, reflection_pass) = (&self.ao, &self.reflections);
@@ -1696,13 +1751,13 @@ impl Renderer {
                         atmosphere: air,
                         transmittance: pass.sampled(tables.transmittance()),
                         sky_view: pass.sampled(tables.sky_view()),
-                        scale: seen.illuminance() * data.exposure,
+                        scale: seen.illuminance() * exposure,
                         disk: seen.disk(),
                     };
                     made.draw(&mut pass, &data.viewpoint, aspect, jitter, &drawn);
                 } else if let Some(SkyData { sky, luminance, .. }) = lit {
                     let drawn = self.sky.as_ref().expect("made for a sky to show");
-                    let scale = luminance * data.exposure;
+                    let scale = luminance * exposure;
                     drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, sky, scale);
                 }
                 let way = Way::Shaded {
@@ -1826,11 +1881,16 @@ impl Renderer {
                         unjittered,
                         clip_from_world: view_projection,
                         jitter,
+                        exposure,
                     };
                     self.taa.resolve(&mut frame, plan, drawn)?;
                 }
                 if let Some(keep) = &view.keep {
                     self.reflections.keep(&mut frame, keep);
+                }
+                if let (Some(plan), Some(adaptation)) = (&view.exposure, &data.adaptation) {
+                    self.exposure
+                        .record(&mut frame, plan, exposure, adaptation)?;
                 }
                 if let Some(plan) = &view.bloom {
                     self.bloom.record(&mut frame, plan, data.bloom, &data.grade);
@@ -1934,7 +1994,7 @@ impl Renderer {
             self.sky_light.prefiltered(plan);
         }
         if keeps {
-            self.reflected.kept(number, size, unjittered);
+            self.reflected.kept(number, size, unjittered, self.exposed);
         }
         self.waited = self.frames.waited();
         Ok(true)
@@ -1962,6 +2022,12 @@ impl Renderer {
     /// gg-core's `tracy` feature, Tracy's GPU timeline shows each pass.
     pub fn gpu_time(&self) -> Option<Duration> {
         self.frames.gpu_time()
+    }
+
+    /// What lit shading multiplied light by in the last frame rendered: [`RenderData::exposure`],
+    /// or what [`RenderData::adaptation`] adapted it to. 0 before the first.
+    pub fn exposure(&self) -> f32 {
+        self.exposed
     }
 
     /// The bytes of GPU memory the frames' own images are in, the view's among them, which those
