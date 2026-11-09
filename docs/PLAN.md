@@ -145,6 +145,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Screen-space reflections** (2026-11-09)
 - **A game's UI's widgets** (2026-11-09)
 - **Exposure that adapts** (2026-11-09)
+- **SMAA** (2026-11-09)
 
 ## Now
 
@@ -248,6 +249,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The view's IDs drawn without TAA's offset for picks and the outline, as by drawing the outlined entity's IDs again without it: they're drawn off by the frame's offset, so that the editor's outline of the pick, and a pick at an edge, can move a pixel from frame to frame | The outline's shimmer bothers someone, or a pick at an edge misses |
 | Motion for a layer's own draws, made each frame, which move with the camera alone under TAA, as the renderer knows no transform the frame before of theirs: an identity that lasts from frame to frame, as the scene's slots give its instances | A layer's own draws move fast enough to smear |
 | Starting TAA's history afresh at a camera's cut, as a game's switch of cameras or a teleport: what the frame before resolved is clipped to what this frame drew, which keeps it from showing as a ghost, but leaves the cut's first frames softer | A game cuts between cameras, and the cut's first frames show blurred |
+| SMAA's other qualities, the reference's LOW, MEDIUM and ULTRA presets, or its threshold and search steps as settings: SMAA runs at the HIGH preset alone | A game needs SMAA cheaper, or its long shallow edges smoother |
+| SMAA T2x, S2x and 4x, SMAA with temporal supersampling or with multisampling, which the area texture's other subsample offsets serve; and FXAA: SMAA 1x alone, of subsample offset 0 | A game wants SMAA's sharpness with TAA's stability where what's thinner than a pixel moves, or a device too slow for SMAA's three passes |
+| SMAA's edges predicated by the view's depth, or found on its colors rather than their luma: luma alone, which misses edges between colors of one luma | Edges between colors of a luma show aliased in a game's look |
+| SMAA's blending weights computed for the pixels with edges alone, as the reference's stencil test keeps its pass to them: the compute pass reads every pixel's edges and stops where there are none | The weights pass is measured to matter |
+| SMAA seeing the view as ACES's and AgX's own curves, PBR Neutral's toe and offset, and the grade's white balance, contrast, power and saturation show it: it sees the view by the grade's slope and PBR Neutral's shoulder, or the clamp's under no tonemapper, so a disk 16 times as bright as white on black shows its edge's coverage 0.19 off on average under ACES and 0.16 under AgX, against 0.10 under PBR Neutral, whose toe darkens what's dim, and 0.08 for an edge below the shoulder (0.26 without antialiasing); and white under a contrast of 1.2, after SMAA, 0.02 off at a pixel half covered, of 2, 0.39 | A bright edge under ACES or AgX, or one under a strong contrast, shows its steps |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |

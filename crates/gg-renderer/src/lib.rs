@@ -12,8 +12,8 @@
 //! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
 //! view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, its exposure adapting to the light it meters,
-//! antialiased against the frames before it, bloomed, and graded and mapped by a tonemapper into
-//! the range it shows; picks, which read back
+//! antialiased against the frames before it or by SMAA, bloomed, and graded and mapped by a
+//! tonemapper into the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
@@ -43,6 +43,7 @@ mod shader;
 mod shadow;
 mod skin;
 mod sky;
+mod smaa;
 mod sprite;
 mod taa;
 mod text;
@@ -116,6 +117,7 @@ use reflections::{ReflectionData, ReflectionPass};
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
 use skin::{SkinPlan, Skinning};
 use sky::{SkyData, SkyLight, SkyPass, Source};
+use smaa::SmaaPass;
 use taa::TaaPass;
 use tonemap::TonemapPass;
 use ui::UiPass;
@@ -266,8 +268,9 @@ pub struct RenderData<'a> {
     /// How the view is antialiased, before it's tonemapped: [`Antialiasing::Taa`] resolves each
     /// frame against those before it, as it says, from the frame before when it resolved the view
     /// at its size, and from this frame's alone otherwise, as when it didn't render the view; what
-    /// the canvas draws, after it, isn't. [`Antialiasing::None`] draws what each pixel's center
-    /// shows.
+    /// the canvas draws, after it, isn't. [`Antialiasing::Smaa`] antialiases each frame's view
+    /// alone, as it says, before the canvas too. [`Antialiasing::None`] draws what each pixel's
+    /// center shows.
     pub antialiasing: Antialiasing,
     /// What lit shading multiplies light by, which shaders read from the frame's data, as
     /// [`Shaders::add`] describes: light in physical units, as lux and candela, times this, is what
@@ -454,6 +457,8 @@ pub struct Renderer {
     /// and against, apart from its pipeline, as frames take them as targets while they record it.
     taa: TaaPass,
     history: taa::History,
+    /// Made by the first frame that antialiases the view by SMAA.
+    smaa: Option<SmaaPass>,
     /// Made by the first frame with a sky to show.
     sky: Option<SkyPass>,
     /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
@@ -555,7 +560,9 @@ struct ViewPasses {
     fog: Option<FogPasses>,
     /// What resolves it, antialiased, if it's antialiased.
     taa: Option<taa::Plan>,
-    /// What keeps its colors, as drawn and resolved, for the next frame's reflections, if it
+    /// What antialiases it by SMAA, if it's so antialiased.
+    smaa: Option<smaa::Plan>,
+    /// What keeps its colors, as drawn and antialiased, for the next frame's reflections, if it
     /// reflects.
     keep: Option<reflections::Keep>,
     /// What meters it, if its exposure adapts.
@@ -767,6 +774,7 @@ impl Renderer {
             fog: FogPass::new(device)?,
             taa: TaaPass::new(device)?,
             history: taa::History::default(),
+            smaa: None,
             sky: None,
             sky_light: SkyLight::default(),
             atmosphere: None,
@@ -982,9 +990,13 @@ impl Renderer {
             })
         });
         let renders_view = has_view && pixels.is_none();
-        // An antialiased view is drawn off by the frame's offset, everything in it but its
-        // canvas, and culled as it's drawn.
+        // A view antialiased temporally is drawn off by the frame's offset, everything in it but its
+        // canvas, and culled as it's drawn; one antialiased by SMAA is drawn as it is.
         let antialiased = renders_view && data.antialiasing == Antialiasing::Taa;
+        let smaa = renders_view && data.antialiasing == Antialiasing::Smaa;
+        if smaa && self.smaa.is_none() {
+            self.smaa = Some(SmaaPass::new(&self.device)?);
+        }
         let (jitter, view_projection) = if antialiased {
             self.history.prepare(&self.device, data.viewport.size)?;
             let jitter = taa::normalized(self.taa.offset(), data.viewport.size);
@@ -1303,13 +1315,14 @@ impl Renderer {
             // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
             // against the frames before into one of the antialiasing's images; and into the view's
             // resolved colors apart, if bloom, the grade or the canvas goes over them, as the next
-            // frame resolves against what the resolve alone wrote. Then bloom and the grade, into
-            // the colors the view shows, before the canvas, so that a game's UI neither blooms nor
-            // is graded; then the canvas, if there is one, which isn't antialiased, in a pass of
-            // its own over what the view shows, where the view's last pass doesn't draw it, as when
-            // the resolve, the meter, bloom or the grade follows it. Reflecting, the colors as
-            // resolved, before bloom, the grade and the canvas, are kept for the next frame's
-            // reflections.
+            // frame resolves against what the resolve alone wrote. Antialiased by SMAA, they're
+            // blended into colors of their own. Then bloom and the grade, into the colors the view
+            // shows, before the canvas, so that a game's UI neither blooms nor is graded; then the
+            // canvas, if there is one, which isn't antialiased, in a pass of its own over what the
+            // view shows, where the view's last pass doesn't draw it, as when the resolve, SMAA, the
+            // meter, bloom or the grade follows it. Reflecting, the colors as antialiased, resolved
+            // or blended by SMAA, or as drawn, before bloom, the grade and the canvas, are kept for
+            // the next frame's reflections.
             let blooms = bloom::blooms(data.bloom, size);
             let grades = !data.grade.is_identity();
             let taa = antialiased.then(|| {
@@ -1317,7 +1330,9 @@ impl Renderer {
                 let drawn = [hdr, depth, motion];
                 taa.plan(graph, resolved, number, size, drawn, apart)
             });
+            let smaa = smaa.then(|| SmaaPass::plan(graph, hdr, size));
             let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
+            let shown = smaa.as_ref().map_or(shown, smaa::Plan::shown);
             let keep = (reflected)
                 .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
             // Where its exposure adapts, the view's light is metered before bloom spreads it and
@@ -1327,7 +1342,11 @@ impl Renderer {
                 (data.adaptation.is_some()).then(|| ExposurePass::plan(graph, shown, size, looked));
             let bloom =
                 (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
-            let apart = taa.is_some() || keep.is_some() || exposure.is_some() || bloom.is_some();
+            let apart = taa.is_some()
+                || smaa.is_some()
+                || keep.is_some()
+                || exposure.is_some()
+                || bloom.is_some();
             let canvas = (!data.canvas.is_empty() && apart).then(|| {
                 let canvas = graph.render(label!("canvas"));
                 let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
@@ -1367,6 +1386,7 @@ impl Renderer {
                 early,
                 fog,
                 taa,
+                smaa,
                 keep,
                 exposure,
                 bloom,
@@ -1436,6 +1456,9 @@ impl Renderer {
         debug_assert_eq!(number, frame.number(), "the frame begun is the one planned");
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
+        if let Some(smaa) = &mut self.smaa {
+            smaa.write_textures(&mut frame)?;
+        }
         // The atmosphere's tables, and where its data is, which its sky's draw and cube read too.
         let air = match (&atmosphere, &tables) {
             (Some(seen), Some(tables)) => {
@@ -1872,7 +1895,7 @@ impl Renderer {
                     pass.end_label();
                     drawn
                 };
-                if view.taa.is_none() && view.canvas.is_none() {
+                if view.taa.is_none() && view.smaa.is_none() && view.canvas.is_none() {
                     counts += draw_canvas(&mut pass)?;
                 }
                 drop(pass);
@@ -1884,6 +1907,13 @@ impl Renderer {
                         exposure,
                     };
                     self.taa.resolve(&mut frame, plan, drawn)?;
+                }
+                if let Some(plan) = &view.smaa {
+                    let smaa = self
+                        .smaa
+                        .as_ref()
+                        .expect("made by the frame that planned it");
+                    smaa.record(&mut frame, plan, data.tonemapper, &data.grade);
                 }
                 if let Some(keep) = &view.keep {
                     self.reflections.keep(&mut frame, keep);

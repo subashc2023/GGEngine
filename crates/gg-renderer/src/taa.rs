@@ -34,11 +34,18 @@ pub enum Antialiasing {
     Taa,
     /// None: each pixel shows what's drawn at its center.
     None,
+    /// SMAA 1x, morphological antialiasing from the view's colors alone, without a history: the
+    /// lines its pixels' edges make measured, and each pixel blended with its neighbor across an
+    /// edge by how much of it lies on the neighbor's side of the edge the line stands for, as
+    /// `shaders/smaa.slang` says. Sharper than temporal antialiasing, and without its ghosts, but
+    /// what's thinner than a pixel still flickers as it moves; what's drawn on the canvas, after
+    /// it, isn't antialiased.
+    Smaa,
 }
 
 impl Antialiasing {
     /// Each way, in the order of their indices.
-    pub const ALL: [Self; 2] = [Self::Taa, Self::None];
+    pub const ALL: [Self; 3] = [Self::Taa, Self::None, Self::Smaa];
 }
 
 /// How many offsets the view cycles through, of the Halton sequence's first.

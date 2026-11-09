@@ -51,8 +51,10 @@
 //! darkened where they hide it from each other and the walls, by ambient occlusion
 //! (`ambient_occlusion.ron`); spheres, a cube and a torus mirrored in a floor of polished steel,
 //! black stone and brushed bronze under that sky, the bronze's reflections blurred as its roughness
-//! spreads them, by screen-space reflections (`reflections.ron`, its floor `models/gloss.gltf`); 3D
-//! physics,
+//! spreads them, by screen-space reflections (`reflections.ron`, its floor `models/gloss.gltf`); a
+//! fence's thin slats and rails, a leaning pole and models, a crate and a torus turning, in a sun's
+//! light, antialiased by SMAA from each frame alone, sharp and without ghosts (`antialiasing.ron`);
+//! 3D physics,
 //! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
 //! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
 //! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor

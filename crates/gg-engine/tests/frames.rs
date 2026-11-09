@@ -14,8 +14,9 @@
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
 //! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
 //! by ambient occlusion, fogs it, reflects what it shows and adapts its exposure to it, its sky an
-//! atmosphere whose sun the ticks raise, its light
-//! prefiltered again each degree it rises, run through the engine's main loop headless, without
+//! atmosphere whose sun the ticks raise, its light prefiltered again each degree it rises, and then
+//! antialiases it by SMAA, adapting still to what SMAA blends, its frames counted again once the
+//! switch has settled, run through the engine's main loop headless, without
 //! the tool API, whose development runs' watchers of the assets' files allocate as they look,
 //! three fifths of a tick apart, so that they draw between ticks, once its first frames have run,
 //! by which every image its attach added has decoded off the main thread
@@ -53,11 +54,11 @@ use std::time::Duration;
 
 use gg_engine::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, Adaptation, Align, App, Atmosphere, Binding, Blend, BoxCollider2D, Camera, Change,
-    Circle, CircleCollider2D, Component, Context, Entity, Environment, Event, Fog, Font, GameUi,
-    Grade, Key, Layer, Light, Mesh, MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter,
-    Pick, Projection, Reflections, Shader, Sky, Source, Sprite, SpriteSheet, Text, TextStyle,
-    Texture, Tick, Transform, World,
+    Actions, Adaptation, Align, Antialiasing, App, Atmosphere, Binding, Blend, BoxCollider2D,
+    Camera, Change, Circle, CircleCollider2D, Component, Context, Entity, Environment, Event, Fog,
+    Font, GameUi, Grade, Key, Layer, Light, Mesh, MeshDraw, Model, MouseButton, ParticleBlend,
+    ParticleEmitter, Pick, Projection, Reflections, Shader, Sky, Source, Sprite, SpriteSheet, Text,
+    TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -70,6 +71,12 @@ const SEED: u64 = 0x5eed_f2a3;
 const WARM_UP: u64 = 320;
 /// The frames counted: more than a period of every motion.
 const COUNTED: u64 = 160;
+/// The frames run once the environment antialiases by SMAA rather than temporally, before counting
+/// again, as SMAA's first frame makes its passes and its images; and those counted then.
+const SMAA_WARM_UP: u64 = 32;
+const SMAA_COUNTED: u64 = 64;
+/// Every frame the app runs, the last after the last counted.
+const FRAMES: u64 = WARM_UP + COUNTED + SMAA_WARM_UP + SMAA_COUNTED + 1;
 /// The ticks a drifter takes to come back to where it started, the parent to turn round, and the
 /// camera to go round.
 const PERIOD: u64 = 64;
@@ -97,8 +104,9 @@ static MISSED: AtomicU64 = AtomicU64::new(0);
 static OUTSIDE: AtomicU64 = AtomicU64::new(0);
 static ASTRAY: AtomicU64 = AtomicU64::new(0);
 
-/// What the counted frames allocated, once the app has run them all.
-static ALLOCATED: Mutex<Option<Counted>> = Mutex::new(None);
+/// What the counted frames allocated, once the app has run them all: antialiased temporally, then
+/// by SMAA.
+static ALLOCATED: Mutex<[Option<Counted>; 2]> = Mutex::new([None, None]);
 
 /// A drifter: where it starts, and how far it goes a tick, a whole number of fields across and up
 /// in `PERIOD` ticks, so that it's back where it started each period; and its z.
@@ -175,6 +183,10 @@ struct Scene {
     sparks: Option<Entity>,
     /// The atmosphere's sun, which the ticks turn.
     sun: Option<Entity>,
+    /// The environment, which the next tick switches to SMAA once the first frames are counted, as
+    /// `smaa` asks.
+    environment: Option<Entity>,
+    smaa: bool,
     subtrees: VecDeque<Entity>,
     copies: VecDeque<Entity>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
@@ -390,7 +402,7 @@ impl Layer for Scene {
         // what's opaque by and what blends draws over in another, reflecting, which traces the
         // view's depth against the colors each frame keeps for the next, and its exposure
         // adapting, metered and read back each frame.
-        world.spawn(Environment {
+        self.environment = Some(world.spawn(Environment {
             adaptation: Some(Adaptation::default()),
             sky: Sky::Atmosphere(Atmosphere::default()),
             grade: Grade {
@@ -400,7 +412,7 @@ impl Layer for Scene {
             fog: Some(Fog::default()),
             reflections: Some(Reflections::default()),
             ..Environment::default()
-        });
+        }));
         self.sun = Some(world.spawn((sun_at(0), Light::default())));
         // The pair, and a copy mirrored, which culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
@@ -467,6 +479,11 @@ impl Layer for Scene {
         let oldest = self.copies.pop_front().expect("a full pool");
         world.despawn(oldest).expect("alive");
         self.spawn_copy(world, (tick.number % COPIES as u64) as f32);
+        if std::mem::take(&mut self.smaa) {
+            let environment = self.environment.expect("attached");
+            let environment = world.get_mut::<Environment>(environment).expect("alive");
+            environment.antialiasing = Antialiasing::Smaa;
+        }
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {
@@ -570,7 +587,13 @@ impl Layer for Scene {
             common::start();
         } else if self.frames == WARM_UP + COUNTED {
             let counted = common::stop();
-            *ALLOCATED.lock().expect("no thread panicked holding it") = Some(counted);
+            ALLOCATED.lock().expect("no thread panicked holding it")[0] = Some(counted);
+            self.smaa = true;
+        } else if self.frames == WARM_UP + COUNTED + SMAA_WARM_UP {
+            common::start();
+        } else if self.frames == FRAMES - 1 {
+            let counted = common::stop();
+            ALLOCATED.lock().expect("no thread panicked holding it")[1] = Some(counted);
         }
     }
 
@@ -761,7 +784,7 @@ fn main() {
         .headless_step(Tick::DT * 3 / 5)
         .layer(scene);
     // Four threads, so that the job system has threads of its own on a machine of two CPUs too.
-    let frames = (WARM_UP + COUNTED + 1).to_string();
+    let frames = FRAMES.to_string();
     let mut args = vec!["--frames", &frames, "--threads", "4"];
     if !windowed {
         // Without the tool API, whose runs in a development build have threads watch the assets'
@@ -773,23 +796,26 @@ fn main() {
         ExitCode::SUCCESS,
         "the run failed, as its log says"
     );
-    let Some(counted) = ALLOCATED
-        .lock()
-        .expect("no thread panicked holding it")
-        .take()
-    else {
-        panic!("the run ended before its {COUNTED} counted frames");
-    };
-    if counted.allocations > 0 {
-        panic!("{COUNTED} frames allocated {counted}");
-    }
+    let allocated = std::mem::take(&mut *ALLOCATED.lock().expect("no thread panicked holding it"));
     let how = if windowed { "in a window" } else { "headless" };
-    println!("{COUNTED} frames {how} allocated nothing");
+    let windows = [
+        (COUNTED, "antialiased temporally"),
+        (SMAA_COUNTED, "by SMAA"),
+    ];
+    for (counted, (frames, antialiased)) in allocated.into_iter().zip(windows) {
+        let Some(counted) = counted else {
+            panic!("the run ended before its {frames} frames {antialiased} were counted");
+        };
+        if counted.allocations > 0 {
+            panic!("{frames} frames {antialiased} allocated {counted}");
+        }
+        println!("{frames} frames {how}, {antialiased}, allocated nothing");
+    }
     // Headless, every frame renders, so each answer comes back in the frame it's due: all but
     // those of the last four frames' picks at the middle, and of the last two's outside the view.
     // A window's frames may not, as one that's minimized doesn't.
     if !windowed {
-        let frames = WARM_UP + COUNTED + 1;
+        let frames = FRAMES;
         let [found, missed, outside, astray] =
             [&FOUND, &MISSED, &OUTSIDE, &ASTRAY].map(|count| count.load(Ordering::SeqCst));
         assert_eq!(astray, 0, "answers came back in frames they weren't due");

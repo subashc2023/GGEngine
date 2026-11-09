@@ -662,6 +662,7 @@ fn antialiasing_name(antialiasing: Antialiasing) -> &'static str {
     match antialiasing {
         Antialiasing::Taa => "Taa",
         Antialiasing::None => "None",
+        Antialiasing::Smaa => "Smaa",
     }
 }
 
@@ -674,8 +675,9 @@ impl Reflect for Antialiasing {
             tuple: false,
         });
         let doc = "How the view is antialiased: temporal antialiasing, each frame drawn a fraction \
-                   of a pixel off and resolved against those before it; or none, each pixel what's \
-                   at its center.";
+                   of a pixel off and resolved against those before it; none, each pixel what's \
+                   at its center; or SMAA, each frame alone, its pixels blended across the edges \
+                   the lines of their edges stand for, sharper and without ghosts.";
         types.add::<Self>("Antialiasing".into(), doc.into(), |_| {
             Ok(Shape::Enum(variants.into()))
         })

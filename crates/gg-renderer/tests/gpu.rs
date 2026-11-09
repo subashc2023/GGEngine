@@ -151,6 +151,10 @@ fn main() -> ExitCode {
         antialiasing_smooths_edges_frame_by_frame,
         antialiasing_follows_what_moves,
         antialiasing_leaves_no_trail,
+        smaa_smooths_edges_in_a_frame,
+        smaa_blends_by_how_much_of_each_pixel_the_edge_covers,
+        smaa_blends_along_diagonals_by_how_much_they_cover,
+        smaa_blends_light_up_to_a_half_floats_brightest,
     );
     // The tests of models' shading again, their models cut into meshlets, which the view draws
     // into its visibility buffer and shades from it, against the references they made drawn by
@@ -4064,11 +4068,13 @@ fn tonemappers_match_their_reference() {
 
 /// Squares of a game's shader past the most a half float holds: red, which the view's colors hold
 /// as that most or as infinite, as the GPU rounds it; and red, and white, infinite, as a shader's
-/// floats can be. Mapped by PBR Neutral, which rolls a color that bright off to white, they show
-/// white, without antialiasing and with it, frame after frame, rather than as no number, black, or
-/// cyan where red alone is infinite.
+/// floats can be; and one of no number. Mapped by PBR Neutral, which rolls a color that bright off
+/// to white, the first three show white, and the last as none, black, without antialiasing, with
+/// TAA and with SMAA, frame after frame, rather than as no number, black, or cyan where red alone
+/// is infinite; and no pixel but those of the square of no number and next to it, which blend with
+/// its black, shows darker than the clear color, as one that blends with no number would.
 fn colors_past_a_half_float_show_as_its_brightest() {
-    const WIDTH: u32 = 48;
+    const WIDTH: u32 = 64;
     const HEIGHT: u32 = 16;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
@@ -4076,7 +4082,7 @@ fn colors_past_a_half_float_show_as_its_brightest() {
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // 2 units from the view's bottom to its top, and 6 across: a unit is 8 pixels both ways.
+    // 2 units from the view's bottom to its top, and 8 across: a unit is 8 pixels both ways.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 2.0,
@@ -4090,14 +4096,16 @@ fn colors_past_a_half_float_show_as_its_brightest() {
         Vec3::new(1.0e6, 0.0, 0.0),
         Vec3::new(f32::INFINITY, 0.0, 0.0),
         Vec3::INFINITY,
+        Vec3::NAN,
     ];
-    for (x, color) in [-2.0, 0.0, 2.0].into_iter().zip(colors) {
+    for (x, color) in [-3.0, -1.0, 1.0, 3.0].into_iter().zip(colors) {
         let at = Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
         draws.push(square, flat, at, color.extend(1.0));
     }
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    for antialiasing in [Antialiasing::None, Antialiasing::Taa] {
+    let shown = [[255; 4], [255; 4], [255; 4], [0, 0, 0, 255]];
+    for antialiasing in [Antialiasing::None, Antialiasing::Taa, Antialiasing::Smaa] {
         for frame in 0..4 {
             let data = RenderData {
                 tonemapper: Tonemapper::PbrNeutral,
@@ -4106,18 +4114,30 @@ fn colors_past_a_half_float_show_as_its_brightest() {
             };
             render_without_ui(&mut renderer, data);
             let pixels = frame_pixels(&mut renderer);
-            for middle in [[8, 8], [24, 8], [40, 8]] {
+            for (middle, color) in [[8, 8], [24, 8], [40, 8], [56, 8]].into_iter().zip(shown) {
                 let got = pixel_at(&pixels, WIDTH, middle);
                 assert!(
-                    close(got, [255; 4]),
-                    "{antialiasing:?}, frame {frame}: {got:?} at {middle:?}, not white"
+                    close(got, color),
+                    "{antialiasing:?}, frame {frame}: {got:?} at {middle:?}, not {color:?}"
                 );
             }
+            // Left of the square of no number, from 52 to 60 across, and the pixel next to it,
+            // against the clear color as the corner shows it, mapped.
+            let clear = pixel_at(&pixels, WIDTH, [0, 0]);
+            let dark = (0..HEIGHT)
+                .flat_map(|y| (0..51).map(move |x| [x, y]))
+                .find(|&at| {
+                    let pixel = pixel_at(&pixels, WIDTH, at);
+                    (pixel.iter().zip(clear)).any(|(&got, clear)| got < clear.saturating_sub(1))
+                });
+            assert!(
+                dark.is_none(),
+                "{antialiasing:?}, frame {frame}: {dark:?} is darker than the clear color, {clear:?}"
+            );
         }
     }
     shut_down(renderer);
 }
-
 /// A square of 2 by 2 pixels 64 times as bright as white in the world, left, and the same on the
 /// canvas, right, in a view of 256 by 128, whose bloom has three levels. Without antialiasing, the
 /// world's spreads its light round it, the same each way, less the further, while the canvas's,
@@ -4765,8 +4785,9 @@ fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
 /// takes the mean of the two, between its tenth and ninetieth percentiles, each half 40% of the
 /// pixels; the bright half alone between its sixtieth and its ninetieth; the dark alone below its
 /// fortieth. A canvas of white over the whole view, which draws after the meter, changes nothing
-/// of it. Over a sky black above the horizon, the dark half alone, as what's darker than the
-/// meter's bins isn't metered.
+/// of it. Antialiased, temporally or by SMAA, whose colors the meter reads in place of the view's
+/// as drawn, it meters the halves alike, as without. Over a sky black above the horizon, the dark
+/// half alone, as what's darker than the meter's bins isn't metered.
 fn exposure_meters_between_its_percentiles() {
     const SIZE: u32 = 32;
     // The middles of two of the meter's bins, 8 stops apart.
@@ -4811,23 +4832,26 @@ fn exposure_meters_between_its_percentiles() {
     };
     let mut time = 0.0;
     let none = Draws::default();
-    // The exposure value of the third frame of `adaptation`, with `canvas` over the view, which the
-    // first's metering sets, and that frame's middle pixel.
-    let mut metered = |stores: &mut Stores, adaptation: Adaptation, canvas: &Draws| {
-        for _ in 0..3 {
-            time += 0.1;
-            let data = RenderData {
-                adaptation: Some(adaptation),
-                time,
-                canvas,
-                ..stores.data(viewport, viewpoint, &draws)
-            };
-            render_without_ui(&mut renderer, data);
-        }
-        let ev100 = -math::libm::log2f(1.2 * renderer.exposure());
-        let middle = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
-        (ev100, middle)
-    };
+    // The exposure value of the third frame of `adaptation`, with `canvas` over the view,
+    // antialiased as `antialiasing` says, which the first's metering sets, and that frame's middle
+    // pixel.
+    let mut metered =
+        |stores: &mut Stores, adaptation: Adaptation, canvas: &Draws, antialiasing| {
+            for _ in 0..3 {
+                time += 0.1;
+                let data = RenderData {
+                    adaptation: Some(adaptation),
+                    time,
+                    canvas,
+                    antialiasing,
+                    ..stores.data(viewport, viewpoint, &draws)
+                };
+                render_without_ui(&mut renderer, data);
+            }
+            let ev100 = -math::libm::log2f(1.2 * renderer.exposure());
+            let middle = pixel_at(&frame_pixels(&mut renderer), SIZE, [SIZE / 2, SIZE / 2]);
+            (ev100, middle)
+        };
     let cases = [
         (0.1, 0.9, (BRIGHT + DARK) / 2.0),
         (0.6, 0.9, BRIGHT),
@@ -4839,7 +4863,7 @@ fn exposure_meters_between_its_percentiles() {
             high_percentile,
             ..instant
         };
-        let (ev100, _) = metered(&mut stores, adaptation, &none);
+        let (ev100, _) = metered(&mut stores, adaptation, &none, Antialiasing::None);
         assert!(
             (ev100 - (mean + 3.0)).abs() < 1e-3,
             "between {low_percentile} and {high_percentile}, {ev100}, not {}",
@@ -4854,7 +4878,7 @@ fn exposure_meters_between_its_percentiles() {
         Vec3::new(SIZE as f32 / 2.0, SIZE as f32 / 2.0, 0.0),
     );
     canvas.push_sprite(whole, Sprite::default());
-    let (ev100, pixel) = metered(&mut stores, instant, &canvas);
+    let (ev100, pixel) = metered(&mut stores, instant, &canvas, Antialiasing::None);
     let mean = (BRIGHT + DARK) / 2.0;
     assert!(
         (ev100 - (mean + 3.0)).abs() < 1e-3,
@@ -4862,8 +4886,22 @@ fn exposure_meters_between_its_percentiles() {
         mean + 3.0
     );
     assert_eq!(pixel, [255; 4], "the canvas shows over the view");
+    let mut antialiased = [Antialiasing::Taa, Antialiasing::Smaa].map(|antialiasing| {
+        let (ev100, _) = metered(&mut stores, instant, &none, antialiasing);
+        assert!(
+            (ev100 - (mean + 3.0)).abs() < 1e-3,
+            "antialiased as {antialiasing:?}, {ev100}, not {}",
+            mean + 3.0
+        );
+        ev100
+    });
+    antialiased.sort_by(f32::total_cmp);
+    assert!(
+        antialiased[1] - antialiased[0] < 1e-3,
+        "temporally and by SMAA, {antialiased:?}"
+    );
     shown(&mut stores, black);
-    let (ev100, _) = metered(&mut stores, instant, &none);
+    let (ev100, _) = metered(&mut stores, instant, &none, Antialiasing::None);
     assert!(
         (ev100 - (DARK + 3.0)).abs() < 1e-3,
         "under a black sky, {ev100}, not {}",
@@ -6562,8 +6600,9 @@ fn reflection_scene(stores: &mut Stores, roughness: [f32; 3]) -> ReflectionScene
 /// trace against, and renders as one without; the frame after shows, where the red sphere's middle
 /// is mirrored in the floor, the red sphere, where a frame without shows the sky's light; and where
 /// the floor's mirror shows the sky alone, the sky's light as a frame without does. Against its
-/// reference image, without antialiasing; and antialiased, the frames after still mirror the
-/// sphere.
+/// reference image, without antialiasing; and antialiased, temporally and by SMAA, whose blended
+/// colors the frames keep in place of the resolve's, the frames after still mirror the sphere, as
+/// they do once the camera moves past what SMAA's last frame kept.
 fn reflections_mirror_what_the_view_shows() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -6619,6 +6658,15 @@ fn reflections_mirror_what_the_view_shows() {
     assert!(
         r > g + 40 && r > b + 40,
         "antialiased, the mirrored sphere shows [{r}, {g}, {b}], not red"
+    );
+    let mut blended = Vec::new();
+    for _ in 0..3 {
+        blended = reflecting(&mut renderer, &mut stores, Antialiasing::Smaa);
+    }
+    let [r, g, b, _] = shown(&blended, scene.mirrored);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "antialiased by SMAA, the mirrored sphere shows [{r}, {g}, {b}], not red"
     );
     // The camera moved since the frame before, farther than the sphere is wide on screen: what a
     // ray finds is taken from where it showed then.
@@ -9414,68 +9462,72 @@ fn side_by_side(frames: &[&[u8]], size: u32) -> Vec<u8> {
         .collect()
 }
 
+/// The side of the view [`edges_seen`] draws, at its own size.
+const EDGES_SIZE: u32 = 64;
+
+/// `frames` frames of the antialiasing tests' view, [`EDGES_SIZE`] times `scale` pixels a side,
+/// antialiased as `antialiasing` says: a lit sphere, a model's, and a square of a game's opaque
+/// shader, turned so that their edges cross the pixels at every angle, with a square on the
+/// canvas, 12 pixels a side at the view's own size, 8 from its bottom left, over them.
+fn edges_seen(scale: u32, antialiasing: Antialiasing, frames: usize) -> Vec<Vec<u8>> {
+    let size = EDGES_SIZE * scale;
+    let mut renderer = renderer(size, size);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let sphere = sphere(&mut stores.meshes, 0.6, 24, 48);
+    let material = stores.materials.add(&Material {
+        color: Vec4::new(0.9, 0.45, 0.2, 1.0),
+        workflow: metallic(0.0, 0.5),
+        ..Material::default()
+    });
+    let ball = MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    let turned = Mat4::from_scale_rotation_translation(
+        Vec3::splat(1.3),
+        Quat::from_rotation_z(0.35),
+        Vec3::new(-0.5, 0.35, 0.0),
+    );
+    draws.push(square, flat, turned, Vec4::new(0.85, 0.85, 0.95, 1.0));
+    draws.push_draw(Mat4::from_translation(Vec3::new(0.45, -0.3, 0.6)), &ball, 0);
+    let mut canvas = Draws::default();
+    let placed = Mat4::from_scale(Vec3::new(scale as f32, scale as f32, 1.0))
+        * Mat4::from_translation(Vec3::new(14.0, 14.0, 0.0))
+        * Mat4::from_scale(Vec3::new(12.0, 12.0, 1.0));
+    let green = Sprite {
+        color: Vec4::new(0.1, 0.8, 0.2, 1.0),
+        ..Sprite::default()
+    };
+    canvas.push_sprite(placed, green);
+    stores.lights = vec![front_light()];
+    let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut drawn = Vec::new();
+    for _ in 0..frames {
+        let data = RenderData {
+            antialiasing,
+            canvas: &canvas,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        drawn.push(frame_pixels(&mut renderer));
+    }
+    shut_down(renderer);
+    drawn
+}
+
 /// A view antialiased frame after frame, against its reference of frames 1, 2, 4 and 16 side by
-/// side: a lit sphere, a model's, and a square of a game's opaque shader, turned so that their
-/// edges cross the pixels at every angle, with a square on the canvas, at the bottom left, over
-/// them. By the sixteenth, their edges average what's drawn across their pixels: it's nearer the
-/// view drawn at 4 times the size, without antialiasing, and averaged down than the view drawn
-/// without it is; and the canvas, drawn after the view resolves, shows as it does without it.
+/// side, of [`edges_seen`]'s view. By the sixteenth, its edges average what's drawn across their
+/// pixels: it's nearer the view drawn at 4 times the size, without antialiasing, and averaged down
+/// than the view drawn without it is; and the canvas, drawn after the view resolves, shows as it
+/// does without it.
 fn antialiasing_smooths_edges_frame_by_frame() {
-    const SIZE: u32 = 64;
+    const SIZE: u32 = EDGES_SIZE;
     const LARGER: u32 = 4;
     const SHOWN: [usize; 4] = [1, 2, 4, 16];
-    // `frames` frames of the view, `scale` times the size, antialiased as `antialiasing` says.
-    let render = |scale: u32, antialiasing: Antialiasing, frames: usize| {
-        let size = SIZE * scale;
-        let mut renderer = renderer(size, size);
-        let mut stores = Stores::default();
-        let flat = (stores.shaders)
-            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
-            .expect("a shader");
-        let square = square(&mut stores.meshes);
-        let sphere = sphere(&mut stores.meshes, 0.6, 24, 48);
-        let material = stores.materials.add(&Material {
-            color: Vec4::new(0.9, 0.45, 0.2, 1.0),
-            workflow: metallic(0.0, 0.5),
-            ..Material::default()
-        });
-        let ball =
-            MeshDraw::with_material(sphere, material, &stores.materials, &mut stores.shaders);
-        let mut draws = Draws::default();
-        let turned = Mat4::from_scale_rotation_translation(
-            Vec3::splat(1.3),
-            Quat::from_rotation_z(0.35),
-            Vec3::new(-0.5, 0.35, 0.0),
-        );
-        draws.push(square, flat, turned, Vec4::new(0.85, 0.85, 0.95, 1.0));
-        draws.push_draw(Mat4::from_translation(Vec3::new(0.45, -0.3, 0.6)), &ball, 0);
-        // 12 pixels a side at the view's own size, 8 from its bottom left.
-        let mut canvas = Draws::default();
-        let placed = Mat4::from_scale(Vec3::new(scale as f32, scale as f32, 1.0))
-            * Mat4::from_translation(Vec3::new(14.0, 14.0, 0.0))
-            * Mat4::from_scale(Vec3::new(12.0, 12.0, 1.0));
-        let green = Sprite {
-            color: Vec4::new(0.1, 0.8, 0.2, 1.0),
-            ..Sprite::default()
-        };
-        canvas.push_sprite(placed, green);
-        stores.lights = vec![front_light()];
-        let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
-        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-        let mut drawn = Vec::new();
-        for _ in 0..frames {
-            let data = RenderData {
-                antialiasing,
-                canvas: &canvas,
-                ..stores.data(viewport, viewpoint, &draws)
-            };
-            render_without_ui(&mut renderer, data);
-            drawn.push(frame_pixels(&mut renderer));
-        }
-        shut_down(renderer);
-        drawn
-    };
-    let antialiased = render(1, Antialiasing::Taa, 16);
+    let antialiased = edges_seen(1, Antialiasing::Taa, 16);
     let shown = SHOWN.map(|frame| antialiased[frame - 1].as_slice());
     compare(
         "antialiased",
@@ -9483,8 +9535,8 @@ fn antialiasing_smooths_edges_frame_by_frame() {
         SIZE,
         &side_by_side(&shown, SIZE),
     );
-    let aliased = render(1, Antialiasing::None, 1).remove(0);
-    let larger = render(LARGER, Antialiasing::None, 1).remove(0);
+    let aliased = edges_seen(1, Antialiasing::None, 1).remove(0);
+    let larger = edges_seen(LARGER, Antialiasing::None, 1).remove(0);
     let truth = averaged_down(&larger, SIZE * LARGER, LARGER);
     let last = &antialiased[15];
     let (resolved, drawn) = (
@@ -9711,6 +9763,350 @@ fn antialiasing_leaves_no_trail() {
     }
 }
 
+/// [`edges_seen`]'s view antialiased by SMAA, against its reference of it without antialiasing and
+/// with SMAA side by side: in its first frame, nearer the view drawn at 4 times the size, without
+/// antialiasing, and averaged down than the view drawn without it is, as near as TAA's sixteenth
+/// frame is; the next frame the same, as SMAA keeps nothing from frame to frame; and the canvas,
+/// drawn after, as it shows without antialiasing.
+fn smaa_smooths_edges_in_a_frame() {
+    const SIZE: u32 = EDGES_SIZE;
+    const LARGER: u32 = 4;
+    let antialiased = edges_seen(1, Antialiasing::Smaa, 2);
+    let aliased = edges_seen(1, Antialiasing::None, 1).remove(0);
+    compare(
+        "smaa",
+        SIZE * 2,
+        SIZE,
+        &side_by_side(&[&aliased, &antialiased[0]], SIZE),
+    );
+    assert!(
+        antialiased[0] == antialiased[1],
+        "the second frame is as the first"
+    );
+    let larger = edges_seen(LARGER, Antialiasing::None, 1).remove(0);
+    let truth = averaged_down(&larger, SIZE * LARGER, LARGER);
+    let (smaa, drawn) = (
+        linear_distance(&antialiased[0], &truth),
+        linear_distance(&aliased, &truth),
+    );
+    assert!(
+        smaa < 0.6 * drawn,
+        "the view antialiased by SMAA is {smaa} from the view averaged down, and the view \
+         without antialiasing {drawn}"
+    );
+    let canvas = |frame: &[u8]| region(frame, SIZE, [8, SIZE - 20], [12, 12]);
+    assert!(
+        canvas(&antialiased[0]) == canvas(&aliased),
+        "the canvas shows as it does without antialiasing"
+    );
+}
+
+/// A disk of `segments` triangles around the origin, of radius 1 in the plane of X and Y, facing
+/// +Z, of positions alone, as `flat_color.slang` takes them.
+fn disk(meshes: &mut Meshes, segments: u32) -> Mesh<[f32; 3]> {
+    use math::libm::{cosf, sinf};
+    let rim = (0..segments).map(|i| {
+        let around = 2.0 * PI * i as f32 / segments as f32;
+        [cosf(around), sinf(around), 0.0]
+    });
+    let corners: Vec<[f32; 3]> = std::iter::once([0.0, 0.0, 0.0]).chain(rim).collect();
+    let indices: Vec<u32> = (0..segments)
+        .flat_map(|i| [0, 1 + i, 1 + (i + 1) % segments])
+        .collect();
+    meshes.add("disk", &corners, &indices).expect("a mesh")
+}
+
+/// A gray disk over black, 70 pixels across in a view of 96, antialiased by SMAA in one frame,
+/// against the view drawn at 8 times the size and averaged down, which shows how much of each
+/// pixel the disk covers: each pixel of its edge shows the share of the disk's light that the disk
+/// covers of it, as the view shows it, within bounds on average, in each eighth of the way round,
+/// across, down and along both diagonals, and at every pixel, where without antialiasing it's 0.2
+/// or more off on average; and those across and down alike, as those along either diagonal are.
+/// Of a disk of 0.25 under no tonemapper; of 0.02, whose edges a luma encoded as a display encodes
+/// it finds, and one of the view's light doesn't; of white, 1, which the clamp shows as it is, so
+/// that blending it as PBR Neutral's shoulder would roll it off shows its edge too dark; of 16
+/// under PBR Neutral, which blended in the view's light would show a pixel the disk covers a
+/// fraction of almost as bright as the disk; and of 2 under PBR Neutral graded by a slope of a
+/// half, after SMAA, which brings its light back under the shoulder.
+fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
+    const SIZE: u32 = 96;
+    const LARGER: u32 = 8;
+    // The disk of light `light` drawn as `antialiasing` says, `scale` times the size, graded by
+    // a slope of `slope` and tonemapped by `tonemapper`: its pixels' green, in linear light.
+    let render = |light: f32, tonemapper, slope: f32, scale: u32, antialiasing| {
+        let size = SIZE * scale;
+        let mut renderer = renderer(size, size);
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let disk = disk(&mut stores.meshes, 512);
+        let mut draws = Draws::default();
+        let color = Vec4::new(light, light, light, 1.0);
+        draws.push(disk, flat, Mat4::from_scale(Vec3::splat(1.2)), color);
+        let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+            tonemapper,
+            antialiasing,
+            grade: Grade {
+                slope: Vec3::splat(slope),
+                ..Grade::IDENTITY
+            },
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        let green = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| decoded(pixel[1]));
+        green.collect::<Vec<f32>>()
+    };
+    // The disk of `light` under `tonemapper` and `slope`, with SMAA and without antialiasing: each
+    // eighth of the way round it, from the right, and all of it, the mean distance between each
+    // pixel's share of the disk's light and its share in the larger view, the mean of its 8 by 8,
+    // over the pixels whose share there is between 2% and 98%; and the most at any pixel, with
+    // SMAA.
+    let distances = |light: f32, tonemapper, slope: f32| {
+        let smaa = render(light, tonemapper, slope, 1, Antialiasing::Smaa);
+        let aliased = render(light, tonemapper, slope, 1, Antialiasing::None);
+        let larger = render(light, tonemapper, slope, LARGER, Antialiasing::None);
+        let averaged = |[x, y]: [u32; 2]| {
+            let (width, by) = (SIZE * LARGER, LARGER);
+            let at = |(dx, dy)| larger[((y * by + dy) * width + x * by + dx) as usize];
+            let under = (0..by).flat_map(|dy| (0..by).map(move |dx| (dx, dy)));
+            under.map(at).sum::<f32>() / (by * by) as f32
+        };
+        let disk = averaged([SIZE / 2, SIZE / 2]);
+        let (mut sums, mut counts, mut worst) = ([[0.0f32; 2]; 8], [0u32; 8], 0.0f32);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let covered = averaged([x, y]) / disk;
+                if !(0.02..0.98).contains(&covered) {
+                    continue;
+                }
+                let half = SIZE as f32 / 2.0;
+                let (dx, dy) = (x as f32 + 0.5 - half, y as f32 + 0.5 - half);
+                let eighth = (math::libm::atan2f(dy, dx) / FRAC_PI_4).round() as i32;
+                let eighth = eighth.rem_euclid(8) as usize;
+                let off = |frame: &[f32]| (frame[(y * SIZE + x) as usize] / disk - covered).abs();
+                sums[eighth][0] += off(&smaa);
+                sums[eighth][1] += off(&aliased);
+                worst = worst.max(off(&smaa));
+                counts[eighth] += 1;
+            }
+        }
+        let means: Vec<[f32; 2]> = (sums.iter().zip(counts))
+            .map(|(sum, count)| sum.map(|sum| sum / count as f32))
+            .collect();
+        let all = |i: usize| {
+            let total: f32 = sums.iter().map(|sum| sum[i]).sum();
+            total / counts.iter().sum::<u32>() as f32
+        };
+        (means, [all(0), all(1)], worst)
+    };
+    // Off by at most this with SMAA, on average, in each eighth and at any pixel: more for the dim
+    // disk, whose light 8 bits hold coarsely, and the bright ones under PBR Neutral, whose pixels a
+    // fraction covered are darkened by its toe and offset, where they're dim.
+    let cases = [
+        (0.25, Tonemapper::None, 1.0, [0.1, 0.11, 0.25]),
+        (0.02, Tonemapper::None, 1.0, [0.11, 0.12, 0.25]),
+        (1.0, Tonemapper::None, 1.0, [0.1, 0.11, 0.25]),
+        (16.0, Tonemapper::PbrNeutral, 1.0, [0.12, 0.15, 0.3]),
+        (2.0, Tonemapper::PbrNeutral, 0.5, [0.12, 0.15, 0.3]),
+    ];
+    for (light, tonemapper, slope, [most, most_eighth, most_pixel]) in cases {
+        let (means, all, worst) = distances(light, tonemapper, slope);
+        assert!(
+            all[0] < most && all[1] > 0.2,
+            "the disk of {light}'s edge shows its coverage {} off with SMAA, and {} off without \
+             antialiasing, on average",
+            all[0],
+            all[1]
+        );
+        for (eighth, [antialiased, drawn]) in means.iter().enumerate() {
+            assert!(
+                *antialiased < most_eighth && *drawn > 0.2,
+                "{eighth} eighths round from the right, the disk of {light}'s edge shows its \
+                 coverage {antialiased} off with SMAA, and {drawn} off without antialiasing: \
+                 {means:?}"
+            );
+        }
+        assert!(
+            worst < most_pixel,
+            "a pixel of the disk of {light}'s edge shows its coverage {worst} off with SMAA"
+        );
+        // The disk is the same each way, so its edges across and down blend alike, as do those
+        // along either diagonal, rising or falling.
+        for first in [0, 1] {
+            let alike = (first..8).step_by(2).map(|eighth| means[eighth][0]);
+            let (least, most) = alike.fold((f32::MAX, 0.0f32), |(least, most), mean| {
+                (least.min(mean), most.max(mean))
+            });
+            assert!(
+                most < 1.2 * least,
+                "the disk of {light}'s edges, every other eighth from {first}, blend unalike: \
+                 {means:?}"
+            );
+        }
+    }
+}
+/// A gray square over black, turned 40° in a view of 96, antialiased by SMAA in one frame, against
+/// the view drawn at 8 times the size and averaged down: its edges diagonals of single steps broken
+/// by steps two pixels long, falling, steeper than 45°, and rising, shallower, which SMAA's
+/// diagonal patterns take, as its orthogonal ones would less nearly. Each pixel of its falling
+/// edges and of its rising ones shows the share of the square's light that the square covers of it
+/// within 0.08 on average, where without the diagonal patterns they're 0.11 off, and every pixel 3
+/// or more from its corners, where two edges meet, within 0.3.
+fn smaa_blends_along_diagonals_by_how_much_they_cover() {
+    const SIZE: u32 = 96;
+    const LARGER: u32 = 8;
+    const TURNED: f32 = 40.0;
+    const SIDE: f32 = 1.6;
+    let gray = 0.25;
+    // The square drawn as `antialiasing` says, `scale` times the size: its pixels' green, in
+    // linear light.
+    let render = |scale: u32, antialiasing| {
+        let size = SIZE * scale;
+        let mut renderer = renderer(size, size);
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let square = square(&mut stores.meshes);
+        let mut draws = Draws::default();
+        let turned = Mat4::from_scale_rotation_translation(
+            Vec3::splat(SIDE),
+            Quat::from_rotation_z(math::to_radians(TURNED)),
+            Vec3::ZERO,
+        );
+        draws.push(square, flat, turned, Vec4::new(gray, gray, gray, 1.0));
+        let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+            antialiasing,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        let green = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| decoded(pixel[1]));
+        green.collect::<Vec<f32>>()
+    };
+    let smaa = render(1, Antialiasing::Smaa);
+    let larger = render(LARGER, Antialiasing::None);
+    // How far the square's corners are from its middle, the view's, in pixels: half the view is
+    // 4 · tan(π/8) units, 4 away, under a field of view of π/4.
+    let half = SIZE as f32 / 2.0;
+    let corner = SIDE / SQRT_2 * half / (4.0 * math::libm::tanf(PI / 8.0));
+    // Each pixel the square covers 2% to 98% of: how far its share of the square's light is from
+    // that, on the falling edges, whose outward normals are 40° and 220°, and on the rising ones.
+    let (mut offs, mut worst) = ([Vec::new(), Vec::new()], 0.0f32);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let under = (0..LARGER).flat_map(|dy| (0..LARGER).map(move |dx| (dx, dy)));
+            let width = SIZE * LARGER;
+            let at = |(dx, dy)| larger[((y * LARGER + dy) * width + x * LARGER + dx) as usize];
+            let covered = under.map(at).sum::<f32>() / (LARGER * LARGER) as f32 / gray;
+            if !(0.02..0.98).contains(&covered) {
+                continue;
+            }
+            let off = (smaa[(y * SIZE + x) as usize] / gray - covered).abs();
+            // From the middle, Y up.
+            let at = Vec2::new(x as f32 + 0.5 - half, half - (y as f32 + 0.5));
+            let around = math::to_degrees(math::libm::atan2f(at.y, at.x));
+            let side = ((around - TURNED) / 90.0).round() as i32;
+            offs[side.rem_euclid(2) as usize].push(off);
+            let near_corner = (0..4).any(|k| {
+                let way = math::to_radians(TURNED + 45.0 + 90.0 * k as f32);
+                let corner = corner * Vec2::new(math::libm::cosf(way), math::libm::sinf(way));
+                at.distance(corner) < 3.0
+            });
+            if !near_corner {
+                worst = worst.max(off);
+            }
+        }
+    }
+    for (offs, edges) in offs.iter().zip(["falling", "rising"]) {
+        let mean = offs.iter().sum::<f32>() / offs.len() as f32;
+        assert!(
+            offs.len() > 50 && mean < 0.08,
+            "the square's {edges} edges, {} pixels, show their coverage {mean} off on average",
+            offs.len()
+        );
+    }
+    assert!(
+        worst < 0.3,
+        "a pixel of the square's edges away from its corners shows its coverage {worst} off"
+    );
+}
+/// A square of red as bright as a half float holds, 65,504, turned, over white as bright, under no
+/// tonemapper, graded by an offset of -65,470 in red, which shows red of the brightest two a half
+/// float holds, 65,472 and 65,504, as 1, and red of 65,471 or less as less: antialiased by SMAA,
+/// every pixel's red shows as 1, as their blends take light back up to the brightest a half float
+/// holds, within the step a write of it to the view's colors may round down by, while its edges'
+/// green blends.
+fn smaa_blends_light_up_to_a_half_floats_brightest() {
+    const SIZE: u32 = 64;
+    const BRIGHTEST: f32 = 65504.0;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    let turned = Mat4::from_scale_rotation_translation(
+        Vec3::splat(1.6),
+        Quat::from_rotation_z(0.3),
+        Vec3::ZERO,
+    );
+    draws.push(square, flat, turned, Vec4::new(BRIGHTEST, 0.0, 0.0, 1.0));
+    let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut render = |antialiasing| {
+        let data = RenderData {
+            clear_color: [BRIGHTEST, BRIGHTEST, BRIGHTEST, 1.0],
+            antialiasing,
+            grade: Grade {
+                offset: Vec3::new(-65470.0, 0.0, 0.0),
+                ..Grade::IDENTITY
+            },
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        frame_pixels(&mut renderer)
+    };
+    let aliased = render(Antialiasing::None);
+    let antialiased = render(Antialiasing::Smaa);
+    shut_down(renderer);
+    let (aliased, antialiased) = (aliased.as_chunks::<4>().0, antialiased.as_chunks::<4>().0);
+    let dim = |frame: &[[u8; 4]]| frame.iter().position(|pixel| pixel[0] != 255);
+    assert_eq!(
+        dim(aliased),
+        None,
+        "without antialiasing, every pixel's red shows as 1"
+    );
+    let dim = dim(antialiased);
+    assert!(
+        dim.is_none(),
+        "pixel {dim:?}'s red, blended by SMAA, is dimmer than either side's: {:?}",
+        dim.map(|i| antialiased[i])
+    );
+    let blended = (aliased.iter().zip(antialiased))
+        .filter(|(a, b)| a[1] != b[1])
+        .count();
+    assert!(blended > 20, "SMAA blended {blended} pixels' green");
+}
 fn drawn_again(
     renderer: &mut Renderer,
     stores: &mut Stores,

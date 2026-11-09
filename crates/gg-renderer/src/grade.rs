@@ -83,6 +83,12 @@ impl Grade {
         (luma + grade.saturation * (light - luma)).clamp(Vec3::ZERO, brightest)
     }
 
+    /// Its slope, each channel's, as the pass that grades the view's colors takes it: 1 for a field
+    /// that isn't a finite number, and within 0 to [`MOST`](Self::MOST).
+    pub(crate) fn slope(&self) -> Vec3 {
+        self.finite().slope
+    }
+
     /// It as the pass that grades the view's colors reads it.
     pub(crate) fn data(&self) -> GradeData {
         let grade = self.finite();

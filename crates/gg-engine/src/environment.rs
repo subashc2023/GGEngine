@@ -35,7 +35,8 @@ pub struct Environment {
     pub tonemapper: Tonemapper,
     /// How the view is antialiased: temporal antialiasing by default, each frame drawn a fraction
     /// of a pixel off and resolved against those before it, before it's tonemapped, which a game's
-    /// canvas is drawn after; or none.
+    /// canvas is drawn after; SMAA, each frame alone, at the same point, sharper and without ghosts;
+    /// or none.
     pub antialiasing: Antialiasing,
     /// The sky, which the view shows behind the world, in place of the clear color, and lights its
     /// models by from all around: an image of the world around, or an atmosphere made from its

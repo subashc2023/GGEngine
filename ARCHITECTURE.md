@@ -1697,8 +1697,9 @@ tonemapper maps the view's colors into the range it shows: Khronos PBR Neutral b
 shows base colors up to about 0.76 as they are, less the 0.04 a dielectric reflects whatever its
 color, and rolls brighter light off toward white; ACES, as Stephen Hill fitted it; AgX; or none,
 each channel clamped, which a world without an environment gets, so that a 2D game's sprites show
-as they're colored. Its antialiasing is temporal, as below, by default, or none, which a world
-without an environment gets too, each pixel what's at its center. It blooms the view, subtly by
+as they're colored. Its antialiasing is temporal, as below, by default, or SMAA, from each frame
+alone, as below, or none, which a world without an environment gets too, each pixel what's at its
+center. It blooms the view, subtly by
 default, and grades its light, by the identity by default, as below, and a world without one does
 neither. Its ambient occlusion, on by default, darkens the sky's light where what's near a point
 hides it, and its reflections, off by default, show in what's opaque what the view shows, as
@@ -2442,9 +2443,10 @@ level keeps to what's behind a thin occluder; the second searches each pixel's h
 three slices of the hemisphere round its normal, which the depth round it gives, three steps each
 way, out as far as the environment's radius, half a unit by default, reaching farther steps through
 coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and,
-where the view is antialiased, on from frame to frame, for the resolve to average over its frames;
-and the denoise blurs each pixel with the eight round it, but across where the depth breaks, once
-where the view is antialiased, and three times where it isn't and the noise stays still, into an
+where the view is antialiased temporally, on from frame to frame, for the resolve to average over
+its frames; and the denoise blurs each pixel with the eight round it, but across where the depth
+breaks, once where the view is antialiased temporally, and three times where it isn't, by SMAA or
+not at all, and the noise stays still, into an
 image of the graph's own of a float a pixel, the fraction of the light from all around that
 reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
 light, never the lights', by the less of that and the material's occlusion map: both estimate how
@@ -2491,8 +2493,8 @@ short of the near plane. It trusts what it found less the farther behind it the 
 thick as the environment's thickness takes what the depth shows to be, 0.25 units by default,
 toward the view's edges and the ray's reach, and as the ray turns back toward the view, which shows
 nothing behind it; nor does it find the sky, which the sky's own light stands for, or what it meets
-from behind. What it found is the colors the frame before showed, antialiased, before bloom, the
-grade and the canvas, where it showed then, as that frame's camera saw it: each frame that reflects
+from behind. What it found is the colors the frame before showed, antialiased, temporally or by
+SMAA, before bloom, the grade and the canvas, where it showed then, as that frame's camera saw it: each frame that reflects
 keeps them, by a pass of its own, in an image of the view's size, and a frame after one that kept
 none, or kept them at another size, traces nothing, as the first that reflects. The trace writes,
 into the first level of the view's reflections, an image of the view's size of up to seven levels,
@@ -2555,10 +2557,40 @@ that a game's UI stays sharp and out of the history. The view's IDs are drawn of
 offset too, so that a pick at an edge, and the editor's outline of the pick, can move a pixel from
 frame to frame.
 
+A view that its environment antialiases by SMAA is antialiased from each frame alone, without
+jitter, a history or motion, in the resolve's place, before bloom, the grade and the canvas: SMAA
+1x (Jimenez, Echevarria, Sousa and Gutierrez, 2012), as the reference's shader computes it at its
+HIGH preset, threshold 0.1, 16 search steps across and down, 8 along diagonals, corner rounding
+25, in three compute passes, each writing every pixel, rather than the reference's draws behind a
+stencil that keeps the second to the pixels with edges. The first finds each pixel's edges with its
+neighbors to the left and above, with local contrast adaptation; the second measures the line of
+edges each pixel with one is on, along diagonals first, by bilinear fetches that read two pixels'
+edges at once and a search texture that says how far the last went, and takes its length and the
+edges crossing its ends through an area texture to the share of the pixel and of its neighbor
+across the edge that the edge the line stands for cuts off; the third blends each pixel with its
+neighbors by those shares, into an image of the graph's own, which bloom, the grade and the canvas
+then go over. The view's colors are of high dynamic range, and the reference's as a display shows
+them, so SMAA sees them about as the grade and the tonemapper that follow it will show them: times
+the grade's slope, each channel's, and rolled off toward 1 above a shoulder by the curve of Khronos
+PBR Neutral's, invertibly, its toe and desaturation left out. The shoulder is PBR Neutral's, at
+0.76, under it and under ACES and AgX, which roll light off sooner and more gently; and under no
+tonemapper, which clamps each channel at 1, the last 256th below 1, all but the clamp. The edges
+are found on the luma of the colors so shown and encoded by sRGB's curve, which the reference's
+threshold is for, and the colors so shown are blended, linear as the reference blends, and taken
+back through how far each channel is below 1, which keeps light's precision up to a half float's
+largest, so that an edge below the shoulder blends exactly as it would after the grade's slope and
+the tonemapper, and a pixel half covered by a bright sky shows half of it, where blended in the
+view's light it would show as bright as the sky. Weighing colors by 1 over 1 plus their luminance,
+as the resolve does, would darken every edge's blend and compress the contrast of bright ones
+under the threshold. The lookup textures are made as the renderer first antialiases a
+view by SMAA, by the algorithm the reference's generator scripts describe, for subsample offset 0
+alone: the area texture's 160 by 80 texels of each pattern's areas, from the revectorized line's
+exact coverage of each pixel, and the search texture's 64 by 16, and written in that frame.
+
 An environment's exposure may adapt to what the view sees, as eyes adapt between sunlight and
-shade, by its adaptation, none by default. Each frame meters the view's light after antialiasing
-resolves it and before it blooms and the canvas draws, as Unreal's histogram exposure does, in three
-compute passes: one empties a histogram of 256 bins, eighths of a stop of luminance from 2^-12
+shade, by its adaptation, none by default. Each frame meters the view's light after antialiasing,
+temporal or SMAA, and before it blooms and the canvas draws, as Unreal's histogram exposure
+does, in three compute passes: one empties a histogram of 256 bins, eighths of a stop of luminance from 2^-12
 candela per square meter to 2^20; one counts each pixel into it, its color taken back through the
 exposure the frame shaded at to the luminance lit shading exposed, a workgroup's own bins first and
 then the histogram's by an atomic add each, what's darker than the lowest bin, as a black sky,
@@ -2586,7 +2618,7 @@ change. But the meter can't tell what isn't lit from the view's pixels, and mete
 were, as DEFECTS.md says.
 
 A view that its environment blooms, as by default, spreads the light of what's bright round it, as
-a camera's lens does: after temporal antialiasing resolves it, or after its last pass without, and
+a camera's lens does: after antialiasing, temporal or SMAA, or after its last pass without, and
 before the canvas, so that a game's UI doesn't bloom, by a chain of compute passes, as Call of
 Duty: Advanced Warfare's (Jimenez, "Next Generation Post Processing in Call of Duty: Advanced
 Warfare", 2014). Each of the chain's levels, images of the graph's own, is half the one before each
@@ -2603,9 +2635,10 @@ adding up to 1; and the view's colors lerp toward the first level, by the same t
 environment's bloom, 0.04 by default, so that bloom spreads light without adding any, and a view of
 one color blooms to itself. Light blooms from everything, without a threshold, as in a lens, the
 lerp leaving what's no brighter than what's round it as it was. That last pass grades the view's
-colors too, as below, and runs to grade them alone in a view that doesn't bloom. Antialiased, the
-resolve then writes the view's resolved colors apart from its history, as it does for a canvas, and
-that pass writes into those; without antialiasing, the canvas draws in a pass of its own after it.
+colors too, as below, and runs to grade them alone in a view that doesn't bloom. Antialiased
+temporally, the resolve then writes the view's resolved colors apart from its history, as it does
+for a canvas, and that pass writes into those, as it does into SMAA's; without antialiasing, the
+canvas draws in a pass of its own after it.
 A view under 32 pixels on a side doesn't bloom.
 
 An environment's grade changes the view's light in the view's linear sRGB, after bloom and before
