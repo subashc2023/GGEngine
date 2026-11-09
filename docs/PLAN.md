@@ -139,7 +139,20 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 
 ## Now
 
-The next phase is the user's to choose, as Open questions has it.
+17. **Rendering looks.** The looks a game reaches for first, each a pass or two on the render graph
+    that a world's `Environment` turns on and sets, alike in development runs, which draw models as
+    they shade them, and in cooked ones, which shade them from the visibility buffer: ambient
+    occlusion from the view's depth, as XeGTAO's ground-truth ambient occlusion, darkening the light
+    from all around where nearby surfaces hide it; bloom, from a chain of downsamples and upsamples
+    of the view's colors, as Call of Duty's, and color grading, white balance, contrast, saturation
+    and ASC CDL's slope, offset and power baked into a lookup table that the tonemap pass applies,
+    with dithering against banding in the view's 8 bits; height fog, thinning exponentially with
+    height, lit by the sky and, toward the sun, by the directional light; and a sky made from its
+    sun, Hillaire's atmosphere under a directional light that a time of day moves, which the view
+    shows and lights its models by, as it does an image sky. *Done when* the showcase has a scene
+    for each, each a GPU test's reference image, and Foxball's arena and the showcase's Sponza show
+    them, each effect's time on the GPU measured. Its milestones: ambient occlusion; bloom and color
+    grading; height fog; a sky made from its sun; and, once they're in, Foxball and Sponza on them.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -653,11 +666,4 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- Which phase comes after Phase 16? Recommendation: the rendering looks a game reaches for first,
-  each a pass or two on the render graph: screen-space ambient occlusion, bloom and color grading,
-  height fog and a sky made from its sun; then the built-in coding agent, v1's headline. Decide
-  before the next phase starts.
-
-- Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
-  then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
-  project contributes.
+None now.

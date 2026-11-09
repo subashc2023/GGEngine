@@ -2458,5 +2458,6 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 | Networking | Our own, over std's TCP and UDP sockets; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |
+| License | `MIT OR Apache-2.0`, at the user's choice, as most of Rust's crates are, [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE), contributions under the same terms; a file beside a license of its own keeps it, as the fonts' OFL and the fox's CC BY 4.0. A game links the engine into its own executable, so a copyleft license, as the GPL's, would bind every game made with it, those for consoles too, whose SDKs can't be opened |
 
 Areas not listed here are undecided.

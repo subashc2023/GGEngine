@@ -139,9 +139,10 @@ only for what another OS could break, and run [ship.yml](.github/workflows/ship.
 ## Rust
 
 - Stable Rust, the release `rust-toolchain.toml` pins; edition 2024, resolver 3.
-- Every member manifest inherits `version`, `edition` and `publish` from `[workspace.package]`
-  and has `[lints] workspace = true`. Without that line, neither the unsafe denial nor the
-  SAFETY-comment lint reaches the crate.
+- Every member manifest inherits `version`, `edition`, `license` and `publish` from
+  `[workspace.package]`, but a game `gg new` makes, whose license is its own, and has `[lints]
+  workspace = true`. Without that line, neither the unsafe denial nor the SAFETY-comment lint
+  reaches the crate.
 - Dependencies, internal and third-party, are declared once in the root
   `[workspace.dependencies]`; members write `name.workspace = true`.
 - `unsafe_code` is denied. A crate that needs unsafe opts in at its root with a comment giving
