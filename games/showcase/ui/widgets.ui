@@ -1,0 +1,154 @@
+(
+    focus: "volume",
+    nodes: [
+        Panel(
+            name: "widgets",
+            color: (0.004, 0.005, 0.012, 0.9),
+            radius: 32.0,
+            padding: (64.0, 52.0),
+            children: [
+                Column(
+                    gap: 28.0,
+                    children: [
+                        Text(
+                            name: "title",
+                            text: "WIDGETS",
+                            font: "d2f1930c7b1ab233",
+                            size: 80.0,
+                        ),
+                        Row(
+                            gap: 56.0,
+                            align: (Center, Start),
+                            children: [
+                                Column(
+                                    name: "options",
+                                    gap: 14.0,
+                                    align: (Start, Start),
+                                    children: [
+                                        Row(
+                                            width: Fixed(520.0),
+                                            children: [
+                                                Text(
+                                                    name: "volume_label",
+                                                    text: "VOLUME",
+                                                    size: 24.0,
+                                                    color: (0.45, 0.5, 0.62, 1.0),
+                                                ),
+                                                Stack(width: Fill(1.0)),
+                                                Text(
+                                                    name: "volume_value",
+                                                    text: "70%",
+                                                    font: "d2f1930c7b1ab233",
+                                                    size: 24.0,
+                                                ),
+                                            ],
+                                        ),
+                                        Slider(
+                                            name: "volume",
+                                            step: 0.05,
+                                            value: 0.7,
+                                            width: Fixed(520.0),
+                                        ),
+                                        Toggle(
+                                            name: "subtitles",
+                                            text: "SUBTITLES",
+                                            on: true,
+                                            width: Fixed(520.0),
+                                            height: Fixed(68.0),
+                                            radius: 14.0,
+                                        ),
+                                        Text(
+                                            name: "difficulty_label",
+                                            text: "DIFFICULTY",
+                                            size: 24.0,
+                                            color: (0.45, 0.5, 0.62, 1.0),
+                                        ),
+                                        Dropdown(
+                                            name: "difficulty",
+                                            options: ["EASY", "NORMAL", "HARD", "NIGHTMARE"],
+                                            choice: 1,
+                                            width: Fixed(520.0),
+                                            height: Fixed(68.0),
+                                            radius: 14.0,
+                                        ),
+                                        Text(
+                                            name: "name_label",
+                                            text: "NAME",
+                                            size: 24.0,
+                                            color: (0.45, 0.5, 0.62, 1.0),
+                                        ),
+                                        Field(
+                                            name: "name",
+                                            hint: "TYPE A NAME",
+                                            most: 24,
+                                            width: Fixed(520.0),
+                                            height: Fixed(68.0),
+                                            radius: 14.0,
+                                        ),
+                                    ],
+                                ),
+                                Column(
+                                    gap: 14.0,
+                                    align: (Start, Start),
+                                    children: [
+                                        Text(
+                                            name: "saves_label",
+                                            text: "SAVES",
+                                            size: 24.0,
+                                            color: (0.45, 0.5, 0.62, 1.0),
+                                        ),
+                                        List(
+                                            name: "saves",
+                                            width: Fixed(420.0),
+                                            height: Fixed(400.0),
+                                            gap: 10.0,
+                                            padding: (0.0, 0.0),
+                                            color: (1.0, 1.0, 1.0, 0.03),
+                                            radius: 14.0,
+                                            children: [
+                                                Button(name: "save_01", text: "SAVE 01  ·  THE HARBOUR", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_02", text: "SAVE 02  ·  THE MARKET", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_03", text: "SAVE 03  ·  THE BRIDGE", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_04", text: "SAVE 04  ·  THE TOWER", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_05", text: "SAVE 05  ·  THE CRYPT", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_06", text: "SAVE 06  ·  THE GARDEN", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_07", text: "SAVE 07  ·  THE MINES", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_08", text: "SAVE 08  ·  THE DOCKS", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_09", text: "SAVE 09  ·  THE KEEP", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                                Button(name: "save_10", text: "SAVE 10  ·  THE SUMMIT", size: 26.0, width: Fixed(400.0), height: Fixed(64.0), radius: 12.0),
+                                            ],
+                                        ),
+                                    ],
+                                ),
+                            ],
+                        ),
+                        Text(
+                            name: "changed",
+                            text: "NOTHING CHANGED YET",
+                            font: "d2f1930c7b1ab233",
+                            size: 30.0,
+                            color: (0.15, 0.45, 1.0, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "controls",
+            anchor: (End, End),
+            margin: (44.0, 44.0),
+            color: (0.0, 0.0, 0.0, 0.55),
+            radius: 20.0,
+            padding: (32.0, 26.0),
+            children: [
+                Text(
+                    name: "hint",
+                    text: "UP · DOWN · TAB · D-PAD  MOVE THE FOCUS\nLEFT · RIGHT  STEP A SLIDER OR A CHOICE\nENTER · SPACE · SOUTH  FLIP, OPEN, CHOOSE\nTHE MOUSE  DRAGS, CLICKS, TYPES, SCROLLS",
+                    size: 22.0,
+                    color: (0.45, 0.5, 0.62, 1.0),
+                    align: (End, Center),
+                ),
+            ],
+        ),
+    ],
+)

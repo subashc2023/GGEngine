@@ -135,6 +135,22 @@
                             ),
                         ),
                         Button(
+                            name: "options",
+                            text: "OPTIONS",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
                             name: "quit",
                             text: "QUIT",
                             font: "083349a64f1c0990",
@@ -156,6 +172,176 @@
                         Text(
                             name: "menu_hint",
                             text: "ARROWS, TAB: CHOOSE  ·  ENTER, SPACE: PRESS  ·  ESC: RESUME",
+                            size: 22.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "settings",
+            visible: false,
+            color: (0.01, 0.012, 0.02, 0.88),
+            radius: 32.0,
+            padding: (72.0, 56.0),
+            children: [
+                Column(
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "settings_title",
+                            text: "OPTIONS",
+                            font: "083349a64f1c0990",
+                            size: 72.0,
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Row(
+                            width: Fixed(700.0),
+                            children: [
+                                Text(
+                                    name: "difficulty_label",
+                                    text: "BOT",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.6, 0.65, 0.75, 1.0),
+                                ),
+                                Stack(
+                                    width: Fill(1.0),
+                                ),
+                                Dropdown(
+                                    name: "difficulty",
+                                    options: ["EASY", "NORMAL", "HARD"],
+                                    choice: 1,
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    width: Fixed(320.0),
+                                    height: Fixed(64.0),
+                                    radius: 14.0,
+                                    accent: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                Stack(
+                                    width: Fixed(110.0),
+                                ),
+                            ],
+                        ),
+                        Row(
+                            width: Fixed(700.0),
+                            children: [
+                                Text(
+                                    name: "main_volume_label",
+                                    text: "VOLUME",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.6, 0.65, 0.75, 1.0),
+                                ),
+                                Stack(
+                                    width: Fill(1.0),
+                                ),
+                                Slider(
+                                    name: "main_volume",
+                                    step: 0.1,
+                                    value: 1.0,
+                                    width: Fixed(320.0),
+                                    accent: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                Text(
+                                    name: "main_volume_value",
+                                    text: "100%",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    width: Fixed(110.0),
+                                    align: (End, Center),
+                                ),
+                            ],
+                        ),
+                        Row(
+                            width: Fixed(700.0),
+                            children: [
+                                Text(
+                                    name: "music_volume_label",
+                                    text: "MUSIC",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.6, 0.65, 0.75, 1.0),
+                                ),
+                                Stack(
+                                    width: Fill(1.0),
+                                ),
+                                Slider(
+                                    name: "music_volume",
+                                    step: 0.1,
+                                    value: 1.0,
+                                    width: Fixed(320.0),
+                                    accent: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                Text(
+                                    name: "music_volume_value",
+                                    text: "100%",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    width: Fixed(110.0),
+                                    align: (End, Center),
+                                ),
+                            ],
+                        ),
+                        Row(
+                            width: Fixed(700.0),
+                            children: [
+                                Text(
+                                    name: "sound_volume_label",
+                                    text: "SOUNDS",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.6, 0.65, 0.75, 1.0),
+                                ),
+                                Stack(
+                                    width: Fill(1.0),
+                                ),
+                                Slider(
+                                    name: "sound_volume",
+                                    step: 0.1,
+                                    value: 1.0,
+                                    width: Fixed(320.0),
+                                    accent: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                Text(
+                                    name: "sound_volume_value",
+                                    text: "100%",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    width: Fixed(110.0),
+                                    align: (End, Center),
+                                ),
+                            ],
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Button(
+                            name: "back",
+                            text: "BACK",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Text(
+                            name: "settings_hint",
+                            text: "UP, DOWN: CHOOSE  ·  LEFT, RIGHT: SET  ·  ENTER: OPEN THE BOT'S  ·  ESC: BACK",
                             size: 22.0,
                             color: (0.45, 0.5, 0.62, 1.0),
                         ),

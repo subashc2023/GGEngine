@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat3, Mat4, Vec4};
+use gg_core::math::{Mat3, Mat4, Vec2, Vec4};
 use gg_gpu::Faces;
 
 use crate::{
@@ -16,8 +16,8 @@ use crate::{
 /// that shader takes, and where it is in the world. Those whose shaders are opaque draw first,
 /// whatever their order, each hiding what's behind it; then those that blend, in order, each over
 /// those before it and over what's opaque, but where what's opaque is nearer. Each run of
-/// consecutive draws of one mesh with one shader that draw the same [`Faces`] renders as one
-/// instanced draw, whatever their transforms, IDs and parameters, a texture among them, or, of a
+/// consecutive draws of one mesh with one shader that draw the same [`Faces`], within the same
+/// [`clip`](Self::clip), renders as one instanced draw, whatever their transforms, IDs and parameters, a texture among them, or, of a
 /// mesh with levels of detail, as one for each level its instances draw at: every draw draws both
 /// faces of its mesh's triangles but a material's that isn't double-sided. Each draw has an ID, a
 /// 64-bit number that the view writes where it shows, which [picks](crate::Pick) read back: what
@@ -48,15 +48,21 @@ pub struct Draws {
     pub(crate) joints: Vec<Mat4>,
     /// Every emitter's particles, in order, each drawn in its run's place.
     pub(crate) particles: Vec<Particles>,
+    /// The clip the draws pushed from here on take, as [`clip`](Self::clip) set it, and whether
+    /// the next of them starts a run of its own, as each call has it.
+    clip: Option<[Vec2; 2]>,
+    split: bool,
 }
 
-/// Consecutive draws of one mesh with one shader that draw the same faces: the instances of one
-/// instanced draw.
+/// Consecutive draws of one mesh with one shader that draw the same faces, within the same clip:
+/// the instances of one instanced draw.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Run {
     pub(crate) mesh: u32,
     pub(crate) shader: u32,
     pub(crate) faces: Faces,
+    /// The rectangle its draws show within, as [`Draws::clip`] says, if any.
+    pub(crate) clip: Option<[Vec2; 2]>,
     /// Where its draws' transforms and IDs are in `Draws::transforms` and `Draws::ids`.
     pub(crate) instances: Range<usize>,
     /// Where their parameters are in `Draws::params`.
@@ -260,10 +266,12 @@ impl Draws {
             mesh: sprite::QUAD.index,
             shader: sprite::SHADER.index,
             faces: Faces::Both,
+            clip: self.clip,
             instances: instance..instance,
             params: start..start,
             particles: Some(self.particles.len() - 1),
         });
+        self.split = false;
     }
 
     /// The emitters' particles the frame draws, in order: for tests, which read what a frame
@@ -320,14 +328,15 @@ impl Draws {
             let particles = run.particles.map(|index| emitter + index);
             let scene_last = self.scene_at == Some(self.runs.len());
             match self.runs.last_mut() {
-                // Its first run goes on from these' last, if it's of the same mesh, shader and
-                // faces, neither is particles, and the scene doesn't draw between them: the last
-                // ends where it begins.
+                // Its first run goes on from these' last, if it's of the same mesh, shader, faces
+                // and clip, neither is particles, the scene doesn't draw between them, and no clip
+                // was set since: the last ends where it begins.
                 Some(last)
-                    if (last.mesh, last.shader, last.faces)
-                        == (run.mesh, run.shader, run.faces)
+                    if (last.mesh, last.shader, last.faces, last.clip)
+                        == (run.mesh, run.shader, run.faces, run.clip)
                         && (last.particles, particles) == (None, None)
-                        && !scene_last =>
+                        && !scene_last
+                        && !self.split =>
                 {
                     last.instances.end = instances.end;
                     last.params.end = params.end;
@@ -339,21 +348,26 @@ impl Draws {
                     ..run
                 }),
             }
+            self.split = false;
         }
         if scene_at == Some(count) {
             self.draw_scene();
         }
+        (other.clip, other.split) = (None, false);
     }
 
     /// Adds the draws from `instance` on, whose parameters start at `start`, of `mesh` with
-    /// `shader`, drawing `faces`, to the last run if it's of them too, or as a run of their own.
+    /// `shader`, drawing `faces`, to the last run if it's of them too, and of the clip set, which
+    /// was set before it, or as a run of their own.
     fn extend_run(&mut self, mesh: u32, shader: u32, faces: Faces, instance: usize, start: usize) {
         let scene_last = self.scene_at == Some(self.runs.len());
         match self.runs.last_mut() {
             Some(run)
-                if (run.mesh, run.shader, run.faces) == (mesh, shader, faces)
+                if (run.mesh, run.shader, run.faces, run.clip)
+                    == (mesh, shader, faces, self.clip)
                     && run.particles.is_none()
-                    && !scene_last =>
+                    && !scene_last
+                    && !self.split =>
             {
                 run.instances.end = self.transforms.len();
                 run.params.end = self.params.len();
@@ -362,11 +376,24 @@ impl Draws {
                 mesh,
                 shader,
                 faces,
+                clip: self.clip,
                 instances: instance..self.transforms.len(),
                 params: start..self.params.len(),
                 particles: None,
             }),
         }
+        self.split = false;
+    }
+
+    /// Has the draws pushed from here on show only within `clip`, a rectangle in the XY plane of
+    /// the space their transforms take them to, its least corner then its greatest, until the next
+    /// call: what of them falls outside the box round where the view shows it, to its pixels, isn't
+    /// drawn, as a list that scrolls hides what's scrolled out of it. `None` clips nothing. Each
+    /// call starts a run for the draws after it, so that [`place`](Self::place) can place their
+    /// clip with them. The view's culling doesn't know a clip, and culls a clipped draw as if it
+    /// weren't.
+    pub fn clip(&mut self, clip: Option<[Vec2; 2]>) {
+        (self.clip, self.split) = (clip, true);
     }
 
     /// Has the renderer's [`Scene`](crate::Scene) draw here, after the draws so far and before
@@ -382,13 +409,23 @@ impl Draws {
     }
 
     /// Places draws `draws`, as they're counted from the first, in the space `transform` takes
-    /// theirs to: each one's transform becomes `transform` times its own. It changes no run, so a
-    /// `transform` that mirrors leaves a draw that culls culling the faces it culled before.
+    /// theirs to: each one's transform becomes `transform` times its own, and the clip of each run
+    /// whose first draw is among them the box round where `transform` takes its corners. It
+    /// changes no run otherwise, so a `transform` that mirrors leaves a draw that culls culling the
+    /// faces it culled before.
     ///
     /// # Panics
     ///
     /// If `draws` reaches past them.
     pub fn place(&mut self, draws: Range<usize>, transform: Mat4) {
+        for run in &mut self.runs {
+            if let Some([least, most]) = &mut run.clip
+                && draws.contains(&run.instances.start)
+            {
+                let [a, b] = [*least, *most].map(|at| transform.transform_point3(at.extend(0.0)));
+                (*least, *most) = (a.min(b).truncate(), a.max(b).truncate());
+            }
+        }
         for at in &mut self.transforms[draws] {
             *at = transform * *at;
         }
@@ -409,6 +446,7 @@ impl Draws {
         self.skins.clear();
         self.joints.clear();
         self.particles.clear();
+        (self.clip, self.split) = (None, false);
     }
 }
 
@@ -567,6 +605,45 @@ mod tests {
             scaled * at(3.0),
         ];
         assert_eq!(draws.transforms, placed);
+    }
+
+    /// A clip set starts a run for the draws after it, though its draws be of the run before's mesh
+    /// and shader, and though it be the clip before; draws appended keep their runs' clips; placing
+    /// draws places the clips of the runs that start among them, as the box round their corners,
+    /// and no other's; and clearing forgets the clip.
+    #[test]
+    fn a_clip_starts_a_run_and_is_placed_with_its_draws() {
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let clip = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0)];
+        let mut draws = Draws::default();
+        draws.push_sprite(at(0.0), Sprite::default());
+        draws.clip(Some(clip));
+        draws.push_sprite(at(1.0), Sprite::default());
+        draws.push_sprite(at(2.0), Sprite::default());
+        draws.clip(Some(clip));
+        draws.push_sprite(at(3.0), Sprite::default());
+        draws.clip(None);
+        draws.push_sprite(at(4.0), Sprite::default());
+        assert_eq!(
+            runs(&draws),
+            [(0, 0, 0..1), (0, 0, 1..3), (0, 0, 3..4), (0, 0, 4..5)]
+        );
+        let clips: Vec<_> = draws.runs.iter().map(|run| run.clip).collect();
+        assert_eq!(clips, [None, Some(clip), Some(clip), None]);
+        let mut over = Draws::default();
+        over.clip(Some(clip));
+        over.push_sprite(at(5.0), Sprite::default());
+        draws.append(&mut over);
+        assert_eq!(draws.runs[4].clip, Some(clip), "appended with its clip");
+        // Mirrored and doubled, from the second draw to the third: the second run's clip alone.
+        let mirrored = Mat4::from_scale(Vec3::new(-2.0, 2.0, 1.0));
+        draws.place(1..3, mirrored);
+        let placed = [Vec2::new(-20.0, 0.0), Vec2::new(0.0, 10.0)];
+        let clips: Vec<_> = draws.runs.iter().map(|run| run.clip).collect();
+        assert_eq!(clips, [None, Some(placed), Some(clip), None, Some(clip)]);
+        draws.clear();
+        draws.push_sprite(at(0.0), Sprite::default());
+        assert_eq!(draws.runs[0].clip, None);
     }
 
     /// Grids are runs of a mesh and a shader of the engine's own, which `Meshes` and `Shaders` add

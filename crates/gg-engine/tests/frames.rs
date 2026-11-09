@@ -5,8 +5,10 @@
 //! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
 //! text, written and shaped again each frame, a sprite and that text on the view's canvas, a UI
-//! from its file, laid out again each frame as code changes its text, drawn on the canvas and fed
-//! input that changes nothing,
+//! from its file, its widgets among it and a list it clips, laid out again each frame as code
+//! changes its text, drawn on the canvas, its focused text field's caret too, and fed input that
+//! changes nothing, and another UI of that file, its list scrolled and its drop-down's options
+//! open over the rest,
 //! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
@@ -154,8 +156,11 @@ struct Assets {
     plain: Model,
     /// The engine's own font, Inter.
     font: Font,
-    /// A panel of a text and two buttons, the second disabled, in the view's bottom left corner.
+    /// A panel of texts, buttons and widgets, its list clipped, in the view's bottom left corner.
     ui: GameUi,
+    /// Another UI of the same file, over it, its list scrolled to its last button and its
+    /// drop-down's options open over the rest.
+    open: GameUi,
 }
 
 /// The app: what it spawns as it attaches, and what its ticks move, spawn and despawn.
@@ -266,6 +271,25 @@ impl Layer for Scene {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter/Inter-Regular.ttf");
         let font = cx.add_font("inter", inter);
         let ui = cx.add_ui("corner", self.dir.join("corner.ui"));
+        let open = cx.add_ui("open", self.dir.join("corner.ui"));
+        let open = open.expect("the UI reads");
+        // Its list scrolled as its last button takes the focus, then its drop-down opened.
+        open.set_focus(cx, "three").expect("a button");
+        open.set_focus(cx, "mode").expect("a drop-down");
+        let enter = Event::Key {
+            key: Key::Enter,
+            pressed: true,
+            repeat: false,
+        };
+        assert_eq!(open.event(cx, &enter), None, "opened");
+        // Its options take the down arrow, lighting the second, rather than the focus moving.
+        let down = Event::Key {
+            key: Key::ArrowDown,
+            pressed: true,
+            repeat: false,
+        };
+        assert_eq!(open.event(cx, &down), None);
+        assert_eq!(open.focused(cx).as_deref(), Some("mode"), "open");
         let assets = Assets {
             quad: quad.expect("the quad is whole triangles"),
             opaque: opaque.expect("the shader compiles"),
@@ -275,6 +299,7 @@ impl Layer for Scene {
             plain: plain.expect("the plain model loads"),
             font: font.expect("Inter bakes"),
             ui: ui.expect("the UI reads"),
+            open,
         };
         let pair = pair.expect("the pair loads");
 
@@ -490,7 +515,8 @@ impl Layer for Scene {
         canvas.draw_text(inset, &self.text, &on_canvas);
         let _ = canvas.cursor();
         // The UI's text shaped and laid out again, its title set to what it says already, and keys
-        // it takes nothing from: a letter, and a step down from its last button.
+        // it takes nothing from: a letter its text field types nothing for without its text, and a
+        // step down from that field, its last.
         let ui = self.assets().ui;
         ui.set_text(cx, "frame", &self.text).expect("a text");
         ui.set_text(cx, "title", "CORNER").expect("a text");
@@ -503,6 +529,7 @@ impl Layer for Scene {
             let _ = ui.event(cx, &pressed);
         }
         ui.draw(cx);
+        self.assets().open.draw(cx);
         let turning = self.turning.expect("attached");
         let turning = cx.world().id(turning).expect("alive");
         cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);
@@ -638,9 +665,11 @@ fn write_assets(dir: &Path) {
 }
 
 /// The UI in the view's bottom left corner, away from its middle, where the picks look: a rounded
-/// panel of a title, a text and two buttons, the first focused and the second disabled.
+/// panel of a title, a text, two buttons, the second disabled, a slider, a toggle and a drop-down,
+/// a list of more buttons than it shows, which it clips, and a text field at the bottom, focused,
+/// its caret and its text drawn within it.
 const CORNER: &str = r#"(
-    focus: "go",
+    focus: "typed",
     nodes: [
         Panel(
             anchor: (Start, End),
@@ -661,6 +690,25 @@ const CORNER: &str = r#"(
                                 Button(name: "stop", text: "STOP", disabled: true),
                             ],
                         ),
+                        Row(
+                            gap: 8.0,
+                            children: [
+                                Slider(name: "volume", value: 0.5, width: Fixed(160.0), height: Fixed(32.0)),
+                                Toggle(name: "sound", text: "ON", size: 20.0, on: true),
+                                Dropdown(name: "mode", options: ["A", "B"], size: 20.0),
+                            ],
+                        ),
+                        List(
+                            name: "lines",
+                            width: Fixed(240.0),
+                            height: Fixed(60.0),
+                            children: [
+                                Button(name: "one", text: "ONE", size: 24.0),
+                                Button(name: "two", text: "TWO", size: 24.0),
+                                Button(name: "three", text: "THREE", size: 24.0),
+                            ],
+                        ),
+                        Field(name: "typed", text: "TYPED", size: 20.0, width: Fixed(240.0)),
                     ],
                 ),
             ],

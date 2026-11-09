@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 36, "{scenes:?}");
+    assert_eq!(scenes.len(), 37, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -623,6 +623,52 @@ fn the_menus_presses_reach_the_world_as_commands() {
     let menu = menu.expect("the scene's menu");
     assert_eq!((menu.ticks, menu.presses, &*menu.pressed), (1, 2, "back"));
     showcase.update(&mut cx, frame);
+}
+
+/// The widgets' UI takes input while widgets are in the world, and none without them: the right
+/// arrow steps its slider, whose label follows it as it's drawn, and the down arrow and Enter flip
+/// its toggle, each change queuing a command that the next tick records on the widgets.
+#[test]
+fn the_widgets_changes_reach_the_world_as_commands() {
+    let (mut cx, mut showcase) = loaded();
+    let ui = showcase.assets.as_ref().expect("loaded").widgets;
+    let frame = Duration::from_millis(16);
+    let key = |key| Event::Key {
+        key,
+        pressed: true,
+        repeat: false,
+    };
+    // The arrows walk the walkers too, which queues commands of their own.
+    let changes = |showcase: &Showcase| -> Vec<Command> {
+        let changes = showcase.commands.iter();
+        let changes = changes.filter(|command| matches!(command, Command::Change { .. }));
+        changes.cloned().collect()
+    };
+    showcase.update(&mut cx, frame);
+    let _ = showcase.event(&mut cx, &key(Key::ArrowRight));
+    assert_eq!(changes(&showcase), [], "no widgets, no input");
+
+    let scene = dir().join("scenes").join("widgets.ron");
+    cx.load_scene_file(&scene).expect("the scene loads");
+    showcase.update(&mut cx, frame);
+    for pressed in [Key::ArrowRight, Key::ArrowDown, Key::Enter] {
+        let _ = showcase.event(&mut cx, &key(pressed));
+    }
+    let change = |widget: &str, value: &str| Command::Change {
+        widget: widget.to_owned(),
+        value: value.to_owned(),
+    };
+    let expected = [change("volume", "0.75"), change("subtitles", "off")];
+    assert_eq!(changes(&showcase), expected);
+    showcase.tick(cx.world_mut(), Tick { number: 0 });
+    let widgets = cx.world().query::<&Widgets>().next().cloned();
+    let widgets = widgets.expect("the scene's widgets");
+    assert_eq!((widgets.changes, &*widgets.changed), (2, "subtitles off"));
+    showcase.update(&mut cx, frame);
+    let Ok(UiValue::Number(volume)) = ui.value(&mut cx, "volume") else {
+        panic!("the slider's value");
+    };
+    assert!((volume - 0.75).abs() < 1e-5, "{volume}");
 }
 
 /// A click in the view grabs the cursor while the world has a look, and Escape lets go; the mouse's

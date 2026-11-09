@@ -179,7 +179,6 @@ file, under Workflow.
 | Defect | Fix | Worth it when |
 |---|---|---|
 | A field a UI file's node of its kind doesn't take is refused at the node's end rather than at the field (`ui.bad_field`), as serde's derive reads the whole node before the check: for a container, many lines past the field; values and names are refused where they stand | Check each field as it's read, through a seed that knows the node's kind, as scene reading does | People or agents are seen searching large UI files for refused fields |
-| A game can't set a UI's focus: opening Foxball's menu again leaves its focus where it was | `GameUi::set_focus`, by a button's name | A menu needs a given button focused as it opens |
 | On the frame a resize comes in, a UI's fills still span the view's size before it: layout runs as the layer updates, for the view the last frame handed off, while what's anchored keeps to its edges | Lay out at hand-off, at the view's size then | That frame is noticed, as in a capture during a resize |
 
 ## Demos

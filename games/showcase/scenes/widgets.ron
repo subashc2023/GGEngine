@@ -1,0 +1,71 @@
+(
+    entities: {
+        "2d9e14a7c05b3f61": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5fa42759e4fcb589": (
+            Name: ("Widgets"),
+            Widgets: (
+                changes: 0,
+                changed: "",
+            ),
+        ),
+        "8c31f0e6a2d94b57": (
+            Bob: (
+                height: 0.4,
+                period: 2.6,
+                time: 0.0,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 0.7),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-7.4, 2.4, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 1.0),
+            ),
+        ),
+        "c47b2e9d1a6f0853": (
+            Bob: (
+                height: 0.4,
+                period: 2.2,
+                time: 0.0,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 0.7),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (7.4, -2.4, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 1.0),
+            ),
+        ),
+    },
+)

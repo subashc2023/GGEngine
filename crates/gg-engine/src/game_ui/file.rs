@@ -12,7 +12,7 @@ use gg_core::{Error, Result};
 use ron::extensions::Extensions;
 use serde::{Deserialize, Deserializer};
 
-use super::{Document, Kind, Look, Named, Node, Size};
+use super::{Document, Kind, Look, Named, Node, Size, Widget};
 use crate::Align;
 use crate::package::Files;
 
@@ -31,6 +31,10 @@ const MOST_NODES: usize = 10_000;
 /// to together stays finite.
 const MOST_UNITS: f32 = 1e6;
 
+/// The most options a drop-down may have, and the most characters a text field may hold.
+const MOST_OPTIONS: usize = 256;
+const MOST_TYPED: u32 = 4096;
+
 /// A button's looks where its file gives none: normal, focused, pressed and disabled, in linear
 /// RGBA, alpha not multiplied in.
 const BUTTON: [Look; 4] = [
@@ -39,6 +43,20 @@ const BUTTON: [Look; 4] = [
     look([0.02, 0.12, 0.5, 1.0], [0.85, 0.9, 1.0, 1.0]),
     look([1.0, 1.0, 1.0, 0.03], [1.0, 1.0, 1.0, 0.3]),
 ];
+
+/// A slider's, a toggle's, a drop-down's and a text field's looks where its file gives none, as a
+/// button's: its box lighter as it's focused, so that what's on in it shows over it in its accent.
+const WIDGET: [Look; 4] = [
+    look([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.85]),
+    look([1.0, 1.0, 1.0, 0.2], [1.0, 1.0, 1.0, 1.0]),
+    look([1.0, 1.0, 1.0, 0.14], [0.85, 0.9, 1.0, 1.0]),
+    look([1.0, 1.0, 1.0, 0.03], [1.0, 1.0, 1.0, 0.3]),
+];
+
+/// What's on, chosen or typed in a widget where its file gives no `accent`, as a button's focused
+/// look; and what's behind a drop-down's options where it gives no `color`.
+const ACCENT: Vec4 = Vec4::new(0.05, 0.27, 0.95, 1.0);
+const BACKING: Vec4 = Vec4::new(0.02, 0.025, 0.04, 0.96);
 
 /// A look of `color` and `text`, without a texture.
 const fn look(color: [f32; 4], text: [f32; 4]) -> Look {
@@ -97,12 +115,18 @@ thread_local! {
 /// isn't RON of a UI, as one with a field no node has or of the wrong type; `ui.bad_name` for a
 /// name that isn't 1 to 64 ASCII letters, digits, `_` and `-`; `ui.duplicate_name` for a name
 /// another node has; `ui.bad_field` for a field a node of its kind doesn't take, as a text's
-/// children, or an image without its texture; `ui.unnamed_button` for a button without a name,
-/// which its presses are told by; `ui.bad_value` for a size, a margin, padding, a gap, a radius, a
-/// slice's width, a text's size or a fill's share that isn't a number from 0 to [`MOST_UNITS`],
-/// at the number, for a text's size or a fill's share of 0, a slice of more than half a texture, or
-/// a color that isn't finite; and `ui.too_many_nodes` past [`MOST_NODES`]; and with `ui.no_node`,
-/// after, for a `focus` no button has.
+/// children, an image without its texture or a drop-down without its options;
+/// `ui.unnamed_button` for a button without a name, which its presses are told by, and
+/// `ui.unnamed_widget` for a slider, a toggle, a drop-down or a text field without one, which its
+/// changes are told by; `ui.bad_value` for a size, a margin, padding, a gap, a radius, a slice's
+/// width, a text's size, a fill's share or a slider's step that isn't a number from 0 to
+/// [`MOST_UNITS`], or a slider's bound or value that isn't one from -[`MOST_UNITS`] to it, at the
+/// number, for a text's size or a fill's share of 0, a slice of more than half a texture, a color
+/// that isn't finite, a slider whose `max` isn't above its `min` or whose `value` is outside them,
+/// a drop-down of more than [`MOST_OPTIONS`] options or whose `choice` isn't one of them, or a text
+/// field that holds no character or more than [`MOST_TYPED`], or whose text is longer than it
+/// holds; and `ui.too_many_nodes` past [`MOST_NODES`]; and with `ui.no_node`, after, for a `focus`
+/// no node that takes it has.
 pub(crate) fn parse(text: &str) -> Result<Document> {
     let options = ron::Options::default()
         .with_default_extension(Extensions::IMPLICIT_SOME | Extensions::UNWRAP_VARIANT_NEWTYPES);
@@ -122,10 +146,13 @@ pub(crate) fn parse(text: &str) -> Result<Document> {
         None => None,
         Some(focus) => {
             let found = nodes.iter().position(|node| {
-                node.kind == Kind::Button && node.name.as_deref() == Some(focus.as_str())
+                node.kind.focuses() && node.name.as_deref() == Some(focus.as_str())
             });
             let found = found.ok_or_else(|| {
-                let message = format!("`focus` names `{focus}`, but no button has that name");
+                let message = format!(
+                    "`focus` names `{focus}`, but no button, slider, toggle, drop-down or text \
+                     field has that name"
+                );
                 Error::new("ui.no_node", message)
             })?;
             Some(found as u32)
@@ -176,9 +203,14 @@ enum RawNode {
     Text(Fields),
     Image(Fields),
     Button(Fields),
+    Slider(Fields),
+    Toggle(Fields),
+    Dropdown(Fields),
+    Field(Fields),
     Row(Fields),
     Column(Fields),
     Stack(Fields),
+    List(Fields),
 }
 
 /// Every field a node may have, each kind taking some, as [`Kind::takes`] says.
@@ -204,6 +236,17 @@ struct Fields {
     size: Option<Units>,
     disabled: Option<bool>,
     looks: Option<RawLooks>,
+    accent: Option<(f32, f32, f32, f32)>,
+    clip: Option<bool>,
+    min: Option<Number>,
+    max: Option<Number>,
+    step: Option<Units>,
+    value: Option<Number>,
+    on: Option<bool>,
+    options: Option<Vec<String>>,
+    choice: Option<u32>,
+    hint: Option<String>,
+    most: Option<u32>,
 }
 
 /// A button's looks as its file gives them, each one's fields over its default.
@@ -247,6 +290,25 @@ impl<'de> Deserialize<'de> for Units {
             return Err(refuse("ui.bad_value", &message));
         }
         Ok(Self(units))
+    }
+}
+
+/// A slider's bound or value, checked as it's read, so that a refusal says where it is: from
+/// -[`MOST_UNITS`] to [`MOST_UNITS`].
+#[derive(Clone, Copy)]
+struct Number(f32);
+
+impl<'de> Deserialize<'de> for Number {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let number = f32::deserialize(deserializer)?;
+        if !(-MOST_UNITS..=MOST_UNITS).contains(&number) {
+            let message = format!(
+                "{number} is out of range: a slider's bounds and value are each from -1,000,000 \
+                 to 1,000,000"
+            );
+            return Err(refuse("ui.bad_value", &message));
+        }
+        Ok(Self(number))
     }
 }
 
@@ -320,9 +382,14 @@ impl<'de> Deserialize<'de> for Checked {
             RawNode::Text(fields) => (Kind::Text, fields),
             RawNode::Image(fields) => (Kind::Image, fields),
             RawNode::Button(fields) => (Kind::Button, fields),
+            RawNode::Slider(fields) => (Kind::Slider, fields),
+            RawNode::Toggle(fields) => (Kind::Toggle, fields),
+            RawNode::Dropdown(fields) => (Kind::Dropdown, fields),
+            RawNode::Field(fields) => (Kind::Field, fields),
             RawNode::Row(fields) => (Kind::Row, fields),
             RawNode::Column(fields) => (Kind::Column, fields),
             RawNode::Stack(fields) => (Kind::Stack, fields),
+            RawNode::List(fields) => (Kind::List, fields),
         };
         build(kind, fields)
             .map(Checked)
@@ -334,17 +401,27 @@ impl Kind {
     /// Whether a node of this kind takes the field `field`: every kind its name, visibility, size,
     /// margin and anchor.
     fn takes(self, field: &str) -> bool {
-        use Kind::{Button, Column, Image, Panel, Row, Stack, Text};
+        use Kind::{
+            Button, Column, Dropdown, Field, Image, List, Panel, Row, Slider, Stack, Text, Toggle,
+        };
         match field {
-            "padding" => matches!(self, Panel | Row | Column | Stack | Button),
-            "gap" => matches!(self, Row | Column),
+            "padding" => !matches!(self, Text | Image),
+            "gap" => matches!(self, Row | Column | List),
             "align" => self != Image,
-            "children" => matches!(self, Panel | Row | Column | Stack),
-            "color" => matches!(self, Panel | Text | Image),
+            "children" => matches!(self, Panel | Row | Column | Stack | List),
+            "color" => matches!(self, Panel | Text | Image | Dropdown | List),
             "texture" => matches!(self, Panel | Image),
-            "radius" | "slice" => matches!(self, Panel | Button),
-            "text" | "font" | "size" => matches!(self, Text | Button),
-            "disabled" | "looks" => self == Button,
+            "radius" => matches!(self, Panel | List) || self.focuses(),
+            "slice" => matches!(self, Panel | Button),
+            "text" => matches!(self, Text | Button | Toggle | Field),
+            "font" | "size" => matches!(self, Text | Button | Toggle | Dropdown | Field),
+            "disabled" | "looks" => self.focuses(),
+            "accent" => matches!(self, Slider | Toggle | Dropdown | Field | List),
+            "clip" => matches!(self, Panel | Row | Column | Stack),
+            "min" | "max" | "step" | "value" => self == Slider,
+            "on" => self == Toggle,
+            "options" | "choice" => self == Dropdown,
+            "hint" | "most" => self == Field,
             _ => true,
         }
     }
@@ -373,6 +450,17 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         size: em,
         disabled,
         looks,
+        accent,
+        clip,
+        min,
+        max,
+        step,
+        value,
+        on,
+        options,
+        choice,
+        hint,
+        most,
     } = fields;
     let name = name.map(|name| name.0);
     let called = match &name {
@@ -393,6 +481,17 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         ("size", em.is_some()),
         ("disabled", disabled.is_some()),
         ("looks", looks.is_some()),
+        ("accent", accent.is_some()),
+        ("clip", clip.is_some()),
+        ("min", min.is_some()),
+        ("max", max.is_some()),
+        ("step", step.is_some()),
+        ("value", value.is_some()),
+        ("on", on.is_some()),
+        ("options", options.is_some()),
+        ("choice", choice.is_some()),
+        ("hint", hint.is_some()),
+        ("most", most.is_some()),
     ];
     if let Some((field, _)) = given
         .iter()
@@ -404,6 +503,10 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         let message = format!("{called} has no `name`, which code is told its presses by");
         return Err(("ui.unnamed_button", message));
     }
+    if kind.focuses() && name.is_none() {
+        let message = format!("{called} has no `name`, which code is told its changes by");
+        return Err(("ui.unnamed_widget", message));
+    }
     if kind == Kind::Image && texture.is_none() {
         return Err(("ui.bad_field", format!("{called} names no `texture`")));
     }
@@ -411,7 +514,12 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         let message = format!("{called}'s `{field}` is {value}, and {why}");
         ("ui.bad_value", message)
     };
-    let size_of = |field: &str, given: Option<RawSize>| match given.unwrap_or(RawSize::Fit) {
+    // A slider is as wide as a menu's buttons and as tall as its thumb by default.
+    let fit = match kind {
+        Kind::Slider => [RawSize::Fixed(Units(400.0)), RawSize::Fixed(Units(48.0))],
+        _ => [RawSize::Fit; 2],
+    };
+    let size_of = |field: &str, given: Option<RawSize>, fit| match given.unwrap_or(fit) {
         RawSize::Fixed(Units(units)) => Ok(Size::Fixed(units)),
         RawSize::Fit => Ok(Size::Fit),
         RawSize::Fill(Units(share)) if share > 0.0 => Ok(Size::Fill(share)),
@@ -420,19 +528,22 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
             Err(bad(field, format!("Fill({share})"), why))
         }
     };
-    let size = [size_of("width", width)?, size_of("height", height)?];
+    let size = [
+        size_of("width", width, fit[0])?,
+        size_of("height", height, fit[1])?,
+    ];
     let pair = |given: Option<(Units, Units)>, default: Vec2| {
         given.map_or(default, |(across, down)| Vec2::new(across.0, down.0))
     };
     let margin = pair(margin, Vec2::ZERO);
     let padding = match kind {
         Kind::Button => pair(padding, Vec2::new(32.0, 14.0)),
+        Kind::Toggle | Kind::Dropdown | Kind::Field => pair(padding, Vec2::new(24.0, 12.0)),
+        Kind::Slider => pair(padding, Vec2::new(24.0, 0.0)),
         _ => pair(padding, Vec2::ZERO),
     };
     let gap = gap.map_or(0.0, |gap| gap.0);
-    let radius = radius.map_or(if kind == Kind::Button { 10.0 } else { 0.0 }, |radius| {
-        radius.0
-    });
+    let radius = radius.map_or(if kind.focuses() { 10.0 } else { 0.0 }, |radius| radius.0);
     let text_size = em.map_or(if kind == Kind::Button { 34.0 } else { 32.0 }, |em| em.0);
     if text_size <= 0.0 {
         return Err(bad(
@@ -455,51 +566,125 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
             .then_some(color)
             .ok_or_else(|| bad(field, format!("{given:?}"), "a color is finite"))
     };
-    let looks = match kind {
-        Kind::Button => {
-            let RawLooks {
-                normal,
-                focused,
-                pressed,
-                disabled,
-            } = looks.unwrap_or_default();
-            let mut built = BUTTON;
-            for (look, given) in built.iter_mut().zip([normal, focused, pressed, disabled]) {
-                let RawLook {
-                    color,
-                    text_color,
-                    texture,
-                } = given.unwrap_or_default();
-                if let Some(color) = color {
-                    look.color = colored("looks' color", color)?;
-                }
-                if let Some(text) = text_color {
-                    look.text = colored("looks' text_color", text)?;
-                }
-                look.texture = texture.and_then(named);
-            }
-            // Each look shows the normal look's texture unless it gives its own.
-            let normal = built[0].texture.clone();
-            for look in &mut built[1..] {
-                if look.texture.is_none() {
-                    look.texture.clone_from(&normal);
-                }
-            }
-            built
-        }
-        _ => {
-            let color = color.map_or(Ok(Vec4::ONE), |color| colored("color", color))?;
-            let look = Look {
+    let looks = if kind.focuses() {
+        let RawLooks {
+            normal,
+            focused,
+            pressed,
+            disabled,
+        } = looks.unwrap_or_default();
+        let mut built = if kind == Kind::Button { BUTTON } else { WIDGET };
+        for (look, given) in built.iter_mut().zip([normal, focused, pressed, disabled]) {
+            let RawLook {
                 color,
-                text: color,
-                texture: texture.and_then(named),
-            };
-            [look.clone(), look.clone(), look.clone(), look]
+                text_color,
+                texture,
+            } = given.unwrap_or_default();
+            if let Some(color) = color {
+                look.color = colored("looks' color", color)?;
+            }
+            if let Some(text) = text_color {
+                look.text = colored("looks' text_color", text)?;
+            }
+            look.texture = texture.and_then(named);
         }
+        // Each look shows the normal look's texture unless it gives its own.
+        let normal = built[0].texture.clone();
+        for look in &mut built[1..] {
+            if look.texture.is_none() {
+                look.texture.clone_from(&normal);
+            }
+        }
+        built
+    } else {
+        // A list shows nothing behind its children but the color its file gives it.
+        let unseen = if kind == Kind::List {
+            Vec4::ZERO
+        } else {
+            Vec4::ONE
+        };
+        let color = color.map_or(Ok(unseen), |color| colored("color", color))?;
+        let look = Look {
+            color,
+            text: color,
+            texture: texture.and_then(named),
+        };
+        [look.clone(), look.clone(), look.clone(), look]
     };
-    let align = align.map_or([Align::Center; 2], |(across, down)| {
-        [across.into(), down.into()]
-    });
+    let accent = accent.map_or(Ok(ACCENT), |accent| colored("accent", accent))?;
+    let text = text.unwrap_or_default();
+    let widget = match kind {
+        Kind::Slider => {
+            let (min, max) = (min.map_or(0.0, |min| min.0), max.map_or(1.0, |max| max.0));
+            if max <= min {
+                let why = format!("a slider's `max` is above its `min`, {min}");
+                return Err(bad("max", max.to_string(), &why));
+            }
+            let value = value.map_or(min, |value| value.0);
+            if !(min..=max).contains(&value) {
+                let why = format!("a slider's `value` is from its `min`, {min}, to its `max`");
+                return Err(bad("value", value.to_string(), &why));
+            }
+            let step = step.map_or(0.0, |step| step.0);
+            Widget::Slider {
+                min,
+                max,
+                step,
+                value,
+            }
+        }
+        Kind::Toggle => Widget::Toggle {
+            on: on.unwrap_or(false),
+        },
+        Kind::Dropdown => {
+            let Some(options) = options.filter(|options| !options.is_empty()) else {
+                return Err(("ui.bad_field", format!("{called} names no `options`")));
+            };
+            if options.len() > MOST_OPTIONS {
+                let why = format!("a drop-down has at most {MOST_OPTIONS} options");
+                return Err(bad("options", format!("{} long", options.len()), &why));
+            }
+            let choice = choice.unwrap_or(0);
+            if choice as usize >= options.len() {
+                let why = format!("a drop-down's `choice` is one of its {}", options.len());
+                return Err(bad("choice", choice.to_string(), &why));
+            }
+            let backing = color.map_or(Ok(BACKING), |color| colored("color", color))?;
+            Widget::Dropdown {
+                options,
+                choice: choice as usize,
+                backing,
+            }
+        }
+        Kind::Field => {
+            let most = most.unwrap_or(64);
+            if !(1..=MOST_TYPED).contains(&most) {
+                let why = format!("a text field holds from 1 to {MOST_TYPED} characters");
+                return Err(bad("most", most.to_string(), &why));
+            }
+            let typed = text.chars().count();
+            if typed > most as usize || text.chars().any(char::is_control) {
+                let why = format!(
+                    "a text field's text is a line of at most the {most} characters it holds"
+                );
+                return Err(bad("text", format!("{typed} characters"), &why));
+            }
+            Widget::Field {
+                hint: hint.unwrap_or_default(),
+                most: most as usize,
+            }
+        }
+        _ => Widget::None,
+    };
+    let align = align.map_or(
+        match kind {
+            // Their text from their left, and a list's children from its top.
+            Kind::Toggle | Kind::Dropdown | Kind::Field => [Align::Start, Align::Center],
+            Kind::List => [Align::Center, Align::Start],
+            _ => [Align::Center; 2],
+        },
+        |(across, down)| [across.into(), down.into()],
+    );
     let node = Node {
         name,
         kind,
@@ -513,13 +698,17 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         gap,
         align,
         anchor: anchor.map(|(across, down)| [across.into(), down.into()]),
-        text: text.unwrap_or_default(),
+        text,
         font: font.and_then(named),
         text_size,
         radius,
         slice,
         looks,
         natural: None,
+        widget,
+        accent,
+        clips: clip.unwrap_or(kind == Kind::List),
+        scroll: 0.0,
     };
     let children = children.unwrap_or_default();
     Ok(Built {

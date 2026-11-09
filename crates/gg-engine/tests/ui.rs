@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gg_api::{Captured, Client, Session, UiList, UiNode};
+use gg_api::{Captured, Client, Session, UiList, UiNode, UiValue};
 use gg_engine::{App, Context, Event, GameUi, Layer, UiEvent};
 use serde_json::{Value, json};
 
@@ -27,8 +27,10 @@ const DEADLINE: Duration = Duration::from_secs(60);
 const SIZE: [u32; 2] = [640, 360];
 
 /// A menu in a rounded panel in the view's middle, its title and three buttons, the first
-/// focused and the last disabled; a row along the view's top, a text at each end; and a panel in
-/// the bottom left corner, a textured image beside a text that says what was pressed.
+/// focused and the last disabled; a row along the view's top, a text at each end; a panel in the
+/// bottom left corner, a textured image beside a text that says what was pressed; and a panel at
+/// the view's right of each widget, a slider, a toggle, a drop-down and a text field, and a list of
+/// more than it shows, which it clips, a bar as wide as it first, under its scroll bar.
 const MENU: &str = r#"(
     focus: "play",
     nodes: [
@@ -93,12 +95,53 @@ const MENU: &str = r#"(
                 ),
             ],
         ),
+        Panel(
+            name: "widgets",
+            anchor: (End, Center),
+            margin: (32.0, 0.0),
+            padding: (32.0, 32.0),
+            color: (0.02, 0.03, 0.06, 0.92),
+            radius: 24.0,
+            children: [
+                Column(
+                    gap: 12.0,
+                    children: [
+                        Slider(name: "volume", value: 0.7, width: Fixed(320.0)),
+                        Toggle(name: "sound", text: "SOUND", on: true, width: Fixed(320.0)),
+                        Dropdown(
+                            name: "difficulty",
+                            options: ["EASY", "NORMAL", "HARD"],
+                            choice: 1,
+                            width: Fixed(320.0),
+                        ),
+                        Field(name: "player", hint: "NAME", width: Fixed(320.0)),
+                        List(
+                            name: "lines",
+                            width: Fixed(320.0),
+                            height: Fixed(120.0),
+                            color: (1.0, 1.0, 1.0, 0.06),
+                            children: [
+                                Panel(
+                                    width: Fill(1.0),
+                                    height: Fixed(36.0),
+                                    color: (0.3, 0.32, 0.4, 1.0),
+                                ),
+                                Text(text: "FIRST LINE", size: 40.0),
+                                Text(text: "SECOND LINE", size: 40.0),
+                                Text(text: "THIRD LINE", size: 40.0),
+                                Text(text: "FOURTH LINE", size: 40.0),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
     ],
 )
 "#;
 
 /// Draws the menu each frame, its clock set each time to what it says already, and has its status
-/// say which button was pressed.
+/// say which button was pressed, or which widget changed.
 struct Menu {
     dir: PathBuf,
     ui: Option<GameUi>,
@@ -120,10 +163,12 @@ impl Layer for Menu {
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> std::ops::ControlFlow<()> {
         let ui = self.ui.expect("loaded");
-        if let Some(UiEvent::Pressed(name)) = ui.event(cx, event) {
-            let status = format!("PRESSED {}", name.to_uppercase());
-            ui.set_text(cx, "status", &status).expect("a text");
-        }
+        let status = match ui.event(cx, event) {
+            Some(UiEvent::Pressed(name)) => format!("PRESSED {}", name.to_uppercase()),
+            Some(UiEvent::Changed(name, _)) => format!("CHANGED {}", name.to_uppercase()),
+            _ => return std::ops::ControlFlow::Continue(()),
+        };
+        ui.set_text(cx, "status", &status).expect("a text");
         std::ops::ControlFlow::Continue(())
     }
 }
@@ -260,6 +305,32 @@ fn check(client: &mut Client) {
     assert_eq!(list.uis[0].focus.as_deref(), Some("options"));
     let status = node(&list, "status").text.as_deref();
     assert_eq!(status, Some("PRESSED OPTIONS"));
+
+    // The widgets list what they hold; the list's last line lies past its bottom, which clips it.
+    assert_eq!(node(&list, "volume").value, Some(UiValue::Number(0.7)));
+    assert_eq!(node(&list, "sound").value, Some(UiValue::On(true)));
+    let difficulty = node(&list, "difficulty");
+    assert_eq!(difficulty.value, Some(UiValue::Choice(1)));
+    assert_eq!(difficulty.text.as_deref(), Some("NORMAL"));
+    let lines = node(&list, "lines").rect;
+    let fourth = list.uis[0].nodes.last().expect("the fourth line").rect;
+    assert!(fourth[1] > lines[1] + lines[3], "{fourth:?} past {lines:?}");
+    // A click on the toggle flips it, and a click on the text field takes what's typed.
+    let middle = |name: &str| {
+        let pixels = node(&list, name).pixels;
+        [pixels[0] + pixels[2] / 2.0, pixels[1] + pixels[3] / 2.0]
+    };
+    let events = json!({"events": [
+        {"cursor": middle("sound")}, button(true), button(false),
+        {"cursor": middle("player")}, button(true), button(false), {"text": "ADA"},
+    ]});
+    client.call("input", events).expect("the input");
+    let list: UiList = client.call_as("ui", Value::Null).expect("the UIs");
+    assert_eq!(node(&list, "sound").value, Some(UiValue::On(false)));
+    assert_eq!(node(&list, "player").text.as_deref(), Some("ADA"));
+    assert_eq!(list.uis[0].focus.as_deref(), Some("player"));
+    let status = node(&list, "status").text.as_deref();
+    assert_eq!(status, Some("CHANGED PLAYER"));
 }
 
 /// Writes a PNG of `size` pixels, each `pixel` of its column and row, to `path`.

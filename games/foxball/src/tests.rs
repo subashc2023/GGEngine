@@ -493,6 +493,59 @@ fn a_sessions_runs_have_no_bot() {
     assert!(game.commands.contains(&Command::Bot { player }), "alone");
 }
 
+/// A match's difficulty other than Normal goes into text and back by its name: the match saved as a
+/// scene's text reads back Hard into another world. A snapshot writes the world's values through
+/// the engine's own text, which games can't reach; its tests carry enums' variants through it.
+#[test]
+fn a_matchs_difficulty_goes_into_text_and_back() {
+    let (mut cx, _game) = attached(0x5eed);
+    let world = cx.world_mut();
+    let found = world.query_mut::<(Entity, &mut Match)>().next();
+    let (entity, found) = found.expect("the match");
+    found.difficulty = Difficulty::Hard;
+    let text = world.save_scene(&[entity]).expect("saved");
+    assert!(text.contains("difficulty: Hard"), "{text}");
+    let mut other = Context::seeded(1);
+    register(other.world_mut());
+    other.world_mut().load_scene(&text).expect("it reads back");
+    let read = other
+        .world()
+        .query::<&Match>()
+        .next()
+        .map(|found| found.difficulty);
+    assert_eq!(read, Some(Difficulty::Hard));
+}
+
+/// A session's runs, a lockstep host's, its joiner's and a server's, have no bot, so their options'
+/// bot's difficulty is disabled, whether a run attaches or picks up from a world, as a run started
+/// again from a snapshot does without attaching; a run alone's takes the focus.
+#[test]
+fn a_sessions_options_choose_no_difficulty() {
+    let takes_focus = |cx: &mut Context, game: &Foxball| {
+        let ui = game.assets.as_ref().expect("loaded").ui;
+        ui.set_visible(cx, "settings", true).expect("the options");
+        ui.set_focus(cx, "difficulty").expect("a drop-down");
+        ui.focused(cx).is_some()
+    };
+    for player in [Some(0), Some(1), None] {
+        for attaches in [true, false] {
+            let cx = Context::seeded(0x5eed).project(env!("CARGO_MANIFEST_DIR"));
+            let mut cx = cx.expect("the project reads").in_session(player);
+            let mut game = Foxball::new();
+            game.load(&mut cx);
+            match attaches {
+                true => game.attach(&mut cx),
+                false => game.restored(&mut cx),
+            }
+            let enabled = takes_focus(&mut cx, &game);
+            assert!(!enabled, "{player:?}, attached: {attaches}");
+        }
+    }
+    let (mut cx, mut game) = attached(0x5eed);
+    game.restored(&mut cx);
+    assert!(takes_focus(&mut cx, &game), "alone");
+}
+
 /// Escape with the cursor free, or a pad's Start, opens the menu, this run's own, and closes it,
 /// its fox standing while it's open, its walk and turn queued at rest as it opens and as the keys
 /// are held as it closes, the keys walking it no more until then; the arrows move the menu's focus
@@ -596,10 +649,84 @@ fn the_menu_opens_and_its_choices_queue_commands() {
     assert!(!game.menu, "resumed");
     assert!(!cx.exiting());
     press(&mut game, &mut cx, Key::Escape);
-    for key in [Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+    for key in [Key::ArrowDown, Key::ArrowDown, Key::ArrowDown, Key::Enter] {
         press(&mut game, &mut cx, key);
     }
     assert!(cx.exiting(), "quit");
+}
+
+/// The menu's Options show its options in place of its first page, the focus on the bot's
+/// difficulty: the right arrow steps it to Hard, queuing the player's command, which reads back as
+/// a recording carries it and which the next tick applies, the bot running faster; a slider below
+/// sets the main bus's volume at once; the bot's difficulty as the options show again is the
+/// world's; and Escape goes back to the first page, the focus on Options, and then closes the menu.
+#[test]
+fn the_options_set_the_bots_difficulty_and_the_volumes() {
+    let (mut cx, mut game) = attached(0x5eed);
+    let ui = game.assets.as_ref().expect("loaded").ui;
+    game.tick(cx.world_mut(), Tick { number: 0 });
+    game.commands.clear();
+    let press = |game: &mut Foxball, cx: &mut Context, key| {
+        for pressed in [true, false] {
+            let event = Event::Key {
+                key,
+                pressed,
+                repeat: false,
+            };
+            let _ = game.event(cx, &event);
+        }
+    };
+    press(&mut game, &mut cx, Key::Escape);
+    game.commands.clear();
+    for key in [Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+        press(&mut game, &mut cx, key);
+    }
+    assert!(game.options && game.menu);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("difficulty"));
+    press(&mut game, &mut cx, Key::ArrowRight);
+    let player = 0;
+    let hard = Command::Difficulty {
+        player,
+        level: Difficulty::Hard,
+    };
+    // It reads back as a recording and a peer carry it.
+    let carried = Command::from_value(&hard.to_value()).expect("it reads back");
+    assert_eq!(carried, hard);
+    assert_eq!(game.commands, [hard]);
+    let world = cx.world_mut();
+    game.tick(world, Tick { number: 1 });
+    let found = *world.query::<&Match>().next().expect("the match");
+    assert_eq!(found.difficulty, Difficulty::Hard);
+    let speed = world
+        .query::<(&Bot, &NavAgent)>()
+        .next()
+        .map(|(_, agent)| agent.speed);
+    assert_eq!(speed, Some(Difficulty::Hard.speed()));
+    // The main volume, below it, down a step from all of it.
+    press(&mut game, &mut cx, Key::ArrowDown);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("main_volume"));
+    press(&mut game, &mut cx, Key::ArrowLeft);
+    assert!(
+        (cx.volume(Bus::Main) - 0.9).abs() < 1e-6,
+        "{}",
+        cx.volume(Bus::Main)
+    );
+    game.update(&mut cx, Duration::from_millis(16));
+    // Back to the first page, and in again, the difficulty the world's.
+    press(&mut game, &mut cx, Key::Escape);
+    assert!(game.menu && !game.options, "back");
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("options"));
+    if let Some(found) = cx.world_mut().query_mut::<&mut Match>().next() {
+        found.difficulty = Difficulty::Easy;
+    }
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(
+        ui.value(&mut cx, "difficulty").ok(),
+        Some(UiValue::Choice(0))
+    );
+    press(&mut game, &mut cx, Key::Escape);
+    press(&mut game, &mut cx, Key::Escape);
+    assert!(!game.menu, "closed");
 }
 
 /// A world restored from a snapshot simulates as it did from there, through walks, turns, kicks,
@@ -628,12 +755,21 @@ fn a_restored_world_simulates_as_before() {
     assert_eq!(parted.map(|tick| 96 + tick), None, "the first tick to part");
 }
 
-/// The commands a script queues before tick `number`, what player 0's keys and mouse would, as
-/// `world` stands, player 1 the bot's: every 4 ticks, its fox turns toward a point just behind the
-/// ball, as seen from the goal it attacks, and runs there, a little faster than the bot, so that
-/// the two don't meet at the ball each time, or, once it's there, turns toward that goal and runs
-/// into the ball, kicking it once it's near; so that they push, kick and score.
+/// The commands a script queues before tick `number`, what player 0's keys, mouse and menu would,
+/// as `world` stands, player 1 the bot's: the bot made Hard at tick 400 and Easy at 600, as the
+/// menu's options would; and every 4 ticks, its fox turns toward a point just behind the ball, as
+/// seen from the goal it attacks, and runs there, a little faster than the bot, so that the two
+/// don't meet at the ball each time, or, once it's there, turns toward that goal and runs into the
+/// ball, kicking it once it's near; so that they push, kick and score.
 fn script(game: &mut Foxball, world: &World, number: u64) {
+    let level = match number {
+        400 => Some(Difficulty::Hard),
+        600 => Some(Difficulty::Easy),
+        _ => None,
+    };
+    if let Some(level) = level {
+        game.commands.push(Command::Difficulty { player: 0, level });
+    }
     if !number.is_multiple_of(4) {
         return;
     }

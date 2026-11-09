@@ -191,7 +191,7 @@ pub use egui;
 pub use environment::Environment;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 pub use font::{Align, Font, Text, TextStyle};
-pub use game_ui::{GameUi, UiEvent};
+pub use game_ui::{GameUi, UiEvent, UiValue};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;

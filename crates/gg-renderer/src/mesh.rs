@@ -1835,8 +1835,9 @@ impl MeshPass {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
         let lod_view = LodView::new(&view_projection, view);
-        // What's set, which a pipeline's binding leaves as it is.
-        let (mut bound, mut faces) = (None, None);
+        // What's set, which a pipeline's binding leaves as it is: the scissor the view's own until
+        // a run's clip.
+        let (mut bound, mut faces, mut clipped) = (None, None, None);
         // The draws before the scene's place, the scene's runs, then the draws after.
         let scene_at = draws.scene_at.unwrap_or(0);
         let order = || {
@@ -1890,6 +1891,17 @@ impl MeshPass {
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
             };
+            // Its clip, as a scissor, and nothing of a run whose clip the view doesn't show.
+            let clip = run.and_then(|run| run.clip);
+            if clip != clipped {
+                let (origin, size) =
+                    clip.map_or(([0, 0], view), |clip| scissor(clip, view_projection, view));
+                if size.contains(&0) {
+                    continue;
+                }
+                pass.set_scissor(origin, size);
+                clipped = clip;
+            }
             // An emitter's particles, which are never culled, on the quad, whose indices they take.
             if let Some(index) = run.and_then(|run| run.particles) {
                 if let (Way::Shaded { .. }, Some(particles)) = (way, particles) {
@@ -1987,8 +1999,41 @@ impl MeshPass {
             }
             pass.end_label();
         }
+        if clipped.is_some() {
+            pass.set_scissor([0, 0], view);
+        }
         Ok(drawn)
     }
+}
+
+/// The pixels of a view `view` across and down, from its top left, that `clip` shows within, a
+/// rectangle in the XY plane of the space `view_projection` takes to clip space, its least corner
+/// then its greatest, as [`Draws::clip`] says: the box round where its corners show, each edge at
+/// the nearest pixel's, so that a pixel draws whose middle is inside, kept within the view; its
+/// origin and its size.
+fn scissor(clip: [Vec2; 2], view_projection: Mat4, view: [u32; 2]) -> ([u32; 2], [u32; 2]) {
+    let [least, most] = clip;
+    let size = Vec2::new(view[0] as f32, view[1] as f32);
+    let corners = [
+        least,
+        Vec2::new(most.x, least.y),
+        most,
+        Vec2::new(least.x, most.y),
+    ];
+    let (mut low, mut high) = (Vec2::INFINITY, Vec2::NEG_INFINITY);
+    for corner in corners {
+        let at = view_projection * corner.extend(0.0).extend(1.0);
+        // Vulkan's clip space is -1 at the view's left and top, and 1 at its right and bottom.
+        let pixel = (at.truncate().truncate() / at.w + 1.0) / 2.0 * size;
+        (low, high) = (low.min(pixel), high.max(pixel));
+    }
+    let [low, high] = [low, high].map(|edge| edge.round().clamp(Vec2::ZERO, size));
+    let extent = (high - low).max(Vec2::ZERO);
+    // A clip of no number, as one past the camera, is cast to none.
+    (
+        [low.x as u32, low.y as u32],
+        [extent.x as u32, extent.y as u32],
+    )
 }
 
 /// How a pass draws the runs it draws, as [`MeshPass::draw`] draws them.
@@ -2742,6 +2787,20 @@ mod tests {
         let lods = self::lods(&[0.0, 0.5, 2.0], 10.0);
         let level = |scale: f32| canvas.level(&lods, &Mat4::from_scale(Vec3::splat(scale)));
         assert_eq!([level(1.0), level(0.4), level(3.0)], [1, 2, 0]);
+    }
+
+    /// A clip on the canvas, in the view's pixels from its bottom left, scissors those pixels from
+    /// its top left, its edges at the nearest pixel's; kept within the view, and of none outside it.
+    #[test]
+    fn a_clip_on_the_canvas_scissors_its_pixels() {
+        let canvas = canvas_projection([400, 300]);
+        let clip = |least: [f32; 2], most: [f32; 2]| {
+            scissor([least, most].map(Vec2::from), canvas, [400, 300])
+        };
+        assert_eq!(clip([10.0, 20.0], [110.0, 70.0]), ([10, 230], [100, 50]));
+        assert_eq!(clip([10.4, 19.6], [110.6, 70.4]), ([10, 230], [101, 50]));
+        assert_eq!(clip([-50.0, 250.0], [450.0, 400.0]), ([0, 0], [400, 50]));
+        assert_eq!(clip([500.0, 0.0], [600.0, 10.0]).1, [0, 10]);
     }
 
     #[test]

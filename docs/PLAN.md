@@ -143,6 +143,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Foxball and Sponza on the rendering looks** (2026-11-09)
 - **Phase 17, rendering looks** (2026-11-09)
 - **Screen-space reflections** (2026-11-09)
+- **A game's UI's widgets** (2026-11-09)
 
 ## Now
 
@@ -252,24 +253,26 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The renderer's UI pass in builds without `dev`, which hand it no UI: it makes the pass's pipeline, `egui`, as it starts | A shipped game's start is measured to wait on it |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
-| Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
+| Composed text from an input method (winit's `Ime` events), for languages typed through one, a game's UI's text fields among what takes it: a field takes winit's text as it's typed, and shows nothing of a composition under way | A game takes text input in such a language, such as chat |
 | Development builds' frames that draw UI allocating nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own; builds without `dev` run no egui | A tool needs frames that allocate nothing, as for measuring one |
 | Shards' menu as a UI file: Shards draws its menu's buttons, finds what the cursor is over, and keeps their focus itself, as it did before UI files | Shards' menu changes |
-| Text fields in a game's UI, and the OS's composition of what's typed (IME): a node typed into, its caret and selection; a UI takes keys for its focus alone | A game takes a name, a chat or a code in its UI |
-| Sliders, toggles and drop-downs in a game's UI, which take the focus and change a value by keys, a pad and the mouse: a UI's buttons are pressed alone | A game's options menu sets values, as a volume or a difficulty |
-| Scrolling lists in a game's UI, and clipping a node to its parent's rectangle: the canvas draws sprites and text unclipped, and what a parent's room can't hold overflows it | A game's UI lists more than fits, as saves or servers |
+| A game's UI's text fields taking more than a line: copying, cutting and pasting through the OS's clipboard, moving by words with Ctrl and the arrows, selecting by Shift and a click or a double click, the caret moving by graphemes rather than characters, a caret that blinks, and several lines | A game's text field takes more than a name or a short line |
+| Telling a layer that a UI's focused text field took a key, so that what's typed doesn't steer the game too: an event gives back what it did, and a key a field took gives back none | A game shows a text field while its game takes keys, as a chat over play |
+| A drop-down's options scrolling, as a list does, where they reach past the view: they open whole, below it or above it | A drop-down has more options than the view holds |
+| Lists that scroll across, a list's scroll bar dragged, and a list scrolled by a pad's right stick or by dragging what it holds: a list scrolls down, by the wheel or the focus moving into it | A game's UI scrolls across, or a pad's player browses a list with nothing in it to focus |
+| Clips that aren't upright rectangles, as a turned panel's or a circle's: the canvas clips by a scissor, to the box round where a clip shows | A game's UI turns or masks what it clips |
 | Tweens on a UI's nodes: fades and slides as a menu opens, and a button easing between its looks, which change at once | A game's menus are to move |
 | Binding a UI's nodes to the world or a layer's values, so that a text or a node's visibility follows them without code setting them by name each frame | A game's UI shows many values, as an inventory's or a scoreboard's |
 | Styles shared between UI files: a button's looks, colors, a font and its sizes named once and taken by name, which each file and node repeats now | A game's UIs are several files of one look |
 | The editor showing a game's UI files: their nodes in a panel, picked in the view by their rectangles, edited and saved as text; agents and people edit them as text and see them reload | Someone lays a UI out in the editor rather than as text |
 | Writing UI files in a canonical form, as scenes are written, so that a tool's edit changes only what it changes: the engine reads them and writes none | A tool writes or rewrites UI files, as the editor would |
-| A pad's D-pad and stick moving the focus again while held, as a key's repeats do: each press, or push of the stick, steps once | A game's menu is long enough that its players hold to move through it |
+| A pad's D-pad and stick moving the focus, or stepping a slider or a drop-down's choice, again while held, as a key's repeats do: each press, or push of the stick, steps once | A game's menu is long enough, or a slider fine enough, that its players hold to move through it |
 | Focus kept within a panel or a group of buttons, and coming round at a UI's edges: the arrows stop at the last button that way, and Tab goes through every button of the UI | A game shows a dialog over a menu whose buttons mustn't take the focus |
 | Pressing a button by name through the tool API: an agent clicks its pixels through `input`, as `ui` gives them | An agent presses buttons it can't reach by a click, as one hidden under another |
 | A UI's sounds named in its file, played as the focus moves and a button is pressed: the layer plays them on `Focused` and `Pressed` | Several games' menus play the same way |
 | The canvas scaled by the view's width or its smaller side, or to a height a game sets, rather than 1,080 units to the view's height: a view much narrower than 16:9 crowds what's anchored to its sides, and a portrait one overlaps it | A game runs in portrait, or at aspect ratios far from 16:9 |
 | Stretching what a layer draws on the canvas itself between anchors: each such draw is placed from one anchor, and scaled with the view's height alone; a UI file's fills stretch to the room they're given | A layer draws a backdrop filling the view itself rather than through a UI file |
-| Circles, meshes and lines on the canvas, and clipping to a rectangle, as a list that scrolls needs: it draws sprites and text | A game's UI draws them |
+| Circles, meshes and lines on the canvas: it draws sprites and text, clipped to rectangles | A game's UI draws them |
 | Hiding a game's UI from the editor's view while it edits, as Unity's Scene view leaves out a canvas over the screen: the canvas draws through the look's viewpoint too, and hides what's under it from picks | Someone edits under a game's HUD |
 | A sound's own distances and spatialization, as kira's spatial tracks take each: a camera with perspective hears every sound full within a unit and silent at 100, panned three quarters of the way to a side, as those tracks' defaults have it; nor Doppler, nor occlusion by what's between | A game's units aren't about a meter, or a sound carries farther or nearer than the rest |
 | Setting a play's volume and pitch, and stopping it, as a hum that follows an engine's speed would: a sound plays as its file holds it, to its end | A game varies or cuts a sound as it plays it |
@@ -422,7 +425,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pausing a run alone as Foxball's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu and the bot can score meanwhile | A game alone needs a pause, or players lose goals to the menu |
 | Asking the other player before a session's New match: either player's menu starts the match afresh for both, scores and wins wiped, at the next tick | Players of a session start matches over each other's |
 | A bot for a session's empty player, as a server's player 1 before a client takes it: a session's foxes are all people's | A session wants a player it hasn't |
-| The bot's difficulty, its speed, reaction and aim, chosen in the menu: fixed at 4.6 units a second, 6 ticks and a cosine of 0.85 | Players ask for an easier or harder bot |
+| Foxball's options kept between runs, its volumes and its bot's difficulty: they're the run's, each run starting at full volume and Normal | Players expect their settings kept |
 | Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
 | Foxball's foxes as instances of a prefab: each fox, its model, animator, state machine and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
 | Foxball's players' colors read from one place: each is written in ui/menu.ui's texts and, brightened, in arena.ron's emitter at its scorer's goal mouth | The players' colors change, or a game has more than two players |

@@ -351,7 +351,8 @@ in the editor is out of an agent's reach.
   scene](#project-state), capture frames, share the view as frames render it, set how it looks and
   pick what it shows, list the assets in the asset root with their [IDs](#project-state), list each
   UI the layers added from its file, its nodes' rectangles in the canvas's units and the view's
-  pixels, what they say and the focus, so that an agent checks a layout as data (`ui`), as [Events
+  pixels, what they say, what its widgets hold and the focus, so that an agent checks a layout as
+  data (`ui`), as [Events
   and layers](#events-and-layers) says, hand the layers input as the window would, save the world
   whole as a snapshot file, as [ECS](#ecs)
   describes, which a run given `--restore` starts from, apply patches of the game's code and debug
@@ -636,31 +637,44 @@ A project's state is text that people and agents edit, diff and merge with ordin
   asset ID (`Context::add_ui`), each add a UI of its own of the file read once, found by its ID
   wherever its file has been renamed or moved, and which is cooked into the package as it is. It's
   RON as the canonical files are written, a part to a line: `(focus: "play", nodes: [...])`, the
-  button focused as it's added, by its name, if any, and the nodes at its top, each its kind,
-  `Panel`, `Text`, `Image`, `Button`, `Row`, `Column` or `Stack`, and its fields inside its kind's
-  parentheses, as `Button(name: "play", text: "PLAY")`, a field it leaves out taking its kind's
-  default and one that may be left out written as its value. Every node has its `name`, `visible`,
-  `width` and `height`, each `Fixed(units)`, `Fit` or `Fill(share)`, `margin` and `anchor`; a
-  container its `children`, `padding` and `align`, and a row or a column its `gap`; a panel its
-  `color`, `texture`, `radius` and `slice`; a text its `text`, `font`, `size`, `color` and `align`;
-  an image its `texture`, fit to its pixels, and `color`; and a button its `text`, `font`, `size`,
-  `padding`, `radius`, `slice`, `disabled` and `looks`, each of its states' `color`, `text_color`
-  and `texture`, a look's texture the normal one's unless it gives its own. Colors are linear RGBA,
-  as a scene's, and a font or a texture is named by its asset ID or its path from the root, loading
-  with the UI. A name is 1 to 64 ASCII letters, digits, `_` and `-`, its UI's alone, and every
-  button has one, which its presses are told by. A load checks the whole file, refusing it at the
-  line and column where its text is refused with `ui.syntax` for text that isn't a UI's, as of a
-  field no node has, `ui.bad_name`, `ui.duplicate_name`, `ui.bad_field` for a field its kind doesn't
-  take or an image without a texture, `ui.unnamed_button`, `ui.bad_value` for a number outside its
-  range, a size, a margin, padding, a gap, a radius, a slice's width, a text's size and a fill's
-  share each 0 to 1,000,000, at the number, or `ui.too_many_nodes` past 10,000 nodes, so that what a
-  file comes to, and each UI's copy of its nodes, stays bounded; and with `ui.no_node` for a `focus`
-  no button has. The engine writes none, as people and agents write them. In a development run that
-  serves the tool API, as a UI's file is saved, every UI of it takes its nodes, each keeping what
-  code set of it, its text, whether it shows and whether it's disabled, by its name, and the focus
-  staying on the button of its name, or else going to the file's, logging `UI reloaded`; or it warns
-  with the code of a file it refuses, or of a font or a texture that doesn't load, and the UI stays
-  as it was. A recorded run and a lockstep peer take it too, as a UI is the run's alone.
+  button or widget focused as it's added, by its name, if any, and the nodes at its top, each its
+  kind, `Panel`, `Text`, `Image`, `Button`, `Slider`, `Toggle`, `Dropdown`, `Field`, `Row`,
+  `Column`, `Stack` or `List`, and its fields inside its kind's parentheses, as `Button(name:
+  "play", text: "PLAY")`, a field it leaves out taking its kind's default and one that may be left
+  out written as its value. Every node has its `name`, `visible`, `width` and `height`, each
+  `Fixed(units)`, `Fit` or `Fill(share)`, `margin` and `anchor`; a container its `children`,
+  `padding` and `align`, a row, a column or a list its `gap`, and a panel, a row, a column or a
+  stack its `clip`, which clips what's under it to it, as a list always does; a panel its `color`,
+  `texture`, `radius` and `slice`, and a list its `color` and `radius`; a text its `text`, `font`,
+  `size`, `color` and `align`; an image its `texture`, fit to its pixels, and `color`; a button its
+  `text`, `font`, `size`, `padding`, `radius`, `slice`, `disabled` and `looks`, each of its states'
+  `color`, `text_color` and `texture`, a look's texture the normal one's unless it gives its own;
+  and each widget its `padding`, `radius`, `disabled`, `looks`, as a button's, and `accent`, the
+  color of what's on, chosen or typed in it, which a list's scroll bar takes too: a slider its
+  `min`, `max`, `value` and `step`, 0 for none, 400 units by 48 by default; a toggle its `text`,
+  `font`, `size` and `on`; a drop-down its `options`, 1 to 256, its `choice`, by its place among
+  them, its `font`, `size` and `color`, behind its options as they open; and a text field its
+  `text`, `font`, `size`, `hint`, what it says while it's empty, and `most`, the characters it
+  holds, 1 to 4,096, 64 by default. Colors are linear RGBA, as a scene's, and a font or a texture is
+  named by its asset ID or its path from the root, loading with the UI. A name is 1 to 64 ASCII
+  letters, digits, `_` and `-`, its UI's alone, and every button and widget has one, which its
+  presses and changes are told by. A load checks the whole file, refusing it at the line and column
+  where its text is refused with `ui.syntax` for text that isn't a UI's, as of a field no node has,
+  `ui.bad_name`, `ui.duplicate_name`, `ui.bad_field` for a field its kind doesn't take, an image
+  without a texture or a drop-down without options, `ui.unnamed_button`, `ui.unnamed_widget`,
+  `ui.bad_value` for a number outside its range, a size, a margin, padding, a gap, a radius, a
+  slice's width, a text's size, a fill's share and a slider's step each 0 to 1,000,000, and a
+  slider's bounds and value -1,000,000 to 1,000,000, at the number, a slider whose value is outside
+  its bounds, a choice none of its options, or a text field's text past what it holds, or
+  `ui.too_many_nodes` past 10,000 nodes, so that what a file comes to, and each UI's copy of its
+  nodes, stays bounded; and with `ui.no_node` for a `focus` no button or widget has. The engine
+  writes none, as people and agents write them. In a development run that serves the tool API, as a
+  UI's file is saved, every UI of it takes its nodes, each keeping what code set of it, its text,
+  whether it shows and whether it's disabled, and what code or input set a widget to, by its name,
+  where its kind still takes it, a slider's value within its bounds, a list its scroll, and the
+  focus staying on the node of its name, or else going to the file's, logging `UI reloaded`; or it
+  warns with the code of a file it refuses, or of a font or a texture that doesn't load, and the UI
+  stays as it was. A recorded run and a lockstep peer take it too, as a UI is the run's alone.
   [game_ui](crates/gg-engine/src/game_ui/mod.rs) has the rest.
 - **Models in scenes.** A model is placed as an entity with a `ModelRoot`, which names it as a
   texture is named, by its asset ID or else its path; the world spawns the model's nodes under it
@@ -1298,32 +1312,54 @@ layer finds the cursor on the canvas as the last frame showed it, to tell what i
 draw there itself.
 
 A game's UI is a file, as [Project state](#project-state)'s UIs says: a tree of named nodes, panels,
-texts, images and buttons in rows, columns and stacks, which a layer adds (`Context::add_ui`),
-getting a handle, `GameUi`, and drives each frame, through what its file names and nothing else. The
-engine lays it out, flexbox-lite, in the canvas's units: each node sized fixed, fit to what it
-holds, a text's text measured by its font (`Fonts::measure`), or filling its share of its parent,
-none below its fit; a row's or a column's children along it, with a gap between each two, what's
-left without a fill to take it before, around or after them as the parent's alignment says, and
-across it, as a stack's or a panel's both ways, each where its anchor or else the parent's alignment
-puts it; padding inside a node and a margin round it; a hidden node taking no room. Each node at the
-top is placed in the view from the point its anchor names, the view's middle by default, and drawn
-from it through the canvas, so that a resize keeps it there in the frame it comes in. Layout runs as
-the UI's drawn only once its tree, its texts, the view's size, or a font or a texture it names,
-reloaded, changed, in the memory the last layout had, and drawing an unchanged UI allocates nothing,
-as no input that changes nothing does. A panel is a color or a texture, its corners rounded by
-quarters of a disc the engine makes with the first UI, or its texture cut into nine; a button a
-panel holding its text, in a look for each of its states, normal, focused, pressed and disabled. The
-layer hands the UI the events it's sent (`GameUi::event`), which give back what happened, at most
-one thing an event: a button pressed, by its name, the focus moved to one, or back asked for, by
-Escape or a pad's East. The arrows, a pad's D-pad and its left stick move the focus to the nearest
-button that takes it the way they go, one level with the focused one first, the stick once a push
-until it comes back near rest; Tab and Shift+Tab through them in the file's order, coming round;
-Enter, Space and a pad's South press the focused button, the mouse focuses what it's over and
-presses what it's let go over after going down on it; a hidden or disabled button takes neither.
-Code sets a node's text, whether it shows and a button's whether it's disabled, by its name, kept as
-the file reloads, and turns the UI's input off while the game plays under it. Its state, the focus
-and what code set, is the run's, not the world's: each lockstep peer has its own, and none of it is
-hashed, snapshot or recorded, as Shards' layer keeps its menu's. A choice that changes the game
+texts, images, buttons and widgets in rows, columns, stacks and lists, which a layer adds
+(`Context::add_ui`), getting a handle, `GameUi`, and drives each frame, through what its file names
+and nothing else. The engine lays it out, flexbox-lite, in the canvas's units: each node sized
+fixed, fit to what it holds, a text's text measured by its font (`Fonts::measure`), or filling its
+share of its parent, none below its fit; a row's or a column's children along it, with a gap between
+each two, what's left without a fill to take it before, around or after them as the parent's
+alignment says, and across it, as a stack's or a panel's both ways, each where its anchor or else
+the parent's alignment puts it; padding inside a node and a margin round it; a hidden node taking no
+room. A list lays its children out as a column from its top, scrolled up as far as its scroll says,
+within what they reach past it, and one that fills its parent takes the room it's given, however
+much it holds; it and a container that clips clip what's under them to their rectangles less their
+padding, each node drawn within each such rectangle above it, and nothing of one clipped out whole,
+nor a click on what's clipped. Each node at the top is placed in the view from the point its anchor
+names, the view's middle by default, and drawn from it through the canvas, so that a resize keeps it
+there in the frame it comes in. Layout runs as the UI's drawn only once its tree, its texts, a
+list's scroll, the view's size, or a font or a texture it names, reloaded, changed, in the memory
+the last layout had, and drawing an unchanged UI allocates nothing, as no input that changes nothing
+does. A panel is a color or a texture, its corners rounded by quarters of a disc the engine makes
+with the first UI, or its texture cut into nine; a button a panel holding its text, in a look for
+each of its states, normal, focused, pressed and disabled; and a widget a box in such looks, which
+holds a value: a slider a number, as a track filled as far as its thumb, in its accent; a toggle
+whether it's on, as its text beside a switch; a drop-down a choice of its options, which open below
+it, or above where they'd pass the view's bottom, over the rest of the UI, unclipped; and a text
+field a line of text, with a caret and a selection while it's focused, scrolled as far as shows its
+caret. The layer hands the UI the events it's sent (`GameUi::event`), which give back what happened,
+at most one thing an event: a button pressed, by its name, a widget changed, by its name, with its
+new value, the focus moved to one, or back asked for, by Escape or a pad's East. The arrows, a pad's
+D-pad and its left stick move the focus to the nearest button or widget that takes it the way they
+go, one level with the focused one first, the stick once a push until it comes back near rest; Tab
+and Shift+Tab through them in the file's order, coming round; either scrolling what it focuses into
+view in the lists it's in. Enter, Space and a pad's South press the focused button, flip a toggle or
+open a drop-down, whose options take every event until it's closed, the up and down arrows lighting
+them and Enter choosing; left and right step a slider's value to the next point of the grid of its
+steps from its `min`, or to its `max` past the grid's last, and a drop-down's choice. The mouse
+focuses what it's over, but a text field, which takes the focus by a click and keeps it as the
+cursor passes over the rest; it presses what it's let go over after going down on it, drags a
+slider and a text field's selection, while they show and are enabled, and its wheel scrolls the
+list it's over, which keeps its scroll while it's hidden. A focused text field takes what's
+typed (`Event::Text`, winit's text, not keys' positions) at its caret, as many characters as it
+holds, its caret moved by the arrows, Home and End, Shift selecting and Ctrl+A selecting it all, and
+Backspace and Delete cutting; the OS's composition of what's typed, IME, doesn't reach it. A hidden
+or disabled button or widget takes neither the focus nor a press. Code sets a node's text, whether
+it shows, a button's or a widget's whether it's disabled, a widget's value and the focus, and reads
+a widget's value, by its name, kept as the file reloads, and turns the UI's input off while the game
+plays under it; only input gives a change. Its state, the focus, the widgets' values and what code
+set, is the run's, not the world's: each lockstep peer has its own, and none of it is hashed,
+snapshot or recorded, as Shards' layer keeps its menu's, so that a change that's the game's, as
+Foxball's bot's difficulty, queues a command, as a press does. A choice that changes the game
 queues a command, as input does, so that the next tick applies it on every peer, and a replay too; a
 Quit asks the run to end through `Context::exit`, as closing the window does. The tool API's `ui`
 lists each UI's nodes where they lie, as [Agents and tools](#agents-and-tools) says.
@@ -2226,7 +2262,12 @@ everything else, the world's draws too, so that they show over all of it but whe
 nearer, as debugging wants. The canvas, a game's UI, as [Events and layers](#events-and-layers)
 says, is a list after those, in the view's pixels rather than through its viewpoint, all at the near
 plane, where depth is 1, which every depth test passes, so that each of its draws goes over all
-before it.
+before it. Draws are clipped to a rectangle by a scissor, `Draws::clip`: each clip starts a run of
+its own, which the mesh pass draws within the box round where the view shows it, to the nearest
+pixel, so that a canvas's clip is placed with its draws as the frame's handed off, a list's or a
+text field's of a UI drawing as one scissored instanced draw of each mesh and shader, rather than a
+rectangle in each instance tested in the shaders, which every shader that draws on the canvas would
+have to take; the view's culling doesn't know a clip, and culls a clipped draw as if it weren't.
 
 Text is drawn from fonts' fields, which `Context::add_font` bakes as a TrueType or OpenType font
 loads, or the engine as text names one, or the cooker into a game's package: a texture of data,

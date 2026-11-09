@@ -1134,9 +1134,11 @@ pub struct ListedUi {
 /// A node of a UI as `ui` lists it: its name, if its file gives it one; its kind; its parent's
 /// place among the UI's nodes, `None` for one at its top; its rectangle, `[x, y, width, height]`
 /// from the view's top left, +Y down, in the canvas's units, 1,080 to the view's height, and in the
-/// view's pixels, as a capture's PNG has them; whether it shows, it and each node above it visible,
-/// a hidden one's rectangle of no size; what a text or a button says; and a button's whether it's
-/// disabled, has the focus, or is held pressed.
+/// view's pixels, as a capture's PNG has them, a list's children's where it's scrolled them; whether
+/// it shows, it and each node above it visible, a hidden one's rectangle of no size; what a text, a
+/// button or a toggle says, what's typed in a text field, or a drop-down's choice; what a slider,
+/// a toggle or a drop-down holds; and a button's or a widget's whether it's disabled, has the
+/// focus, or is held pressed, a drop-down's while its options are open.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiNode {
     pub name: Option<String>,
@@ -1147,6 +1149,8 @@ pub struct UiNode {
     pub visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<UiValue>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1160,8 +1164,9 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// What a node of a UI is, as its file names it: a panel, a background behind the children it
-/// stacks; a text; an image; a button; or a container that lays its children out in a row, a
-/// column, or stacked over each other.
+/// stacks; a text; an image; a button; a widget, a slider, a toggle, a drop-down or a text field;
+/// or a container that lays its children out in a row, a column, stacked over each other, or in a
+/// list, a column that clips and scrolls them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiKind {
@@ -1169,9 +1174,24 @@ pub enum UiKind {
     Text,
     Image,
     Button,
+    Slider,
+    Toggle,
+    Dropdown,
+    Field,
     Row,
     Column,
     Stack,
+    List,
+}
+
+/// What a widget of a UI holds, as `ui` lists it: a slider's number, a toggle's whether it's on,
+/// or a drop-down's choice, by its place among its options, from 0; as `{"number": 0.5}`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiValue {
+    Number(f32),
+    On(bool),
+    Choice(usize),
 }
 
 /// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;

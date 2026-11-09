@@ -180,9 +180,11 @@ Talk to a running game, through its tool API:
                                  each node's name, kind, parent, rectangle, `[x, y, width, height]`
                                  from the view's top left in the canvas's units, 1,080 to its
                                  height, and in its pixels, as `capture` and `input` have them,
-                                 whether it shows, what it says, and a button's whether it's
-                                 disabled, focused or pressed; and each UI's focus and whether it
-                                 takes input. Press a button by clicking its pixels with `input`
+                                 whether it shows, what it says, what a widget holds, and a
+                                 button's or a widget's whether it's disabled, focused or
+                                 pressed; and each UI's focus and whether it takes input. Press a
+                                 button by clicking its pixels with `input`, and type into a text
+                                 field clicked so with `text`
   apply <OPERATIONS>            Apply OPERATIONS, a JSON array of the API's operations, as one edit:
                                  all or none, between ticks, which `undo` takes back; among them
                                  `{\"unlink\":{\"id\":ID}}`, which unlinks a prefab's instance into

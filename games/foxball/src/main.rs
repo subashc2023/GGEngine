@@ -9,8 +9,10 @@
 //! grabbed from a click in the view until Escape, as do Q and E and the right stick; and Space, a
 //! pad's South, or a click with the cursor grabbed kicks the ball, if it's in front of the fox.
 //! Escape with the cursor free, or a pad's Start, opens the menu, `ui/menu.ui`, over the match,
-//! which goes on meanwhile, the run's fox standing: Resume, New match and Quit. The scores and the
-//! keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
+//! which goes on meanwhile, the run's fox standing: Resume, New match, Options and Quit, its
+//! options choosing how well the bot plays, a command each player's runs and replays apply as
+//! they do New match, and the volumes of the main, music and sound buses, this run's own. The
+//! scores and the keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
 //! CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest
 //! under CC BY 4.0, as its README there says), skinned, each played by a state machine, Survey
 //! standing and Walk blended with Run by how fast it goes, characters that rapier3d's controller
@@ -40,12 +42,12 @@ use gg_engine::math::libm::{atan2f, expf};
 use gg_engine::math::{Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, AnimationParam, AnimationState, AnimationStates, Animator, App, Binding, BlendPoint,
-    CapsuleCollider3D, Change, CharacterController3D, Commands, Component, Context, EmitterShape,
-    Entity, Error, Event, GameUi, Key, Layer, Model, MouseButton, Name, NavAgent, Owner, PadButton,
-    ParamCondition, ParamTest, ParamValue, Parent, ParticleBlend, ParticleEmitter, Place, Play,
-    Playback, Projection, Reflect, RigidBody3D, Sound, Source, StateMotion, StateTransition, Stick,
-    Tick, Toward, Transform, UiEvent, Viewpoint, World, step_animation, step_navigation,
-    step_physics,
+    Bus, CapsuleCollider3D, Change, CharacterController3D, Commands, Component, Context,
+    EmitterShape, Entity, Error, Event, GameUi, Key, Layer, Model, MouseButton, Name, NavAgent,
+    Owner, PadButton, ParamCondition, ParamTest, ParamValue, Parent, ParticleBlend,
+    ParticleEmitter, Place, Play, Playback, Projection, Reflect, RigidBody3D, Sound, Source,
+    StateMotion, StateTransition, Stick, Tick, Toward, Transform, UiEvent, UiValue, Viewpoint,
+    World, step_animation, step_navigation, step_physics,
 };
 
 #[cfg(test)]
@@ -151,12 +153,52 @@ const WINS_AT: u32 = 5;
 /// The player whose fox the game's bot plays in a run alone, whose own keys steer player 0.
 const BOT_PLAYER: u8 = 1;
 
-/// The game's bot: how fast it runs, a little slower than a player, in units a second; how fast it
-/// turns, in radians a second; and every how many ticks it sees where the ball is, its reaction,
-/// heading where that says until it next does.
-const BOT_SPEED: f32 = 4.6;
+/// How fast the game's bot turns, in radians a second.
 const BOT_TURN_SPEED: f32 = 7.0;
-const BOT_REACTION: u32 = 6;
+
+/// How well the game's bot plays, which the menu's options choose, as [`Match::difficulty`] has it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+enum Difficulty {
+    Easy,
+    #[default]
+    Normal,
+    Hard,
+}
+
+impl Difficulty {
+    /// Each, in the order of the menu's options.
+    const ALL: [Self; 3] = [Self::Easy, Self::Normal, Self::Hard];
+
+    /// How fast the bot runs, in units a second: at Normal a little slower than a player, and at
+    /// Hard a little faster.
+    fn speed(self) -> f32 {
+        match self {
+            Self::Easy => 3.8,
+            Self::Normal => 4.6,
+            Self::Hard => 5.2,
+        }
+    }
+
+    /// Every how many ticks the bot sees where the ball is, its reaction, heading where that says
+    /// until it next does.
+    fn reaction(self) -> u32 {
+        match self {
+            Self::Easy => 12,
+            Self::Normal => 6,
+            Self::Hard => 3,
+        }
+    }
+
+    /// How near facing where it aims the bot kicks, as the cosine of the angle it faces away from
+    /// it, its aim: the wider, the farther its shots go astray.
+    fn aim(self) -> f32 {
+        match self {
+            Self::Easy => 0.7,
+            Self::Normal => 0.85,
+            Self::Hard => 0.95,
+        }
+    }
+}
 
 /// Where the bot goes about the ball, in units from the ball's middle: how far behind it, from the
 /// goal the bot attacks, it lines up, and how near that counts as there; and how far to the ball's
@@ -166,10 +208,8 @@ const BOT_LINED: f32 = 0.45;
 const BOT_CLEAR: f32 = 1.25;
 
 /// How near the ball the bot faces it, rather than the way it goes, while the ball is ahead of it
-/// toward where it aims; and how near facing there it kicks, as the cosine of the angle it faces
-/// away from it.
+/// toward where it aims.
 const BOT_CLOSE: f32 = 2.0;
-const BOT_AIM: f32 = 0.85;
 
 /// Where the bot aims, as [`aim`] chooses: how far to either side of the middle of a goal's mouth
 /// it aims at its sides, inside the posts by more than the ball's radius; how far from its way the
@@ -196,6 +236,13 @@ const VIEW_FOLLOW: f32 = 14.0;
 
 /// The texts of `ui/menu.ui` that say each player's goals and matches won, by its index.
 const SCORES: [(&str, &str); 2] = [("blue_score", "blue_wins"), ("orange_score", "orange_wins")];
+
+/// The sliders of `ui/menu.ui`'s options that set each bus's volume, and the texts that say it.
+const VOLUMES: [(&str, &str, Bus); 3] = [
+    ("main_volume", "main_volume_value", Bus::Main),
+    ("music_volume", "music_volume_value", Bus::Music),
+    ("sound_volume", "sound_volume_value", Bus::Sounds),
+];
 
 /// A player's fox, the character its capsule is: which player steers it, which way the keys or a
 /// stick walk it, how fast it turns, the way it faces, and the ticks until its next kick.
@@ -232,11 +279,13 @@ struct Goal {
     player: u8,
 }
 
-/// The match: each player's goals in it, and matches won.
+/// The match: each player's goals in it, and matches won; and how well the game's bot plays, in a
+/// run alone, which a new match keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Match {
     scores: [u32; 2],
     wins: [u32; 2],
+    difficulty: Difficulty,
 }
 
 /// What the players' keys, pads, mice and menus do, and what a run alone sets up, queued as
@@ -253,6 +302,9 @@ enum Command {
     Kick { player: u8 },
     /// Starts a match afresh, for both players, as the player's menu's New match chooses.
     NewMatch { player: u8 },
+    /// Has the game's bot play as well as `level` says, as the player's menu's options choose: a
+    /// run alone's, as a session has no bot, but which travels as the rest do all the same.
+    Difficulty { player: u8, level: Difficulty },
     /// Has the game's bot play the player's fox from then on, as a run alone queues for
     /// [`BOT_PLAYER`] as it attaches, so that its recording keeps it and a session's runs, whose
     /// players are all people, have none.
@@ -305,8 +357,10 @@ struct Foxball {
     /// Whether this run wants the cursor grabbed, for the mouse to turn its fox: from a click in
     /// the view until Escape, or the menu opening.
     grab: bool,
-    /// Whether the menu is open: this run's own, as a lockstep peer's is its own.
+    /// Whether the menu is open: this run's own, as a lockstep peer's is its own; and whether it
+    /// shows its options, in place of its first page.
     menu: bool,
+    options: bool,
     /// How far this run's view looks down, which the mouse moves: this run's own, as it's no part
     /// of the world.
     pitch: f32,
@@ -358,6 +412,7 @@ impl Foxball {
             assets: None,
             grab: false,
             menu: false,
+            options: false,
             pitch: VIEW_PITCH,
             seen: None,
             text: String::new(),
@@ -398,10 +453,12 @@ impl Foxball {
         turns.sum()
     }
 
-    /// Opens or closes the menu, as `open` says: its UI shown and taking input while it's open, the
-    /// cursor let go as it opens, and this run's fox standing, its walk and turn queued at rest,
-    /// then queued as the keys and sticks are held as it closes.
+    /// Opens or closes the menu, as `open` says: its UI shown and taking input while it's open, at
+    /// its first page, the focus on Resume, the cursor let go as it opens, and this run's fox
+    /// standing, its walk and turn queued at rest, then queued as the keys and sticks are held as it
+    /// closes.
     fn open_menu(&mut self, cx: &mut Context, open: bool) {
+        self.show_options(cx, false);
         self.menu = open;
         self.grab &= !open;
         let player = self.player;
@@ -418,6 +475,69 @@ impl Foxball {
             // A file edited to drop the menu shows none.
             let _ = assets.ui.set_visible(cx, "menu", open);
             assets.ui.set_input(cx, open);
+            if open {
+                let _ = assets.ui.set_focus(cx, "resume");
+            }
+        }
+    }
+
+    /// Shows the menu's options in place of its first page, or its first page again, as `shown`
+    /// says, the focus on the bot's difficulty or on Options: the options taking what the bot plays
+    /// at, as the world has it, and each bus's volume, as the run has it. A node a file edited to
+    /// drop it goes without, as the scores do.
+    fn show_options(&mut self, cx: &mut Context, shown: bool) {
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        let ui = assets.ui;
+        if shown {
+            let level = cx
+                .world()
+                .query::<&Match>()
+                .next()
+                .map(|found| found.difficulty);
+            let choice = Difficulty::ALL.iter().position(|&of| Some(of) == level);
+            let _ = ui.set_value(cx, "difficulty", UiValue::Choice(choice.unwrap_or(1)));
+            for (slider, _, bus) in VOLUMES {
+                let volume = UiValue::Number(cx.volume(bus));
+                let _ = ui.set_value(cx, slider, volume);
+            }
+        }
+        let _ = ui.set_visible(cx, "menu", !shown);
+        let _ = ui.set_visible(cx, "settings", shown);
+        if shown != self.options {
+            let _ = ui.set_focus(cx, if shown { "difficulty" } else { "options" });
+        }
+        self.options = shown;
+    }
+
+    /// Has the menu's options choose the bot's difficulty in a run alone, and disables it in a
+    /// session, which has no bot.
+    fn offer_difficulty(&self, cx: &mut Context) {
+        if let Some(assets) = &self.assets {
+            let networked = cx.networked();
+            let _ = assets.ui.set_disabled(cx, "difficulty", networked);
+        }
+    }
+
+    /// What the menu's options do as widget `name` changes to `value`: the bot's difficulty queues
+    /// its command, which the next tick applies, as New match's does; a volume sets its bus's, at
+    /// once, this run's own.
+    fn change(&mut self, cx: &mut Context, name: &str, value: &UiValue) {
+        match (name, value) {
+            ("difficulty", &UiValue::Choice(choice)) => {
+                if let Some(&level) = Difficulty::ALL.get(choice) {
+                    let player = self.player;
+                    self.commands.push(Command::Difficulty { player, level });
+                }
+            }
+            (slider, &UiValue::Number(volume)) => {
+                let bus = VOLUMES.iter().find(|&&(of, ..)| of == slider);
+                if let Some(&(_, _, bus)) = bus {
+                    cx.set_volume(bus, volume, Duration::ZERO);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -443,6 +563,7 @@ impl Layer for Foxball {
         if let Some(assets) = &self.assets {
             build(cx.world_mut(), assets.fox);
         }
+        self.offer_difficulty(cx);
         if !cx.networked() {
             let player = BOT_PLAYER;
             self.commands.push(Command::Bot { player });
@@ -452,8 +573,10 @@ impl Layer for Foxball {
     /// Takes back which player this run steers, which a joiner's world, the host's, and a client's,
     /// the server's, don't say, and lets go of what may have been held as the world was taken; and,
     /// run alone, queues the bot again for a world without one, as the world as edited is, which
-    /// Stop brings back.
+    /// Stop brings back. A run started again from a snapshot picks up here, without attaching, so
+    /// its options take whether it has a bot here too.
     fn restored(&mut self, cx: &mut Context) {
+        self.offer_difficulty(cx);
         self.player = cx.player().unwrap_or(0);
         let player = self.player;
         self.commands.extend([
@@ -515,16 +638,22 @@ impl Layer for Foxball {
         // Nodes a file edited to drop them goes without.
         let _ = ui.set_visible(cx, "hint", !self.grab && !self.menu);
         let _ = ui.set_visible(cx, "hint_grabbed", self.grab && !self.menu);
+        if self.options {
+            write_volumes(cx, ui, &mut self.text);
+        }
         ui.draw(cx);
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         let open = self.menu;
-        // What the menu makes of the event while it's open: a button pressed, or back.
-        let (mut chosen, mut toggled) = (None, false);
+        // What the menu makes of the event while it's open: a button pressed, an option changed,
+        // or back, which goes back from the options to the menu's first page.
+        let (mut chosen, mut toggled, mut changed) = (None, false, None);
         if open && let Some(assets) = &self.assets {
             match assets.ui.event(cx, event) {
                 Some(UiEvent::Pressed(button)) => chosen = Some(button),
+                Some(UiEvent::Changed(name, value)) => changed = Some((name, value)),
+                Some(UiEvent::Back) if self.options => chosen = Some("back".into()),
                 Some(UiEvent::Back) => toggled = true,
                 Some(UiEvent::Focused(_)) | None => {}
             }
@@ -597,8 +726,13 @@ impl Layer for Foxball {
                 self.commands.push(Command::NewMatch { player });
                 toggled = true;
             }
+            Some("options") => self.show_options(cx, true),
+            Some("back") => self.show_options(cx, false),
             Some("quit") => cx.exit(),
             _ => {}
+        }
+        if let Some((name, value)) = changed {
+            self.change(cx, &name, &value);
         }
         if toggled {
             self.open_menu(cx, !open);
@@ -628,6 +762,7 @@ fn build(world: &mut World, fox: Model) {
         Match {
             scores: [0; 2],
             wins: [0; 2],
+            difficulty: Difficulty::default(),
         },
         Name("Match".to_owned()),
     ));
@@ -726,13 +861,19 @@ fn states() -> AnimationStates {
 }
 
 /// Applies `command` to `world`: to its player's fox, which way it walks, how fast it turns, a turn
-/// or a kick, as [`kick`] has it; a new match, as [`new_match`] has it; or the bot, as [`give_bot`]
-/// has it.
+/// or a kick, as [`kick`] has it; a new match, as [`new_match`] has it; the bot, as [`give_bot`]
+/// has it; or how well the bot plays, on the match, which [`play_bots`] reads.
 fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
     let player = match *command {
         Command::Kick { player } => return kick(world, player, sounds),
         Command::NewMatch { .. } => return new_match(world),
         Command::Bot { player } => return give_bot(world, player),
+        Command::Difficulty { level, .. } => {
+            if let Some(found) = world.query_mut::<&mut Match>().next() {
+                found.difficulty = level;
+            }
+            return;
+        }
         Command::Walk { player, .. }
         | Command::Spin { player, .. }
         | Command::Turn { player, .. } => player,
@@ -746,7 +887,10 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
                 fox.yaw = wrapped(fox.yaw - by);
                 at.rotation = Quat::from_rotation_y(fox.yaw);
             }
-            Command::Kick { .. } | Command::NewMatch { .. } | Command::Bot { .. } => {}
+            Command::Kick { .. }
+            | Command::NewMatch { .. }
+            | Command::Bot { .. }
+            | Command::Difficulty { .. } => {}
         }
     }
 }
@@ -795,7 +939,7 @@ fn reaches(from: Vec3, yaw: f32, ball: Vec3) -> bool {
 }
 
 /// Starts a match afresh, as a menu's New match chooses: no goals and no matches won for either
-/// player, and the ball and the foxes back at their starts.
+/// player, and the ball and the foxes back at their starts, the bot playing as well as it did.
 fn new_match(world: &mut World) {
     if let Some(found) = world.query_mut::<&mut Match>().next() {
         found.scores = [0; 2];
@@ -806,7 +950,7 @@ fn new_match(world: &mut World) {
 
 /// Has the game's bot play player `player`'s fox from then on, unless one does already: a [`Bot`]
 /// on its capsule, which sees the ball at its first tick, and a [`NavAgent`] as wide as the
-/// capsule, which runs as fast as [`BOT_SPEED`].
+/// capsule, which runs as fast as the match's difficulty says.
 fn give_bot(world: &mut World, player: u8) {
     let found = (world.query::<(Entity, &Player)>()).find(|(_, fox)| fox.index == player);
     let Some(fox) = found.map(|(fox, _)| fox) else {
@@ -815,8 +959,9 @@ fn give_bot(world: &mut World, player: u8) {
     if world.get::<Bot>(fox).is_some() {
         return;
     }
+    let level = world.query::<&Match>().next().map(|found| found.difficulty);
     let agent = NavAgent {
-        speed: BOT_SPEED,
+        speed: level.unwrap_or_default().speed(),
         radius: CAPSULE.1,
         stopping_distance: 0.15,
         ..NavAgent::default()
@@ -836,15 +981,15 @@ fn flat(v: Vec3) -> Vec3 {
     Vec3::new(v.x, 0.0, v.z)
 }
 
-/// Plays each fox a [`Bot`] is on: every [`BOT_REACTION`] ticks it sees where the ball and the
-/// foxes are, chooses where it aims, as [`aim`] says, and sets where its [`NavAgent`] heads, as
-/// [`bot_destination`] says, the agent steering its character there; at every tick it turns its
-/// fox, at up to [`BOT_TURN_SPEED`], toward the ball while it's near and ahead toward where it
-/// aims, or else the way the agent goes, or else the ball; and it kicks, as a player's kick does,
-/// gathering its player in `kicks` first, while the fox faces near where it aims and [`reaches`]
-/// the ball. It decides from the world alone, in `f32` arithmetic, libm's arctangent and
-/// comparisons, as peers and replays must agree. `foxes` is where it gathers each fox's player and
-/// place first.
+/// Plays each fox a [`Bot`] is on, as well as the match's [`Difficulty`] says: every reaction's
+/// ticks it sees where the ball and the foxes are, chooses where it aims, as [`aim`] says, and sets
+/// where its [`NavAgent`] heads, as [`bot_destination`] says, the agent steering its character
+/// there, at the difficulty's speed; at every tick it turns its fox, at up to [`BOT_TURN_SPEED`],
+/// toward the ball while it's near and ahead toward where it aims, or else the way the agent goes,
+/// or else the ball; and it kicks, as a player's kick does, gathering its player in `kicks` first,
+/// while the fox faces as near where it aims as the difficulty's aim says and [`reaches`] the ball.
+/// It decides from the world alone, in `f32` arithmetic, libm's arctangent and comparisons, as
+/// peers and replays must agree. `foxes` is where it gathers each fox's player and place first.
 fn play_bots(
     world: &mut World,
     sounds: Option<Sounds>,
@@ -855,6 +1000,8 @@ fn play_bots(
     let Some(ball) = ball.map(|(_, at)| at.translation) else {
         return;
     };
+    let level = world.query::<&Match>().next().map(|found| found.difficulty);
+    let level = level.unwrap_or_default();
     foxes.clear();
     let placed = world.query::<(&Player, &Transform)>();
     foxes.extend(placed.map(|(fox, at)| (fox.index, at.translation)));
@@ -870,10 +1017,11 @@ fn play_bots(
         let attack = flat(bot.aim - ball).normalize_or(Vec3::Z * toward);
         if bot.wait == 0 {
             agent.destination = Some(bot_destination(at, ball, attack));
-            bot.wait = BOT_REACTION - 1;
+            bot.wait = level.reaction() - 1;
         } else {
             bot.wait -= 1;
         }
+        agent.speed = level.speed();
         let to_ball = flat(ball - at);
         let near = to_ball.length() < BOT_CLOSE && to_ball.dot(attack) > 0.0;
         let way = if near || agent.velocity.length() < 0.5 {
@@ -889,7 +1037,7 @@ fn play_bots(
             }
         }
         let forward = Quat::from_rotation_y(fox.yaw) * Vec3::Z;
-        if fox.cooldown == 0 && forward.dot(attack) > BOT_AIM && reaches(at, fox.yaw, ball) {
+        if fox.cooldown == 0 && forward.dot(attack) > level.aim() && reaches(at, fox.yaw, ball) {
             kicks.push(fox.index);
         }
     }
@@ -1124,6 +1272,17 @@ fn follow(seen: Vec3, yaw: f32, pitch: f32) -> Viewpoint {
             fov: 1.1,
             near: 0.05,
         },
+    }
+}
+
+/// Has the UI `ui`'s options say each bus's volume, as the run has it, as a percentage, writing
+/// each text through `text`. A text the UI's file no longer names goes unset, as the scores do.
+fn write_volumes(cx: &mut Context, ui: GameUi, text: &mut String) {
+    for (_, said, bus) in VOLUMES {
+        text.clear();
+        let written = write!(text, "{:.0}%", cx.volume(bus) * 100.0);
+        written.expect("a string takes any text");
+        let _ = ui.set_text(cx, said, text);
     }
 }
 

@@ -484,9 +484,12 @@ fn tools() -> Value {
              `focus`, and its `nodes`, each after its parent: `name`, `kind`, `parent`, `rect`, \
              [x, y, width, height] from the view's top left in the canvas's units, 1,080 to its \
              height, `pixels`, the same in the view's pixels as a capture's PNG has them, \
-             `visible`, `text`, and a button's `disabled`, `focused` and `pressed`. Edit the \
-             file and it reloads, each node keeping what the game's code set of it. Press a \
-             button with `input`: the cursor at its pixels, then the left button down and up.",
+             `visible`, `text`, a slider's, a toggle's or a drop-down's `value`, as \
+             {\"number\": 0.5}, {\"on\": true} or {\"choice\": 1}, and a button's or a widget's \
+             `disabled`, `focused` and `pressed`. Edit the file and it reloads, each node \
+             keeping what the game's code set of it. Press a button with `input`: the cursor at \
+             its pixels, then the left button down and up; click a text field so and type into \
+             it with `text`, and scroll a list under the cursor with `scroll`.",
             json!({}),
             &[],
         ),

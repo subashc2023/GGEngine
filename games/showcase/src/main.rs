@@ -14,7 +14,10 @@
 //! which keys, a pad and the mouse move the focus over and press, a HUD along the top whose clock
 //! the layer sets each second, and panels in its corners saying what was pressed and what has the
 //! focus, each press reaching the world as a command (`menu.ron`, its UI `ui/menu.ui`, which
-//! reloads as it's saved); a
+//! reloads as it's saved); a UI's widgets, a slider of the volume whose label follows it, a
+//! toggle, a drop-down of difficulties, a text field for a name and a list of saves that scrolls
+//! and clips them, each change reaching the world as a command, which the panel's last line tells
+//! of (`widgets.ron`, its UI `ui/widgets.ui`); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); sounds
 //! played from where their entities are, bells to the left, the middle and the right in turn and a
@@ -87,8 +90,9 @@
 //! sends its agent to its stops in turn by its destination; and animation, navigation and physics
 //! step, so that each scene moves as it plays, in the editor from its Play, and in the reference
 //! player, which runs the game's package without its code, and so without the keys' walking and
-//! its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the plasma, the
-//! look, the state labels, the tether and the launches, which its code registers and runs.
+//! its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the widgets, the
+//! plasma, the look, the state labels, the tether and the launches, which its code registers and
+//! runs.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -108,7 +112,7 @@ use gg_engine::{
     Context, Curve, Ease, Entity, Error, Event, Font, GameUi, Joint3D, Key, Layer, Mesh, MeshDraw,
     MouseButton, Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, RigidBody3D,
     Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween,
-    UiEvent, World, step_animation, step_navigation, step_physics,
+    UiEvent, UiValue, World, step_animation, step_navigation, step_physics,
 };
 
 #[cfg(test)]
@@ -162,6 +166,9 @@ enum Command {
     Look { by: Vec2 },
     /// Records a press of the menu's button named `button`, or `back` for back, on each [`Menu`].
     Press { button: String },
+    /// Records a change of the widget named `widget` to what `value` says, or a press of a button
+    /// among the widgets, on each [`Widgets`].
+    Change { widget: String, value: String },
 }
 
 /// A sound of the showcase's, which a [`Chime`] rings.
@@ -232,6 +239,21 @@ struct Menu {
     presses: u32,
     pressed: String,
 }
+
+/// Has the showcase drive its widgets, `ui/widgets.ui`, while its entity is in the world: draws
+/// them on the view's canvas, the volume's label saying the slider's value, and has them take
+/// input, whose changes reach the world as commands, which record here what changed last:
+/// `widgets.ron`'s.
+#[derive(Clone, Debug, PartialEq, Component)]
+struct Widgets {
+    /// The changes of its widgets and the presses of its buttons, and the last, the widget's name
+    /// and what it changed to.
+    changes: u32,
+    changed: String,
+}
+
+/// The widgets' drop-down's options, as `ui/widgets.ui` names them.
+const DIFFICULTIES: [&str; 4] = ["EASY", "NORMAL", "HARD", "NIGHTMARE"];
 
 /// Has its entity drawn by the showcase's own shader, `shaders/plasma.slang`, once the world
 /// ticks: a unit square that its transform places, colored by waves drifting with the frame's time,
@@ -359,6 +381,8 @@ struct Assets {
     plasma: Shader<Corner, Waves>,
     /// The menu, `ui/menu.ui`, as [`Menu`] drives it.
     menu: GameUi,
+    /// The widgets, `ui/widgets.ui`, as [`Widgets`] drives them.
+    widgets: GameUi,
 }
 
 impl Assets {
@@ -379,6 +403,7 @@ impl Assets {
         let square = cx.add_mesh("plasma", &corners, &[0, 1, 2, 0, 2, 3]);
         let square = square.expect("the square is two whole triangles");
         let menu = cx.add_ui("menu", root.join("ui/menu.ui"))?;
+        let widgets = cx.add_ui("widgets", root.join("ui/widgets.ui"))?;
         Ok(Self {
             tones,
             music,
@@ -386,6 +411,7 @@ impl Assets {
             square,
             plasma,
             menu,
+            widgets,
         })
     }
 }
@@ -398,6 +424,7 @@ fn register(world: &mut World) {
         world.register::<Jukebox>()?;
         world.register::<Hud>()?;
         world.register::<Menu>()?;
+        world.register::<Widgets>()?;
         world.register::<Plasma>()?;
         world.register::<Look>()?;
         world.register::<StateLabel>()?;
@@ -612,8 +639,9 @@ impl Showcase {
 }
 
 /// Applies `command` to `world`: to each of its walkers, the entities with `walk.luau`'s `Walk`, its
-/// heading, with forward along -Z, or its jump; to each of its HUDs, a click; or to each of its
-/// looks, a turn, which turns its entity.
+/// heading, with forward along -Z, or its jump; to each of its HUDs, a click; to each of its menus,
+/// a press, and to each of its widgets, a change; or to each of its looks, a turn, which turns its
+/// entity.
 fn apply(world: &mut World, command: &Command) {
     let (field, value) = match *command {
         Command::Walk { heading } => (
@@ -631,6 +659,19 @@ fn apply(world: &mut World, command: &Command) {
             for menu in world.query_mut::<&mut Menu>() {
                 menu.presses = menu.presses.saturating_add(1);
                 menu.pressed.clone_from(button);
+            }
+            return;
+        }
+        Command::Change {
+            ref widget,
+            ref value,
+        } => {
+            for widgets in world.query_mut::<&mut Widgets>() {
+                widgets.changes = widgets.changes.saturating_add(1);
+                widgets.changed.clear();
+                widgets.changed.push_str(widget);
+                widgets.changed.push(' ');
+                widgets.changed.push_str(value);
             }
             return;
         }
@@ -736,11 +777,19 @@ impl Layer for Showcase {
         if let Some(hud) = cx.world().query::<&Hud>().next().copied() {
             draw_hud(cx, hud, font, &mut self.text);
         }
-        let ui = assets.menu;
+        let (ui, widgets_ui) = (assets.menu, assets.widgets);
         let menu = cx.world().query::<&Menu>().next().cloned();
         ui.set_input(cx, menu.is_some());
         if let Some(menu) = menu {
             drive_menu(cx, ui, &menu, &mut self.text);
+        }
+        // Read in place, its record written into the text that shows it, so that a frame copies
+        // none of the world's strings.
+        let widgets = cx.world().query::<&Widgets>().next();
+        let shown = widgets.map(|widgets| write_changed(widgets, &mut self.text));
+        widgets_ui.set_input(cx, shown.is_some());
+        if shown.is_some() {
+            drive_widgets(cx, widgets_ui, &mut self.text);
         }
     }
 
@@ -781,7 +830,24 @@ impl Layer for Showcase {
                 Some(UiEvent::Focused(_)) => {
                     cx.play_sound(tones[Tone::Pluck as usize], Place::Nowhere);
                 }
-                None => {}
+                Some(UiEvent::Changed(..)) | None => {}
+            }
+            // As the menu's: a change or a press reaches the world as a command.
+            let change = match assets.widgets.event(cx, event) {
+                Some(UiEvent::Changed(widget, value)) => Some((widget, said(&value))),
+                Some(UiEvent::Pressed(widget)) => {
+                    cx.play_sound(tones[Tone::Bell as usize], Place::Nowhere);
+                    Some((widget, "pressed".to_owned()))
+                }
+                Some(UiEvent::Focused(_)) => {
+                    cx.play_sound(tones[Tone::Pluck as usize], Place::Nowhere);
+                    None
+                }
+                Some(UiEvent::Back) | None => None,
+            };
+            if let Some((widget, value)) = change {
+                let widget = widget.to_string();
+                commands.push(Command::Change { widget, value });
             }
         }
         let looks = cx.world().query::<&Look>().next().is_some();
@@ -841,6 +907,53 @@ fn drive_menu(cx: &mut Context, ui: GameUi, menu: &Menu, text: &mut String) {
     }
     let _ = ui.set_text(cx, "focus", text);
     ui.draw(cx);
+}
+
+/// Draws the widgets' UI, `ui`, its last line `text`, as [`write_changed`] wrote it, and the
+/// volume's label the slider's value as a percentage, written through `text` after. A node the
+/// UI's file no longer names goes unset, as the menu's do.
+fn drive_widgets(cx: &mut Context, ui: GameUi, text: &mut String) {
+    let _ = ui.set_text(cx, "changed", text);
+    if let Ok(UiValue::Number(volume)) = ui.value(cx, "volume") {
+        text.clear();
+        let written = write!(text, "{:.0}%", volume * 100.0);
+        written.expect("a string takes any text");
+        let _ = ui.set_text(cx, "volume_value", text);
+    }
+    ui.draw(cx);
+}
+
+/// Writes what `widgets` says changed last into `text`, in capitals, a space for each `_`, and how
+/// many changes there have been, as the widgets' UI's last line says it.
+fn write_changed(widgets: &Widgets, text: &mut String) {
+    text.clear();
+    if widgets.changed.is_empty() {
+        text.push_str("NOTHING CHANGED YET");
+    } else {
+        let capitals = widgets.changed.chars().map(|c| match c {
+            '_' => ' ',
+            c => c.to_ascii_uppercase(),
+        });
+        text.extend(capitals);
+        let changes = if widgets.changes == 1 {
+            "CHANGE"
+        } else {
+            "CHANGES"
+        };
+        let written = write!(text, "  ·  {} {changes}", widgets.changes);
+        written.expect("a string takes any text");
+    }
+}
+
+/// What a widget's `value` is, as [`Widgets`] records it: a slider's to two places, a toggle's on
+/// or off, a drop-down's choice by its name, as [`DIFFICULTIES`] has them, and a text field's text.
+fn said(value: &UiValue) -> String {
+    match value {
+        UiValue::Number(number) => format!("{number:.2}"),
+        UiValue::On(on) => (if *on { "on" } else { "off" }).to_owned(),
+        UiValue::Choice(choice) => DIFFICULTIES.get(*choice).unwrap_or(&"?").to_string(),
+        UiValue::Text(text) => text.clone(),
+    }
 }
 
 /// Whether `at`, on the canvas from its middle, is on the HUD's button.
