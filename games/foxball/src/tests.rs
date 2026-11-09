@@ -729,6 +729,62 @@ fn the_options_set_the_bots_difficulty_and_the_volumes() {
     assert!(!game.menu, "closed");
 }
 
+/// The options' antialiasing shows what the view renders with as they open, the arena's TAA; the
+/// right arrow steps it to SMAA, then to none, each the view's at once, in place of the arena's
+/// environment's, as the engine hands the renderer it: queuing no command, which is all a
+/// recording or a peer takes of the game's layer, and leaving the world, its environment and its
+/// hash among it, as it was, through the ticks after too; and shown again, it's the run's choice.
+#[test]
+fn the_options_antialiasing_is_the_runs_own() {
+    let (mut cx, mut game) = attached(0x5eed);
+    let ui = game.assets.as_ref().expect("loaded").ui;
+    game.tick(cx.world_mut(), Tick { number: 0 });
+    let press = |game: &mut Foxball, cx: &mut Context, key| {
+        for pressed in [true, false] {
+            let event = Event::Key {
+                key,
+                pressed,
+                repeat: false,
+            };
+            let _ = game.event(cx, &event);
+        }
+    };
+    for key in [Key::Escape, Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+        press(&mut game, &mut cx, key);
+    }
+    assert!(game.options);
+    let shown = |cx: &mut Context| ui.value(cx, "antialiasing").ok();
+    assert_eq!(shown(&mut cx), Some(UiValue::Choice(0)), "the arena's");
+    assert_eq!(cx.antialiasing(), None);
+    for _ in 0..4 {
+        press(&mut game, &mut cx, Key::ArrowDown);
+    }
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("antialiasing"));
+    // What the world and a twin of it, taken before, are and become, the twin chosen nothing in.
+    let mut twin = cx.world().clone();
+    let environment = |world: &World| *world.query::<&Environment>().next().expect("the arena's");
+    let arena = environment(cx.world());
+    assert_eq!(arena.antialiasing, Antialiasing::Taa);
+    game.commands.clear();
+    press(&mut game, &mut cx, Key::ArrowRight);
+    assert_eq!(cx.antialiasing(), Some(Antialiasing::Smaa));
+    press(&mut game, &mut cx, Key::ArrowRight);
+    assert_eq!(cx.antialiasing(), Some(Antialiasing::None));
+    assert!(game.commands.is_empty(), "{:?}", game.commands);
+    assert_eq!(cx.world().hash(), twin.hash());
+    assert_eq!(environment(cx.world()), arena);
+    let mut other = Foxball::new();
+    for number in 1..64 {
+        game.tick(cx.world_mut(), Tick { number });
+        other.tick(&mut twin, Tick { number });
+        assert_eq!(cx.world().hash(), twin.hash(), "at tick {number}");
+    }
+    press(&mut game, &mut cx, Key::Escape);
+    press(&mut game, &mut cx, Key::Enter);
+    assert!(game.options, "in again");
+    assert_eq!(shown(&mut cx), Some(UiValue::Choice(2)), "the run's");
+}
+
 /// A world restored from a snapshot simulates as it did from there, through walks, turns, kicks,
 /// goals and the bot's play: the game keeps nothing of the match but in the world.
 #[test]

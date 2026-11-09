@@ -310,6 +310,9 @@ pub struct Context {
     /// says.
     cursor_grabbed: bool,
     clear_color: [f32; 4],
+    /// How a layer set the view to be antialiased, in place of the world's environment's, as
+    /// [`set_antialiasing`](Self::set_antialiasing) says.
+    antialiasing: Option<Antialiasing>,
     /// What a layer set the view to see from this frame, in place of the world's camera.
     viewpoint: Option<Viewpoint>,
     /// Where the world's camera saw from as the world was last drawn, if it has one, and its ID.
@@ -661,6 +664,7 @@ impl Context {
             input: Input::default(),
             cursor_grabbed: false,
             clear_color: [0.02, 0.02, 0.02, 1.0],
+            antialiasing: None,
             viewpoint: None,
             seen: None,
             seer: None,
@@ -863,6 +867,21 @@ impl Context {
     /// Sets the color each frame clears to, in linear RGBA.
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
+    }
+
+    /// How a layer set the game's view to be antialiased, in place of its world's environment's, if
+    /// one has, as [`set_antialiasing`](Self::set_antialiasing) says.
+    pub fn antialiasing(&self) -> Option<Antialiasing> {
+        self.antialiasing
+    }
+
+    /// Has the game's view antialiased as `antialiasing` says, in place of what its world's
+    /// [`Environment`] says, a world without one antialiased by it too, from the frame being made
+    /// on; or, for `None`, as the environment says again. It's the run's own, as a player's display
+    /// settings are, and holds for the run: no hash, scene, snapshot or recording holds it, so that
+    /// lockstep peers whose players choose differently, and a replay of either, go as they would.
+    pub fn set_antialiasing(&mut self, antialiasing: Option<Antialiasing>) {
+        self.antialiasing = antialiasing;
     }
 
     /// What a layer set the game's view to see the world from this frame, if one has.
@@ -3802,8 +3821,9 @@ impl Context {
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
     /// antialiasing, exposure and its adaptation, sky, ambient occlusion, fog, reflections and
-    /// camera's effects, or none, none, the default's and none, none, none, none, none and none, and
-    /// its lights, as the world was last drawn, and the time it was drawn at;
+    /// camera's effects, or none, none, the default's and none, none, none, none, none and none,
+    /// the antialiasing a layer set in place of its own, and its lights, as the world was last
+    /// drawn, and the time it was drawn at;
     /// its draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
@@ -3824,11 +3844,12 @@ impl Context {
     /// none reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
-        // A world without an environment isn't tonemapped or antialiased, and its light is exposed
-        // as the default environment's is.
+        // A world without an environment isn't tonemapped or antialiased, but as a layer sets, and
+        // its light is exposed as the default environment's is.
         frame.tonemapper = (self.environment).map_or(Tonemapper::None, |seen| seen.tonemapper);
-        frame.antialiasing =
-            (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing);
+        frame.antialiasing = self.antialiasing.unwrap_or_else(|| {
+            (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing)
+        });
         frame.exposure = self.environment.unwrap_or_default().light_scale();
         frame.adaptation = (self.environment)
             .and_then(|seen| seen.adaptation)
@@ -5053,9 +5074,8 @@ mod tests {
     use super::*;
     use crate::{Key, Projection, Transform, render_thread};
 
-    /// A frame of `cx`'s world, drawn and handed off with its view at 64 by 32: whether it's cut to
-    /// its viewpoint.
-    fn cut(cx: &mut Context) -> bool {
+    /// A frame of `cx`'s world, drawn and handed off with its view at 64 by 32.
+    fn handed_off(cx: &mut Context) -> Extracted {
         cx.draw_world(1.0, 0.0, 0);
         let mut frame = Extracted::default();
         let view = Viewport {
@@ -5063,7 +5083,35 @@ mod tests {
             size: [64, 32],
         };
         cx.extract(&mut frame, view);
-        frame.cut
+        frame
+    }
+
+    /// A frame of `cx`'s world, as [`handed_off`] has it: whether it's cut to its viewpoint.
+    fn cut(cx: &mut Context) -> bool {
+        handed_off(cx).cut
+    }
+
+    /// The view is antialiased as a layer sets, in place of its world's environment's, and of none
+    /// for a world without one, and as the environment says again once it's unset; the world, its
+    /// environment and its hash among it, stays as it was.
+    #[test]
+    fn a_layers_antialiasing_takes_the_environments_place() {
+        let antialiased = |cx: &mut Context| handed_off(cx).antialiasing;
+        let mut cx = Context::seeded(1);
+        assert_eq!(antialiased(&mut cx), Antialiasing::None, "no environment");
+        cx.set_antialiasing(Some(Antialiasing::Smaa));
+        assert_eq!(antialiased(&mut cx), Antialiasing::Smaa, "in place of none");
+        let environment = cx.world_mut().spawn(Environment::default());
+        let hash = cx.world().hash();
+        assert_eq!(antialiased(&mut cx), Antialiasing::Smaa, "in place of TAA");
+        cx.set_antialiasing(Some(Antialiasing::None));
+        assert_eq!(antialiased(&mut cx), Antialiasing::None);
+        assert_eq!(cx.antialiasing(), Some(Antialiasing::None));
+        let held = cx.world().get::<Environment>(environment).copied();
+        assert_eq!(held, Some(Environment::default()));
+        assert_eq!(cx.world().hash(), hash);
+        cx.set_antialiasing(None);
+        assert_eq!(antialiased(&mut cx), Antialiasing::Taa, "the environment's");
     }
 
     /// A camera at `x` along X, of perspective, primary or not.

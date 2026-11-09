@@ -45,7 +45,15 @@
         "e2fe1e4adf862c0d": (
             Environment: (
                 exposure: 13.7,
-                adaptation: None,
+                adaptation: Some((
+                    min: 0.0,
+                    max: 18.0,
+                    compensation: -0.5,
+                    speed_up: 3.0,
+                    speed_down: 1.0,
+                    low_percentile: 0.1,
+                    high_percentile: 0.9,
+                )),
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: Atmosphere((
@@ -84,13 +92,17 @@
                     sun: 0.4,
                     sharpness: 0.65,
                 )),
-                reflections: None,
+                reflections: Some((
+                    distance: 100.0,
+                    thickness: 0.25,
+                    roughness: 0.6,
+                )),
                 depth_of_field: None,
                 motion_blur: None,
                 lens: (
-                    vignette: 0.0,
-                    chromatic_aberration: 0.0,
-                    grain: 0.0,
+                    vignette: 0.4,
+                    chromatic_aberration: 0.25,
+                    grain: 0.02,
                 ),
             ),
             Name: ("Environment"),

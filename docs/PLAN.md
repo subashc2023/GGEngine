@@ -147,25 +147,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Exposure that adapts** (2026-11-09)
 - **SMAA** (2026-11-09)
 - **Depth of field and motion blur** (2026-11-09)
+- **Foxball and Sponza on the frame's finish** (2026-11-09)
+- **Phase 18, the frame's finish and a game's widgets** (2026-11-09)
 
 ## Now
 
-18. **The frame's finish and a game's widgets.** What a modern frame has beyond Phase 17's looks,
-    each a pass or a few on the render graph that a world's `Environment` turns on and sets, alike
-    in development runs and cooked ones: SMAA, antialiasing without a history, for games that
-    can't take TAA's softness or its ghosts; exposure that adapts to what the view sees, from a
-    histogram of its luminance, as eyes adapt between sunlight and shade; screen-space reflections,
-    traced through the view's depth and falling back to the sky's light where they miss, with the
-    sky's reflections hidden where ambient occlusion says they're hidden; and depth of field and
-    motion blur, from a focus and an aperture and from the view's motion, with a vignette,
-    chromatic aberration and film grain. And a game's UI's widgets beyond buttons: sliders,
-    toggles, drop-downs, text fields and lists that scroll, clipped to their rectangles, which take
-    the focus, keys, a pad and the mouse. *Done when* the showcase has a scene for each look and one
-    of the widgets, each look a GPU test's reference image with its time on the GPU measured, and
-    Foxball has an options menu of the widgets, setting its bot's difficulty, its volumes and its
-    antialiasing. Its milestones: SMAA; exposure that adapts; screen-space reflections; depth of
-    field and motion blur; a game's UI's widgets; and, once they're in, Foxball and the showcase on
-    them.
+The next phase is the user's to choose, as Open questions has it.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -191,7 +178,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 17 are done, as Done has it, but for what Deferred holds.
+Phases 11 to 18 are done, as Done has it, but for what Deferred holds.
 
 19. **World streaming**, to be decided, as Open questions has it: a world of cells, each a scene,
     loaded and unloaded around its viewers as they move, off the main thread, with a world far
@@ -255,6 +242,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | SMAA's edges predicated by the view's depth, or found on its colors rather than their luma: luma alone, which misses edges between colors of one luma | Edges between colors of a luma show aliased in a game's look |
 | SMAA's blending weights computed for the pixels with edges alone, as the reference's stencil test keeps its pass to them: the compute pass reads every pixel's edges and stops where there are none | The weights pass is measured to matter |
 | SMAA seeing the view as ACES's and AgX's own curves, PBR Neutral's toe and offset, and the grade's white balance, contrast, power and saturation show it: it sees the view by the grade's slope and PBR Neutral's shoulder, or the clamp's under no tonemapper, so a disk 16 times as bright as white on black shows its edge's coverage 0.19 off on average under ACES and 0.16 under AgX, against 0.10 under PBR Neutral, whose toe darkens what's dim, and 0.08 for an edge below the shoulder (0.26 without antialiasing); and white under a contrast of 1.2, after SMAA, 0.02 off at a pixel half covered, of 2, 0.39 | A bright edge under ACES or AgX, or one under a strong contrast, shows its steps |
+| A run's own display settings beyond antialiasing, as a game's graphics options set them apart from the world: `Context::set_antialiasing` alone takes an environment's field's place, so a game that lets its players turn reflections, ambient occlusion, motion blur or a lens off would write them into the world's environment, which parts lockstep peers whose players chose otherwise, and replays | A game's options set more of how its view renders than its antialiasing |
 | Each pass's time on the GPU for agents, in `engine.perf` or the tool API: the log has the frames', and Tracy each pass's | An agent tunes one pass |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
@@ -444,7 +432,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pausing a run alone as Foxball's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu and the bot can score meanwhile | A game alone needs a pause, or players lose goals to the menu |
 | Asking the other player before a session's New match: either player's menu starts the match afresh for both, scores and wins wiped, at the next tick | Players of a session start matches over each other's |
 | A bot for a session's empty player, as a server's player 1 before a client takes it: a session's foxes are all people's | A session wants a player it hasn't |
-| Foxball's options kept between runs, its volumes and its bot's difficulty: they're the run's, each run starting at full volume and Normal | Players expect their settings kept |
+| Foxball's options kept between runs, its volumes, its antialiasing and its bot's difficulty: they're the run's, each run starting at full volume, with the arena's TAA and at Normal | Players expect their settings kept |
 | Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
 | Foxball's foxes as instances of a prefab: each fox, its model, animator, state machine and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
 | Foxball's players' colors read from one place: each is written in ui/menu.ui's texts and, brightened, in arena.ron's emitter at its scorer's goal mouth | The players' colors change, or a game has more than two players |
@@ -729,4 +717,4 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
   the built-in coding agent, v1's headline, in the editor, modeled on the pi coding agent: it edits
   a project's files and works on the running game through the tool API, as Claude Code does now;
   world streaming once a game's world outgrows a scene, since how its cells stay in step across
-  peers and a server is a design of its own. Decide before Phase 18 ends.
+  peers and a server is a design of its own. Decide before the next phase starts.

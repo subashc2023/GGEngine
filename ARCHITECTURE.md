@@ -2245,6 +2245,13 @@ and a projection, through `Context::set_viewpoint`, as the engine's camera contr
 it itself or with one of them. A viewpoint isn't in the world: it moves every frame, by input, where
 the world changes only at ticks, so no hash, scene or recording holds it.
 
+A layer sets how the view is antialiased in place of its environment's, through
+`Context::set_antialiasing`, as Foxball's options do, a world without an environment antialiased by
+it too, until it's unset. It's the run's own, as the buses' volumes are, and for the same reason:
+the environment is the world's, which the hash reads, so a player's choice written into it would
+part lockstep peers whose players chose otherwise, and their replays and recordings with them. No
+hash, scene, snapshot or recording holds it.
+
 2D games draw sprites, which are draws like any other rather than a renderer of their own:
 `Context::draw_sprite` draws the engine's quad mesh with its sprite shader, whose parameters pick a
 rectangle of a texture, so that a sprite sheet's frames and an atlas's images draw from one texture.

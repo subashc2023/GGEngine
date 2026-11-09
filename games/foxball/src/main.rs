@@ -11,21 +11,23 @@
 //! Escape with the cursor free, or a pad's Start, opens the menu, `ui/menu.ui`, over the match,
 //! which goes on meanwhile, the run's fox standing: Resume, New match, Options and Quit, its
 //! options choosing how well the bot plays, a command each player's runs and replays apply as
-//! they do New match, and the volumes of the main, music and sound buses, this run's own. The
-//! scores and the keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
+//! they do New match, and the volumes of the main, music and sound buses and how the view is
+//! antialiased, by TAA, SMAA or neither, this run's own, which no world holds. The scores and the
+//! keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
 //! CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest
 //! under CC BY 4.0, as its README there says), skinned, each played by a state machine, Survey
 //! standing and Walk blended with Run by how fast it goes, characters that rapier3d's controller
 //! walks, which push the ball as they walk into it, late in an afternoon, under a sky made from its
-//! low sun and in a haze that it lights; the ball and the arena are 3D physics, the arena's walls,
-//! goals and navmesh's volume its scene file, `scenes/arena.ron`, which a development build applies
-//! as it's saved, each wall, a goal's pocket's too, an instance of one prefab, `prefabs/wall.prefab`,
-//! placed and sized by its own transform. Each run's view follows its own fox, a little above and
-//! behind it, the mouse looking up and down too. A kick throws a puff of dust from the ball, a goal
-//! a fountain in its scorer's color from the goal's mouth, and a running fox kicks up dust behind
-//! it: emitters of the world, which the game bursts and sets at its ticks. Its sounds,
-//! `sounds/*.wav`, play from where they happen, heard by their direction and distance from the
-//! view: a kick from the ball, a goal from where it went in, and a match won.
+//! low sun and in a haze that it lights, the view's exposure adapting as it turns toward the sun
+//! and away, within a stop either way, through a light vignette; the ball and the arena are 3D
+//! physics, the arena's walls, goals and navmesh's volume its scene file, `scenes/arena.ron`, which
+//! a development build applies as it's saved, each wall, a goal's pocket's too, an instance of one
+//! prefab, `prefabs/wall.prefab`, placed and sized by its own transform. Each run's view follows
+//! its own fox, a little above and behind it, the mouse looking up and down too. A kick throws a
+//! puff of dust from the ball, a goal a fountain in its scorer's color from the goal's mouth, and a
+//! running fox kicks up dust behind it: emitters of the world, which the game bursts and sets at
+//! its ticks. Its sounds, `sounds/*.wav`, play from where they happen, heard by their direction and
+//! distance from the view: a kick from the ball, a goal from where it went in, and a match won.
 
 // A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
 // records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
@@ -41,13 +43,13 @@ use std::time::Duration;
 use gg_engine::math::libm::{atan2f, expf};
 use gg_engine::math::{Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, AnimationParam, AnimationState, AnimationStates, Animator, App, Binding, BlendPoint,
-    Bus, CapsuleCollider3D, Change, CharacterController3D, Commands, Component, Context,
-    EmitterShape, Entity, Error, Event, GameUi, Key, Layer, Model, MouseButton, Name, NavAgent,
-    Owner, PadButton, ParamCondition, ParamTest, ParamValue, Parent, ParticleBlend,
-    ParticleEmitter, Place, Play, Playback, Projection, Reflect, RigidBody3D, Sound, Source,
-    StateMotion, StateTransition, Stick, Tick, Toward, Transform, UiEvent, UiValue, Viewpoint,
-    World, step_animation, step_navigation, step_physics,
+    Actions, AnimationParam, AnimationState, AnimationStates, Animator, Antialiasing, App, Binding,
+    BlendPoint, Bus, CapsuleCollider3D, Change, CharacterController3D, Commands, Component,
+    Context, EmitterShape, Entity, Environment, Error, Event, GameUi, Key, Layer, Model,
+    MouseButton, Name, NavAgent, Owner, PadButton, ParamCondition, ParamTest, ParamValue, Parent,
+    ParticleBlend, ParticleEmitter, Place, Play, Playback, Projection, Reflect, RigidBody3D, Sound,
+    Source, StateMotion, StateTransition, Stick, Tick, Toward, Transform, UiEvent, UiValue,
+    Viewpoint, World, step_animation, step_navigation, step_physics,
 };
 
 #[cfg(test)]
@@ -243,6 +245,10 @@ const VOLUMES: [(&str, &str, Bus); 3] = [
     ("music_volume", "music_volume_value", Bus::Music),
     ("sound_volume", "sound_volume_value", Bus::Sounds),
 ];
+
+/// How the view is antialiased by each choice of `ui/menu.ui`'s options' drop-down of it, in its
+/// order: TAA, SMAA and none.
+const ANTIALIASING: [Antialiasing; 3] = [Antialiasing::Taa, Antialiasing::Smaa, Antialiasing::None];
 
 /// A player's fox, the character its capsule is: which player steers it, which way the keys or a
 /// stick walk it, how fast it turns, the way it faces, and the ticks until its next kick.
@@ -483,8 +489,9 @@ impl Foxball {
 
     /// Shows the menu's options in place of its first page, or its first page again, as `shown`
     /// says, the focus on the bot's difficulty or on Options: the options taking what the bot plays
-    /// at, as the world has it, and each bus's volume, as the run has it. A node a file edited to
-    /// drop it goes without, as the scores do.
+    /// at, as the world has it, each bus's volume, as the run has it, and how the view is
+    /// antialiased, as the run chose, or else as the world's environment says. A node a file edited
+    /// to drop it goes without, as the scores do.
     fn show_options(&mut self, cx: &mut Context, shown: bool) {
         let Some(assets) = &self.assets else {
             return;
@@ -502,6 +509,12 @@ impl Foxball {
                 let volume = UiValue::Number(cx.volume(bus));
                 let _ = ui.set_value(cx, slider, volume);
             }
+            // A world without an environment isn't antialiased.
+            let seen = cx.world().query::<&Environment>().next();
+            let seen = seen.map_or(Antialiasing::None, |seen| seen.antialiasing);
+            let antialiasing = cx.antialiasing().unwrap_or(seen);
+            let choice = ANTIALIASING.iter().position(|&of| of == antialiasing);
+            let _ = ui.set_value(cx, "antialiasing", UiValue::Choice(choice.unwrap_or(0)));
         }
         let _ = ui.set_visible(cx, "menu", !shown);
         let _ = ui.set_visible(cx, "settings", shown);
@@ -522,13 +535,20 @@ impl Foxball {
 
     /// What the menu's options do as widget `name` changes to `value`: the bot's difficulty queues
     /// its command, which the next tick applies, as New match's does; a volume sets its bus's, at
-    /// once, this run's own.
+    /// once, this run's own; and the antialiasing sets the view's, in place of the world's
+    /// environment's, from the next frame, this run's own too, so that a peer's player chooses
+    /// their own, which no tick, hash or recording sees.
     fn change(&mut self, cx: &mut Context, name: &str, value: &UiValue) {
         match (name, value) {
             ("difficulty", &UiValue::Choice(choice)) => {
                 if let Some(&level) = Difficulty::ALL.get(choice) {
                     let player = self.player;
                     self.commands.push(Command::Difficulty { player, level });
+                }
+            }
+            ("antialiasing", &UiValue::Choice(choice)) => {
+                if let Some(&antialiasing) = ANTIALIASING.get(choice) {
+                    cx.set_antialiasing(Some(antialiasing));
                 }
             }
             (slider, &UiValue::Number(volume)) => {

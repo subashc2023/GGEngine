@@ -317,6 +317,35 @@
                                 ),
                             ],
                         ),
+                        Row(
+                            width: Fixed(700.0),
+                            children: [
+                                Text(
+                                    name: "antialiasing_label",
+                                    text: "ANTIALIASING",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.6, 0.65, 0.75, 1.0),
+                                ),
+                                Stack(
+                                    width: Fill(1.0),
+                                ),
+                                Dropdown(
+                                    name: "antialiasing",
+                                    options: ["TAA", "SMAA", "OFF"],
+                                    choice: 0,
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    width: Fixed(320.0),
+                                    height: Fixed(64.0),
+                                    radius: 14.0,
+                                    accent: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                Stack(
+                                    width: Fixed(110.0),
+                                ),
+                            ],
+                        ),
                         Stack(
                             height: Fixed(12.0),
                         ),
@@ -341,7 +370,7 @@
                         ),
                         Text(
                             name: "settings_hint",
-                            text: "UP, DOWN: CHOOSE  ·  LEFT, RIGHT: SET  ·  ENTER: OPEN THE BOT'S  ·  ESC: BACK",
+                            text: "UP, DOWN: CHOOSE  ·  LEFT, RIGHT: SET  ·  ENTER: OPEN A LIST  ·  ESC: BACK",
                             size: 22.0,
                             color: (0.45, 0.5, 0.62, 1.0),
                         ),

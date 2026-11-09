@@ -36,7 +36,15 @@
         "1c2d3e4f5a6b7c8d": (
             Environment: (
                 exposure: 14.0,
-                adaptation: None,
+                adaptation: Some((
+                    min: 13.0,
+                    max: 15.0,
+                    compensation: 1.4,
+                    speed_up: 3.0,
+                    speed_down: 1.0,
+                    low_percentile: 0.1,
+                    high_percentile: 0.9,
+                )),
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
                 sky: Atmosphere((
@@ -79,7 +87,7 @@
                 depth_of_field: None,
                 motion_blur: None,
                 lens: (
-                    vignette: 0.0,
+                    vignette: 0.4,
                     chromatic_aberration: 0.0,
                     grain: 0.0,
                 ),
