@@ -81,6 +81,7 @@
                     radius: 0.5,
                     strength: 1.0,
                 )),
+                fog: None,
             ),
             Name: ("Environment"),
         ),

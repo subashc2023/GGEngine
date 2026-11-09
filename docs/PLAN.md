@@ -138,6 +138,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 16, gameplay systems** (2026-11-08)
 - **Bloom and color grading** (2026-11-08)
 - **Ambient occlusion** (2026-11-08)
+- **Height fog** (2026-11-09)
 
 ## Now
 
@@ -321,6 +322,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows, and the depth ambient occlusion takes of it, are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |
 | Shadows that soften with the distance from their casters, as PCSS's, and contact shadows: every shadow's edge is six texels of its cascade | A game's look needs them |
 | Shadows from what blends, as glass's colored ones: what blends casts none | A game's transparent objects need them |
+| Volumetric fog, its light gathered in froxels, a grid of the view's frustum by slices of its depth, which takes the shadows, so that the sun's light falls through the fog in shafts, and every light's light, point and spot lights' too: height fog takes no shadows, so the sun lights all of it, which `Fog::sun` turns down by hand where walls would shade much of it, and takes the sun's light and the sky's alone | A game needs light shafts, fog in shadow, or fog lit by its lamps |
+| Fog that varies by volume, in boxes and spheres a scene places, as local fog volumes, and fog that drifts with noise or wind: one height fog fills the world, alike at every point of a height | A game needs a patch of mist, a smoky room, or fog that moves |
+| Games' shaders that blend fogging themselves through the engine, as by a module of the engine's they include, rather than by copying `shaders/fog.slang`'s formula, reading the fog in the frame's data: one that doesn't draws unfogged in fog | A game's own shaders that blend draw in fog |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |

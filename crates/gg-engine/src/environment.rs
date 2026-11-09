@@ -3,7 +3,7 @@
 //! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::{AmbientOcclusion, Antialiasing, Grade, Sky, Texture, Tonemapper};
+use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Sky, Texture, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, Entity, EntityId, World};
@@ -65,6 +65,10 @@ pub struct Environment {
     /// Under a perspective with a sky alone, as without one there's no such light.
     #[reflect(default = Some(AmbientOcclusion::default()))]
     pub ambient_occlusion: Option<AmbientOcclusion>,
+    /// The height fog the view is in, densest low down and thinning with height, lit by the sky
+    /// from all around, or without one by a luminance of its own, and by the sun, the brightest
+    /// directional light, as [`Fog`] says: `None`, the default, for none.
+    pub fog: Option<Fog>,
 }
 
 impl Default for Environment {
@@ -78,6 +82,7 @@ impl Default for Environment {
             bloom: 0.04,
             grade: Grade::IDENTITY,
             ambient_occlusion: Some(AmbientOcclusion::default()),
+            fog: None,
         }
     }
 }
@@ -149,6 +154,39 @@ mod tests {
         // to about 0.8 on a sunny day's exposure.
         let white = 100_000.0 / std::f32::consts::PI * at(15.0).light_scale();
         assert!((0.8..0.82).contains(&white), "{white}");
+    }
+
+    /// Fog, none by default, reflects whole: its description's default is the default fog, which an
+    /// environment's fog switched on takes, and an environment in fog comes back from its value as
+    /// it was, every field of its fog's among it.
+    #[test]
+    fn fog_reflects_whole() {
+        use gg_core::math::Vec3;
+
+        use crate::reflect::{Meta, Reflect, Types};
+
+        let mut types = Types::default();
+        let fog = Fog::describe(&mut types).expect("described");
+        let default = (types.default_value(&fog, &Meta::default())).expect("a default");
+        assert_eq!(Fog::from_value(&default).expect("made"), Fog::default());
+        let foggy = Environment {
+            fog: Some(Fog {
+                density: 0.3,
+                falloff: 0.9,
+                height: 1.5,
+                start: 2.0,
+                opacity: 0.8,
+                color: Vec3::new(0.9, 0.95, 1.0),
+                luminance: 500.0,
+                sun: 0.4,
+                sharpness: 0.7,
+            }),
+            ..Environment::default()
+        };
+        let made = Environment::from_value(&foggy.to_value());
+        assert_eq!(made.expect("made"), foggy);
+        let clear = Environment::from_value(&Environment::default().to_value());
+        assert_eq!(clear.expect("made").fog, None);
     }
 
     /// Of several environments the view renders with the one of the lowest ID, which a tie keeps

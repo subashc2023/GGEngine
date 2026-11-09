@@ -1677,9 +1677,9 @@ lights, how many and where; the address of the table of models' materials; where
 from, the camera's position, or for an orthographic projection, which sees along one way, the way
 back toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
-through the bindless set's sampler that compares; the clusters the lights are binned into; and the
-view's ambient occlusion. Fields are added at its end, so that games' shaders that read the fields
-before them keep to the contract.
+through the bindless set's sampler that compares; the clusters the lights are binned into; the
+view's ambient occlusion; and the fog the view is in. Fields are added at its end, so that games'
+shaders that read the fields before them keep to the contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1790,6 +1790,36 @@ texels times the sine of the light's angle to it, so that a surface doesn't shad
 filters six by six of the map's texels' comparisons, in nine samples of four, by a kernel that falls
 from the point outward, so that a shadow's edge moves smoothly. A frame whose lights cast no shadows
 makes no shadow maps and draws no shadows.
+
+An environment's fog, none by default, is height fog, as Unreal's exponential height fog is: a
+medium filling the world, whose density, its extinction, the share of light it takes out over a
+unit, is its density at its height, thinning exponentially above it by its falloff and thickening
+as fast below. Along the way from the eye to what the view shows, past the fog's start, the
+integral of that density, its optical depth, is in closed form, from the lower of the way's ends,
+where the fog's densest, so that it stays finite however far below the eye the way falls; toward
+the sky, infinitely far, a way that rises takes a finite depth of fog, and one that doesn't takes
+all of the light. The fog lets through e to the minus that depth of the light from behind it, never
+less than its opacity leaves, and scatters toward the eye, by as much as it takes out, its color of
+the light that reaches it: from all around, the sky's diffuse light the way the eye looks, or in a
+world without a sky a luminance of its own, in candela per square meter; and the sun's, the
+brightest directional light's, by Henyey-Greenstein's phase function, normalized, in a lobe round
+the way toward the sun as sharp as its sharpness says, times how much of the sun's light it says
+reaches it, as it takes no shadows. That's light, exposed as light is, so that the fog suits any
+exposure, and any sky that fills the sky's diffuse light. A compute pass of its own fogs what's
+opaque, the sky and the clear color among it, from the view's depth, once the view has drawn it: of
+the visibility buffer, after its shading and the pass that draws the rest that's opaque, and
+without one after the passes that draw, so that both fog alike; then what blends draws over that,
+in a pass of its own, each fragment fogging itself as it's drawn, by the frame's data, so that what
+it covers of what's behind it gives way to the fog in front of it, where a pass over the colors
+alone would fog what blends as though it were as far away as what's behind it. The engine's
+shaders that blend fog themselves: models' materials that blend, a fragment at a time; and what's
+drawn on the engine's quad, at its corners, between which the fog changes too little to tell for
+quads small beside the fog's scale, so that a swarm of sprites out of fog pays the check a corner
+rather than a fragment: particles, which are unlit but fade into the fog by their alpha, one that
+adds its light adding less, sprites, circles and text. Lines and grids, which are drawn to see by,
+and the canvas aren't fogged. A game's shader that blends draws unfogged unless it fogs itself by
+the fog in the frame's data, as `shaders/fog.slang` does; one that's opaque is fogged by the pass.
+A view without fog, or in fog of no density, draws as it does without, through neither pass.
 
 Each frame's GPU work is a render graph, gg-gpu's `Graph`: its passes, in the order the renderer
 adds them, each saying how it uses the images it touches, drawing into them, writing them from
@@ -2247,7 +2277,8 @@ falls within 2 by 2 texels of the level whose texels are as wide, and an instanc
 nearest point is farther than the farthest of those is hidden. The
 view's second pass draws what isn't, over the first's, so that what comes into view draws in the
 frame it does, and then what blends and the canvas, from the frame's arrays on the CPU's levels,
-once for each stretch of draws in a row at one level, keeping their order. The second pass finds
+once for each stretch of draws in a row at one level, keeping their order: in fog, what blends and
+the canvas draw in the pass after the fog's instead, as above. The second pass finds
 again whether each instance is unhidden, for the next frame's first, a word of a buffer of the
 graph's own that lasts from frame to frame, by where the instance is gathered: a frame in which
 instances before one came or went takes another's word for it, which draws in its first pass what
@@ -2297,7 +2328,8 @@ too; and so interpolates what the draw's fragments took, picking the textures' l
 of their coordinates, and shades as they would, by the code both share. The view's pass after it
 draws the sky behind everything, then the culled runs drawn otherwise, as games' opaque shaders and
 models without meshlets, or whose frame planned no room for them, as their shaders shade them, then
-what blends and the canvas, against the buffer's depth. The depth pyramid is the first pass's depth,
+what blends and the canvas, against the buffer's depth, or in fog, after the fog's pass, in the pass
+of their own that follows it. The depth pyramid is the first pass's depth,
 of the buffer's draws alone. `Settings::visibility_buffer` off has them shade as they draw instead,
 for tests and measurements of each way.
 
@@ -2333,7 +2365,8 @@ as its shadows are drawn but neither clamped nor set back, the masked model shad
 what it draws is, and the occlusion takes the nearer of the two depths at each pixel. Without one,
 the view's first and second passes draw that depth alone of every culled run, the depth pyramid
 built from the first's, and the view then draws all of it again, shaded, in one pass that clears
-its depth, rather than over the depth alone: a game's opaque shader may discard, which its depth
+its depth, in fog all but what blends, which draws after the fog's pass, rather than over the depth
+alone: a game's opaque shader may discard, which its depth
 alone doesn't, and two pipelines aren't bound to place a vertex alike. So what's drawn forward,
 as every model of a development run is, has its opaque vertices drawn twice. A frame without a
 sky, or under an orthographic projection, or whose environment has none, or a radius or a strength

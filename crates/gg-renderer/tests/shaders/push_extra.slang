@@ -17,7 +17,7 @@ struct Frame {
     float4 tint;
     float4 shade;
     float4 glow;
-    float4 haze[19];
+    float4 haze[29];
 };
 
 struct Push {

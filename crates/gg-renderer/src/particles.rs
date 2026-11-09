@@ -562,6 +562,9 @@ struct DrawPush {
     unused_right: f32,
     up: Vec3,
     unused_up: f32,
+    /// The address of the frame's data, a [`FrameData`](crate::mesh::FrameData), whose fog the
+    /// particles are fogged by.
+    frame: u64,
 }
 
 /// `Look` in `shaders/particle.slang`, field for field.
@@ -902,13 +905,15 @@ pub(crate) struct ParticleDraws<'a> {
 impl ParticleDraws<'_> {
     /// Draws the frame's particles of `index` among its draws', every slot of their ring an
     /// instance of the quad, whose indices are `quad`, as `clip_from_world` takes the world to clip
-    /// space, if they have a ring. Returns what it drew.
+    /// space, if they have a ring, fogged by the fog of the frame's data at the address `frame`.
+    /// Returns what it drew.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
         quad: &GpuBuffer,
         index: usize,
         clip_from_world: Mat4,
+        frame: u64,
     ) -> DrawCounts {
         let Ok(at) = (self.planned).binary_search_by_key(&index, |planned| planned.index) else {
             return DrawCounts::default();
@@ -924,6 +929,7 @@ impl ParticleDraws<'_> {
             unused_right: 0.0,
             up: self.up,
             unused_up: 0.0,
+            frame,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.draw_indexed(quad, 0, 6, 0, slots);

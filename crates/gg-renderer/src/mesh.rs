@@ -1845,13 +1845,15 @@ impl MeshPass {
                 .chain((0..self.scene.runs().len()).map(Drawn::Scene))
                 .chain(frame_runs(scene_at..draws.runs.len()))
         };
-        let (culled, rest) = match runs {
-            Runs::Culled(plan, slot) => (Some((plan, slot)), false),
-            Runs::CulledThenRest(plan, slot) => (Some((plan, slot)), true),
-            Runs::All => (None, true),
+        let (culled, culled_drawn, rest) = match runs {
+            Runs::Culled(plan, slot) => (Some((plan, slot)), true, false),
+            Runs::CulledThenRest(plan, slot) => (Some((plan, slot)), true, true),
+            // The culled runs aren't drawn, so their slot is never read.
+            Runs::Rest(plan) => (Some((plan, FIRST)), false, true),
+            Runs::All => (None, false, true),
         };
         // The culled runs, then the rest, which don't hide them.
-        let culled_order = culled
+        let culled_order = (culled.filter(|_| culled_drawn))
             .into_iter()
             .flat_map(|_| order().map(|run| (run, true)));
         let rest_order = rest.then(order).into_iter().flatten();
@@ -1892,7 +1894,7 @@ impl MeshPass {
             if let Some(index) = run.and_then(|run| run.particles) {
                 if let (Way::Shaded { .. }, Some(particles)) = (way, particles) {
                     pass.begin_label(c"particles");
-                    drawn += particles.draw(pass, &mesh.indices, index, view_projection);
+                    drawn += particles.draw(pass, &mesh.indices, index, view_projection, frame);
                     pass.end_label();
                     // Its pipeline is bound and its faces are set in place of the runs'.
                     (bound, faces) = (None, None);
@@ -2017,6 +2019,9 @@ pub(crate) enum Runs<'p> {
     /// What the culling's view in the slot given kept of the runs it culled, then the rest: the
     /// game's view's second pass.
     CulledThenRest(&'p CullPlan, usize),
+    /// The runs the culling doesn't cull alone, what blends: the game's view's pass after its fog,
+    /// which fogs what the passes before it drew.
+    Rest(&'p CullPlan),
     /// Every run, on the CPU's levels: the canvas's, or a view's whose frame culls none.
     All,
 }
@@ -2245,6 +2250,8 @@ pub(crate) struct FrameData {
     /// as for every pass but the view's shading.
     pub(crate) ambient_occlusion: u32,
     pub(crate) unused: u32,
+    /// The height fog the view is in, as [`FogData`](crate::fog::FogData) has it.
+    pub(crate) fog: crate::fog::FogData,
 }
 
 #[cfg(test)]

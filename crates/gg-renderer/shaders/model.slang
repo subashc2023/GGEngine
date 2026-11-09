@@ -12,12 +12,16 @@
 // loses early depth testing on some GPUs; its shadows are cut out as it is, by `shadow_main`,
 // where those of an opaque material, drawn without a fragment shader, are whole.
 //
+// What blends fogs itself by the frame's fog, as fog.slang says, as it draws over what the fog's
+// pass fogged, which fogs what's opaque.
+//
 // The meshlets a view keeps of their meshes draw into the visibility buffer too, which the view's
 // shading then shades a pixel at a time (visibility.slang): each fragment the draw and the meshlet
 // and triangle it shows, for the shading to find again, and its instance's ID, cut out as
 // `fragment_main` cuts it out.
 
 #include "shading.slang"
+#include "fog.slang"
 
 struct Params {
     // The material's index in the frame's table.
@@ -199,6 +203,11 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     out.color = lit(frame, material, input.world, input.normal, input.tangent, shows_front, color,
                     surface, mapped, occlusion, emission);
     out.motion = float4(input.moved, 0.0);
+#if !defined(OPAQUE) && !defined(MASKED)
+    // What blends fogs itself, over what the fog's pass fogged behind it; what's opaque, the fog's
+    // pass fogs.
+    out.color = fogged(fog_at(frame, input.world), out.color);
+#endif
     return out;
 }
 

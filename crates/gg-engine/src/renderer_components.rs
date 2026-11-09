@@ -1,5 +1,5 @@
-//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing, grade and
-//! ambient occlusion an environment holds, which it does too, and the sampler a sprite holds, which
+//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing, grade, ambient
+//! occlusion and fog an environment holds, which it does too, and the sampler a sprite holds, which
 //! `gg-gpu` does, described to reflection here, since neither crate can derive it.
 
 use std::fmt::Write as _;
@@ -7,7 +7,8 @@ use std::fmt::Write as _;
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
 use gg_renderer::{
-    AmbientOcclusion, Antialiasing, Circle, Grade, MeshDraw, Sampler, Sprite, Texture, Tonemapper,
+    AmbientOcclusion, Antialiasing, Circle, Fog, Grade, MeshDraw, Sampler, Sprite, Texture,
+    Tonemapper,
 };
 
 use crate::reflect::{
@@ -316,6 +317,211 @@ impl Reflect for Circle {
 
 /// A circle's fields, in the order its description gives them.
 const CIRCLE_FIELDS: [&str; 3] = ["color", "thickness", "fade"];
+
+/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
+/// it's described. Its fields' defaults are the default fog's, its amounts no less than 0, and its
+/// opacity and its sharpness within what [`Fog`] takes.
+impl Reflect for Fog {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let field =
+            |name: &'static str, ty, show, bounds: [Option<f64>; 2], default, doc: &'static str| {
+                Field {
+                    name: name.into(),
+                    ty,
+                    meta: Meta {
+                        min: bounds[0].map(Bound::Float),
+                        max: bounds[1].map(Bound::Float),
+                        show,
+                        doc: doc.into(),
+                    },
+                    default: Some(default),
+                }
+            };
+        let base = Fog::default();
+        let doc = "Height fog: densest low down and thinning exponentially with height, lit by the \
+                   sky from all around, or by a luminance of its own without one, and by the sun.";
+        let (amount, unbounded) = ([Some(0.0), None], [None, None]);
+        types.add::<Self>("Fog".into(), doc.into(), |_| {
+            let fields = vec![
+                field(
+                    "density",
+                    Type::F32,
+                    Show::Plain,
+                    amount,
+                    base.density.to_value(),
+                    "The share of the light it takes out over a unit of the world at its height, \
+                     its extinction there; 0 for no fog.",
+                ),
+                field(
+                    "falloff",
+                    Type::F32,
+                    Show::Plain,
+                    amount,
+                    base.falloff.to_value(),
+                    "How fast it thins with height, per unit: halving every 0.69 / falloff units \
+                     up, and doubling as far down; 0 fills the world alike at every height.",
+                ),
+                field(
+                    "height",
+                    Type::F32,
+                    Show::Plain,
+                    unbounded,
+                    base.height.to_value(),
+                    "The height, along +Y, at which its density is its density.",
+                ),
+                field(
+                    "start",
+                    Type::F32,
+                    Show::Plain,
+                    amount,
+                    base.start.to_value(),
+                    "How far from the eye it starts: what's nearer shows unfogged.",
+                ),
+                field(
+                    "opacity",
+                    Type::F32,
+                    Show::Plain,
+                    [Some(0.0), Some(1.0)],
+                    base.opacity.to_value(),
+                    "The most of the light from behind it it takes out: 1 hides what's far enough \
+                     away, the sky among it; less lets that much show through, however far.",
+                ),
+                field(
+                    "color",
+                    Type::Vec3,
+                    Show::Color,
+                    amount,
+                    base.color.to_value(),
+                    "The share of the light reaching it that it scatters toward the eye, in linear \
+                     RGB: white as water's droplets.",
+                ),
+                field(
+                    "luminance",
+                    Type::F32,
+                    Show::Plain,
+                    amount,
+                    base.luminance.to_value(),
+                    "The luminance, in candela per square meter, of the light from all around that \
+                     reaches it in a world without a sky, before the exposure.",
+                ),
+                field(
+                    "sun",
+                    Type::F32,
+                    Show::Plain,
+                    amount,
+                    base.sun.to_value(),
+                    "How much of the sun's light reaches it: 1 as out in the open, less where \
+                     shadows it doesn't take would keep much of it out.",
+                ),
+                field(
+                    "sharpness",
+                    Type::F32,
+                    Show::Plain,
+                    [Some(0.0), Some(0.99)],
+                    base.sharpness.to_value(),
+                    "How much more of the sun's light it scatters on along the way the light goes, \
+                     Henyey-Greenstein's g: 0 alike every way, toward 1 a narrow glow round the \
+                     sun.",
+                ),
+            ];
+            Ok(Shape::Struct {
+                fields,
+                tuple: false,
+            })
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let parts = FOG_FIELDS.into_iter().zip(fog_parts(self));
+        Value::Struct(
+            parts
+                .map(|(name, part)| (name.into(), part.to_value()))
+                .collect(),
+        )
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        Self::default().with_value(value)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let given = reflect::fields(value, FOG_FIELDS)?;
+        let mut fog = *self;
+        for (i, (name, given)) in (0..).zip(FOG_FIELDS.into_iter().zip(given)) {
+            let part = fog.part_mut(i).expect("a part for each field");
+            (part.set_value(given)).map_err(|error| reflect::within(error, name))?;
+        }
+        Ok(fog)
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        fog_parts(self).into_iter().nth(index as usize)
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        let Fog {
+            density,
+            falloff,
+            height,
+            start,
+            opacity,
+            color,
+            luminance,
+            sun,
+            sharpness,
+        } = self;
+        let parts: [&mut dyn Reflect; 9] = [
+            density, falloff, height, start, opacity, color, luminance, sun, sharpness,
+        ];
+        parts.into_iter().nth(index as usize)
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        for part in fog_parts(self) {
+            part.digest(to);
+        }
+    }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// Fog's fields, in the order its description gives them.
+const FOG_FIELDS: [&str; 9] = [
+    "density",
+    "falloff",
+    "height",
+    "start",
+    "opacity",
+    "color",
+    "luminance",
+    "sun",
+    "sharpness",
+];
+
+/// `fog`'s fields, in the order of [`FOG_FIELDS`], taken apart whole, so that a field `gg-renderer`
+/// adds fails to compile here until it's described.
+fn fog_parts(fog: &Fog) -> [&dyn Reflect; 9] {
+    let Fog {
+        density,
+        falloff,
+        height,
+        start,
+        opacity,
+        color,
+        luminance,
+        sun,
+        sharpness,
+    } = fog;
+    [
+        density, falloff, height, start, opacity, color, luminance, sun, sharpness,
+    ]
+}
 
 /// A sampler's variant name, by a match that names each, so that a sampler `gg-gpu` adds fails to
 /// compile here until it's named.

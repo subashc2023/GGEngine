@@ -1,0 +1,81 @@
+(
+    entities: {
+        "3b9f6a0c5d2e7184": (
+            ModelRoot: ("44ae3d1eca56e109"),
+            Name: ("Sponza"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, -0.16762912, 0.0, 0.98585016),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5e1d8c4a9b0f2763": (
+            Camera: (
+                projection: Perspective(
+                    fov: 1.0471976,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (1.5479072, 1.7, 0.11825121),
+                rotation: (0.08525687, 0.5754002, -0.060476992, 0.81116486),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8c27f0b6e4a13d95": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 1.0, 0.92),
+                intensity: 126000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 40.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 12.0, 0.0),
+                rotation: (-0.44687283, 0.33397424, 0.0, 0.8299192),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d4a6e2093c7b815f": (
+            Environment: (
+                exposure: 14.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: Some((
+                    density: 0.3,
+                    falloff: 0.9,
+                    height: 0.0,
+                    start: 0.0,
+                    opacity: 1.0,
+                    color: (1.0, 1.0, 1.0),
+                    luminance: 10000.0,
+                    sun: 0.4,
+                    sharpness: 0.65,
+                )),
+            ),
+            Name: ("Environment"),
+        ),
+    },
+)

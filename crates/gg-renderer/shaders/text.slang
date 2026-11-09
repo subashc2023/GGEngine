@@ -3,10 +3,12 @@
 // that their median keeps its corners sharp, and filled with its color by how far inside it each
 // pixel is, smoothed over a pixel however big it shows. Each instance is a glyph, with its own
 // transform, ID and parameters, writing its ID where it shows but where it's fully transparent, so
-// that a pick between its strokes finds what's behind it. `Params` in src/text.rs, which `Glyph`
-// here matches byte for byte, its `rect` being `top_left` then `bottom_right`.
+// that a pick between its strokes finds what's behind it, and fogged where it is by the frame's
+// fog, at its corners, as fog.slang says. `Params` in src/text.rs, which `Glyph` here matches byte
+// for byte, its `rect` being `top_left` then `bottom_right`.
 
 #include "mesh.slang"
+#include "fog.slang"
 
 struct Glyph {
     // Linear RGBA, alpha not multiplied in.
@@ -26,6 +28,8 @@ static const uint LINEAR_CLAMP = 0;
 
 struct Varyings {
     float4 position : SV_Position;
+    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    float4 fog;
     float2 uv;
     // How far the field's distances reach, in texture coordinates, across and down.
     nointerpolation float2 range;
@@ -40,6 +44,8 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     float4 world = mul(push.transforms[instance], float4(corner.position, 1.0));
     Varyings out;
     out.position = mul(push.clip_from_world, world);
+    Frame frame = *push.frame;
+    out.fog = fog_at(frame, world.xyz);
     out.uv = lerp(glyph.top_left, glyph.bottom_right, corner.uv);
     uint width, height;
     textures[NonUniformResourceIndex(glyph.field)].GetDimensions(width, height);
@@ -77,7 +83,7 @@ Targets fragment_main(Varyings input) {
         discard;
     }
     Targets out;
-    out.color = color;
+    out.color = fogged(input.fog, color);
     out.id = input.id;
     return out;
 }

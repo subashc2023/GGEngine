@@ -190,8 +190,8 @@ impl Shaders {
     /// what's behind it still shows through it. What one that's opaque draws casts shadows, from
     /// the light that casts them, of whole triangles, as its vertex shader places them, pushed a
     /// shadow map's matrix from the world to its clip space and the map's size in place of the
-    /// view's, and the frame's data without the sky, the shadows or the clusters. `name` names it
-    /// in errors and GPU captures.
+    /// view's, and the frame's data without the sky, the shadows, the clusters, the ambient
+    /// occlusion or the fog. `name` names it in errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine checks, in the SPIR-V slangc writes,
     /// that it keeps to this contract:
@@ -229,7 +229,7 @@ impl Shaders {
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
     ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; uint
-    ///   ambient_occlusion; uint unused; }`,
+    ///   ambient_occlusion; uint unused; Fog fog; }`,
     ///   where the view sees from in the world, the time it shows, what lit shading multiplies
     ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
     ///   that light everywhere first, directional lights and those without a range, then the rest,
@@ -242,13 +242,17 @@ impl Shaders {
     ///   maps among them, `Shadows` as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in
     ///   a frame without them; and which of the lights reach each cluster of the view, the view
     ///   cut into tiles and those along its depth, `Clusters` as `shaders/mesh.slang` declares it,
-    ///   its `words` 0 in a frame without them, where each fragment shades by every light; and the
+    ///   its `words` 0 in a frame without them, where each fragment shades by every light; the
     ///   view's ambient occlusion, as [`AmbientOcclusion`](crate::AmbientOcclusion) says, a
     ///   texture of the bindless set's of the view's size, whose red is the fraction of the light
     ///   from all around that reaches what's opaque at each pixel, which a fragment of what's opaque
     ///   loads at its pixel, `SV_Position`'s XY, and darkens the sky's light by, 0 for none, in a
-    ///   frame without it and in every pass but the view's own, the canvas's among them; or a
-    ///   struct of as many of its first fields: the engine adds fields at its end. The eighth and
+    ///   frame without it and in every pass but the view's own, the canvas's among them; and the
+    ///   fog the view is in, `Fog` as `shaders/mesh.slang` declares it, its `density` 0 in a frame
+    ///   without fog, which the view fogs what an opaque shader draws by, in a pass of its own once
+    ///   what's opaque has drawn, and which a shader that blends fogs itself by, if it likes, as
+    ///   `shaders/fog.slang` does, drawing unfogged otherwise; or a struct of as many of its first
+    ///   fields: the engine adds fields at its end. The eighth and
     ///   the ninth are the engine's own model shaders', 0 for any other; the tenth, how many
     ///   transforms past each instance's its transform the frame before is, which the motion is
     ///   from: those of the world's opaque meshes, in the game's view, and 0 for the rest, which
@@ -1124,7 +1128,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 372 bytes, past the 368 the engine's take",
+                "its frame's data, Frame, take 532 bytes, past the 432 the engine's take",
                 "it reads brightness from its push constants, past the 128 bytes",
             ],
         );
@@ -1269,6 +1273,7 @@ mod tests {
             "model.slang",
             "shading.slang",
             "mesh.slang",
+            "fog.slang",
         ];
         for file in files {
             fs::copy(shaders_dir.join(file), dir.0.join(file)).expect("a copy");

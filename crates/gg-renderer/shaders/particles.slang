@@ -5,9 +5,11 @@
 // its birth and now. A slot whose particle isn't born yet, or has died, draws nothing. Each shows its
 // texture, or a soft disc, tinted, and goes over what's behind it by its alpha, premultiplied, or
 // adds its light, writing no alpha, its emitter's ID where it shows but where it adds next to
-// nothing. `DrawPush` in src/particles.rs matches the one here byte for byte.
+// nothing, fogged where it is by the frame's fog, at its corners, as fog.slang says. `DrawPush` in
+// src/particles.rs matches the one here byte for byte.
 
 #include "mesh.slang"
+#include "fog.slang"
 #include "particle.slang"
 
 struct DrawPush {
@@ -21,11 +23,15 @@ struct DrawPush {
     float unused_right;
     float3 up;
     float unused_up;
+    // The frame's data, whose fog fogs them.
+    Frame* frame;
 };
 [[vk::push_constant]] ConstantBuffer<DrawPush> push;
 
 struct Varyings {
     float4 position : SV_Position;
+    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    float4 fog;
     // Where on its texture, in texture coordinates.
     float2 uv;
     // Where on its quad, from -1 to 1 each way, for the disc.
@@ -60,6 +66,7 @@ Varyings vertex_main(uint vertex: SV_VulkanVertexID, uint instance: SV_VulkanIns
     float age = ticks * look.tick_seconds;
     float lifetime = from_half(particle.lifetime_spin);
     Varyings out;
+    out.fog = float4(0.0, 0.0, 0.0, 1.0);
     out.uv = float2(0.0);
     out.disc = float2(0.0);
     out.color = float4(0.0);
@@ -85,6 +92,8 @@ Varyings vertex_main(uint vertex: SV_VulkanVertexID, uint instance: SV_VulkanIns
                            sin(turn) * corner.x + cos(turn) * corner.y) * size;
     float3 world = position + push.right * turned.x + push.up * turned.y;
     out.position = mul(push.clip_from_world, float4(world, 1.0));
+    Frame frame = *push.frame;
+    out.fog = fog_at(frame, world);
     out.disc = corner * 2.0;
     out.color = lerp(look.color_birth, look.color_death, share);
     // The cell its share of its life is on, row by row from the top left.
@@ -129,7 +138,10 @@ Targets fragment_main(Varyings input) {
         discard;
     }
     Targets out;
-    out.color = float4(premultiplied, input.additive != 0 ? 0.0 : alpha);
+    // Unlit, as they draw their colors as they are, but fogged as what they're in is, so that one
+    // far off in fog fades into it as what's behind it does, and one that adds its light adds less.
+    float4 color_out = float4(premultiplied, input.additive != 0 ? 0.0 : alpha);
+    out.color = fogged_premultiplied(input.fog, color_out);
     out.id = input.id;
     return out;
 }

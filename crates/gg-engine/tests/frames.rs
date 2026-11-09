@@ -10,8 +10,8 @@
 //! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
-//! antialiases the view against the frames before, blooms it, grades it and darkens its sky's light
-//! by ambient occlusion, run through the
+//! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
+//! by ambient occlusion and fogs it, run through the
 //! engine's main loop headless, without the tool API, whose development runs' watchers of the
 //! assets' files allocate as they look, three fifths of a tick apart, so that they draw between
 //! ticks, once its first frames have run, by which every image its attach added has decoded off
@@ -51,7 +51,7 @@ use std::time::Duration;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Environment, Event, Font, GameUi, Grade, Key, Layer, Mesh,
+    Component, Context, Entity, Environment, Event, Fog, Font, GameUi, Grade, Key, Layer, Mesh,
     MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source,
     Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
 };
@@ -344,14 +344,16 @@ impl Layer for Scene {
         self.pivot = Some(pivot);
         // The default environment's, which antialiases the view, resolving it against the frames
         // before, blooms it, and darkens its sky's light by ambient occlusion, but graded, which
-        // bakes its grade's table each frame, and under a sky, the checker, which the occlusion
-        // needs.
+        // bakes its grade's table each frame, under a sky, the checker, which the occlusion
+        // needs, and in the default fog, which a pass of its own fogs what's opaque by and what
+        // blends draws over in another.
         world.spawn(Environment {
             sky: Some(assets.texture),
             grade: Grade {
                 saturation: 1.2,
                 ..Grade::IDENTITY
             },
+            fog: Some(Fog::default()),
             ..Environment::default()
         });
         // The pair, and a copy mirrored, which culls the other way.

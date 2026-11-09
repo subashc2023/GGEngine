@@ -2,10 +2,12 @@
 // filled with its color and drawn by its alpha over what's behind it. Each instance is a circle,
 // with its own transform, ID and parameters, writing its ID where it shows but where it's fully
 // transparent, as past its edge, so that a pick there finds what's behind it. Its edges are smoothed
-// over a pixel however big it shows, and faded further inward by its fade. `Params` in
-// src/circle.rs, which `Circle` here matches byte for byte.
+// over a pixel however big it shows, and faded further inward by its fade, and fogged where it is
+// by the frame's fog, at its corners, as fog.slang says. `Params` in src/circle.rs, which `Circle`
+// here matches byte for byte.
 
 #include "mesh.slang"
+#include "fog.slang"
 
 struct Circle {
     // Linear RGBA, alpha not multiplied in.
@@ -20,6 +22,8 @@ struct Circle {
 
 struct Varyings {
     float4 position : SV_Position;
+    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    float4 fog;
     // Where it is on the quad, from (-1, -1) to (1, 1), so that the circle's edge is 1 from its
     // middle.
     float2 local;
@@ -33,6 +37,8 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     float4 world = mul(push.transforms[instance], float4(corner.position, 1.0));
     Varyings out;
     out.position = mul(push.clip_from_world, world);
+    Frame frame = *push.frame;
+    out.fog = fog_at(frame, world.xyz);
     out.local = corner.position.xy * 2.0;
     out.instance = instance;
     out.id = push.ids[instance];
@@ -62,7 +68,7 @@ Targets fragment_main(Varyings input) {
         discard;
     }
     Targets out;
-    out.color = color;
+    out.color = fogged(input.fog, color);
     out.id = input.id;
     return out;
 }

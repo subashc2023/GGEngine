@@ -6,9 +6,10 @@
 // byte, its `rect` being `top_left` then `bottom_right`. A sprite samples only the texels its
 // rectangle covers, so that the cells of a sprite sheet packed edge to edge show nothing of one
 // another: Godot's region filter clip, which Godot makes optional and always insets by half a
-// texel.
+// texel. It's fogged where it is by the frame's fog, at its corners, as fog.slang says.
 
 #include "mesh.slang"
+#include "fog.slang"
 
 struct Sprite {
     // Linear RGBA, alpha not multiplied in.
@@ -24,6 +25,8 @@ struct Sprite {
 
 struct Varyings {
     float4 position : SV_Position;
+    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    float4 fog;
     float2 uv;
     // Where the fragment stage may sample, in texture coordinates: the least corner, then the
     // greatest.
@@ -45,6 +48,8 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     float4 world = mul(push.transforms[instance], float4(corner.position, 1.0));
     Varyings out;
     out.position = mul(push.clip_from_world, world);
+    Frame frame = *push.frame;
+    out.fog = fog_at(frame, world.xyz);
     out.uv = lerp(sprite.top_left, sprite.bottom_right, corner.uv);
     // The centers of the outermost texels the rectangle covers, wholly or in part, between which
     // neither a linear sampler, which reads the 2 by 2 texels around a point, nor a nearest one
@@ -78,7 +83,7 @@ Targets fragment_main(Varyings input) {
         discard;
     }
     Targets out;
-    out.color = color;
+    out.color = fogged(input.fog, color);
     out.id = input.id;
     return out;
 }

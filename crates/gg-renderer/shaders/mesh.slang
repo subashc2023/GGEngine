@@ -1,11 +1,13 @@
 // What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, shading.slang
 // and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
-// its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades
-// and the clusters its lights are binned into, and the push constants, for a shader's types of
-// vertices and parameters, and what the fragment stage returns. `Corner` in src/sprite.rs,
-// `GpuLight` in src/light.rs, `Entry` in src/model.rs, `ShadowData` in src/shadow.rs,
-// `ClusterData` in src/cluster.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`,
-// `Light`, `Material`, `Shadows`, `Clusters`, `Push` and `Frame` here match field for field.
+// its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades,
+// the clusters its lights are binned into, its ambient occlusion and its fog, and the push
+// constants, for a shader's types of vertices and parameters, and what the fragment stage returns.
+// `Corner` in
+// src/sprite.rs, `GpuLight` in src/light.rs, `Entry` in src/model.rs, `ShadowData` in
+// src/shadow.rs, `ClusterData` in src/cluster.rs, `FogData` in src/fog.rs and `Push` and
+// `FrameData` in src/mesh.rs, which `Corner`, `Light`, `Material`, `Shadows`, `Clusters`, `Fog`,
+// `Push` and `Frame` here match field for field.
 
 // The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
 // second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
@@ -125,6 +127,31 @@ struct Clusters {
     uint unused;
 };
 
+// The height fog the frame's view is in, as fog.slang fogs light by it, `FogData` in src/fog.rs:
+// densest low down, thinning exponentially with height, lit from all around and by the sun.
+struct Fog {
+    // The light it scatters toward the eye of the light from all around, exposed: in a frame with
+    // a sky, times the sky's diffuse light, `irradiance`, the way the eye looks.
+    float3 ambient;
+    // Its extinction, per unit of the world, at `height`: 0 in a frame without fog, which fogs
+    // nothing.
+    float density;
+    // The light it scatters toward the eye of the sun's, exposed, before its phase function.
+    float3 sun;
+    // How fast it thins with height: its density at `height + h` is `density * exp(-falloff * h)`.
+    float falloff;
+    // The way toward the sun, a unit vector.
+    float3 to_sun;
+    float height;
+    // How far from the eye it starts.
+    float start;
+    // The least share of the light from behind it that it lets through: 1 less its most opacity.
+    float least;
+    // Henyey-Greenstein's g, for the sun's light, from 0 up to 1.
+    float lobe;
+    uint unused;
+};
+
 // What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
 struct Frame {
     // Where the view sees from, in the world.
@@ -167,6 +194,8 @@ struct Frame {
     // at its pixel; 0 for none, which reads as 1.
     uint ambient_occlusion;
     uint unused;
+    // The height fog its view is in.
+    Fog fog;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

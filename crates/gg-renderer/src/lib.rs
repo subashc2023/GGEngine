@@ -7,7 +7,8 @@
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
 //! behind them, prefiltered on the GPU, its light darkened by ambient occlusion from the view's
 //! depth, opaque and masked ones drawn by their meshlets shaded from
-//! a visibility buffer, a game's UI over them in the view's own space, and the UI over the view;
+//! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
+//! view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, antialiased against the frames before it,
 //! bloomed, and graded and mapped by a tonemapper into the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
@@ -22,6 +23,7 @@ mod bloom;
 mod circle;
 mod cluster;
 mod draws;
+mod fog;
 mod grade;
 mod grid;
 mod light;
@@ -60,6 +62,7 @@ use tracing::info;
 pub use ao::AmbientOcclusion;
 pub use circle::Circle;
 pub use draws::Draws;
+pub use fog::Fog;
 pub use gg_gpu::{
     Arenas, Blend, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath, Validation,
     Window, Wrap, mip_sizes,
@@ -94,6 +97,7 @@ pub use viewpoint::{Projection, Viewpoint};
 use ao::AoPass;
 use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
+use fog::{FogData, FogPass};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
@@ -286,6 +290,12 @@ pub struct RenderData<'a> {
     /// [`AmbientOcclusion`] says: computed in a frame whose view a sky lights, seen through a
     /// perspective, where something opaque draws, and in no other, which runs none of it.
     pub ambient_occlusion: Option<AmbientOcclusion>,
+    /// The height fog the view is in, if any, as [`Fog`] says: what's opaque in the view, the sky
+    /// or the clear color among it, fogged once it's drawn, by a pass of its own over the view's
+    /// colors, from its depth; and what blends after, fogging itself as it draws, the engine's
+    /// models, particles, sprites, circles and text, but not lines or grids, which are for seeing
+    /// by, nor the canvas. `None`, or fog of no density, fogs nothing.
+    pub fog: Option<Fog>,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -390,6 +400,8 @@ pub struct Renderer {
     bloom: BloomPass,
     tonemap: TonemapPass,
     outline: OutlinePass,
+    /// What fogs what's opaque in the view, if it's in fog.
+    fog: FogPass,
     /// What resolves the view, antialiased, against the frames before, and what it resolves into
     /// and against, apart from its pipeline, as frames take them as targets while they record it.
     taa: TaaPass,
@@ -477,6 +489,8 @@ struct ViewPasses {
     shaded: Option<ShadedPasses>,
     /// What computes its ambient occlusion, if it has any.
     ao: Option<AoPasses>,
+    /// What fogs what's opaque in it, and draws what blends over that, if it's in fog.
+    fog: Option<FogPasses>,
     /// What resolves it, antialiased, if it's antialiased.
     taa: Option<taa::Plan>,
     /// What blooms and grades it, if it does either.
@@ -518,6 +532,14 @@ struct AoPasses {
     depth: Option<PassId>,
     plan: ao::Plan,
     view: Option<PassId>,
+}
+
+/// The game's view's fog, in a frame's graph: the pass that fogs its colors once what's opaque has
+/// drawn, the sky or the clear color among it, from its depth, and the pass after, which draws what
+/// blends over them, fogging itself, and the canvas, where the view's last pass draws it.
+struct FogPasses {
+    plan: fog::Plan,
+    blended: PassId,
 }
 
 /// The shadows' cascades, fitted to the view, and their shadow maps and the passes that draw them,
@@ -663,6 +685,7 @@ impl Renderer {
             bloom: BloomPass::new(device)?,
             tonemap: TonemapPass::new(device)?,
             outline: OutlinePass::new(device)?,
+            fog: FogPass::new(device)?,
             taa: TaaPass::new(device)?,
             history: taa::History::default(),
             sky: None,
@@ -948,6 +971,7 @@ impl Renderer {
         let lighting = &self.lighting;
         let taa = &self.taa;
         let visibility_buffer = self.visibility_buffer;
+        let fogged = data.fog.is_some_and(|fog| fog.shows());
         let view = renders_view.then(|| {
             // The cascades of the shadows of the light that casts them, if one does, each drawn
             // before the view samples it, and before them, the culling of the view's opaque runs
@@ -1001,6 +1025,17 @@ impl Renderer {
                 let maps = shadows.iter().flat_map(|shadows| shadows.maps);
                 plan.iter().flat_map(sky::Plan::sampled).chain(maps)
             };
+            // A pass of the view's, named `label`, that draws over what the passes before it drew,
+            // shading as it draws: taking what `kept` keeps, if it's given a culling, and reading
+            // the skinned meshes' vertices, the particles' pool and the lights' clusters, and
+            // sampling what the draws light by, and the view's ambient occlusion, `occlusion`, if
+            // it has any for what the pass draws.
+            let shading =
+                |graph: &mut Graph, label, kept: Option<&CullPlan>, occlusion: Option<ImageId>| {
+                    let pass = particled(born, culled(kept, skinned(skin, graph.render(label))));
+                    let pass = binned(clusters.as_ref(), sampling(lit().chain(occlusion), pass));
+                    pass.keep(hdr).keep(ids).keep(motion).keep(depth).add()
+                };
             // Where the view culls runs drawn by their meshlets, those of the opaque and masked
             // model shaders draw into a visibility buffer alone, in both of its passes, and a
             // compute pass then shades the view from it, before a pass that draws the rest.
@@ -1043,24 +1078,22 @@ impl Renderer {
             // what that kept, and, without a visibility buffer, the runs it doesn't cull.
             let second = cull.as_mut().map(|cull| {
                 cull.second_pass(graph, forward_depth.unwrap_or(depth), size);
-                let second = match (visibility, forward_depth) {
+                match (visibility, forward_depth) {
                     (Some(visibility), _) => {
                         let second = skinned(skin, graph.render(label!("view visibility second")));
-                        cull.drawn(second).keep(visibility).keep(ids).keep(depth)
+                        cull.drawn(second)
+                            .keep(visibility)
+                            .keep(ids)
+                            .keep(depth)
+                            .add()
                     }
                     (None, Some(occlusion_depth)) => {
                         let label = label!("ambient occlusion depth second");
-                        cull.drawn(skinned(skin, graph.render(label)))
-                            .keep(occlusion_depth)
+                        let second = cull.drawn(skinned(skin, graph.render(label)));
+                        second.keep(occlusion_depth).add()
                     }
-                    (None, None) => {
-                        let second = skinned(skin, graph.render(label!("view second")));
-                        let second = particled(born, cull.drawn(second));
-                        let second = binned(clusters.as_ref(), sampling(lit(), second));
-                        second.keep(hdr).keep(motion).keep(ids).keep(depth)
-                    }
-                };
-                second.add()
+                    (None, None) => shading(graph, label!("view second"), Some(&*cull), None),
+                }
             });
             // Beside a visibility buffer, the depth of the culled runs drawn otherwise, if any may
             // be; then the occlusion, from the nearer of the two depths; and without one, the view,
@@ -1096,14 +1129,22 @@ impl Renderer {
                     None => shade,
                 };
                 let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
-                let rest = cull.drawn(skinned(skin, graph.render(label!("view rest"))));
-                let rest = particled(born, rest);
-                let rest = binned(clusters.as_ref(), sampling(lit().chain(occlusion), rest));
-                let rest = rest.keep(hdr).keep(ids).keep(motion).keep(depth).add();
+                let rest = shading(graph, label!("view rest"), Some(cull), occlusion);
                 ShadedPasses {
                     visibility,
                     shade,
                     rest,
+                }
+            });
+            // In fog, what's opaque, the sky among it, is fogged by a pass of its own over the
+            // view's colors, from its depth, once it's drawn; then what blends draws over them in a
+            // pass of its own, fogging itself, as a pass over the colors alone would fog it as
+            // though it were as far away as what's behind it.
+            let fog = fogged.then(|| {
+                let sky_light = plan.iter().flat_map(sky::Plan::sampled);
+                FogPasses {
+                    plan: FogPass::plan(graph, size, depth, hdr, sky_light),
+                    blended: shading(graph, label!("view blended"), None, None),
                 }
             });
             // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
@@ -1162,6 +1203,7 @@ impl Renderer {
                 second,
                 shaded,
                 ao,
+                fog,
                 taa,
                 bloom,
                 canvas,
@@ -1291,6 +1333,7 @@ impl Renderer {
                     clusters: ClusterData::default(),
                     ambient_occlusion: 0,
                     unused: 0,
+                    fog: FogData::default(),
                 };
                 // What the casters and what's drawn into the visibility buffer read of the frame's
                 // data, all but what the view alone samples.
@@ -1325,12 +1368,14 @@ impl Renderer {
                     };
                     let shadows = (view.shadows.as_ref())
                         .map(|shadows| shadows.cascades.data(shadows.maps.map(sampled)));
+                    let sky = lit.map(|sky| sky.luminance);
                     let shared = FrameData {
                         lights: view_lights,
                         sky: lit.unwrap_or_default(),
                         shadows: shadows.unwrap_or_default(),
                         clusters,
                         ambient_occlusion: occlusion.map_or(0, sampled),
+                        fog: FogData::new(data.fog, sky, data.lights, data.exposure),
                         ..shared
                     };
                     (shared, lit)
@@ -1457,17 +1502,23 @@ impl Renderer {
                 let way = Way::Shaded {
                     beside_visibility: shades.is_some(),
                 };
-                let mut counts = (self.meshes).draw(
-                    &mut pass,
-                    view_projection,
-                    shared,
-                    size,
-                    data.draws,
-                    uploaded,
-                    runs(FIRST),
-                    way,
-                    born,
-                )?;
+                // In fog, a view that culls nothing has nothing opaque to draw before the fog, but
+                // the sky, as what it draws all blends.
+                let mut counts = if view.fog.is_some() && view.cull.is_none() {
+                    DrawCounts::default()
+                } else {
+                    (self.meshes).draw(
+                        &mut pass,
+                        view_projection,
+                        shared,
+                        size,
+                        data.draws,
+                        uploaded,
+                        runs(FIRST),
+                        way,
+                        born,
+                    )?
+                };
                 // What the first pass didn't draw, over it: after the depth pyramid, from the
                 // first's depth, and the culling's second pass, against it, in a pass of its own;
                 // or, beside a visibility buffer or after the ambient occlusion, in the same pass,
@@ -1479,7 +1530,36 @@ impl Renderer {
                         pass = (frame.render(second))
                             .expect("the graph's own images are always there");
                     }
-                    let rest = Runs::CulledThenRest(plan, plan.second());
+                    // In fog, what blends draws after the fog's pass.
+                    let rest = if view.fog.is_some() {
+                        Runs::Culled(plan, plan.second())
+                    } else {
+                        Runs::CulledThenRest(plan, plan.second())
+                    };
+                    counts += (self.meshes).draw(
+                        &mut pass,
+                        view_projection,
+                        shared,
+                        size,
+                        data.draws,
+                        uploaded,
+                        rest,
+                        way,
+                        born,
+                    )?;
+                }
+                // In fog, what's opaque fogged, the sky among it, and then what blends over it, in
+                // a pass of its own, fogging itself.
+                if let Some(fog) = &view.fog {
+                    drop(pass);
+                    self.fog
+                        .record(&mut frame, &fog.plan, view_projection, shared);
+                    pass = (frame.render(fog.blended))
+                        .expect("the graph's own images are always there");
+                    let rest = match &view.cull {
+                        Some(plan) => Runs::Rest(plan),
+                        None => Runs::All,
+                    };
                     counts += (self.meshes).draw(
                         &mut pass,
                         view_projection,
@@ -1494,12 +1574,14 @@ impl Renderer {
                 }
                 // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
                 // what the view shows, in its own pass, if it has one; without the view's ambient
-                // occlusion, which is of the depth the view's own passes draw.
-                let canvas_data = if frame_data.ambient_occlusion == 0 {
+                // occlusion, which is of the depth the view's own passes draw, or its fog, as it's
+                // drawn in the view's own space.
+                let canvas_data = if frame_data.ambient_occlusion == 0 && view.fog.is_none() {
                     shared
                 } else {
                     let unoccluded = FrameData {
                         ambient_occlusion: 0,
+                        fog: FogData::default(),
                         ..frame_data
                     };
                     pass.upload(bytemuck::bytes_of(&unoccluded))?.address()

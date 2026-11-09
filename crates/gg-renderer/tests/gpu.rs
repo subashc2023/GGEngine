@@ -23,7 +23,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, AmbientOcclusion, Antialiasing, Births, Blend, Bursts, Circle,
-    DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Glyph, Grade, Grid, GridLines, Light,
+    DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines, Light,
     LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
     Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
     PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, RenderData, Renderer,
@@ -103,6 +103,9 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
+        fog_dims_and_lights_as_its_integral_says,
+        fog_of_no_density_or_opacity_changes_nothing,
+        fogged_scenes_match_their_reference,
         shadows_fall_where_their_casters_put_them,
         culling_keeps_what_each_view_sees,
         the_scene_draws_as_draws_do,
@@ -151,6 +154,9 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
+        fog_dims_and_lights_as_its_integral_says,
+        fog_of_no_density_or_opacity_changes_nothing,
+        fogged_scenes_match_their_reference,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
         models_match_their_reference,
@@ -383,6 +389,7 @@ impl Stores {
             bloom: 0.0,
             grade: Grade::IDENTITY,
             ambient_occlusion: *ambient_occlusion,
+            fog: None,
             viewport,
             viewpoint,
             uploads,
@@ -6097,6 +6104,744 @@ fn a_skys_sun_lights_once() {
          without it"
     );
     shut_down(renderer);
+}
+
+/// The share of the light from `distance` along `way` from `origin`, or from infinitely far for
+/// `None`, that `fog` lets through: e to the minus the integral of its density along the way, past
+/// its start, by the midpoint rule over 100,000 steps, in doubles; upward to where its density is
+/// e^-40 of what it is at its start, and downward without end; and at least what its opacity leaves.
+fn fog_through(fog: &Fog, origin: Vec3, way: Vec3, distance: Option<f32>) -> f32 {
+    let (falloff, start) = (f64::from(fog.falloff), f64::from(fog.start));
+    let least = 1.0 - fog.opacity;
+    let end = match distance {
+        Some(distance) => f64::from(distance),
+        None if way.y > 0.0 => start + 40.0 / (falloff * f64::from(way.y)),
+        None => return least,
+    };
+    if end <= start {
+        return 1.0;
+    }
+    const STEPS: u32 = 100_000;
+    let step = (end - start) / f64::from(STEPS);
+    let density = |along: f64| {
+        let y = f64::from(origin.y) + f64::from(way.y) * along;
+        f64::from(fog.density) * math::libm::exp(-falloff * (y - f64::from(fog.height)))
+    };
+    let depth: f64 = (0..STEPS)
+        .map(|i| density(start + (f64::from(i) + 0.5) * step) * step)
+        .sum();
+    (math::libm::exp(-depth) as f32).max(least)
+}
+
+/// What Henyey-Greenstein's phase function of `g` gives a cosine of `cos` between the way light
+/// goes and the way it's scattered, per steradian.
+fn henyey_greenstein(g: f32, cos: f32) -> f32 {
+    let spread = 1.0 + g * g - 2.0 * g * cos;
+    (1.0 - g * g) / (4.0 * PI * spread * math::libm::sqrtf(spread))
+}
+
+/// A rectangle of one color, as it's drawn, in linear RGB and alpha, which it blends by, facing
+/// along an axis, at `at` along it, from `least` to `most` along the other two, in order, which a
+/// pixel's way meets or misses.
+#[derive(Clone, Copy, Debug)]
+struct Patch {
+    /// 1 for one facing along Y, 2 for one facing along Z.
+    axis: usize,
+    at: f32,
+    least: Vec2,
+    most: Vec2,
+    color: Vec4,
+}
+
+impl Patch {
+    /// One facing along Z, `side` across, its center at `center`.
+    fn facing(center: Vec3, side: f32, color: Vec4) -> Self {
+        let half = Vec2::splat(side / 2.0);
+        Self {
+            axis: 2,
+            at: center.z,
+            least: center.truncate() - half,
+            most: center.truncate() + half,
+            color,
+        }
+    }
+
+    /// How far along `way` from `origin` it is, if the way meets it.
+    fn met(&self, origin: Vec3, way: Vec3) -> Option<f32> {
+        let along = (self.at - origin[self.axis]) / way[self.axis];
+        let point = origin + way * along;
+        let across = if self.axis == 2 {
+            Vec2::new(point.x, point.y)
+        } else {
+            Vec2::new(point.x, point.z)
+        };
+        let inside = across.cmpge(self.least).all() && across.cmple(self.most).all();
+        (along > 0.0 && inside).then_some(along)
+    }
+}
+
+/// Asserts that each of `pixels` of `frame`, a view `size` pixels across and down that `viewpoint`
+/// sees, in `fog`, lit by `sun`, a directional light's illuminance and the way toward it, if one
+/// shines, shows what the pixel's way meets of `patches`, each by its alpha over what's behind it,
+/// over the clear color, as far as can be: each as much of it as the fog lets through, as
+/// [`fog_through`] integrates it, and the fog's color of the light that reaches it, its luminance
+/// and the sun's by Henyey-Greenstein's lobe, by as much as the fog takes out; each channel within
+/// 2 of that, sRGB-encoded.
+fn assert_fogged(
+    frame: &[u8],
+    size: [u32; 2],
+    viewpoint: &Viewpoint,
+    fog: &Fog,
+    sun: Option<(Vec3, Vec3)>,
+    patches: &[Patch],
+    pixels: &[[u32; 2]],
+) {
+    let [width, height] = size.map(|side| side as f32);
+    let world_from_clip = viewpoint.view_projection(width / height).inverse();
+    let clear = Vec3::new(CLEAR[0], CLEAR[1], CLEAR[2]);
+    for &[x, y] in pixels {
+        let clip = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) / Vec2::new(width, height) * 2.0 - 1.0;
+        let near = world_from_clip.project_point3(clip.extend(1.0));
+        // From the camera, or without perspective, the one way it looks, from its plane.
+        let (origin, way) = match viewpoint.projection {
+            Projection::Perspective { .. } => {
+                (viewpoint.position, (near - viewpoint.position).normalize())
+            }
+            Projection::Orthographic { .. } => {
+                let way = viewpoint.rotation * Vec3::NEG_Z;
+                (near - way * (near - viewpoint.position).dot(way), way)
+            }
+        };
+        let sunlight = sun.map_or(Vec3::ZERO, |(light, to_sun)| {
+            light * fog.sun * henyey_greenstein(fog.sharpness, way.dot(to_sun))
+        });
+        let light = fog.color * (fog.luminance + sunlight);
+        let fogged = |distance: Option<f32>, color: Vec3| {
+            let through = fog_through(fog, origin, way, distance);
+            color * through + light * (1.0 - through)
+        };
+        // The farthest first.
+        let mut met: Vec<(f32, Vec4)> = (patches.iter())
+            .filter_map(|patch| Some((patch.met(origin, way)?, patch.color)))
+            .collect();
+        met.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut expected = fogged(None, clear);
+        for (at, color) in met {
+            expected = fogged(Some(at), color.truncate()) * color.w + expected * (1.0 - color.w);
+        }
+        let [r, g, b] = expected.to_array().map(encoded);
+        let got = pixel_at(frame, size[0], [x, y]);
+        let near = got
+            .iter()
+            .zip([r, g, b, 255])
+            .all(|(&a, b)| a.abs_diff(b) <= 2);
+        assert!(
+            near,
+            "pixel ({x}, {y}) shows {got:?} in {fog:?} from {viewpoint:?}, not {expected} \
+             encoded, {:?}",
+            [r, g, b]
+        );
+    }
+}
+
+/// Renders a frame of `draws` and `canvas` into a view `size` pixels across and down, as
+/// `viewpoint` sees them, in `fog`, antialiased as `antialiasing` says: its pixels.
+#[expect(clippy::too_many_arguments, reason = "a frame's every part apart")]
+fn fogged_frame(
+    renderer: &mut Renderer,
+    stores: &mut Stores,
+    size: [u32; 2],
+    viewpoint: Viewpoint,
+    draws: &Draws,
+    canvas: &Draws,
+    fog: Fog,
+    antialiasing: Antialiasing,
+) -> Vec<u8> {
+    let data = RenderData {
+        fog: Some(fog),
+        canvas,
+        antialiasing,
+        ..stores.data(filling(size), viewpoint, draws)
+    };
+    render_without_ui(renderer, data);
+    frame_pixels(renderer)
+}
+
+/// In height fog lit by a luminance of its own, and then by a sun too, in a lobe round it, each
+/// pixel shows what's behind it as much as the fog lets through, and the fog's light, its color of
+/// what reaches it, by as much as it takes out, as an integral of the fog's density along the
+/// pixel's way finds them, numerically: through a camera with perspective, a black wall, unlit, 10
+/// units ahead and left of it, the clear color right of it, as far as can be, and, unlit, each of
+/// a color of its own, a sprite before the wall, and a circle, a glyph and a particle past it, which
+/// fog themselves at their quads' corners. Past the fog's start alone, so that the wall nearer than
+/// it shows black; upward out of the fog, to the sky; and looking down, where the fog has no end,
+/// all of the clear color but what its opacity lets through. Through a camera without perspective,
+/// looking a little up; in a view of nothing opaque, all of what it draws blending, which draws its
+/// canvas unfogged; antialiased; and from 100 units above the fog's height, looking down on a floor
+/// at it, where the fog's density at the camera is e^-100 of the floor's.
+fn fog_dims_and_lights_as_its_integral_says() {
+    const SIZE: [u32; 2] = [64, 48];
+    /// What's drawn on the engine's quad, across.
+    const SIDE: f32 = 1.5;
+    let mut renderer = renderer(SIZE[0], SIZE[1]);
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let black = Material {
+        color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        unlit: true,
+        ..Material::default()
+    };
+    let black = stores.materials.add(&black);
+    let model = MeshDraw::with_material(square, black, &stores.materials, &mut stores.shaders);
+    let wall = Mat4::from_scale_rotation_translation(
+        Vec3::new(60.0, 120.0, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(-30.0, 0.0, -10.0),
+    );
+    let wall_patch = Patch {
+        axis: 2,
+        at: -10.0,
+        least: Vec2::new(-60.0, -60.0),
+        most: Vec2::new(0.0, 60.0),
+        color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+    };
+    let floor = facing_up(400.0, Vec3::ZERO);
+    let floor_patch = Patch {
+        axis: 1,
+        at: 0.0,
+        least: Vec2::splat(-200.0),
+        most: Vec2::splat(200.0),
+        color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+    };
+    // A field whose every texel is inside a glyph's edges, so that a glyph fills its quad.
+    let field = stores
+        .textures
+        .add("field", [4, 4], vec![255; 64], Texels::Data);
+    let field = field.expect("a field");
+    let quads = [
+        Vec3::new(-2.0, 1.2, -6.0),
+        Vec3::new(2.0, 2.6, -12.0),
+        Vec3::new(3.5, 1.0, -14.0),
+        Vec3::new(1.5, 0.6, -16.0),
+    ];
+    // The circle half transparent, so that what it's over shows how many times it's fogged.
+    let colors = [
+        Vec4::new(0.9, 0.2, 0.1, 1.0),
+        Vec4::new(0.2, 0.8, 0.3, 0.5),
+        Vec4::new(0.3, 0.4, 0.9, 1.0),
+        Vec4::new(0.9, 0.8, 0.2, 1.0),
+    ];
+    let patches: Vec<Patch> = (quads.iter().zip(colors))
+        .map(|(&at, color)| Patch::facing(at, SIDE, color))
+        .collect();
+    // The models placed by `models`, then the sprite, the circle and the glyph, and the particle,
+    // if `particle`, born in each frame alike, so that a frame after one without it draws it too.
+    let drawn = |stores: &mut Stores, models: &[Mat4], particle: bool| {
+        let mut draws = Draws::default();
+        for &placed in models {
+            draws.push_draw(placed, &model, 0);
+        }
+        let placed = |at: Vec3| Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(SIDE));
+        let [sprite, circle, glyph, particle_color] = colors;
+        let sprite = Sprite {
+            color: sprite,
+            ..Sprite::default()
+        };
+        draws.push_sprite(placed(quads[0]), sprite);
+        let circle = Circle {
+            color: circle,
+            thickness: 1.0,
+            fade: 0.0,
+        };
+        draws.push_circle(&mut stores.shaders, placed(quads[1]), circle);
+        let glyph = Glyph {
+            color: glyph,
+            field,
+            rect: [Vec2::ZERO, Vec2::ONE],
+            range: 4.0,
+        };
+        let glyphs = std::iter::once((placed(quads[2]), glyph, 0));
+        draws.extend_glyphs(&mut stores.shaders, glyphs);
+        if particle {
+            let at = Mat4::from_translation(quads[3]);
+            let emission = Emission {
+                shape: ParticleShape::Point,
+                speed: [0.0; 2],
+                lifetime: [10.0; 2],
+                spin: [0.0; 2],
+                acceleration: Vec3::ZERO,
+                drag: 0.0,
+                size: [SIDE; 2],
+                color: [particle_color; 2],
+                texture: Some(Texture::WHITE),
+                cells: [1, 1],
+                additive: false,
+            };
+            let births = Births {
+                first: 0,
+                count: 1,
+                time: 0.0,
+                every: 1.0,
+                from: at,
+                to: at,
+                along: 0.0,
+                step: 1.0 / 16.0,
+            };
+            draws.push_particles(Particles {
+                id: 9,
+                fresh: false,
+                most: 64,
+                now: 16.0,
+                tick: 1.0 / 64.0,
+                births,
+                bursts: Bursts::none(at),
+                emission,
+            });
+        }
+        draws
+    };
+    let looking = Viewpoint {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        projection: Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let draws = drawn(&mut stores, &[wall], true);
+    settle(&mut renderer, &mut stores, filling(SIZE), looking, &draws);
+    let none = Draws::default();
+    let low = Fog {
+        density: 0.08,
+        falloff: 0.3,
+        height: 1.0,
+        start: 10.5,
+        opacity: 1.0,
+        color: Vec3::ONE,
+        luminance: 1.0,
+        ..Fog::default()
+    };
+    let sunlit = Fog {
+        density: 0.3,
+        falloff: 0.15,
+        height: 3.0,
+        start: 0.0,
+        opacity: 0.7,
+        color: Vec3::new(1.0, 0.8, 0.6),
+        luminance: 0.25,
+        sun: 1.0,
+        sharpness: 0.5,
+    };
+    let to_sun = Vec3::new(1.0, 0.2, -1.0).normalize();
+    let sun_light = Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: -to_sun,
+        color: Vec3::splat(0.8),
+        range: None,
+        shadow_distance: None,
+    };
+    let sunlight = Some((sun_light.color, to_sun));
+    let (unaliased, taa) = (Antialiasing::None, Antialiasing::Taa);
+    let grid: Vec<[u32; 2]> = [8, 30, 56]
+        .into_iter()
+        .flat_map(|x| [1, 10, 20, 26, 34, 46].map(|y| [x, y]))
+        .collect();
+    // The grid's pixels, and those `viewpoint` sees `quads`' centers at.
+    let seen = |viewpoint: &Viewpoint, quads: &[Vec3]| {
+        let centers = quads.iter().map(|&at| pixel_of(*viewpoint, SIZE, at));
+        grid.iter().copied().chain(centers).collect::<Vec<_>>()
+    };
+    let mut walled = vec![wall_patch];
+    walled.extend_from_slice(&patches);
+    // Through perspective, before and after its start, then lit by the sun too.
+    let pixels = seen(&looking, &quads);
+    for (fog, sun) in [(low, None), (sunlit, sunlight)] {
+        stores.lights = sun.map_or(Vec::new(), |_| vec![sun_light]);
+        let (renderer, stores) = (&mut renderer, &mut stores);
+        let frame = fogged_frame(
+            renderer, stores, SIZE, looking, &draws, &none, fog, unaliased,
+        );
+        assert_fogged(&frame, SIZE, &looking, &fog, sun, &walled, &pixels);
+    }
+    // Antialiased, each pixel resolved from frames drawn a fraction of a pixel off, away from edges.
+    let flat = [[8, 10], [8, 40], [56, 5], [56, 40]];
+    for _ in 0..16 {
+        let (renderer, stores) = (&mut renderer, &mut stores);
+        fogged_frame(renderer, stores, SIZE, looking, &draws, &none, sunlit, taa);
+    }
+    let frame = frame_pixels(&mut renderer);
+    assert_fogged(&frame, SIZE, &looking, &sunlit, sunlight, &walled, &flat);
+    // Without perspective, looking a little up, every way rising out of the fog; the particle,
+    // which faces the view, aside.
+    let orthographic = Viewpoint {
+        rotation: Quat::from_rotation_x(0.3),
+        projection: Projection::Orthographic {
+            height: 12.0,
+            near: 0.1,
+            far: 100.0,
+        },
+        ..looking
+    };
+    let draws = drawn(&mut stores, &[wall], false);
+    let frame = fogged_frame(
+        &mut renderer,
+        &mut stores,
+        SIZE,
+        orthographic,
+        &draws,
+        &none,
+        sunlit,
+        unaliased,
+    );
+    let pixels = seen(&orthographic, &quads[..3]);
+    let flat_walled = &walled[..4];
+    assert_fogged(
+        &frame,
+        SIZE,
+        &orthographic,
+        &sunlit,
+        sunlight,
+        flat_walled,
+        &pixels,
+    );
+    // Nothing opaque, all blending, the fog's pass fogging the clear color alone; and the canvas,
+    // a sprite in the view's bottom left corner, unfogged.
+    let draws = drawn(&mut stores, &[], true);
+    let mut canvas = Draws::default();
+    let cornered =
+        Mat4::from_translation(Vec3::new(4.0, 4.0, 0.0)) * Mat4::from_scale(Vec3::splat(6.0));
+    let orange = Vec4::new(0.8, 0.5, 0.2, 1.0);
+    let sprite = Sprite {
+        color: orange,
+        ..Sprite::default()
+    };
+    canvas.push_sprite(cornered, sprite);
+    let frame = fogged_frame(
+        &mut renderer,
+        &mut stores,
+        SIZE,
+        looking,
+        &draws,
+        &canvas,
+        sunlit,
+        unaliased,
+    );
+    let pixels = seen(&looking, &quads);
+    assert_fogged(&frame, SIZE, &looking, &sunlit, sunlight, &patches, &pixels);
+    let [r, g, b] = orange.truncate().to_array().map(encoded);
+    let corner = pixel_at(&frame, SIZE[0], [4, SIZE[1] - 5]);
+    assert!(
+        close(corner, [r, g, b, 255]),
+        "the canvas shows {corner:?} in fog"
+    );
+    // From 100 units above the fog's height, looking down on a floor at it.
+    stores.lights.clear();
+    let above = Viewpoint {
+        position: Vec3::new(0.0, 100.0, 0.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_2),
+        ..looking
+    };
+    let high = Fog {
+        density: 0.5,
+        falloff: 1.0,
+        height: 0.0,
+        start: 0.0,
+        opacity: 1.0,
+        color: Vec3::ONE,
+        luminance: 1.0,
+        sun: 1.0,
+        sharpness: 0.0,
+    };
+    let mut draws = Draws::default();
+    draws.push_draw(floor, &model, 0);
+    let frame = fogged_frame(
+        &mut renderer,
+        &mut stores,
+        SIZE,
+        above,
+        &draws,
+        &none,
+        high,
+        unaliased,
+    );
+    let pixels = [[32, 24], [8, 8], [56, 40]];
+    assert_fogged(&frame, SIZE, &above, &high, None, &[floor_patch], &pixels);
+    shut_down(renderer);
+}
+
+/// A scene of every kind of draw that fog fogs, as a camera with perspective sees it, under a sky
+/// and a sun casting shadows: opaque spheres receding along a floor, the sky behind them, a glass
+/// square of a material that blends, a sprite, a circle and an emitter's particles, born in the
+/// frame [`FoggedScene::settle`] ends with, which the frames after, at the same time, draw alike.
+struct FoggedScene {
+    renderer: Renderer,
+    stores: Stores,
+    viewport: Viewport,
+    viewpoint: Viewpoint,
+    /// Its models' draws, each with its transform and ID, the glass last.
+    models: Vec<(Mat4, MeshDraw, u64)>,
+}
+
+impl FoggedScene {
+    fn new(width: u32, height: u32) -> Self {
+        let renderer = renderer(width, height);
+        let mut stores = Stores::default();
+        let [sky_width, sky_height] = [64, 32];
+        let sky = sky_texture(&mut stores.textures, [sky_width, sky_height], |_, y| {
+            let up = 1.0 - 2.0 * (y as f32 + 0.5) / sky_height as f32;
+            if up > 0.0 {
+                let pale = 1.0 - up;
+                [0.25 + 0.5 * pale, 0.45 + 0.35 * pale, 0.9]
+            } else {
+                [0.1, 0.08, 0.06]
+            }
+        });
+        stores.sky = Some(Sky {
+            texture: sky,
+            luminance: 1.0,
+        });
+        stores.lights = vec![Light {
+            kind: LightKind::Directional,
+            position: Vec3::ZERO,
+            direction: -Vec3::new(0.6, 0.25, -1.0).normalize(),
+            color: Vec3::new(3.0, 2.8, 2.4),
+            range: None,
+            shadow_distance: Some(60.0),
+        }];
+        let viewpoint = Viewpoint {
+            position: Vec3::new(0.0, 1.2, 5.0),
+            rotation: Quat::from_rotation_x(-0.08),
+            projection: Projection::Perspective {
+                fov: 0.9,
+                near: 0.1,
+            },
+        };
+        let viewport = filling([width, height]);
+        let mut models = Vec::new();
+        let mut model = |stores: &mut Stores, mesh, material: &Material, placed, id| {
+            let material = stores.materials.add(material);
+            let draw =
+                MeshDraw::with_material(mesh, material, &stores.materials, &mut stores.shaders);
+            models.push((placed, draw, id));
+        };
+        let square = model_square(&mut stores.meshes);
+        let ground = Material {
+            color: Vec4::new(0.5, 0.48, 0.45, 1.0),
+            workflow: metallic(0.0, 0.9),
+            ..Material::default()
+        };
+        let floor = facing_up(80.0, Vec3::new(0.0, 0.0, -20.0));
+        model(&mut stores, square, &ground, floor, 1);
+        let ball = sphere(&mut stores.meshes, 0.5, 16, 32);
+        let colors = [
+            Vec4::new(0.8, 0.2, 0.15, 1.0),
+            Vec4::new(0.2, 0.6, 0.25, 1.0),
+            Vec4::new(0.2, 0.3, 0.8, 1.0),
+            Vec4::new(0.85, 0.75, 0.3, 1.0),
+        ];
+        for i in 0..8 {
+            let material = Material {
+                color: colors[i % colors.len()],
+                workflow: metallic(0.0, 0.4),
+                ..Material::default()
+            };
+            let side = if i % 2 == 0 { -1.3 } else { 1.3 };
+            let at = Mat4::from_translation(Vec3::new(side, 0.5, -3.0 * i as f32));
+            model(&mut stores, ball, &material, at, 2 + i as u64);
+        }
+        let glass = Material {
+            color: Vec4::new(0.6, 0.8, 1.0, 0.35),
+            workflow: metallic(0.0, 0.1),
+            alpha: AlphaMode::Blend,
+            double_sided: true,
+            ..Material::default()
+        };
+        let pane = Mat4::from_scale_rotation_translation(
+            Vec3::new(1.2, 1.2, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(0.3, 0.9, 1.5),
+        );
+        model(&mut stores, square, &glass, pane, 20);
+        Self {
+            renderer,
+            stores,
+            viewport,
+            viewpoint,
+            models,
+        }
+    }
+
+    /// The scene's draws: its models, the glass, which blends, last, then the rest, which blends,
+    /// with the particles' births of the frame if `born`.
+    fn draws(&mut self, born: bool) -> Draws {
+        let stores = &mut self.stores;
+        let mut draws = Draws::default();
+        for (placed, draw, id) in &self.models {
+            draws.push_draw(*placed, draw, *id);
+        }
+        draws.push_sprite(
+            Mat4::from_translation(Vec3::new(-2.5, 1.5, -10.0)),
+            Sprite {
+                color: Vec4::new(1.0, 0.9, 0.3, 0.8),
+                ..Sprite::default()
+            },
+        );
+        let circle = Circle {
+            color: Vec4::new(0.9, 0.3, 0.9, 0.9),
+            ..Circle::default()
+        };
+        let far =
+            Mat4::from_translation(Vec3::new(2.6, 1.4, -14.0)) * Mat4::from_scale(Vec3::splat(1.5));
+        draws.push_circle(&mut stores.shaders, far, circle);
+        let at = Mat4::from_translation(Vec3::new(-0.2, 0.2, -2.5));
+        let disc = Emission {
+            shape: ParticleShape::Cone {
+                angle: 0.3,
+                radius: 0.05,
+            },
+            speed: [2.0, 2.6],
+            lifetime: [1.0, 1.2],
+            spin: [0.0; 2],
+            acceleration: Vec3::new(0.0, -3.0, 0.0),
+            drag: 0.2,
+            size: [0.25, 0.12],
+            color: [
+                Vec4::new(1.0, 0.5, 0.15, 0.9),
+                Vec4::new(1.0, 0.2, 0.05, 0.0),
+            ],
+            texture: None,
+            cells: [1, 1],
+            additive: false,
+        };
+        let births = if born {
+            Births {
+                first: 0,
+                count: 65,
+                time: 0.0,
+                every: 0.25,
+                from: at,
+                to: at,
+                along: 0.0,
+                step: 0.25 / 16.0,
+            }
+        } else {
+            Births::none(at)
+        };
+        draws.push_particles(Particles {
+            id: 30,
+            fresh: false,
+            most: 96,
+            now: 16.0,
+            tick: 1.0 / 64.0,
+            births,
+            bursts: Bursts::none(at),
+            emission: disc,
+        });
+        draws
+    }
+
+    /// Renders the scene, its particles born in an earlier frame, in `fog`: its pixels.
+    fn render(&mut self, fog: Option<Fog>) -> Vec<u8> {
+        let draws = self.draws(false);
+        let data = RenderData {
+            fog,
+            tonemapper: Tonemapper::PbrNeutral,
+            ..self.stores.data(self.viewport, self.viewpoint, &draws)
+        };
+        render_without_ui(&mut self.renderer, data);
+        frame_pixels(&mut self.renderer)
+    }
+
+    /// Settles it, and has a frame give its particles their births.
+    fn settle(&mut self) {
+        let (viewport, viewpoint) = (self.viewport, self.viewpoint);
+        let draws = self.draws(false);
+        settle(
+            &mut self.renderer,
+            &mut self.stores,
+            viewport,
+            viewpoint,
+            &draws,
+        );
+        let draws = self.draws(true);
+        let data = self.stores.data(viewport, viewpoint, &draws);
+        render_without_ui(&mut self.renderer, data);
+    }
+}
+
+/// Fog of no density, and fog of no opacity, which takes out none of the light behind it however
+/// far, draw a scene of every kind of draw that fog fogs exactly as it draws without fog, though
+/// fog of no opacity has its pass fog what's opaque and draws what blends after it; fog that takes
+/// some light draws it otherwise. Likewise with ambient occlusion, which has the view draw what's
+/// opaque again, shaded, once the occlusion is found, after which the fog's pass fogs it: the sky,
+/// which the occlusion doesn't darken, as fogged as without it.
+fn fog_of_no_density_or_opacity_changes_nothing() {
+    const SIZE: [u32; 2] = [96, 64];
+    let mut scene = FoggedScene::new(SIZE[0], SIZE[1]);
+    scene.settle();
+    let thin = Fog {
+        density: 0.0,
+        ..Fog::default()
+    };
+    let clear = Fog {
+        density: 0.5,
+        opacity: 0.0,
+        ..Fog::default()
+    };
+    let foggy = Fog {
+        density: 0.5,
+        ..Fog::default()
+    };
+    let mut fogged = Vec::new();
+    for occlusion in [None, Some(AmbientOcclusion::default())] {
+        scene.stores.ambient_occlusion = occlusion;
+        let without = scene.render(None);
+        for (name, fog) in [("no density", thin), ("no opacity", clear)] {
+            assert!(
+                scene.render(Some(fog)) == without,
+                "fog of {name} changes what's drawn, with ambient occlusion {occlusion:?}"
+            );
+        }
+        let frame = scene.render(Some(foggy));
+        assert!(
+            frame != without,
+            "fog changes nothing, with ambient occlusion {occlusion:?}"
+        );
+        fogged.push(frame);
+    }
+    for x in [10, 48, 86] {
+        let [without, with] =
+            [&fogged[0], &fogged[1]].map(|frame| pixel_at(frame, SIZE[0], [x, 2]));
+        assert!(
+            close(with, without),
+            "the fogged sky shows {with:?} with ambient occlusion, {without:?} without"
+        );
+    }
+    shut_down(scene.renderer);
+}
+
+/// A scene of every kind of draw that fog fogs, as [`FoggedScene`] has it, in a low height fog,
+/// lit by the sky and by the sun, in a lobe round it, as a camera with perspective sees it,
+/// tonemapped by PBR Neutral, against its reference image.
+fn fogged_scenes_match_their_reference() {
+    const WIDTH: u32 = 200;
+    const HEIGHT: u32 = 112;
+    let mut scene = FoggedScene::new(WIDTH, HEIGHT);
+    scene.settle();
+    let fog = Fog {
+        density: 0.06,
+        falloff: 0.5,
+        height: 0.0,
+        start: 0.0,
+        opacity: 1.0,
+        color: Vec3::ONE,
+        luminance: 1.0,
+        sun: 1.0,
+        sharpness: 0.65,
+    };
+    scene.render(Some(fog));
+    check(scene.renderer, "fog", WIDTH, HEIGHT);
 }
 
 /// The bytes of a shadow map of a light's cascade: 2048 texels across and down, of 32-bit depth.
