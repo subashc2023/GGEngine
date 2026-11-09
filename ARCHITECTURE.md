@@ -1775,7 +1775,10 @@ Production Ready Sky and Atmosphere Rendering Technique" (2020) makes it, after 
 implementation: Rayleigh's and Mie's scattering and ozone's absorption over a planet of Earth's
 radius, 6,360 km, up to a top 100 km above it, Earth's by default, as the paper's, the world's
 units taken as meters, its +Y up and its origin as high above the ground as the atmosphere says,
-the viewer as high as that and its own Y, kept 10 m above the ground and below the top. Its sun is
+the viewer as high as that and its own Y, kept 10 m above the ground and below the top. Its shaders
+work in kilometers from heights above the ground, not radii from the planet's center, at which an
+f32 is half a meter apart: what's meters above the ground, as which points the planet shadows, is
+then found alike on every GPU, rather than by how each rounds. Its sun is
 the frame's brightest directional light that shines, the first of those as bright, whatever its
 shadows: where the light shines from is where the sky's sun is, so that turning the light, as a
 time of day does, moves the sun and its disk, which the view draws there, as wide as the

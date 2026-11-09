@@ -224,11 +224,6 @@ impl Seen {
         }
     }
 
-    /// How far the viewer is from the planet's center, in kilometers.
-    fn radius(&self) -> f32 {
-        GROUND + self.height / 1000.0
-    }
-
     /// The cosine of the angle from the sun's center to its disk's edge.
     fn sun_cosine(&self) -> f32 {
         libm::cosf(self.atmosphere.sun_size.max(1.0e-5) / 2.0)
@@ -263,7 +258,7 @@ impl Seen {
             ground_albedo: atmosphere.ground_albedo.clamp(Vec3::ZERO, Vec3::ONE),
             mie_anisotropy: atmosphere.mie_anisotropy.clamp(-0.999, 0.999),
             sun: self.to_sun,
-            height: self.radius(),
+            height: self.height / 1000.0,
             tint: self.tint,
             sun_cosine: self.sun_cosine(),
         }
@@ -397,7 +392,9 @@ pub(crate) struct AtmosphereData {
     mie_extinction: f32,
     ground_albedo: Vec3,
     mie_anisotropy: f32,
-    /// The unit way toward the sun, and how far the viewer is from the planet's center.
+    /// The unit way toward the sun, and how far the viewer is above the ground, in kilometers: a
+    /// height rather than a radius, as an f32 keeps its meters, which it loses at the planet's
+    /// radius.
     sun: Vec3,
     height: f32,
     /// The sun's color, as a share of its illuminance, and the cosine of its disk's radius.
