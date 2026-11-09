@@ -36,7 +36,8 @@ struct Atmosphere {
     // The ground's albedo, and the asymmetry of Mie's phase function, Henyey-Greenstein's g.
     float3 ground_albedo;
     float mie_anisotropy;
-    // The unit way toward the sun, and how far the viewer is from the planet's center.
+    // The unit way toward the sun, and how far the viewer is above the ground: a height rather
+    // than a radius, as an f32 keeps meters in it, which it loses at the planet's radius.
     float3 sun;
     float height;
     // The sun's color, as a share of its illuminance, and the cosine of its disk's radius.
@@ -99,8 +100,7 @@ struct Medium {
     float3 extinction;
 };
 
-Medium medium_at(Atmosphere atmosphere, float radius) {
-    float height = radius - GROUND;
+Medium medium_at(Atmosphere atmosphere, float height) {
     float mie = exp(-height / MIE_HEIGHT);
     float ozone = saturate(1.0 - abs(height - OZONE_HEIGHT) / OZONE_WIDTH);
     Medium medium;
@@ -112,18 +112,42 @@ Medium medium_at(Atmosphere atmosphere, float radius) {
     return medium;
 }
 
-// How far along `way`, a unit vector, from `from` a ray first meets the sphere of `radius` round
-// the planet's center, 0 from inside it; -1 if it doesn't.
-float nearest(float3 from, float3 way, float radius) {
-    float b = dot(from, way);
-    float c = dot(from, from) - radius * radius;
+// Points are heights above the ground, not radii: at the planet's radius f32s are half a meter
+// apart, and the squares of radii 4 km² apart, a third of a meter of height, so that what's found
+// from radii a few meters above the ground is found by rounding, which no two GPUs do alike. A
+// point's radius is used only where meters don't count.
+
+// How much higher than a point `radius` from the planet's center a point `t` along a way of zenith
+// cosine `mu` from it is: the difference of their radii's squares over their sum, which keeps the
+// meters their difference loses.
+float rise(float radius, float mu, float t) {
+    float squares = t * (t + 2.0 * radius * mu);
+    return squares / (sqrt(max(radius * radius + squares, 0.0)) + radius);
+}
+
+// How far along a way of zenith cosine `mu`, from a point `height` above the ground, a ray first
+// meets the sphere `sphere` above the ground round the planet's center, the far side from inside
+// it or on it; -1 if it doesn't. Its square's constant term from the heights, and the root whose
+// terms would cancel from the other's, by their product, so that a point a meter from the sphere
+// is on its side of it.
+float nearest(float height, float mu, float sphere) {
+    float radius = GROUND + height;
+    float b = radius * mu;
+    float c = (height - sphere) * (radius + GROUND + sphere);
     float discriminant = b * b - c;
     if (discriminant < 0.0) {
         return -1.0;
     }
     float root = sqrt(discriminant);
-    float near = -b - root;
-    float far = -b + root;
+    float near;
+    float far;
+    if (b >= 0.0) {
+        near = -b - root;
+        far = b + root > 0.0 ? -c / (b + root) : 0.0;
+    } else {
+        far = -b + root;
+        near = c / far;
+    }
     if (near < 0.0 && far < 0.0) {
         return -1.0;
     }
@@ -145,26 +169,27 @@ float texel_of(float u, float size) {
     return u * ((size - 1.0) / size) + 0.5 / size;
 }
 
-// The transmittance's table's coordinates of a point `radius` from the planet's center and the
-// cosine `mu` of a way's zenith angle there, by Bruneton's map: the height across the horizon's
-// distance down, and how far the way reaches out of the atmosphere, between the least and most it
-// could, across.
-float2 transmittance_uv(float radius, float mu) {
+// The transmittance's table's coordinates of a point `height` above the ground and the cosine `mu`
+// of a way's zenith angle there, by Bruneton's map: the height across the horizon's distance down,
+// and how far the way reaches out of the atmosphere, between the least and most it could, across.
+float2 transmittance_uv(float height, float mu) {
+    float radius = GROUND + height;
     float horizon = sqrt(TOP * TOP - GROUND * GROUND);
-    float rho = sqrt(max(0.0, radius * radius - GROUND * GROUND));
+    float rho = sqrt(max(0.0, height * (radius + GROUND)));
     float discriminant = radius * radius * (mu * mu - 1.0) + TOP * TOP;
     float reach = max(0.0, -radius * mu + sqrt(max(discriminant, 0.0)));
-    float least = TOP - radius;
+    float least = TOP - GROUND - height;
     float most = rho + horizon;
     return float2((reach - least) / (most - least), rho / horizon);
 }
 
-// The point's radius and way's cosine that the transmittance's table's coordinates `uv` stand for.
-void transmittance_params(float2 uv, out float radius, out float mu) {
+// The point's height and way's cosine that the transmittance's table's coordinates `uv` stand for.
+void transmittance_params(float2 uv, out float height, out float mu) {
     float horizon = sqrt(TOP * TOP - GROUND * GROUND);
     float rho = horizon * uv.y;
-    radius = sqrt(rho * rho + GROUND * GROUND);
-    float least = TOP - radius;
+    float radius = sqrt(rho * rho + GROUND * GROUND);
+    height = rho * rho / (radius + GROUND);
+    float least = TOP - GROUND - height;
     float most = rho + horizon;
     float reach = least + uv.x * (most - least);
     mu = reach == 0.0 ? 1.0
@@ -172,18 +197,18 @@ void transmittance_params(float2 uv, out float radius, out float mu) {
     mu = clamp(mu, -1.0, 1.0);
 }
 
-// The share of light that comes from outside the atmosphere to a point `radius` from the planet's
-// center along a way of zenith cosine `mu`, as the table holds it: of ways above the horizon, which
-// the ground leaves alone.
-float3 transmittance_to_top(float radius, float mu) {
-    float2 uv = transmittance_uv(radius, mu);
+// The share of light that comes from outside the atmosphere to a point `height` above the ground
+// along a way of zenith cosine `mu`, as the table holds it: of ways above the horizon, which the
+// ground leaves alone.
+float3 transmittance_to_top(float height, float mu) {
+    float2 uv = transmittance_uv(height, mu);
     return textures[push.transmittance].SampleLevel(samplers[LINEAR_CLAMP], uv, 0.0).rgb;
 }
 
-// The light scattered many times over toward a point `radius` from the planet's center, under a
-// sun of zenith cosine `mu` there, for a medium that scatters 1.
-float3 multiple_at(float radius, float mu) {
-    float2 uv = saturate(float2(mu * 0.5 + 0.5, (radius - GROUND) / (TOP - GROUND)));
+// The light scattered many times over toward a point `height` above the ground, under a sun of
+// zenith cosine `mu` there, for a medium that scatters 1.
+float3 multiple_at(float height, float mu) {
+    float2 uv = saturate(float2(mu * 0.5 + 0.5, height / (TOP - GROUND)));
     uv = float2(texel_of(uv.x, MULTIPLE_SIZE), texel_of(uv.y, MULTIPLE_SIZE));
     return textures[push.multiple].SampleLevel(samplers[LINEAR_CLAMP], uv, 0.0).rgb;
 }
@@ -199,20 +224,19 @@ float mie_phase(float g, float cosine) {
     return (1.0 - g * g) / (4.0 * PI * denominator * sqrt(denominator));
 }
 
-// The optical depth from a point `radius` from the planet's center out of the atmosphere along a
-// way of zenith cosine `mu`, or to the ground, by the midpoints of even steps.
-float3 optical_depth(Atmosphere atmosphere, float radius, float mu) {
-    float3 from = float3(0.0, radius, 0.0);
-    float3 way = float3(sqrt(saturate(1.0 - mu * mu)), mu, 0.0);
+// The optical depth from a point `height` above the ground out of the atmosphere along a way of
+// zenith cosine `mu`, or to the ground, by the midpoints of even steps.
+float3 optical_depth(Atmosphere atmosphere, float height, float mu) {
+    float radius = GROUND + height;
     // To the ground, if the way goes into it, and otherwise out of the atmosphere.
-    float bottom = nearest(from, way, GROUND);
-    float top = max(nearest(from, way, TOP), 0.0);
+    float bottom = nearest(height, mu, 0.0);
+    float top = max(nearest(height, mu, TOP - GROUND), 0.0);
     float end = bottom > 0.0 ? min(top, bottom) : top;
     float step = end / float(TRANSMITTANCE_STEPS);
     float3 depth = float3(0.0);
     for (uint i = 0; i < TRANSMITTANCE_STEPS; i++) {
         float t = (float(i) + 0.5) * step;
-        depth += medium_at(atmosphere, length(from + t * way)).extinction;
+        depth += medium_at(atmosphere, height + rise(radius, mu, t)).extinction;
     }
     return depth * step;
 }
@@ -227,21 +251,24 @@ struct Scattered {
     float3 multiple;
 };
 
-// The light scattered toward `from` along `way`, a unit vector, from as far as the atmosphere, the
-// ground or `most` reach, under a sun the unit way `to_sun` of `sunlight`, as the reference's
+// The light scattered toward a point `height` above the ground along `way`, a unit vector, the
+// point straight above the planet's center, from as far as the atmosphere, the ground or `most`
+// reach, under a sun the unit way `to_sun` of `sunlight`, as the reference's
 // IntegrateScatteredLuminance has it: in `samples` steps, or, if `variable`, from 4 to 14 by how
 // far the ray reaches, crowded toward its start; by Rayleigh's and Mie's phase functions if
 // `phased`, and every way alike otherwise; with the light scattered many times over if `multiply`;
 // and with the light the ground reflects at its end if `ground`.
-Scattered scattered(Atmosphere atmosphere, float3 from, float3 way, float3 to_sun, float3 sunlight,
-                    bool ground, float samples, bool variable, bool phased, float most,
-                    bool multiply) {
+Scattered scattered(Atmosphere atmosphere, float height, float3 way, float3 to_sun,
+                    float3 sunlight, bool ground, float samples, bool variable, bool phased,
+                    float most, bool multiply) {
     Scattered out;
     out.luminance = float3(0.0);
     out.transmittance = float3(1.0);
     out.multiple = float3(0.0);
-    float bottom = nearest(from, way, GROUND);
-    float top = nearest(from, way, TOP);
+    float radius = GROUND + height;
+    float3 from = float3(0.0, radius, 0.0);
+    float bottom = nearest(height, way.y, 0.0);
+    float top = nearest(height, way.y, TOP - GROUND);
     float end = 0.0;
     if (bottom < 0.0) {
         if (top < 0.0) {
@@ -281,19 +308,20 @@ Scattered scattered(Atmosphere atmosphere, float3 from, float3 way, float3 to_su
             dt = next - t;
             t = next;
         }
-        float3 at = from + t * way;
-        float radius = length(at);
-        float3 up = at / radius;
-        float sun_mu = dot(to_sun, up);
-        Medium medium = medium_at(atmosphere, radius);
+        float sun_mu = dot(to_sun, normalize(from + t * way));
+        float lifted = rise(radius, way.y, t);
+        float there = height + lifted;
+        Medium medium = medium_at(atmosphere, there);
         float3 extinction = max(medium.extinction, float3(1e-9));
         float3 through = exp(-medium.extinction * dt);
-        float3 to_sun_transmittance = transmittance_to_top(radius, sun_mu);
+        float3 to_sun_transmittance = transmittance_to_top(there, sun_mu);
         float3 phase_scattering = phased ? medium.mie * mie + medium.rayleigh * rayleigh
                                          : medium.scattering / (4.0 * PI);
-        // In the planet's shadow, the point looked out from a little lower.
-        float shadow = nearest(at - OFFSET * up, to_sun, GROUND) >= 0.0 ? 0.0 : 1.0;
-        float3 many = multiply ? multiple_at(radius, sun_mu) : float3(0.0);
+        // In the planet's shadow, the point looked out from a little lower: `OFFSET` lower, taken
+        // from the viewer's height before the rise is added, so that a viewer held at `OFFSET`
+        // leaves the rise whole.
+        float shadow = nearest(height - OFFSET + lifted, sun_mu, 0.0) >= 0.0 ? 0.0 : 1.0;
+        float3 many = multiply ? multiple_at(there, sun_mu) : float3(0.0);
         float3 lit = shadow * to_sun_transmittance * phase_scattering;
         float3 source = sunlight * (lit + many * medium.scattering);
         // Each integrated over its step, as the extinction there takes it away (Hillaire,
@@ -304,22 +332,26 @@ Scattered scattered(Atmosphere atmosphere, float3 from, float3 way, float3 to_su
         out.transmittance *= through;
     }
     if (ground && end == bottom && bottom > 0.0) {
-        float3 at = from + bottom * way;
-        float radius = length(at);
-        float sun_mu = dot(to_sun, at / radius);
-        float3 to_sun_transmittance = transmittance_to_top(radius, sun_mu);
+        float sun_mu = dot(to_sun, normalize(from + bottom * way));
+        float3 to_sun_transmittance = transmittance_to_top(0.0, sun_mu);
         out.luminance += sunlight * to_sun_transmittance * out.transmittance * saturate(sun_mu)
             * atmosphere.ground_albedo / PI;
     }
     return out;
 }
 
+// The angle from straight down to the horizon from a point `height` above the ground.
+float below_horizon(float height) {
+    float radius = GROUND + height;
+    return acos(sqrt(max(height * (radius + GROUND), 0.0)) / radius);
+}
+
 // The sky's table's coordinates of a way of zenith cosine `view_mu` whose way round from the sun's
-// has the cosine `light_view`, from a point `radius` from the planet's center, which meets the
-// ground if `ground`: the zenith angle down, squared toward the horizon from above and below it,
-// and the way round across, squared toward the sun's.
-float2 sky_view_uv(bool ground, float view_mu, float light_view, float radius) {
-    float beta = acos(sqrt(max(radius * radius - GROUND * GROUND, 0.0)) / radius);
+// has the cosine `light_view`, from a point `height` above the ground, which meets the ground if
+// `ground`: the zenith angle down, squared toward the horizon from above and below it, and the way
+// round across, squared toward the sun's.
+float2 sky_view_uv(bool ground, float view_mu, float light_view, float height) {
+    float beta = below_horizon(height);
     float zenith_horizon = PI - beta;
     float2 uv;
     if (!ground) {
@@ -334,10 +366,10 @@ float2 sky_view_uv(bool ground, float view_mu, float light_view, float radius) {
 }
 
 // The way's zenith cosine and its way round from the sun's that the sky's table's coordinates `uv`
-// stand for, from a point `radius` from the planet's center.
-void sky_view_params(float2 uv, float radius, out float view_mu, out float light_view) {
+// stand for, from a point `height` above the ground.
+void sky_view_params(float2 uv, float height, out float view_mu, out float light_view) {
     uv = float2(unit_of(uv.x, SKY_VIEW_SIZE.x), unit_of(uv.y, SKY_VIEW_SIZE.y));
-    float beta = acos(sqrt(max(radius * radius - GROUND * GROUND, 0.0)) / radius);
+    float beta = below_horizon(height);
     float zenith_horizon = PI - beta;
     if (uv.y < 0.5) {
         float coord = 1.0 - 2.0 * uv.y;
@@ -352,11 +384,10 @@ void sky_view_params(float2 uv, float radius, out float view_mu, out float light
 // The sky the viewer sees along `way`, a unit vector in the world, from its table, for a sun of an
 // illuminance of 1.
 float3 sky_view_at(Atmosphere atmosphere, float3 way) {
-    float3 from = float3(0.0, atmosphere.height, 0.0);
     float lengths = length(way.xz) * length(atmosphere.sun.xz);
     float light_view =
         lengths > 0.0 ? clamp(dot(way.xz, atmosphere.sun.xz) / lengths, -1.0, 1.0) : 1.0;
-    bool ground = nearest(from, way, GROUND) >= 0.0;
+    bool ground = nearest(atmosphere.height, way.y, 0.0) >= 0.0;
     float2 uv = sky_view_uv(ground, clamp(way.y, -1.0, 1.0), light_view, atmosphere.height);
     return textures[push.sky_view].SampleLevel(samplers[LINEAR_CLAMP], uv, 0.0).rgb;
 }
@@ -369,10 +400,10 @@ void transmittance_main(uint3 id: SV_DispatchThreadID) {
         return;
     }
     Atmosphere atmosphere = *push.atmosphere;
-    float radius;
+    float height;
     float mu;
-    transmittance_params((float2(id.xy) + 0.5) / TRANSMITTANCE_SIZE, radius, mu);
-    float3 transmittance = exp(-optical_depth(atmosphere, radius, mu));
+    transmittance_params((float2(id.xy) + 0.5) / TRANSMITTANCE_SIZE, height, mu);
+    float3 transmittance = exp(-optical_depth(atmosphere, height, mu));
     storage[push.target][uint3(id.xy, 0)] = float4(transmittance, 1.0);
 }
 
@@ -393,13 +424,12 @@ void multiple_main(uint3 id: SV_DispatchThreadID, uint3 thread: SV_GroupThreadID
     uv = float2(unit_of(uv.x, MULTIPLE_SIZE), unit_of(uv.y, MULTIPLE_SIZE));
     float sun_mu = uv.x * 2.0 - 1.0;
     float3 to_sun = float3(sqrt(saturate(1.0 - sun_mu * sun_mu)), sun_mu, 0.0);
-    float radius = GROUND + saturate(uv.y + OFFSET) * (TOP - GROUND - OFFSET);
-    float3 from = float3(0.0, radius, 0.0);
+    float height = saturate(uv.y + OFFSET) * (TOP - GROUND - OFFSET);
     uint i = thread.z;
     float theta = 2.0 * PI * (float(i / 8) + 0.5) / 8.0;
     float phi = acos(1.0 - 2.0 * (float(i % 8) + 0.5) / 8.0);
     float3 way = float3(cos(theta) * sin(phi), cos(phi), sin(theta) * sin(phi));
-    Scattered found = scattered(atmosphere, from, way, to_sun, float3(1.0), true,
+    Scattered found = scattered(atmosphere, height, way, to_sun, float3(1.0), true,
                                 MULTIPLE_STEPS, false, false, 9.0e6, false);
     // Each way's share of the sphere's solid angle.
     shared_luminance[i] = found.luminance * (4.0 * PI / 64.0);
@@ -430,17 +460,17 @@ void sky_view_main(uint3 id: SV_DispatchThreadID) {
         return;
     }
     Atmosphere atmosphere = *push.atmosphere;
-    float radius = atmosphere.height;
     float view_mu;
     float light_view;
-    sky_view_params((float2(id.xy) + 0.5) / SKY_VIEW_SIZE, radius, view_mu, light_view);
+    sky_view_params((float2(id.xy) + 0.5) / SKY_VIEW_SIZE, atmosphere.height, view_mu,
+                    light_view);
     float sun_mu = clamp(atmosphere.sun.y, -1.0, 1.0);
     float3 to_sun = float3(sqrt(saturate(1.0 - sun_mu * sun_mu)), sun_mu, 0.0);
     float view_sin = sqrt(saturate(1.0 - view_mu * view_mu));
     float3 way = float3(view_sin * light_view, view_mu,
                         view_sin * sqrt(saturate(1.0 - light_view * light_view)));
-    Scattered found = scattered(atmosphere, float3(0.0, radius, 0.0), way, to_sun,
-                                atmosphere.tint, true, 30.0, true, true, 9.0e6, true);
+    Scattered found = scattered(atmosphere, atmosphere.height, way, to_sun, atmosphere.tint,
+                                true, 30.0, true, true, 9.0e6, true);
     storage[push.target][uint3(id.xy, 0)] = float4(found.luminance, 1.0);
 }
 
@@ -464,17 +494,25 @@ void aerial_main(uint3 id: SV_DispatchThreadID) {
     float2 clip = (float2(id.xy) + 0.5) / float(SLICES) * 2.0 - 1.0;
     float4 point = mul(atmosphere.ways_from_clip, float4(clip, 1.0, 1.0));
     float3 way = normalize(point.xyz / point.w);
-    float3 from = float3(0.0, atmosphere.height, 0.0);
+    float height = atmosphere.height;
+    float radius = GROUND + height;
     float reach = slice_reach(id.z);
-    float3 to = from + reach * way;
-    // A froxel under the ground is moved onto it.
-    if (length(to) <= GROUND + OFFSET) {
-        to = normalize(to) * (GROUND + OFFSET + 0.001);
-        way = normalize(to - from);
-        reach = length(to - from);
+    // A froxel under the ground, or less than `OFFSET` above it, is moved up onto it, its way and
+    // reach to it found again: from the heights, and the angle at the planet's center, whose sine
+    // and its 1 less cosine keep the meters the difference of two radii loses.
+    float raised = OFFSET + 0.001;
+    if (height + rise(radius, way.y, reach) <= OFFSET) {
+        float3 to = float3(0.0, radius, 0.0) + reach * way;
+        float far = length(to);
+        float sine = length(to.xz) / far;
+        float bend = sine * sine / (1.0 + to.y / far);
+        float3 moved = float3(to.x, 0.0, to.z) / far * (GROUND + raised);
+        moved.y = (raised - height) - (GROUND + raised) * bend;
+        reach = length(moved);
+        way = moved / reach;
     }
     float samples = max(1.0, float(id.z + 1) * 2.0);
-    Scattered found = scattered(atmosphere, from, way, atmosphere.sun, atmosphere.tint, false,
+    Scattered found = scattered(atmosphere, height, way, atmosphere.sun, atmosphere.tint, false,
                                 samples, false, true, reach, true);
     float transmittance = dot(found.transmittance, float3(1.0 / 3.0));
     storage[push.target][uint3(id.x + id.z * SLICES, id.y, 0)] =
@@ -524,8 +562,8 @@ Targets fragment_main(Varyings input) {
     float3 way = normalize(point.xyz / point.w);
     Atmosphere atmosphere = *push.atmosphere;
     float3 color = sky_view_at(atmosphere, way);
-    float3 from = float3(0.0, atmosphere.height, 0.0);
-    if (dot(way, atmosphere.sun) > atmosphere.sun_cosine && nearest(from, way, GROUND) < 0.0) {
+    if (dot(way, atmosphere.sun) > atmosphere.sun_cosine
+        && nearest(atmosphere.height, way.y, 0.0) < 0.0) {
         float3 through = transmittance_to_top(atmosphere.height, way.y);
         color += through * atmosphere.tint * push.disk;
     }

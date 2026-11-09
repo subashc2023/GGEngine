@@ -417,6 +417,10 @@ pub struct Context {
     /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
     #[cfg(feature = "dev")]
     pub(crate) folders: Vec<PathBuf>,
+    /// The project's directory, where its manifest is, and its fetch list, which an ID no asset
+    /// has is looked for in, as [`asset_path`](Self::asset_path) says: a project's game's alone.
+    #[cfg(feature = "dev")]
+    project_dir: Option<PathBuf>,
     /// The directory of what the app keeps for the user from run to run, beside the dock's layout,
     /// as [`read_state`](Self::read_state) says: a windowed run's alone.
     state: Option<PathBuf>,
@@ -536,6 +540,7 @@ impl Context {
         if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
                 cx.folders.clone_from(&manifest.scenes);
+                cx.project_dir = manifest.path.parent().map(Path::to_owned);
             }
             cx.asset_cache = (cx.root.as_deref()).and_then(|root| assets::cache(app.name, root));
         }
@@ -588,6 +593,7 @@ impl Context {
         #[cfg(feature = "dev")]
         {
             cx.folders = manifest.scenes;
+            cx.project_dir = Some(dir.as_ref().to_owned());
         }
         Ok(cx)
     }
@@ -715,6 +721,8 @@ impl Context {
             start: None,
             #[cfg(feature = "dev")]
             folders: Vec::new(),
+            #[cfg(feature = "dev")]
+            project_dir: None,
             state: None,
             assets,
             loaded: Loaded::default(),
@@ -2156,8 +2164,9 @@ impl Context {
     /// the tool API, finds only what it was given, so that it names the asset as its host would.
     ///
     /// Fails with `asset.not_given` for what such a run wasn't given; `asset.unknown_id` for an ID
-    /// no asset has this run, or any ID in a build without `dev` that reads no package, as it reads
-    /// no ID file; and `asset.outside_root` for an absolute path.
+    /// no asset has this run, naming the file the project's fetch list gives it, if it gives it
+    /// one, as [`fetched`](Self::fetched) finds it, or any ID in a build without `dev` that reads
+    /// no package, as it reads no ID file; and `asset.outside_root` for an absolute path.
     fn asset_path(&self, name: &str, kind: &str, stand_in: bool) -> Result<Arc<str>> {
         #[cfg(feature = "dev")]
         if let Some(given) = &self.given {
@@ -2190,7 +2199,14 @@ impl Context {
                 if let Some(path) = id.and_then(|id| self.assets.catalog().path(id)) {
                     return Ok(path.into());
                 }
-                let message = format!("no asset under the asset root has the ID {name} this run");
+                let mut message =
+                    format!("no asset under the asset root has the ID {name} this run");
+                if let Some(path) = id.and_then(|id| self.fetched(id)) {
+                    message += &format!(
+                        ", but the project's fetch list gives it to `{path}`: `cargo gg fetch`, \
+                         in the project's directory, fetches it with its ID"
+                    );
+                }
                 return Err(Error::new("asset.unknown_id", message));
             }
             #[cfg(not(feature = "dev"))]
@@ -2215,6 +2231,18 @@ impl Context {
             return Err(Error::new("asset.outside_root", message));
         }
         Ok(name.into())
+    }
+
+    /// The path, from the project's directory, of the file the project's fetch list, `fetch.ron`,
+    /// gives asset ID `id`, as gg-api's `Fetch` reads it, if it gives it one: a file that `gg
+    /// fetch` fetches, which the repository doesn't hold, and so a checkout hasn't until it's
+    /// fetched. `None` for a context that isn't a project's game, or one without a fetch list, or
+    /// whose list doesn't read. It reads the list each time, as only an error asks.
+    #[cfg(feature = "dev")]
+    fn fetched(&self, id: AssetId) -> Option<String> {
+        let list = gg_api::Fetch::read(self.project_dir.as_deref()?).ok()?;
+        let mut files = list.files();
+        files.find(|file| file.id == Some(id)).map(|file| file.path)
     }
 
     /// Loads the texture at `path` from the asset root, which text names `name`, as
@@ -6233,6 +6261,55 @@ mod tests {
             cx.take_reloaded(false);
         }
         assert_eq!((size(&cx, there), size(&cx, after)), (None, None));
+    }
+
+    /// An ID no asset has, which the project's fetch list gives a file, names that file and `cargo
+    /// gg fetch`, the list read beside the manifest, not under the asset root; but not an ID the
+    /// list doesn't give, nor in a context that isn't a project's game.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn an_unknown_id_the_fetch_list_gives_names_what_fetches_it() {
+        let scratch = crate::dirs::tests::Scratch::new("unknown-fetched");
+        let dir = scratch.0.join("game");
+        std::fs::create_dir_all(dir.join("content")).expect("a directory");
+        let project = gg_api::Project {
+            game: "tested".to_owned(),
+            assets: "content".to_owned(),
+            scenes: vec!["content/scenes".to_owned()],
+            start: "content/scenes/main.ron".to_owned(),
+        };
+        std::fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
+        let (id, hash) = (
+            "44ae3d1eca56e109",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        let list = format!(
+            "[\n    (\n        from: \"https://example.com/sponza\",\n        into: \
+             \"content/models/sponza\",\n        files: {{\n            \"Sponza.gltf\": \
+             \"{hash}\",\n        }},\n        ids: {{\n            \"Sponza.gltf\": \
+             \"{id}\",\n        }},\n    ),\n]\n"
+        );
+        std::fs::write(dir.join(gg_api::Fetch::FILE), list).expect("written");
+
+        let cx = Context::seeded(0).project(&dir).expect("the project reads");
+        let error = cx.asset_path(id, "model", false).expect_err("not fetched");
+        let message = format!("{error:#}");
+        assert_eq!(error.code(), "asset.unknown_id", "{message}");
+        assert!(
+            message.contains("`content/models/sponza/Sponza.gltf`")
+                && message.contains("`cargo gg fetch`"),
+            "{message}"
+        );
+        let other = cx.asset_path("0a1b2c3d4e5f6071", "model", false);
+        let message = format!("{:#}", other.expect_err("no such ID"));
+        assert!(!message.contains("fetch"), "{message}");
+
+        let rooted = Context::seeded(0).root(dir.join("content"));
+        let message = format!(
+            "{:#}",
+            rooted.asset_path(id, "model", false).expect_err("none")
+        );
+        assert!(!message.contains("fetch"), "{message}");
     }
 
     /// A scene file loads the textures it names that no layer added, by an ID or by a path from the

@@ -888,11 +888,12 @@ impl Drop for Frames {
         let raw = self.device.raw();
         // SAFETY: the GPU has finished every frame, on every queue, and every copy, so nothing here
         // is in use. Null handles, left by a failed `new` or by a device that doesn't upload
-        // through a transfer queue or has no compute queue, are allowed.
+        // through a transfer queue or has no compute queue, are allowed. The command pools go
+        // before the timers' query pools, as a forgotten frame's command buffer, still recording,
+        // writes timestamps to them: Vulkan allows either order, but KosmicKrisp, freeing such a
+        // buffer, ends its Metal encoder, which reads the timestamps' query pool, and crashes if
+        // it's gone.
         unsafe {
-            for timer in &self.timers {
-                timer.destroy(&self.device);
-            }
             for slot in &self.slots {
                 for &semaphore in &slot.acquired {
                     raw.destroy_semaphore(semaphore, None);
@@ -903,6 +904,9 @@ impl Drop for Frames {
             }
             for transfers in &self.transfers {
                 raw.destroy_command_pool(transfers.pool, None);
+            }
+            for timer in &self.timers {
+                timer.destroy(&self.device);
             }
             raw.destroy_semaphore(self.timeline, None);
             raw.destroy_semaphore(self.transfer_timeline, None);
