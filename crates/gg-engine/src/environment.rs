@@ -3,7 +3,7 @@
 //! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::{Antialiasing, Grade, Sky, Texture, Tonemapper};
+use gg_renderer::{AmbientOcclusion, Antialiasing, Grade, Sky, Texture, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, Entity, EntityId, World};
@@ -11,12 +11,13 @@ use crate::{Component, Entity, EntityId, World};
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
 /// that maps the view's colors, drawn in high dynamic range, into the range it shows, how it's
-/// antialiased, the sky it shows behind the world and lights it by, how much it blooms, and how
-/// it's graded. A world has one, on an entity of its own; of several, the view renders with the one
-/// of the lowest ID, warning (`engine.environment_tie`). A world without one isn't tonemapped,
-/// antialiased, bloomed or graded, so that what's in the range a view shows, as a 2D game's
-/// sprites, shows as it's drawn, each pixel what's at its center, and lit shading exposes its light
-/// as the default environment's exposure does.
+/// antialiased, the sky it shows behind the world and lights it by, how much it blooms, how it's
+/// graded, and how what's near a point hides that light from it. A world has one, on an entity of
+/// its own; of several, the view renders with the one of the lowest ID, warning
+/// (`engine.environment_tie`). A world without one isn't tonemapped, antialiased, bloomed or
+/// graded, so that what's in the range a view shows, as a 2D game's sprites, shows as it's drawn,
+/// each pixel what's at its center, and lit shading exposes its light as the default environment's
+/// exposure does.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Environment {
     /// How much light the view takes in, as a camera's exposure value at ISO 100, EV100: lit
@@ -58,6 +59,12 @@ pub struct Environment {
     /// tonemapped: white balance, contrast, saturation and ASC CDL's slope, offset and power. The
     /// default, the identity, leaves it as it is.
     pub grade: Grade,
+    /// How what's near each point the view shows darkens the light that reaches it from all
+    /// around, the sky's, never the lights', as XeGTAO's ground-truth ambient occlusion finds it
+    /// from the view's depth: on by default, with XeGTAO's radius of half a unit; `None` for none.
+    /// Under a perspective with a sky alone, as without one there's no such light.
+    #[reflect(default = Some(AmbientOcclusion::default()))]
+    pub ambient_occlusion: Option<AmbientOcclusion>,
 }
 
 impl Default for Environment {
@@ -70,6 +77,7 @@ impl Default for Environment {
             sky_luminance: 30_000.0,
             bloom: 0.04,
             grade: Grade::IDENTITY,
+            ambient_occlusion: Some(AmbientOcclusion::default()),
         }
     }
 }

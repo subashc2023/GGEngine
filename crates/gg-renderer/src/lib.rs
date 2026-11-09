@@ -5,7 +5,8 @@
 //! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
 //! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
-//! behind them, prefiltered on the GPU, opaque and masked ones drawn by their meshlets shaded from
+//! behind them, prefiltered on the GPU, its light darkened by ambient occlusion from the view's
+//! depth, opaque and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, a game's UI over them in the view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, antialiased against the frames before it,
 //! bloomed, and graded and mapped by a tonemapper into the range it shows; picks, which read back
@@ -16,6 +17,7 @@
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod ao;
 mod bloom;
 mod circle;
 mod cluster;
@@ -55,6 +57,7 @@ use gg_gpu::{
 };
 use tracing::info;
 
+pub use ao::AmbientOcclusion;
 pub use circle::Circle;
 pub use draws::Draws;
 pub use gg_gpu::{
@@ -88,6 +91,7 @@ pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
+use ao::AoPass;
 use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
@@ -278,6 +282,10 @@ pub struct RenderData<'a> {
     /// bloomed, before its canvas, so that a game's UI isn't graded, and before the tonemapper
     /// maps them. The identity, which leaves them as they are, costs nothing.
     pub grade: Grade,
+    /// How the view's ambient occlusion darkens its light from all around, the sky's, if at all, as
+    /// [`AmbientOcclusion`] says: computed in a frame whose view a sky lights, seen through a
+    /// perspective, where something opaque draws, and in no other, which runs none of it.
+    pub ambient_occlusion: Option<AmbientOcclusion>,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -428,6 +436,8 @@ pub struct Renderer {
     skinning: Skinning,
     /// What writes emitters' particles' births before the frame draws them, and draws them.
     particles: ParticlePass,
+    /// What computes the view's ambient occlusion.
+    ao: AoPass,
 }
 
 enum Output {
@@ -465,6 +475,8 @@ struct ViewPasses {
     /// What shades the view from its visibility buffer, and draws the rest over that, if it has
     /// one.
     shaded: Option<ShadedPasses>,
+    /// What computes its ambient occlusion, if it has any.
+    ao: Option<AoPasses>,
     /// What resolves it, antialiased, if it's antialiased.
     taa: Option<taa::Plan>,
     /// What blooms and grades it, if it does either.
@@ -494,6 +506,18 @@ struct ShadedPasses {
     visibility: ImageId,
     shade: PassId,
     rest: PassId,
+}
+
+/// The game's view's ambient occlusion, in a frame's graph, which needs the depth of what's opaque
+/// in the view before any of it shades: beside a visibility buffer, which has the depth of what
+/// it draws, the pass that draws the depth alone of the culled runs drawn otherwise, if any may be,
+/// into an image of its own; the occlusion, from the depths; and without a visibility buffer, whose
+/// view's first and second passes draw the depth alone of every culled run, the pass that draws the
+/// view after, shaded, as those would have.
+struct AoPasses {
+    depth: Option<PassId>,
+    plan: ao::Plan,
+    view: Option<PassId>,
 }
 
 /// The shadows' cascades, fitted to the view, and their shadow maps and the passes that draw them,
@@ -661,6 +685,7 @@ impl Renderer {
             lighting: Lighting::new(device)?,
             skinning: Skinning::new(device)?,
             particles: ParticlePass::new(device)?,
+            ao: AoPass::new(device)?,
         })
     }
 
@@ -873,6 +898,11 @@ impl Renderer {
         if sky.is_some() && self.sky.is_none() {
             self.sky = Some(SkyPass::new(&self.device)?);
         }
+        // The view's ambient occlusion, where it darkens anything: of the light from all around,
+        // which only a sky gives, under a perspective, whose depth it reads.
+        let perspective = matches!(data.viewpoint.projection, Projection::Perspective { .. });
+        let occluded = (data.ambient_occlusion)
+            .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
         if renders_view {
             self.lighting.order(data.lights, &data.viewpoint);
         } else {
@@ -977,42 +1007,90 @@ impl Renderer {
             let visibility = (cull.as_ref())
                 .filter(|cull| visibility_buffer && cull.by_meshlets())
                 .map(|_| graph.visibility("view visibility", size));
-            let first = match visibility {
-                Some(visibility) => {
+            // The ambient occlusion takes the depth of what's opaque before any of it shades, where
+            // something is: what's drawn otherwise than into a visibility buffer, if anything may
+            // be, draws its depth alone first, into an image of its own; without one, in the view's
+            // first and second passes, and the view then draws all again, shaded, in one pass.
+            let occluding = occluded.filter(|_| cull.is_some());
+            let by_indices = (cull.as_ref()).is_some_and(CullPlan::by_indices);
+            let occlusion_depth = (occluding.filter(|_| visibility.is_none() || by_indices))
+                .map(|_| graph.depth("ambient occlusion depth", size));
+            let forward_depth = occlusion_depth.filter(|_| visibility.is_none());
+            let first = match (visibility, forward_depth) {
+                (Some(visibility), _) => {
                     let first = skinned(skin, graph.render(label!("view visibility")));
                     let first = culled(cull.as_ref(), first);
-                    first.visibility(visibility).ids(ids)
+                    first.visibility(visibility).ids(ids).depth(depth)
                 }
-                None => {
+                (None, Some(occlusion_depth)) => {
+                    let first = skinned(skin, graph.render(label!("ambient occlusion depth")));
+                    culled(cull.as_ref(), first).depth(occlusion_depth)
+                }
+                (None, None) => {
                     let first = skinned(skin, graph.render(label!("view")));
                     let first = particled(born, culled(cull.as_ref(), first));
                     let first = binned(clusters.as_ref(), sampling(lit(), first));
-                    first.clear(hdr, data.clear_color).ids(ids).motion(motion)
+                    first
+                        .clear(hdr, data.clear_color)
+                        .ids(ids)
+                        .motion(motion)
+                        .depth(depth)
                 }
             };
-            let first = first.depth(depth).add();
+            let first = first.add();
             // Where the view culls, its second pass, over its first: once the depth pyramid is
             // built from the first's depth, and the culling's second pass has culled against it,
             // what that kept, and, without a visibility buffer, the runs it doesn't cull.
             let second = cull.as_mut().map(|cull| {
-                cull.second_pass(graph, depth, size);
-                let second = match visibility {
-                    Some(visibility) => {
+                cull.second_pass(graph, forward_depth.unwrap_or(depth), size);
+                let second = match (visibility, forward_depth) {
+                    (Some(visibility), _) => {
                         let second = skinned(skin, graph.render(label!("view visibility second")));
-                        cull.drawn(second).keep(visibility)
+                        cull.drawn(second).keep(visibility).keep(ids).keep(depth)
                     }
-                    None => {
+                    (None, Some(occlusion_depth)) => {
+                        let label = label!("ambient occlusion depth second");
+                        cull.drawn(skinned(skin, graph.render(label)))
+                            .keep(occlusion_depth)
+                    }
+                    (None, None) => {
                         let second = skinned(skin, graph.render(label!("view second")));
                         let second = particled(born, cull.drawn(second));
                         let second = binned(clusters.as_ref(), sampling(lit(), second));
-                        second.keep(hdr).keep(motion)
+                        second.keep(hdr).keep(motion).keep(ids).keep(depth)
                     }
                 };
-                second.keep(ids).keep(depth).add()
+                second.add()
             });
+            // Beside a visibility buffer, the depth of the culled runs drawn otherwise, if any may
+            // be; then the occlusion, from the nearer of the two depths; and without one, the view,
+            // shaded.
+            let ao = occluding.map(|_| {
+                let rest = visibility.zip(occlusion_depth).map(|(_, occlusion_depth)| {
+                    let rest = skinned(skin, graph.render(label!("ambient occlusion depth")));
+                    culled(cull.as_ref(), rest).depth(occlusion_depth).add()
+                });
+                let alone = occlusion_depth.unwrap_or(depth);
+                let depths = [if visibility.is_some() { depth } else { alone }, alone];
+                let plan = AoPass::plan(graph, depths, size, antialiased);
+                let occlusion = iter::once(plan.image());
+                let view = visibility.is_none().then(|| {
+                    let view = skinned(skin, graph.render(label!("view")));
+                    let view = particled(born, culled(cull.as_ref(), view));
+                    let view = binned(clusters.as_ref(), sampling(lit().chain(occlusion), view));
+                    let view = view.clear(hdr, data.clear_color).ids(ids).motion(motion);
+                    view.depth(depth).add()
+                });
+                AoPasses {
+                    depth: rest,
+                    plan,
+                    view,
+                }
+            });
+            let occlusion = ao.as_ref().map(|ao| ao.plan.image());
             let shaded = visibility.zip(cull.as_ref()).map(|(visibility, cull)| {
                 let shade = graph.compute(label!("view shading")).sample(visibility);
-                let shade = lit().fold(shade, ComputePass::sample);
+                let shade = lit().chain(occlusion).fold(shade, ComputePass::sample);
                 let shade = match &clusters {
                     Some(clusters) => shade.read_buffer(clusters.buffer),
                     None => shade,
@@ -1020,11 +1098,8 @@ impl Renderer {
                 let shade = cull.shaded(shade).overwrite(hdr).overwrite(motion).add();
                 let rest = cull.drawn(skinned(skin, graph.render(label!("view rest"))));
                 let rest = particled(born, rest);
-                let rest = (binned(clusters.as_ref(), sampling(lit(), rest)).keep(hdr))
-                    .keep(ids)
-                    .keep(motion)
-                    .keep(depth)
-                    .add();
+                let rest = binned(clusters.as_ref(), sampling(lit().chain(occlusion), rest));
+                let rest = rest.keep(hdr).keep(ids).keep(motion).keep(depth).add();
                 ShadedPasses {
                     visibility,
                     shade,
@@ -1086,6 +1161,7 @@ impl Renderer {
                 first,
                 second,
                 shaded,
+                ao,
                 taa,
                 bloom,
                 canvas,
@@ -1213,6 +1289,8 @@ impl Renderer {
                     sky: SkyData::default(),
                     shadows: ShadowData::default(),
                     clusters: ClusterData::default(),
+                    ambient_occlusion: 0,
+                    unused: 0,
                 };
                 // What the casters and what's drawn into the visibility buffer read of the frame's
                 // data, all but what the view alone samples.
@@ -1237,8 +1315,9 @@ impl Renderer {
                 let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
                 let (view_lights, clusters) =
                     (self.lighting).bin(&mut frame, binning, lights, viewpoint, aspect);
-                // The view's data, as the pass that shades it samples the sky's light and the
-                // shadows' maps through the indices `sampled` gives.
+                // The view's data, as the pass that shades it samples the sky's light, the
+                // shadows' maps and the ambient occlusion through the indices `sampled` gives.
+                let occlusion = view.ao.as_ref().map(|ao| ao.plan.image());
                 let view_data = |sampled: &dyn Fn(ImageId) -> u32| {
                     let lit = match (&plan, sky) {
                         (Some(plan), Some((sky, ..))) => Some(plan.data(sampled, sky)),
@@ -1251,15 +1330,34 @@ impl Renderer {
                         sky: lit.unwrap_or_default(),
                         shadows: shadows.unwrap_or_default(),
                         clusters,
+                        ambient_occlusion: occlusion.map_or(0, sampled),
                         ..shared
                     };
                     (shared, lit)
                 };
+                // The ambient occlusion's view, from its space to its clip space, offset as the
+                // frame draws it.
+                let occlusion_seen = occluded.map(|settings| ao::Seen {
+                    clip_from_view: taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect),
+                    settings,
+                    frame: number,
+                });
+                // The depth alone of the culled runs `runs` keeps, for the ambient occlusion: all
+                // of them, or, `beside_visibility`, those drawn otherwise than into it.
+                let meshes = &self.meshes;
+                let draw_depth = |pass: &mut gg_gpu::Pass<'_, '_>, runs, beside_visibility| {
+                    let way = Way::Depth { beside_visibility };
+                    let (draws, at) = (data.draws, view_projection);
+                    meshes.draw(pass, at, partial, size, draws, uploaded, runs, way, None)
+                };
                 let shades = view.shaded.as_ref().zip(view.cull.as_ref());
-                // Beside a visibility buffer, what's drawn into it, in the view's two passes, and
-                // its shading, which the view's data is uploaded in, then the pass the rest draws
-                // in; or else the view's first pass, which takes the culled runs it kept.
-                let (mut pass, shared, lit) = if let Some((shaded, plan)) = shades {
+                // Beside a visibility buffer, what's drawn into it, in the view's two passes, then
+                // the ambient occlusion, if any, and the view's shading, which the view's data is
+                // uploaded in, then the pass the rest draws in; or else, with ambient occlusion, the
+                // depth of what the view's two passes keep, the occlusion, and the pass that draws
+                // all of it, shaded; or else the view's first pass, which takes the culled runs it
+                // kept.
+                let (mut pass, shared, frame_data, lit) = if let Some((shaded, plan)) = shades {
                     let mut pass = (frame.render(view.first))
                         .expect("the graph's own images are always there");
                     let (drawn, visible) = (data.draws, Way::Visibility);
@@ -1293,9 +1391,19 @@ impl Renderer {
                         None,
                     )?;
                     drop(pass);
+                    if let (Some(ao), Some(seen)) = (&view.ao, &occlusion_seen) {
+                        if let Some(rest) = ao.depth {
+                            let mut pass = (frame.render(rest))
+                                .expect("the graph's own images are always there");
+                            for slot in [FIRST, plan.second()] {
+                                draw_depth(&mut pass, Runs::Culled(plan, slot), true)?;
+                            }
+                        }
+                        self.ao.record(&mut frame, &ao.plan, seen)?;
+                    }
                     let mut shade = frame.compute(shaded.shade);
-                    let (shared, lit) = view_data(&|image| shade.sampled(image));
-                    let shared = shade.upload(bytemuck::bytes_of(&shared))?.address();
+                    let (frame_data, lit) = view_data(&|image| shade.sampled(image));
+                    let shared = shade.upload(bytemuck::bytes_of(&frame_data))?.address();
                     let seen = Shaded {
                         clip_from_world: view_projection,
                         clear: data.clear_color,
@@ -1309,13 +1417,35 @@ impl Renderer {
                     drop(shade);
                     let pass = (frame.render(shaded.rest))
                         .expect("the graph's own images are always there");
-                    (pass, shared, lit)
+                    (pass, shared, frame_data, lit)
+                } else if let (Some(ao), Some(plan), Some(seen)) =
+                    (&view.ao, &view.cull, &occlusion_seen)
+                {
+                    let mut pass = (frame.render(view.first))
+                        .expect("the graph's own images are always there");
+                    draw_depth(&mut pass, Runs::Culled(plan, FIRST), false)?;
+                    drop(pass);
+                    self.meshes.cull_second(&mut frame, plan)?;
+                    let second = view.second.expect("a view that culls has a second pass");
+                    let mut pass =
+                        (frame.render(second)).expect("the graph's own images are always there");
+                    draw_depth(&mut pass, Runs::Culled(plan, plan.second()), false)?;
+                    drop(pass);
+                    self.ao.record(&mut frame, &ao.plan, seen)?;
+                    let shading = ao
+                        .view
+                        .expect("the view draws after the occlusion without a visibility buffer");
+                    let mut pass =
+                        (frame.render(shading)).expect("the graph's own images are always there");
+                    let (frame_data, lit) = view_data(&|image| pass.sampled(image));
+                    let shared = pass.upload(bytemuck::bytes_of(&frame_data))?.address();
+                    (pass, shared, frame_data, lit)
                 } else {
                     let mut pass = (frame.render(view.first))
                         .expect("the graph's own images are always there");
-                    let (shared, lit) = view_data(&|image| pass.sampled(image));
-                    let shared = pass.upload(bytemuck::bytes_of(&shared))?.address();
-                    (pass, shared, lit)
+                    let (frame_data, lit) = view_data(&|image| pass.sampled(image));
+                    let shared = pass.upload(bytemuck::bytes_of(&frame_data))?.address();
+                    (pass, shared, frame_data, lit)
                 };
                 // Behind everything, in place of the clear color.
                 if let Some(SkyData { sky, luminance, .. }) = lit {
@@ -1340,9 +1470,10 @@ impl Renderer {
                 )?;
                 // What the first pass didn't draw, over it: after the depth pyramid, from the
                 // first's depth, and the culling's second pass, against it, in a pass of its own;
-                // or, beside a visibility buffer, in the same pass, as its culling has run.
+                // or, beside a visibility buffer or after the ambient occlusion, in the same pass,
+                // as its culling has run.
                 if let (Some(plan), Some(second)) = (&view.cull, view.second) {
-                    if shades.is_none() {
+                    if shades.is_none() && view.ao.is_none() {
                         drop(pass);
                         self.meshes.cull_second(&mut frame, plan)?;
                         pass = (frame.render(second))
@@ -1362,15 +1493,33 @@ impl Renderer {
                     )?;
                 }
                 // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
-                // what the view shows, in its own pass, if it has one.
-                let meshes = &self.meshes;
+                // what the view shows, in its own pass, if it has one; without the view's ambient
+                // occlusion, which is of the depth the view's own passes draw.
+                let canvas_data = if frame_data.ambient_occlusion == 0 {
+                    shared
+                } else {
+                    let unoccluded = FrameData {
+                        ambient_occlusion: 0,
+                        ..frame_data
+                    };
+                    pass.upload(bytemuck::bytes_of(&unoccluded))?.address()
+                };
                 let draw_canvas = |pass: &mut gg_gpu::Pass<'_, '_>| {
                     pass.begin_label(c"canvas");
                     let canvas = canvas_projection(size);
                     let on = data.canvas;
                     let all = Runs::All;
-                    let drawn =
-                        meshes.draw(pass, canvas, shared, size, on, on_canvas, all, way, None);
+                    let drawn = meshes.draw(
+                        pass,
+                        canvas,
+                        canvas_data,
+                        size,
+                        on,
+                        on_canvas,
+                        all,
+                        way,
+                        None,
+                    );
                     pass.end_label();
                     drawn
                 };

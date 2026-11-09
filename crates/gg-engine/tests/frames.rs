@@ -10,7 +10,8 @@
 //! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
-//! antialiases the view against the frames before, blooms it and grades it, run through the
+//! antialiases the view against the frames before, blooms it, grades it and darkens its sky's light
+//! by ambient occlusion, run through the
 //! engine's main loop headless, without the tool API, whose development runs' watchers of the
 //! assets' files allocate as they look, three fifths of a tick apart, so that they draw between
 //! ticks, once its first frames have run, by which every image its attach added has decoded off
@@ -342,8 +343,11 @@ impl Layer for Scene {
         world.set_parent(camera, Some(pivot)).expect("both alive");
         self.pivot = Some(pivot);
         // The default environment's, which antialiases the view, resolving it against the frames
-        // before, and blooms it, but graded, which bakes its grade's table each frame.
+        // before, blooms it, and darkens its sky's light by ambient occlusion, but graded, which
+        // bakes its grade's table each frame, and under a sky, the checker, which the occlusion
+        // needs.
         world.spawn(Environment {
+            sky: Some(assets.texture),
             grade: Grade {
                 saturation: 1.2,
                 ..Grade::IDENTITY

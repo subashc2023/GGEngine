@@ -233,20 +233,27 @@ pub(crate) struct Bounds {
     /// The words of each view's meshlets, as [`meshlet_words`] counts them for each run drawn by
     /// them, up to [`MOST_MESHLET_WORDS`].
     meshlet_words: u64,
+    /// How many runs are drawn by their levels' indices: those not drawn by meshlets, and those
+    /// past what [`MOST_MESHLET_WORDS`] holds.
+    by_indices: u64,
 }
 
 impl Bounds {
     /// Adds a run of `count` instances whose shader takes `params_words` words of parameters for
     /// each, drawn by its mesh's meshlets, `placed`, if it's drawn by them, as far as
-    /// [`MOST_MESHLET_WORDS`] holds them.
+    /// [`MOST_MESHLET_WORDS`] holds them, and otherwise by its levels' indices.
     fn add(&mut self, count: u64, params_words: u64, placed: Option<&PlacedMeshlets>) {
         self.runs += 1;
         self.instances += count;
         self.blocks += count.div_ceil(BLOCK);
         self.params_words += count * params_words;
-        if let Some(placed) = placed {
-            let words = self.meshlet_words + meshlet_words(placed, count);
-            self.meshlet_words = words.min(MOST_MESHLET_WORDS);
+        match placed {
+            Some(placed) => {
+                let words = self.meshlet_words + meshlet_words(placed, count);
+                self.by_indices += u64::from(words > MOST_MESHLET_WORDS);
+                self.meshlet_words = words.min(MOST_MESHLET_WORDS);
+            }
+            None => self.by_indices += 1,
         }
     }
 
@@ -469,6 +476,13 @@ impl CullPlan {
     /// Whether it culls runs drawn by their meshlets, as a visibility buffer draws them.
     pub(crate) fn by_meshlets(&self) -> bool {
         self.bounds.meshlet_words > 0
+    }
+
+    /// Whether it may cull runs drawn by their levels' indices, outside a visibility buffer: those
+    /// whose meshes have no meshlets, or aren't drawable yet as it's planned, or whose meshlets the
+    /// frame has no room for.
+    pub(crate) fn by_indices(&self) -> bool {
+        self.bounds.by_indices > 0
     }
 
     /// `pass`, reading what the culling kept of the instances and of their meshlets, for shading
@@ -1413,7 +1427,8 @@ mod tests {
     /// A frame plans room in each view for the meshlets of its runs drawn by them up to
     /// [`MOST_MESHLET_WORDS`], however many such runs it has; and its culling draws by their
     /// meshlets the runs whose draws fit what it planned, in turn, and those past it by their
-    /// levels' indices, taking no room for them.
+    /// levels' indices, taking no room for them. The plan counts as drawn by their indices the runs
+    /// without meshlets, and each that may be, as it comes once the room is full.
     #[test]
     fn runs_past_a_views_room_for_meshlets_are_drawn_by_their_indices() {
         let placed = |most| PlacedMeshlets {
@@ -1427,8 +1442,10 @@ mod tests {
         let mut bounds = Bounds::default();
         bounds.add(3, 1, Some(&small));
         bounds.add(3, 1, Some(&small));
+        assert_eq!(bounds.by_indices, 0);
         bounds.add(5, 1, None);
         assert_eq!(bounds.meshlet_words, 2 * small_words, "each run's own");
+        assert_eq!(bounds.by_indices, 1, "the run without meshlets");
         // Instances enough of the large mesh for the most meshlets a draw takes.
         let many = (MOST_MESHLETS / 64) as u32;
         let runs = [(&small, 3), (&large, many), (&small, 3), (&large, many)];
@@ -1437,6 +1454,7 @@ mod tests {
             bounds.add(u64::from(count), 1, Some(placed));
         }
         assert_eq!(bounds.meshlet_words, MOST_MESHLET_WORDS);
+        assert_eq!(bounds.by_indices, 3, "each run once the room is full");
         let mut totals = Totals::default();
         let drawn =
             runs.map(|(placed, count)| totals.take_meshlets(placed, count, bounds.meshlet_words));

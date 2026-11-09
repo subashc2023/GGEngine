@@ -206,12 +206,12 @@ pub use gg_renderer::MeshDraw;
 /// sheets whose cells they show; circles; meshes; shaders for their vertex types, each added with
 /// how it blends; the textures those shaders and sprites sample, and the samplers they sample them
 /// with; the viewpoint the game's view sees them from, and its projection, which a [`Camera`] has
-/// too; the tonemapper an [`Environment`] maps the view's colors by, how it antialiases them and
-/// how it grades them; where that view is in the window; and what's still streaming to the GPU, as
-/// [`Context::streaming`] tells.
+/// too; the tonemapper an [`Environment`] maps the view's colors by, how it antialiases them, how
+/// it grades them and its ambient occlusion; where that view is in the window; and what's still
+/// streaming to the GPU, as [`Context::streaming`] tells.
 pub use gg_renderer::{
-    Antialiasing, Blend, Circle, Grade, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet,
-    Streaming, Texture, Tonemapper, Viewpoint, Viewport,
+    AmbientOcclusion, Antialiasing, Blend, Circle, Grade, Mesh, Projection, Sampler, Shader,
+    Sprite, SpriteSheet, Streaming, Texture, Tonemapper, Viewpoint, Viewport,
 };
 pub use grant::{Capability, Grant};
 pub use input::Input;

@@ -1664,8 +1664,9 @@ each channel clamped, which a world without an environment gets, so that a 2D ga
 as they're colored. Its antialiasing is temporal, as below, by default, or none, which a world
 without an environment gets too, each pixel what's at its center. It blooms the view, subtly by
 default, and grades its light, by the identity by default, as below, and a world without one does
-neither. The clear color, which a sky
-takes the place of, is tonemapped with what's drawn, as the sky is. Its exposure, in EV100, scales
+neither. Its ambient occlusion, on by default, darkens the sky's light where what's near a point
+hides it, as below. The clear color, which a sky takes the place of, is tonemapped with what's
+drawn, as the sky is. Its exposure, in EV100, scales
 light: lit shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades,
 which keeps a sunny day's light within 16-bit floats, and a world without an environment is
 exposed as the default's, EV100 15; what isn't lit, sprites, text, lines, the editor's grid and
@@ -1676,9 +1677,9 @@ lights, how many and where; the address of the table of models' materials; where
 from, the camera's position, or for an orthographic projection, which sees along one way, the way
 back toward it; the sky's texture, its prefiltered light, the split sum's table and its luminance;
 the shadows, their light and their cascades' shadow maps, which shaders sample by comparison alone,
-through the bindless set's sampler that compares; and the clusters the lights are binned into.
-Fields are added at its end, so that games' shaders that read the fields before them keep to the
-contract.
+through the bindless set's sampler that compares; the clusters the lights are binned into; and the
+view's ambient occlusion. Fields are added at its end, so that games' shaders that read the fields
+before them keep to the contract.
 
 A world's lights are its entities with a `Light` and a `Transform`, as KHR_lights_punctual
 describes them: directional, in lux, all along its entity's -Z; point, in candela, from where its
@@ -1710,8 +1711,9 @@ same lobes, as the extension's reference has it: it reflects its specular color 
 its diffuse color times 1 less that color's strongest channel, and is as rough as 1 less its
 glossiness, its map's specular color sRGB-encoded and its glossiness, in alpha, as stored. Light times
 the exposure, then the material's emission, as the view shows it rather than exposed, make the
-color, so that an emissive white shows as white under any light. Occlusion darkens only light from
-all around, the sky's. A material that KHR_materials_unlit makes unlit, and every material in a
+color, so that an emissive white shows as white under any light. Occlusion, a material's map's and
+the view's ambient occlusion, as below, darkens only light from all around, the sky's. A material
+that KHR_materials_unlit makes unlit, and every material in a
 frame without lights or a sky, draws its base color alone, as models drew before lights. A primitive without normals draws flat, its triangles'
 corners apart, as glTF says, but one whose material is unlit, which reads none; a lit material's
 normal map without tangents, or whose tangents aren't all finite, as a tool can leave them where
@@ -1817,7 +1819,8 @@ discarding it, for a pass that writes every texel. A storage image is among a fr
 an offscreen image is, and keeps the layout its last frame left it in, so that once a frame whose
 last use of it sampled it is submitted, frames after sample it through its texture slot without
 declaring it; the graph's own colors of high dynamic range are written so too, through a slot of
-their own, as the view's shading writes the view's. A pass may draw depth alone, as a shadow map's
+their own, as the view's shading writes the view's, and so are its images of a 32-bit float a
+pixel, as the view's ambient occlusion is. A pass may draw depth alone, as a shadow map's
 does, and may draw over the colors, IDs and depth an earlier pass left, as the view's second pass
 does; its color target may be a visibility buffer of the graph's own, two 32-bit integers a pixel,
 cleared to 0, beside its IDs and depth, which later passes sample as integers. Beside its IDs, a
@@ -2297,6 +2300,44 @@ models without meshlets, or whose frame planned no room for them, as their shade
 what blends and the canvas, against the buffer's depth. The depth pyramid is the first pass's depth,
 of the buffer's draws alone. `Settings::visibility_buffer` off has them shade as they draw instead,
 for tests and measurements of each way.
+
+A view that its environment gives ambient occlusion, as by default, seen through a perspective
+and lit by a sky, darkens the light from all around, the sky's diffuse and specular light, at each
+point it shows where what's near the point hides that light from it: ground-truth ambient
+occlusion (Jimenez, Wu, Pesce and Jarabo, 2016), as Intel's XeGTAO finds it from the view's depth,
+with its defaults and its high quality, in compute passes once the depth of everything opaque in
+the view is drawn and before any of it shades. The first takes the depth to view-space depth, the
+distance ahead of the view, in five levels, each half the one before, in a buffer of the graph's
+own, each texel the mean of the 2 by 2 under it weighted toward the farthest, so that a coarser
+level keeps to what's behind a thin occluder; the second searches each pixel's horizons along
+three slices of the hemisphere round its normal, which the depth round it gives, three steps each
+way, out as far as the environment's radius, half a unit by default, reaching farther steps through
+coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and,
+where the view is antialiased, on from frame to frame, for the resolve to average over its frames;
+and the denoise blurs each pixel with the eight round it, but across where the depth breaks, once
+where the view is antialiased, and three times where it isn't and the noise stays still, into an
+image of the graph's own of a float a pixel, the fraction of the light from all around that
+reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
+light, never the lights', by the less of that and the material's occlusion map: both estimate how
+much of the same light reaches the point, the map at its texels' scale, so that their product would
+darken twice where both see one occluder, as Filament takes them. What blends shows over what's
+opaque, whose occlusion this is, and takes none. Games' shaders can read it, through the frame's
+data, a texture loaded at a fragment's pixel, in the view's own passes; the canvas's frame data
+names none.
+
+Beside a visibility buffer, which holds the depth of what it draws, a pass then draws the depth
+alone of the culled runs drawn otherwise, where any may be, games' opaque shaders, skinned models
+and those without meshlets, into a depth image of its own, through a pipeline of each shader's
+vertex shader alone,
+as its shadows are drawn but neither clamped nor set back, the masked model shader's cut out as
+what it draws is, and the occlusion takes the nearer of the two depths at each pixel. Without one,
+the view's first and second passes draw that depth alone of every culled run, the depth pyramid
+built from the first's, and the view then draws all of it again, shaded, in one pass that clears
+its depth, rather than over the depth alone: a game's opaque shader may discard, which its depth
+alone doesn't, and two pipelines aren't bound to place a vertex alike. So what's drawn forward,
+as every model of a development run is, has its opaque vertices drawn twice. A frame without a
+sky, or under an orthographic projection, or whose environment has none, or a radius or a strength
+that isn't positive, runs none of it and takes none of its memory.
 
 A view that its environment antialiases, as by default, is antialiased temporally: each frame draws
 it a fraction of a pixel off, by the next of eight offsets, the Halton sequence of bases 2 and 3,

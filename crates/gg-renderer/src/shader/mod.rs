@@ -228,7 +228,8 @@ impl Shaders {
     ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
     ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
     ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
-    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; }`,
+    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; uint
+    ///   ambient_occlusion; uint unused; }`,
     ///   where the view sees from in the world, the time it shows, what lit shading multiplies
     ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
     ///   that light everywhere first, directional lights and those without a range, then the rest,
@@ -241,7 +242,12 @@ impl Shaders {
     ///   maps among them, `Shadows` as `shaders/mesh.slang` declares it, its `light` 0xFFFFFFFF in
     ///   a frame without them; and which of the lights reach each cluster of the view, the view
     ///   cut into tiles and those along its depth, `Clusters` as `shaders/mesh.slang` declares it,
-    ///   its `words` 0 in a frame without them, where each fragment shades by every light; or a
+    ///   its `words` 0 in a frame without them, where each fragment shades by every light; and the
+    ///   view's ambient occlusion, as [`AmbientOcclusion`](crate::AmbientOcclusion) says, a
+    ///   texture of the bindless set's of the view's size, whose red is the fraction of the light
+    ///   from all around that reaches what's opaque at each pixel, which a fragment of what's opaque
+    ///   loads at its pixel, `SV_Position`'s XY, and darkens the sky's light by, 0 for none, in a
+    ///   frame without it and in every pass but the view's own, the canvas's among them; or a
     ///   struct of as many of its first fields: the engine adds fields at its end. The eighth and
     ///   the ninth are the engine's own model shaders', 0 for any other; the tenth, how many
     ///   transforms past each instance's its transform the frame before is, which the motion is
@@ -1118,7 +1124,7 @@ mod tests {
             refusal::<Vertex, Color>("push_extra.slang"),
             &[
                 "its push constants' view isn't a float2",
-                "its frame's data, Frame, take 372 bytes, past the 360 the engine's take",
+                "its frame's data, Frame, take 372 bytes, past the 368 the engine's take",
                 "it reads brightness from its push constants, past the 128 bytes",
             ],
         );

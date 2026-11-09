@@ -15,7 +15,8 @@
 // light, through the split sum, with Fdez-Agüera's roughness-dependent Fresnel and his scattering
 // many times over ("A Multiple-Scattering Microfacet Model for Real-Time Image-based Lighting",
 // 2019), as the sample viewer's ibl.glsl and pbr.frag have it (glTF-Sample-Renderer at df3e51cb),
-// which the occlusion map darkens, as it darkens nothing else. The light that casts the frame's
+// which the occlusion map and the view's ambient occlusion darken, as they darken nothing else, by
+// `ambient`. The light that casts the frame's
 // shadows lights only what its shadow maps see of it. Their light, times the frame's exposure,
 // then the material's emission, as the view shows it, make the color.
 //
@@ -338,6 +339,17 @@ float3 reflected(Frame frame, Surface surface, uint i) {
     float3 specular = fresnel * distribution * visibility;
     float3 diffuse = (1.0 - fresnel) * surface.diffuse_color / PI;
     return (diffuse + specular) * radiance * n_dot_l;
+}
+
+// How much of the light from all around reaches what the game's view shows at `pixel`, as its
+// ambient occlusion has it, with `occlusion`, a material's map's: the less of the two, as both
+// estimate how much of the same light reaches the point, at their own scales, where their product
+// would darken twice where both see the same occluder, as Filament takes them.
+float ambient(Frame frame, uint2 pixel, float occlusion) {
+    if (frame.ambient_occlusion == 0) {
+        return occlusion;
+    }
+    return min(occlusion, textures[frame.ambient_occlusion].Load(int3(int2(pixel), 0)).r);
 }
 
 // Where a point is in no cluster.

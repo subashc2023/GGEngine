@@ -162,6 +162,11 @@ struct Frame {
     Shadows shadows;
     // The clusters its lights are binned into.
     Clusters clusters;
+    // The game's view's ambient occlusion, a texture of the bindless set's of the view's size: the
+    // fraction of the light from all around that reaches each pixel, in red, which a fragment loads
+    // at its pixel; 0 for none, which reads as 1.
+    uint ambient_occlusion;
+    uint unused;
 };
 
 // What the engine pushes for each instanced draw of a mesh of vertices `V`, whose instances take

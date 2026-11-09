@@ -26,7 +26,16 @@ const SHADERS: [&str; 14] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 11] = [
+const COMPUTE: [(&str, &[&str]); 12] = [
+    (
+        "ao",
+        &[
+            "prefilter_main",
+            "occlusion_main",
+            "denoise_main",
+            "denoise_last_main",
+        ],
+    ),
     (
         "bloom",
         &["first_main", "down_main", "up_main", "composite_main"],

@@ -709,13 +709,13 @@ pub(crate) struct Uploaded {
 
 struct GpuShader {
     pipeline: Pipeline,
-    /// What draws its shadows into a shadow map, if it writes depth: its vertex shader, and
-    /// `shadow_main` if its shadows are cut out ([`shader::Added::shadow`]).
-    shadow: Option<Pipeline>,
-    /// What draws the meshlets a view keeps of a mesh, and their shadows, for a model shader that
-    /// views draw meshes with meshlets by: through mesh shaders where the device has them, and
+    /// What draws its depth alone, if it writes depth: its vertex shader, and `shadow_main` if its
+    /// shadows are cut out ([`shader::Added::shadow`]).
+    depth_only: Option<DepthOnly>,
+    /// What draws the meshlets a view keeps of a mesh, and their depth alone, for a model shader
+    /// that views draw meshes with meshlets by: through mesh shaders where the device has them, and
     /// through vertex shaders elsewhere ([`shader::Added::meshlets`]).
-    meshlets: Option<(Pipeline, Option<Pipeline>)>,
+    meshlets: Option<(Pipeline, Option<DepthOnly>)>,
     /// What draws them into the visibility buffer, for such a shader, likewise.
     visibility: Option<Pipeline>,
     /// Its name, which captures label its runs of draws with.
@@ -726,6 +726,14 @@ struct GpuShader {
     params_size: usize,
     /// Whether the pipeline writes depth, as [`shader::writes_depth`] says.
     writes_depth: bool,
+}
+
+/// What draws a shader's depth alone, by its geometry: into a shadow map, its depth clamped to the
+/// map's near side and set back by its slope; and into the depth the view's ambient occlusion
+/// takes, as the view draws it.
+struct DepthOnly {
+    shadow: Pipeline,
+    view: Pipeline,
 }
 
 struct GpuMesh {
@@ -1096,13 +1104,13 @@ struct Geometry<'a> {
 
 impl Geometry<'_> {
     /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says; and, if
-    /// that writes depth, what draws its shadows into a shadow map, by its geometry and, if they're
-    /// cut out, `shadow_main`.
+    /// that writes depth, what draws its depth alone, by its geometry and, if its shadows are cut
+    /// out, `shadow_main`.
     fn pipelines(
         &self,
         device: &Arc<Device>,
         blend: Blend,
-    ) -> Result<(Pipeline, Option<Pipeline>)> {
+    ) -> Result<(Pipeline, Option<DepthOnly>)> {
         let writes_depth = shader::writes_depth(blend);
         let pipeline = Pipeline::graphics(
             device,
@@ -1119,13 +1127,13 @@ impl Geometry<'_> {
                 depth_clamp: false,
             },
         )?;
-        // What's opaque casts shadows, drawn by its own geometry into the shadow maps.
-        let shadow = writes_depth.then(|| {
-            let name = format!("{} shadow", self.name);
+        // What's opaque casts shadows, drawn by its own geometry into the shadow maps, and draws
+        // its depth so for the view's ambient occlusion, as the view draws it.
+        let depth_only = |name: &str, shadow: bool| {
             Pipeline::graphics(
                 device,
                 &GraphicsDesc {
-                    name: &name,
+                    name,
                     spirv: self.shadow.unwrap_or(self.spirv),
                     vertex: self.entry,
                     mesh: self.mesh,
@@ -1133,12 +1141,18 @@ impl Geometry<'_> {
                     format: Format::DEPTH,
                     blend: Blend::Opaque,
                     depth_write: true,
-                    depth_bias: shadow::DEPTH_BIAS,
-                    depth_clamp: true,
+                    depth_bias: if shadow { shadow::DEPTH_BIAS } else { 0.0 },
+                    depth_clamp: shadow,
                 },
             )
+        };
+        let depth_only = writes_depth.then(|| {
+            Ok(DepthOnly {
+                shadow: depth_only(&format!("{} shadow", self.name), true)?,
+                view: depth_only(&format!("{} depth", self.name), false)?,
+            })
         });
-        Ok((pipeline, shadow.transpose()?))
+        Ok((pipeline, depth_only.transpose()?))
     }
 }
 
@@ -1369,8 +1383,8 @@ impl MeshPass {
                 made.and_then(|made| Ok((made, meshlets.transpose()?, visibility.transpose()?)));
             match self.shaders.get_mut(index) {
                 Some(Some(old)) => match made {
-                    Ok(((pipeline, shadow), meshlets, visibility)) => {
-                        (old.pipeline, old.shadow) = (pipeline, shadow);
+                    Ok(((pipeline, depth_only), meshlets, visibility)) => {
+                        (old.pipeline, old.depth_only) = (pipeline, depth_only);
                         (old.meshlets, old.visibility) = (meshlets, visibility);
                         old.writes_depth = writes_depth;
                     }
@@ -1382,10 +1396,10 @@ impl MeshPass {
                 },
                 Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
                 None => {
-                    let ((pipeline, shadow), meshlets, visibility) = made?;
+                    let ((pipeline, depth_only), meshlets, visibility) = made?;
                     self.shaders.push(Some(GpuShader {
                         pipeline,
-                        shadow,
+                        depth_only,
                         meshlets,
                         visibility,
                         // A name with a nul is labeled as far as it goes.
@@ -1887,9 +1901,9 @@ impl MeshPass {
             }
             // A run the culling draws by its meshlets, by its shader's meshlet geometry.
             let by_meshlets = culled_run.is_some_and(|run| self.culling.by_meshlets(run));
-            let (geometry, shadow) = match &shader.meshlets {
-                Some((geometry, shadow)) if by_meshlets => (geometry, shadow),
-                _ => (&shader.pipeline, &shader.shadow),
+            let (geometry, depth_only) = match &shader.meshlets {
+                Some((geometry, depth_only)) if by_meshlets => (geometry, depth_only),
+                _ => (&shader.pipeline, &shader.depth_only),
             };
             // Such a run of a model shader's draws into the visibility buffer where the view has
             // one.
@@ -1902,10 +1916,19 @@ impl MeshPass {
                     geometry
                 }
                 (Way::Shadows, _) => {
-                    let Some(shadow) = shadow else {
+                    let Some(depth_only) = depth_only else {
                         continue;
                     };
-                    shadow
+                    &depth_only.shadow
+                }
+                (Way::Depth { beside_visibility }, visible) => {
+                    let Some(depth_only) = depth_only else {
+                        continue;
+                    };
+                    if beside_visibility && visible.is_some() {
+                        continue;
+                    }
+                    &depth_only.view
                 }
                 (Way::Visibility, Some(visible)) => visible,
                 (Way::Visibility, None) => continue,
@@ -1975,6 +1998,11 @@ pub(crate) enum Way {
     /// Their shadows, into a shadow map, by the shadow pipelines of those whose shaders write depth,
     /// and nothing of the rest.
     Shadows,
+    /// Their depth alone, as the view draws it, into the depth the view's ambient occlusion takes,
+    /// by the depth pipelines of those whose shaders write depth: every such run, or, beside a
+    /// visibility buffer, all but those drawn into it, whose depth the view's holds; and nothing
+    /// of the rest.
+    Depth { beside_visibility: bool },
     /// Into a visibility buffer: the culled runs drawn by their meshlets whose shaders have a
     /// pipeline for it, as the opaque and masked model shaders do, and nothing of the rest.
     Visibility,
@@ -2211,6 +2239,12 @@ pub(crate) struct FrameData {
     /// The clusters the lights are binned into, as [`ClusterData`](crate::cluster::ClusterData)
     /// has them.
     pub(crate) clusters: crate::cluster::ClusterData,
+    /// The slot of the game's view's ambient occlusion in the bindless set, an image of the view's
+    /// size, the fraction of the light from all around that reaches each pixel, as
+    /// [`AmbientOcclusion`](crate::AmbientOcclusion) says; 0 for none, which shaders take as 1,
+    /// as for every pass but the view's shading.
+    pub(crate) ambient_occlusion: u32,
+    pub(crate) unused: u32,
 }
 
 #[cfg(test)]

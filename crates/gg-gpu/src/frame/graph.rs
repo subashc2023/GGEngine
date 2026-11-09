@@ -34,7 +34,8 @@ pub const MAX_BUFFER_READ: u64 = 256;
 /// allocates nothing.
 ///
 /// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
-/// [`Graph::visibility`] and [`Graph::depth`], last for a frame: each is undefined until a pass of
+/// [`Graph::visibility`], [`Graph::depth`] and [`Graph::scalar`], last for a frame: each is
+/// undefined until a pass of
 /// the frame writes it, so its first use writes it whole, and passes whose uses of two of them
 /// don't overlap may find them in the same memory. The frames keep them for the frames after,
 /// which add them alike, by their names, kinds and sizes.
@@ -104,6 +105,10 @@ pub(crate) enum Kind {
     /// view's is to build its depth pyramid. Every device the engine opens renders it and samples
     /// it both ways.
     Depth,
+    /// A 32-bit float a pixel, which compute passes write as storage and later passes sample, as
+    /// the view's ambient occlusion is. Vulkan requires every device to store to the format from
+    /// shaders and to sample it.
+    Scalar,
 }
 
 impl Kind {
@@ -113,6 +118,7 @@ impl Kind {
             Self::Hdr | Self::Motion => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids | Self::Visibility => vk::Format::R32G32_UINT,
             Self::Depth => vk::Format::D32_SFLOAT,
+            Self::Scalar => vk::Format::R32_SFLOAT,
         }
     }
 
@@ -137,12 +143,18 @@ impl Kind {
             Self::Depth => {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
             }
+            Self::Scalar => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
         }
     }
 
     pub(crate) fn range(self) -> vk::ImageSubresourceRange {
         match self {
-            Self::Color | Self::Hdr | Self::Ids | Self::Motion | Self::Visibility => COLOR_RANGE,
+            Self::Color
+            | Self::Hdr
+            | Self::Ids
+            | Self::Motion
+            | Self::Visibility
+            | Self::Scalar => COLOR_RANGE,
             Self::Depth => DEPTH_RANGE,
         }
     }
@@ -178,9 +190,9 @@ pub(crate) enum Use {
     /// Sampled by its compute shaders, through the image's slot in the bindless set.
     ComputeSampled,
     /// Written and read by its compute shaders, a level at a time, through the storage slots of a
-    /// storage image's levels, or of an image of colors of high dynamic range of the graph's own,
-    /// in the general layout: as its last use left it, if `kept`, and otherwise discarding that,
-    /// for shaders that write every texel.
+    /// storage image's levels, or of an image of the graph's own of a kind they write, in the
+    /// general layout: as its last use left it, if `kept`, and otherwise discarding that, for
+    /// shaders that write every texel.
     Storage { kept: bool },
     /// Copied from, as a read back is.
     CopySource,
@@ -461,6 +473,17 @@ impl Graph {
         self.transient(name, Kind::Depth, size)
     }
 
+    /// An image of the graph's own of a 32-bit float a pixel, `size` pixels, named `name`, which
+    /// compute passes write as storage, through a `RWTexture2DArray<float>` of format `r32f`, and
+    /// later passes sample, as the view's ambient occlusion is.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn scalar(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, Kind::Scalar, size)
+    }
+
     fn transient(&mut self, name: &'static str, kind: Kind, size: [u32; 2]) -> ImageId {
         let [width, height] = size;
         assert!(
@@ -708,7 +731,9 @@ impl RenderPass<'_> {
             Some(Kind::Ids) => Use::Ids { kept: true },
             Some(Kind::Motion) => Use::Motion { kept: true },
             Some(Kind::Depth) => Use::Depth { kept: true },
-            None | Some(Kind::Color | Kind::Hdr | Kind::Visibility) => Use::Color(None),
+            None | Some(Kind::Color | Kind::Hdr | Kind::Visibility | Kind::Scalar) => {
+                Use::Color(None)
+            }
         };
         self.with(image, use_)
     }
@@ -877,8 +902,8 @@ impl ComputePass<'_> {
     /// Writes and reads `image` through its levels' storage slots, which
     /// [`Compute::storage`](crate::Compute::storage) gives, as its last use left it: a storage
     /// image among the frame's targets, which is undefined until a pass has written it since it
-    /// was made, or an image of colors of high dynamic range of the graph's own, which an earlier
-    /// pass wrote.
+    /// was made, or an image of colors of high dynamic range, of motion or of scalars of the
+    /// graph's own, which an earlier pass wrote.
     pub fn write(self, image: ImageId) -> Self {
         self.with(image, Use::Storage { kept: true })
     }
@@ -1493,6 +1518,44 @@ mod tests {
             let hdr = graph.hdr("hdr", [4, 4]);
             graph.compute(label()).overwrite(hdr).add();
             graph.compute(label()).write(hdr).add();
+        }));
+    }
+
+    /// An image of scalars is written by compute passes, through a storage view of its own format,
+    /// and sampled by later passes, computing or drawing, but never drawn into, kept as an
+    /// attachment, or read back.
+    #[test]
+    fn scalars_are_computed_then_sampled_but_never_drawn_into() {
+        assert_eq!(Kind::Scalar.format(), vk::Format::R32_SFLOAT);
+        assert!(Kind::Scalar.storage() && Kind::Scalar.sampled());
+        let mut graph = Graph::default();
+        let (scalar, hdr) = (graph.scalar("scalar", [4, 4]), graph.hdr("hdr", [4, 4]));
+        let written = graph.compute(label()).overwrite(scalar).add();
+        let computed = graph.compute(label()).sample(scalar).overwrite(hdr).add();
+        let drawn = graph.render(label()).keep(hdr).sample(scalar).add();
+        assert_eq!(
+            graph.uses(written),
+            [(scalar, Use::Storage { kept: false })]
+        );
+        assert_eq!(graph.uses(computed)[0], (scalar, Use::ComputeSampled));
+        assert_eq!(graph.uses(drawn)[1], (scalar, Use::Sampled));
+        let refused = |build: fn(&mut Graph)| {
+            let mut graph = Graph::default();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut graph))).is_err()
+        };
+        assert!(refused(|graph| {
+            let scalar = graph.scalar("scalar", [4, 4]);
+            graph.render(label()).clear(scalar, [0.0; 4]).add();
+        }));
+        assert!(refused(|graph| {
+            let scalar = graph.scalar("scalar", [4, 4]);
+            graph.compute(label()).overwrite(scalar).add();
+            graph.render(label()).keep(scalar).add();
+        }));
+        assert!(refused(|graph| {
+            let scalar = graph.scalar("scalar", [4, 4]);
+            graph.compute(label()).overwrite(scalar).add();
+            graph.read_image(label(), scalar);
         }));
     }
 

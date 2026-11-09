@@ -22,13 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Antialiasing, Births, Blend, Bursts, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts,
-    Draws, Emission, Glyph, Grade, Grid, GridLines, Light, LightKind, Line, Lod, Lods,
-    MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes,
-    Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline, PackedVertex, ParticleShape,
-    Particles, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
-    Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
-    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
+    AlphaMode, AmbientOcclusion, Antialiasing, Births, Blend, Bursts, Circle,
+    DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Glyph, Grade, Grid, GridLines, Light,
+    LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
+    Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
+    PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, RenderData, Renderer,
+    Sampled, Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels,
+    Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
+    Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -99,10 +100,14 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
+        ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
+        ambient_occlusion_leaves_the_lights_alone,
+        ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
         shadows_fall_where_their_casters_put_them,
         culling_keeps_what_each_view_sees,
         the_scene_draws_as_draws_do,
         occlusion_culling_draws_what_shows,
+        occlusion_culling_draws_what_shows_with_ambient_occlusion,
         what_blends_goes_over_what_is_opaque_behind_it_in_any_order,
         shadows_hold_still_as_the_view_moves,
         surfaces_cast_no_shadows_on_themselves,
@@ -143,6 +148,9 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
+        ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
+        ambient_occlusion_leaves_the_lights_alone,
+        ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
         models_match_their_reference,
@@ -322,7 +330,8 @@ fn shader(file: &str) -> PathBuf {
 }
 
 /// What a test adds meshes, shaders, textures and materials to, and the uploads that take them to
-/// its renderer; the lights and the sky its frames shade with; and no draws, for a frame's canvas.
+/// its renderer; the lights, the sky and the ambient occlusion its frames shade with; and no draws,
+/// for a frame's canvas.
 #[derive(Default)]
 struct Stores {
     meshes: Meshes,
@@ -333,15 +342,16 @@ struct Stores {
     uploads: Uploads,
     lights: Vec<Light>,
     sky: Option<Sky>,
+    ambient_occlusion: Option<AmbientOcclusion>,
     none: Draws,
 }
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
     /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased, bloomed,
-    /// graded or tonemapped,
-    /// at time 0 with an exposure of 1 and the stores' lights and sky, with the uploads of what's
-    /// been added, and what's changed in the scene, since the last frame's.
+    /// graded or tonemapped, at time 0 with an exposure of 1 and the stores' lights, sky and
+    /// ambient occlusion, with the uploads of what's been added, and what's changed in the scene,
+    /// since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -357,6 +367,7 @@ impl Stores {
             uploads,
             lights,
             sky,
+            ambient_occlusion,
             none,
         } = self;
         uploads.take(meshes, shaders, textures, materials);
@@ -371,6 +382,7 @@ impl Stores {
             sky: *sky,
             bloom: 0.0,
             grade: Grade::IDENTITY,
+            ambient_occlusion: *ambient_occlusion,
             viewport,
             viewpoint,
             uploads,
@@ -5471,6 +5483,392 @@ fn sky_lit_spheres_match_their_reference() {
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
 }
 
+/// The scene the tests of ambient occlusion see, under the stores' sky and lights, as `viewpoint`
+/// sees it, a camera with perspective in front of it and above: a floor, a model's, 6 units across
+/// and white; a wall on its left, a model's too, facing +X at -1.5; a wall at its back, of a game's
+/// shader of one color, facing +Z at -1, which a view beside a visibility buffer draws otherwise;
+/// a sphere of 0.5 on the floor, of ID [`BALL`], and one of 0.3 near the left wall; a masked panel
+/// 0.8 across, facing up 0.3 over the floor, cut out in its middle half each way; and a skinned
+/// strip, standing, which its joints carry a unit along -Z from where it was bound, of a skinned
+/// mesh, which a view beside a visibility buffer draws otherwise too. And the world's points where
+/// the floor meets the large sphere, the corner of the walls and the back wall alone, out in the
+/// open, up the back wall, the middle of the panel's hole, and where the floor meets the strip, as
+/// it's posed and as it was bound.
+struct OcclusionScene {
+    draws: Draws,
+    viewpoint: Viewpoint,
+    ball: Vec3,
+    contact: Vec3,
+    corner: Vec3,
+    by_back_wall: Vec3,
+    open: Vec3,
+    back_wall: Vec3,
+    hole: Vec3,
+    strip: Vec3,
+    unposed: Vec3,
+}
+
+/// The ID of [`occlusion_scene`]'s large sphere.
+const BALL: u64 = 7;
+
+fn occlusion_scene(stores: &mut Stores) -> OcclusionScene {
+    let plain = square(&mut stores.meshes);
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let model = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 1.0, 24, 48);
+    // Opaque, but for its middle half each way.
+    let holed: Vec<[u8; 4]> = (0..16)
+        .map(|i: u32| {
+            let inside = |at: u32| (1..3).contains(&at);
+            let alpha = if inside(i % 4) && inside(i / 4) {
+                0
+            } else {
+                255
+            };
+            [255, 255, 255, alpha]
+        })
+        .collect();
+    let holed = (stores.textures).add(
+        "holed",
+        [4, 4],
+        holed.as_flattened(),
+        Texels::Color(Mipmaps::None),
+    );
+    let holed = Sampled::of(holed.expect("a texture"));
+    // A strip from y = -1 to 1 and x = -0.25 to 0.25, bound to joint 0.
+    let mut vertices = Vec::new();
+    for y in [-1.0, 1.0] {
+        for x in [-0.25, 0.25] {
+            vertices.push(ModelVertex {
+                position: Vec3::new(x, y, 0.0),
+                uv: Vec2::ZERO,
+                color: Vec4::ONE,
+                normal: Vec3::Z,
+                tangent: Vec4::X,
+            });
+        }
+    }
+    let skin = vec![SkinVertex::new([0, 0, 0, 0], [1.0, 0.0, 0.0, 0.0]); 4];
+    let reach = [Vec3::splat(-1.5), Vec3::splat(1.5)];
+    let indices = vec![0, 1, 3, 3, 2, 0];
+    let strip = ModelMesh::pack_skinned("strip", &vertices, indices, Vec::new(), skin, reach);
+    let strip = (stores.meshes).add_model("strip", &strip.expect("a mesh"));
+    let strip = strip.expect("a mesh");
+    let add = |materials: &mut Materials, material: Material| materials.add(&material);
+    let gray = |color: f32, roughness: f32| Material {
+        color: Vec4::new(color, color, color, 1.0),
+        workflow: metallic(0.0, roughness),
+        ..Material::default()
+    };
+    let floor = add(&mut stores.materials, gray(0.8, 1.0));
+    let walls = add(&mut stores.materials, gray(0.7, 1.0));
+    let round = add(&mut stores.materials, gray(0.8, 0.5));
+    let panel = Material {
+        color_texture: holed,
+        alpha: AlphaMode::Mask { cutoff: 0.5 },
+        ..gray(0.6, 1.0)
+    };
+    let panel = add(&mut stores.materials, panel);
+    let (materials, shaders) = (&stores.materials, &mut stores.shaders);
+    let floor = MeshDraw::with_material(model, floor, materials, shaders);
+    let wall = MeshDraw::with_material(model, walls, materials, shaders);
+    let round = MeshDraw::with_material(ball, round, materials, shaders);
+    let panel = MeshDraw::with_material(model, panel, materials, shaders);
+    let standing = MeshDraw::with_material(strip, walls, materials, shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(6.0, Vec3::ZERO), &floor, 0);
+    let placed = |scale: Vec3, rotation: Quat, at: Vec3| {
+        Mat4::from_scale_rotation_translation(scale, rotation, at)
+    };
+    let left = Quat::from_rotation_y(FRAC_PI_2);
+    let left = placed(Vec3::new(6.0, 4.0, 1.0), left, Vec3::new(-1.5, 2.0, 0.0));
+    draws.push_draw(left, &wall, 0);
+    let back = placed(
+        Vec3::new(6.0, 4.0, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(0.0, 2.0, -1.0),
+    );
+    draws.push(plain, flat, back, Vec4::new(0.35, 0.4, 0.5, 1.0));
+    let ball = Vec3::new(0.3, 0.5, 0.0);
+    for (radius, at, id) in [(0.5, ball, BALL), (0.3, Vec3::new(-1.15, 0.3, 0.5), 0)] {
+        draws.push_draw(placed(Vec3::splat(radius), Quat::IDENTITY, at), &round, id);
+    }
+    let hole = Vec3::new(-0.7, 0.3, 1.6);
+    draws.push_draw(facing_up(0.8, hole), &panel, 0);
+    // Bound standing at 0.8 along Z, and posed a unit along -Z from there.
+    draws.push_draw(
+        Mat4::from_translation(Vec3::new(2.2, 1.0, 0.8)),
+        &standing,
+        0,
+    );
+    draws.skin(strip, [Mat4::from_translation(Vec3::new(0.0, 0.0, -1.0))]);
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 2.4, 3.4),
+        rotation: Quat::from_rotation_x(-0.6),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+    };
+    OcclusionScene {
+        draws,
+        viewpoint,
+        ball,
+        contact: Vec3::new(0.3, 0.0, 0.4),
+        corner: Vec3::new(-1.35, 0.0, -0.85),
+        by_back_wall: Vec3::new(1.6, 0.0, -0.85),
+        open: Vec3::new(1.8, 0.0, 1.2),
+        back_wall: Vec3::new(0.5, 1.6, -1.0),
+        hole,
+        strip: Vec3::new(2.2, 0.0, -0.05),
+        unposed: Vec3::new(2.2, 0.0, 0.95),
+    }
+}
+
+/// The pixel of a view `size` pixels across and down that `viewpoint` sees `at` at.
+fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
+    let [width, height] = size.map(|side| side as f32);
+    let clip = viewpoint.view_projection(width / height) * at.extend(1.0);
+    let ndc = Vec2::new(clip.x, clip.y) / clip.w;
+    let pixel = (ndc + 1.0) / 2.0 * Vec2::new(width, height);
+    [pixel.x as u32, pixel.y as u32]
+}
+
+/// [`occlusion_scene`] lit by a sky alone, of 0.5 every way, with ambient occlusion and without:
+/// where the floor meets the large sphere, and in the corner of the walls, the sky's light is
+/// darkened, and where the floor meets the back wall, a game's shader's, and the skinned strip as
+/// it's posed, whose depth occludes too, as a view beside a visibility buffer draws them
+/// otherwise; through the panel's hole, the floor under it, as the depth of a masked material is
+/// cut out as it is; out in the open, and where the strip was bound, it's as it is without; and the
+/// back wall, which reads none, shows its color either way. Against its reference image, without
+/// antialiasing, which denoises the still noise; and antialiased, as the frames' noise averages
+/// out, against it too, where two frames drawn at the same offset, each starting afresh, differ
+/// by their noise.
+fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let scene = occlusion_scene(&mut stores);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    // Past the frame the meshes came to be drawable in, which planned no room for their meshlets
+    // and drew them by their indices.
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, draws));
+    let without = frame_pixels(&mut renderer);
+    let on = Some(AmbientOcclusion::default());
+    let data = RenderData {
+        ambient_occlusion: on,
+        ..stores.data(viewport, viewpoint, draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let with = frame_pixels(&mut renderer);
+    let shown = |frame: &[u8], at: Vec3| {
+        let pixel = pixel_at(frame, WIDTH, pixel_of(viewpoint, [WIDTH, HEIGHT], at));
+        i32::from(pixel[1])
+    };
+    for (name, at, least) in [
+        ("where the floor meets the sphere", scene.contact, 12),
+        ("in the corner of the walls", scene.corner, 20),
+        (
+            "where the floor meets the back wall",
+            scene.by_back_wall,
+            12,
+        ),
+        ("through the panel's hole", scene.hole, 12),
+        ("where the floor meets the strip", scene.strip, 12),
+    ] {
+        let (lit, darkened) = (shown(&without, at), shown(&with, at));
+        assert!(
+            darkened <= lit - least,
+            "{name}, {darkened} with ambient occlusion, not {least} darker than {lit} without"
+        );
+    }
+    for (name, at) in [
+        ("out in the open", scene.open),
+        ("where the strip was bound", scene.unposed),
+    ] {
+        let (lit, darkened) = (shown(&without, at), shown(&with, at));
+        assert!(
+            (lit - darkened).abs() <= 6,
+            "{name}, {darkened} with ambient occlusion, not near {lit} without"
+        );
+    }
+    let wall = |frame: &[u8]| {
+        let pixel = pixel_of(viewpoint, [WIDTH, HEIGHT], scene.back_wall);
+        pixel_at(frame, WIDTH, pixel)
+    };
+    assert_eq!(
+        wall(&with),
+        wall(&without),
+        "the back wall reads no occlusion"
+    );
+    compare("ambient_occlusion", WIDTH, HEIGHT, &with);
+    // Antialiased, each frame takes another frame's noise. Its first frame, after one that resolved
+    // nothing, starts afresh, as does the one after the next 7 and a frame that resolves nothing,
+    // at the same offset of the 8: the two differ by their noise alone, where the occlusion shows.
+    let taa = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
+        let data = RenderData {
+            ambient_occlusion: on,
+            antialiasing,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(renderer, data);
+    };
+    taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    let first = frame_pixels(&mut renderer);
+    for _ in 0..7 {
+        taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    }
+    taa(&mut renderer, &mut stores, Antialiasing::None);
+    taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    let again = frame_pixels(&mut renderer);
+    assert_eq!(wall(&again), wall(&first), "the frames are drawn alike");
+    let moved = (first.as_chunks::<4>().0.iter())
+        .zip(again.as_chunks::<4>().0)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        moved > 100,
+        "{moved} pixels differ, as the occlusion's noise stays from frame to frame"
+    );
+    // Which the resolve averages over its frames.
+    for _ in 0..16 {
+        taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    }
+    check(renderer, "ambient_occlusion", WIDTH, HEIGHT);
+}
+
+/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, seen first looking up,
+/// so that the culling finds the floor, the spheres, the panel and the strip outside the view, and
+/// then as the other tests see it: that frame draws them in the view's second pass, their depth
+/// alone too, and darkens where the floor meets the large sphere as a frame without ambient
+/// occlusion doesn't; and a pick of the large sphere there, in that frame, finds it.
+fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    stores.ambient_occlusion = Some(AmbientOcclusion::default());
+    let scene = occlusion_scene(&mut stores);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    let up = Viewpoint {
+        rotation: Quat::from_rotation_x(1.2),
+        ..viewpoint
+    };
+    settle(&mut renderer, &mut stores, viewport, up, draws);
+    drawn_again(&mut renderer, &mut stores, viewport, up, draws);
+    let size = [WIDTH, HEIGHT];
+    let pick = Pick {
+        tag: 1,
+        pixel: pixel_of(viewpoint, size, scene.ball),
+    };
+    let data = RenderData {
+        picks: &[pick],
+        ..stores.data(viewport, viewpoint, draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let entered = frame_pixels(&mut renderer);
+    // The pick, answered as the frame two after it begins.
+    drawn_again(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    assert_eq!(renderer.picked(), [(1, BALL)], "the pick of the sphere");
+    stores.ambient_occlusion = None;
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, draws));
+    let lit = frame_pixels(&mut renderer);
+    let shown = |frame: &[u8]| pixel_at(frame, WIDTH, pixel_of(viewpoint, size, scene.contact))[1];
+    let (lit, darkened) = (i32::from(shown(&lit)), i32::from(shown(&entered)));
+    assert!(
+        darkened <= lit - 12,
+        "where the floor meets the sphere, {darkened} as it comes into view, not 12 darker than \
+         {lit} without ambient occlusion"
+    );
+    shut_down(renderer);
+}
+
+/// [`occlusion_scene`] lit by a sun alone, casting shadows, under a sky that's black every way,
+/// renders the same with ambient occlusion as without: it darkens the sky's light alone, and never
+/// the lights'. And none of its passes run, nor take any memory, in a frame without a sky, under
+/// an orthographic projection, or with a strength of 0, but with a sky, under perspective, they do.
+fn ambient_occlusion_leaves_the_lights_alone() {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.0; 3]);
+    let sky = Sky {
+        texture: sky,
+        luminance: 1.0,
+    };
+    stores.sky = Some(sky);
+    stores.lights = vec![Light {
+        color: Vec3::splat(2.0),
+        ..sun(Vec3::new(1.0, -2.0, -1.0), Some(20.0))
+    }];
+    let scene = occlusion_scene(&mut stores);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    let on = Some(AmbientOcclusion::default());
+    // A frame's, and what the graph's own images and buffers take.
+    let frame = |renderer: &mut Renderer,
+                 stores: &mut Stores,
+                 ambient_occlusion: Option<AmbientOcclusion>,
+                 sky: Option<Sky>,
+                 viewpoint: Viewpoint| {
+        let data = RenderData {
+            ambient_occlusion,
+            sky,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(renderer, data);
+        renderer.transient_bytes()
+    };
+    let without = frame(&mut renderer, &mut stores, None, Some(sky), viewpoint);
+    let lit = frame_pixels(&mut renderer);
+    let above = looking_down(Vec3::new(0.0, 6.0, 0.0), 6.0, 10.0);
+    let weak = Some(AmbientOcclusion {
+        strength: 0.0,
+        ..AmbientOcclusion::default()
+    });
+    for (name, ambient_occlusion, sky, viewpoint) in [
+        ("without a sky", on, None, viewpoint),
+        ("under an orthographic projection", on, Some(sky), above),
+        ("of a strength of 0", weak, Some(sky), viewpoint),
+    ] {
+        let bytes = frame(
+            &mut renderer,
+            &mut stores,
+            ambient_occlusion,
+            sky,
+            viewpoint,
+        );
+        assert_eq!(bytes, without, "ambient occlusion takes memory {name}");
+    }
+    let with = frame(&mut renderer, &mut stores, on, Some(sky), viewpoint);
+    assert!(
+        with > without,
+        "ambient occlusion takes no memory, {with} bytes"
+    );
+    let occluded = frame_pixels(&mut renderer);
+    let differ = (lit.iter().zip(&occluded)).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "ambient occlusion changes the lights' light");
+    shut_down(renderer);
+}
+
 /// Spheres of KHR_materials_pbrSpecularGlossiness's materials, lit by a sky, a directional light and
 /// a point light, each showing as its metallic-roughness equal does: a dielectric, which reflects
 /// 0.04 head-on and diffuses its base color, as one that diffuses that over 0.96, as much as its
@@ -6043,6 +6441,18 @@ fn the_scene_draws_as_draws_do() {
 /// plate, bit for bit as a renderer that never saw the wall draws them all; and once the wall is
 /// back, the frames are as before it went, the red plate hidden again and counted out.
 fn occlusion_culling_draws_what_shows() {
+    occlusion_culled(false);
+}
+
+/// As [`occlusion_culling_draws_what_shows`], under a sky, with ambient occlusion, whose depth
+/// alone the view's two passes draw before it draws again, shaded, without a visibility buffer.
+fn occlusion_culling_draws_what_shows_with_ambient_occlusion() {
+    occlusion_culled(true);
+}
+
+/// The frames of [`occlusion_culling_draws_what_shows`], under a sky of 0.5 every way, with
+/// ambient occlusion, if `occluded`.
+fn occlusion_culled(occluded: bool) {
     const SIZE: u32 = 128;
     let viewport = filling([SIZE, SIZE]);
     // 5 in front of the origin, seeing a sixth of a turn across: 22 pixels a unit at z = 0, the
@@ -6058,6 +6468,14 @@ fn occlusion_culling_draws_what_shows() {
     // What a renderer draws with, and the frames with the wall and without.
     let made = || {
         let mut stores = Stores::default();
+        if occluded {
+            let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
+            stores.sky = Some(Sky {
+                texture: sky,
+                luminance: 1.0,
+            });
+            stores.ambient_occlusion = Some(AmbientOcclusion::default());
+        }
         let flat = (stores.shaders)
             .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
             .expect("a shader");
@@ -6146,6 +6564,10 @@ fn occlusion_culling_draws_what_shows() {
     assert!(close(found, red_shown), "the red plate is {found:?}");
     let (mut fresh_stores, _, open) = made();
     settle(&mut fresh, &mut fresh_stores, viewport, viewpoint, &open);
+    if occluded {
+        // The sky shows from the frame after the one its texture came to be drawable in.
+        render_without_ui(&mut fresh, fresh_stores.data(viewport, viewpoint, &open));
+    }
     assert!(
         shown == frame_pixels(&mut fresh),
         "the frame the wall went differs from one that never saw it"

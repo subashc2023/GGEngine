@@ -191,6 +191,11 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     // Vulkan's front winds counterclockwise as seen, whichever faces the run draws, which a
     // transform that mirrors shows of its mesh's backs.
     bool shows_front = front != (input.side.x < 0.0);
+#if defined(OPAQUE) || defined(MASKED)
+    // The view's ambient occlusion is of what's opaque, as its depth has it: what blends shows
+    // over that, and takes none.
+    occlusion = ambient(frame, uint2(input.position.xy), occlusion);
+#endif
     out.color = lit(frame, material, input.world, input.normal, input.tangent, shows_front, color,
                     surface, mapped, occlusion, emission);
     out.motion = float4(input.moved, 0.0);

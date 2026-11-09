@@ -1,12 +1,14 @@
-//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing and grade an
-//! environment holds, which it does too, and the sampler a sprite holds, which `gg-gpu` does,
-//! described to reflection here, since neither crate can derive it.
+//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing, grade and
+//! ambient occlusion an environment holds, which it does too, and the sampler a sprite holds, which
+//! `gg-gpu` does, described to reflection here, since neither crate can derive it.
 
 use std::fmt::Write as _;
 
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
-use gg_renderer::{Antialiasing, Circle, Grade, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
+use gg_renderer::{
+    AmbientOcclusion, Antialiasing, Circle, Grade, MeshDraw, Sampler, Sprite, Texture, Tonemapper,
+};
 
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
@@ -743,6 +745,103 @@ const GRADE_FIELDS: [&str; 7] = [
     "offset",
     "power",
 ];
+
+/// Taken apart whole, as a circle is, so that a field `gg-renderer` adds fails to compile here until
+/// it's described. Its fields' defaults are XeGTAO's, the default's, and neither goes below 0, at
+/// which it darkens nothing.
+impl Reflect for AmbientOcclusion {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let field = |name: &'static str, default: f32, doc: &'static str| Field {
+            name: name.into(),
+            ty: Type::F32,
+            meta: Meta {
+                min: Some(Bound::Float(0.0)),
+                doc: doc.into(),
+                ..Meta::default()
+            },
+            default: Some(default.to_value()),
+        };
+        let base = AmbientOcclusion::default();
+        let doc = "How what's near each point the view shows darkens the light that reaches it \
+                   from all around, the sky's, as XeGTAO's ground-truth ambient occlusion finds it \
+                   from the view's depth.";
+        types.add::<Self>("AmbientOcclusion".into(), doc.into(), |_| {
+            let fields = vec![
+                field(
+                    "radius",
+                    base.radius,
+                    "How far from a point what darkens it reaches, in the world's units.",
+                ),
+                field(
+                    "strength",
+                    base.strength,
+                    "How much it darkens: 1 as XeGTAO does, more for darker, 0 for nothing.",
+                ),
+            ];
+            Ok(Shape::Struct {
+                fields,
+                tuple: false,
+            })
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let AmbientOcclusion { radius, strength } = self;
+        Value::Struct(vec![
+            ("radius".into(), radius.to_value()),
+            ("strength".into(), strength.to_value()),
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        Self::default().with_value(value)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let AmbientOcclusion { radius, strength } = self;
+        let [new_radius, new_strength] = reflect::fields(value, AMBIENT_OCCLUSION_FIELDS)?;
+        let at = |name| move |error: Error| reflect::within(error, name);
+        Ok(AmbientOcclusion {
+            radius: radius.with_value(new_radius).map_err(at("radius"))?,
+            strength: (strength.with_value(new_strength)).map_err(at("strength"))?,
+        })
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        let AmbientOcclusion { radius, strength } = self;
+        match index {
+            0 => Some(radius),
+            1 => Some(strength),
+            _ => None,
+        }
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        let AmbientOcclusion { radius, strength } = self;
+        match index {
+            0 => Some(radius),
+            1 => Some(strength),
+            _ => None,
+        }
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        let AmbientOcclusion { radius, strength } = self;
+        radius.digest(to);
+        strength.digest(to);
+    }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// Ambient occlusion's fields, in the order its description gives them.
+const AMBIENT_OCCLUSION_FIELDS: [&str; 2] = ["radius", "strength"];
 
 /// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
 /// it culls, and its parameters' bytes in hex, as `1 2 true false x0a0b`: what a restart takes back

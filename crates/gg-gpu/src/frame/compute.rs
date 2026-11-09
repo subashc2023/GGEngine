@@ -76,8 +76,9 @@ impl<'a> Compute<'_, 'a> {
 
     /// The index among the bindless set's storage images that shaders write and read level
     /// `level` of `image` through, an image the pass writes, as its graph declared, during the
-    /// pass alone: a `RWTexture2DArray` of 16-bit floats of its layers, a cube's six faces in
-    /// Vulkan's order, +X, -X, +Y, -Y, +Z, -Z; an image of the graph's own has one layer and one
+    /// pass alone: a `RWTexture2DArray` of its layers, a cube's six faces in Vulkan's order, +X,
+    /// -X, +Y, -Y, +Z, -Z, of 16-bit floats in RGBA, or of a 32-bit float for an image of scalars
+    /// ([`Graph::scalar`](crate::Graph::scalar)); an image of the graph's own has one layer and one
     /// level.
     ///
     /// # Panics

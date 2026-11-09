@@ -37,6 +37,10 @@
                     offset: (0.0, 0.0, 0.0),
                     power: (1.0, 1.0, 1.0),
                 ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
             ),
             Name: ("Environment"),
         ),

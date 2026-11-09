@@ -137,6 +137,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Foxball on Phase 16's systems** (2026-11-08)
 - **Phase 16, gameplay systems** (2026-11-08)
 - **Bloom and color grading** (2026-11-08)
+- **Ambient occlusion** (2026-11-08)
 
 ## Now
 
@@ -306,13 +307,18 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
 | Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes often, as a time of day's, or a hitch that shows |
 | Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
+| Bent normals from ambient occlusion's horizons, as XeGTAO gives them, so that the sky's diffuse light is taken the way the open part of a point's hemisphere faces, and its specular light by the cone they leave: the occlusion darkens the sky's light whole, the way the normal faces | Light from the sky shows coming through what hides it, as in creases |
+| Ambient occlusion of what blends, as glass and particles, which takes none: the view's occlusion is of what's opaque, as its depth has it | A game's blended surfaces show lit where what's near should hide their light |
+| Ambient occlusion under an orthographic projection, whose depth XeGTAO's reach in pixels and its edges by the depth's scale take as a perspective's: such a view runs none of it | A game seen without perspective is lit by a sky, as an isometric one |
+| Ambient occlusion's quality and size set by a game or by quality settings: XeGTAO's high quality, 3 slices of 3 steps each way, at the view's size, and its noise and denoise as antialiasing picks them | A device is too slow for it, or a game's look needs another |
+| Drawing the view over the depth alone it draws for ambient occlusion without a visibility buffer, testing depth for equality, rather than drawing depth again as it shades: a game's opaque shader that discards draws whole triangles' depth alone, and the two pipelines would need to place each vertex alike | A development run's frames are measured to lose much to drawing their opaque vertices twice |
 | Reflection probes and other light from all around but the one sky's, which lights indoors too | A game lights interiors |
 | Point and spot lights' shadows, as cubes and maps in an atlas: a directional light alone casts them | A game lit by them needs their shadows |
 | More than one directional light's shadows: of those that cast them, the brightest does | A scene with two suns, or a sun and a moon at once |
 | Leaving a model's lights out where a scene places it: each root spawns all of the model's nodes, lights among them, so the showcase's 16 Bistros shine 16 suns, exposed 4 stops down, the one that casts shadows among 15 that fill them in, and their point lights a 16th as bright | A scene places a model that holds a sun more than once for its look, not its cost |
 | Blending between cascades over a band at each split, where shadows' sharpness now steps from one cascade to the next | The step shows, as it doesn't in the showcase's Sponza at 1,280 by 720 |
 | Shadow maps' size, the cascades' count and splits, and the shadows' offsets and bias, set by a game or by quality settings: 2,048 texels, four cascades, three quarters logarithmic, and the constants `shaders/model.slang` and `src/shadow.rs` hold | A game needs others, or a device is too slow for them |
-| Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |
+| Games' shaders' shadows cut out as they cut out what they draw, by a fragment shader of their own, as the masked model shader's are: a game's opaque shader's shadows, and the depth ambient occlusion takes of it, are of whole triangles, as games' shaders compile `vertex_main` and `fragment_main` alone | A game's opaque shader discards, as foliage's does |
 | Shadows that soften with the distance from their casters, as PCSS's, and contact shadows: every shadow's edge is six texels of its cascade | A game's look needs them |
 | Shadows from what blends, as glass's colored ones: what blends casts none | A game's transparent objects need them |
 | Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |

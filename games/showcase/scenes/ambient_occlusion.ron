@@ -1,0 +1,178 @@
+(
+    entities: {
+        "0b5e9c27d4a61f83": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate"),
+            Transform: (
+                translation: (-3.35, 0.5, -2.35),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1c7f3a9e5b2d4068": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate beside"),
+            Transform: (
+                translation: (-2.25, 0.5, -2.45),
+                rotation: (0.0, 0.14944, 0.0, 0.98877),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2d84b1f6c3e9a750": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate on top"),
+            Transform: (
+                translation: (-2.85, 1.5, -2.4),
+                rotation: (0.0, 0.29552, 0.0, 0.95534),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3e1a6d0c8f5b2947": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.6, 2.2, 5.4),
+                rotation: (-0.099552, 0.074556, 0.007481, 0.992207),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4f2c8b5a1d7e6093": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Ball by the wall"),
+            Transform: (
+                translation: (-1.1, 0.5, -2.45),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5a3d9e7b2c8f1064": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Ball"),
+            Transform: (
+                translation: (0.3, 0.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6b4e0f8c3d9a2175": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Transform: (
+                translation: (1.7, 0.2, -0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7c5f1a9d4e0b3286": (
+            ModelRoot: ("963ad8b306ccadf8"),
+            Name: ("Capsule"),
+            Transform: (
+                translation: (2.4, 0.5, -2.3),
+                rotation: (0.0, 0.0, 0.70710677, 0.70710677),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8d6a2b0e5f1c4397": (
+            ModelRoot: ("cb44b1a97866f432"),
+            Name: ("Cube"),
+            Transform: (
+                translation: (3.2, 0.5, -1.4),
+                rotation: (0.0, 0.38268343, 0.0, 0.9238795),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9e7b3c1f6a2d5408": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+            ),
+            Name: ("Environment"),
+        ),
+        "a08c4d2e7b3f6519": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b19d5e3f8c4a7620": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Back wall"),
+            Transform: (
+                translation: (0.0, 1.5, -3.15),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (8.0, 3.0, 0.3),
+            ),
+        ),
+        "c2ae6f4a9d5b8731": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Left wall"),
+            Transform: (
+                translation: (-4.15, 1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.3, 3.0, 6.0),
+            ),
+        ),
+        "d3bf7a5bae6c9842": (
+            Name: ("Hint"),
+            Text: (
+                text: "Ambient occlusion from the view's depth, as XeGTAO finds it, darkening the sky's light where what's near hides it",
+                font: None,
+                size: 0.16,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.15, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e4c08b6cbf7da953": (
+            Name: ("Title"),
+            Text: (
+                text: "Ambient occlusion",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.55, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

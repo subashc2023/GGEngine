@@ -53,6 +53,8 @@ pub(crate) struct Extracted {
     /// How much the view blooms and how it's graded, as its environment has them.
     pub(crate) bloom: f32,
     pub(crate) grade: gg_renderer::Grade,
+    /// The view's ambient occlusion, as the world's environment has it.
+    pub(crate) ambient_occlusion: Option<gg_renderer::AmbientOcclusion>,
     /// The simulation's time in seconds as the world was drawn.
     pub(crate) time: f32,
     pub(crate) viewport: Viewport,
@@ -140,6 +142,7 @@ impl Default for Extracted {
             sky: None,
             bloom: 0.0,
             grade: gg_renderer::Grade::IDENTITY,
+            ambient_occlusion: None,
             time: 0.0,
             viewport: Viewport {
                 origin: [0, 0],
@@ -243,6 +246,7 @@ impl Render for Renderer {
             sky: frame.sky,
             bloom: frame.bloom,
             grade: frame.grade,
+            ambient_occlusion: frame.ambient_occlusion,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,

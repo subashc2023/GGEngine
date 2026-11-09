@@ -186,6 +186,7 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
         + material.occlusion_strength * (sampled_by(material, 3, uv, uv_across, uv_down).r - 1.0);
     float3 emission = sampled_by(material, 4, uv, uv_across, uv_down).rgb * material.emissive;
     color.a = 1.0;
+    occlusion = ambient(frame, pixel.xy, occlusion);
     storage[push.target][at] =
         lit(frame, material, world, normal, tangent, front, color, surface, mapped, occlusion,
             emission);
