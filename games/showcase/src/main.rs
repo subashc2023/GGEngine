@@ -62,8 +62,10 @@
 //! (`joints.ron`); a navmesh baked from a small maze's colliders, a step and a ramp up to a
 //! platform among them, and a dozen agents walking its paths to stops in turn, round each other,
 //! the navmesh and their paths in lines (`navigation.ron`); and, once `cargo
-//! gg fetch` has fetched them, Sponza under that sky and a sun (`sponza.ron`), in a low height fog
-//! that they light, thickest along its floor and thinning up its walls (`fog.ron`), and walked
+//! gg fetch` has fetched them, Sponza under a sky made from its sun, its arches darkened by ambient
+//! occlusion, what's bright blooming, graded and in a low fog, every look at once (`sponza.ron`),
+//! under the Puresky and a sun in a low height fog that they light, thickest along its floor and
+//! thinning up its walls (`fog.ron`), and walked
 //! through by a character that the keys or a pad move, a camera following it, Sponza's triangles
 //! what it collides with, among crates and balls it pushes (`walk.ron`), and Amazon
 //! Lumberyard Bistro, its materials of specular and glossiness, its images DDS files of BC7, lit by

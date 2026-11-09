@@ -124,9 +124,8 @@ fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(&project.assets_dir(dir));
     assert_eq!(
         found.assets.len(),
-        9,
-        "the ball, the box, the tiles, the Fox and its texture, the sky, the font, the wall and \
-         the UI"
+        8,
+        "the ball, the box, the tiles, the Fox and its texture, the font, the wall and the UI"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -760,7 +759,7 @@ fn live_recording() -> PathBuf {
 }
 
 /// The game's package, as `tools/cook` cooks it, holds what its runs load: its scene, its wall's
-/// prefab, its UI and its sounds as they are, its sky and the Fox's texture compressed, its models
+/// prefab, its UI and its sounds as they are, the Fox's texture compressed, its models
 /// cooked and its font baked, its assets by their IDs; and the live recording replays from it to
 /// its hashes, as a build without `dev` runs from it.
 #[test]
@@ -787,7 +786,6 @@ fn the_live_recording_replays_from_the_games_package() {
         ("sounds/goal.wav", Kind::File, false),
         ("sounds/kick.wav", Kind::File, false),
         ("sounds/win.wav", Kind::File, false),
-        ("textures/sky.hdr", Kind::Texture, true),
         ("ui/menu.ui", Kind::File, true),
     ];
     assert_eq!(held, expected);

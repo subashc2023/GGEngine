@@ -1766,8 +1766,8 @@ the sky whole. In the texture's own units, that's the power of two at or below 1
 luminance, so that a luminance that changes, as a day's does, has the sky prefiltered again only
 as it crosses one, rather than in every frame it changes. A frame
 without one lights by the whole sky. The light should shine from where the sky shows its sun, its
-way and illuminance found from the sky's texels past that, as the showcase's Sponza's are; a sun low
-in its sky, dimmed through more air, can fall short of it, and then lights twice.
+way and illuminance found from the sky's texels past that, as the showcase's Sponza in fog has
+them; a sun low in its sky, dimmed through more air, can fall short of it, and then lights twice.
 
 An environment's sky may be an atmosphere instead, made from its sun, as Hillaire's "A Scalable and
 Production Ready Sky and Atmosphere Rendering Technique" (2020) makes it, after his reference

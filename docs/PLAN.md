@@ -140,23 +140,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Ambient occlusion** (2026-11-08)
 - **Height fog** (2026-11-09)
 - **A sky made from its sun** (2026-11-09)
+- **Foxball and Sponza on the rendering looks** (2026-11-09)
+- **Phase 17, rendering looks** (2026-11-09)
 
 ## Now
 
-17. **Rendering looks.** The looks a game reaches for first, each a pass or two on the render graph
-    that a world's `Environment` turns on and sets, alike in development runs, which draw models as
-    they shade them, and in cooked ones, which shade them from the visibility buffer: ambient
-    occlusion from the view's depth, as XeGTAO's ground-truth ambient occlusion, darkening the light
-    from all around where nearby surfaces hide it; bloom, from a chain of downsamples and upsamples
-    of the view's colors, as Call of Duty's, and color grading, white balance, contrast, saturation
-    and ASC CDL's slope, offset and power, computed on the view's colors before the tonemapper,
-    with dithering against banding in the view's 8 bits; height fog, thinning exponentially with
-    height, lit by the sky and, toward the sun, by the directional light; and a sky made from its
-    sun, Hillaire's atmosphere under a directional light that a time of day moves, which the view
-    shows and lights its models by, as it does an image sky. *Done when* the showcase has a scene
-    for each, each a GPU test's reference image, and Foxball's arena and the showcase's Sponza show
-    them, each effect's time on the GPU measured. Its milestones: ambient occlusion; bloom and color
-    grading; height fog; a sky made from its sun; and, once they're in, Foxball and Sponza on them.
+The next phase is the user's to choose, as Open questions has it.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -182,7 +171,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 16 are done, as Done has it, but for what Deferred holds.
+Phases 11 to 17 are done, as Done has it, but for what Deferred holds.
 
 Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -310,7 +299,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An atmosphere's haze over what isn't lit, as sprites, text, unlit materials, particles and games' own shaders, which draw as they are however far: lit shading alone hazes what it lights | A game draws such things kilometers away |
 | An atmosphere's tables made only as its sun, the viewer or its settings change, and over several frames: every frame that renders the view makes them all, about 36 µs of an RTX 4090's time, the aerial perspective's 16 µs of it, a thread a froxel | Their time is measured to matter, as on a slow GPU |
 | Turning a sky, as EXT_lights_image_based turns one: its image's middle column faces +X, and a scene faces its sky's sun by turning itself, as the showcase's Sponza turns its model | A scene can't turn to face its sky's sun, as a level laid out first |
-| Finding a sky's sun by its contrast with the sky round it, rather than by 10⁷ candela per square meter, which a sun low in its sky can fall short of, lighting both through the sky's light and through the directional light that stands for it; and its way and illuminance, for that light, which the showcase's Sponza's sun was given by hand from its sky's texels | A scene under a low sun lights twice, or skies change often enough that setting their suns by hand matters |
+| Finding a sky's sun by its contrast with the sky round it, rather than by 10⁷ candela per square meter, which a sun low in its sky can fall short of, lighting both through the sky's light and through the directional light that stands for it; and its way and illuminance, for that light, which the sun of the showcase's Sponza in fog was given by hand from its sky's texels | A scene under a low sun lights twice, or skies change often enough that setting their suns by hand matters |
 | Mip levels for skies and other textures of high dynamic range, which have one: a 4K sky the view shows smaller than it is shimmers as the camera turns | Shimmering shows |
 | Prefiltering a sky over several frames, or on a compute queue: the frame that prefilters a 4K sky takes about 0.4 ms of an RTX 4090's time, and one that prefilters an atmosphere's, as its sun turns, by 64 samples a texel, about 35 µs at the median, every frame while a sun of a fast day is low, its pipelines made as the first sky shows, some 60 ms on the render thread in a debug build without the pipeline cache | A sky that changes every few frames, as a day passing in seconds, or a hitch that shows |
 | Specular occlusion as Frostbite derives it from the occlusion map and the way to the eye, and a normal map's horizon hiding its reflections: the occlusion map darkens the sky's specular light as it does its diffuse | Reflections show through what should hide them |
@@ -687,4 +676,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-None now.
+- Which phase comes after Phase 17? Recommendation: the built-in coding agent, v1's headline, in
+  the editor, modeled on the pi coding agent: it edits a project's files and works on the running
+  game through the tool API, as Claude Code does now. Decide before the next phase starts.

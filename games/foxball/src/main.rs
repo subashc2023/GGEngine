@@ -14,8 +14,8 @@
 //! CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest
 //! under CC BY 4.0, as its README there says), skinned, each played by a state machine, Survey
 //! standing and Walk blended with Run by how fast it goes, characters that rapier3d's controller
-//! walks, which push the ball as they walk into it, under Poly Haven's Kloofendal 48d Partly Cloudy
-//! Puresky (`textures/sky.hdr`, CC0); the ball and the arena are 3D physics, the arena's walls,
+//! walks, which push the ball as they walk into it, late in an afternoon, under a sky made from its
+//! low sun and in a haze that it lights; the ball and the arena are 3D physics, the arena's walls,
 //! goals and navmesh's volume its scene file, `scenes/arena.ron`, which a development build applies
 //! as it's saved, each wall, a goal's pocket's too, an instance of one prefab, `prefabs/wall.prefab`,
 //! placed and sized by its own transform. Each run's view follows its own fox, a little above and
