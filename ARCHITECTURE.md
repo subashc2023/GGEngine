@@ -479,7 +479,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   its SHA-256 is the list's, and writes each asset's ID file, with the list's ID or a fresh one, as
   a development run would, so that every checkout that fetches gives it the ID its scenes name. A
   checkout that hasn't fetched them, as CI's, can't load a scene that names them, which the
-  showcase's tests leave unloaded.
+  showcase's tests leave unloaded; its `asset.unknown_id` names the file the list gives the ID and
+  `cargo gg fetch`.
 - **Packages.** A game's package is one file, which the cooker, `gg-cook`, writes from its project,
   and a build of the game without `dev` runs from: `<executable>.ggpk` beside its executable, in a
   macOS app's bundle in its `Contents/Resources`, or the one `--package` names, a run of a project
