@@ -17,7 +17,7 @@ use gg_api::asset::{AssetId, AssetKind};
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Antialiasing, Blend, Circle, Draws, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps,
+    Antialiasing, Blend, Circle, Draws, Grade, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps,
     ModelParams, ModelVertex, Outline, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming,
     Texels, Texture, Textures, Tonemapper, Viewpoint, Viewport,
 };
@@ -3809,6 +3809,9 @@ impl Context {
             (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing);
         frame.exposure = self.environment.unwrap_or_default().light_scale();
         frame.sky = self.environment.and_then(|seen| seen.sky());
+        // Nor bloomed or graded.
+        frame.bloom = self.environment.map_or(0.0, |seen| seen.bloom);
+        frame.grade = self.environment.map_or(Grade::IDENTITY, |seen| seen.grade);
         frame.lights.clear();
         frame.lights.extend_from_slice(self.lit.lights());
         frame.time = self.time;

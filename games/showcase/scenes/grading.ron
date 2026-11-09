@@ -1,0 +1,120 @@
+(
+    entities: {
+        "a1deb3e4a4f7c4d4": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.4, 7.5),
+                rotation: (-0.15931821, 0.0, 0.0, 0.98722726),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "acd1b9ac83323e26": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Transform: (
+                translation: (2.2, 0.55, -1.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "aed82f5ea5bc361a": (
+            ModelRoot: ("cb44b1a97866f432"),
+            Name: ("Cube"),
+            Transform: (
+                translation: (0.0, 0.5, -1.8),
+                rotation: (0.0, 0.25881904, 0.0, 0.9659258),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "af1919e0e9a18a49": (
+            Environment: (
+                exposure: 15.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Some("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.35,
+                    tint: 0.05,
+                    contrast: 1.15,
+                    saturation: 1.25,
+                    slope: (1.05, 1.0, 0.95),
+                    offset: (0.0, 0.0, 0.01),
+                    power: (1.0, 1.0, 1.0),
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "c30347384adeb1ab": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e71d9477b468e1db": (
+            Name: ("Hint"),
+            Text: (
+                text: "A golden hour's grade: warmer, more contrast and saturation, the shadows teal, set by the Environment's grade",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ea471ad017a9d928": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "ef563d7ccbcc4988": (
+            Name: ("Title"),
+            Text: (
+                text: "Color grading",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f8d7d1cad67fd0d8": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Transform: (
+                translation: (-2.2, 0.75, -1.8),
+                rotation: (0.70710677, 0.0, 0.0, 0.70710677),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

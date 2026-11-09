@@ -1,6 +1,6 @@
 // The game's view, drawn in colors of high dynamic range, mapped into the range its image shows, 0
 // to 1, by a tonemapper: each pixel of the view's colors onto the image's, which the target encodes
-// as sRGB.
+// as sRGB; and, tonemapped by any but none, dithered against banding in the image's 8 bits.
 
 [[vk::binding(0, 0)]] Texture2D textures[];
 
@@ -15,6 +15,7 @@ struct Push {
 static const uint PBR_NEUTRAL = 0;
 static const uint ACES = 1;
 static const uint AGX = 2;
+static const uint NONE = 3;
 
 // The largest a half float holds, short of infinity, which the view's colors are.
 static const float BRIGHTEST = 65504.0;
@@ -117,10 +118,46 @@ float3 agx(float3 color) {
     return saturate(mul(color, REC2020_TO_SRGB));
 }
 
+// sRGB's encoding, of linear values from 0 to 1, as the target writes them, and its decoding.
+float3 srgb_encoded(float3 value) {
+    return select(value <= 0.0031308, value * 12.92, 1.055 * pow(value, 1.0 / 2.4) - 0.055);
+}
+
+float3 srgb_decoded(float3 value) {
+    return select(value <= 0.04045, value / 12.92, pow((value + 0.055) / 1.055, 2.4));
+}
+
+// PCG2D, a hash of two numbers into two (Jarzynski and Olano, "Hash Functions for GPU Rendering",
+// 2020).
+uint2 pcg2d(uint2 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> 16u);
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    return v ^ (v >> 16u);
+}
+
+// `color`, from 0 to 1, dithered against banding in the target's 8 bits, where the target encodes
+// it: triangular noise, of two uniform noises of up to half a step either way, from a hash of the
+// pixel, the same each frame, so that frames of the same colors write the same; added to the color
+// encoded, which is then decoded, for the target to encode again. Within a step of 0 or 1, the
+// noise shrinks to reach no further than they, so that black and white stay as they are and no
+// noise is clamped off, which would shift the mean.
+float3 dithered(float3 color, uint2 pixel) {
+    float2 halves = float2(pcg2d(pixel) >> 8u) / 16777216.0;
+    float noise = (halves.x + halves.y - 1.0) / 255.0;
+    float3 shown = srgb_encoded(color);
+    float3 reach = saturate(min(shown, 1.0 - shown) * 255.0);
+    return srgb_decoded(shown + noise * reach);
+}
+
 [shader("fragment")]
 float4 fragment_main(float4 position: SV_Position) : SV_Target {
     // A pixel's position is its center, so its whole part is the pixel's.
-    float4 drawn = textures[push.image].Load(int3(int2(position.xy), 0));
+    int2 pixel = int2(position.xy);
+    float4 drawn = textures[push.image].Load(int3(pixel, 0));
     float3 color = finite(drawn.rgb);
     switch (push.tonemapper) {
     case PBR_NEUTRAL:
@@ -135,6 +172,9 @@ float4 fragment_main(float4 position: SV_Position) : SV_Target {
     default:
         color = saturate(color);
         break;
+    }
+    if (push.tonemapper != NONE) {
+        color = dithered(color, uint2(pixel));
     }
     return float4(color, saturate(drawn.a));
 }

@@ -26,7 +26,11 @@ const SHADERS: [&str; 14] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 10] = [
+const COMPUTE: [(&str, &[&str]); 11] = [
+    (
+        "bloom",
+        &["first_main", "down_main", "up_main", "composite_main"],
+    ),
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
     ("emit", &["emit_main", "grow_main"]),

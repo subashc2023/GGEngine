@@ -23,7 +23,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Antialiasing, Births, Blend, Bursts, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts,
-    Draws, Emission, Glyph, Grid, GridLines, Light, LightKind, Line, Lod, Lods,
+    Draws, Emission, Glyph, Grade, Grid, GridLines, Light, LightKind, Line, Lod, Lods,
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes,
     Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline, PackedVertex, ParticleShape,
     Particles, Pick, Pixels, Projection, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
@@ -85,6 +85,10 @@ fn main() -> ExitCode {
         outlines_match_their_reference,
         tonemappers_match_their_reference,
         colors_past_a_half_float_show_as_its_brightest,
+        bloom_spreads_light_round_what_is_bright_and_no_further,
+        a_lone_bright_pixel_blooms_less_than_a_square_of_its_light,
+        grades_transform_as_they_say,
+        dithering_keeps_a_gradients_mean_and_breaks_its_bands,
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         back_faces_flip_their_normal_maps,
@@ -334,7 +338,8 @@ struct Stores {
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
-    /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased or tonemapped,
+    /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased, bloomed,
+    /// graded or tonemapped,
     /// at time 0 with an exposure of 1 and the stores' lights and sky, with the uploads of what's
     /// been added, and what's changed in the scene, since the last frame's.
     fn data<'a>(
@@ -364,6 +369,8 @@ impl Stores {
             time: 0.0,
             lights,
             sky: *sky,
+            bloom: 0.0,
+            grade: Grade::IDENTITY,
             viewport,
             viewpoint,
             uploads,
@@ -4061,6 +4068,536 @@ fn colors_past_a_half_float_show_as_its_brightest() {
         }
     }
     shut_down(renderer);
+}
+
+/// A square of 2 by 2 pixels 64 times as bright as white in the world, left, and the same on the
+/// canvas, right, in a view of 256 by 128, whose bloom has three levels. Without antialiasing, the
+/// world's spreads its light round it, the same each way, less the further, while the canvas's,
+/// after the bloom, doesn't spread at all; and no light goes further than the levels reach: each
+/// downsample into level k reaches 2^(k + 1) pixels further, as its 13 taps read 2 texels of the
+/// level before past the texel's own, and each upsample from level i + 1, and the blend into the
+/// view from level 1, 3.5 × 2^i pixels, as its tent's bilinear taps read texels within 2 of its
+/// own of the level below: 52.5 pixels in all, past which the view is its clear color, as bloom
+/// adds no light. Without bloom, nothing spreads; with antialiasing, the world's light spreads and
+/// the canvas's doesn't alike. Compared, with bloom and without antialiasing, with its reference.
+fn bloom_spreads_light_round_what_is_bright_and_no_further() {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 128;
+    // How far, in pixels, light can go from the square's edges, as above.
+    const REACH: f32 = 52.5;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // A unit to a pixel, from the view's middle.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let bright = Vec4::new(64.0, 64.0, 64.0, 1.0);
+    let mut draws = Draws::default();
+    // Over pixels 63 and 64 each way.
+    let at = Mat4::from_scale_rotation_translation(
+        Vec3::new(2.0, 2.0, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(-64.0, 0.0, 0.0),
+    );
+    draws.push(square, flat, at, bright);
+    // Over pixels 191 and 192 across and 63 and 64 down.
+    let mut canvas = Draws::default();
+    let on_canvas = Mat4::from_translation(Vec3::new(192.0, 64.0, 0.0))
+        * Mat4::from_scale(Vec3::new(2.0, 2.0, 1.0));
+    canvas.push_sprite(
+        on_canvas,
+        Sprite {
+            color: bright,
+            ..Sprite::default()
+        },
+    );
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let render = |renderer: &mut Renderer, stores: &mut Stores, bloom, antialiasing| {
+        let mut pixels = Vec::new();
+        // Antialiased, enough frames for the history to settle.
+        for _ in 0..16 {
+            let data = RenderData {
+                bloom,
+                antialiasing,
+                canvas: &canvas,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(renderer, data);
+            pixels = frame_pixels(renderer);
+        }
+        pixels
+    };
+    let background = [CLEAR[0], CLEAR[1], CLEAR[2]].map(encoded);
+    let background = [background[0], background[1], background[2], 255];
+    let red = |pixels: &[u8], at: [u32; 2]| pixel_at(pixels, WIDTH, at)[0];
+    // The square's light, `d` pixels right of it, left, below and above, in red.
+    let around = |pixels: &[u8], d: u32| {
+        [
+            red(pixels, [64 + d, 64]),
+            red(pixels, [63 - d, 64]),
+            red(pixels, [64, 64 + d]),
+            red(pixels, [64, 63 - d]),
+        ]
+    };
+    let unbloomed = render(&mut renderer, &mut stores, 0.0, Antialiasing::None);
+    for d in [2, 8] {
+        assert!(
+            close(pixel_at(&unbloomed, WIDTH, [64 + d, 64]), background),
+            "without bloom, the square's light spreads {d} pixels"
+        );
+    }
+    let bloomed = render(&mut renderer, &mut stores, 0.25, Antialiasing::None);
+    let mut nearer = u8::MAX;
+    for d in [2, 4, 8, 16, 24] {
+        let light = around(&bloomed, d);
+        assert!(
+            light.iter().all(|&l| l.abs_diff(light[0]) <= 1),
+            "the square's light {d} pixels away isn't the same each way: {light:?}"
+        );
+        assert!(
+            light[0] > background[0] && light[0] < nearer,
+            "the square's light {d} pixels away is {}, not between the background's {} and \
+             {nearer} nearer",
+            light[0],
+            background[0]
+        );
+        nearer = light[0];
+    }
+    // Whether pixel `at` overlaps the reach round the square, which spans pixels 63 and 64 each way.
+    let reached = |at: u32| (at + 1) as f32 > 63.0 - REACH && (at as f32) < 65.0 + REACH;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH * 5 / 8 {
+            let got = pixel_at(&bloomed, WIDTH, [x, y]);
+            assert!(
+                (reached(x) && reached(y)) || close(got, background),
+                "the square's light reaches ({x}, {y}), past the levels' reach: {got:?}"
+            );
+        }
+    }
+    let canvas_light = |pixels: &[u8]| {
+        for (x, y) in [(194, 64), (189, 64), (192, 67), (192, 60), (200, 64)] {
+            let got = pixel_at(pixels, WIDTH, [x, y]);
+            assert!(
+                close(got, background),
+                "the canvas's square blooms to ({x}, {y}): {got:?}"
+            );
+        }
+        assert_eq!(red(pixels, [192, 64]), 255, "the canvas's square shows");
+    };
+    canvas_light(&bloomed);
+    let antialiased = render(&mut renderer, &mut stores, 0.25, Antialiasing::Taa);
+    canvas_light(&antialiased);
+    let light = around(&antialiased, 8);
+    assert!(
+        light.iter().all(|&l| l > background[0]),
+        "antialiased, the square's light doesn't spread: {light:?}"
+    );
+    shut_down(renderer);
+    compare("bloom", WIDTH, HEIGHT, &bloomed);
+}
+
+/// A lone pixel as bright as a half float holds, 65,504, in the middle of a view of 128 by 128,
+/// blooms far less than a square of 4 by 4 pixels there holding the same light, a 16th of it each,
+/// as Karis's average weighs each box of the first downsample by 1 over 1 plus its luminance, so
+/// that a pixel far brighter than those round it, a firefly, doesn't bloom into a blot: the light
+/// round each, from 6 pixels out to 24, past the square, less the clear color's, the lone pixel's
+/// under half the square's. Without the average, the two would spread their light alike.
+fn a_lone_bright_pixel_blooms_less_than_a_square_of_its_light() {
+    const SIZE: u32 = 128;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // A unit to a pixel, from the view's middle.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: SIZE as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let brightest = 65_504.0;
+    // A square `side` pixels a side round `middle`, holding `brightest` in all.
+    let lit = |side: f32, middle: Vec2| {
+        let mut draws = Draws::default();
+        let at = Mat4::from_scale_rotation_translation(
+            Vec3::new(side, side, 1.0),
+            Quat::IDENTITY,
+            middle.extend(0.0),
+        );
+        let color = Vec3::splat(brightest / (side * side)).extend(1.0);
+        draws.push(square, flat, at, color);
+        draws
+    };
+    let viewport = filling([SIZE, SIZE]);
+    let background = decoded(encoded(CLEAR[0]));
+    let mut spread = |draws: &Draws| {
+        settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        let data = RenderData {
+            bloom: 0.0005,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let pixels = frame_pixels(&mut renderer);
+        let mut light = 0.0;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let far = x.abs_diff(64).max(y.abs_diff(64));
+                if (6..=24).contains(&far) {
+                    light += decoded(pixel_at(&pixels, SIZE, [x, y])[0]) - background;
+                }
+            }
+        }
+        light
+    };
+    // Pixel (64, 64) alone, and pixels 62 to 65 each way.
+    let lone = spread(&lit(1.0, Vec2::new(0.5, -0.5)));
+    let patch = spread(&lit(4.0, Vec2::ZERO));
+    shut_down(renderer);
+    assert!(patch > 1.0, "the square's light hardly spreads: {patch}");
+    assert!(
+        lone < 0.5 * patch,
+        "a lone pixel spreads {lone} of light, against {patch} from a square of its light"
+    );
+}
+
+/// Squares of grays and colors, saturated and dark ones among them, graded each way in turn,
+/// without a tonemapper, so that what's graded shows as the grade makes it, each channel within a
+/// step of what `Grade::graded` makes of it on the CPU: saturation 0, which makes them grays of
+/// their luminance, and 2, which keeps grays and takes some colors' channels to none; a slope of a
+/// half; contrast of 1.5; ASC CDL's slope, offset and power, each a channel's; the showcase's
+/// golden hour; the white balance at its coolest and greenest, and warmer; the CPU's own checks
+/// (`grade.rs`) say those are what each should make. The identity, and a grade a hair from it,
+/// leave them as they were. A square on the canvas isn't graded. The rows, graded each way, are
+/// compared with their reference.
+fn grades_transform_as_they_say() {
+    const WIDTH: u32 = 128;
+    const HEIGHT: u32 = 8;
+    const COLORS: [Vec3; 16] = [
+        Vec3::new(0.18, 0.18, 0.18),
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(0.8, 0.1, 0.05),
+        Vec3::new(0.1, 0.6, 0.2),
+        Vec3::new(0.05, 0.1, 0.7),
+        Vec3::new(0.9, 0.4, 0.1),
+        Vec3::new(0.02, 0.01, 0.03),
+        Vec3::new(0.9, 0.9, 0.6),
+        Vec3::new(0.3, 0.05, 0.6),
+        Vec3::new(0.65, 0.55, 0.05),
+        Vec3::new(0.02, 0.4, 0.45),
+        Vec3::new(0.33, 0.27, 0.21),
+        Vec3::new(0.7, 0.02, 0.3),
+        Vec3::new(0.12, 0.12, 0.35),
+        Vec3::new(0.45, 0.8, 0.6),
+        Vec3::new(0.004, 0.06, 0.01),
+    ];
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // A unit to a pixel, from the view's middle.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let mut draws = Draws::default();
+    for (i, color) in COLORS.into_iter().enumerate() {
+        let at = Mat4::from_scale_rotation_translation(
+            Vec3::new(8.0, 8.0, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(i as f32 * 8.0 + 4.0 - WIDTH as f32 / 2.0, 0.0, 0.0),
+        );
+        draws.push(square, flat, at, color.extend(1.0));
+    }
+    // Red, over the top left 4 by 4 of the first square, which leaves its middle.
+    let red = Vec4::new(0.8, 0.1, 0.05, 1.0);
+    let mut canvas = Draws::default();
+    let corner = Mat4::from_translation(Vec3::new(2.0, 6.0, 0.0))
+        * Mat4::from_scale(Vec3::new(4.0, 4.0, 1.0));
+    canvas.push_sprite(
+        corner,
+        Sprite {
+            color: red,
+            ..Sprite::default()
+        },
+    );
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut graded = |grade: Grade, canvas: &Draws| {
+        let data = RenderData {
+            grade,
+            canvas,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        frame_pixels(&mut renderer)
+    };
+    let none = Draws::default();
+    // Each square's middle pixel.
+    let middles = |pixels: &[u8]| -> Vec<[u8; 4]> {
+        (0..COLORS.len() as u32)
+            .map(|i| pixel_at(pixels, WIDTH, [i * 8 + 4, 4]))
+            .collect()
+    };
+    // Each square shows what `grade` makes of its color on the CPU, each channel within a step.
+    let shows = |pixels: &[u8], what: &str, grade: Grade| {
+        for (got, color) in middles(pixels).into_iter().zip(COLORS) {
+            let want = grade.graded(color).to_array().map(encoded);
+            let near = (got.iter().zip(want)).all(|(&g, w)| g.abs_diff(w) <= 1);
+            assert!(near, "{what} shows {color} as {got:?}, not {want:?}");
+        }
+    };
+    let mut rows = Vec::new();
+    let grades = [
+        ("the identity", Grade::IDENTITY),
+        (
+            "saturation 0",
+            Grade {
+                saturation: 0.0,
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "saturation 2",
+            Grade {
+                saturation: 2.0,
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "a slope of a half",
+            Grade {
+                slope: Vec3::splat(0.5),
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "contrast 1.5",
+            Grade {
+                contrast: 1.5,
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "ASC CDL",
+            Grade {
+                slope: Vec3::new(0.8, 1.1, 0.9),
+                offset: Vec3::new(0.05, 0.0, 0.02),
+                power: Vec3::new(1.2, 0.9, 1.0),
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "a golden hour",
+            Grade {
+                temperature: 0.35,
+                tint: 0.05,
+                contrast: 1.15,
+                saturation: 1.25,
+                slope: Vec3::new(1.05, 1.0, 0.95),
+                offset: Vec3::new(0.0, 0.0, 0.01),
+                power: Vec3::ONE,
+            },
+        ),
+        (
+            "the coolest and greenest white balance",
+            Grade {
+                temperature: -1.0,
+                tint: -1.0,
+                ..Grade::IDENTITY
+            },
+        ),
+        (
+            "a warmer white balance",
+            Grade {
+                temperature: 0.5,
+                ..Grade::IDENTITY
+            },
+        ),
+    ];
+    for (what, grade) in grades {
+        let pixels = graded(grade, &none);
+        shows(&pixels, what, grade);
+        rows.push(pixels);
+    }
+    let ungraded = &rows[0];
+    for (got, color) in middles(ungraded).into_iter().zip(COLORS) {
+        let want = color.to_array().map(encoded);
+        let near = (got.iter().zip(want)).all(|(&g, w)| g.abs_diff(w) <= 1);
+        assert!(near, "ungraded, {color} shows as {got:?}, not {want:?}");
+    }
+    for got in middles(&rows[1]) {
+        assert!(got[0] == got[1] && got[1] == got[2], "{got:?} isn't gray");
+    }
+    let [r, _, b, _] = middles(&rows[8])[0];
+    assert!(
+        r > b + 4,
+        "a warmer white balance makes mid gray {r} red and {b} blue"
+    );
+    let nearly = graded(
+        Grade {
+            contrast: 1.0 + 1.0e-6,
+            ..Grade::IDENTITY
+        },
+        &none,
+    );
+    let differs = (nearly.iter().zip(ungraded)).filter(|(a, b)| a.abs_diff(**b) > 1);
+    assert_eq!(
+        differs.count(),
+        0,
+        "a grade a hair from the identity changes the view"
+    );
+    let gray_under_canvas = graded(
+        Grade {
+            saturation: 0.0,
+            ..Grade::IDENTITY
+        },
+        &canvas,
+    );
+    let want = red.truncate().to_array().map(encoded);
+    let got = pixel_at(&gray_under_canvas, WIDTH, [1, 1]);
+    let near = (got.iter().zip(want)).all(|(&g, w)| g.abs_diff(w) <= 1);
+    assert!(
+        near,
+        "the canvas's red is graded to {got:?}, not left {want:?}"
+    );
+    let [r, g, b, _] = middles(&gray_under_canvas)[0];
+    assert!(r == g && g == b, "the world under the canvas isn't graded");
+    shut_down(renderer);
+    compare("grades", WIDTH, HEIGHT * rows.len() as u32, &rows.concat());
+}
+
+/// A gradient of gray across a view of 256 by 64, a column of pixels a shade, from 0.2 to 0.21,
+/// which PBR Neutral takes 0.04 off, about 2.3 steps of the view's 8 bits from end to end. Dithered,
+/// as PBR Neutral's view is, each row changes from pixel to pixel many times over, rather than at
+/// the 2 edges of the bands rounding leaves, as without a tonemapper, which doesn't dither;
+/// and the mean of each 16 columns is the gradient's within a tenth of a step, as rounding's
+/// isn't. Black and white stay exactly as they are, the noise kept from reaching past them.
+fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 64;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    // A unit to a pixel, from the view's middle.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let shade = |x: u32| 0.2 + 0.01 * (x as f32 + 0.5) / WIDTH as f32;
+    // What PBR Neutral makes of the gradient, or what's drawn without a tonemapper for the same.
+    let gradient = |less: f32| {
+        let mut draws = Draws::default();
+        for x in 0..WIDTH {
+            let at = Mat4::from_scale_rotation_translation(
+                Vec3::new(1.0, HEIGHT as f32, 1.0),
+                Quat::IDENTITY,
+                Vec3::new(x as f32 + 0.5 - WIDTH as f32 / 2.0, 0.0, 0.0),
+            );
+            draws.push(square, flat, at, Vec3::splat(shade(x) - less).extend(1.0));
+        }
+        draws
+    };
+    let (drawn, mapped) = (gradient(0.0), gradient(0.04));
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &drawn);
+    let data = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        ..stores.data(viewport, viewpoint, &drawn)
+    };
+    render_without_ui(&mut renderer, data);
+    let dithered = frame_pixels(&mut renderer);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &mapped));
+    let rounded = frame_pixels(&mut renderer);
+    // Black, left, and as bright as a half float holds, right, which PBR Neutral rolls off to
+    // within a millionth of white.
+    let mut ends = Draws::default();
+    for (x, gray) in [(-0.25, 0.0), (0.25, 65_504.0)] {
+        let at = Mat4::from_scale_rotation_translation(
+            Vec3::new(WIDTH as f32 / 2.0, HEIGHT as f32, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(x * WIDTH as f32, 0.0, 0.0),
+        );
+        ends.push(square, flat, at, Vec3::splat(gray).extend(1.0));
+    }
+    let data = RenderData {
+        tonemapper: Tonemapper::PbrNeutral,
+        ..stores.data(viewport, viewpoint, &ends)
+    };
+    render_without_ui(&mut renderer, data);
+    let ended = frame_pixels(&mut renderer);
+    shut_down(renderer);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let want = if x < WIDTH / 2 { 0 } else { 255 };
+            let got = pixel_at(&ended, WIDTH, [x, y]);
+            assert_eq!(got, [want, want, want, 255], "dithered at ({x}, {y})");
+        }
+    }
+    // How many times each row's gray changes from one pixel to the next.
+    let changes = |pixels: &[u8]| -> Vec<usize> {
+        let gray = |x, y| pixel_at(pixels, WIDTH, [x, y])[1];
+        let row = |y| (1..WIDTH).filter(|&x| gray(x, y) != gray(x - 1, y)).count();
+        (0..HEIGHT).map(row).collect()
+    };
+    // At its bands' 2 edges, where the GPU's rounding may waver between pixels.
+    let banded = changes(&rounded).into_iter().max().expect("rows");
+    assert!(banded <= 6, "rounded, a row changes {banded} times");
+    let least = changes(&dithered).into_iter().min().expect("rows");
+    assert!(least > 64, "dithered, a row changes only {least} times");
+    // The gradient, in steps of the view's 8 bits, encoded as the view is.
+    let exact = |x: u32| {
+        let linear = shade(x) - 0.04;
+        255.0 * (1.055 * math::libm::powf(linear, 1.0 / 2.4) - 0.055)
+    };
+    let mean_of = |pixels: &[u8], columns: std::ops::Range<u32>| {
+        let sum: f32 = (columns.clone())
+            .flat_map(|x| (0..HEIGHT).map(move |y| [x, y]))
+            .map(|at| f32::from(pixel_at(pixels, WIDTH, at)[1]))
+            .sum();
+        sum / (columns.len() as u32 * HEIGHT) as f32
+    };
+    let mut rounding_strays = 0.0_f32;
+    for start in (0..WIDTH).step_by(16) {
+        let columns = start..start + 16;
+        let want = columns.clone().map(exact).sum::<f32>() / 16.0;
+        let got = mean_of(&dithered, columns.clone());
+        assert!(
+            (got - want).abs() < 0.1,
+            "dithered, columns {columns:?} average {got}, not {want}"
+        );
+        rounding_strays = rounding_strays.max((mean_of(&rounded, columns) - want).abs());
+    }
+    assert!(
+        rounding_strays > 0.2,
+        "rounding keeps the mean within {rounding_strays}, which tells dithering nothing"
+    );
 }
 
 /// A square that covers a view, with a shader that shows the frame's data as colors: where the

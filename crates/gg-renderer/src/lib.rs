@@ -7,8 +7,8 @@
 //! lights, a directional light's shadows, in cascades fitted to the view, and its sky, which shows
 //! behind them, prefiltered on the GPU, opaque and masked ones drawn by their meshlets shaded from
 //! a visibility buffer, a game's UI over them in the view's own space, and the UI over the view;
-//! the view drawn in colors of high dynamic range, antialiased against the frames before it, which
-//! a tonemapper maps into the range it shows; picks, which read back
+//! the view drawn in colors of high dynamic range, antialiased against the frames before it,
+//! bloomed, and graded and mapped by a tonemapper into the range it shows; picks, which read back
 //! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
@@ -16,9 +16,11 @@
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod bloom;
 mod circle;
 mod cluster;
 mod draws;
+mod grade;
 mod grid;
 mod light;
 mod line;
@@ -59,6 +61,7 @@ pub use gg_gpu::{
     Arenas, Blend, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath, Validation,
     Window, Wrap, mip_sizes,
 };
+pub use grade::Grade;
 pub use grid::{Grid, GridLines};
 pub use light::{Light, LightKind};
 pub use line::Line;
@@ -85,6 +88,7 @@ pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
+use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
 use particles::{ParticlePass, ParticlePlan};
@@ -236,7 +240,8 @@ pub struct RenderData<'a> {
     /// with them, and the frame around it, as it is, in linear RGBA.
     pub clear_color: [f32; 4],
     /// How the view's colors, drawn in high dynamic range, map into the range it shows, 0 to 1:
-    /// [`Tonemapper::None`] clamps them, so that what's in that range shows as it was drawn.
+    /// [`Tonemapper::None`] clamps them, so that what's in that range shows as it was drawn; the
+    /// others dither what they map against banding in the view's 8 bits.
     pub tonemapper: Tonemapper,
     /// How the view is antialiased, before it's tonemapped: [`Antialiasing::Taa`] resolves each
     /// frame against those before it, as it says, from the frame before when it resolved the view
@@ -264,6 +269,15 @@ pub struct RenderData<'a> {
     /// no sky and is lit by none. In a frame with a directional light that shines, which stands for
     /// the sky's sun, its light leaves the sun out, as [`Sky`] says.
     pub sky: Option<Sky>,
+    /// How much the view blooms, from 0, for none, to 1: its colors, as drawn and antialiased,
+    /// before its canvas, so that a game's UI doesn't bloom, lerped by this toward their bloom, a
+    /// weighted mean of them blurred further and further, which spreads their light round what's
+    /// bright without adding any. A view under 32 pixels on a side doesn't bloom.
+    pub bloom: f32,
+    /// How the view's light is graded, as [`Grade`] says: its colors, as drawn, antialiased and
+    /// bloomed, before its canvas, so that a game's UI isn't graded, and before the tonemapper
+    /// maps them. The identity, which leaves them as they are, costs nothing.
+    pub grade: Grade,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
@@ -365,6 +379,7 @@ pub struct Renderer {
     windows: Vec<Swapchain>,
     meshes: MeshPass,
     view: ViewPass,
+    bloom: BloomPass,
     tonemap: TonemapPass,
     outline: OutlinePass,
     /// What resolves the view, antialiased, against the frames before, and what it resolves into
@@ -450,9 +465,16 @@ struct ViewPasses {
     /// What shades the view from its visibility buffer, and draws the rest over that, if it has
     /// one.
     shaded: Option<ShadedPasses>,
-    /// What resolves it, antialiased, if it's antialiased, and then draws its canvas, if it has
-    /// one; without antialiasing, the view's last pass draws the canvas.
-    taa: Option<(taa::Plan, Option<PassId>)>,
+    /// What resolves it, antialiased, if it's antialiased.
+    taa: Option<taa::Plan>,
+    /// What blooms and grades it, if it does either.
+    bloom: Option<bloom::Plan>,
+    /// What draws its canvas, if it has one, in a pass of its own, if the view is antialiased,
+    /// bloomed or graded; otherwise the view's last pass draws the canvas.
+    canvas: Option<PassId>,
+    /// What it shows, drawn, antialiased, bloomed and graded, with its canvas over that, which the
+    /// tonemap pass samples.
+    shown: ImageId,
     /// What tonemaps it.
     tonemap: PassId,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
@@ -614,6 +636,7 @@ impl Renderer {
             windows: Vec::new(),
             meshes: MeshPass::new(device, settings.upload_budget)?,
             view: ViewPass::new(device, format)?,
+            bloom: BloomPass::new(device)?,
             tonemap: TonemapPass::new(device)?,
             outline: OutlinePass::new(device)?,
             taa: TaaPass::new(device)?,
@@ -1009,22 +1032,29 @@ impl Renderer {
                 }
             });
             // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
-            // against the frames before into one of the antialiasing's images; then the canvas, if
-            // there is one, which isn't antialiased, is drawn in a pass of its own over the view's
-            // resolved colors, which the resolve writes apart, as the next frame resolves against
-            // what the resolve alone wrote.
+            // against the frames before into one of the antialiasing's images; and into the view's
+            // resolved colors apart, if bloom, the grade or the canvas goes over them, as the next
+            // frame resolves against what the resolve alone wrote. Then bloom and the grade, into
+            // the colors the view shows, before the canvas, so that a game's UI neither blooms nor
+            // is graded; then the canvas, if there is one, which isn't antialiased, in a pass of
+            // its own over what the view shows, where the view's last pass doesn't draw it, as when
+            // the resolve, bloom or the grade follows it.
+            let blooms = bloom::blooms(data.bloom, size);
+            let grades = !data.grade.is_identity();
             let taa = antialiased.then(|| {
-                let apart = !data.canvas.is_empty();
+                let apart = blooms || grades || !data.canvas.is_empty();
                 let drawn = [hdr, depth, motion];
-                let plan = taa.plan(graph, resolved, number, size, drawn, apart);
-                let canvas = apart.then(|| {
+                taa.plan(graph, resolved, number, size, drawn, apart)
+            });
+            let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
+            let bloom =
+                (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
+            let canvas =
+                (!data.canvas.is_empty() && (taa.is_some() || bloom.is_some())).then(|| {
                     let canvas = graph.render(label!("canvas"));
                     let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
-                    (canvas.keep(plan.shown()).keep(ids).keep(motion).keep(depth)).add()
+                    (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
                 });
-                (plan, canvas)
-            });
-            let shown = taa.as_ref().map_or(hdr, |(plan, _)| plan.shown());
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
@@ -1057,6 +1087,9 @@ impl Renderer {
                 second,
                 shaded,
                 taa,
+                bloom,
+                canvas,
+                shown,
                 tonemap,
                 read_ids,
                 outline,
@@ -1328,8 +1361,8 @@ impl Renderer {
                         born,
                     )?;
                 }
-                // The canvas, over the view's last pass's; or, antialiased, over what the view
-                // resolved, in its own pass, if it has one.
+                // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
+                // what the view shows, in its own pass, if it has one.
                 let meshes = &self.meshes;
                 let draw_canvas = |pass: &mut gg_gpu::Pass<'_, '_>| {
                     pass.begin_label(c"canvas");
@@ -1341,35 +1374,33 @@ impl Renderer {
                     pass.end_label();
                     drawn
                 };
-                let shown = match &view.taa {
-                    Some((plan, canvas)) => {
-                        drop(pass);
-                        let drawn = taa::Drawn {
-                            unjittered,
-                            clip_from_world: view_projection,
-                            jitter,
-                        };
-                        self.taa.resolve(&mut frame, plan, drawn)?;
-                        if let Some(canvas) = *canvas {
-                            let mut pass = (frame.render(canvas))
-                                .expect("the graph's own images are always there");
-                            counts += draw_canvas(&mut pass)?;
-                        }
-                        plan.shown()
-                    }
-                    None => {
-                        counts += draw_canvas(&mut pass)?;
-                        drop(pass);
-                        view.hdr
-                    }
-                };
+                if view.taa.is_none() && view.canvas.is_none() {
+                    counts += draw_canvas(&mut pass)?;
+                }
+                drop(pass);
+                if let Some(plan) = &view.taa {
+                    let drawn = taa::Drawn {
+                        unjittered,
+                        clip_from_world: view_projection,
+                        jitter,
+                    };
+                    self.taa.resolve(&mut frame, plan, drawn)?;
+                }
+                if let Some(plan) = &view.bloom {
+                    self.bloom.record(&mut frame, plan, data.bloom, &data.grade);
+                }
+                if let Some(canvas) = view.canvas {
+                    let mut pass =
+                        (frame.render(canvas)).expect("the graph's own images are always there");
+                    counts += draw_canvas(&mut pass)?;
+                }
                 if let Some(read) = view.read_ids {
                     let picked = self.picks.take(frame.number(), Some(size));
                     frame.read_ids(read, picked)?;
                 }
                 let mut pass =
                     (frame.render(view.tonemap)).expect("the graph's own images are always there");
-                let shown = pass.sampled(shown);
+                let shown = pass.sampled(view.shown);
                 self.tonemap.draw(&mut pass, shown, data.tonemapper);
                 drop(pass);
                 if let Some((outlined, outline)) = view.outline {

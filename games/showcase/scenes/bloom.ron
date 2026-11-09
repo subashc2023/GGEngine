@@ -1,0 +1,243 @@
+(
+    entities: {
+        "058a424e2db53d96": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 2.4, 7.5),
+                rotation: (-0.15931821, 0.0, 0.0, 0.98722726),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "07559a52a4d5ee8e": (
+            Environment: (
+                exposure: 4.0,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: None,
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "10b1e9714c751b33": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2625e08e6400c1f7": (
+            Name: ("Hint"),
+            Text: (
+                text: "Light spreading round what's bright, as through a lens: the Environment's bloom",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.5, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2963ca2096d5396d": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.35, 0.75),
+                intensity: 40.0,
+                range: Some(6.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Magenta lamp"),
+            Transform: (
+                translation: (-2.2, 1.2, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "33a8149901f7b70f": (
+            Light: (
+                kind: Point,
+                color: (0.35, 0.8, 1.0),
+                intensity: 40.0,
+                range: Some(6.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Cyan lamp"),
+            Transform: (
+                translation: (2.2, 1.2, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3fc6875d2b6510bb": (
+            Light: (
+                kind: Directional,
+                color: (0.6, 0.7, 1.0),
+                intensity: 6.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Moon"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.5, 0.0, 0.0, 0.8660254),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "62daf55f77c27178": (
+            Name: ("Magenta neon"),
+            Sprite: (
+                color: (6.0, 0.5, 3.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.2, 1.4, -1.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.08, 2.4, 1.0),
+            ),
+        ),
+        "7bedfe58c16fddcd": (
+            Name: ("Amber neon"),
+            Sprite: (
+                color: (8.0, 3.0, 0.4, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 1.9, -1.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (5.2, 0.06, 1.0),
+            ),
+        ),
+        "87f9a2c5b1a34e0e": (
+            Name: ("Cyan neon"),
+            Sprite: (
+                color: (0.4, 3.0, 6.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.2, 1.4, -1.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.08, 2.4, 1.0),
+            ),
+        ),
+        "8f0b3f511a389aeb": (
+            Name: ("Sparks"),
+            ParticleEmitter: (
+                rate: 90.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    0.6,
+                    1.1,
+                ],
+                speed: [
+                    1.5,
+                    2.6,
+                ],
+                shape: Cone(
+                    angle: 0.5235988,
+                    radius: 0.05,
+                ),
+                acceleration: (0.0, -4.0, 0.0),
+                drag: 0.4,
+                size: [
+                    0.05,
+                    0.02,
+                ],
+                color: [
+                    (6.0, 2.4, 0.6, 1.0),
+                    (2.0, 0.3, 0.05, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 1.05, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "91c58fa08db64419": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a155ca0f962c047f": (
+            Name: ("Title"),
+            Text: (
+                text: "Bloom",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.1, -1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -1646,8 +1646,8 @@ over it and the menus show over it. The view draws in colors of high dynamic ran
 in linear RGBA, which games' pipelines are made for, with the image of IDs beside them, below, and
 the depth image, of 32-bit floats, which every draw into the view tests; a tonemap pass then maps
 the colors into the view's 8-bit sRGB image, which the frame shows, captures read and the outline
-draws over, whatever the window presents. What reads the colors, the tonemap and antialiasing,
-takes one that's no number as none, and an infinite one as a half float's largest, 65,504: a
+draws over, whatever the window presents. What reads the colors, the tonemap, antialiasing and
+bloom, takes one that's no number as none, and an infinite one as a half float's largest, 65,504: a
 shader's float can be infinite, and a GPU that rounds to the nearest writes a color past that
 largest as infinite. Depth runs reversed, from 1 at the near plane to 0 far
 away, which keeps a float's precision where it's needed and lets perspective see infinitely far;
@@ -1662,7 +1662,9 @@ shows base colors up to about 0.76 as they are, less the 0.04 a dielectric refle
 color, and rolls brighter light off toward white; ACES, as Stephen Hill fitted it; AgX; or none,
 each channel clamped, which a world without an environment gets, so that a 2D game's sprites show
 as they're colored. Its antialiasing is temporal, as below, by default, or none, which a world
-without an environment gets too, each pixel what's at its center. The clear color, which a sky
+without an environment gets too, each pixel what's at its center. It blooms the view, subtly by
+default, and grades its light, by the identity by default, as below, and a world without one does
+neither. The clear color, which a sky
 takes the place of, is tonemapped with what's drawn, as the sky is. Its exposure, in EV100, scales
 light: lit shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100) as it shades,
 which keeps a sunny day's light within 16-bit floats, and a world without an environment is
@@ -2325,6 +2327,48 @@ its own over the view's resolved colors, which the resolve then writes apart fro
 that a game's UI stays sharp and out of the history. The view's IDs are drawn off by the frame's
 offset too, so that a pick at an edge, and the editor's outline of the pick, can move a pixel from
 frame to frame.
+
+A view that its environment blooms, as by default, spreads the light of what's bright round it, as
+a camera's lens does: after temporal antialiasing resolves it, or after its last pass without, and
+before the canvas, so that a game's UI doesn't bloom, by a chain of compute passes, as Call of
+Duty: Advanced Warfare's (Jimenez, "Next Generation Post Processing in Call of Duty: Advanced
+Warfare", 2014). Each of the chain's levels, images of the graph's own, is half the one before each
+way, rounded up, from half the view down to between 16 and 32 texels on its shorter side, five at
+1,280 by 720 and at most eight; each is downsampled from the one before by 13 bilinear taps over the
+6 by 6 texels round the 2 by 2 under each texel, as five boxes of four, the middle one a half and
+those at the corners an eighth each, so that what's small and bright doesn't shimmer as it moves
+across texels; the first from the view's colors themselves, a texel at a time, taken as light as
+the tonemap takes them, each box weighed by 1 over 1 plus its luminance, Karis's average, so that a
+lone pixel far brighter than the rest doesn't bloom into a blot. Then, from the smallest up, each
+level lerps 0.7 of the way toward the one below it, taken by a 3 by 3 tent of bilinear taps a texel
+of that level apart, so that each holds a weighted mean of itself and every level below, the weights
+adding up to 1; and the view's colors lerp toward the first level, by the same tent, by the
+environment's bloom, 0.04 by default, so that bloom spreads light without adding any, and a view of
+one color blooms to itself. Light blooms from everything, without a threshold, as in a lens, the
+lerp leaving what's no brighter than what's round it as it was. That last pass grades the view's
+colors too, as below, and runs to grade them alone in a view that doesn't bloom. Antialiased, the
+resolve then writes the view's resolved colors apart from its history, as it does for a canvas, and
+that pass writes into those; without antialiasing, the canvas draws in a pass of its own after it.
+A view under 32 pixels on a side doesn't bloom.
+
+An environment's grade changes the view's light in the view's linear sRGB, after bloom and before
+the canvas, so that a game's UI isn't graded, and before the tonemapper maps it, as Unreal's and
+HDRP's do: white balance, a von Kries adaptation in CAT02's LMS to D65's white from that of daylight
+of a color temperature, along CIE's daylight locus, 4,000 K at -1, and tinted off it toward green or
+magenta; contrast, each channel raised to a power round mid gray, 0.18; ASC CDL's slope, offset and
+power, each channel's; and saturation, by Rec. 709's luminance, as ASC CDL's, each step's light
+kept within a half float's largest, so that no grade makes a color infinite or no number. Grading
+before the tonemapper keeps the tonemapper the last to map light into the range the view shows, so
+that what a grade brightens or saturates rolls off into its shoulder rather than clipping, and a
+warmer balance warms what's lit as a camera's would, before the tonemapper whitens what's brightest.
+The pass that blooms the view computes the grade at each pixel, exactly, from the grade's numbers
+among its push constants, its white balance a matrix the CPU makes; the identity, the default,
+isn't computed at all. A view tonemapped by any tonemapper but none is dithered as it's mapped: triangular noise, of two
+uniform noises of up to half a step either way of the view's 8 bits, from a hash of the pixel, the
+same every frame, so that frames of the same colors write the same, is added to the color encoded
+as sRGB, as the view's image encodes it, which is decoded again for the image to encode as it's
+written, breaking the bands a smooth gradient would show while keeping its mean; within a step of
+black or white the noise shrinks to reach no further, so that they stay as they are.
 
 A skinned model's primitive, of glTF's JOINTS_0 and WEIGHTS_0, packs as any model's mesh does, its
 vertices as they were bound, with each vertex's four joints and their weights after them, as

@@ -1,5 +1,6 @@
 //! Tonemapping: the pass that maps the game's view, drawn in colors of high dynamic range, into the
-//! range the view's image shows, 0 to 1, by a tonemapper.
+//! range the view's image shows, 0 to 1, by a tonemapper, and dithers it against banding in the
+//! image's 8 bits.
 
 use std::sync::Arc;
 
@@ -24,8 +25,8 @@ pub enum Tonemapper {
     /// AgX, Blender's default since 4.0, as three.js has it: a filmic curve that keeps very bright,
     /// saturated light from clipping to its primaries, but shifts every color a little.
     Agx,
-    /// None: each channel clamped to 0 to 1, so that what's in that range shows as it was drawn,
-    /// as the view of a world without an environment does.
+    /// None: each channel clamped to 0 to 1, and not dithered, so that what's in that range shows
+    /// as it was drawn, as the view of a world without an environment does.
     None,
 }
 
@@ -71,7 +72,8 @@ impl TonemapPass {
     }
 
     /// Draws over the whole of the pass's target, the view's image, the view's colors, whose index
-    /// [`Pass::sampled`] gave this pass as `colors`, mapped by `tonemapper`.
+    /// [`Pass::sampled`] gave this pass as `colors`, mapped by `tonemapper`, and, but by
+    /// [`Tonemapper::None`], dithered.
     ///
     /// # Panics
     ///

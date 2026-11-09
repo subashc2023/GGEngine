@@ -9,11 +9,12 @@
 //! input that changes nothing,
 //! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
-//! camera of the world's that a pivot the ticks turn carries round, under the default environment,
-//! which antialiases the view against the frames before, run through the engine's main
-//! loop headless, without the tool API, whose development runs' watchers of the assets' files
-//! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
-//! first frames have run, by which every image its attach added has decoded off the main thread
+//! camera of the world's that a pivot the ticks turn carries round, under an environment that
+//! antialiases the view against the frames before, blooms it and grades it, run through the
+//! engine's main loop headless, without the tool API, whose development runs' watchers of the
+//! assets' files allocate as they look, three fifths of a tick apart, so that they draw between
+//! ticks, once its first frames have run, by which every image its attach added has decoded off
+//! the main thread
 //! and everything has streamed to the GPU. Every frame picks what the view shows at its middle, as the frame before had
 //! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
 //! due: four frames after the one that asked, and two for the pick outside the view, which finds
@@ -49,9 +50,9 @@ use std::time::Duration;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Environment, Event, Font, GameUi, Key, Layer, Mesh, MeshDraw,
-    Model, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source, Sprite,
-    SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
+    Component, Context, Entity, Environment, Event, Font, GameUi, Grade, Key, Layer, Mesh,
+    MeshDraw, Model, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Shader, Source,
+    Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -341,8 +342,14 @@ impl Layer for Scene {
         world.set_parent(camera, Some(pivot)).expect("both alive");
         self.pivot = Some(pivot);
         // The default environment's, which antialiases the view, resolving it against the frames
-        // before.
-        world.spawn(Environment::default());
+        // before, and blooms it, but graded, which bakes its grade's table each frame.
+        world.spawn(Environment {
+            grade: Grade {
+                saturation: 1.2,
+                ..Grade::IDENTITY
+            },
+            ..Environment::default()
+        });
         // The pair, and a copy mirrored, which culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
         let mirrored = Transform {

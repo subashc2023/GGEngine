@@ -1,12 +1,12 @@
-//! The engine's components that `gg-renderer` defines, the tonemapper an environment holds, which
-//! it does too, and the sampler a sprite holds, which `gg-gpu` does, described to reflection here,
-//! since neither crate can derive it.
+//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing and grade an
+//! environment holds, which it does too, and the sampler a sprite holds, which `gg-gpu` does,
+//! described to reflection here, since neither crate can derive it.
 
 use std::fmt::Write as _;
 
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
-use gg_renderer::{Antialiasing, Circle, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
+use gg_renderer::{Antialiasing, Circle, Grade, MeshDraw, Sampler, Sprite, Texture, Tonemapper};
 
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
@@ -515,6 +515,234 @@ impl Reflect for Antialiasing {
 
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
+
+/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
+/// it's described. Its fields' defaults are the identity's; its white balance runs from -1 to 1,
+/// its saturation from 0, and its contrast, slope and power from 0 to [`Grade::MOST`].
+impl Reflect for Grade {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let field =
+            |name: &'static str, ty, [min, max]: [Option<f64>; 2], default, doc: &'static str| {
+                Field {
+                    name: name.into(),
+                    ty,
+                    meta: Meta {
+                        min: min.map(Bound::Float),
+                        max: max.map(Bound::Float),
+                        show: Show::Plain,
+                        doc: doc.into(),
+                    },
+                    default: Some(default),
+                }
+            };
+        let balance = [Some(-1.0), Some(1.0)];
+        let positive = [Some(0.0), None];
+        let bounded = [Some(0.0), Some(f64::from(Grade::MOST))];
+        let base = Grade::IDENTITY;
+        let doc = "How the view's light is graded before a game's canvas and before it's \
+                   tonemapped: white balanced, its contrast raised or lowered round mid gray, \
+                   through ASC CDL's slope, offset and power, and saturated, in that order.";
+        types.add::<Self>("Grade".into(), doc.into(), |_| {
+            let fields = vec![
+                field(
+                    "temperature",
+                    Type::F32,
+                    balance,
+                    base.temperature.to_value(),
+                    "The white balance's temperature, from -1, cooler, bluer, to 1, warmer, more \
+                     amber: balanced from daylight's white of 4,000 K at -1, about 17,400 K at 1.",
+                ),
+                field(
+                    "tint",
+                    Type::F32,
+                    balance,
+                    base.tint.to_value(),
+                    "The white balance's tint, from -1, greener, to 1, more magenta.",
+                ),
+                field(
+                    "contrast",
+                    Type::F32,
+                    bounded,
+                    base.contrast.to_value(),
+                    "What each channel's light is raised to round mid gray, 0.18, which stays as \
+                     it is, up to 4: above 1, more contrast; below, less.",
+                ),
+                field(
+                    "saturation",
+                    Type::F32,
+                    positive,
+                    base.saturation.to_value(),
+                    "How far each color is from gray, as ASC CDL's saturation weighs it: 0 makes \
+                     the view gray, and above 1 more colorful.",
+                ),
+                field(
+                    "slope",
+                    Type::Vec3,
+                    bounded,
+                    base.slope.to_value(),
+                    "ASC CDL's slope: what each channel's light is multiplied by, up to 4.",
+                ),
+                field(
+                    "offset",
+                    Type::Vec3,
+                    [None, None],
+                    base.offset.to_value(),
+                    "ASC CDL's offset: what's added to each channel's light after its slope.",
+                ),
+                field(
+                    "power",
+                    Type::Vec3,
+                    bounded,
+                    base.power.to_value(),
+                    "ASC CDL's power: what each channel's light is raised to after its offset, \
+                     round 1, which stays as it is, up to 4.",
+                ),
+            ];
+            Ok(Shape::Struct {
+                fields,
+                tuple: false,
+            })
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let Grade {
+            temperature,
+            tint,
+            contrast,
+            saturation,
+            slope,
+            offset,
+            power,
+        } = self;
+        Value::Struct(vec![
+            ("temperature".into(), temperature.to_value()),
+            ("tint".into(), tint.to_value()),
+            ("contrast".into(), contrast.to_value()),
+            ("saturation".into(), saturation.to_value()),
+            ("slope".into(), slope.to_value()),
+            ("offset".into(), offset.to_value()),
+            ("power".into(), power.to_value()),
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        Grade::IDENTITY.with_value(value)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let Grade {
+            temperature,
+            tint,
+            contrast,
+            saturation,
+            slope,
+            offset,
+            power,
+        } = self;
+        let [
+            new_temperature,
+            new_tint,
+            new_contrast,
+            new_saturation,
+            new_slope,
+            new_offset,
+            new_power,
+        ] = reflect::fields(value, GRADE_FIELDS)?;
+        let at = |name| move |error: Error| reflect::within(error, name);
+        Ok(Grade {
+            temperature: (temperature.with_value(new_temperature)).map_err(at("temperature"))?,
+            tint: tint.with_value(new_tint).map_err(at("tint"))?,
+            contrast: contrast.with_value(new_contrast).map_err(at("contrast"))?,
+            saturation: (saturation.with_value(new_saturation)).map_err(at("saturation"))?,
+            slope: slope.with_value(new_slope).map_err(at("slope"))?,
+            offset: offset.with_value(new_offset).map_err(at("offset"))?,
+            power: power.with_value(new_power).map_err(at("power"))?,
+        })
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        let Grade {
+            temperature,
+            tint,
+            contrast,
+            saturation,
+            slope,
+            offset,
+            power,
+        } = self;
+        match index {
+            0 => Some(temperature),
+            1 => Some(tint),
+            2 => Some(contrast),
+            3 => Some(saturation),
+            4 => Some(slope),
+            5 => Some(offset),
+            6 => Some(power),
+            _ => None,
+        }
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        let Grade {
+            temperature,
+            tint,
+            contrast,
+            saturation,
+            slope,
+            offset,
+            power,
+        } = self;
+        match index {
+            0 => Some(temperature),
+            1 => Some(tint),
+            2 => Some(contrast),
+            3 => Some(saturation),
+            4 => Some(slope),
+            5 => Some(offset),
+            6 => Some(power),
+            _ => None,
+        }
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        let Grade {
+            temperature,
+            tint,
+            contrast,
+            saturation,
+            slope,
+            offset,
+            power,
+        } = self;
+        temperature.digest(to);
+        tint.digest(to);
+        contrast.digest(to);
+        saturation.digest(to);
+        slope.digest(to);
+        offset.digest(to);
+        power.digest(to);
+    }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+}
+
+/// A grade's fields, in the order its description gives them.
+const GRADE_FIELDS: [&str; 7] = [
+    "temperature",
+    "tint",
+    "contrast",
+    "saturation",
+    "slope",
+    "offset",
+    "power",
+];
 
 /// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
 /// it culls, and its parameters' bytes in hex, as `1 2 true false x0a0b`: what a restart takes back

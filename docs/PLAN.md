@@ -136,6 +136,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Navigation** (2026-11-08)
 - **Foxball on Phase 16's systems** (2026-11-08)
 - **Phase 16, gameplay systems** (2026-11-08)
+- **Bloom and color grading** (2026-11-08)
 
 ## Now
 
@@ -145,7 +146,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
     occlusion from the view's depth, as XeGTAO's ground-truth ambient occlusion, darkening the light
     from all around where nearby surfaces hide it; bloom, from a chain of downsamples and upsamples
     of the view's colors, as Call of Duty's, and color grading, white balance, contrast, saturation
-    and ASC CDL's slope, offset and power baked into a lookup table that the tonemap pass applies,
+    and ASC CDL's slope, offset and power, computed on the view's colors before the tonemapper,
     with dithering against banding in the view's 8 bits; height fog, thinning exponentially with
     height, lit by the sky and, toward the sun, by the directional light; and a sky made from its
     sun, Hillaire's atmosphere under a directional light that a time of day moves, which the view
@@ -283,9 +284,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A sprite sheet's texture reloaded at another size, which keeps drawing as it did (`asset.sheet_resized`): its sprites hold its cells as fractions of its size, which a layer cut it by as it added it | A game's sheets grow as they're drawn, as frames added to an animation's |
 | Following a texture's, a model's or a font's file outside the asset root, or a sound's or music's anywhere, none of which has an asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
 | Exposure that adapts to what the view sees, from its luminance, as eyes adapt: an environment's exposure is set by hand | A game's light changes more than one exposure suits, as from sunlight indoors |
-| Dithering the tonemapped view against banding in its 8 bits | Banding shows in dark gradients, as skies' |
 | Showing the frame on HDR displays, through HDR10 or scRGB swapchains: frames are 8-bit sRGB | A game targets HDR displays |
-| Post-processing past tonemapping, as bloom and color grading by a lookup table | A game's look needs it |
+| Bloom's radius and a threshold, set by a game: each of the chain's levels lerps 0.7 of the way toward the one below, and light blooms from everything, as in a lens | A game needs a wider or tighter glow, or bloom from its brightest light alone |
+| Lens dirt, flares and streaks over bloom, and each of its levels tinted and sized apart, as Unreal's are: bloom is one weighted mean of its levels | A game's look needs them |
+| Bloom's first downsample reading each of the view's texels once, through a workgroup's shared memory: it reads them a texel at a time for each of its 13 taps, 52 reads a texel of its own, as the view's colors can be no number, which bilinear taps would spread; about 24 µs of the RTX 4090's at 1,280 by 720, of the chain's 57 | A profile shows it |
+| Grading's lookup tables from files, `.cube` from DaVinci Resolve and the like, which are made for the display's encoded colors and so would apply after the tonemapper: the grade is computed from an environment's fields | A game's grade is made in a grading tool |
+| Grading's further controls: lift, gamma and gain, shadows, midtones and highlights apart, curves, hue shifts and mixing channels | A game's look needs them |
+| Dithering that changes from frame to frame, or of blue noise, which hide it further: each pixel's noise is a hash of the pixel alone, the same every frame, so that captures of the same view match | Dithering shows as a pattern that holds still while the view moves |
 | The view's size and the frame's data for a shader that takes no parameters, whose push constants end before them, as [`Shaders::add`](../crates/gg-renderer/src/shader/mod.rs) says: such a shader takes parameters it doesn't read | A game's shader needs them without parameters |
 | The frame's time as more than an `f32` of seconds, which steps by about 8 ms once a run has simulated a day | A game animates by the time through runs that long |
 | Games' own shaders' parameters in a table on the GPU, as models' materials are, written when they change rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | A game draws many instances of its own shader whose parameters seldom change, or needs more than 64 bytes of them |

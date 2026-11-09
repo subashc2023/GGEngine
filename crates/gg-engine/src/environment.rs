@@ -3,7 +3,7 @@
 //! with.
 
 use gg_core::math::libm::exp2f;
-use gg_renderer::{Antialiasing, Sky, Texture, Tonemapper};
+use gg_renderer::{Antialiasing, Grade, Sky, Texture, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, Entity, EntityId, World};
@@ -11,11 +11,12 @@ use crate::{Component, Entity, EntityId, World};
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
 /// that maps the view's colors, drawn in high dynamic range, into the range it shows, how it's
-/// antialiased, and the sky it shows behind the world and lights it by. A world has one, on an
-/// entity of its own; of several, the view renders with the one of the lowest ID, warning
-/// (`engine.environment_tie`). A world without one isn't tonemapped or antialiased, so that what's
-/// in the range a view shows, as a 2D game's sprites, shows as it's drawn, each pixel what's at its
-/// center, and lit shading exposes its light as the default environment's exposure does.
+/// antialiased, the sky it shows behind the world and lights it by, how much it blooms, and how
+/// it's graded. A world has one, on an entity of its own; of several, the view renders with the one
+/// of the lowest ID, warning (`engine.environment_tie`). A world without one isn't tonemapped,
+/// antialiased, bloomed or graded, so that what's in the range a view shows, as a 2D game's
+/// sprites, shows as it's drawn, each pixel what's at its center, and lit shading exposes its light
+/// as the default environment's exposure does.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Environment {
     /// How much light the view takes in, as a camera's exposure value at ISO 100, EV100: lit
@@ -46,6 +47,17 @@ pub struct Environment {
     /// Filament's default for an environment's intensity, which suits a sunny day's exposure.
     #[reflect(default = 30_000.0)]
     pub sky_luminance: f32,
+    /// How much the view blooms, light spreading round what's bright in it as through a camera's
+    /// lens, from 0, for none, to 1: its colors, before they're tonemapped and before a game's
+    /// canvas, lerped by this toward a weighted mean of them blurred further and further, which
+    /// spreads light without adding any. 0.04, the default, is subtle: a glow round what's far
+    /// brighter than white.
+    #[reflect(min = 0.0, max = 1.0, default = 0.04)]
+    pub bloom: f32,
+    /// How the view's light is graded, before a game's canvas, which isn't graded, and before it's
+    /// tonemapped: white balance, contrast, saturation and ASC CDL's slope, offset and power. The
+    /// default, the identity, leaves it as it is.
+    pub grade: Grade,
 }
 
 impl Default for Environment {
@@ -56,6 +68,8 @@ impl Default for Environment {
             antialiasing: Antialiasing::default(),
             sky: None,
             sky_luminance: 30_000.0,
+            bloom: 0.04,
+            grade: Grade::IDENTITY,
         }
     }
 }

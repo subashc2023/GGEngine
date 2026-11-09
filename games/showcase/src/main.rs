@@ -32,7 +32,10 @@
 //! from a click in the view until Escape, a bell to the left, a pluck behind, and farther ones
 //! ahead (`listen.ron`); colors from a quarter as
 //! bright as white to 16 times, which the world's
-//! environment tonemaps (`hdr.ron`); glTF's metallic-roughness materials, plastic, metal,
+//! environment tonemaps (`hdr.ron`); light spreading round neon tubes, sparks and a glowing sphere
+//! at night, as the world's environment blooms them (`bloom.ron`); the light of models under a sky
+//! graded as a golden hour's, warmer, of more contrast and saturation, its shadows teal
+//! (`grading.ron`); glTF's metallic-roughness materials, plastic, metal,
 //! glowing and tiled with every map, lit by a sun, a point light and a spot (`lights.ron`); the
 //! same lit by a sky alone, Poly Haven's Kloofendal 48d Partly Cloudy Puresky at 1K, CC0, which
 //! shows behind them (`sky.ron`); models casting a sun's shadows (`shadows.ron`); 3D physics,
