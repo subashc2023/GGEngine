@@ -289,6 +289,19 @@ impl Loading {
     }
 }
 
+/// Where a frame's viewpoint came from: a layer, which sets one as its camera moves; the tool
+/// API's look, whichever viewpoint it set, as each is a jump; the world's primary camera, by its ID;
+/// or none, the default. A frame whose viewpoint comes from elsewhere than the frame before's, or
+/// whose projection is the other kind, is cut to, as [`gg_renderer::RenderData::cut`] says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Seer {
+    Layer,
+    #[cfg(feature = "dev")]
+    Look(Viewpoint),
+    Camera(EntityId),
+    Default,
+}
+
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
@@ -299,8 +312,11 @@ pub struct Context {
     clear_color: [f32; 4],
     /// What a layer set the view to see from this frame, in place of the world's camera.
     viewpoint: Option<Viewpoint>,
-    /// Where the world's camera saw from as the world was last drawn, if it has one.
-    seen: Option<Viewpoint>,
+    /// Where the world's camera saw from as the world was last drawn, if it has one, and its ID.
+    seen: Option<(EntityId, Viewpoint)>,
+    /// Where the view's viewpoint came from in the last frame handed off, and whether it had
+    /// perspective, which tell whether the next is cut to from elsewhere.
+    seer: Option<(Seer, bool)>,
     /// The tie among the world's cameras last warned of, while they've tied since.
     tie: Option<Tie>,
     /// The world's environment as the world was last drawn, if it has one.
@@ -647,6 +663,7 @@ impl Context {
             clear_color: [0.02, 0.02, 0.02, 1.0],
             viewpoint: None,
             seen: None,
+            seer: None,
             tie: None,
             environment: None,
             environment_tie: None,
@@ -3738,7 +3755,8 @@ impl Context {
         self.time = time;
         #[cfg(feature = "dev")]
         if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
-            let viewpoint = self.look.viewpoint.or(self.viewpoint).or(self.seen);
+            let seen = self.seen.map(|(_, seen)| seen);
+            let viewpoint = self.look.viewpoint.or(self.viewpoint).or(seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
         }
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
@@ -3783,14 +3801,16 @@ impl Context {
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
-    /// antialiasing, exposure and its adaptation, sky, ambient occlusion, fog and reflections, or
-    /// none, none, the default's and none, none, none, none and none, and its lights, as the world
-    /// was last drawn, and the time it was drawn at;
+    /// antialiasing, exposure and its adaptation, sky, ambient occlusion, fog, reflections and
+    /// camera's effects, or none, none, the default's and none, none, none, none, none and none, and
+    /// its lights, as the world was last drawn, and the time it was drawn at;
     /// its draws, those over the rest last, and its canvas's, placed from their anchors in the view's
     /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
     /// viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
-    /// default, which hears the sounds playing from a place, as [`Place`] says; what a layer
+    /// default, which hears the sounds playing from a place, as [`Place`] says, and whether the
+    /// view is cut to it, as it comes from elsewhere than the last frame's, as [`Seer`] says; what
+    /// a layer
     /// outlined this frame, which it forgets too; the pixels the view shows,
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
     /// last took it, after what `frame` still holds, the images the loader has decoded since among
@@ -3821,22 +3841,38 @@ impl Context {
         frame.fog = self.environment.and_then(|seen| seen.fog);
         frame.reflections = self.environment.and_then(|seen| seen.reflections);
         frame.atmosphere = self.environment.and_then(|seen| seen.atmosphere());
+        frame.depth_of_field = (self.environment)
+            .and_then(|seen| seen.depth_of_field)
+            .map(|focus| focus.rendered());
+        frame.motion_blur = (self.environment)
+            .and_then(|seen| seen.motion_blur)
+            .map(|blur| blur.rendered());
+        frame.lens = self
+            .environment
+            .map_or(gg_renderer::Lens::NONE, |seen| seen.lens.rendered());
         frame.lights.clear();
         frame.lights.extend_from_slice(self.lit.lights());
         frame.time = self.time;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         let (viewpoint, outline) = (self.viewpoint.take(), self.outline.take());
-        #[cfg(feature = "dev")]
-        let (viewpoint, outline) = if self.look.bare {
-            (viewpoint, outline)
-        } else {
-            (
-                self.look.viewpoint.or(viewpoint),
-                self.look.outline.or(outline),
-            )
+        let seen = match (viewpoint, self.seen) {
+            (Some(viewpoint), _) => (Seer::Layer, viewpoint),
+            (None, Some((camera, viewpoint))) => (Seer::Camera(camera), viewpoint),
+            (None, None) => (Seer::Default, Viewpoint::default()),
         };
-        frame.viewpoint = viewpoint.or(self.seen).unwrap_or_default();
+        #[cfg(feature = "dev")]
+        let (seen, outline) = if self.look.bare {
+            (seen, outline)
+        } else {
+            let looked = (self.look.viewpoint).map(|looked| (Seer::Look(looked), looked));
+            (looked.unwrap_or(seen), self.look.outline.or(outline))
+        };
+        let (seer, viewpoint) = seen;
+        frame.viewpoint = viewpoint;
+        let perspective = matches!(viewpoint.projection, crate::Projection::Perspective { .. });
+        frame.cut = self.seer != Some((seer, perspective));
+        self.seer = Some((seer, perspective));
         (self.audio).hear_from(&frame.viewpoint, viewport.size, &self.world);
         frame.outline = outline;
         #[cfg(feature = "dev")]
@@ -3844,7 +3880,8 @@ impl Context {
             self.look.seen = Some(frame.viewpoint);
             frame.look = self.look.revision;
             frame.bare = self.look.bare;
-            frame.looked = !self.look.bare && self.look.viewpoint.is_some();
+            // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
+            frame.looked = matches!(seer, Seer::Look(_));
         }
         frame.pixels = self.shown;
         if mem::take(&mut self.shown_new) {
@@ -5014,7 +5051,144 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::{Key, Transform, render_thread};
+    use crate::{Key, Projection, Transform, render_thread};
+
+    /// A frame of `cx`'s world, drawn and handed off with its view at 64 by 32: whether it's cut to
+    /// its viewpoint.
+    fn cut(cx: &mut Context) -> bool {
+        cx.draw_world(1.0, 0.0, 0);
+        let mut frame = Extracted::default();
+        let view = Viewport {
+            origin: [0, 0],
+            size: [64, 32],
+        };
+        cx.extract(&mut frame, view);
+        frame.cut
+    }
+
+    /// A camera at `x` along X, of perspective, primary or not.
+    fn camera_at(x: f32, primary: bool) -> (Transform, Camera) {
+        let at = Transform {
+            translation: Vec3::new(x, 0.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let projection = Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        };
+        (
+            at,
+            Camera {
+                projection,
+                primary,
+            },
+        )
+    }
+
+    /// The view is cut to its viewpoint as it comes from elsewhere than the last frame's, which
+    /// motion blur takes as standing still: in the first frame; as the primary camera switches, not
+    /// as it moves; as its projection turns to the other kind; and as a layer sets a viewpoint and
+    /// as it stops, not as the one it sets moves.
+    #[test]
+    fn the_view_cuts_as_its_viewpoint_comes_from_elsewhere() {
+        let mut cx = Context::seeded(1);
+        let first = cx.world_mut().spawn(camera_at(0.0, true));
+        let second = cx.world_mut().spawn(camera_at(9.0, false));
+        assert!(cut(&mut cx), "the first frame isn't cut to");
+        assert!(!cut(&mut cx), "the same camera cuts");
+        cx.world_mut()
+            .get_mut::<Transform>(first)
+            .expect("alive")
+            .translation
+            .x = 5.0;
+        assert!(!cut(&mut cx), "the camera moving cuts");
+        cx.world_mut()
+            .get_mut::<Camera>(first)
+            .expect("alive")
+            .primary = false;
+        cx.world_mut()
+            .get_mut::<Camera>(second)
+            .expect("alive")
+            .primary = true;
+        assert!(cut(&mut cx), "the primary camera switching doesn't cut");
+        assert!(!cut(&mut cx), "the camera switched to cuts again");
+        let flat = Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        };
+        cx.world_mut()
+            .get_mut::<Camera>(second)
+            .expect("alive")
+            .projection = flat;
+        assert!(
+            cut(&mut cx),
+            "the projection turning orthographic doesn't cut"
+        );
+        assert!(!cut(&mut cx), "the orthographic camera cuts again");
+        cx.set_viewpoint(Viewpoint::default());
+        assert!(cut(&mut cx), "a layer setting a viewpoint doesn't cut");
+        cx.set_viewpoint(Viewpoint {
+            position: Vec3::X,
+            ..Viewpoint::default()
+        });
+        assert!(!cut(&mut cx), "the layer's viewpoint moving cuts");
+        assert!(
+            cut(&mut cx),
+            "the layer leaving it to the camera doesn't cut"
+        );
+    }
+
+    /// The view is cut to the tool API's look as it's set, as each viewpoint it sets changes, and
+    /// as it's cleared; and to and from a bare frame among the look's, which sees through the
+    /// game's camera, but for a look without a viewpoint, whose bare frames see as the rest. Each
+    /// frame says the look shows, for the exposure, as it sees from the look's viewpoint, so that
+    /// every frame that turns to or from it is cut to.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_view_cuts_to_and_from_the_tools_look() {
+        // Whether the next frame is cut to, and whether it says the look shows.
+        let seen = |cx: &mut Context| {
+            cx.draw_world(1.0, 0.0, 0);
+            let mut frame = Extracted::default();
+            let view = Viewport {
+                origin: [0, 0],
+                size: [64, 32],
+            };
+            cx.extract(&mut frame, view);
+            (frame.cut, frame.looked)
+        };
+        let mut cx = Context::seeded(1);
+        cx.world_mut().spawn(camera_at(0.0, true));
+        seen(&mut cx);
+        assert_eq!(seen(&mut cx), (false, false), "the camera");
+        let looked = Viewpoint {
+            position: Vec3::new(1.0, 2.0, 10.0),
+            ..Viewpoint::default()
+        };
+        cx.look.viewpoint = Some(looked);
+        assert_eq!(seen(&mut cx), (true, true), "the look set");
+        assert_eq!(seen(&mut cx), (false, true), "the look held");
+        cx.look.viewpoint = Some(Viewpoint {
+            position: Vec3::ZERO,
+            ..looked
+        });
+        assert_eq!(seen(&mut cx), (true, true), "the look changed");
+        cx.look.bare = true;
+        assert_eq!(
+            seen(&mut cx),
+            (true, false),
+            "a bare frame among the look's"
+        );
+        cx.look.bare = false;
+        assert_eq!(seen(&mut cx), (true, true), "the look's frame after it");
+        cx.look.viewpoint = None;
+        assert_eq!(seen(&mut cx), (true, false), "the look cleared");
+        cx.look.bare = true;
+        assert_eq!(seen(&mut cx), (false, false), "a bare frame without a look");
+        cx.look.bare = false;
+        assert_eq!(seen(&mut cx), (false, false), "the frame after it");
+    }
 
     /// Each skinned part of a model's root draws a mesh of its own, a copy of its model's, which
     /// the frame skins by its skin's joints, each where it draws, from the mesh's space as it was

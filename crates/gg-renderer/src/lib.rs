@@ -12,9 +12,11 @@
 //! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
 //! view's own space, and the UI over the view;
 //! the view drawn in colors of high dynamic range, its exposure adapting to the light it meters,
-//! antialiased against the frames before it or by SMAA, bloomed, and graded and mapped by a
-//! tonemapper into the range it shows; picks, which read back
-//! the ID of the draw the view shows at a pixel; an outline round what the view shows of an ID;
+//! antialiased against the frames before it or by SMAA,
+//! blurred by its depth of field and its motion, bloomed, graded, seen through a lens's vignette,
+//! chromatic aberration and grain, and mapped by a tonemapper into the range it shows; picks,
+//! which read back the ID of the draw the view shows at a pixel; an outline round what the view
+//! shows of an ID;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
 //!
@@ -26,15 +28,18 @@ mod atmosphere;
 mod bloom;
 mod circle;
 mod cluster;
+mod depth_of_field;
 mod draws;
 mod exposure;
 mod fog;
 mod grade;
 mod grid;
+mod lens;
 mod light;
 mod line;
 mod mesh;
 mod model;
+mod motion_blur;
 mod packed;
 mod particles;
 mod pick;
@@ -69,6 +74,7 @@ use tracing::info;
 pub use ao::AmbientOcclusion;
 pub use atmosphere::Atmosphere;
 pub use circle::Circle;
+pub use depth_of_field::DepthOfField;
 pub use draws::Draws;
 pub use exposure::{Adaptation, light_scale};
 pub use fog::Fog;
@@ -78,12 +84,14 @@ pub use gg_gpu::{
 };
 pub use grade::Grade;
 pub use grid::{Grid, GridLines};
+pub use lens::Lens;
 pub use light::{Light, LightKind};
 pub use line::Line;
 pub use mesh::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes, Scene};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, MaterialId, Materials, ModelVertex, Sampled, Workflow};
+pub use motion_blur::MotionBlur;
 pub use packed::{
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, Meshlets, ModelMesh, PackedVertex,
     Packing, SkinVertex,
@@ -108,9 +116,12 @@ use ao::AoPass;
 use atmosphere::{AerialData, AtmospherePass};
 use bloom::BloomPass;
 use cluster::{ClusterData, ClusterPlan, Lighting};
+use depth_of_field::DepthOfFieldPass;
 use exposure::{Adapting, ExposurePass};
 use fog::{FogData, FogPass};
+use lens::LensPass;
 use mesh::{CullPlan, CullView, FIRST, FrameData, MeshPass, Runs, Shaded, Way};
+use motion_blur::MotionBlurPass;
 use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
 use reflections::{ReflectionData, ReflectionPass};
@@ -347,12 +358,28 @@ pub struct RenderData<'a> {
     /// sun, and once it's set is none, when it casts no shadows either. What it lights is hazed by
     /// how far it is from the viewer, in the world's units, meters.
     pub atmosphere: Option<Atmosphere>,
+    /// The view's depth of field, if any, as [`DepthOfField`] says: its colors, as drawn and
+    /// antialiased, blurred by their circles of confusion from its depth, before motion blur, bloom
+    /// and its canvas, so that a game's UI isn't blurred. Under a perspective alone, as without one
+    /// there's no lens.
+    pub depth_of_field: Option<DepthOfField>,
+    /// The view's motion blur, if any, as [`MotionBlur`] says: its colors, after depth of field,
+    /// blurred by how far what they show moved since the frame before, from the view's motion,
+    /// before bloom and its canvas, so that a game's UI isn't blurred.
+    pub motion_blur: Option<MotionBlur>,
+    /// What a camera's lens and film do to the view, as [`Lens`] says: after bloom and the grade,
+    /// before its canvas, so that a game's UI shows none of it. [`Lens::NONE`] costs nothing.
+    pub lens: Lens,
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
     /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
     /// paints a [`ViewCallback`], where that is instead.
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub viewpoint: Viewpoint,
+    /// Whether the view is cut to `viewpoint` from elsewhere since the frame before, rather than
+    /// moved there, as a tool's look set or a camera switched: what takes the camera's motion from
+    /// the frame before, motion blur, takes it as standing still.
+    pub cut: bool,
     /// The meshes, shaders and textures added, replaced or removed since a frame last took them,
     /// which it takes first: the shaders get their pipelines, the removals apply, and the meshes
     /// and textures queue up to stream to the GPU, within the frame's budget.
@@ -517,6 +544,11 @@ pub struct Renderer {
     exposure: ExposurePass,
     adapting: [Adapting; 2],
     exposed: f32,
+    /// What blurs the view by its depth of field, and by its motion.
+    depth_of_field: DepthOfFieldPass,
+    motion_blur: MotionBlurPass,
+    /// What lays a lens's effects over the view.
+    lens: LensPass,
 }
 
 enum Output {
@@ -567,13 +599,19 @@ struct ViewPasses {
     keep: Option<reflections::Keep>,
     /// What meters it, if its exposure adapts.
     exposure: Option<exposure::Plan>,
+    /// What blurs it by its depth of field, and by its motion, if it's blurred so.
+    focus: Option<depth_of_field::Plan>,
+    blur: Option<motion_blur::Plan>,
     /// What blooms and grades it, if it does either.
     bloom: Option<bloom::Plan>,
+    /// What lays a lens's effects over it, if it has any.
+    lens: Option<lens::Plan>,
     /// What draws its canvas, if it has one, in a pass of its own, if the view is antialiased,
-    /// metered, bloomed or graded; otherwise the view's last pass draws the canvas.
+    /// kept for reflections, metered, blurred, bloomed, graded or seen through a lens; otherwise
+    /// the view's last pass draws the canvas.
     canvas: Option<PassId>,
-    /// What it shows, drawn, antialiased, bloomed and graded, with its canvas over that, which the
-    /// tonemap pass samples.
+    /// What it shows, drawn, antialiased, blurred, bloomed, graded and seen through a lens, with
+    /// its canvas over that, which the tonemap pass samples.
     shown: ImageId,
     /// What tonemaps it.
     tonemap: PassId,
@@ -803,6 +841,9 @@ impl Renderer {
             exposure: ExposurePass::new(device)?,
             adapting: [Adapting::default(), Adapting::default()],
             exposed: 0.0,
+            depth_of_field: DepthOfFieldPass::new(device)?,
+            motion_blur: MotionBlurPass::new(device)?,
+            lens: LensPass::new(device)?,
         })
     }
 
@@ -1314,19 +1355,32 @@ impl Renderer {
             });
             // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
             // against the frames before into one of the antialiasing's images; and into the view's
-            // resolved colors apart, if bloom, the grade or the canvas goes over them, as the next
-            // frame resolves against what the resolve alone wrote. Antialiased by SMAA, they're
-            // blended into colors of their own. Then bloom and the grade, into the colors the view
-            // shows, before the canvas, so that a game's UI neither blooms nor is graded; then the
-            // canvas, if there is one, which isn't antialiased, in a pass of its own over what the
-            // view shows, where the view's last pass doesn't draw it, as when the resolve, SMAA, the
-            // meter, bloom or the grade follows it. Reflecting, the colors as antialiased, resolved
-            // or blended by SMAA, or as drawn, before bloom, the grade and the canvas, are kept for
-            // the next frame's reflections.
+            // resolved colors apart, if what follows writes over them in place, as the next frame
+            // resolves against what the resolve alone wrote. Antialiased by SMAA, they're blended
+            // into colors of their own, which keep no history. Then depth of field, into those
+            // colors, and motion blur, into colors of its own, as it reads the pixels round each,
+            // before bloom, as Unreal orders them; bloom and the grade, into the colors the view
+            // shows; and the lens, into colors of its own, as its chromatic aberration reads the
+            // pixels round each: all before the canvas, so that a game's UI is neither blurred,
+            // bloomed, graded nor seen through a lens. Then the canvas, if there is one, which
+            // isn't antialiased, in a pass of its own over what the view shows, where the view's
+            // last pass doesn't draw it, as when any of those follows it. Reflecting, the colors as
+            // antialiased, resolved or blended by SMAA, or as drawn, are kept for the next frame's
+            // reflections first, before depth of field, motion blur, bloom, the grade, the lens and
+            // the canvas, so that a reflection holds none of them; and where the exposure adapts,
+            // they're metered next, before the same.
             let blooms = bloom::blooms(data.bloom, size);
             let grades = !data.grade.is_identity();
+            let circle = (data.depth_of_field)
+                .and_then(|focus| depth_of_field::Circle::new(focus, &data.viewpoint, size));
+            let blur = data.motion_blur.filter(MotionBlur::blurs);
+            let lensed = data.lens.shows();
             let taa = antialiased.then(|| {
-                let apart = blooms || grades || !data.canvas.is_empty();
+                // Apart where what follows writes the resolved colors in place: depth of field;
+                // bloom, the grade or the canvas, unless motion blur or the lens has written colors
+                // of their own before them.
+                let over = blooms || grades || (!lensed && !data.canvas.is_empty());
+                let apart = circle.is_some() || (blur.is_none() && over);
                 let drawn = [hdr, depth, motion];
                 taa.plan(graph, resolved, number, size, drawn, apart)
             });
@@ -1335,19 +1389,30 @@ impl Renderer {
             let shown = smaa.as_ref().map_or(shown, smaa::Plan::shown);
             let keep = (reflected)
                 .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
-            // Where its exposure adapts, the view's light is metered before bloom spreads it and
-            // the canvas, whose UI isn't lit, draws over it.
+            // Where its exposure adapts, the view's light is metered as resolved, before the
+            // camera's passes, bloom and the canvas, whose UI isn't lit: blurring keeps about the
+            // mean of what it blurs, and a lens's vignette and grain shouldn't move the exposure.
             let looked = data.looked;
             let exposure =
                 (data.adaptation.is_some()).then(|| ExposurePass::plan(graph, shown, size, looked));
+            let focus =
+                circle.map(|circle| DepthOfFieldPass::plan(graph, circle, shown, depth, size));
+            let blur =
+                blur.map(|blur| MotionBlurPass::plan(graph, blur, [shown, depth, motion], size));
+            let shown = blur.as_ref().map_or(shown, motion_blur::Plan::blurred);
             let bloom =
                 (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
-            let apart = taa.is_some()
+            let lens = lensed.then(|| LensPass::plan(graph, data.lens, shown, size));
+            let shown = lens.as_ref().map_or(shown, lens::Plan::lensed);
+            let after = taa.is_some()
                 || smaa.is_some()
                 || keep.is_some()
                 || exposure.is_some()
-                || bloom.is_some();
-            let canvas = (!data.canvas.is_empty() && apart).then(|| {
+                || focus.is_some()
+                || blur.is_some()
+                || bloom.is_some()
+                || lens.is_some();
+            let canvas = (!data.canvas.is_empty() && after).then(|| {
                 let canvas = graph.render(label!("canvas"));
                 let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
                 (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
@@ -1389,7 +1454,10 @@ impl Renderer {
                 smaa,
                 keep,
                 exposure,
+                focus,
+                blur,
                 bloom,
+                lens,
                 canvas,
                 shown,
                 tonemap,
@@ -1856,8 +1924,8 @@ impl Renderer {
                         born,
                     )?;
                 }
-                // The canvas, over the view's last pass's; or, antialiased, bloomed or graded, over
-                // what the view shows, in its own pass, if it has one; without the view's ambient
+                // The canvas, over the view's last pass's; or, after what follows that, over what
+                // the view shows, in its own pass, if it has one; without the view's ambient
                 // occlusion or reflections, which are of the depth the view's own passes draw, or
                 // its fog or its atmosphere's haze, as it's drawn in the view's own space.
                 let canvas_data = if frame_data.ambient_occlusion == 0
@@ -1899,13 +1967,13 @@ impl Renderer {
                     counts += draw_canvas(&mut pass)?;
                 }
                 drop(pass);
+                let drawn = taa::Drawn {
+                    unjittered,
+                    clip_from_world: view_projection,
+                    jitter,
+                    exposure,
+                };
                 if let Some(plan) = &view.taa {
-                    let drawn = taa::Drawn {
-                        unjittered,
-                        clip_from_world: view_projection,
-                        jitter,
-                        exposure,
-                    };
                     self.taa.resolve(&mut frame, plan, drawn)?;
                 }
                 if let Some(plan) = &view.smaa {
@@ -1922,8 +1990,17 @@ impl Renderer {
                     self.exposure
                         .record(&mut frame, plan, exposure, adaptation)?;
                 }
+                if let Some(plan) = &view.focus {
+                    self.depth_of_field.record(&mut frame, plan);
+                }
+                if let Some(plan) = &view.blur {
+                    self.motion_blur.record(&mut frame, plan, drawn, data.cut)?;
+                }
                 if let Some(plan) = &view.bloom {
                     self.bloom.record(&mut frame, plan, data.bloom, &data.grade);
+                }
+                if let Some(plan) = &view.lens {
+                    self.lens.record(&mut frame, plan);
                 }
                 if let Some(canvas) = view.canvas {
                     let mut pass =

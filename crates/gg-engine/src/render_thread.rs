@@ -66,10 +66,16 @@ pub(crate) struct Extracted {
     pub(crate) reflections: Option<gg_renderer::Reflections>,
     /// The world's atmosphere, as its environment has it.
     pub(crate) atmosphere: Option<gg_renderer::Atmosphere>,
+    /// The camera's depth of field, motion blur and lens, as the world's environment has them.
+    pub(crate) depth_of_field: Option<gg_renderer::DepthOfField>,
+    pub(crate) motion_blur: Option<gg_renderer::MotionBlur>,
+    pub(crate) lens: gg_renderer::Lens,
     /// The simulation's time in seconds as the world was drawn.
     pub(crate) time: f32,
     pub(crate) viewport: Viewport,
     pub(crate) viewpoint: Viewpoint,
+    /// Whether the view is cut to its viewpoint from elsewhere, as [`RenderData::cut`] says.
+    pub(crate) cut: bool,
     pub(crate) draws: Draws,
     /// What the layers drew on the canvas, in the view's pixels.
     pub(crate) canvas: Draws,
@@ -159,12 +165,16 @@ impl Default for Extracted {
             fog: None,
             reflections: None,
             atmosphere: None,
+            depth_of_field: None,
+            motion_blur: None,
+            lens: gg_renderer::Lens::NONE,
             time: 0.0,
             viewport: Viewport {
                 origin: [0, 0],
                 size: [0, 0],
             },
             viewpoint: Viewpoint::default(),
+            cut: true,
             draws: Draws::default(),
             canvas: Draws::default(),
             uploads: Uploads::default(),
@@ -268,8 +278,12 @@ impl Render for Renderer {
             fog: frame.fog,
             reflections: frame.reflections,
             atmosphere: frame.atmosphere,
+            depth_of_field: frame.depth_of_field,
+            motion_blur: frame.motion_blur,
+            lens: frame.lens,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,
+            cut: frame.cut,
             uploads: &mut frame.uploads,
             draws: &frame.draws,
             canvas: &frame.canvas,

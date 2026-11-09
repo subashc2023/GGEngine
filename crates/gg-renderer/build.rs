@@ -26,7 +26,7 @@ const SHADERS: [&str; 14] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 17] = [
+const COMPUTE: [(&str, &[&str]); 20] = [
     (
         "ao",
         &[
@@ -52,6 +52,16 @@ const COMPUTE: [(&str, &[&str]); 17] = [
     ),
     ("clusters", &["bin_main"]),
     ("cull", &["choose_main", "offsets_main", "write_main"]),
+    (
+        "depth_of_field",
+        &[
+            "downsample_main",
+            "tiles_main",
+            "dilate_main",
+            "gather_main",
+            "composite_main",
+        ],
+    ),
     ("emit", &["emit_main", "grow_main"]),
     (
         "exposure",
@@ -59,7 +69,17 @@ const COMPUTE: [(&str, &[&str]); 17] = [
     ),
     ("fogging", &["fog_main"]),
     ("gather", &["gather_main"]),
+    ("lens", &["lens_main"]),
     ("meshlets", &["meshlets_main"]),
+    (
+        "motion_blur",
+        &[
+            "velocity_main",
+            "tiles_main",
+            "neighbors_main",
+            "gather_main",
+        ],
+    ),
     ("pyramid", &["depth_main", "reduce_main"]),
     (
         "reflections",

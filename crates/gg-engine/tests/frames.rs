@@ -13,9 +13,10 @@
 //! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, under an environment that
 //! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
-//! by ambient occlusion, fogs it, reflects what it shows and adapts its exposure to it, its sky an
-//! atmosphere whose sun the ticks raise, its light prefiltered again each degree it rises, and then
-//! antialiases it by SMAA, adapting still to what SMAA blends, its frames counted again once the
+//! by ambient occlusion, fogs it, reflects what it shows, adapts its exposure to it, blurs it by its
+//! depth of field and its motion and lays a lens's effects over it, its sky an atmosphere whose sun
+//! the ticks raise, its light prefiltered again each degree it rises, and then antialiases it by
+//! SMAA, adapting, blurring and seen through the lens still, its frames counted again once the
 //! switch has settled, run through the engine's main loop headless, without
 //! the tool API, whose development runs' watchers of the assets' files allocate as they look,
 //! three fifths of a tick apart, so that they draw between ticks, once its first frames have run,
@@ -55,10 +56,10 @@ use std::time::Duration;
 use gg_engine::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Adaptation, Align, Antialiasing, App, Atmosphere, Binding, Blend, BoxCollider2D,
-    Camera, Change, Circle, CircleCollider2D, Component, Context, Entity, Environment, Event, Fog,
-    Font, GameUi, Grade, Key, Layer, Light, Mesh, MeshDraw, Model, MouseButton, ParticleBlend,
-    ParticleEmitter, Pick, Projection, Reflections, Shader, Sky, Source, Sprite, SpriteSheet, Text,
-    TextStyle, Texture, Tick, Transform, World,
+    Camera, Change, Circle, CircleCollider2D, Component, Context, DepthOfField, Entity,
+    Environment, Event, Fog, Font, GameUi, Grade, Key, Layer, Lens, Light, Mesh, MeshDraw, Model,
+    MotionBlur, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Reflections, Shader,
+    Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -400,8 +401,9 @@ impl Layer for Scene {
         // bakes its grade's table each frame, under an atmosphere, whose sun the ticks turn and
         // which the occlusion needs as a sky, in the default fog, which a pass of its own fogs
         // what's opaque by and what blends draws over in another, reflecting, which traces the
-        // view's depth against the colors each frame keeps for the next, and its exposure
-        // adapting, metered and read back each frame.
+        // view's depth against the colors each frame keeps for the next, its exposure adapting,
+        // metered and read back each frame; with the default depth of field and motion blur, and a
+        // lens of each of its effects, each in passes of their own, under TAA and then SMAA.
         self.environment = Some(world.spawn(Environment {
             adaptation: Some(Adaptation::default()),
             sky: Sky::Atmosphere(Atmosphere::default()),
@@ -411,6 +413,13 @@ impl Layer for Scene {
             },
             fog: Some(Fog::default()),
             reflections: Some(Reflections::default()),
+            depth_of_field: Some(DepthOfField::default()),
+            motion_blur: Some(MotionBlur::default()),
+            lens: Lens {
+                vignette: 0.5,
+                chromatic_aberration: 1.0,
+                grain: 0.1,
+            },
             ..Environment::default()
         }));
         self.sun = Some(world.spawn((sun_at(0), Light::default())));

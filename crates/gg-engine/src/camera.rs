@@ -237,16 +237,17 @@ impl Tie {
 }
 
 /// What the game's view sees through in frames no layer sets a viewpoint, as `world` draws `alpha`
-/// of the way on from `past`, placed as `placed` has it: its primary camera, from where it draws, and of several, the one of
-/// the lowest ID; `None` without one. Several warn (`engine.camera_tie`) as they come to be and as
-/// they change, which `warned` keeps track of, rather than every frame.
+/// of the way on from `past`, placed as `placed` has it: its primary camera, by its ID, from where
+/// it draws, and of several, the one of the lowest ID; `None` without one. Several warn
+/// (`engine.camera_tie`) as they come to be and as they change, which `warned` keeps track of,
+/// rather than every frame.
 pub(crate) fn seen(
     world: &World,
     past: &Past,
     placed: &Placed,
     alpha: f32,
     warned: &mut Option<Tie>,
-) -> Option<Viewpoint> {
+) -> Option<(EntityId, Viewpoint)> {
     let primary = || cameras(world).filter(|(.., camera)| camera.primary);
     let best = primary().min_by_key(|&(_, _, id, _)| id);
     let tie = best.and_then(|(_, _, seen, _)| {
@@ -266,13 +267,14 @@ pub(crate) fn seen(
              {seen}"
         );
     }
-    let (table, row, _, camera) = best?;
+    let (table, row, id, camera) = best?;
     let (position, rotation) = Poses::new(world, past, placed, alpha)?.pose(table, row);
-    Some(Viewpoint {
+    let viewpoint = Viewpoint {
         position,
         rotation,
         projection: camera.projection,
-    })
+    };
+    Some((id, viewpoint))
 }
 
 /// Each of `world`'s cameras, its entities with a [`Camera`] and a [`Transform`]: its table, its
@@ -626,6 +628,7 @@ mod tests {
             1.0,
             &mut None,
         )
+        .map(|(_, viewpoint)| viewpoint)
     }
 
     /// The view sees through the primary camera; without one, through none, though the world has
@@ -664,7 +667,8 @@ mod tests {
             1.0,
             &mut warned,
         )
-        .expect("a camera");
+        .expect("a camera")
+        .1;
         assert_eq!(seen.position.x, [1.0, 2.0][lowest]);
         let tie = Tie {
             seen: ids[lowest],
@@ -681,7 +685,8 @@ mod tests {
             1.0,
             &mut warned,
         )
-        .expect("a camera");
+        .expect("a camera")
+        .1;
         assert_eq!(seen.position.x, [2.0, 1.0][lowest]);
         assert_eq!(warned, None);
     }
@@ -805,7 +810,8 @@ mod tests {
             0.5,
             &mut None,
         )
-        .expect("a camera");
+        .expect("a camera")
+        .1;
         assert_eq!(halfway.position, carried(1.0).w_axis.truncate());
         let facing = turned.rotation * local.rotation;
         let rotation = halfway.rotation;
@@ -817,7 +823,8 @@ mod tests {
             1.0,
             &mut None,
         )
-        .expect("a camera");
+        .expect("a camera")
+        .1;
         assert_eq!(headless.position, carried(2.0).w_axis.truncate());
     }
 
@@ -835,7 +842,8 @@ mod tests {
             }
             past.resolve(world);
             let halfway = seen(world, &past, &Placed::of(world, &past, 0.5), 0.5, &mut None)
-                .expect("a camera");
+                .expect("a camera")
+                .1;
             halfway.position.x
         };
         assert_eq!(tick(&mut world, 4.0, false), 2.0);

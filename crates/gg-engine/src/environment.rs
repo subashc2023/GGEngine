@@ -5,15 +5,15 @@
 use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Reflections, Tonemapper};
 use tracing::warn;
 
-use crate::{Component, Entity, EntityId, Reflect, Sky, World};
+use crate::{Component, DepthOfField, Entity, EntityId, Lens, MotionBlur, Reflect, Sky, World};
 
 /// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
 /// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
 /// that maps the view's colors, drawn in high dynamic range, into the range it shows, how it's
 /// antialiased, the sky it shows behind the world and lights it by, how much it blooms, how it's
-/// graded, how what's near a point hides that light from it, and how what's opaque reflects what
-/// the view shows. A world has one, on an entity of
-/// its own; of several, the view renders with the one of the lowest ID, warning
+/// graded, how what's near a point hides that light from it, the fog it's in, how what's opaque
+/// reflects what the view shows, and the camera's depth of field, motion blur and lens. A world has
+/// one, on an entity of its own; of several, the view renders with the one of the lowest ID, warning
 /// (`engine.environment_tie`). A world without one isn't tonemapped, antialiased, bloomed or
 /// graded, so that what's in the range a view shows, as a 2D game's sprites, shows as it's drawn,
 /// each pixel what's at its center, and lit shading exposes its light as the default environment's
@@ -76,6 +76,15 @@ pub struct Environment {
     /// it to take the place of. `None`, the default, for none: it costs a trace of every pixel and
     /// two images of the view's size, which only a glossy surface makes worth it.
     pub reflections: Option<Reflections>,
+    /// How what's nearer or farther than a focus blurs, as through a camera's lens, before a
+    /// game's canvas, which isn't blurred, as [`DepthOfField`] says: `None`, the default, for none.
+    pub depth_of_field: Option<DepthOfField>,
+    /// How what moves across the view blurs along its way while the shutter's open, before a
+    /// game's canvas, which isn't blurred, as [`MotionBlur`] says: `None`, the default, for none.
+    pub motion_blur: Option<MotionBlur>,
+    /// What a camera's lens and film do to the view, before a game's canvas, which shows none of it:
+    /// a vignette, chromatic aberration and film grain, none of them by default.
+    pub lens: Lens,
 }
 
 impl Default for Environment {
@@ -92,6 +101,9 @@ impl Default for Environment {
             ambient_occlusion: Some(AmbientOcclusion::default()),
             fog: None,
             reflections: None,
+            depth_of_field: None,
+            motion_blur: None,
+            lens: Lens::NONE,
         }
     }
 }
@@ -367,6 +379,46 @@ mod tests {
         };
         assert_eq!(adaptation.rendered(), rendered);
         assert_eq!(Environment::default().adaptation, None);
+    }
+
+    /// The camera's effects, none by default, reflect whole: their descriptions' defaults are their
+    /// defaults, which an environment's switched on take, and an environment with all of them comes
+    /// back from its value as it was, every field among it.
+    #[test]
+    fn the_cameras_effects_reflect_whole() {
+        use crate::reflect::{Meta, Reflect, Types};
+
+        let mut types = Types::default();
+        let described = DepthOfField::describe(&mut types).expect("described");
+        let default = (types.default_value(&described, &Meta::default())).expect("a default");
+        let focus = DepthOfField::from_value(&default).expect("made");
+        assert_eq!(focus, DepthOfField::default());
+        assert_eq!(focus.rendered(), gg_renderer::DepthOfField::default());
+        let described = MotionBlur::describe(&mut types).expect("described");
+        let default = (types.default_value(&described, &Meta::default())).expect("a default");
+        let blur = MotionBlur::from_value(&default).expect("made");
+        assert_eq!(blur.rendered(), gg_renderer::MotionBlur::default());
+        let filmed = Environment {
+            depth_of_field: Some(DepthOfField {
+                focus_distance: 7.5,
+                f_number: 2.8,
+            }),
+            motion_blur: Some(MotionBlur { shutter: 0.25 }),
+            lens: Lens {
+                vignette: 0.4,
+                chromatic_aberration: 1.5,
+                grain: 0.1,
+            },
+            ..Environment::default()
+        };
+        let made = Environment::from_value(&filmed.to_value());
+        assert_eq!(made.expect("made"), filmed);
+        let plain = Environment::from_value(&Environment::default().to_value()).expect("made");
+        assert_eq!(
+            (plain.depth_of_field, plain.motion_blur, plain.lens),
+            (None, None, Lens::NONE)
+        );
+        assert_eq!(filmed.lens.rendered().grain, 0.1);
     }
 
     /// An environment hands the renderer its image sky, at its luminance, or its atmosphere as it

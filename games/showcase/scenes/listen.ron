@@ -44,6 +44,13 @@
                 )),
                 fog: None,
                 reflections: None,
+                depth_of_field: None,
+                motion_blur: None,
+                lens: (
+                    vignette: 0.0,
+                    chromatic_aberration: 0.0,
+                    grain: 0.0,
+                ),
             ),
             Name: ("Environment"),
         ),

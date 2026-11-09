@@ -54,7 +54,12 @@
 //! spreads them, by screen-space reflections (`reflections.ron`, its floor `models/gloss.gltf`); a
 //! fence's thin slats and rails, a leaning pole and models, a crate and a torus turning, in a sun's
 //! light, antialiased by SMAA from each frame alone, sharp and without ghosts (`antialiasing.ron`);
-//! 3D physics,
+//! crates, balls and spheres, a glowing one among them, receding from a camera of a narrow field of
+//! view, those before and past its focus at 7 m blurred, as through a lens of f/1.4, by depth of
+//! field (`depth_of_field.ron`); balls and marbles on a carousel, a crate spinning and a torus
+//! tumbling, blurred along their ways by motion blur through a 180° shutter (`motion_blur.ron`);
+//! spheres, a crate and a torus seen through a lens's vignette, chromatic aberration and grain
+//! (`lens.ron`); 3D physics,
 //! boxes, balls and capsules, dynamic, kinematic and static, tumbling down a ramp, bouncing and
 //! swept about within walls (`physics3d.ron`); particles, a fountain's drops going over what's
 //! behind them by their alpha, a fire and its embers adding their light over its smoke, the floor

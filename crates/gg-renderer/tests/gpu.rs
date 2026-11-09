@@ -23,13 +23,13 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
-    Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Emission, Fog, Glyph, Grade, Grid, GridLines,
-    Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material,
-    Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, Outline,
-    PackedVertex, ParticleShape, Particles, Pick, Pixels, Projection, Reflections, RenderData,
-    Renderer, Sampled, Sampler, Scene, Settings, Shaders, SkinVertex, Sky, Sprite, SpriteSheet,
-    Texels, Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint,
-    Viewport, Workflow, Wrap,
+    Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog, Glyph, Grade,
+    Grid, GridLines, Lens, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES,
+    MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets,
+    Mipmaps, ModelMesh, ModelVertex, MotionBlur, Outline, PackedVertex, ParticleShape, Particles,
+    Pick, Pixels, Projection, Reflections, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
+    Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
+    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -95,6 +95,9 @@ fn main() -> ExitCode {
         a_looks_exposure_adapts_apart_from_the_games_own,
         an_exposure_jump_under_antialiasing_leaves_no_ghost,
         adapted_frames_match_their_reference,
+        depth_of_field_blurs_what_is_off_its_focus,
+        motion_blur_smears_what_moves_and_the_turning_camera,
+        lenses_vignette_fringe_and_grain_the_view,
         shaders_read_the_frames_data,
         lights_shade_as_gltf_defines,
         back_faces_flip_their_normal_maps,
@@ -423,8 +426,12 @@ impl Stores {
             ambient_occlusion: *ambient_occlusion,
             fog: None,
             reflections: *reflections,
+            depth_of_field: None,
+            motion_blur: None,
+            lens: Lens::NONE,
             viewport,
             viewpoint,
+            cut: false,
             uploads,
             draws,
             canvas: none,
@@ -5231,6 +5238,800 @@ fn settled(
         last = next.1;
     }
     panic!("the exposure still moves after 100 frames: {last}");
+}
+
+/// What the depth of field's tests see: squares of flat colors at 2, 4 and 8 ahead of a camera
+/// whose field of view is 20° from bottom to top, a 68 mm lens's on a full-frame camera's sensor,
+/// over stripes 12 ahead; and where each of the squares' middles shows.
+struct FocusScene {
+    draws: Draws,
+    viewpoint: Viewpoint,
+    near: Vec3,
+    focused: Vec3,
+    far: Vec3,
+    /// Another scene of the same view: a red square 0.1 across at 2 ahead, and beside it, just past
+    /// the focus, a yellow one at `past`, whose circle at f/1.4 is 2.5 pixels, 20 pixels a side,
+    /// within the tiles the red square's circle reaches, over white 200 ahead.
+    beside: Draws,
+    past: Vec3,
+}
+
+/// The depth of field's tests' scene, in `stores`: a red square 0.2 across at 2 ahead, its right
+/// edge over a green one's left edge, the green 0.5 across at 4 ahead, its right edge over a blue
+/// one's left edge, the blue 0.8 across at 8 ahead, and stripes of light and dark gray a tenth of a
+/// unit wide 12 ahead, filling the view behind them.
+fn focus_scene(stores: &mut Stores) -> FocusScene {
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let viewpoint = Viewpoint {
+        projection: Projection::Perspective {
+            fov: math::to_radians(20.0),
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let (near, focused, far) = (
+        Vec3::new(-0.195, 0.03, -2.0),
+        Vec3::new(0.0, 0.0, -4.0),
+        Vec3::new(0.78, -0.1, -8.0),
+    );
+    let mut draws = Draws::default();
+    let placed = |at: Vec3, side: f32| {
+        Mat4::from_scale_rotation_translation(Vec3::new(side, side, 1.0), Quat::IDENTITY, at)
+    };
+    draws.push(
+        square,
+        flat,
+        placed(near, 0.2),
+        Vec4::new(0.9, 0.1, 0.1, 1.0),
+    );
+    draws.push(
+        square,
+        flat,
+        placed(focused, 0.5),
+        Vec4::new(0.1, 0.8, 0.2, 1.0),
+    );
+    draws.push(
+        square,
+        flat,
+        placed(far, 0.8),
+        Vec4::new(0.1, 0.2, 0.9, 1.0),
+    );
+    for stripe in -40..40 {
+        let at = Vec3::new(0.05 + 0.1 * stripe as f32, 0.0, -12.0);
+        let at =
+            Mat4::from_scale_rotation_translation(Vec3::new(0.1, 5.0, 1.0), Quat::IDENTITY, at);
+        let shade = if stripe % 2 == 0 { 0.6 } else { 0.05 };
+        draws.push(square, flat, at, Vec4::new(shade, shade, shade, 1.0));
+    }
+    // 2.5 = 6.3 (1 - 4 / 6.63), of what's infinitely far's 6.3 pixels; 154 pixels a unit there.
+    let past = Vec3::new(-0.208, 0.0, -6.63);
+    let mut beside = Draws::default();
+    let red = Vec4::new(0.9, 0.1, 0.1, 1.0);
+    beside.push(square, flat, placed(Vec3::new(-0.137, 0.0, -2.0), 0.1), red);
+    beside.push(
+        square,
+        flat,
+        placed(past, 0.13),
+        Vec4::new(1.0, 0.9, 0.0, 1.0),
+    );
+    beside.push(
+        square,
+        flat,
+        placed(Vec3::new(0.0, 0.0, -200.0), 200.0),
+        Vec4::ONE,
+    );
+    FocusScene {
+        draws,
+        viewpoint,
+        near,
+        focused,
+        far,
+        beside,
+        past,
+    }
+}
+
+/// [`focus_scene`] in focus at 4, through f/1.4, without antialiasing, in a view of 640 by 360, whose
+/// circles of confusion's radius is at most 7.2 pixels: 6.3 pixels for what's infinitely far, 3.2 at
+/// 8, 4.2 at 12, and past the most at 2. The green square, in focus, is as it is without depth of
+/// field, every pixel within 2 of it, its edges too, the blue square's blur behind its right edge not
+/// spreading over it; the red square, before the focus, spreads over what's round it, over the green
+/// square's edge too, and fades in from its own edge; the blue square's right edge and the stripes
+/// behind blur, the stripes' contrast falling, but the stripes, of a larger circle, don't spread
+/// into the blue square past its own circle; nor does white far behind a square just past the
+/// focus beside a red one before it, whose circle widens what's gathered there. Antialiased, the
+/// square in focus's edges shimmer over the offsets' cycle no more than docs/DEFECTS.md says; by
+/// SMAA, the square in focus stays as sharp and the red one spreads alike. A
+/// focus that blurs nothing, at f/1000, and depth of
+/// field under an orthographic projection, which has no lens, change no pixel; nor does what's on
+/// the canvas, drawn after it, blur. With antialiasing, the green square stays as sharp. Compared,
+/// without antialiasing, with its reference.
+fn depth_of_field_blurs_what_is_off_its_focus() {
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 360;
+    let size = [WIDTH, HEIGHT];
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let scene = focus_scene(&mut stores);
+    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    let mut canvas = Draws::default();
+    let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
+        * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
+    canvas.push_sprite(placed, Sprite::default());
+    let viewport = filling(size);
+    let viewpoint = scene.viewpoint;
+    settle(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        viewpoint,
+        &scene.draws,
+    );
+    let focus = DepthOfField {
+        focus_distance: 4.0,
+        f_number: 1.4,
+    };
+    // Each frame of the view, of one frame, or antialiased, of enough for the history to settle and
+    // a cycle of the offsets after.
+    let mut frames = |depth_of_field, viewpoint, antialiasing| {
+        let count = if antialiasing == Antialiasing::Taa {
+            24
+        } else {
+            1
+        };
+        let mut drawn = Vec::new();
+        for _ in 0..count {
+            let data = RenderData {
+                depth_of_field,
+                antialiasing,
+                canvas: &canvas,
+                ..stores.data(viewport, viewpoint, &scene.draws)
+            };
+            render_without_ui(&mut renderer, data);
+            drawn.push(frame_pixels(&mut renderer));
+        }
+        drawn
+    };
+    let last = |mut drawn: Vec<Vec<u8>>| drawn.pop().expect("a frame");
+    let sharp = last(frames(None, viewpoint, Antialiasing::None));
+    let blurred = last(frames(Some(focus), viewpoint, Antialiasing::None));
+    let still = DepthOfField {
+        f_number: 1000.0,
+        ..focus
+    };
+    assert!(
+        last(frames(Some(still), viewpoint, Antialiasing::None)) == sharp,
+        "a focus that blurs nothing changes the view"
+    );
+    let flat = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.0,
+            far: 20.0,
+        },
+        ..viewpoint
+    };
+    assert!(
+        last(frames(Some(focus), flat, Antialiasing::None))
+            == last(frames(None, flat, Antialiasing::None)),
+        "depth of field under an orthographic projection changes the view"
+    );
+    let antialiased_frames = frames(Some(focus), viewpoint, Antialiasing::Taa);
+    let antialiased = antialiased_frames.last().expect("a frame").clone();
+    let antialiased_sharp_frames = frames(None, viewpoint, Antialiasing::Taa);
+    let antialiased_sharp = antialiased_sharp_frames.last().expect("a frame").clone();
+    let smaa = last(frames(Some(focus), viewpoint, Antialiasing::Smaa));
+    let smaa_sharp = last(frames(None, viewpoint, Antialiasing::Smaa));
+    let data = RenderData {
+        depth_of_field: Some(focus),
+        ..stores.data(viewport, viewpoint, &scene.beside)
+    };
+    render_without_ui(&mut renderer, data);
+    let beside = frame_pixels(&mut renderer);
+    shut_down(renderer);
+    // The yellow square just past the focus, 5 pixels in from its right edge, twice its own
+    // circle, is as yellow as it is, its blue none, though the red square's circle widens what each
+    // texel there gathers to 3.6 texels: the white behind, of a circle of 6.2 pixels, doesn't
+    // spread over it past its own circle, where it would reach 5 pixels in.
+    let [x, y] = pixel_of(viewpoint, size, scene.past + Vec3::new(0.065, 0.0, 0.0));
+    let inside = pixel_at(&beside, WIDTH, [x - 5, y]);
+    assert!(
+        inside[2] <= 8,
+        "the white behind the square just past the focus spreads 5 pixels into it: {inside:?}"
+    );
+    // Antialiased, across the square in focus's edges over the stripes and the blue square, each
+    // pixel's channels move no more than 16 further over a cycle of the offsets, the last 8 frames,
+    // than they do without depth of field: the edge's own pixels, whose depth the offsets move the
+    // edge across, take the circle of what's behind them in some frames, as docs/DEFECTS.md says,
+    // about 10 further, and no others shimmer.
+    let [gx, gy] = pixel_of(viewpoint, size, scene.focused);
+    let spread = |drawn: &[Vec<u8>], p: [u32; 2]| {
+        let cycle = drawn[drawn.len() - 8..]
+            .iter()
+            .map(|frame| pixel_at(frame, WIDTH, p));
+        let (least, most) = cycle.fold(([u8::MAX; 4], [0; 4]), |(least, most), pixel| {
+            (
+                std::array::from_fn(|c| least[c].min(pixel[c])),
+                std::array::from_fn(|c| most[c].max(pixel[c])),
+            )
+        });
+        (0..3).map(|c| most[c] - least[c]).max().expect("channels")
+    };
+    let across = (gy - 68..gy - 59).map(|y| [gx + 20, y]);
+    let across = across.chain((gy + 59..gy + 68).map(|y| [gx + 20, y]));
+    for p in across.chain((gx + 59..gx + 68).map(|x| [x, gy])) {
+        let (focused, unfocused) = (
+            spread(&antialiased_frames, p),
+            spread(&antialiased_sharp_frames, p),
+        );
+        assert!(
+            focused <= unfocused + 16,
+            "antialiased, the edge in focus at {p:?} moves {focused} over the offsets' cycle, \
+             against {unfocused} without depth of field"
+        );
+    }
+    let at = |pixels: &[u8], [x, y]: [u32; 2]| pixel_at(pixels, WIDTH, [x, y]);
+    let differs =
+        |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(b).any(|(&a, b)| a.abs_diff(b) > by);
+    // The green square spans 128 pixels each way round its middle: within it, but where the red
+    // square's blur reaches, as sharp as it is without depth of field.
+    let [gx, gy] = pixel_of(viewpoint, size, scene.focused);
+    for y in gy - 62..gy + 62 {
+        for x in gx - 34..gx + 63 {
+            let (got, want) = (at(&blurred, [x, y]), at(&sharp, [x, y]));
+            assert!(
+                !differs(got, want, 2),
+                "the square in focus at ({x}, {y}) is {got:?}, not {want:?}"
+            );
+            let (got, want) = (at(&antialiased, [x, y]), at(&antialiased_sharp, [x, y]));
+            assert!(
+                !differs(got, want, 2),
+                "antialiased, the square in focus at ({x}, {y}) is {got:?}, not {want:?}"
+            );
+            let (got, want) = (at(&smaa, [x, y]), at(&smaa_sharp, [x, y]));
+            assert!(
+                !differs(got, want, 2),
+                "by SMAA, the square in focus at ({x}, {y}) is {got:?}, not {want:?}"
+            );
+        }
+    }
+    // The red square spans 102 pixels each way round its middle: 2 pixels out from its left edge
+    // and its top edge, its light, as more red than green; 2 pixels in, less, as the background
+    // shows through its blurred edge; and 4 pixels into the green square from the red's right edge,
+    // its light.
+    let [rx, ry] = pixel_of(viewpoint, size, scene.near);
+    let redness = |pixels: &[u8], p| {
+        let [r, g, ..] = at(pixels, p);
+        i32::from(r) - i32::from(g)
+    };
+    for (outside, inside) in [
+        ([rx - 53, ry], [rx - 49, ry]),
+        ([rx, ry - 53], [rx, ry - 49]),
+    ] {
+        assert!(
+            redness(&blurred, outside) > redness(&sharp, outside) + 30,
+            "the red square's light doesn't spread out to {outside:?}: {:?} against {:?}",
+            at(&blurred, outside),
+            at(&sharp, outside)
+        );
+        assert!(
+            redness(&smaa, outside) > redness(&smaa_sharp, outside) + 30,
+            "by SMAA, the red square's light doesn't spread out to {outside:?}"
+        );
+        assert!(
+            redness(&blurred, inside) + 20 < redness(&sharp, inside),
+            "the red square at {inside:?} doesn't fade toward its edge: {:?} against {:?}",
+            at(&blurred, inside),
+            at(&sharp, inside)
+        );
+    }
+    let over = [rx + 55, ry];
+    assert!(
+        redness(&blurred, over) > redness(&sharp, over) + 20,
+        "the red square's light doesn't spread over the square in focus at {over:?}: {:?} against \
+         {:?}",
+        at(&blurred, over),
+        at(&sharp, over)
+    );
+    // The blue square spans 102 pixels each way round its middle: its last pixel and the second
+    // past its right edge, between its blue and the stripes', as it blurs.
+    let [bx, by] = pixel_of(viewpoint, size, scene.far);
+    for p in [[bx + 51, by], [bx + 53, by]] {
+        assert!(
+            differs(at(&blurred, p), at(&sharp, p), 20),
+            "the blue square's edge doesn't blur at {p:?}: {:?}",
+            at(&blurred, p)
+        );
+    }
+    // 4 pixels in from its right edge, past its own circle, it stays blue, as the stripes behind
+    // it, of a larger circle, don't spread over it.
+    let inside = [bx + 47, by];
+    assert!(
+        !differs(at(&blurred, inside), at(&sharp, inside), 8),
+        "the stripes behind the blue square spread over it to {inside:?}: {:?}",
+        at(&blurred, inside)
+    );
+    // The stripes, along a row below the squares: their least and most, nearer each other.
+    let contrast = |pixels: &[u8]| {
+        let row = (0..WIDTH).map(|x| at(pixels, [x, HEIGHT - 40])[1]);
+        let (least, most) = row.fold((u8::MAX, 0), |(l, m), v| (l.min(v), m.max(v)));
+        most - least
+    };
+    assert!(
+        contrast(&blurred) + 30 < contrast(&sharp),
+        "the stripes keep their contrast: {} against {}",
+        contrast(&blurred),
+        contrast(&sharp)
+    );
+    let on_canvas = |pixels: &[u8]| region(pixels, WIDTH, [8, HEIGHT - 24], [16, 16]);
+    assert!(on_canvas(&blurred) == on_canvas(&sharp), "the canvas blurs");
+    compare("depth_of_field", WIDTH, HEIGHT, &blurred);
+}
+
+/// A plate of the scene, unlit, 1 across, at 4 ahead of a camera whose field of view is 45° from
+/// bottom to top, in a view of 384 by 216, whose tiles' side, the farthest it blurs a pixel either
+/// way, is 6 pixels, over stripes of flat colors 10 ahead, light and dark, 0.2 wide, without
+/// antialiasing; through a shutter open half the frame. The plate moving 0.3 to the right each
+/// frame, about 20 pixels, its left and right edges blur out over the stripes, up to 5 pixels, as
+/// the filter keeps what moves alike at a depth alike, the plate's own pixels, mostly as they are;
+/// its top and bottom edges and the stripes, still, staying as they are without motion blur; standing
+/// still, as the frames before it, no pixel changes. The camera turning 4° about its up each frame,
+/// about 18 pixels at the middle, everything blurs across, the stripes' contrast falling, while
+/// the plate's top edge stays sharp; but cut to, as from a tool's look, the turn is a jump, which
+/// blurs nothing, the view as it is without motion blur, while the moving plate still blurs by its
+/// own motion. What's on the canvas, drawn after it, doesn't blur. Antialiased, temporally or by
+/// SMAA, the moving plate blurs too, and by SMAA, which draws no offset, what stands still far from
+/// it is as it was. Compared, the moving plate's frame and the turning camera's side by side, with
+/// their reference.
+fn motion_blur_smears_what_moves_and_the_turning_camera() {
+    const WIDTH: u32 = 384;
+    const HEIGHT: u32 = 216;
+    let size = [WIDTH, HEIGHT];
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let plate = model_square(&mut stores.meshes);
+    let material = stores.materials.add(&Material {
+        color: Vec4::new(0.95, 0.75, 0.2, 1.0),
+        workflow: metallic(0.0, 0.7),
+        ..Material::default()
+    });
+    let draw = MeshDraw::with_material(plate, material, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.draw_scene();
+    for stripe in -30..30 {
+        let at = Vec3::new(0.1 + 0.2 * stripe as f32, 0.0, -10.0);
+        let at =
+            Mat4::from_scale_rotation_translation(Vec3::new(0.2, 12.0, 1.0), Quat::IDENTITY, at);
+        let shade = if stripe % 2 == 0 { 0.5 } else { 0.05 };
+        draws.push(square, flat, at, Vec4::new(shade, shade, shade * 1.2, 1.0));
+    }
+    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    let mut canvas = Draws::default();
+    let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
+        * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
+    canvas.push_sprite(placed, Sprite::default());
+    let viewport = filling(size);
+    let seen = |turn: f32| Viewpoint {
+        rotation: Quat::from_rotation_y(math::to_radians(turn)),
+        projection: Projection::Perspective {
+            fov: FRAC_PI_4,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, -4.0));
+    stores.scene.set(0, at(0.0), &draw, 1);
+    settle(&mut renderer, &mut stores, viewport, seen(0.0), &draws);
+    let blur = MotionBlur { shutter: 0.5 };
+    // The last of 4 frames of the plate at `x(frame)` and the camera turned `turn(frame)`, the
+    // last cut to, if `cut`.
+    let mut render =
+        |x: &dyn Fn(f32) -> f32, turn: &dyn Fn(f32) -> f32, motion_blur, antialiasing, cut| {
+            let mut pixels = Vec::new();
+            for frame in 0..4 {
+                stores.scene.set(0, at(x(frame as f32)), &draw, 1);
+                let data = RenderData {
+                    motion_blur,
+                    antialiasing,
+                    canvas: &canvas,
+                    cut: cut && frame == 3,
+                    ..stores.data(viewport, seen(turn(frame as f32)), &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                pixels = frame_pixels(&mut renderer);
+            }
+            pixels
+        };
+    let none = Antialiasing::None;
+    let (moving, still) = (|frame: f32| 0.3 * frame - 0.45, |_| 0.45);
+    let (turning, facing) = (|frame: f32| 4.0 * frame - 6.0, |_| 6.0);
+    let sharp = render(&moving, &|_| 0.0, None, none, false);
+    let blurred = render(&moving, &|_| 0.0, Some(blur), none, false);
+    assert!(
+        render(&still, &|_| 0.0, Some(blur), none, false)
+            == render(&still, &|_| 0.0, None, none, false),
+        "motion blur changes a view where nothing moves"
+    );
+    let turned_sharp = render(&still, &turning, None, none, false);
+    let turned = render(&still, &turning, Some(blur), none, false);
+    let unturned = render(&still, &facing, Some(blur), none, false);
+    // Cut to, the camera's turn since the frame before is a jump, which blurs nothing; the plate's
+    // own motion still blurs it.
+    let jumped = render(&still, &turning, Some(blur), none, true);
+    let moved_jumped = render(&moving, &turning, Some(blur), none, true);
+    let moved_turned_sharp = render(&moving, &turning, None, none, false);
+    let antialiased = render(&moving, &|_| 0.0, Some(blur), Antialiasing::Taa, false);
+    let antialiased_sharp = render(&moving, &|_| 0.0, None, Antialiasing::Taa, false);
+    let smaa = render(&moving, &|_| 0.0, Some(blur), Antialiasing::Smaa, false);
+    let smaa_sharp = render(&moving, &|_| 0.0, None, Antialiasing::Smaa, false);
+    shut_down(renderer);
+    assert!(
+        jumped == turned_sharp,
+        "a camera cut to blurs by its jump from the frame before"
+    );
+    let pixel = |pixels: &[u8], [x, y]: [u32; 2]| pixel_at(pixels, WIDTH, [x, y]);
+    let differs =
+        |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(b).any(|(&a, b)| a.abs_diff(b) > by);
+    // The plate, 0.45 right of the middle in the last frame, spans 65 pixels each way: a pixel out
+    // from its left and right edges, along the 40 rows round its middle, its color, as it blurs over
+    // the stripes, apart from theirs by a tenth on average in linear light, past the noise that
+    // jitters the filter's samples from pixel to pixel.
+    let [px, py] = pixel_of(seen(0.0), size, Vec3::new(0.45, 0.0, -4.0));
+    let apart = |a: &[u8], b: &[u8], x: u32| {
+        let rows = py - 20..py + 20;
+        let sum: f32 = (rows.clone())
+            .map(|y| {
+                let (a, b) = (pixel(a, [x, y]), pixel(b, [x, y]));
+                (0..3)
+                    .map(|c| (decoded(a[c]) - decoded(b[c])).abs())
+                    .sum::<f32>()
+                    / 3.0
+            })
+            .sum();
+        sum / rows.len() as f32
+    };
+    for x in [px - 34, px + 34] {
+        let blurs = apart(&blurred, &sharp, x);
+        assert!(blurs > 0.1, "the moving plate's edge blurs {blurs} at {x}");
+        let blurs = apart(&antialiased, &antialiased_sharp, x);
+        assert!(
+            blurs > 0.1,
+            "antialiased, the moving plate's edge blurs {blurs} at {x}"
+        );
+        let blurs = apart(&smaa, &smaa_sharp, x);
+        assert!(
+            blurs > 0.1,
+            "by SMAA, the moving plate's edge blurs {blurs} at {x}"
+        );
+    }
+    for p in [[px, py - 34], [px, py - 30], [px, py + 30], [px, py + 34]] {
+        assert!(
+            !differs(pixel(&blurred, p), pixel(&sharp, p), 4),
+            "the moving plate's top or bottom edge blurs at {p:?}: {:?} against {:?}",
+            pixel(&blurred, p),
+            pixel(&sharp, p)
+        );
+    }
+    // Far from the plate's tiles, the stripes stand still and are as they were.
+    let corner = |pixels: &[u8]| region(pixels, WIDTH, [0, 0], [96, 64]);
+    assert!(
+        corner(&blurred) == corner(&sharp),
+        "what stands still far from the moving plate blurs"
+    );
+    // By SMAA, which draws no offset, so too.
+    assert!(
+        corner(&smaa) == corner(&smaa_sharp),
+        "by SMAA, what stands still far from the moving plate blurs"
+    );
+    // Cut to as the camera turns, the moving plate's edges blur by its own motion, a pixel out
+    // from each, and the stripes far from it are as they were.
+    let edge = |x: f32| pixel_of(seen(6.0), size, Vec3::new(x, 0.0, -4.0))[0];
+    for x in [edge(-0.05) - 1, edge(0.95) + 1] {
+        let blurs = apart(&moved_jumped, &moved_turned_sharp, x);
+        assert!(
+            blurs > 0.1,
+            "cut to, the moving plate's edge blurs {blurs} at {x}"
+        );
+    }
+    assert!(
+        corner(&moved_jumped) == corner(&moved_turned_sharp),
+        "cut to, what stands still far from the moving plate blurs"
+    );
+    let on_canvas = |pixels: &[u8]| region(pixels, WIDTH, [8, HEIGHT - 24], [16, 16]);
+    assert!(
+        on_canvas(&blurred) == on_canvas(&sharp) && on_canvas(&turned) == on_canvas(&sharp),
+        "the canvas blurs"
+    );
+    // The stripes, along a row above the plate, right of where the clear color shows past their
+    // end, their least and most nearer each other as the camera turns, and as they were where it
+    // stops turning.
+    let contrast = |pixels: &[u8]| {
+        let row = (WIDTH / 4..WIDTH).map(|x| pixel(pixels, [x, 20])[1]);
+        let (least, most) = row.fold((u8::MAX, 0), |(l, m), v| (l.min(v), m.max(v)));
+        most - least
+    };
+    assert!(
+        contrast(&turned) + 40 < contrast(&turned_sharp),
+        "the stripes keep their contrast as the camera turns: {} against {}",
+        contrast(&turned),
+        contrast(&turned_sharp)
+    );
+    assert!(
+        contrast(&unturned) == contrast(&turned_sharp),
+        "the stripes blur where the camera stands still"
+    );
+    // 3 pixels below the plate's top edge, its color as it is, and 3 above, none of it, whose red is
+    // much more than its blue, where the stripes' is less.
+    let top = pixel_of(seen(6.0), size, Vec3::new(0.45, 0.5, -4.0));
+    let (inside, above) = ([top[0], top[1] + 3], [top[0], top[1] - 3]);
+    assert!(
+        !differs(pixel(&turned, inside), pixel(&turned_sharp, inside), 4),
+        "the plate's top edge blurs into it as the camera turns about its up, at {inside:?}"
+    );
+    let [r, _, b, _] = pixel(&turned, above);
+    assert!(
+        r < b + 10,
+        "the plate's top edge blurs past it as the camera turns about its up, at {above:?}"
+    );
+    compare(
+        "motion_blur",
+        WIDTH * 2,
+        HEIGHT,
+        &side_by_side_of(&[&blurred, &turned], WIDTH, HEIGHT),
+    );
+}
+
+/// A lens over a view of 256 by 144, a unit to a pixel, without a tonemapper, so that what it does
+/// shows as it makes it. Its vignette of 1 over a uniform gray darkens each pixel by the cos⁴ law,
+/// `(1 + (r / R)²)⁻²` of its distance from the middle over the corners', within a step of that,
+/// a quarter at the corners. Its chromatic aberration of 4, over a white rectangle on black left
+/// of the middle, parts red out from the middle by 4% of each pixel's way from it and blue in: red
+/// alone 3 pixels out from its left edge, blue alone just out from its right one, nearer the
+/// middle, white within. Its grain of 0.2 over the gray scales each pixel's light by at most a fifth
+/// either way, its mean within half a percent of the gray's, its standard deviation within a tenth
+/// of the triangular law's, every frame's noise its own, and the
+/// same of a frame's number from one renderer to another. A white square on the canvas, after it,
+/// shows as it's drawn through all three, and over grain of 1 on light at a half float's
+/// brightest, 65,504, which the grain keeps within it. The three together, over gray with white squares round
+/// the view, are compared with their reference.
+fn lenses_vignette_fringe_and_grain_the_view() {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 144;
+    let size = [WIDTH, HEIGHT];
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let viewport = filling(size);
+    // From the view's top left, a unit to a pixel.
+    let rectangle = |min: [f32; 2], max: [f32; 2]| {
+        let middle = Vec2::new(min[0] + max[0], min[1] + max[1]) * 0.5;
+        let at = Vec3::new(
+            middle.x - WIDTH as f32 / 2.0,
+            HEIGHT as f32 / 2.0 - middle.y,
+            0.0,
+        );
+        let side = Vec3::new(max[0] - min[0], max[1] - min[1], 1.0);
+        Mat4::from_scale_rotation_translation(side, Quat::IDENTITY, at)
+    };
+    let white = Vec4::ONE;
+    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    let mut canvas = Draws::default();
+    let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
+        * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
+    canvas.push_sprite(placed, Sprite::default());
+    // `frames` frames of a renderer of its own, of `draws` over `clear` through `lens`, antialiased
+    // as `antialiasing` says.
+    let render_as =
+        |draw: &dyn Fn(&mut Stores) -> Draws, clear: f32, lens, frames: usize, antialiasing| {
+            let mut renderer = renderer(WIDTH, HEIGHT);
+            let mut stores = Stores::default();
+            let draws = draw(&mut stores);
+            settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+            let mut drawn = Vec::new();
+            for _ in 0..frames {
+                let data = RenderData {
+                    clear_color: [clear, clear, clear, 1.0],
+                    lens,
+                    antialiasing,
+                    canvas: &canvas,
+                    ..stores.data(viewport, viewpoint, &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                drawn.push(frame_pixels(&mut renderer));
+            }
+            shut_down(renderer);
+            drawn
+        };
+    let render = |draw: &dyn Fn(&mut Stores) -> Draws, clear, lens, frames| {
+        render_as(draw, clear, lens, frames, Antialiasing::None)
+    };
+    let nothing = |_: &mut Stores| Draws::default();
+    let flat = |stores: &mut Stores| {
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        (flat, square(&mut stores.meshes))
+    };
+    let on_canvas = |pixels: &[u8]| region(pixels, WIDTH, [8, HEIGHT - 24], [16, 16]);
+    let canvas_white = vec![255; 16 * 16 * 4];
+    let vignetted = Lens {
+        vignette: 1.0,
+        ..Lens::NONE
+    };
+    let vignette = render(&nothing, 0.5, vignetted, 1).remove(0);
+    // Antialiased too, the lens reading what the resolve writes for the frame after, or what SMAA
+    // blends.
+    let antialiased = render_as(&nothing, 0.5, vignetted, 4, Antialiasing::Taa).remove(3);
+    let smaa = render_as(&nothing, 0.5, vignetted, 1, Antialiasing::Smaa).remove(0);
+    for [x, y] in [
+        [0, 0],
+        [255, 143],
+        [128, 72],
+        [40, 100],
+        [200, 20],
+        [128, 0],
+    ] {
+        let middle = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - Vec2::new(128.0, 72.0);
+        let away = middle.length() / Vec2::new(128.0, 72.0).length();
+        let lit = 1.0 / (1.0 + away * away);
+        let want = encoded(0.5 * lit * lit);
+        for (frame, way) in [
+            (&vignette, "drawn"),
+            (&antialiased, "antialiased"),
+            (&smaa, "by SMAA"),
+        ] {
+            let got = pixel_at(frame, WIDTH, [x, y]);
+            assert!(
+                (0..3).all(|c| got[c].abs_diff(want) <= 1),
+                "{way}, the vignette makes ({x}, {y}) {got:?}, not {want}"
+            );
+        }
+    }
+    for frame in [&vignette, &antialiased, &smaa] {
+        assert!(on_canvas(frame) == canvas_white, "the canvas is vignetted");
+    }
+    let fringed = Lens {
+        chromatic_aberration: 4.0,
+        ..Lens::NONE
+    };
+    let bar = |stores: &mut Stores| {
+        let (flat, square) = flat(stores);
+        let mut draws = Draws::default();
+        draws.push(square, flat, rectangle([16.0, 16.0], [64.0, 48.0]), white);
+        draws
+    };
+    let fringe = render(&bar, 0.0, fringed, 1).remove(0);
+    let at = |[x, y]: [u32; 2]| pixel_at(&fringe, WIDTH, [x, y]);
+    let [r, g, b, _] = at([13, 32]);
+    assert!(
+        r > 200 && g < 30 && b < 30,
+        "out from the left edge, {:?}",
+        [r, g, b]
+    );
+    let [r, g, b, _] = at([65, 32]);
+    assert!(
+        b > 200 && r < 30 && g < 30,
+        "out from the right edge, {:?}",
+        [r, g, b]
+    );
+    assert!(
+        at([40, 32]).iter().all(|&c| c > 240),
+        "within, {:?}",
+        at([40, 32])
+    );
+    assert!(on_canvas(&fringe) == canvas_white, "the canvas is fringed");
+    let grained = Lens {
+        grain: 0.2,
+        ..Lens::NONE
+    };
+    let grain = render(&nothing, 0.5, grained, 2);
+    let again = render(&nothing, 0.5, grained, 2);
+    assert!(
+        grain == again,
+        "the grain of a frame's number differs from run to run"
+    );
+    assert!(
+        grain[0] != grain[1],
+        "the grain is the same from frame to frame"
+    );
+    let light: Vec<f32> = (grain[1].as_chunks::<4>().0.iter())
+        .map(|pixel| decoded(pixel[1]))
+        .collect();
+    let mean = light.iter().sum::<f32>() / light.len() as f32;
+    assert!((mean - 0.5).abs() < 0.005, "the grain's mean is {mean}");
+    // But the canvas's, which keeps its white.
+    let canvas_pixels = 16 * 16;
+    let strays = light
+        .iter()
+        .filter(|&&l| !(0.39..=0.61).contains(&l))
+        .count();
+    assert!(
+        strays <= canvas_pixels,
+        "{strays} pixels stray past a fifth of the gray's light"
+    );
+    // The grain's spread, of the pixels but the canvas's: within a tenth of the triangular law's
+    // standard deviation, √(1/6), times the most it scales the gray's light by, 0.5 × 0.2, which
+    // the 8 bits' rounding, about a hundredth of it, can't cross either way, and grain of half or
+    // twice as much would.
+    let gray: Vec<f32> = (light.iter().enumerate())
+        .filter(|&(i, _)| {
+            let (x, y) = (i as u32 % WIDTH, i as u32 / WIDTH);
+            !((8..24).contains(&x) && (HEIGHT - 24..HEIGHT - 8).contains(&y))
+        })
+        .map(|(_, &l)| l)
+        .collect();
+    let count = gray.len() as f32;
+    let middle = gray.iter().sum::<f32>() / count;
+    let squares: f32 = gray.iter().map(|&l| (l - middle) * (l - middle)).sum();
+    let deviation = (squares / count).sqrt();
+    let law = 0.5 * 0.2 * (1.0f32 / 6.0).sqrt();
+    assert!(
+        (deviation / law - 1.0).abs() < 0.1,
+        "the grain's standard deviation is {deviation}, against the triangular law's {law}"
+    );
+    assert!(
+        on_canvas(&grain[1]) == canvas_white,
+        "the canvas is grained"
+    );
+    // Over light as bright as a half float holds, grain that would scale it past that keeps it
+    // there, as the canvas, blending over it, would otherwise blend over infinities into no number,
+    // which shows black.
+    let brightest = Lens {
+        grain: 1.0,
+        ..Lens::NONE
+    };
+    let bright = render(&nothing, 65_504.0, brightest, 1).remove(0);
+    assert!(
+        on_canvas(&bright) == canvas_white,
+        "the canvas over grained light at a half float's brightest isn't white"
+    );
+    let all = Lens {
+        vignette: 0.6,
+        chromatic_aberration: 2.0,
+        grain: 0.1,
+    };
+    let squares = |stores: &mut Stores| {
+        let (flat, square) = flat(stores);
+        let mut draws = Draws::default();
+        for [x, y] in [
+            [24.0, 20.0],
+            [216.0, 20.0],
+            [24.0, 108.0],
+            [216.0, 108.0],
+            [120.0, 56.0],
+        ] {
+            draws.push(square, flat, rectangle([x, y], [x + 16.0, y + 16.0]), white);
+        }
+        draws
+    };
+    let together = render(&squares, 0.3, all, 1).remove(0);
+    compare("lens", WIDTH, HEIGHT, &together);
+}
+
+/// `frames`, each read back `width` by `height` pixels, side by side, as a reference holds frames
+/// in a row.
+fn side_by_side_of(frames: &[&[u8]], width: u32, height: u32) -> Vec<u8> {
+    let row = (width * 4) as usize;
+    (0..height as usize)
+        .flat_map(|y| {
+            frames
+                .iter()
+                .flat_map(move |frame| &frame[y * row..(y + 1) * row])
+        })
+        .copied()
+        .collect()
 }
 
 /// A square that covers a view, with a shader that shows the frame's data as colors: where the

@@ -1,0 +1,134 @@
+(
+    entities: {
+        "b89def4723a7042d": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.6, 6.0),
+                rotation: (-0.043619387, 0.0, 0.0, 0.99904823),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "b8fd058a0e01f27e": (
+            ModelRoot: ("97e3b20fb9bf40fb"),
+            Name: ("Spheres"),
+            Transform: (
+                translation: (0.0, 0.0, -0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bba1dbdf9561880a": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate"),
+            Transform: (
+                translation: (-2.6, 0.5, 1.4),
+                rotation: (0.0, 0.21643962, 0.0, 0.976296),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bdf6c8a93a6fd74e": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Transform: (
+                translation: (2.5, 0.2, 1.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c63d1627a7854517": (
+            Environment: (
+                exposure: 14.0,
+                adaptation: None,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Image("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: None,
+                depth_of_field: None,
+                motion_blur: None,
+                lens: (
+                    vignette: 0.6,
+                    chromatic_aberration: 1.0,
+                    grain: 0.08,
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "cf71e3b615747df3": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d4fe8170a0571f8f": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Back wall"),
+            Transform: (
+                translation: (0.0, 1.5, -3.15),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (8.0, 3.0, 0.3),
+            ),
+        ),
+        "dce94192437296c8": (
+            Name: ("Hint"),
+            Text: (
+                text: "A lens and its film: the Environment's lens, its vignette darkening the corners, red and blue parting toward the edges, and grain",
+                font: None,
+                size: 0.15,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.15, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e572eb8fd0d90147": (
+            Name: ("Title"),
+            Text: (
+                text: "Lens",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.55, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

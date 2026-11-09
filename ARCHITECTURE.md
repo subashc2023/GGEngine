@@ -2494,7 +2494,8 @@ thick as the environment's thickness takes what the depth shows to be, 0.25 unit
 toward the view's edges and the ray's reach, and as the ray turns back toward the view, which shows
 nothing behind it; nor does it find the sky, which the sky's own light stands for, or what it meets
 from behind. What it found is the colors the frame before showed, antialiased, temporally or by
-SMAA, before bloom, the grade and the canvas, where it showed then, as that frame's camera saw it: each frame that reflects
+SMAA, before depth of field, motion blur, bloom, the grade, the lens and the canvas, where it showed
+then, as that frame's camera saw it: each frame that reflects
 keeps them, by a pass of its own, in an image of the view's size, and a frame after one that kept
 none, or kept them at another size, traces nothing, as the first that reflects. The trace writes,
 into the first level of the view's reflections, an image of the view's size of up to seven levels,
@@ -2589,8 +2590,8 @@ exact coverage of each pixel, and the search texture's 64 by 16, and written in 
 
 An environment's exposure may adapt to what the view sees, as eyes adapt between sunlight and
 shade, by its adaptation, none by default. Each frame meters the view's light after antialiasing,
-temporal or SMAA, and before it blooms and the canvas draws, as Unreal's histogram exposure
-does, in three compute passes: one empties a histogram of 256 bins, eighths of a stop of luminance from 2^-12
+temporal or SMAA, and after its colors are kept for reflections, and before depth of field, motion
+blur, bloom, the lens and the canvas, as Unreal's histogram exposure does, in three compute passes: one empties a histogram of 256 bins, eighths of a stop of luminance from 2^-12
 candela per square meter to 2^20; one counts each pixel into it, its color taken back through the
 exposure the frame shaded at to the luminance lit shading exposed, a workgroup's own bins first and
 then the histogram's by an atomic add each, what's darker than the lowest bin, as a black sky,
@@ -2659,6 +2660,54 @@ same every frame, so that frames of the same colors write the same, is added to 
 as sRGB, as the view's image encodes it, which is decoded again for the image to encode as it's
 written, breaking the bands a smooth gradient would show while keeping its mean; within a step of
 black or white the noise shrinks to reach no further, so that they stay as they are.
+
+An environment's depth of field, motion blur and lens are the camera's, each off by default and
+costing nothing then, after the view is antialiased, temporally or by SMAA, its colors kept for
+reflections and metered for the exposure, and before the canvas, so that a game's UI is neither
+blurred nor seen through the lens: depth of field, then motion blur, before bloom, as Unreal orders
+them, and the lens after the grade. Depth of field is a thin lens's, of the focal
+length the view's field of view takes on a full-frame camera's sensor, 24 mm high, and of a focus
+distance and an f-number, in the world's units taken as meters, so that a wider aperture, a nearer
+focus or a narrower field of view blurs more, as a camera's do; under the view's reversed infinite
+perspective each pixel's circle of confusion is linear in its depth, and without perspective there's
+no lens and none of it runs. A circle's radius is at most 2% of the view's height. As
+Call of Duty: Advanced Warfare's (Jimenez, "Next Generation Post Processing in Call of Duty: Advanced
+Warfare", 2014), the view is taken to half its size, each texel the mean of its 2 by 2 pixels and the
+nearest one's circle, so that what's thin and near isn't lost; tiles of 8 texels find their largest
+circle before the focus, dilated over the tiles it reaches, since what's near spreads past its own
+edges; then a gather from rings of texels, as many as keep them 1.25 texels apart, up to five, round
+each texel as far as the largest circle that can reach it, splits it into a near field, what's before
+the focus scattered toward it by each circle that covers it, each weighed by 1 over its circle's area,
+premultiplied by how much of the texel it covers, and a far field, what's at or past the focus, each
+circle kept within the texel's own, so that what's behind doesn't spread over what's nearer and
+sharper; a texel of the near field takes as its far field what's round it that isn't, what its blurred
+edge lets show. Each of the view's pixels then lerps toward the far field by its own circle, from 1
+pixel to 2, so that what's in focus keeps the view's own resolution, and takes the near field over
+that. Motion blur is McGuire, Hennessy, Bukowski and Osman's reconstruction filter ("A Reconstruction
+Filter for Plausible Motion Blur", 2012): each pixel's velocity found from the view's depth and motion
+as temporal antialiasing finds it, against the camera of the frame before that blurred the view, as
+though the camera stood still after one that didn't, or where the view is cut to its viewpoint
+from elsewhere, half of it times the shutter's share of the frame, a half by default, how far the
+pixel moves either way while it's open, within a tile's side,
+a 36th of the view's height, 20 pixels at 720; each tile's largest velocity and their neighbors'
+largest; and 15 samples along that either way, jittered by noise of the pixel's that stays from frame
+to frame, weighed by whether each is in front of the pixel or behind it, within a hundredth of the
+nearer's depth, and how far each moves. A headless frame draws a tick, so its motion is a tick's.
+The engine says a frame is cut to its viewpoint where it comes from elsewhere than the frame
+before's, rather than as a camera moves: a tool's look set, changed or cleared, a bare frame among
+the look's and the look's frame after it, the primary camera switched, or the projection turned to
+the other kind, which would otherwise blur every pixel by the jump, a capture of the look's first
+frame among them. A game's teleport of its camera isn't, as nothing says it's one. The
+lens is a compute pass of its own, into colors of its own, as its chromatic aberration reads the
+pixels round each: red spread out from the view's middle and blue drawn in, by a hundredth of the way
+at 1; a vignette by the cos⁴ law of a lens's light off its axis, as Unreal's natural vignetting, the
+view's corners at an angle whose tangent is the vignette's; and grain, each pixel's light scaled by
+triangular noise of a hash of the pixel and the frame's number, alike in every channel, so that the
+same frames of a run take the same noise on any GPU, kept within a half float's largest, as bloom
+and the grade keep theirs. It runs before the canvas, rather than in the tonemap pass, which samples
+the view with its canvas drawn over it. Antialiased, the resolve writes its colors apart from its
+history only where what follows writes them in place: depth of field, or bloom, the grade or the
+canvas without motion blur or the lens, which write colors of their own, before them.
 
 A skinned model's primitive, of glTF's JOINTS_0 and WEIGHTS_0, packs as any model's mesh does, its
 vertices as they were bound, with each vertex's four joints and their weights after them, as

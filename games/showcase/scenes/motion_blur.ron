@@ -1,0 +1,187 @@
+(
+    entities: {
+        "344e554610a3465b": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.8, 6.5),
+                rotation: (-0.087155744, 0.0, 0.0, 0.9961947),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "3627b37c3685fa57": (
+            Name: ("Carousel"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 10.0,
+            ),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4837d43ab21e50ed": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Ball"),
+            Parent: ("3627b37c3685fa57"),
+            Transform: (
+                translation: (1.6, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4d7c9408a5327b6d": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Ball"),
+            Parent: ("3627b37c3685fa57"),
+            Transform: (
+                translation: (-1.6, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "58ff6c59e0e4db30": (
+            ModelRoot: ("98efd58c25cd3a2a"),
+            Name: ("Marble"),
+            Parent: ("3627b37c3685fa57"),
+            Transform: (
+                translation: (0.0, 0.0, 1.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7fe35f61d538cfc8": (
+            ModelRoot: ("98efd58c25cd3a2a"),
+            Name: ("Marble"),
+            Parent: ("3627b37c3685fa57"),
+            Transform: (
+                translation: (0.0, 0.0, -1.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "83f777cc0c566b50": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Spinning crate"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 12.0,
+            ),
+            Transform: (
+                translation: (-2.7, 0.5, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "87944fc8384efc71": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Tumbling torus"),
+            Spin: (
+                axis: (1.0, 0.0, 0.0),
+                speed: 8.0,
+            ),
+            Transform: (
+                translation: (2.7, 0.8, 1.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "94f71bca79283ba7": (
+            Environment: (
+                exposure: 15.0,
+                adaptation: None,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Image("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: None,
+                depth_of_field: None,
+                motion_blur: Some((
+                    shutter: 0.5,
+                )),
+                lens: (
+                    vignette: 0.0,
+                    chromatic_aberration: 0.0,
+                    grain: 0.0,
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "9764b19d0e09d873": (
+            ModelRoot: ("dbb3e3cdedb40fcf"),
+            Name: ("Floor"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9d79a3fea8bdf9bb": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Back wall"),
+            Transform: (
+                translation: (0.0, 1.5, -3.15),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (8.0, 3.0, 0.3),
+            ),
+        ),
+        "a5184610e37a8935": (
+            Name: ("Hint"),
+            Text: (
+                text: "What moves blurs along its way while the shutter's open, half the frame: the Environment's motion blur",
+                font: None,
+                size: 0.16,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.15, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "a97fa5c886c8498b": (
+            Name: ("Title"),
+            Text: (
+                text: "Motion blur",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.55, -2.9),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)
