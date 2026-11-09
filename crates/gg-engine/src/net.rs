@@ -2076,7 +2076,7 @@ fn log_parting(tick: u64, ours: &World, theirs: &World) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -2112,6 +2112,9 @@ mod tests {
         /// and what its link does to what comes.
         rollback: bool,
         link: Option<Conditions>,
+        /// Whether its run was networked as it attached or picked up from a world, each time, in
+        /// order.
+        networked: Rc<RefCell<Vec<(&'static str, bool)>>>,
     }
 
     impl Layer for Game {
@@ -2127,6 +2130,8 @@ mod tests {
         }
 
         fn attach(&mut self, cx: &mut Context) {
+            let networked = cx.networked();
+            self.networked.borrow_mut().push(("attach", networked));
             let score = cx.world_mut().spawn(Score { points: [0; 2] });
             if let Some(scene) = &self.scene {
                 cx.load_scene_file(scene).expect("loaded");
@@ -2134,6 +2139,11 @@ mod tests {
             if self.script.is_some() {
                 cx.world_mut().add_default(score, "Spin").expect("added");
             }
+        }
+
+        fn restored(&mut self, cx: &mut Context) {
+            let networked = cx.networked();
+            self.networked.borrow_mut().push(("restored", networked));
         }
 
         fn tick(&mut self, world: &mut World, _: Tick) {
@@ -2643,6 +2653,51 @@ mod tests {
             panic!("two points: {parting:?}");
         };
         assert_eq!(joiner - host, i64::from(points) - 5, "{parting:?}");
+    }
+
+    /// A lockstep session's host and joiner are networked as their layers attach, and the joiner as
+    /// its layers pick up from its host's world; and so is a host started again from a snapshot of
+    /// its world, as `gg run` restarts a peer, as its layers pick up from it in place of attaching:
+    /// so that a game keeps what only a run alone has, as a player it plays itself, out of a
+    /// session's worlds.
+    #[test]
+    fn peers_are_networked_as_their_layers_attach_and_pick_up() {
+        let seen = |game: &Game| Rc::clone(&game.networked);
+        let game = Game::default();
+        let host_saw = seen(&game);
+        let mut host = Peer::host(Context::seeded(1), game, 1);
+        let address = host.net().listening.expect("listening").to_string();
+        let game = Game::default();
+        let joiner_saw = seen(&game);
+        let mut joiner = Peer::new(&Net::Join(address), Context::seeded(2), game);
+        join(&mut host, &mut joiner);
+        assert_eq!(*host_saw.borrow(), [("attach", true)]);
+        assert_eq!(*joiner_saw.borrow(), [("attach", true), ("restored", true)]);
+
+        let of = crate::snapshot::Of {
+            world: host.cx.world(),
+            scenes: &host.cx.scenes.files,
+            open: &host.cx.scenes.open,
+            scripts: &[],
+            mods: &[],
+        };
+        let playing = &crate::snapshot::Run::Playing;
+        let text = crate::snapshot::write(&of, playing, "Tested", host.stack.names(), host.next);
+        let from = "the host's world".to_owned();
+        let snapshot = crate::snapshot::Snapshot::parse(text.expect("written"), from, "Tested");
+        let game = Game::default();
+        let restarted_saw = seen(&game);
+        let mut stack = Stack::default();
+        stack.push_layer(game);
+        let names = stack.names().to_vec();
+        let net = Net::Host("127.0.0.1:0".to_owned());
+        stack.lockstep(Lockstep::start(&net, "Tested", &names).expect("started"));
+        let mut cx = Context::seeded(3);
+        cx.world_mut().register::<Score>().expect("described");
+        let restored = stack.restore(&mut cx, &snapshot.expect("read"), false);
+        restored.expect("restored");
+        assert!(cx.networked());
+        assert_eq!(*restarted_saw.borrow(), [("restored", true)]);
     }
 
     /// A joiner its host refuses, as of another app, closes its connection and tries again only

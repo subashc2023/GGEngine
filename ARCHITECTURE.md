@@ -1102,7 +1102,9 @@ each predicting its own player. A run given `--host <address>` listens there, an
 `--join <address>` connects to it; the host is player 0 and the joiner player 1, and a server
 gives each client the least player no other client has, as `Context::player` tells a layer, which
 queues commands for its own player alone, naming it in them, since each run runs every player's
-world.
+world. `Context::networked` tells a layer whether its run takes part in a session at all, a
+server's too, whose player is none as a run alone's is, so that what a game sets up for a run
+alone, as Foxball's bot, a session's runs leave out.
 
 - **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
   the joiner's, and the edits from outside the layers that apply before it, as a recording keeps

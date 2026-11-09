@@ -1,24 +1,29 @@
 //! Foxball, the engine's networked 3D demo: two players, each a fox in a walled arena, knocking a
 //! ball into the other's goal, first to five. Run alone, the keys, a pad and the mouse steer player
-//! 0; or networked, in lockstep, a run given `--host <address>` steering player 0 and one given
-//! `--join <address>` player 1, each with its own keys; or as clients of a run given
-//! `--serve <address>`, each given `--connect <address>` steering the player the server gives it,
-//! each fox its player's [`Owner`]. W, A, S and D, or a pad's left stick, walk a fox forward, back and to
-//! its sides; the mouse turns it, the cursor grabbed from a click in the view until Escape, as do Q
-//! and E and the right stick; and Space, a pad's South, or a click with the cursor grabbed kicks
-//! the ball, if it's in front of the fox. The foxes are Khronos's Fox (`models/fox`, CC0 by
-//! PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest under CC
-//! BY 4.0, as its README there says), skinned, blending Survey, Walk and Run by how fast each goes,
-//! characters that rapier3d's controller walks, which push the ball as they walk into it, under
-//! Poly Haven's Kloofendal 48d Partly Cloudy Puresky (`textures/sky.hdr`, CC0); the ball and the
-//! arena are 3D physics, the arena's walls and goals its scene file, `scenes/arena.ron`, which a
-//! development build applies as it's saved, each wall, a goal's pocket's too, an instance of one
-//! prefab, `prefabs/wall.prefab`, placed and sized by its own transform. Each run's view follows
-//! its own fox, a little above and behind it, the mouse looking up and down too. A kick throws a
-//! puff of dust from the ball, a goal a fountain in its scorer's color from the goal's mouth, and a
-//! running fox kicks up dust behind it: emitters of the world, which the game bursts and sets at
-//! its ticks. Its sounds, `sounds/*.wav`, play from where they happen, heard by their direction and
-//! distance from the view: a kick from the ball, a goal from where it went in, and a match won.
+//! 0, and the game's bot plays player 1, its fox running to the ball over the arena's navmesh and
+//! kicking it toward player 0's goal; or networked, both foxes their players', in lockstep, a run
+//! given `--host <address>` steering player 0 and one given `--join <address>` player 1, each with
+//! its own keys; or as clients of a run given `--serve <address>`, each given `--connect <address>`
+//! steering the player the server gives it, each fox its player's [`Owner`]. W, A, S and D, or a
+//! pad's left stick, walk a fox forward, back and to its sides; the mouse turns it, the cursor
+//! grabbed from a click in the view until Escape, as do Q and E and the right stick; and Space, a
+//! pad's South, or a click with the cursor grabbed kicks the ball, if it's in front of the fox.
+//! Escape with the cursor free, or a pad's Start, opens the menu, `ui/menu.ui`, over the match,
+//! which goes on meanwhile, the run's fox standing: Resume, New match and Quit. The scores and the
+//! keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
+//! CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest
+//! under CC BY 4.0, as its README there says), skinned, each played by a state machine, Survey
+//! standing and Walk blended with Run by how fast it goes, characters that rapier3d's controller
+//! walks, which push the ball as they walk into it, under Poly Haven's Kloofendal 48d Partly Cloudy
+//! Puresky (`textures/sky.hdr`, CC0); the ball and the arena are 3D physics, the arena's walls,
+//! goals and navmesh's volume its scene file, `scenes/arena.ron`, which a development build applies
+//! as it's saved, each wall, a goal's pocket's too, an instance of one prefab, `prefabs/wall.prefab`,
+//! placed and sized by its own transform. Each run's view follows its own fox, a little above and
+//! behind it, the mouse looking up and down too. A kick throws a puff of dust from the ball, a goal
+//! a fountain in its scorer's color from the goal's mouth, and a running fox kicks up dust behind
+//! it: emitters of the world, which the game bursts and sets at its ticks. Its sounds,
+//! `sounds/*.wav`, play from where they happen, heard by their direction and distance from the
+//! view: a kick from the ball, a goal from where it went in, and a match won.
 
 // A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
 // records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
@@ -31,14 +36,16 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use gg_engine::math::libm::expf;
-use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::libm::{atan2f, expf};
+use gg_engine::math::{Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, Align, Animator, App, Binding, CapsuleCollider3D, Change, CharacterController3D,
-    Commands, Component, Context, EmitterShape, Entity, Error, Event, Font, Key, Layer, Model,
-    MouseButton, Name, Owner, PadButton, Parent, ParticleBlend, ParticleEmitter, Place, Play,
-    Projection, Reflect, RigidBody3D, Sound, Source, Stick, TextStyle, Tick, Toward, Transform,
-    Viewpoint, World, step_animation, step_physics,
+    Actions, AnimationParam, AnimationState, AnimationStates, Animator, App, Binding, BlendPoint,
+    CapsuleCollider3D, Change, CharacterController3D, Commands, Component, Context, EmitterShape,
+    Entity, Error, Event, GameUi, Key, Layer, Model, MouseButton, Name, NavAgent, Owner, PadButton,
+    ParamCondition, ParamTest, ParamValue, Parent, ParticleBlend, ParticleEmitter, Place, Play,
+    Playback, Projection, Reflect, RigidBody3D, Sound, Source, StateMotion, StateTransition, Stick,
+    Tick, Toward, Transform, UiEvent, Viewpoint, World, step_animation, step_navigation,
+    step_physics,
 };
 
 #[cfg(test)]
@@ -66,10 +73,6 @@ const GOAL: f32 = 2.0;
 /// How far past its end's wall the ball's middle goes into a goal to count.
 const GOAL_DEPTH: f32 = 0.45;
 
-/// Each player's color, in linear RGB: blue and orange, which the emitters of the goals' mouths in
-/// `scenes/arena.ron` burst in too, brightened.
-const COLORS: [[f32; 3]; 2] = [[0.15, 0.55, 1.0], [1.0, 0.45, 0.1]];
-
 /// Where each player's fox starts, and goes back to after each goal, and the way it faces then: 0
 /// along +Z, player 0 toward the far goal, which it attacks, and player 1 toward the near one.
 const STARTS: [(Vec3, f32); 2] = [
@@ -89,6 +92,13 @@ const FOX_SCALE: f32 = 0.02;
 /// How fast a fox runs, in units a second, and how fast it walks as Walk alone plays.
 const RUN_SPEED: f32 = 5.0;
 const WALK_SPEED: f32 = 1.6;
+
+/// A fox's state machine, as [`states`] makes it: the name of its parameter that [`animate`] sets
+/// to how fast the fox goes across, in units a second; how fast it goes to leave `Idle` for `Move`,
+/// and slower than which it goes back; and the seconds each fades into the other.
+const SPEED: &str = "speed";
+const MOVING: f32 = 0.25;
+const STATE_FADE: f32 = 0.2;
 
 /// The dust a fox kicks up behind its feet as it runs: where its emitter is from the capsule's
 /// middle, the puffs a second it gives at the fox's running speed, fewer as it runs slower and none
@@ -138,6 +148,41 @@ const BALL_DRAG: f32 = 0.6;
 /// How many goals win a match.
 const WINS_AT: u32 = 5;
 
+/// The player whose fox the game's bot plays in a run alone, whose own keys steer player 0.
+const BOT_PLAYER: u8 = 1;
+
+/// The game's bot: how fast it runs, a little slower than a player, in units a second; how fast it
+/// turns, in radians a second; and every how many ticks it sees where the ball is, its reaction,
+/// heading where that says until it next does.
+const BOT_SPEED: f32 = 4.6;
+const BOT_TURN_SPEED: f32 = 7.0;
+const BOT_REACTION: u32 = 6;
+
+/// Where the bot goes about the ball, in units from the ball's middle: how far behind it, from the
+/// goal the bot attacks, it lines up, and how near that counts as there; and how far to the ball's
+/// side it keeps as it goes round it to get behind it.
+const BOT_BEHIND: f32 = 0.9;
+const BOT_LINED: f32 = 0.45;
+const BOT_CLEAR: f32 = 1.25;
+
+/// How near the ball the bot faces it, rather than the way it goes, while the ball is ahead of it
+/// toward where it aims; and how near facing there it kicks, as the cosine of the angle it faces
+/// away from it.
+const BOT_CLOSE: f32 = 2.0;
+const BOT_AIM: f32 = 0.85;
+
+/// Where the bot aims, as [`aim`] chooses: how far to either side of the middle of a goal's mouth
+/// it aims at its sides, inside the posts by more than the ball's radius; how far from its way the
+/// other foxes must stand for it to shoot, more than a fox's radius and the ball's; and how far to
+/// the side of a fox in its way, where every way is, it kicks the ball past it.
+const BOT_POST: f32 = 1.3;
+const BOT_OPEN: f32 = 0.9;
+const BOT_PAST: f32 = 2.2;
+
+/// How far inside the field's walls the bot heads, so that its capsule fits, but into a goal's
+/// mouth, where it heads as far as a unit past the field's end, through the ball.
+const BOT_MARGIN: f32 = 0.5;
+
 /// The view behind a run's own fox: how far back it is, how high above the fox's middle it looks
 /// at, and how far it looks down, as it starts, and the least and most, in radians.
 const VIEW_DISTANCE: f32 = 5.0;
@@ -149,11 +194,8 @@ const VIEW_PITCHES: (f32, f32) = (-0.25, 1.2);
 /// each second as `1 - e^(-rate)`: smoothing the ticks' steps between frames.
 const VIEW_FOLLOW: f32 = 14.0;
 
-/// The scores on the canvas, in its units: how far they are from the view's top corners, and how
-/// tall a score's em is and its matches won's, below it.
-const HUD_INSET: f32 = 40.0;
-const SCORE_SIZE: f32 = 80.0;
-const WINS_SIZE: f32 = 32.0;
+/// The texts of `ui/menu.ui` that say each player's goals and matches won, by its index.
+const SCORES: [(&str, &str); 2] = [("blue_score", "blue_wins"), ("orange_score", "orange_wins")];
 
 /// A player's fox, the character its capsule is: which player steers it, which way the keys or a
 /// stick walk it, how fast it turns, the way it faces, and the ticks until its next kick.
@@ -167,6 +209,17 @@ struct Player {
     /// Its turn to its left about the world's up, in radians, from facing +Z.
     yaw: f32,
     cooldown: u32,
+}
+
+/// The game's bot, on the fox it plays, beside the [`NavAgent`] that walks the fox, as
+/// [`play_bots`] has it play: from the world as each tick finds it alone, as determinism needs.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Bot {
+    /// The ticks until it next sees where the ball is, and chooses where it aims and where its
+    /// agent heads.
+    wait: u32,
+    /// Where it means to kick the ball, as [`aim`] chose last, along the ground.
+    aim: Vec3,
 }
 
 /// The ball, which the foxes push and kick, and whose emitter bursts as it's kicked.
@@ -186,8 +239,8 @@ struct Match {
     wins: [u32; 2],
 }
 
-/// What the players' keys, pads and mice do, queued as commands for the next tick, each naming its
-/// player, which a recording and a lockstep peer keep.
+/// What the players' keys, pads, mice and menus do, and what a run alone sets up, queued as
+/// commands for the next tick, each naming its player, which a recording and a lockstep peer keep.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 enum Command {
     /// Has the player's fox walk this way, until the next: across to its right and up forward.
@@ -198,6 +251,12 @@ enum Command {
     Turn { player: u8, by: f32 },
     /// Has the player's fox kick the ball, if it can.
     Kick { player: u8 },
+    /// Starts a match afresh, for both players, as the player's menu's New match chooses.
+    NewMatch { player: u8 },
+    /// Has the game's bot play the player's fox from then on, as a run alone queues for
+    /// [`BOT_PLAYER`] as it attaches, so that its recording keeps it and a session's runs, whose
+    /// players are all people, have none.
+    Bot { player: u8 },
 }
 
 /// What the keys and pads do.
@@ -209,6 +268,8 @@ enum Act {
     Spin,
     /// Space and South.
     Kick,
+    /// Start, which opens and closes the menu, as Escape does with the cursor free.
+    Menu,
 }
 
 /// The game's sounds, from its `sounds` folder: a kick, a goal and a match won.
@@ -219,19 +280,20 @@ struct Sounds {
     win: Sound,
 }
 
-/// What the game loads: its sounds, its font and the fox.
+/// What the game loads: its sounds, the fox, and its UI, the scores, the keys' hint and the menu.
 struct Assets {
     sounds: Sounds,
-    font: Font,
     fox: Model,
+    ui: GameUi,
 }
 
 /// The game's layer: it builds the match and the players' foxes as it attaches, in the arena its
-/// start scene holds; applies each player's commands at each tick, walking, turning and kicking,
-/// then blends each fox's clips by how fast it goes, steps animation and physics, and counts the
-/// goals; and as it updates, has the view follow this run's fox and draws the scores. An asset of
-/// its own, or its start scene, that doesn't load ends the run with its error, through
-/// [`Context::fail`].
+/// start scene holds, and run alone, queues player 1's for its bot; applies each player's commands
+/// at each tick, walking, turning and kicking, has the bots play, steps navigation, sets each fox's
+/// state machine's speed, steps animation and physics, and counts the goals; and as it updates, has
+/// the view follow this run's fox and draws its UI, the scores, the hint and the menu while it's
+/// open. An asset of its own, or its start scene, that doesn't load ends the run with its error,
+/// through [`Context::fail`].
 struct Foxball {
     /// The player this run's keys steer: 0, unless it joined a lockstep session or a server gave
     /// it another.
@@ -241,8 +303,10 @@ struct Foxball {
     /// Once loaded.
     assets: Option<Assets>,
     /// Whether this run wants the cursor grabbed, for the mouse to turn its fox: from a click in
-    /// the view until Escape.
+    /// the view until Escape, or the menu opening.
     grab: bool,
+    /// Whether the menu is open: this run's own, as a lockstep peer's is its own.
+    menu: bool,
     /// How far this run's view looks down, which the mouse moves: this run's own, as it's no part
     /// of the world.
     pitch: f32,
@@ -250,6 +314,12 @@ struct Foxball {
     seen: Option<Vec3>,
     /// The scores' text, written again in its memory each frame.
     text: String,
+    /// Each fox's player and place at a tick, gathered before the bots see them, the players whose
+    /// bots kick, before they kick, and each fox's speed, before its state machine and dust are
+    /// given it: kept, so that ticks reuse their room.
+    foxes: Vec<(u8, Vec3)>,
+    kicks: Vec<u8>,
+    speeds: Vec<(Entity, f32)>,
 }
 
 impl Foxball {
@@ -267,6 +337,7 @@ impl Foxball {
             negative: Source::PadStick(Stick::Right, Toward::Left),
             positive: Source::PadStick(Stick::Right, Toward::Right),
         };
+        let pad = |button| Binding::Button(Source::PadButton(button));
         let bound = [
             (Act::Walk, Binding::WASD),
             (Act::Walk, arrows),
@@ -274,10 +345,8 @@ impl Foxball {
             (Act::Spin, spin_keys),
             (Act::Spin, spin_stick),
             (Act::Kick, Binding::Button(Source::Key(Key::Space))),
-            (
-                Act::Kick,
-                Binding::Button(Source::PadButton(PadButton::South)),
-            ),
+            (Act::Kick, pad(PadButton::South)),
+            (Act::Menu, pad(PadButton::Start)),
         ]
         .into_iter()
         .try_for_each(|(action, binding)| actions.bind(action, binding));
@@ -288,14 +357,18 @@ impl Foxball {
             commands: Vec::new(),
             assets: None,
             grab: false,
+            menu: false,
             pitch: VIEW_PITCH,
             seen: None,
             text: String::new(),
+            foxes: Vec::new(),
+            kicks: Vec::new(),
+            speeds: Vec::new(),
         }
     }
 
-    /// Loads the game's sounds, font and fox, and registers its components. Fails with the first
-    /// that doesn't load.
+    /// Loads the game's sounds, fox and UI, which takes no input until the menu opens, and
+    /// registers its components. Fails with the first that doesn't load.
     fn load_game(&mut self, cx: &mut Context) -> Result<(), Error> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let sound = |cx: &mut Context, name: &str| {
@@ -306,10 +379,11 @@ impl Foxball {
             goal: sound(cx, "goal")?,
             win: sound(cx, "win")?,
         };
-        let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"))?;
         let fox = cx.add_model("Fox", root.join("models/fox/Fox.gltf"))?;
+        let ui = cx.add_ui("menu", root.join("ui/menu.ui"))?;
+        ui.set_input(cx, false);
         register(cx.world_mut());
-        self.assets = Some(Assets { sounds, font, fox });
+        self.assets = Some(Assets { sounds, fox, ui });
         Ok(())
     }
 
@@ -322,6 +396,29 @@ impl Foxball {
             _ => None,
         });
         turns.sum()
+    }
+
+    /// Opens or closes the menu, as `open` says: its UI shown and taking input while it's open, the
+    /// cursor let go as it opens, and this run's fox standing, its walk and turn queued at rest,
+    /// then queued as the keys and sticks are held as it closes.
+    fn open_menu(&mut self, cx: &mut Context, open: bool) {
+        self.menu = open;
+        self.grab &= !open;
+        let player = self.player;
+        let (heading, rate) = if open {
+            (Vec2::ZERO, 0.0)
+        } else {
+            (self.actions.axis2(Act::Walk), self.actions.axis(Act::Spin))
+        };
+        self.commands.extend([
+            Command::Walk { player, heading },
+            Command::Spin { player, rate },
+        ]);
+        if let Some(assets) = &self.assets {
+            // A file edited to drop the menu shows none.
+            let _ = assets.ui.set_visible(cx, "menu", open);
+            assets.ui.set_input(cx, open);
+        }
     }
 }
 
@@ -346,10 +443,16 @@ impl Layer for Foxball {
         if let Some(assets) = &self.assets {
             build(cx.world_mut(), assets.fox);
         }
+        if !cx.networked() {
+            let player = BOT_PLAYER;
+            self.commands.push(Command::Bot { player });
+        }
     }
 
     /// Takes back which player this run steers, which a joiner's world, the host's, and a client's,
-    /// the server's, don't say, and lets go of what may have been held as the world was taken.
+    /// the server's, don't say, and lets go of what may have been held as the world was taken; and,
+    /// run alone, queues the bot again for a world without one, as the world as edited is, which
+    /// Stop brings back.
     fn restored(&mut self, cx: &mut Context) {
         self.player = cx.player().unwrap_or(0);
         let player = self.player;
@@ -360,6 +463,10 @@ impl Layer for Foxball {
             },
             Command::Spin { player, rate: 0.0 },
         ]);
+        if !cx.networked() && cx.world().query::<&Bot>().next().is_none() {
+            let player = BOT_PLAYER;
+            self.commands.push(Command::Bot { player });
+        }
     }
 
     fn tick(&mut self, world: &mut World, _: Tick) {
@@ -368,9 +475,11 @@ impl Layer for Foxball {
         for command in self.commands.drain(..) {
             apply(world, &command, sounds);
         }
+        play_bots(world, sounds, &mut self.foxes, &mut self.kicks);
         walk(world, Tick::DT);
         roll(world, Tick::DT);
-        animate(world);
+        step_navigation(world);
+        animate(world, &mut self.speeds);
         step_animation(world);
         step_physics(world);
         score(world, sounds);
@@ -381,7 +490,7 @@ impl Layer for Foxball {
     }
 
     /// Grabs the cursor while this run wants it, has the view follow this run's fox, and draws the
-    /// scores.
+    /// UI: the scores, the hint for the cursor as it's grabbed or not, and the menu while it's open.
     fn update(&mut self, cx: &mut Context, dt: Duration) {
         cx.set_cursor_grabbed(self.grab);
         let turning = self.turning();
@@ -399,15 +508,29 @@ impl Layer for Foxball {
         let Some(assets) = &self.assets else {
             return;
         };
-        let font = assets.font;
+        let ui = assets.ui;
         if let Some(&found) = cx.world().query::<&Match>().next() {
-            draw_scores(cx, &found, font, &mut self.text);
-            draw_hint(cx, font, self.grab);
+            write_scores(cx, ui, &found, &mut self.text);
         }
+        // Nodes a file edited to drop them goes without.
+        let _ = ui.set_visible(cx, "hint", !self.grab && !self.menu);
+        let _ = ui.set_visible(cx, "hint_grabbed", self.grab && !self.menu);
+        ui.draw(cx);
     }
 
-    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        // Queued now, rather than at the next update, so that the next tick applies them.
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        let open = self.menu;
+        // What the menu makes of the event while it's open: a button pressed, or back.
+        let (mut chosen, mut toggled) = (None, false);
+        if open && let Some(assets) = &self.assets {
+            match assets.ui.event(cx, event) {
+                Some(UiEvent::Pressed(button)) => chosen = Some(button),
+                Some(UiEvent::Back) => toggled = true,
+                Some(UiEvent::Focused(_)) | None => {}
+            }
+        }
+        // Queued now, rather than at the next update, so that the next tick applies them; none
+        // while the menu's open, the fox standing.
         let Self {
             player,
             actions,
@@ -418,12 +541,16 @@ impl Layer for Foxball {
         } = self;
         let player = *player;
         actions.event(event, |change| match change {
+            Change::Pressed(Act::Menu) => toggled = true,
+            _ if open => {}
             Change::Axis2(Act::Walk, heading) => commands.push(Command::Walk { player, heading }),
             Change::Axis(Act::Spin, rate) => commands.push(Command::Spin { player, rate }),
             Change::Pressed(Act::Kick) => commands.push(Command::Kick { player }),
             _ => {}
         });
         match *event {
+            // The menu's, while it's open.
+            _ if open => {}
             // A click grabs the cursor, and with it grabbed, kicks.
             Event::MouseButton {
                 button: MouseButton::Left,
@@ -434,11 +561,18 @@ impl Layer for Foxball {
                 }
                 *grab = true;
             }
+            // Escape lets go of the cursor, if it's grabbed, or else opens the menu.
             Event::Key {
                 key: Key::Escape,
                 pressed: true,
-                ..
-            } => *grab = false,
+                repeat,
+            } => {
+                if *grab {
+                    *grab = false;
+                } else if !repeat {
+                    toggled = true;
+                }
+            }
             // Each tick turns the fox once, by the motion since the tick before; up and down is
             // the view's alone.
             Event::MouseMotion { x, y } if *grab => {
@@ -457,6 +591,18 @@ impl Layer for Foxball {
             }
             _ => {}
         }
+        match chosen.as_deref() {
+            Some("resume") => toggled = true,
+            Some("new_match") => {
+                self.commands.push(Command::NewMatch { player });
+                toggled = true;
+            }
+            Some("quit") => cx.exit(),
+            _ => {}
+        }
+        if toggled {
+            self.open_menu(cx, !open);
+        }
         ControlFlow::Continue(())
     }
 }
@@ -465,6 +611,7 @@ impl Layer for Foxball {
 /// before any entity has one.
 fn register(world: &mut World) {
     let registered = world.register::<Player>().and_then(|()| {
+        world.register::<Bot>()?;
         world.register::<Ball>()?;
         world.register::<Goal>()?;
         world.register::<Match>()
@@ -474,7 +621,8 @@ fn register(world: &mut World) {
 
 /// Builds what the arena's scene doesn't hold: the match, and each player's fox at its start, a
 /// character's capsule with `fox`'s model under it, its feet at the capsule's bottom, its clips
-/// played by an animator, which [`animate`] blends, and its dust behind them.
+/// played by an animator, which its state machine drives, as [`states`] makes it, and its dust
+/// behind them.
 fn build(world: &mut World, fox: Model) {
     world.spawn((
         Match {
@@ -517,7 +665,8 @@ fn build(world: &mut World, fox: Model) {
         let model = fox.spawn(world, feet);
         let named = world.insert(model, Name(format!("Fox {}", index + 1)));
         let played = named.and_then(|()| world.insert(model, Animator(vec![Play::new("Survey")])));
-        let parented = played.and_then(|()| world.set_parent(model, Some(body)));
+        let driven = played.and_then(|()| world.insert(model, states()));
+        let parented = driven.and_then(|()| world.set_parent(model, Some(body)));
         parented.expect("the fox and its body, just spawned");
         let behind = Transform {
             translation: DUST_AT,
@@ -529,17 +678,65 @@ fn build(world: &mut World, fox: Model) {
     }
 }
 
+/// A fox's state machine: `Idle`, Survey alone, while it goes slower than [`MOVING`], and `Move`,
+/// Walk at [`WALK_SPEED`] blended with Run at [`RUN_SPEED`] along its [`SPEED`], as fast or faster,
+/// each fading into the other over [`STATE_FADE`] seconds. Survey stays out of the blend, whose
+/// clips keep in step, as a pose that stands would be sped up or slowed down with them.
+fn states() -> AnimationStates {
+    let state = |name: &str, motion| AnimationState {
+        name: name.to_owned(),
+        motion,
+        speed: 1.0,
+        playback: Playback::Loop,
+    };
+    let point = |clip: &str, at| BlendPoint {
+        clip: clip.to_owned(),
+        at,
+    };
+    let moving = StateMotion::Blend {
+        param: SPEED.to_owned(),
+        points: vec![point("Walk", WALK_SPEED), point("Run", RUN_SPEED)],
+    };
+    let transition = |from: &str, to: &str, test| StateTransition {
+        from: Some(from.to_owned()),
+        to: to.to_owned(),
+        conditions: vec![ParamCondition {
+            param: SPEED.to_owned(),
+            test,
+        }],
+        exit_time: None,
+        fade: STATE_FADE,
+    };
+    AnimationStates {
+        params: vec![AnimationParam {
+            name: SPEED.to_owned(),
+            value: ParamValue::Float(0.0),
+        }],
+        states: vec![
+            state("Idle", StateMotion::Clip("Survey".to_owned())),
+            state("Move", moving),
+        ],
+        transitions: vec![
+            transition("Idle", "Move", ParamTest::Above(MOVING)),
+            transition("Move", "Idle", ParamTest::Below(MOVING)),
+        ],
+        state: String::new(),
+        time: 0.0,
+    }
+}
+
 /// Applies `command` to `world`: to its player's fox, which way it walks, how fast it turns, a turn
-/// or a kick, which sends the ball forward and up if it's in front of the fox, bursts the ball's
-/// emitter and plays `sounds`' kick from it.
+/// or a kick, as [`kick`] has it; a new match, as [`new_match`] has it; or the bot, as [`give_bot`]
+/// has it.
 fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
     let player = match *command {
+        Command::Kick { player } => return kick(world, player, sounds),
+        Command::NewMatch { .. } => return new_match(world),
+        Command::Bot { player } => return give_bot(world, player),
         Command::Walk { player, .. }
         | Command::Spin { player, .. }
-        | Command::Turn { player, .. }
-        | Command::Kick { player } => player,
+        | Command::Turn { player, .. } => player,
     };
-    let mut kicker = None;
     let players = world.query_mut::<(&mut Player, &mut Transform)>();
     for (fox, at) in players.filter(|(fox, _)| fox.index == player) {
         match *command {
@@ -549,23 +746,29 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
                 fox.yaw = wrapped(fox.yaw - by);
                 at.rotation = Quat::from_rotation_y(fox.yaw);
             }
-            Command::Kick { .. } if fox.cooldown == 0 => {
-                kicker = Some((at.translation, fox.yaw));
-                fox.cooldown = KICK_EVERY;
-            }
-            Command::Kick { .. } => {}
+            Command::Kick { .. } | Command::NewMatch { .. } | Command::Bot { .. } => {}
         }
+    }
+}
+
+/// Has player `player`'s fox kick, if its cooldown has passed, which it then waits again: the ball,
+/// if the fox [`reaches`] it, goes forward and up, its emitter bursting and `sounds`' kick playing
+/// from it.
+fn kick(world: &mut World, player: u8, sounds: Option<Sounds>) {
+    let mut kicker = None;
+    let players = world.query_mut::<(&mut Player, &Transform)>();
+    for (fox, at) in players.filter(|(fox, _)| fox.index == player && fox.cooldown == 0) {
+        kicker = Some((at.translation, fox.yaw));
+        fox.cooldown = KICK_EVERY;
     }
     let Some((from, yaw)) = kicker else {
         return;
     };
     let forward = Quat::from_rotation_y(yaw) * Vec3::Z;
-    let front = from + forward * CAPSULE.1;
     let balls = world.query_mut::<(Entity, &Ball, &Transform, &mut RigidBody3D)>();
     let mut kicked = None;
     for (ball, _, at, body) in balls {
-        let flat = Vec3::new(at.translation.x, front.y, at.translation.z);
-        if flat.distance(front) < KICK_REACH && (at.translation.y - from.y).abs() < 1.0 {
+        if reaches(from, yaw, at.translation) {
             body.velocity = forward * KICK_SPEED + Vec3::Y * KICK_LIFT;
             kicked = Some(ball);
         }
@@ -579,6 +782,203 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
     if let Some(sounds) = sounds {
         world.play_sound(sounds.kick, Place::On(ball));
     }
+}
+
+/// Whether a fox whose middle is at `from`, facing `yaw`, reaches the ball at `ball` with a kick:
+/// the ball's middle within [`KICK_REACH`] across of just in front of the fox, and within a unit of
+/// the fox's middle up or down.
+fn reaches(from: Vec3, yaw: f32, ball: Vec3) -> bool {
+    let forward = Quat::from_rotation_y(yaw) * Vec3::Z;
+    let front = from + forward * CAPSULE.1;
+    let flat = Vec3::new(ball.x, front.y, ball.z);
+    flat.distance(front) < KICK_REACH && (ball.y - from.y).abs() < 1.0
+}
+
+/// Starts a match afresh, as a menu's New match chooses: no goals and no matches won for either
+/// player, and the ball and the foxes back at their starts.
+fn new_match(world: &mut World) {
+    if let Some(found) = world.query_mut::<&mut Match>().next() {
+        found.scores = [0; 2];
+        found.wins = [0; 2];
+    }
+    to_starts(world);
+}
+
+/// Has the game's bot play player `player`'s fox from then on, unless one does already: a [`Bot`]
+/// on its capsule, which sees the ball at its first tick, and a [`NavAgent`] as wide as the
+/// capsule, which runs as fast as [`BOT_SPEED`].
+fn give_bot(world: &mut World, player: u8) {
+    let found = (world.query::<(Entity, &Player)>()).find(|(_, fox)| fox.index == player);
+    let Some(fox) = found.map(|(fox, _)| fox) else {
+        return;
+    };
+    if world.get::<Bot>(fox).is_some() {
+        return;
+    }
+    let agent = NavAgent {
+        speed: BOT_SPEED,
+        radius: CAPSULE.1,
+        stopping_distance: 0.15,
+        ..NavAgent::default()
+    };
+    let bot = Bot {
+        wait: 0,
+        aim: Vec3::ZERO,
+    };
+    let given = world
+        .insert(fox, bot)
+        .and_then(|()| world.insert(fox, agent));
+    given.expect("the fox, just found");
+}
+
+/// `v` along the ground: its height dropped.
+fn flat(v: Vec3) -> Vec3 {
+    Vec3::new(v.x, 0.0, v.z)
+}
+
+/// Plays each fox a [`Bot`] is on: every [`BOT_REACTION`] ticks it sees where the ball and the
+/// foxes are, chooses where it aims, as [`aim`] says, and sets where its [`NavAgent`] heads, as
+/// [`bot_destination`] says, the agent steering its character there; at every tick it turns its
+/// fox, at up to [`BOT_TURN_SPEED`], toward the ball while it's near and ahead toward where it
+/// aims, or else the way the agent goes, or else the ball; and it kicks, as a player's kick does,
+/// gathering its player in `kicks` first, while the fox faces near where it aims and [`reaches`]
+/// the ball. It decides from the world alone, in `f32` arithmetic, libm's arctangent and
+/// comparisons, as peers and replays must agree. `foxes` is where it gathers each fox's player and
+/// place first.
+fn play_bots(
+    world: &mut World,
+    sounds: Option<Sounds>,
+    foxes: &mut Vec<(u8, Vec3)>,
+    kicks: &mut Vec<u8>,
+) {
+    let ball = world.query::<(&Ball, &Transform)>().next();
+    let Some(ball) = ball.map(|(_, at)| at.translation) else {
+        return;
+    };
+    foxes.clear();
+    let placed = world.query::<(&Player, &Transform)>();
+    foxes.extend(placed.map(|(fox, at)| (fox.index, at.translation)));
+    let most = BOT_TURN_SPEED * Tick::DT.as_secs_f32();
+    let bots = world.query_mut::<(&mut Bot, &mut Player, &mut Transform, &mut NavAgent)>();
+    for (bot, fox, transform, agent) in bots {
+        let at = transform.translation;
+        // Player 0 attacks the far goal, at +Z, and player 1 the near one.
+        let toward = if fox.index == 0 { 1.0 } else { -1.0 };
+        if bot.wait == 0 {
+            bot.aim = aim(ball, toward * FIELD.y, foxes, fox.index);
+        }
+        let attack = flat(bot.aim - ball).normalize_or(Vec3::Z * toward);
+        if bot.wait == 0 {
+            agent.destination = Some(bot_destination(at, ball, attack));
+            bot.wait = BOT_REACTION - 1;
+        } else {
+            bot.wait -= 1;
+        }
+        let to_ball = flat(ball - at);
+        let near = to_ball.length() < BOT_CLOSE && to_ball.dot(attack) > 0.0;
+        let way = if near || agent.velocity.length() < 0.5 {
+            to_ball
+        } else {
+            agent.velocity
+        };
+        if way.length_squared() > 1e-4 {
+            let turn = wrapped(atan2f(way.x, way.z) - fox.yaw).clamp(-most, most);
+            if turn != 0.0 {
+                fox.yaw = wrapped(fox.yaw + turn);
+                transform.rotation = Quat::from_rotation_y(fox.yaw);
+            }
+        }
+        let forward = Quat::from_rotation_y(fox.yaw) * Vec3::Z;
+        if fox.cooldown == 0 && forward.dot(attack) > BOT_AIM && reaches(at, fox.yaw, ball) {
+            kicks.push(fox.index);
+        }
+    }
+    for player in kicks.drain(..) {
+        kick(world, player, sounds);
+    }
+}
+
+/// Where a bot of player `own` aims the ball at `ball`, the goal it attacks at `end` along Z, the
+/// other foxes as `foxes` places them: the middle of the goal's mouth or [`BOT_POST`] to either
+/// side, whichever way from the ball the other foxes ahead of it stand farthest from, the first of
+/// those as far; or, where each stands nearer one than [`BOT_OPEN`], [`BOT_PAST`] to the side of
+/// the fox nearest that way, the side the ball is on, so that it shoots again from past it. All
+/// along the ground.
+fn aim(ball: Vec3, end: f32, foxes: &[(u8, Vec3)], own: u8) -> Vec3 {
+    let from = flat(ball);
+    // How far the nearest other fox ahead of the ball stands from its way to `to`, and that fox.
+    let room = |to: Vec3| {
+        let way = to - from;
+        let mut nearest = (f32::INFINITY, None);
+        for &(_, at) in foxes.iter().filter(|&&(index, _)| index != own) {
+            let along = flat(at - from).dot(way) / way.length_squared();
+            if along.is_nan() || along <= 0.0 {
+                continue;
+            }
+            let along = if along < 1.0 { along } else { 1.0 };
+            let off = flat(at - (from + way * along)).length();
+            if off < nearest.0 {
+                nearest = (off, Some(at));
+            }
+        }
+        nearest
+    };
+    let mut best = (f32::NEG_INFINITY, Vec3::ZERO, None);
+    for x in [0.0, -BOT_POST, BOT_POST] {
+        let to = Vec3::new(x, 0.0, end);
+        let (off, nearest) = room(to);
+        if off > best.0 {
+            best = (off, to, nearest);
+        }
+    }
+    match best {
+        (off, _, Some(blocker)) if off < BOT_OPEN => {
+            let side = if ball.x < blocker.x { -1.0 } else { 1.0 };
+            let inside = FIELD.x - 1.0;
+            let x = (blocker.x + side * BOT_PAST).clamp(-inside, inside);
+            Vec3::new(x, 0.0, blocker.z)
+        }
+        (_, to, _) => to,
+    }
+}
+
+/// Where a bot whose fox is at `at` heads, the ball at `ball` and `attack` the way from it toward
+/// where the bot aims, along the ground, of unit length: on that side of the ball, or beside it,
+/// out of the ball's way, [`BOT_CLEAR`] to its side, then round it to as far behind it as
+/// [`BOT_BEHIND`]; behind it, to that far behind it, lined up with its aim; and lined up, on
+/// through the ball as far again. It keeps [`BOT_MARGIN`] inside the field, but in front of a
+/// goal's mouth, where it goes as far as a unit past the field's end; at the fox's height, as an
+/// agent's middle stands above its floor.
+fn bot_destination(at: Vec3, ball: Vec3, attack: Vec3) -> Vec3 {
+    let from_ball = flat(at - ball);
+    let along = from_ball.dot(attack);
+    let aside = from_ball - attack * along;
+    let off = aside.length();
+    // Its own side of the ball, or the right of the way to the goal, facing it, where it's on it.
+    let out = if off > 1e-3 {
+        aside / off
+    } else {
+        Vec3::new(-attack.z, 0.0, attack.x)
+    };
+    let behind = ball - attack * BOT_BEHIND;
+    let to = if along > -BOT_BEHIND / 2.0 {
+        if off < BOT_CLEAR {
+            ball + out * BOT_CLEAR + attack * along.clamp(-BOT_BEHIND, BOT_BEHIND)
+        } else {
+            ball + out * BOT_CLEAR - attack * BOT_BEHIND
+        }
+    } else if flat(at - behind).length() > BOT_LINED {
+        behind
+    } else {
+        ball + attack * BOT_BEHIND
+    };
+    let x = to.x.clamp(BOT_MARGIN - FIELD.x, FIELD.x - BOT_MARGIN);
+    let long = if x.abs() < GOAL - BOT_MARGIN {
+        FIELD.y + 1.0
+    } else {
+        FIELD.y - BOT_MARGIN
+    };
+    Vec3::new(x, at.y, to.z.clamp(-long, long))
 }
 
 /// `angle`, in radians, brought within a turn of 0 each way, so that a fox turned round and round
@@ -595,7 +995,7 @@ fn wrapped(angle: f32) -> f32 {
 
 /// Turns each fox, `dt` on, as fast as its spin says, and has its character walk the way its
 /// heading says, as it faces, at up to its running speed, keeping what its character's fall gives;
-/// counting its kick's cooldown down.
+/// counting its kick's cooldown down. A bot's fox stands here, its agent steering it after.
 fn walk(world: &mut World, dt: Duration) {
     let dt = dt.as_secs_f32();
     let foxes = world.query_mut::<(&mut Player, &mut Transform, &mut CharacterController3D)>();
@@ -622,43 +1022,29 @@ fn roll(world: &mut World, dt: Duration) {
     }
 }
 
-/// Sets each fox's clips' weights by how fast its character walks: Survey alone standing, Walk
-/// alone at [`WALK_SPEED`], and Run alone at [`RUN_SPEED`], blending between; a clip at no weight
-/// leaves its animator, joining again from its start once it has some. Its dust's rate goes with
-/// Run's weight, to [`DUST_RATE`] at its running speed.
-fn animate(world: &mut World) {
-    let speeds: Vec<(Entity, f32)> = world
-        .query::<(Entity, &Player, &CharacterController3D)>()
-        .map(|(entity, _, character)| (entity, character.velocity.with_y(0.0).length()))
-        .collect();
-    let speed_of = |body: Entity| speeds.iter().find(|(entity, _)| *entity == body);
+/// Sets each fox's state machine's [`SPEED`] to how fast its character walks across, which takes
+/// it from `Idle` to `Move` and back and blends Walk and Run in `Move`; and its dust's rate by how
+/// far from walking to running it goes, to [`DUST_RATE`] at its running speed. `speeds` is where it
+/// gathers each fox's speed first.
+fn animate(world: &mut World, speeds: &mut Vec<(Entity, f32)>) {
+    speeds.clear();
+    let foxes = world.query::<(Entity, &Player, &CharacterController3D)>();
+    speeds
+        .extend(foxes.map(|(body, _, character)| (body, character.velocity.with_y(0.0).length())));
+    let speed_of = |body: Entity| {
+        let found = speeds.iter().find(|(fox, _)| *fox == body);
+        found.map(|&(_, speed)| speed)
+    };
     let running = |speed: f32| ((speed - WALK_SPEED) / (RUN_SPEED - WALK_SPEED)).clamp(0.0, 1.0);
     for (&Parent(body), dust) in world.query_mut::<(&Parent, &mut ParticleEmitter)>() {
-        if let Some(&(_, speed)) = speed_of(body) {
+        if let Some(speed) = speed_of(body) {
             dust.rate = DUST_RATE * running(speed);
         }
     }
-    for (&Parent(body), clips) in world.query_mut::<(&Parent, &mut Animator)>() {
-        let Some(&(_, speed)) = speed_of(body) else {
-            continue;
-        };
-        let walking = (speed / WALK_SPEED).min(1.0);
-        let running = running(speed);
-        let weights = [
-            ("Survey", 1.0 - walking),
-            ("Walk", walking * (1.0 - running)),
-            ("Run", running),
-        ];
-        for (clip, weight) in weights {
-            match clips.0.iter_mut().find(|play| play.clip == clip) {
-                Some(play) => (play.weight, play.target) = (weight, weight),
-                None if weight > 0.0 => clips.0.push(Play {
-                    weight,
-                    target: weight,
-                    ..Play::new(clip)
-                }),
-                None => {}
-            }
+    for (&Parent(body), machine) in world.query_mut::<(&Parent, &mut AnimationStates)>() {
+        // A machine edited to hold no speed, as through the tool API, goes without.
+        if let Some(speed) = speed_of(body) {
+            let _ = machine.set_param(SPEED, speed);
         }
     }
 }
@@ -741,51 +1127,19 @@ fn follow(seen: Vec3, yaw: f32, pitch: f32) -> Viewpoint {
     }
 }
 
-/// Draws the match's scores on the canvas, in `font`, writing each text into `text`: each player's
-/// goals in its color in the view's top corner on its side, and below them the matches it has won.
-fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
-    for (index, &color) in COLORS.iter().enumerate() {
-        let (corner, inward) = if index == 0 {
-            (Align::Start, 1.0)
-        } else {
-            (Align::End, -1.0)
-        };
-        let mut canvas = cx.canvas([corner, Align::Start]);
-        let at = |down: f32| Mat4::from_translation(Vec3::new(inward * HUD_INSET, -down, 0.0));
-        let style = |size: f32, alpha: f32| TextStyle {
-            font: Some(font),
-            size,
-            color: Vec3::from(color).extend(alpha),
-            align: [corner, Align::Start],
-        };
-        let write = |text: &mut String, value: u32, then: &str| {
-            text.clear();
-            write!(text, "{value}{then}").expect("a string takes any text");
-        };
-        write(text, found.scores[index], "");
-        canvas.draw_text(at(HUD_INSET), text, &style(SCORE_SIZE, 1.0));
+/// Has the UI `ui` say the match's scores, as `found` has them, writing each text through `text`:
+/// each player's goals, and its matches won below them, in the texts [`SCORES`] names. A text the
+/// UI's file no longer names, as an edit of it may take one away, goes unset: the file says what
+/// shows.
+fn write_scores(cx: &mut Context, ui: GameUi, found: &Match, text: &mut String) {
+    for (index, (goals, matches)) in SCORES.into_iter().enumerate() {
+        text.clear();
+        write!(text, "{}", found.scores[index]).expect("a string takes any text");
+        let _ = ui.set_text(cx, goals, text);
         let won = found.wins[index];
-        write(text, won, if won == 1 { " WIN" } else { " WINS" });
-        let below = HUD_INSET + SCORE_SIZE * 1.25;
-        canvas.draw_text(at(below), text, &style(WINS_SIZE, 0.7));
+        text.clear();
+        let wins = if won == 1 { "WIN" } else { "WINS" };
+        write!(text, "{won} {wins}").expect("a string takes any text");
+        let _ = ui.set_text(cx, matches, text);
     }
-}
-
-/// Draws, at the view's bottom, in `font`, the keys: how to look about, while the cursor isn't
-/// grabbed, or how to let it go, while it is.
-fn draw_hint(cx: &mut Context, font: Font, grabbed: bool) {
-    let style = TextStyle {
-        font: Some(font),
-        size: 26.0,
-        color: Vec4::new(1.0, 1.0, 1.0, 0.5),
-        align: [Align::Center, Align::End],
-    };
-    let at = Mat4::from_translation(Vec3::new(0.0, 24.0, 0.0));
-    let hint = if grabbed {
-        "WASD: WALK  ·  MOUSE: LOOK  ·  CLICK OR SPACE: KICK  ·  ESC: FREE THE CURSOR"
-    } else {
-        "WASD: WALK  ·  Q, E: TURN  ·  SPACE: KICK  ·  CLICK TO LOOK WITH THE MOUSE"
-    };
-    cx.canvas([Align::Center, Align::End])
-        .draw_text(at, hint, &style);
 }

@@ -134,19 +134,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Joints and continuous collision** (2026-11-08)
 - **A game's UI** (2026-11-08)
 - **Navigation** (2026-11-08)
+- **Foxball on Phase 16's systems** (2026-11-08)
+- **Phase 16, gameplay systems** (2026-11-08)
 
 ## Now
 
-16. **Gameplay systems.** Joints between bodies and continuous collision, in 2D and 3D, through
-    rapier; animation state machines over an `Animator`'s plays, their states clips or clips blended
-    along a parameter, their transitions on parameters, cross-fading; navigation, a navmesh baked
-    from the world's static colliders, paths across it, and agents that follow them and steer round
-    each other, alike on every platform; and a game's UI as a retained tree of its own files, laid
-    out by the engine, its buttons and lists focused by keys, pads and the mouse, reloaded as saved
-    and read through the tool API. *Done when* Foxball, run alone, plays against a fox that runs to
-    the ball by navigation, its foxes animate through a state machine, and its menu is a UI file;
-    and the showcase has a scene for each. Its milestones: joints and continuous collision;
-    animation state machines; navigation; a game's UI; and, once they're in, Foxball on them.
+The next phase is the user's to choose, as Open questions has it.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -172,7 +165,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 15 are done, as Done has it, but for what Deferred holds.
+Phases 11 to 16 are done, as Done has it, but for what Deferred holds.
 
 Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -375,10 +368,14 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Where frames draw an entity between ticks, for layers: `Context` gives none, so Foxball's view eases toward its fox as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
 | Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
 | Foxball shipped and run as it ships in CI, as Shards is: its tests cook its package and replay its live recording from it | A change could break its shipping alone |
-| A menu in Foxball, and a fox that plays a side for a player alone: alone, player 1's fox stands where it starts | Someone plays it alone and misses a match |
+| Foxball's menu sounds, as Shards plays them for its focus moving and its choices: the menu is silent | Foxball has sounds of its own for them |
+| Pausing a run alone as Foxball's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu and the bot can score meanwhile | A game alone needs a pause, or players lose goals to the menu |
+| Asking the other player before a session's New match: either player's menu starts the match afresh for both, scores and wins wiped, at the next tick | Players of a session start matches over each other's |
+| A bot for a session's empty player, as a server's player 1 before a client takes it: a session's foxes are all people's | A session wants a player it hasn't |
+| The bot's difficulty, its speed, reaction and aim, chosen in the menu: fixed at 4.6 units a second, 6 ticks and a cosine of 0.85 | Players ask for an easier or harder bot |
 | Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
-| Foxball's foxes as instances of a prefab: each fox, its model, animator and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
-| Foxball's goals' colors read from one place: each mouth's emitter has its scorer's color written in arena.ron, brightened, beside the game's `COLORS` | The players' colors change, or a game has more than two players |
+| Foxball's foxes as instances of a prefab: each fox, its model, animator, state machine and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
+| Foxball's players' colors read from one place: each is written in ui/menu.ui's texts and, brightened, in arena.ron's emitter at its scorer's goal mouth | The players' colors change, or a game has more than two players |
 | Textures for Foxball's particles, as dust puffs and confetti: its emitters draw soft discs | Its look gets an art pass |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |

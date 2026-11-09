@@ -144,6 +144,23 @@
                 scale: (2.0, 1.0, 4.3333335),
             ),
         ),
+        "4a7c19e2b65d03f8": (
+            Name: ("Navmesh"),
+            NavMeshVolume: (
+                size: (17.0, 4.0, 27.0),
+                agent_radius: 0.35,
+                agent_height: 1.0,
+                agent_climb: 0.3,
+                max_slope: 0.7853982,
+                cell_size: 0.25,
+                cell_height: 0.1,
+            ),
+            Transform: (
+                translation: (0.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "4f5a6b7c8d9eafb0": (
             Name: ("Wall: Left"),
             PrefabRoot: ("e675a64df84ed899"),

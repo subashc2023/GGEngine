@@ -463,6 +463,9 @@ pub struct Context {
     pub(crate) edited: Option<Edited>,
     /// The local player, in a lockstep session.
     player: Option<u8>,
+    /// Whether the run takes part in a networked session, as the layers attach or pick up from a
+    /// restore.
+    networked: bool,
     /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
     /// from a restore.
     #[cfg(feature = "dev")]
@@ -578,6 +581,18 @@ impl Context {
     pub fn mods(mut self, game: &str, dir: impl Into<PathBuf>) -> Self {
         self.mods.game = game.to_owned();
         self.mods.dir = Some(dir.into());
+        self
+    }
+
+    /// Has the context say it takes part in a networked session, as [`networked`](Self::networked)
+    /// does for a session's runs, playing `player`, as [`player`](Self::player) says, `None` for a
+    /// server: for a [`seeded`](Self::seeded) context, so that a test calls a layer's `attach` and
+    /// `restored` as a session's run does.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn in_session(mut self, player: Option<u8>) -> Self {
+        self.networked = true;
+        self.player = player;
         self
     }
 
@@ -705,6 +720,7 @@ impl Context {
             #[cfg(feature = "dev")]
             edited: None,
             player: None,
+            networked: false,
             #[cfg(feature = "dev")]
             sync_tested: false,
         }
@@ -724,6 +740,15 @@ impl Context {
     /// peer's queue for theirs.
     pub fn player(&self) -> Option<u8> {
         self.player
+    }
+
+    /// Whether the run takes part in a networked session: a lockstep session's, as its host
+    /// (`--host`) or its joiner (`--join`), or a server's, as the server (`--serve`) or a client
+    /// (`--connect`); not a run alone, a replay or a test's context. A game tells by it what only a
+    /// run alone has, as a player the game plays itself, which a server's world, whose
+    /// [`player`](Self::player) is `None` as a run alone's is, mustn't have.
+    pub fn networked(&self) -> bool {
+        self.networked
     }
 
     /// The app's window; `None` in a headless run.
@@ -4306,6 +4331,7 @@ impl Stack {
             recorder.start(&self.names, cx.world.stream_state());
         }
         cx.player = self.net.as_ref().and_then(Session::player);
+        cx.networked = self.net.is_some();
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {
@@ -4341,6 +4367,7 @@ impl Stack {
     ) -> Result<(u64, bool)> {
         let _zone = gg_core::zone!();
         cx.player = self.net.as_ref().and_then(Session::player);
+        cx.networked = self.net.is_some();
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {

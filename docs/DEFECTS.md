@@ -152,6 +152,12 @@ file, under Workflow.
 |---|---|---|
 | The cooker cooks each image a model names twice: with its model, with its full chain of levels, and again as a texture of its own, of one level, as it takes every PNG and JPEG under the asset root, which no run loads unless a layer or a scene names it alone. Sponza's 69 images, once fetched, add 50 MB to the showcase's package of 141 MB, and part of its cook's 37 s | Leave out an image that a model names unless a scene names it, or the project says the game's code adds it alone, which the cooker can't see | A package's size or its cook's time matters, as a shipped game's does |
 
+## Animation
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| A state machine's blend plays its nearest clip alone, at its own rate, past its points: so a fox slower than Walk's 1.6 units a second, as a stick tilted a little or Foxball's bot slowing at its destination, plays Walk at full rate in Move, its feet sliding, where the hand-written weights the state machine replaced faded Survey into Walk | Scale a state's speed by a parameter, or blend in a still pose without phase sync | Slow walking is seen to slide |
+
 ## Navigation
 
 | Defect | Fix | Worth it when |
@@ -170,7 +176,15 @@ file, under Workflow.
 | Defect | Fix | Worth it when |
 |---|---|---|
 | A field a UI file's node of its kind doesn't take is refused at the node's end rather than at the field (`ui.bad_field`), as serde's derive reads the whole node before the check: for a container, many lines past the field; values and names are refused where they stand | Check each field as it's read, through a seed that knows the node's kind, as scene reading does | People or agents are seen searching large UI files for refused fields |
+| A game can't set a UI's focus: opening Foxball's menu again leaves its focus where it was | `GameUi::set_focus`, by a button's name | A menu needs a given button focused as it opens |
 | On the frame a resize comes in, a UI's fills still span the view's size before it: layout runs as the layer updates, for the view the last frame handed off, while what's anchored keeps to its edges | Lay out at hand-off, at the view's size then | That frame is noticed, as in a capture during a resize |
+
+## Demos
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| Foxball's bot never beats a quick, exact player to the ball: against the player its reference hashes' test scripts, which runs at full speed and lines up every 4 ticks, it lost 0 to 14 in two minutes, the same kickoff each time, though it scores about every 3 s unopposed or past a fox standing in front of its goal | Contest the ball: meet it where it's going, and kick it clear at once when the other fox is nearer to it | Players find the bot too easy |
+| A Foxball kick reaches a ball touching the fox's back: reach is measured from the fox's front point, 1.1 around it, and a ball against the fox's back is 1.05 from it, so a fox, the bot's too, can kick the ball out from behind itself | Take only a ball in front of the fox's middle, as by the sign of its offset along the fox's facing | Kicks through a fox's back are seen in play |
 
 ## Editor
 

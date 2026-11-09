@@ -1,0 +1,167 @@
+(
+    focus: "resume",
+    nodes: [
+        Column(
+            name: "blue",
+            anchor: (Start, Start),
+            margin: (40.0, 28.0),
+            align: (Start, Start),
+            children: [
+                Text(
+                    name: "blue_score",
+                    text: "0",
+                    font: "083349a64f1c0990",
+                    size: 80.0,
+                    color: (0.15, 0.55, 1.0, 1.0),
+                ),
+                Text(
+                    name: "blue_wins",
+                    text: "0 WINS",
+                    font: "083349a64f1c0990",
+                    size: 32.0,
+                    color: (0.15, 0.55, 1.0, 0.7),
+                ),
+            ],
+        ),
+        Column(
+            name: "orange",
+            anchor: (End, Start),
+            margin: (40.0, 28.0),
+            align: (End, Start),
+            children: [
+                Text(
+                    name: "orange_score",
+                    text: "0",
+                    font: "083349a64f1c0990",
+                    size: 80.0,
+                    color: (1.0, 0.45, 0.1, 1.0),
+                ),
+                Text(
+                    name: "orange_wins",
+                    text: "0 WINS",
+                    font: "083349a64f1c0990",
+                    size: 32.0,
+                    color: (1.0, 0.45, 0.1, 0.7),
+                ),
+            ],
+        ),
+        Text(
+            name: "hint",
+            anchor: (Center, End),
+            margin: (0.0, 24.0),
+            text: "WASD: WALK  ·  Q, E: TURN  ·  SPACE: KICK  ·  CLICK TO LOOK WITH THE MOUSE  ·  ESC: MENU",
+            font: "083349a64f1c0990",
+            size: 26.0,
+            color: (1.0, 1.0, 1.0, 0.5),
+        ),
+        Text(
+            name: "hint_grabbed",
+            visible: false,
+            anchor: (Center, End),
+            margin: (0.0, 24.0),
+            text: "WASD: WALK  ·  MOUSE: LOOK  ·  CLICK OR SPACE: KICK  ·  ESC: FREE THE CURSOR",
+            font: "083349a64f1c0990",
+            size: 26.0,
+            color: (1.0, 1.0, 1.0, 0.5),
+        ),
+        Panel(
+            name: "menu",
+            visible: false,
+            color: (0.01, 0.012, 0.02, 0.88),
+            radius: 32.0,
+            padding: (72.0, 56.0),
+            children: [
+                Column(
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "title",
+                            text: "FOXBALL",
+                            font: "083349a64f1c0990",
+                            size: 96.0,
+                        ),
+                        Row(
+                            gap: 16.0,
+                            children: [
+                                Text(
+                                    name: "first_to",
+                                    text: "FIRST TO FIVE",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (0.15, 0.55, 1.0, 1.0),
+                                ),
+                                Text(
+                                    name: "wins_a_match",
+                                    text: "WINS A MATCH",
+                                    font: "083349a64f1c0990",
+                                    size: 28.0,
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                            ],
+                        ),
+                        Stack(
+                            height: Fixed(20.0),
+                        ),
+                        Button(
+                            name: "resume",
+                            text: "RESUME",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "new_match",
+                            text: "NEW MATCH",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "quit",
+                            text: "QUIT",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Text(
+                            name: "menu_hint",
+                            text: "ARROWS, TAB: CHOOSE  ·  ENTER, SPACE: PRESS  ·  ESC: RESUME",
+                            size: 22.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)

@@ -671,6 +671,8 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
         let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        // A server plays no player, as a run alone doesn't, but is networked, as its clients are.
+        assert_eq!((server.cx.player(), server.cx.networked()), (None, true));
         let address = match server.stack.session_mut() {
             Some(Session::Server(server)) => server.listening.to_string(),
             _ => panic!("a server"),
@@ -686,6 +688,7 @@ mod tests {
             .collect();
         players.sort_unstable();
         assert_eq!(players, [0, 1, 2]);
+        assert!(clients.iter().all(|client| client.cx.networked()));
 
         // Its own command runs at its next tick, before the server, a link's latency away, has it.
         let first = clients

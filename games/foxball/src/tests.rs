@@ -4,19 +4,33 @@ use std::path::PathBuf;
 
 use gg_api::Project;
 use gg_engine::cook::Kind;
-use gg_engine::math::libm::atan2f;
-use gg_engine::{BoxCollider3D, Prefab, PrefabRoot};
+use gg_engine::{BoxCollider3D, NavMeshVolume, Pad, Prefab, PrefabRoot, SphereCollider3D};
 
 use super::*;
 
 /// The game as it attaches, the project's as the app is, so that the world's hash doesn't depend on
-/// where the repository is, its world's IDs drawn from `seed`.
+/// where the repository is, its world's IDs drawn from `seed`: run alone, its bot queued for player
+/// 1.
 fn attached(seed: u64) -> (Context, Foxball) {
     let cx = Context::seeded(seed).project(env!("CARGO_MANIFEST_DIR"));
     let mut cx = cx.expect("the project reads");
     let mut game = Foxball::new();
     game.load(&mut cx);
     game.attach(&mut cx);
+    (cx, game)
+}
+
+/// The game as it attaches, as [`attached`] has it, but with both foxes their players', as in a
+/// session: the bot that a run alone queues dropped from the queue.
+fn humans(seed: u64) -> (Context, Foxball) {
+    let (cx, mut game) = attached(seed);
+    let player = BOT_PLAYER;
+    assert_eq!(
+        game.commands,
+        [Command::Bot { player }],
+        "a run alone's bot"
+    );
+    game.commands.clear();
     (cx, game)
 }
 
@@ -67,8 +81,8 @@ fn put_ball(world: &mut World, at: Vec3) {
 
 /// The game's project's manifest is canonical, writing back to its own bytes, and starts the game
 /// in the arena, which loads and saves to its own bytes, as its walls' prefab does, so that a type
-/// that changes under either fails here; and every wall of the arena, each goal's pocket's too, is
-/// an instance of that one prefab, colliding as the prefab's box.
+/// that changes under either fails here; every wall of the arena, each goal's pocket's too, is an
+/// instance of that one prefab, colliding as the prefab's box; and one volume bakes its navmesh.
 #[test]
 fn the_arena_saves_as_it_is() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -92,6 +106,7 @@ fn the_arena_saves_as_it_is() {
         "2 sides, 2 beside each mouth, 3 to each pocket"
     );
     assert!(prefabs.iter().all(|&prefab| prefab == prefabs[0]));
+    assert_eq!(cx.world().query::<&NavMeshVolume>().count(), 1);
     let path = dir.join("prefabs/wall.prefab");
     let text = fs::read_to_string(&path).expect("the wall's prefab");
     let roots = cx.load_scene_file(&path).expect("the prefab loads");
@@ -99,7 +114,7 @@ fn the_arena_saves_as_it_is() {
     assert_eq!(saved, text);
 }
 
-/// Each texture, model, font and prefab under the game's asset root has its ID file beside it,
+/// Each texture, model, font, prefab and UI under the game's asset root has its ID file beside it,
 /// committed with it, each holding an ID of its own, and no ID file is left without its asset, so
 /// that every checkout gives each asset the ID the repository holds, which its scene names it by.
 #[test]
@@ -109,8 +124,9 @@ fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(&project.assets_dir(dir));
     assert_eq!(
         found.assets.len(),
-        8,
-        "the ball, the box, the tiles, the Fox and its texture, the sky, the font and the wall"
+        9,
+        "the ball, the box, the tiles, the Fox and its texture, the sky, the font, the wall and \
+         the UI"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {
@@ -128,7 +144,8 @@ fn every_asset_has_its_id_file_beside_it() {
 }
 
 /// The game builds the match and a fox for each player at its start, facing the goal it attacks,
-/// owned by its player, its model under its capsule, standing as Survey plays alone.
+/// owned by its player, its model under its capsule, standing as Survey plays alone, its state
+/// machine to enter its first state, Idle, at its first tick.
 #[test]
 fn each_player_has_a_fox_at_its_start() {
     let (cx, _game) = attached(0x5eed);
@@ -139,11 +156,15 @@ fn each_player_has_a_fox_at_its_start() {
     }
     let owners: Vec<u8> = world.query::<&Owner>().map(|owner| owner.player).collect();
     assert_eq!(owners.len(), 2);
-    let foxes: Vec<&Animator> = world.query::<&Animator>().collect();
+    let foxes: Vec<_> = world.query::<(&Animator, &AnimationStates)>().collect();
     assert_eq!(foxes.len(), 2);
-    for clips in foxes {
+    for (clips, machine) in foxes {
         assert_eq!(clips.0.len(), 1);
         assert_eq!(clips.0[0].clip, "Survey");
+        assert_eq!(
+            (&*machine.state, machine.states[0].name.as_str()),
+            ("", "Idle")
+        );
     }
     let found = world.query::<&Match>().next().expect("the match");
     assert_eq!((found.scores, found.wins), ([0; 2], [0; 2]));
@@ -156,7 +177,7 @@ fn each_player_has_a_fox_at_its_start() {
 /// nothing. As the joiner, the keys walk player 1.
 #[test]
 fn the_keys_and_the_mouse_queue_commands_for_the_runs_own_player() {
-    let (mut cx, mut game) = attached(0x5eed);
+    let (mut cx, mut game) = humans(0x5eed);
     let key = |key, pressed| Event::Key {
         key,
         pressed,
@@ -219,7 +240,7 @@ fn the_keys_and_the_mouse_queue_commands_for_the_runs_own_player() {
 /// ball out of reach isn't kicked.
 #[test]
 fn a_kick_sends_the_ball_from_in_front_of_its_fox() {
-    let (mut cx, mut game) = attached(0x5eed);
+    let (mut cx, mut game) = humans(0x5eed);
     let kick = game.assets.as_ref().expect("loaded").sounds.kick;
     let world = cx.world_mut();
     let (start, _) = STARTS[0];
@@ -256,7 +277,7 @@ fn a_kick_sends_the_ball_from_in_front_of_its_fox() {
 /// of the arena goes back to its start alone.
 #[test]
 fn goals_score_and_five_win_a_match() {
-    let (mut cx, mut game) = attached(0x5eed);
+    let (mut cx, mut game) = humans(0x5eed);
     let sounds = game.assets.as_ref().expect("loaded").sounds;
     let world = cx.world_mut();
     let score = |world: &World| *world.query::<&Match>().next().expect("the match");
@@ -302,50 +323,288 @@ fn goals_score_and_five_win_a_match() {
     );
 }
 
-/// A fox's clips blend by how fast it goes: Survey alone standing, Run alone at its running speed,
-/// as its dust goes from none to its most; and the clips it doesn't play leave its animator.
+/// Player `index`'s fox's state machine: the state it's in, its speed, and the plays of its
+/// animator, which it drives, each its clip and weight.
+fn machine(world: &World, index: u8) -> (String, f32, Vec<(String, f32)>) {
+    let mut roots = world.query::<(&Parent, &Animator, &AnimationStates)>();
+    let found = roots.find(|&(&Parent(body), ..)| {
+        let player = world.get::<Player>(body);
+        player.is_some_and(|player| player.index == index)
+    });
+    let (_, clips, machine) = found.expect("the fox's model's root");
+    let speed = match machine.param(SPEED) {
+        Some(ParamValue::Float(speed)) => speed,
+        other => panic!("its speed is {other:?}"),
+    };
+    let plays = clips.0.iter().map(|play| (play.clip.clone(), play.weight));
+    (machine.state.clone(), speed, plays.collect())
+}
+
+/// A fox's state machine goes as fast as the fox does: Idle, Survey alone, as it stands, with no
+/// dust; Move as it runs, Run alone once the fade is done, the clips it doesn't play gone from its
+/// animator, its dust at its most; and Idle again as it stops, Survey alone once the fade is done,
+/// the dust gone.
 #[test]
-fn a_fox_runs_as_fast_as_it_goes() {
-    let (mut cx, mut game) = attached(0x5eed);
+fn a_foxs_state_machine_runs_and_stands_as_it_goes() {
+    let (mut cx, mut game) = humans(0x5eed);
     let world = cx.world_mut();
     let dust = |world: &World| {
         let dusts = world.query::<(&Parent, &ParticleEmitter)>();
         dusts.map(|(_, dust)| dust.rate).collect::<Vec<_>>()
     };
-    let weights = |world: &World, index: usize| {
-        let mut found = world.query::<&Animator>().skip(index);
-        let clips = found.next().expect("a fox's animator");
-        let weight = |clip: &str| {
-            let play = clips.0.iter().find(|play| play.clip == clip);
-            play.map_or(0.0, |play| play.weight)
-        };
-        [weight("Survey"), weight("Walk"), weight("Run")]
-    };
+    let survey = vec![("Survey".to_owned(), 1.0)];
     game.tick(world, Tick { number: 0 });
-    assert_eq!(weights(world, 0), [1.0, 0.0, 0.0]);
+    for index in 0..2 {
+        assert_eq!(
+            machine(world, index),
+            ("Idle".to_owned(), 0.0, survey.clone())
+        );
+    }
     assert_eq!(dust(world), [0.0; 2]);
-    game.commands.push(Command::Walk {
-        player: 0,
-        heading: Vec2::Y,
-    });
-    game.commands.push(Command::Walk {
-        player: 1,
-        heading: Vec2::Y,
-    });
-    for number in 1..8 {
+    let walk = |game: &mut Foxball, heading| {
+        let walks = (0..2).map(|player| Command::Walk { player, heading });
+        game.commands.extend(walks);
+    };
+    walk(&mut game, Vec2::Y);
+    game.tick(world, Tick { number: 1 });
+    let (state, speed, _) = machine(world, 0);
+    assert_eq!(state, "Move", "at the tick it runs");
+    assert!((speed - RUN_SPEED).abs() < 1e-4, "{speed}");
+    // The fade's 0.2 seconds, 13 ticks, and some.
+    for number in 2..20 {
         game.tick(world, Tick { number });
     }
     for index in 0..2 {
-        assert_eq!(weights(world, index), [0.0, 0.0, 1.0]);
-        let mut found = world.query::<&Animator>().skip(index);
-        let plays = found.next().expect("a fox's animator").0.len();
-        assert_eq!(plays, 1, "Survey and Walk left");
+        let (state, _, plays) = machine(world, index);
+        assert_eq!(
+            (state.as_str(), plays),
+            ("Move", vec![("Run".to_owned(), 1.0)])
+        );
     }
     assert_eq!(dust(world), [DUST_RATE; 2]);
+    walk(&mut game, Vec2::ZERO);
+    game.tick(world, Tick { number: 20 });
+    assert_eq!(machine(world, 0).0, "Idle", "at the tick it stops");
+    for number in 21..40 {
+        game.tick(world, Tick { number });
+    }
+    for index in 0..2 {
+        assert_eq!(
+            machine(world, index),
+            ("Idle".to_owned(), 0.0, survey.clone())
+        );
+    }
+    assert_eq!(dust(world), [0.0; 2]);
 }
 
-/// A world restored from a snapshot simulates as it did from there, through walks, turns, kicks
-/// and goals: the game keeps nothing of the match but in the world.
+/// Run alone, player 1's fox is the game's bot's from the first tick, and player 0's its player's:
+/// the bot's agent plans a path over the arena's navmesh, its fox runs to the ball, as its state
+/// machine's Move, kicks it, as a player's kick does, and scores in player 0's goal within 20
+/// seconds, past player 0's fox standing at its start in front of it, where a shot at the goal's
+/// middle would hit it, the ball never touching that fox from the bot's last kick to the goal; and
+/// a world taken back with the bot in it queues no other.
+#[test]
+fn the_bot_runs_to_the_ball_kicks_it_and_scores() {
+    let (mut cx, mut game) = attached(0x5eed);
+    let world = cx.world_mut();
+    game.tick(world, Tick { number: 0 });
+    let bots: Vec<u8> = (world.query::<(&Player, &Bot, &NavAgent)>())
+        .map(|(player, ..)| player.index)
+        .collect();
+    assert_eq!(bots, [BOT_PLAYER]);
+    let (_, _, agent) = world
+        .query::<(&Bot, &Transform, &NavAgent)>()
+        .next()
+        .expect("its agent");
+    assert!(
+        agent.destination.is_some() && !agent.corners.is_empty(),
+        "{agent:?}"
+    );
+    let balls = world.query::<(&Ball, &SphereCollider3D, &Transform)>();
+    let (_, sphere, at) = balls.into_iter().next().expect("the ball");
+    // How near the ball's middle comes to the fox's, across, where they touch.
+    let touching = sphere.radius * at.scale.x + CAPSULE.1;
+    // How near the ball came to player 0's fox, across, since the bot's last kick.
+    let (mut moved, mut kicked, mut kicks, mut nearest) = (false, None, 0, f32::INFINITY);
+    let scored = (1..64 * 20).find(|&number| {
+        game.tick(world, Tick { number });
+        if world.query::<&Match>().next().expect("the match").scores[1] > 0 {
+            return true;
+        }
+        moved |= machine(world, BOT_PLAYER).0 == "Move";
+        if ball_bursts(world) > kicks {
+            kicks = ball_bursts(world);
+            kicked.get_or_insert(number);
+            nearest = f32::INFINITY;
+        }
+        nearest = nearest.min(flat(ball(world).0 - fox(world, 0).0).length());
+        false
+    });
+    assert!(moved, "it ran there");
+    let kicked = kicked.expect("it kicked the ball");
+    let scored = scored.expect("it scored within 20 seconds");
+    assert!(kicked <= scored, "{kicked} {scored}");
+    assert!(
+        nearest > touching,
+        "past player 0's fox: {nearest}, {touching}"
+    );
+    assert_eq!(
+        goal_bursts(world),
+        [0, 1],
+        "in player 0's goal, for player 1"
+    );
+    game.commands.clear();
+    game.restored(&mut cx);
+    let bot = game
+        .commands
+        .iter()
+        .any(|command| matches!(command, Command::Bot { .. }));
+    assert!(!bot, "{:?}", game.commands);
+}
+
+/// A session's runs, a lockstep host's, its joiner's and a server's, queue no bot as their layers
+/// attach or pick up from a world, as a joiner's from its host's, and no fox has one as they tick,
+/// both foxes their players'; while a run alone that picks up from a world without one, as the
+/// world as edited that Stop brings back, queues it again.
+#[test]
+fn a_sessions_runs_have_no_bot() {
+    let bot = |game: &Foxball| {
+        let mut commands = game.commands.iter();
+        commands.any(|command| matches!(command, Command::Bot { .. }))
+    };
+    for player in [Some(0), Some(1), None] {
+        let cx = Context::seeded(0x5eed).project(env!("CARGO_MANIFEST_DIR"));
+        let mut cx = cx.expect("the project reads").in_session(player);
+        let mut game = Foxball::new();
+        game.load(&mut cx);
+        game.attach(&mut cx);
+        assert!(!bot(&game), "{player:?}, attached: {:?}", game.commands);
+        game.restored(&mut cx);
+        assert!(!bot(&game), "{player:?}, restored: {:?}", game.commands);
+        let world = cx.world_mut();
+        for number in 0..8 {
+            game.tick(world, Tick { number });
+        }
+        let bots = world.query::<&Bot>().count() + world.query::<&NavAgent>().count();
+        assert_eq!(bots, 0, "{player:?}");
+    }
+    let (mut cx, mut game) = humans(0x5eed);
+    game.restored(&mut cx);
+    let player = BOT_PLAYER;
+    assert!(game.commands.contains(&Command::Bot { player }), "alone");
+}
+
+/// Escape with the cursor free, or a pad's Start, opens the menu, this run's own, and closes it,
+/// its fox standing while it's open, its walk and turn queued at rest as it opens and as the keys
+/// are held as it closes, the keys walking it no more until then; the arrows move the menu's focus
+/// and Enter presses: New match queues the player's command, which the next tick applies, starting
+/// the match afresh, Resume closes the menu and Quit ends the run. Escape with the cursor grabbed
+/// lets it go, opening nothing, and Escape with the menu open closes it.
+#[test]
+fn the_menu_opens_and_its_choices_queue_commands() {
+    let (mut cx, mut game) = humans(0x5eed);
+    let ui = game.assets.as_ref().expect("loaded").ui;
+    game.update(&mut cx, Duration::from_millis(16));
+    let press = |game: &mut Foxball, cx: &mut Context, key| {
+        for pressed in [true, false] {
+            let event = Event::Key {
+                key,
+                pressed,
+                repeat: false,
+            };
+            let _ = game.event(cx, &event);
+        }
+    };
+    let player = 0;
+    let at_rest = [
+        Command::Walk {
+            player,
+            heading: Vec2::ZERO,
+        },
+        Command::Spin { player, rate: 0.0 },
+    ];
+    let held = Event::Key {
+        key: Key::KeyW,
+        pressed: true,
+        repeat: false,
+    };
+    let _ = game.event(&mut cx, &held);
+    press(&mut game, &mut cx, Key::Escape);
+    assert!(game.menu);
+    let walk = Command::Walk {
+        player,
+        heading: Vec2::Y,
+    };
+    assert_eq!(game.commands, [&[walk][..], &at_rest].concat());
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("resume"), "the file's");
+    game.commands.clear();
+    let let_go = Event::Key {
+        key: Key::KeyW,
+        pressed: false,
+        repeat: false,
+    };
+    let _ = game.event(&mut cx, &let_go);
+    press(&mut game, &mut cx, Key::ArrowDown);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("new_match"));
+    assert!(game.commands.is_empty(), "{:?}", game.commands);
+    press(&mut game, &mut cx, Key::Space);
+    assert!(!game.menu, "closed by its choice");
+    let new_match = Command::NewMatch { player };
+    assert_eq!(game.commands, [&[new_match][..], &at_rest].concat());
+    let world = cx.world_mut();
+    if let Some(found) = world.query_mut::<&mut Match>().next() {
+        (found.scores, found.wins) = ([3, 2], [1, 0]);
+    }
+    for (_, at) in world.query_mut::<(&Player, &mut Transform)>() {
+        at.translation.x += 2.0;
+    }
+    game.tick(world, Tick { number: 0 });
+    let found = *world.query::<&Match>().next().expect("the match");
+    assert_eq!((found.scores, found.wins), ([0; 2], [0; 2]));
+    // Back at its start, as the tick began, which physics settles on the floor.
+    assert_eq!(flat(fox(world, 0).0), flat(STARTS[0].0));
+
+    // A click grabs the cursor, and Escape lets it go, opening nothing; a pad's Start opens the
+    // menu and closes it, as Escape does.
+    let click = Event::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    };
+    let _ = game.event(&mut cx, &click);
+    assert!(game.grab);
+    press(&mut game, &mut cx, Key::Escape);
+    assert!(!game.grab && !game.menu);
+    let start = |game: &mut Foxball, cx: &mut Context| {
+        for pressed in [true, false] {
+            let event = Event::PadButton {
+                pad: Pad(0),
+                button: PadButton::Start,
+                pressed,
+            };
+            let _ = game.event(cx, &event);
+        }
+    };
+    start(&mut game, &mut cx);
+    assert!(game.menu);
+    start(&mut game, &mut cx);
+    assert!(!game.menu);
+    press(&mut game, &mut cx, Key::Escape);
+    press(&mut game, &mut cx, Key::Escape);
+    assert!(!game.menu, "Escape asks the open menu for back");
+    press(&mut game, &mut cx, Key::Escape);
+    press(&mut game, &mut cx, Key::ArrowUp);
+    press(&mut game, &mut cx, Key::Enter);
+    assert!(!game.menu, "resumed");
+    assert!(!cx.exiting());
+    press(&mut game, &mut cx, Key::Escape);
+    for key in [Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+        press(&mut game, &mut cx, key);
+    }
+    assert!(cx.exiting(), "quit");
+}
+
+/// A world restored from a snapshot simulates as it did from there, through walks, turns, kicks,
+/// goals and the bot's play: the game keeps nothing of the match but in the world.
 #[test]
 fn a_restored_world_simulates_as_before() {
     let (mut cx, mut game) = attached(0x5eed);
@@ -370,47 +629,36 @@ fn a_restored_world_simulates_as_before() {
     assert_eq!(parted.map(|tick| 96 + tick), None, "the first tick to part");
 }
 
-/// The commands a script queues before tick `number`, what both players' keys and mice would, as
-/// `world` stands: every 4 ticks, each fox turns toward a point just behind the ball, as seen from
-/// the goal it attacks, and walks there, or, once it's there, turns toward that goal and walks into
-/// the ball, kicking it once it's near; player 1 at a little more than half speed, as a stick held
-/// part of the way, so that the two don't meet at the ball each time, and they push, kick and
-/// score.
+/// The commands a script queues before tick `number`, what player 0's keys and mouse would, as
+/// `world` stands, player 1 the bot's: every 4 ticks, its fox turns toward a point just behind the
+/// ball, as seen from the goal it attacks, and runs there, a little faster than the bot, so that
+/// the two don't meet at the ball each time, or, once it's there, turns toward that goal and runs
+/// into the ball, kicking it once it's near; so that they push, kick and score.
 fn script(game: &mut Foxball, world: &World, number: u64) {
     if !number.is_multiple_of(4) {
         return;
     }
     let (ball_at, _) = ball(world);
-    for player in 0..2u8 {
-        let (at, fox) = fox(world, player);
-        let goal = Vec3::new(
-            0.0,
-            ball_at.y,
-            if player == 0 {
-                FIELD.y + 1.0
-            } else {
-                -FIELD.y - 1.0
-            },
-        );
-        let behind = ball_at - (goal - ball_at).normalize_or_zero() * 0.9;
-        let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
-        let to_behind = flat(behind - at);
-        let lined_up = to_behind.length() < 0.6;
-        let toward = if lined_up { flat(goal - at) } else { to_behind };
-        let wanted = atan2f(toward.x, toward.z);
-        game.commands.extend([
-            Command::Turn {
-                player,
-                by: wrapped(fox.yaw - wanted),
-            },
-            Command::Walk {
-                player,
-                heading: Vec2::Y * if player == 0 { 1.0 } else { 0.55 },
-            },
-        ]);
-        if flat(ball_at - at).length() < 1.2 && lined_up {
-            game.commands.push(Command::Kick { player });
-        }
+    let player = 0;
+    let (at, fox) = fox(world, player);
+    let goal = Vec3::new(0.0, ball_at.y, FIELD.y + 1.0);
+    let behind = ball_at - (goal - ball_at).normalize_or_zero() * 0.9;
+    let to_behind = flat(behind - at);
+    let lined_up = to_behind.length() < 0.6;
+    let toward = if lined_up { flat(goal - at) } else { to_behind };
+    let wanted = atan2f(toward.x, toward.z);
+    game.commands.extend([
+        Command::Turn {
+            player,
+            by: wrapped(fox.yaw - wanted),
+        },
+        Command::Walk {
+            player,
+            heading: Vec2::Y,
+        },
+    ]);
+    if flat(ball_at - at).length() < 1.2 && lined_up {
+        game.commands.push(Command::Kick { player });
     }
 }
 
@@ -456,9 +704,9 @@ fn the_simulation_gives_its_reference_hashes() {
     assert_eq!(run.len(), reference.lines().count(), "{}", path.display());
 }
 
-/// The game's simulation from a seed, as lines of the world's hash, its content then its layout:
-/// one after it attaches, and one at each of 768 ticks, between which the script queues what both
-/// players' keys and mice would.
+/// The game's simulation from a seed, run alone, as lines of the world's hash, its content then its
+/// layout: one after it attaches, and one at each of 768 ticks, between which the script queues
+/// what player 0's keys and mouse would, the bot playing player 1.
 fn simulate() -> Vec<String> {
     let (mut cx, mut game) = attached(0x5eed);
     let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
@@ -477,12 +725,12 @@ fn simulate() -> Vec<String> {
     lines
 }
 
-/// The live recording, `tests/references/live.recording`, of a run walked, turned and kicked by its
-/// keys and its mouse, and edited through the tool API, replays without a GPU to the hashes it
-/// recorded, as determinism needs, in a debug build as in a release one and on every platform.
-/// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the simulation
-/// or what the hash reads; a change to a command's type that its lines no longer read as needs a new
-/// recording.
+/// The live recording, `tests/references/live.recording`, of a run alone walked, turned and kicked
+/// by its keys and its mouse against the bot, started afresh by its menu's New match, and edited
+/// through the tool API, replays without a GPU to the hashes it recorded, as determinism needs, in
+/// a debug build as in a release one and on every platform. `GG_UPDATE_REFERENCES=1` writes its
+/// hashes again, after a change meant to change the simulation or what the hash reads; a change to
+/// a command's type that its lines no longer read as needs a new recording.
 #[test]
 fn the_live_recording_replays_to_its_hashes() {
     let path = live_recording();
@@ -512,9 +760,9 @@ fn live_recording() -> PathBuf {
 }
 
 /// The game's package, as `tools/cook` cooks it, holds what its runs load: its scene, its wall's
-/// prefab and its sounds as they are, its sky and the Fox's texture compressed, its models cooked
-/// and its font baked, its assets by their IDs; and the live recording replays from it to its
-/// hashes, as a build without `dev` runs from it.
+/// prefab, its UI and its sounds as they are, its sky and the Fox's texture compressed, its models
+/// cooked and its font baked, its assets by their IDs; and the live recording replays from it to
+/// its hashes, as a build without `dev` runs from it.
 #[test]
 fn the_live_recording_replays_from_the_games_package() {
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
@@ -540,6 +788,7 @@ fn the_live_recording_replays_from_the_games_package() {
         ("sounds/kick.wav", Kind::File, false),
         ("sounds/win.wav", Kind::File, false),
         ("textures/sky.hdr", Kind::Texture, true),
+        ("ui/menu.ui", Kind::File, true),
     ];
     assert_eq!(held, expected);
     let text = fs::read_to_string(live_recording()).expect("the live recording");
