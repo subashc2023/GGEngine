@@ -11,20 +11,22 @@
 //! game's UI on the view's canvas, labels kept to its edges and corners, the ticks counted and a
 //! button that lights under the cursor and counts its clicks, over the world (`ui.ron`); a game's
 //! UI from a file, laid out by the engine, a menu in the view's middle, four buttons, one disabled,
-//! which keys, a pad and the mouse move the focus over and press, a HUD along the top whose clock
+//! which keys, a pad and the mouse move the focus over and press, a soft tick as the focus moves and
+//! a click at a press (`sounds/tick.wav` and `sounds/click.wav`), a HUD along the top whose clock
 //! the layer sets each second, and panels in its corners saying what was pressed and what has the
 //! focus, each press reaching the world as a command (`menu.ron`, its UI `ui/menu.ui`, which
 //! reloads as it's saved); a UI's widgets, a slider of the volume whose label follows it, a
 //! toggle, a drop-down of difficulties, a text field for a name and a list of saves that scrolls
 //! and clips them, each change reaching the world as a command, which the panel's last line tells
-//! of (`widgets.ron`, its UI `ui/widgets.ui`); a
+//! of, ticking and clicking as the menu does (`widgets.ron`, its UI `ui/widgets.ui`); a
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); sounds
 //! played from where their entities are, bells to the left, the middle and the right in turn and a
-//! pluck sweeping across and out past the view's edges (`sounds.ron`, its sounds `sounds/*.wav`);
-//! music looping while the scene is open, its volume a field, bars bouncing at its tempo
-//! (`music.ron`, its music `music/loop.ogg`; those three synthesized by a script outside the
-//! repository); squares drawn by the game's own shader, which reloads as it's saved (`shader.ron`,
+//! pluck sweeping across and out past the view's edges (`sounds.ron`, its sounds `sounds/bell.wav`
+//! and `sounds/pluck.wav`); music looping while the scene is open, its volume a field, bars
+//! bouncing at its tempo (`music.ron`, its music `music/loop.ogg`; those three, and the UI's tick
+//! and click, synthesized by scripts outside the repository); squares drawn by the game's own
+//! shader, which reloads as it's saved (`shader.ron`,
 //! its shader `shaders/plasma.slang`); glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
 //! (`models.ron`); Khronos's Fox, skinned, playing its clips, Survey, Walk and Run, each alone,
@@ -385,6 +387,10 @@ const BUTTON: (Vec2, Vec2) = (Vec2::new(0.0, -40.0), Vec2::new(190.0, 56.0));
 struct Assets {
     /// The sounds, by [`Tone`].
     tones: [Sound; 2],
+    /// The menu's and the widgets' cues, quiet and short beside the chimes' tones: `focus` as the
+    /// focus moves, as the cursor comes over a button, and `press` at a press of a button.
+    focus: Sound,
+    press: Sound,
     music: Music,
     /// Its font, Inter Bold, which the HUD writes in.
     font: Font,
@@ -405,6 +411,7 @@ impl Assets {
             cx.add_sound(name, root.join(format!("sounds/{name}.wav")))
         };
         let tones = [sound(cx, "bell")?, sound(cx, "pluck")?];
+        let (focus, press) = (sound(cx, "tick")?, sound(cx, "click")?);
         let music = cx.add_music("loop", root.join("music/loop.ogg"))?;
         let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"))?;
         let plasma = cx.add_shader("plasma", root.join("shaders/plasma.slang"), Blend::Opaque)?;
@@ -418,6 +425,8 @@ impl Assets {
         let widgets = cx.add_ui("widgets", root.join("ui/widgets.ui"))?;
         Ok(Self {
             tones,
+            focus,
+            press,
             music,
             font,
             square,
@@ -828,31 +837,29 @@ impl Layer for Showcase {
         }
         if let Some(assets) = &self.assets {
             // This run's own, as a lockstep peer's menu is: a press reaches the world as a command.
-            let (menu, tones) = (assets.menu, assets.tones);
+            let (menu, focus, press) = (assets.menu, assets.focus, assets.press);
             match menu.event(cx, event) {
                 Some(UiEvent::Pressed(button)) => {
                     let button = button.to_string();
                     commands.push(Command::Press { button });
-                    cx.play_sound(tones[Tone::Bell as usize], Place::Nowhere);
+                    cx.play_sound(press, Place::Nowhere);
                 }
                 Some(UiEvent::Back) => {
                     let button = "back".to_owned();
                     commands.push(Command::Press { button });
                 }
-                Some(UiEvent::Focused(_)) => {
-                    cx.play_sound(tones[Tone::Pluck as usize], Place::Nowhere);
-                }
+                Some(UiEvent::Focused(_)) => cx.play_sound(focus, Place::Nowhere),
                 Some(UiEvent::Changed(..)) | None => {}
             }
             // As the menu's: a change or a press reaches the world as a command.
             let change = match assets.widgets.event(cx, event) {
                 Some(UiEvent::Changed(widget, value)) => Some((widget, said(&value))),
                 Some(UiEvent::Pressed(widget)) => {
-                    cx.play_sound(tones[Tone::Bell as usize], Place::Nowhere);
+                    cx.play_sound(press, Place::Nowhere);
                     Some((widget, "pressed".to_owned()))
                 }
                 Some(UiEvent::Focused(_)) => {
-                    cx.play_sound(tones[Tone::Pluck as usize], Place::Nowhere);
+                    cx.play_sound(focus, Place::Nowhere);
                     None
                 }
                 Some(UiEvent::Back) | None => None,

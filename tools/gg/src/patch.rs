@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::build::{self, Package};
 use crate::classify::{self, Edit};
 use crate::dx::{self, Dx, Fat};
-use crate::run::{self, Run, Stamp, event};
+use crate::run::{self, Run, Stamp, event, millis};
 
 /// How long the sources must stay the same after a change before it's acted on, as an editor or an
 /// agent may save several files at once.
@@ -850,11 +850,6 @@ fn listed(files: &[PathBuf]) -> String {
         .map(|file| file.display().to_string())
         .collect();
     paths.join(", ")
-}
-
-/// `duration` in whole milliseconds.
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

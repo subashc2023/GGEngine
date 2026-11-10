@@ -129,7 +129,7 @@
         "357fbc5af71a1bfc": (
             Camera: (
                 projection: Orthographic(
-                    height: 10.0,
+                    height: 12.5,
                     near: 0.1,
                     far: 100.0,
                 ),

@@ -41,42 +41,44 @@ games alone; a manifest that doesn't read is an error. Elsewhere, it works on th
 Build and run:
   run [PACKAGE] [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
       [--embedded] [-- <ARGS>...]
-      Build PACKAGE's development build, the project's game without one, and run a copy of it with
-      ARGS, printing a line as it starts, as it serves the tool API, and as it ends: `exited`, or
-      `crashed` or `hung`, with the errors its log holds. A run whose frames stop for `--hang`
-      seconds (10), while it waits for nothing the user does, has hung, and is ended. It's
-      snapshotted every `--snapshot` seconds (5) from its first frame, `snapshot_failed` saying why
-      they fail, and started again from its last snapshot after a crash or a hang, and from one
-      taken then as PACKAGE is rebuilt (`rebuilt`). One that ends before its first snapshot waits
-      for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). `run` ends
-      as the game comes to its own end, as its window closes, `quit` asks or its frames run out,
-      whatever its status; as one that has never served the API ends; and as it ends at all with
-      `--snapshot 0` or ARGS with `--record`, `--replay` or `--no-api`, which turn restarts off.
-      With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE builds with,
-      the game is patched as its code changes, unless `--no-patch`, `--release`, restarts' being
-      off or a library beside PACKAGE's binary, which no patch reaches, turns patches off
-      (`patches_off` says why): `run` builds it with `dx build --fat-binary` and watches PACKAGE's
-      modules, the workspace's packages it builds with, and the workspace's manifest and lock file
-      (`watching`). An edit inside function bodies of PACKAGE's modules is built as a patch with
-      `dx tools hotpatch`, which the game applies between ticks (`patched`, or `patch_failed` with
-      rustc's errors, the game running on); any other change rebuilds it with dx, saying which file
-      and why (`rebuilding`, then `rebuilt` or `rebuild_failed`): one to a type, even one declared
-      in a body, or to code that has run as the game started, `main` and a layer's `load` and
-      `restored`, and any change while the last rebuild has failed. A game that waits for a
-      rebuild gets one at any change, and one started again is patched with the edits since its
-      build at once. The game logs a patch or a rebuild that failed too, as warnings
-      `gg.patch_failed` and `gg.rebuild_failed`, which `logs` shows. An edit inside a layer's
-      `attach`, which builds the world as a run starts afresh, is patched, `patched` naming its
-      module in `attach` and the game warning `gg.attach_changed`, but shows only in a run started
-      afresh, as the run keeps its world, its restarts starting from snapshots. With `--peers 2`,
-      it runs the two peers of a lockstep session from one build, the host given `--host` and the
-      joiner `--join` at a free port of the loopback, each `started` naming its `player`: patched
-      together, and stopped and started again together as either ends or the game is rebuilt. With
-      `--embedded`, for the tool that started gg, such as the editor, the game is given
-      `--embedded`, running offscreen for the tool, which shows its view, and the run ends cleanly,
-      stopping the game, once gg's stdin closes (`closed`), as the tool ends, a build under way
-      finishing first. Each game gets `--supervised` and a stdin gg holds, so it ends as gg does,
-      however gg ends. A second `run` of PACKAGE while one runs is refused (`gg.running`).
+      Build PACKAGE's development build, the project's game without one, saying how long that took
+      (`built`), and run a copy of it with ARGS, printing a line as it starts, as it serves the tool
+      API, and as it ends: `exited`, or `crashed` or `hung`, with the errors its log holds. A run
+      whose frames stop for `--hang` seconds (10), while it waits for nothing the user does, has
+      hung, and is ended. It's snapshotted every `--snapshot` seconds (5) from its first frame,
+      `snapshot_failed` saying why they fail, and started again from its last snapshot after a crash
+      or a hang, and from one taken then as PACKAGE is rebuilt (`rebuilt`). One that ends before its
+      first snapshot waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh
+      (`refused`). `run` ends as the game comes to its own end, as its window closes, `quit` asks or
+      its frames run out, whatever its status; as one that has never served the API ends; and as it
+      ends at all with `--snapshot 0` or ARGS with `--record`, `--replay` or `--no-api`, which turn
+      restarts off. With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE
+      builds with, the game is patched as its code changes, unless `--no-patch`, `--release`,
+      restarts' being off or a library beside PACKAGE's binary, which no patch reaches, turns
+      patches off (`patches_off` says why): `run` builds it with `dx build --fat-binary`, printing
+      each stage the build comes to and, as it compiles, how many of the crates dx counts on it has
+      compiled, every 5 seconds at most (`building`), and watches PACKAGE's modules, the workspace's
+      packages it builds with, and the workspace's manifest and lock file (`watching`). An edit
+      inside function bodies of PACKAGE's modules is built as a patch with `dx tools hotpatch`,
+      which the game applies between ticks (`patched`, or `patch_failed` with rustc's errors, the
+      game running on); any other change rebuilds it with dx, saying which file and why
+      (`rebuilding`, then `rebuilt` or `rebuild_failed`): one to a type, even one declared in a
+      body, or to code that has run as the game started, `main` and a layer's `load` and `restored`,
+      and any change while the last rebuild has failed. A game that waits for a rebuild gets one at
+      any change, and one started again is patched with the edits since its build at once. The game
+      logs a patch or a rebuild that failed too, as warnings `gg.patch_failed` and
+      `gg.rebuild_failed`, which `logs` shows. An edit inside a layer's `attach`, which builds the
+      world as a run starts afresh, is patched, `patched` naming its module in `attach` and the game
+      warning `gg.attach_changed`, but shows only in a run started afresh, as the run keeps its
+      world, its restarts starting from snapshots. With `--peers 2`, it runs the two peers of a
+      lockstep session from one build, the host given `--host` and the joiner `--join` at a free
+      port of the loopback, each `started` naming its `player`: patched together, and stopped and
+      started again together as either ends or the game is rebuilt. With `--embedded`, for the tool
+      that started gg, such as the editor, the game is given `--embedded`, running offscreen for the
+      tool, which shows its view, and the run ends cleanly, stopping the game, once gg's stdin
+      closes (`closed`), as the tool ends, a build under way finishing first. Each game gets
+      `--supervised` and a stdin gg holds, so it ends as gg does, however gg ends. A second `run` of
+      PACKAGE while one runs is refused (`gg.running`).
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.

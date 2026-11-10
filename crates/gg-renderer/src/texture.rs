@@ -533,24 +533,9 @@ pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
     };
     let _zone = gg_core::zone!();
     let decode: [f32; 256] = array::from_fn(|byte| srgb_to_linear(byte as f32 / 255.0));
-    // The linear values at which encoding rounds up to each byte from the one below, so that a
-    // search encodes, rounding as GPUs do, rather than a power for each channel. The search is
-    // written out, since `partition_point`'s calls take longer than it in debug builds.
-    let rounding: [f32; 255] = array::from_fn(|byte| srgb_to_linear((byte as f32 + 0.5) / 255.0));
-    let encode = |linear: f32| {
-        let (mut low, mut high) = (0, rounding.len());
-        while low < high {
-            let middle = (low + high) / 2;
-            if rounding[middle] <= linear {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        low as u8
-    };
+    let encoder = Encoder::new();
+    let encode = |linear| encoder.encode(linear);
     let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
-        pixels.reserve(level.len() * 4);
         for &[r, g, b, a] in level {
             let alpha = (a * 255.0).round() as u8;
             pixels.extend_from_slice(&[encode(r), encode(g), encode(b), alpha]);
@@ -562,6 +547,7 @@ pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
         // A pixel across and down: the whole chain.
         return;
     };
+    reserve_levels(pixels, from);
     let first = pixels.as_chunks::<4>().0;
     let texel = |i| {
         let [r, g, b, a]: [u8; 4] = first[i];
@@ -591,10 +577,11 @@ pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
 #[doc(hidden)]
 pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
     let _zone = gg_core::zone!();
+    // Its channels written out, as arrays' `map` takes several times as long in debug builds.
     let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
-        pixels.reserve(level.len() * 4);
-        for texel in level {
-            pixels.extend(texel.map(|value| (value * 255.0).round() as u8));
+        let byte = |value: f32| (value * 255.0).round() as u8;
+        for &[r, g, b, a] in level {
+            pixels.extend_from_slice(&[byte(r), byte(g), byte(b), byte(a)]);
         }
     };
     let mut sizes = mip_sizes(size[0], size[1]);
@@ -602,8 +589,13 @@ pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
     let Some(mut from) = sizes.next() else {
         return;
     };
+    reserve_levels(pixels, from);
     let first = pixels.as_chunks::<4>().0;
-    let texel = |i: usize| first[i].map(|byte| f32::from(byte) / 255.0);
+    let texel = |i: usize| {
+        let [r, g, b, a] = first[i];
+        let value = |byte| f32::from(byte) / 255.0;
+        [value(r), value(g), value(b), value(a)]
+    };
     let mut level = shrink(texel, first_size, from, false);
     append(pixels, &level);
     for to in sizes {
@@ -611,6 +603,18 @@ pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
         append(pixels, &level);
         from = to;
     }
+}
+
+/// Makes room in `pixels` for the RGBA8 of every level from one `from` texels across and down on,
+/// at once, as growing them level by level would double the room of the first, which they're
+/// appended to: a 4,096 by 4,096 texture's 64 MiB to 128, rather than to the 85 its chain takes.
+fn reserve_levels(pixels: &mut Vec<u8>, [width, height]: [u32; 2]) {
+    let levels = mip_sizes(width, height);
+    pixels.reserve_exact(
+        levels
+            .map(|[width, height]| width as usize * height as usize * 4)
+            .sum(),
+    );
 }
 
 /// Appends to `pixels`, the RGBA8 of a texture `size` pixels across and down, of `texels`, the rest
@@ -666,7 +670,7 @@ fn shrink(
                 }
             }
             let [r, g, b] = if weights > 0.0 {
-                color.map(|sum| sum / weights)
+                [color[0] / weights, color[1] / weights, color[2] / weights]
             } else {
                 plain
             };
@@ -692,6 +696,52 @@ fn taps(from: u32, i: u32) -> ([(usize, f32); 3], usize) {
             [(at, (m - i) / n), (at + 1, m / n), (at + 2, (i + 1.0) / n)],
             3,
         )
+    }
+}
+
+/// Encodes linear channels, from 0 to 1, as sRGB bytes, rounding as GPUs do, as the byte whose
+/// value is nearest once encoded, rather than taking a power for each channel.
+struct Encoder {
+    /// The linear values at which encoding rounds up to each byte from the one below, then NaN,
+    /// which no value reaches.
+    rounding: [f32; 256],
+    /// The byte of each [`STEPS`](Self::STEPS)th of the way from 0 to 1, where it starts.
+    below: [u8; Self::STEPS + 1],
+}
+
+impl Encoder {
+    /// How finely `below` divides the way from 0 to 1: more finely than the bytes come where they
+    /// come closest, at 0, where the curve is steepest, at a rate of 12.92 × 255 bytes, about
+    /// 3,295, over the whole way. So each step holds at most one of the values where encoding rounds
+    /// up, which a comparison finds: as a search of `rounding` would, but without its branches,
+    /// which mispredict channel after channel, and in a fraction of its time in debug builds.
+    const STEPS: usize = 4096;
+
+    fn new() -> Self {
+        let rounding = array::from_fn(|byte| {
+            if byte < 255 {
+                srgb_to_linear((byte as f32 + 0.5) / 255.0)
+            } else {
+                f32::NAN
+            }
+        });
+        let mut below = [0; Self::STEPS + 1];
+        let mut byte = 0;
+        for (step, below) in below.iter_mut().enumerate() {
+            while rounding[byte] <= step as f32 / Self::STEPS as f32 {
+                byte += 1;
+            }
+            *below = byte as u8;
+        }
+        Self { rounding, below }
+    }
+
+    /// `linear`, encoded: past 1 as 1 is, and below 0, or NaN, as 0 is.
+    fn encode(&self, linear: f32) -> u8 {
+        // Exact, as scaling by a power of two is, and saturating.
+        let step = ((linear * Self::STEPS as f32) as usize).min(Self::STEPS);
+        let byte = self.below[step];
+        byte + u8::from(self.rounding[usize::from(byte)] <= linear)
     }
 }
 
@@ -1059,6 +1109,26 @@ mod tests {
         let row = [gray(0), gray(0), gray(26), gray(255)].concat();
         let expected = [gray(0), gray(188), gray(138)].concat();
         assert_eq!(levels(&row, [4, 1], Averaged), expected);
+    }
+
+    /// Each byte's value, decoded, encodes as that byte; encoding rounds up to each byte exactly at
+    /// the value halfway to it from the byte below, as a search of those values would, and not a
+    /// float before; and what's past 1 or below 0, or NaN, takes the nearest end.
+    #[test]
+    fn colors_encode_as_the_nearest_byte() {
+        let encoder = Encoder::new();
+        for byte in 0..=255 {
+            let linear = srgb_to_linear(f32::from(byte) / 255.0);
+            assert_eq!(encoder.encode(linear), byte, "byte {byte}");
+        }
+        for byte in 0..255 {
+            let up = encoder.rounding[usize::from(byte)];
+            assert_eq!(encoder.encode(up), byte + 1, "at {up}");
+            assert_eq!(encoder.encode(up.next_down()), byte, "just below {up}");
+        }
+        for (linear, byte) in [(2.0, 255), (f32::INFINITY, 255), (-1.0, 0), (f32::NAN, 0)] {
+            assert_eq!(encoder.encode(linear), byte, "{linear}");
+        }
     }
 
     #[test]

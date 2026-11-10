@@ -3,7 +3,13 @@
 //! in compute passes once what's opaque has drawn its depth and before it's shaded, which takes the
 //! reflection in place of the sky's specular light where a ray found something, blurred as its
 //! roughness spreads it; from the view's colors as the frame before showed them, which a pass of its
-//! own keeps each frame, once the view is drawn and resolved, in an image of the view's size.
+//! own keeps each frame, once the view is drawn and resolved, in an image of the view's size. Each
+//! ray is the mirror of its point's shading normal where a pass before the trace found it, from the
+//! view's visibility buffer ([`MeshPass::find_normals`]) or drawn by the model shaders beside the
+//! depth they drew alone ([`Way::Normals`]), and of the normal its depth has elsewhere.
+//!
+//! [`MeshPass::find_normals`]: crate::mesh::MeshPass::find_normals
+//! [`Way::Normals`]: crate::mesh::Way::Normals
 
 use std::sync::Arc;
 
@@ -86,6 +92,7 @@ pub(crate) struct ReflectionData {
 #[derive(Clone, Copy, NoUninit)]
 struct Trace {
     previous_clip_from_view: Mat4,
+    view_from_world: Mat4,
     view_mul: [f32; 2],
     view_add: [f32; 2],
     depth_mul: f32,
@@ -99,7 +106,8 @@ struct Trace {
     thickness: f32,
     starts: [u32; MOST_LEVELS],
     scale: f32,
-    unused: u32,
+    normals: [u32; 2],
+    unused: [u32; 3],
 }
 
 /// What every pass pushes: `Push` in `shaders/reflections.slang`, field for field.
@@ -239,12 +247,13 @@ pub(crate) struct ReflectionPass {
 }
 
 /// A frame's reflections in its graph: the view's size, the depths whose nearer is what's opaque,
-/// the depth pyramid and its passes, the colors the frame before kept, the view's reflections, in
-/// levels, and how far each spreads, which the passes that shade the view sample, and the trace
-/// and the blurs.
+/// the shading's normals of what drew each, those found, the depth pyramid and its passes, the
+/// colors the frame before kept, the view's reflections, in levels, and how far each spreads, which
+/// the passes that shade the view sample, and the trace and the blurs.
 pub(crate) struct Plan {
     size: [u32; 2],
     depths: [ImageId; 2],
+    normals: [Option<ImageId>; 2],
     pyramid: BufferId,
     levels: [Option<PassId>; MOST_LEVELS],
     kept: ImageId,
@@ -311,25 +320,31 @@ impl ReflectionPass {
     }
 
     /// Declares in `graph` the reflections of a view of `size` pixels, from `depths`, as the passes
-    /// before drew them, whose nearer at each pixel is what's opaque there, against the colors the
-    /// frame before kept in the [`Images`]' first, at target `first`, into its second, at 1 past it:
-    /// the depth pyramid's levels, in a buffer of the graph's own; the trace, into the reflections'
-    /// first level, and how far each spreads, into an image of the graph's own; and the blurs of the
+    /// before drew them, whose nearer at each pixel is what's opaque there, the first the view's
+    /// visibility buffer's where it has one, and the shading's `normals` of what drew each, those a
+    /// pass before found, where it's nearest in that depth, against the colors the frame before kept
+    /// in the [`Images`]' first, at target `first`, into its second, at 1 past it: the depth
+    /// pyramid's levels, in a buffer of the graph's own; the trace, into the reflections' first
+    /// level, and how far each spreads, into an image of the graph's own; and the blurs of the
     /// levels after.
     pub(crate) fn plan(
         graph: &mut Graph,
         first: usize,
         depths: [ImageId; 2],
+        normals: [Option<ImageId>; 2],
         size: [u32; 2],
     ) -> Plan {
+        // Each of the depths once, which may be one image twice.
+        let distinct = &depths[..if depths[0] == depths[1] { 1 } else { 2 }];
         let (count, _, bytes) = pyramid(size);
         let pyramid = graph.buffer("reflections depth pyramid", bytes);
         let mut levels = [None; MOST_LEVELS];
         for (i, level) in levels.iter_mut().take(count).enumerate() {
             let pass = graph.compute(label!("reflections depth"));
             let pass = match i {
-                0 if depths[0] == depths[1] => pass.sample(depths[0]),
-                0 => pass.sample(depths[0]).sample(depths[1]),
+                0 => distinct
+                    .iter()
+                    .fold(pass, |pass, &depth| pass.sample(depth)),
                 _ => pass,
             };
             *level = Some(pass.write_buffer(pyramid).add());
@@ -339,10 +354,10 @@ impl ReflectionPass {
         let spread = graph.scalar("reflections spread", size);
         let trace = (graph.compute(label!("reflections")))
             .read_buffer(pyramid)
-            .sample(kept)
-            .overwrite(reflected)
-            .overwrite(spread)
-            .add();
+            .sample(kept);
+        let sampled = distinct.iter().chain(normals.iter().flatten());
+        let trace = sampled.fold(trace, |trace, &image| trace.sample(image));
+        let trace = trace.overwrite(reflected).overwrite(spread).add();
         let mut blurs = [None; LEVELS as usize - 1];
         for blur in blurs.iter_mut().take(reflected_levels(size) as usize - 1) {
             *blur = Some(
@@ -355,6 +370,7 @@ impl ReflectionPass {
         Plan {
             size,
             depths,
+            normals,
             pyramid,
             levels,
             kept,
@@ -427,8 +443,11 @@ impl ReflectionPass {
         // The view's space has Z ahead, as the shader's does, where the world's views look down -Z.
         let ahead = Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0));
         let mut pass = frame.compute(plan.trace);
+        let normals =
+            (plan.normals).map(|normals| normals.map_or(0, |normals| pass.sampled(normals)));
         let trace = Trace {
             previous_clip_from_view: seen.kept_clip_from_world * seen.world_from_view * ahead,
+            view_from_world: ahead * seen.world_from_view.inverse(),
             view_mul: view_mul.to_array(),
             view_add: view_add.to_array(),
             depth_mul,
@@ -442,11 +461,13 @@ impl ReflectionPass {
             thickness: seen.settings.thickness,
             starts,
             scale: seen.kept_scale,
-            unused: 0,
+            normals,
+            unused: [0; 3],
         };
         let push = Push {
             pyramid: pass.address(plan.pyramid),
             trace: pass.upload(bytemuck::bytes_of(&trace))?.address(),
+            depths: plan.depths.map(|depth| pass.sampled(depth)),
             size: plan.size,
             ..Push::default()
         };

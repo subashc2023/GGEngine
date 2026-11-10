@@ -445,23 +445,16 @@ uint cluster(Clusters clusters, float3 world) {
     return (at.z * clusters.down + at.y) * clusters.across + at.x;
 }
 
-// The color of a point of `material`, as the frame lights it, or unlit: where it is in the world,
-// `world`, its `normal` and `tangent` as interpolated, whether its triangle shows its front, the
-// side its corners wind counterclockwise from in its mesh, which a transform that mirrors shows
-// winding the other way, and what its maps hold there: its base `color`, its vertices' and its
-// factor's in, its `surface`'s map, its normal map's X and Y, from -1 to 1, its occlusion and its
-// emission; and the view's `reflection` there, as `reflection` gives it, or 0 for none.
-float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
-           bool front, float4 color, float4 surface, float2 mapped, float occlusion,
-           float3 emission, float4 reflection) {
-    if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
-        return color;
-    }
+// Which way a point of `material` faces, as `lit` shades it: its `interpolated` normal, turned to
+// face the view where its triangle shows its back, as a double-sided material's does, then bent by
+// its normal map, whose X and Y are `mapped`, from -1 to 1, along its `tangent`, if it has one; and
+// in `surface_normal`, which way it faces before its normal map.
+float3 shading_normal(Material material, float3 interpolated, float4 tangent, bool front,
+                      float2 mapped, out float3 surface_normal) {
     // A back face seen of a double-sided material faces the other way, its tangent space too.
     float facing = front ? 1.0 : -1.0;
     float3 normal = normalize(interpolated) * facing;
-    // Which way the surface faces where its shadows are sampled: the normal map's bumps cast none.
-    float3 surface_normal = normal;
+    surface_normal = normal;
     if ((material.flags & NORMAL_MAPPED) != 0) {
         // Kept square to the normal, which interpolation doesn't keep them.
         float3 along = tangent.xyz * facing;
@@ -474,6 +467,24 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         float3 local = float3(mapped * material.normal_scale, z);
         normal = normalize(along * local.x + bitangent * local.y + normal * local.z);
     }
+    return normal;
+}
+
+// The color of a point of `material`, as the frame lights it, or unlit: where it is in the world,
+// `world`, its `normal` and `tangent` as interpolated, whether its triangle shows its front, the
+// side its corners wind counterclockwise from in its mesh, which a transform that mirrors shows
+// winding the other way, and what its maps hold there: its base `color`, its vertices' and its
+// factor's in, its `surface`'s map, its normal map's X and Y, from -1 to 1, its occlusion and its
+// emission; and the view's `reflection` there, as `reflection` gives it, or 0 for none.
+float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
+           bool front, float4 color, float4 surface, float2 mapped, float occlusion,
+           float3 emission, float4 reflection) {
+    if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
+        return color;
+    }
+    // Which way the surface faces where its shadows are sampled: the normal map's bumps cast none.
+    float3 surface_normal;
+    float3 normal = shading_normal(material, interpolated, tangent, front, mapped, surface_normal);
     // What it diffuses and reflects head-on, which the frame's lights shade; and for the sky's
     // light, a dielectric's, which it mixes with a metal's by how metallic it is.
     float metallic = 0.0;

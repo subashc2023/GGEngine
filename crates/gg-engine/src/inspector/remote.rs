@@ -40,7 +40,7 @@ mod imp {
     use super::super::{Edit, Gesture, Inspector, Pass, Placed, Step};
     use crate::api::json::{self, Remote as Names};
     use crate::reflect::{Reflect, Type, Types, Value};
-    use crate::{EntityId, Pose, Transform};
+    use crate::{EntityId, Name, Pose, Transform};
 
     /// How long the connection waits to connect. It waits for each answer as long as it takes: a
     /// script stopped in the game holds the answers for as long as it's debugged, and `gg run` ends
@@ -458,6 +458,8 @@ mod imp {
                                 ("revert", Some(*id), Some(component))
                             }
                             &Command::Unlink(id) => ("unlink", Some(id), None),
+                            &Command::Reparent(id, _) => ("reparent", Some(id), None),
+                            &Command::Rename(id, _) => ("rename", Some(id), None),
                             Command::Set(..) | Command::Seal | Command::Step(_) => {
                                 unreachable!("the menus choose no sets, seals or steps")
                             }
@@ -902,6 +904,25 @@ mod imp {
                             path: path.clone(),
                         },
                         Command::Unlink(of) => gg_api::Operation::Unlink { id: id(of) },
+                        Command::Reparent(of, parent) => gg_api::Operation::Reparent {
+                            id: id(of),
+                            parent: parent.as_ref().map(id),
+                            in_place: true,
+                        },
+                        // A set of the name it has, as the list has it, or an add of one.
+                        Command::Rename(of, name) => match self.name(*of) {
+                            Some(_) => gg_api::Operation::Set {
+                                id: id(of),
+                                component: "Name".to_owned(),
+                                path: "0".to_owned(),
+                                value: value(&Value::String(name.clone()))?,
+                            },
+                            None => gg_api::Operation::Add {
+                                id: id(of),
+                                component: "Name".to_owned(),
+                                value: Some(value(&Name(name.clone()).to_value())?),
+                            },
+                        },
                         Command::Set(..) | Command::Seal | Command::Step(_) => {
                             unreachable!("the menus choose no sets, seals or steps")
                         }
@@ -1423,6 +1444,44 @@ mod imp {
                 "path": "color"}});
             let operations = json!({"operations": [reverted]});
             assert_eq!(ask(&operation(revert)), ("apply".to_owned(), operations));
+        }
+
+        /// A reparent goes to the game as the API's `reparent` takes it, to a parent or to the
+        /// roots; and a rename as a set of the name the entity has, as the read of it says, or for
+        /// one without, an add of one.
+        #[test]
+        fn reparents_and_renames_go_as_the_api_has_them() {
+            let mut remote = Remote::new("editor");
+            let (a, b) = (id(1), id(2));
+            let ask = |remote: &Remote, command| {
+                let operation = Ask::Operation {
+                    command,
+                    picked: Some(a),
+                    parent: None,
+                    number: 1,
+                };
+                remote.request(&operation).expect("a request")
+            };
+            let apply = |operation| ("apply".to_owned(), json!({ "operations": [operation] }));
+            let (a_id, b_id) = (a.to_string(), b.to_string());
+            let reparent = json!({"reparent": {"id": a_id, "parent": b_id, "in_place": true}});
+            assert_eq!(ask(&remote, Command::Reparent(a, Some(b))), apply(reparent));
+            let root = json!({"reparent": {"id": a_id, "parent": null, "in_place": true}});
+            assert_eq!(ask(&remote, Command::Reparent(a, None)), apply(root));
+            let read = |name: &str| {
+                let answer =
+                    format!(r#"{{"name":{name},"parent":null,"children":[],"components":{{}}}}"#);
+                Ok(answer)
+            };
+            let rename = || Command::Rename(a, "Lamp".to_owned());
+            remote.entity(a, read("null"), Some(a));
+            // Whole, as a create's components go.
+            let add = json!({"add": {"id": a_id, "component": "Name", "value": {"0": "Lamp"}}});
+            assert_eq!(ask(&remote, rename()), apply(add));
+            remote.entity(a, read(r#""Old""#), Some(a));
+            let set =
+                json!({"set": {"id": a_id, "component": "Name", "path": "0", "value": "Lamp"}});
+            assert_eq!(ask(&remote, rename()), apply(set));
         }
 
         /// A set through the link waits, as the link says, until a read of its entity after the

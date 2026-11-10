@@ -30,8 +30,8 @@
 //! input at once, and brings back the world as edited, as `stop` does, with its edits' history,
 //! the view going to the editor's camera, as it does at any client's `stop` that no Play clicked
 //! since follows. Stopped, the camera switch has the view show what the game's camera sees, as it
-//! does at first, the input staying the editor's, until the editor's camera takes some, which
-//! turns the view to it.
+//! does at first and as a New or an Open opens a scene, the input staying the editor's, until the
+//! editor's camera takes some, which turns the view to it.
 //!
 //! A game that asks for the cursor grabbed, for looking about with the mouse, as the view's memory
 //! says it does, has the editor grab its own window's in Play while the view has the keys, the
@@ -82,7 +82,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gg_api::asset::{AssetKind, Meta};
 use gg_api::view::Reader;
 use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status};
-use gg_engine::egui::{self, Color32, Response, RichText, ScrollArea, ViewportCommand, ViewportId};
+use gg_engine::egui::{
+    self, Color32, Response, RichText, ScrollArea, TextStyle, TextWrapMode, ViewportCommand,
+    ViewportId,
+};
 use gg_engine::grid::{self, Plane};
 use gg_engine::math::{Quat, Vec2, Vec3};
 use gg_engine::reflect::{self, Reflect};
@@ -196,6 +199,9 @@ struct Game {
     /// `Some(None)` unpicks.
     wants: Wants,
     took_pick: Option<Option<EntityId>>,
+    /// The entity the Entities panel asked to frame in the view, while the link doesn't place it
+    /// yet, as it doesn't a pick just made until a read of it comes.
+    framing: Option<EntityId>,
     /// Whether the view's input went to the game as the game was last told, as
     /// [`through`](Self::through) says: as it stops, the game lets go of what's held, and as it
     /// starts, it gets the cursor.
@@ -369,22 +375,26 @@ enum Line {
 }
 
 /// How the run goes, as the title bar says, but `Running`, while a game serves, for which it says
-/// how the game runs, as [`Game::label`] has it.
+/// how the game runs, as [`Game::label`] has it. A build says where it has come to once `gg run`
+/// does, as [`progress`] puts it.
 #[derive(Clone, Debug, PartialEq)]
 enum RunState {
-    Building,
+    Building(Option<String>),
     Starting,
     Running,
-    Rebuilding,
+    Rebuilding(Option<String>),
     Restarting,
     Waiting,
     Ended(String),
 }
 
-/// A line of the Logs panel.
+/// A line of the Logs panel, which shows each of its text's lines, between its newlines, as a row.
 struct Logged {
     level: Level,
     text: String,
+    /// The row its first line has among those logged since the editor started, so that the panel
+    /// finds the rows it shows without laying out the rest, as [`show_logs`] does.
+    line: usize,
 }
 
 /// How a line of the Logs panel shows: `Debug` for the game's debug and trace events, which
@@ -433,6 +443,7 @@ impl Game {
             looking: Looking::new(CLIENT),
             wants,
             took_pick: None,
+            framing: None,
             told: false,
             size: None,
             seen: None,
@@ -442,7 +453,7 @@ impl Game {
             input: Vec::new(),
             inputting: false,
             escaped: false,
-            run_state: RunState::Building,
+            run_state: RunState::Building(None),
             paused: false,
             stopped: true,
             stopping: false,
@@ -515,7 +526,8 @@ impl Game {
         if self.logs.len() == LOGGED {
             self.logs.pop_front();
         }
-        self.logs.push_back(Logged { level, text });
+        let line = (self.logs.back()).map_or(0, |last| last.line + last.text.split('\n').count());
+        self.logs.push_back(Logged { level, text, line });
     }
 
     /// Takes what `gg run` printed since: its events, which say how the run goes, and connect the
@@ -576,7 +588,7 @@ impl Game {
             {
                 continue;
             }
-            let Logged { level, text } = logged(event);
+            let (level, text) = logged(event);
             self.log(level, text);
         }
     }
@@ -608,9 +620,14 @@ impl Game {
         }
         self.log(level, text);
         match name {
+            "building" => {
+                if let RunState::Building(at) | RunState::Rebuilding(at) = &mut self.run_state {
+                    *at = Some(progress(event));
+                }
+            }
             "started" => self.run_state = RunState::Starting,
             "serving" => self.serve(event),
-            "rebuilding" => self.run_state = RunState::Rebuilding,
+            "rebuilding" => self.run_state = RunState::Rebuilding(None),
             // The game before goes on, if one runs.
             "rebuild_failed" if self.talker.is_some() => self.run_state = RunState::Running,
             "rebuild_failed" => self.run_state = RunState::Waiting,
@@ -787,7 +804,8 @@ impl Game {
     /// editor's Stop, another client's `stop`, or a New or Open of the File menu's that stopped a
     /// copy playing, the input meant for it that wasn't sent goes, but its letting go, and the view
     /// turns to the editor's camera, if it was through the game's, whose viewpoint goes to the game
-    /// with the grid, as the user's turn would; but neither while a Play or Simulate clicked since
+    /// with the grid, as the user's turn would, a New or an Open turning it back to the game's, as
+    /// [`scene_done`](Self::scene_done) says; but neither while a Play or Simulate clicked since
     /// waits for its answer, the input then going to the copy it plays.
     fn take_status(&mut self, status: &Status) {
         self.paused = status.paused;
@@ -875,9 +893,11 @@ impl Game {
             }
             RunState::Running if self.paused => format!("{running}, paused"),
             RunState::Running => running.to_owned(),
-            RunState::Building => "Building…".to_owned(),
+            RunState::Building(None) => "Building…".to_owned(),
+            RunState::Building(Some(at)) => format!("Building… {at}"),
             RunState::Starting => "Starting…".to_owned(),
-            RunState::Rebuilding => "Rebuilding…".to_owned(),
+            RunState::Rebuilding(None) => "Rebuilding…".to_owned(),
+            RunState::Rebuilding(Some(at)) => format!("Rebuilding… {at}"),
             RunState::Restarting => "Restarting…".to_owned(),
             RunState::Waiting => "Waiting for a rebuild".to_owned(),
             RunState::Ended(why) => format!("Ended: {why}"),
@@ -938,8 +958,8 @@ impl Game {
 
     /// Opens the project in `dir` in place of the one open, if one is: lets go of its game, closing
     /// its run's stdin, which ends it, the run going on ending meanwhile; logs what was measured of
-    /// its view; and makes the layer the new project's, as it starts but for the hub, the Logs and
-    /// the runs ending, noting the project opened, and starting its run, as
+    /// its view; and makes the layer the new project's, as it starts but for the hub, the Logs, the
+    /// runs ending and where the toolbar is, noting the project opened, and starting its run, as
     /// [`start`](Self::start) does.
     fn switch(&mut self, cx: &mut Context, dir: PathBuf) {
         self.disconnect();
@@ -953,6 +973,7 @@ impl Game {
         opened.hub = mem::take(&mut self.hub);
         opened.ending = mem::take(&mut self.ending);
         opened.logs = mem::take(&mut self.logs);
+        opened.view.toolbar.placement = mem::take(&mut self.view.toolbar.placement);
         *self = opened;
         info!(code = "editor.project", dir = %dir.display(), "Opened a project");
         self.log(
@@ -1147,10 +1168,20 @@ impl Game {
         self.switching = None;
     }
 
-    /// Goes on from the File menu's request, `scene`, that the game did: from a save, to what was
-    /// to follow it.
+    /// Goes on from the File menu's request, `scene`, that the game did: from a New or an Open, to
+    /// the view through the game's camera, as the editor starts, so that it frames the scene the
+    /// game has now, rather than the editor's camera framing the one before, whose grid goes too,
+    /// as the user's turn would; but not while a Play or Simulate clicked since waits for its
+    /// answer, which turned the view itself; from a save, to what was to follow it.
     fn scene_done(&mut self, scene: &Scene) {
         if scene.action != SceneAction::Save {
+            let toolbar = &mut self.view.toolbar;
+            if !toolbar.world_camera && self.playing == 0 {
+                toolbar.world_camera = true;
+                // `changes`, which runs before the answers are taken, doesn't see this turn.
+                self.looking.change(Part::Viewpoint);
+                self.looking.follow(Part::Grid);
+            }
             return;
         }
         match self.then.take() {
@@ -1579,6 +1610,24 @@ impl Game {
         }
     }
 
+    /// Frames the entity the Entities panel asked to frame, as the view's F does, once the link
+    /// places it: the pick, as the panel picks what it frames; or drops the ask as the pick changes.
+    fn frame_asked(&mut self) {
+        let link = &self.view.link;
+        if let Some(asked) = link.framed() {
+            self.framing = Some(asked);
+        }
+        let Some(asked) = self.framing else {
+            return;
+        };
+        if link.picked() != Some(asked) {
+            self.framing = None;
+        } else if let Some(placed) = picked(link).filter(|placed| placed.entity == asked) {
+            self.view.frame(&placed);
+            self.framing = None;
+        }
+    }
+
     /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
     /// editor's camera's viewpoint while it drives the view; the Inspector's pick outlined; the
     /// toolbar's grid, while it's on and the editor's camera drives; and the colliders' outlines
@@ -1849,11 +1898,12 @@ fn engine_plane(given: gg_api::Plane) -> Plane {
 }
 
 impl Layer for Game {
-    /// Reads the projects the hub keeps, and opens the project the editor was started in, noting
-    /// it, or else the latest opened, if the hub's to skip to it; or, with neither, opens none,
-    /// the hub showing.
+    /// Reads the projects the hub keeps, and where the toolbar was, and opens the project the
+    /// editor was started in, noting it, or else the latest opened, if the hub's to skip to it; or,
+    /// with neither, opens none, the hub showing.
     fn attach(&mut self, cx: &mut Context) {
         self.hub.read(cx);
+        self.view.toolbar.read(cx);
         match self.dir.clone() {
             Some(dir) => {
                 self.hub.opened(&dir);
@@ -1880,6 +1930,7 @@ impl Layer for Game {
         // What the user changed since the last update, before what the game answered changes it,
         // and before the camera settles, which changes nothing the view shows.
         self.view.camera.update(dt);
+        self.frame_asked();
         self.changes(wants(&self.view));
         self.view.settle();
         self.take_answers();
@@ -2096,23 +2147,7 @@ impl Layer for Game {
             self.take_drop(ui.egui(), response, cx.view(), cx.scale() as f32);
         }
         let logs = &self.logs;
-        ui.panel("Logs", |ui| {
-            ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    for logged in logs {
-                        let text = RichText::new(&logged.text).monospace();
-                        let text = match logged.level {
-                            Level::Debug => text.weak(),
-                            Level::Info => text,
-                            Level::Warn => text.color(Color32::from_rgb(230, 190, 60)),
-                            Level::Error => text.color(Color32::from_rgb(240, 90, 80)),
-                        };
-                        ui.label(text);
-                    }
-                });
-        });
+        ui.panel("Logs", |ui| show_logs(ui, logs));
         // What the game's view shows under the cursor, while the cursor's over it: a pick at the
         // cursor as each comes back, and what the latest answer found, painted over the handles.
         let origin = cx.view().map_or([0, 0], |view| view.origin);
@@ -2138,6 +2173,7 @@ impl Layer for Game {
         let alt = view::alt_down(cx.input());
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
         self.view.overlay(ui, self.screen(cx.view()));
+        self.view.toolbar.save(cx);
         // As Play, Simulate, Stop and the toolbar's switch went.
         self.tell(cx.input().cursor(), cx.view());
         if let Some(action) = &self.prompt {
@@ -2231,10 +2267,23 @@ const PLACES: [&str; 9] = [
     "threadName",
 ];
 
+/// What `gg run`'s `building` event `event` says the build has come to, for the title bar: as it
+/// compiles, how many of the crates dx counts on it has compiled, as `212 of 530 crates`; else its
+/// stage, as `linking`.
+fn progress(event: &Value) -> String {
+    match (event["compiled"].as_u64(), event["crates"].as_u64()) {
+        (Some(compiled), Some(crates)) => format!("{compiled} of {crates} crates"),
+        _ => event["stage"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('_', " "),
+    }
+}
+
 /// The Logs panel's line for `event`, an event of the game's JSON log, as the console shows it but
 /// for where and when it was logged: `[code] message  name=value ...`, a string among the fields
 /// quoted if it's empty or has spaces; at its level, `Debug` for a debug or trace event.
-fn logged(event: &Value) -> Logged {
+fn logged(event: &Value) -> (Level, String) {
     let level = match event["level"].as_str() {
         Some("ERROR") => Level::Error,
         Some("WARN") => Level::Warn,
@@ -2261,7 +2310,41 @@ fn logged(event: &Value) -> Logged {
         };
         separator = " ";
     }
-    Logged { level, text }
+    (level, text)
+}
+
+/// Shows the Logs panel's lines, `logs`, in `ui`: a row to each line of their text, unwrapped, as
+/// rustc renders its errors, the newest showing while the panel's scrolled to the bottom. It lays
+/// out only the rows in view: laying out all the [`LOGGED`] the panel keeps took 5 ms a frame in a
+/// debug build, its egui optimized.
+fn show_logs(ui: &mut egui::Ui, logs: &VecDeque<Logged>) {
+    let first = logs.front().map_or(0, |logged| logged.line);
+    let rows = (logs.back()).map_or(0, |last| last.line + last.text.split('\n').count() - first);
+    let height = ui.text_style_height(&TextStyle::Monospace);
+    ScrollArea::both()
+        .stick_to_bottom(true)
+        .auto_shrink(false)
+        .show_rows(ui, height, rows, |ui, shown| {
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
+            let (start, end) = (first + shown.start, first + shown.end);
+            let from = logs.partition_point(|logged| logged.line <= start);
+            for logged in (logs.range(from.saturating_sub(1)..)).take_while(|l| l.line < end) {
+                let (skip, take) = (
+                    start.saturating_sub(logged.line),
+                    end - logged.line.max(start),
+                );
+                for line in logged.text.split('\n').skip(skip).take(take) {
+                    let text = RichText::new(line).monospace();
+                    let text = match logged.level {
+                        Level::Debug => text.weak(),
+                        Level::Info => text,
+                        Level::Warn => text.color(Color32::from_rgb(230, 190, 60)),
+                        Level::Error => text.color(Color32::from_rgb(240, 90, 80)),
+                    };
+                    ui.label(text);
+                }
+            }
+        });
 }
 
 /// Follows the log of the game `session` names on a connection of its own, as the editor, sending
@@ -3230,11 +3313,15 @@ mod tests {
         assert_eq!(game.closing, Closing::Checking(true));
     }
 
-    /// A New, or an Open, that stopped a copy playing turns the view to the editor's camera, as
-    /// another client's `stop` does; and the title bar names the open scene's file once a game has
-    /// served, Untitled after a New, marked while it has unsaved edits.
+    /// A New or an Open turns the view to the game's camera, as the editor starts, so that it
+    /// frames the scene the game has now: one that stopped a copy playing, though the stop turns
+    /// the view to the editor's camera, as another client's `stop` does; and one from the editor's
+    /// camera, as a Stop leaves the view, the next look giving its viewpoint and the grid back to
+    /// the game. Not one refused, nor one whose answer comes before that of a Simulate clicked
+    /// since. And the title bar names the open scene's file once a game has served, Untitled after
+    /// a New, marked while it has unsaved edits.
     #[test]
-    fn a_scene_answer_that_says_stopped_turns_the_view() {
+    fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
         let game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
         assert_eq!(game.scene_label(), None, "before a game serves");
         // Playing, through the game's camera.
@@ -3264,8 +3351,80 @@ mod tests {
         ends.answer.send(emptied).expect("sent");
         game.update(&mut cx, Duration::ZERO);
         assert_eq!(game.mode(), Mode::Edit);
-        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        assert!(game.view.toolbar.world_camera, "the game's camera");
         assert_eq!(game.scene_label().as_deref(), Some("Untitled"));
+        // Through the editor's camera, for which a test sets the switch, the game's look holding
+        // its viewpoint and the grid.
+        game.view.toolbar.world_camera = false;
+        game.update(&mut cx, Duration::ZERO);
+        let sent = looks(&ends);
+        let [sent] = &sent[..] else {
+            panic!("a look: {sent:?}");
+        };
+        let (Some(viewpoint), Some(grid)) = (sent.viewpoint.flatten(), sent.grid.flatten()) else {
+            panic!("the editor's viewpoint and grid: {sent:?}");
+        };
+        let held = Looked {
+            viewpoint: Some(viewpoint),
+            outline: None,
+            grid: Some(grid),
+            colliders: None,
+            by: By {
+                viewpoint: Some(CLIENT.to_owned()),
+                outline: None,
+                grid: Some(CLIENT.to_owned()),
+                colliders: None,
+            },
+            revision: 1,
+            run: 1,
+            seen: None,
+        };
+        ends.answer
+            .send(("look".to_owned(), Ok(json!(held))))
+            .expect("sent");
+        let level = PathBuf::from("scenes/level2.ron");
+        let opened = || {
+            let level2 = scene_status(Some("scenes/level2.ron"), false);
+            ("scene".to_owned(), level2)
+        };
+        game.open(level.clone());
+        game.update(&mut cx, Duration::ZERO);
+        let missing = Failure::new("scene.no_file", "scenes/level2.ron isn't there");
+        ends.answer
+            .send(("scene".to_owned(), Err(missing)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert!(game.message.take().is_some(), "refused");
+        assert!(!game.view.toolbar.world_camera, "refused");
+        // A Simulate clicked after the Open was asked, which its answer comes before.
+        game.open(level.clone());
+        game.update(&mut cx, Duration::ZERO);
+        game.run(Mode::Simulate);
+        ends.answer.send(opened()).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert!(!game.view.toolbar.world_camera, "as Simulate turned it");
+        ends.answer
+            .send(("play".to_owned(), status(false, false)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.mode(), Mode::Simulate);
+        game.run(Mode::Edit);
+        ends.answer
+            .send(("stop".to_owned(), status(true, false)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let _ = looks(&ends);
+        game.open(level);
+        game.update(&mut cx, Duration::ZERO);
+        ends.answer.send(opened()).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert!(game.view.toolbar.world_camera, "the game's camera");
+        let back = Look {
+            viewpoint: Some(None),
+            grid: Some(None),
+            ..Look::default()
+        };
+        assert_eq!(looks(&ends), [back]);
     }
 
     /// In Play, a press or a repeat of N, O or S with the command key held, a key of the File
@@ -3771,6 +3930,98 @@ mod tests {
             game.run_state,
             RunState::Ended("[gg.running] another `gg run` runs shards".to_owned())
         );
+    }
+
+    /// The Logs panel, holding all it keeps of more logged, the oldest gone, lays out only the
+    /// rows in view, a row to each line, and fills itself with the latest lines in order, entries
+    /// of more than one line among them, the last at its bottom.
+    #[test]
+    fn the_logs_lay_out_only_the_rows_in_view_and_show_the_latest() {
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
+        // An entry of one to three lines, each its own text; but the one before the last, of more
+        // than the panel holds, so that its top row is inside an entry.
+        let logged = LOGGED + 1000;
+        let entry = |at: usize| {
+            let lines = if at == logged - 2 { 40 } else { at % 3 + 1 };
+            (0..lines).map(move |line| format!("{at}.{line}"))
+        };
+        for at in 0..logged {
+            game.log(Level::Info, entry(at).collect::<Vec<_>>().join("\n"));
+        }
+        let lines: Vec<String> = (0..logged).flat_map(entry).collect();
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        let panel = egui::Rect::from_min_max(egui::pos2(0.0, 100.0), egui::pos2(400.0, 300.0));
+        let frame = || {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let builder = egui::UiBuilder::new().max_rect(panel);
+                ui.scope_builder(builder, |ui| show_logs(ui, &game.logs));
+            });
+            output.textures_delta.clear();
+            output.shapes
+        };
+        // The first finds how tall its rows are, the bottom of which the second scrolls to, and
+        // the third lays out only what the second did.
+        frame();
+        frame();
+        let mut shown = texts(&frame());
+        shown.sort_by(|(_, a), (_, b)| a.top().total_cmp(&b.top()));
+        assert!(shown.len() > 10, "{shown:?}");
+        let laid_out = ctx.fonts(|fonts| fonts.num_galleys_in_cache());
+        assert!(laid_out <= 4 * shown.len(), "{laid_out} laid out");
+        let texts: Vec<_> = shown.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(texts, lines[lines.len() - shown.len()..]);
+        let pitch = shown[1].1.top() - shown[0].1.top();
+        let (top, bottom) = (shown[0].1.top(), shown[shown.len() - 1].1.bottom());
+        assert!(top < panel.top() + pitch && bottom > panel.bottom() - pitch);
+    }
+
+    #[test]
+    fn a_build_says_where_it_has_come_to_in_the_title_bar() {
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
+        let send = game.send.take().expect("not started");
+        assert_eq!(game.label(), "Building…");
+        let building = |mut event: Value| {
+            event["event"] = json!("building");
+            event
+        };
+        let events = [
+            (
+                building(json!({"stage": "starting", "crates": 293})),
+                "Building… starting",
+            ),
+            (
+                building(
+                    json!({"stage": "compiling", "compiled": 212, "crates": 293, "crate": "gg_engine"}),
+                ),
+                "Building… 212 of 293 crates",
+            ),
+            (building(json!({"stage": "linking"})), "Building… linking"),
+            (
+                json!({"event": "built", "build_ms": 14580}),
+                "Building… linking",
+            ),
+            (json!({"event": "started", "pid": 7}), "Starting…"),
+            (
+                json!({"event": "rebuilding", "file": "src/main.rs"}),
+                "Rebuilding…",
+            ),
+            (
+                building(json!({"stage": "extracting_assets"})),
+                "Rebuilding… extracting assets",
+            ),
+        ];
+        let count = events.len();
+        for (event, label) in events {
+            send.send(Line::Out(event.to_string())).expect("sent");
+            game.take_lines();
+            assert_eq!(game.label(), label, "after {event}");
+        }
+        assert_eq!(game.logs.len(), count, "each reaches the Logs too");
     }
 
     /// The game's events reach the Logs as they're read, each with its code, its message and its

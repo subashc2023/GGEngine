@@ -10,7 +10,9 @@
 // what's less opaque than their cutoff: both are drawn fully opaque, so they return an alpha of 1.
 // Of those, only the masked one discards, since a shader that can discard while it writes depth
 // loses early depth testing on some GPUs; its shadows are cut out as it is, by `shadow_main`,
-// where those of an opaque material, drawn without a fragment shader, are whole.
+// where those of an opaque material, drawn without a fragment shader, are whole. Both draw their
+// normals by `normal_main` too, for the view's reflections, where the view draws them otherwise than
+// into its visibility buffer.
 //
 // What blends fogs itself by the frame's fog, as fog.slang says, as it draws over what the fog's
 // pass fogged, which fogs what's opaque.
@@ -229,6 +231,31 @@ void shadow_main(Varyings input) {
     if (alpha < material.cutoff) {
         discard;
     }
+}
+#endif
+
+#if defined(OPAQUE) || defined(MASKED)
+// Which way what's opaque faces in the world, as `fragment_main` shades it, and 1 in alpha, for the
+// view's reflections to trace their rays about: drawn against the view's depth once it's drawn,
+// where it's nearest, before anything shades; and none of a masked material where it's less opaque
+// than its cutoff, as `fragment_main` draws none.
+[shader("fragment")]
+float4 normal_main(Varyings input, bool front: SV_IsFrontFace) : SV_Target0 {
+    // Loaded whole, as `shadow_main` says why.
+    Frame frame = loadAligned<8>(push.frame);
+    Material material = frame.materials[push.params[input.instance].material];
+    // Sampled before the discard, as `fragment_main` says why.
+    float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
+#if defined(MASKED)
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a;
+    if (alpha < material.cutoff) {
+        discard;
+    }
+#endif
+    bool shows_front = front != (input.side.x < 0.0);
+    float3 surface_normal;
+    return float4(shading_normal(material, input.normal, input.tangent, shows_front, mapped,
+                                 surface_normal), 1.0);
 }
 #endif
 

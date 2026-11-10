@@ -104,7 +104,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   The toolbar's camera switch is that switch while the game plays; stopped, it shows what the
   game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
   turns the view to the editor's camera, which carries on from where the view was, as it does
-  whenever it takes the view over. Its Scenes panel, below the Entities, lists the scene files in
+  whenever it takes the view over; a New or an Open turns it to the game's camera, as the editor
+  starts, which frames the scene opened. F over the view, and a double click on a row of its
+  Entities panel, that row's Frame in View or F in the panel, frame the pick: the editor's camera
+  eases to look at its origin, turned as it was and as far back, as no entity's size reaches the
+  editor, and the view turns to it. Its Scenes panel, below the Entities, lists the scene files in
   the project's scenes folders, a click opening one as the File menu's Open does. Its Debugger
   panel debugs the game's scripts through the API: the source of each script the game runs, a click
   on a line's number setting or clearing a breakpoint there, which the editor keeps and gives each
@@ -1014,8 +1018,13 @@ parent as its `Parent` component, and its `Transform` is relative to its parent'
 parent carries its children along, and despawning an entity despawns its descendants. The world
 keeps the hierarchy whole: once an entity is spawned, only `World::set_parent` gives, changes or
 takes away its `Parent`, which isn't `Writable`, so that code changing it any other way doesn't
-compile, and `set_field` and operations refuse it by name. A parent's children are in the order
-they became its children, which means no more than the order queries find entities in. Drawing
+compile, and `set_field` and operations refuse it by name. A reparent keeps the entity's own
+transform, so that it moves as its new parent is placed; the editor's panels, and the tool API's
+`reparent` given `in_place`, keep it where it is in the world instead, a set of its transform
+joining the reparent in one edit, as `World::reparent_in_place` finds it from the two world
+matrices, decomposed, which loses any shear they give it between them. A parent's children are in
+the order they became its children, which means no more than the order queries find entities in.
+Drawing
 keeps each entity's world matrix, its parent's times its own transform's from its root down, and
 its rotation likewise, outside the world, as the latest tick left it, and places again, after the
 frame's ticks, the entities whose transforms or parents changed, or that joined a table, and what
@@ -1268,7 +1277,17 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   decoding or streaming once its layers have attached, which counts what they added as they loaded
   and attached, and may miss what they add after: how long it took to load from the engine's
   start, the process's resident memory and its peak, and the GPU's own memory in use and its
-  budget. The OS's counts are read then and as the run ends alone.
+  budget. The OS's counts are read then and as the run ends alone. What that time went to logs as
+  it's done, each with how long it took, `ms`, what each loads among it: at the info level, each
+  scene file a layer loads (`scene.loaded`) or the tool API opens (`scene.opened`), and each
+  model, prefab, font, UI file and music added (`asset.model_loaded`, `asset.prefab_loaded`,
+  `asset.font_loaded`, `asset.ui_loaded`, `asset.music_loaded`); at the debug level, as there may
+  be many, each texture and sound added from its file (`asset.texture_loaded`,
+  `asset.sound_loaded`), each font baked (`asset.font_baked`), the sound's output opened
+  (`audio.opened`), each image decoded, a model's among them, from the thread that decoded it as
+  it's done (`asset.texture_decoded`, with the time its mip levels took, `levels_ms`), and each
+  texture and mesh streamed to the GPU, from when the render thread queued it to when it's drawable
+  (`renderer.texture_streamed`, `renderer.mesh_streamed`).
 
 ## Events and layers
 
@@ -2163,10 +2182,11 @@ again. A change that doesn't compile, decode, read or bake, or breaks a shader's
 and the asset keeps drawing as it did. The engine's own shaders and font don't reload, nor do the
 meshes layers make themselves.
 
-Windowed runs keep a pipeline cache, which they load from the OS's per-user directory for caches as
-the renderer starts and save as it ends, so that pipelines an earlier run made are made again in a
-fraction of the time. Headless runs, replays and tests use none, as they keep no layout, so that
-their startup times compare.
+Windowed and embedded runs keep a pipeline cache, which they load from the OS's per-user directory
+for caches as the renderer starts and save as it ends, so that pipelines an earlier run made are
+made again in a fraction of the time: an embedded run, the game the editor plays, starts afresh at
+each change `gg run` can't patch in. Other headless runs and replays, as most tests run, use none,
+so that their startup times compare.
 
 A game's texture is a PNG or a JPEG that the engine decodes to RGBA8 with colors sRGB-encoded and
 alpha not multiplied into them, as images store them, whatever color profile or gamma the file
@@ -2184,9 +2204,9 @@ is its handle and its size, as a sprite sheet's cells are cut by it, so a run re
 header on the main thread as a layer adds it, or as text names it, as [Project
 state](#project-state) says, which hands out the handle at once, and a file that's missing or isn't
 an image of a size the engine takes fails there; its pixels, PNG's, JPEG's and Radiance HDR's or
-the package's levels supercompressed by zstd, decode on a thread of their own, `gg-load`, one at a
-time in the
-order they came, and fill the texture as a frame starts, which shows its stand-in until then. Pixels
+the package's levels supercompressed by zstd, decode on threads of their own, `gg-load`, each
+taking the next in the order they came, and fill each texture as the frame after its image is done
+starts, which shows its stand-in until then. Pixels
 that don't decode warn (`engine.bad_texture`), and the texture keeps its stand-in until its file,
 still watched, reads again; the cooker refuses them, so a package holds none. A test's context and a
 replay's decode on the main thread as they add, as nothing draws them, failures warning alike, so
@@ -2495,8 +2515,18 @@ traced through the view's depth, in place of the sky's specular light where the 
 something: screen-space reflections, in compute passes once the depth of what's opaque is drawn,
 as the ambient occlusion's is, and before any of it shades. The first build a pyramid of the
 nearer of the two depths, the nearest of the 2 by 2 texels under each texel, its first level the
-view's size and each after half the one before, rounded up, in a buffer of the graph's own. The
-trace finds each pixel's normal from the depth round it, reflects the way from the eye about it,
+view's size and each after half the one before, rounded up, in a buffer of the graph's own. Beside
+a visibility buffer, a compute pass first finds each pixel's normal from it, where it drew, as the
+view's shading turns it, its normal map's bumps among it, the same way the shading finds its
+triangle's corners, into an image of the graph's own. Where the depth alone of what's drawn
+otherwise was drawn, a pass after it draws the opaque and masked model shaders' normals, as they
+shade them, into another, tested against that depth without writing it, so that what's nearest
+there alone draws, and games' shaders, which have no way to draw one, draw none: what's drawn
+forward has its model shaders' opaque vertices drawn a third time. That test takes the normals'
+pipelines to place a vertex as the depth's do, as the drivers the tests run on do; a pixel one that
+doesn't leaves takes its depth's normal, below. The trace takes the normal of what drew the nearer
+depth at the pixel, where that has one, and elsewhere finds it from the depth round the pixel,
+which is a curved mesh's facets', reflects the way from the eye about it,
 and follows the ray through the pyramid as AMD's FidelityFX SSSR does, climbing a level each time
 it crosses a texel wholly in front of what that holds and stepping down where it meets it, until
 it's behind what the first level holds, as far as the environment's distance, 100 units by default,
@@ -2802,11 +2832,13 @@ makes and drops the renderer's surfaces, and the render thread never holds the l
 window. An error while rendering comes back with the renderer and ends the run, and a panic resumes
 on the main thread.
 
-A run decodes images on a thread of its own, `gg-load`, which the main thread hands each texture's
+A run decodes images on threads of its own, `gg-load`, which the main thread hands each texture's
 bytes as its handle goes out and takes the pixels back from as each frame starts, so that neither a
-layer's add nor a tick that names an asset waits for a decode. The thread starts with the first
-image, and ends once the run drops it, after the decode under way; a panic there resumes on the main
-thread, and a thread that can't start leaves the main thread to decode, warning (`engine.loader`).
+layer's add nor a tick that names an asset waits for a decode. There are half as many as the
+hardware runs at once, leaving the rest to the main and render threads and the game's, and 8 at
+most, as each holds the image it's on whole, its levels among it. They start with the first image,
+and each ends once the run drops them, after the decode it's on; a panic there resumes on the main
+thread, and threads that can't start leave the main thread to decode, warning (`engine.loader`).
 
 ## Platforms
 

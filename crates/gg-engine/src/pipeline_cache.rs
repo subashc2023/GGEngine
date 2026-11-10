@@ -1,7 +1,7 @@
-//! The pipeline cache's file, which windowed runs give the renderer as it starts and save as it
-//! ends, in the OS's per-user directory for caches: pipelines the GPU's driver made in an earlier
-//! run are made again in a fraction of the time, where the driver keeps no cache of its own.
-//! Headless runs, replays and tests keep none, as they keep no layout, so that their startup times
+//! The pipeline cache's file, which windowed and embedded runs give the renderer as it starts and
+//! save as it ends, in the OS's per-user directory for caches: pipelines the GPU's driver made in
+//! an earlier run are made again in a fraction of the time, where the driver keeps no cache of its
+//! own. Other headless runs and replays, as most tests run, keep none, so that their startup times
 //! compare from run to run. One file per app, so a run on another GPU starts empty and saves its
 //! own.
 

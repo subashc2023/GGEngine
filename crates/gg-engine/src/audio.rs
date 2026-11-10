@@ -920,9 +920,11 @@ impl Audio {
 /// Opens kira's output on the system's default output device, its mixer on cpal's audio thread,
 /// with a track under its main track for the music and one for the sounds, each bus at its volume
 /// in `volumes`, in [`Bus`]'s order; or, if it can't, as on a machine without one, warns
-/// `audio.no_output` with why, and the run plays no sound.
+/// `audio.no_output` with why, and the run plays no sound. Opened, it logs `audio.opened`, with how
+/// long that took, at the debug level.
 fn open(volumes: [f32; 3]) -> Output {
     let _zone = gg_core::zone!("open the sound's output");
+    let started = std::time::Instant::now();
     let [main, music, sounds] = volumes.map(decibels);
     let settings = AudioManagerSettings {
         main_track_builder: MainTrackBuilder::new().volume(main),
@@ -935,7 +937,11 @@ fn open(volumes: [f32; 3]) -> Output {
                 track.expect("two of the 128 tracks kira's mixer takes")
             };
             let (music, sounds) = (track(music), track(sounds));
-            debug!("The sound's output opened");
+            debug!(
+                code = "audio.opened",
+                ms = crate::perf::millis(started.elapsed()),
+                "The sound's output opened"
+            );
             Output::Open(Box::new(Mixer {
                 manager,
                 music,

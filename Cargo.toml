@@ -209,3 +209,48 @@ opt-level = 3
 # fdsm, at fdsm's level.
 [profile.dev.package.fdsm]
 opt-level = 3
+
+# Debug builds make a mesh collider's BVH in the step its body is made, at each Play's first tick
+# in the editor: Sponza's in 1.37 s unoptimized, 0.11 s so. Floats step to the same bits at any
+# level, so a world's hash doesn't change with it.
+[profile.dev.package.parry3d]
+opt-level = 3
+
+# Debug builds draw their development UI through egui each frame, and its text through the crates
+# that shape, read and rasterize it, which unoptimized take some 6 times as long: the editor's
+# panels some 6 ms a frame, where these make them 1 ms. Optimizing every dependency gained nothing
+# more.
+[profile.dev.package.egui]
+opt-level = 3
+[profile.dev.package.epaint]
+opt-level = 3
+[profile.dev.package.emath]
+opt-level = 3
+[profile.dev.package.ecolor]
+opt-level = 3
+[profile.dev.package.harfrust]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.read-fonts]
+opt-level = 3
+[profile.dev.package.font-types]
+opt-level = 3
+[profile.dev.package.vello_cpu]
+opt-level = 3
+[profile.dev.package.vello_common]
+opt-level = 3
+[profile.dev.package.fearless_simd]
+opt-level = 3
+[profile.dev.package.kurbo]
+opt-level = 3
+[profile.dev.package.peniko]
+opt-level = 3
+[profile.dev.package.guillotiere]
+opt-level = 3
+[profile.dev.package.unicode-segmentation]
+opt-level = 3
+[profile.dev.package.unicode-general-category]
+opt-level = 3
+[profile.dev.package.unicode-properties]
+opt-level = 3

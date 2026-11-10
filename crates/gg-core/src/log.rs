@@ -117,6 +117,12 @@ pub fn init(name: &str, dir: &Path, console: bool) -> Option<PathBuf> {
     }
 }
 
+/// `duration` in milliseconds, rounded to the microsecond: how events give how long something
+/// took, in their `ms` fields.
+pub fn millis(duration: Duration) -> f64 {
+    (duration.as_nanos() as f64 / 1e3).round() / 1e3
+}
+
 /// The JSON log's last events, kept in memory, as [`init`] has [`EVENTS`] keep them, for any thread
 /// to [`read`](Self::read) as they come: each numbered as it's pushed, from 0, with its level and
 /// its line. At most 10,000 events and 8 MiB of their lines are kept, the oldest going first; a

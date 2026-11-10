@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
@@ -15,7 +16,7 @@ use gg_gpu::{
     Blend, ComputePipeline, Device, Format, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass,
     Pipeline, Texture as GpuTexture, TextureFormat,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::draws::Run;
 use crate::packed::{MeshletBounds, ModelMesh, PackedVertex};
@@ -37,7 +38,7 @@ pub(crate) use scene::Change as SceneChange;
 pub use scene::Scene;
 #[cfg(test)]
 pub(crate) use visibility::SPIRV as VISIBILITY_SPIRV;
-pub(crate) use visibility::Shaded;
+pub(crate) use visibility::{Normals, Shaded};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -688,8 +689,10 @@ pub(crate) struct MeshPass {
     scene: scene::Kept,
     /// What culls the meshlets of the meshes drawn by them.
     meshlet_table: MeshletTable,
-    /// What shades the game's view from its visibility buffer.
+    /// What shades the game's view from its visibility buffer, and what finds its normals from it
+    /// for its reflections.
     shading: ComputePipeline,
+    normals: ComputePipeline,
     /// Where this frame's skin pass moved each skinned mesh's vertices, by the mesh's handle, which
     /// its draws read in place of its own; 0 for a mesh it didn't move. Kept from frame to frame,
     /// each frame setting again those it sets, so that it allocates nothing once it's grown.
@@ -730,10 +733,12 @@ struct GpuShader {
 
 /// What draws a shader's depth alone, by its geometry: into a shadow map, its depth clamped to the
 /// map's near side and set back by its slope; and into the depth the view's ambient occlusion
-/// takes, as the view draws it.
+/// takes, as the view draws it. And for a model shader, which has `normal_main`, what draws its
+/// normals, for the view's reflections, where it's nearest in that depth, once it's drawn.
 struct DepthOnly {
     shadow: Pipeline,
     view: Pipeline,
+    normals: Option<Pipeline>,
 }
 
 struct GpuMesh {
@@ -963,6 +968,8 @@ struct Item {
     total: u64,
     /// Whether it has warned that it waits for room in the GPU's memory.
     warned: bool,
+    /// When it was queued.
+    queued: Instant,
     asset: Asset,
 }
 
@@ -1004,6 +1011,31 @@ impl Item {
         match &self.asset {
             Asset::Mesh { buffers, .. } => buffers.is_some(),
             Asset::Texture { made, .. } => *made,
+        }
+    }
+
+    /// Logs that it's drawable, `renderer.mesh_streamed` or `renderer.texture_streamed`, at the
+    /// debug level, as there may be many: its bytes on the GPU, and how long since it was queued,
+    /// as it waited for its turn and for room and was copied, a texture's levels made among it if
+    /// its loader didn't make them.
+    fn streamed(&self) {
+        let ms = gg_core::log::millis(self.queued.elapsed());
+        match &self.asset {
+            Asset::Mesh { .. } => debug!(
+                code = "renderer.mesh_streamed",
+                mesh = &*self.name,
+                bytes = self.total,
+                ms,
+                "Mesh streamed"
+            ),
+            Asset::Texture { size, .. } => debug!(
+                code = "renderer.texture_streamed",
+                texture = &*self.name,
+                ?size,
+                bytes = self.total,
+                ms,
+                "Texture streamed"
+            ),
         }
     }
 }
@@ -1090,14 +1122,15 @@ fn out_of_memory(error: &Error) -> bool {
     error.code() == "gpu.out_of_memory"
 }
 
-/// A shader's geometry, which its pipelines draw with: its module, named `name`, and the module of
-/// its shadows if they're cut out, as [`shader::Added::shadow`] says; and its geometry's entry
-/// point in each, or in `mesh`, a mesh shader's module apart from them, as [`GraphicsDesc::mesh`]
-/// says.
+/// A shader's geometry, which its pipelines draw with: its module, named `name`, the module of its
+/// shadows if they're cut out, as [`shader::Added::shadow`] says, and of its normals, for a model
+/// shader, as [`shader::Meshlets`] says; and its geometry's entry point in each, or in `mesh`, a
+/// mesh shader's module apart from them, as [`GraphicsDesc::mesh`] says.
 struct Geometry<'a> {
     name: &'a str,
     spirv: &'a [u8],
     shadow: Option<&'a [u8]>,
+    normals: Option<&'a [u8]>,
     entry: &'a CStr,
     mesh: Option<&'a [u8]>,
 }
@@ -1105,7 +1138,7 @@ struct Geometry<'a> {
 impl Geometry<'_> {
     /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says; and, if
     /// that writes depth, what draws its depth alone, by its geometry and, if its shadows are cut
-    /// out, `shadow_main`.
+    /// out, `shadow_main`, and its normals, if it has a module of them, by `normal_main`.
     fn pipelines(
         &self,
         device: &Arc<Device>,
@@ -1146,10 +1179,30 @@ impl Geometry<'_> {
                 },
             )
         };
+        // Its normals, into an image of high dynamic range's format, tested against the depth drawn
+        // alone and leaving it as it is, so that what's nearest there alone draws.
+        let normals = |spirv| {
+            Pipeline::graphics(
+                device,
+                &GraphicsDesc {
+                    name: &format!("{} normals", self.name),
+                    spirv,
+                    vertex: self.entry,
+                    mesh: self.mesh,
+                    fragment: Some(c"normal_main"),
+                    format: Format::HDR.with_depth(),
+                    blend: Blend::Opaque,
+                    depth_write: false,
+                    depth_bias: 0.0,
+                    depth_clamp: false,
+                },
+            )
+        };
         let depth_only = writes_depth.then(|| {
             Ok(DepthOnly {
                 shadow: depth_only(&format!("{} shadow", self.name), true)?,
                 view: depth_only(&format!("{} depth", self.name), false)?,
+                normals: self.normals.map(normals).transpose()?,
             })
         });
         Ok((pipeline, depth_only.transpose()?))
@@ -1234,6 +1287,8 @@ fn mesh_buffers(
 impl MeshPass {
     /// A pass whose frames copy at most `budget` bytes each.
     pub(crate) fn new(device: &Arc<Device>, budget: u64) -> Result<Self> {
+        let from_visibility = shader::non_uniform(visibility::SPIRV);
+        let pipeline = |name, entry| ComputePipeline::new(device, name, &from_visibility, entry);
         Ok(Self {
             device: device.clone(),
             shaders: Vec::new(),
@@ -1247,12 +1302,8 @@ impl MeshPass {
             },
             budget,
             culling: cull::Culling::new(device)?,
-            shading: ComputePipeline::new(
-                device,
-                "view shading",
-                &shader::non_uniform(visibility::SPIRV),
-                c"shade_main",
-            )?,
+            shading: pipeline("view shading", c"shade_main")?,
+            normals: pipeline("view normals", c"normal_main")?,
             scene: scene::Kept::default(),
             meshlet_table: MeshletTable {
                 table: None,
@@ -1345,10 +1396,12 @@ impl MeshPass {
             }
             let writes_depth = shader::writes_depth(added.blend);
             let device = &self.device;
+            let normals = (added.meshlets.as_deref()).map(|meshlets| meshlets.normals.as_slice());
             let geometry = Geometry {
                 name: &added.name,
                 spirv: &added.spirv,
                 shadow: added.shadow.as_deref(),
+                normals,
                 entry: c"vertex_main",
                 mesh: None,
             };
@@ -1362,6 +1415,7 @@ impl MeshPass {
                         name: &name,
                         spirv: &added.spirv,
                         shadow: added.shadow.as_deref(),
+                        normals,
                         entry: c"mesh_main",
                         mesh: Some(&meshlets.mesh),
                     }
@@ -1370,6 +1424,7 @@ impl MeshPass {
                         name: &name,
                         spirv: &meshlets.vertices,
                         shadow: meshlets.vertices_shadow.as_deref(),
+                        normals: Some(&meshlets.vertices_normals),
                         entry: c"meshlet_vertex_main",
                         mesh: None,
                     }
@@ -1493,6 +1548,7 @@ impl MeshPass {
             name: added.name,
             total,
             warned: false,
+            queued: Instant::now(),
             asset: Asset::Mesh {
                 vertices: added.vertices,
                 indices: added.indices,
@@ -1549,6 +1605,7 @@ impl MeshPass {
                     name: added.name,
                     total: format.bytes(added.size, mipmapped),
                     warned: false,
+                    queued: Instant::now(),
                     asset: Asset::Texture {
                         size: added.size,
                         texels: added.texels,
@@ -1584,7 +1641,9 @@ impl MeshPass {
         let mut i = 0;
         while i < self.streaming.len() {
             if self.advance(frame, i, budget, &mut spent, &mut copying)? {
-                self.streaming.remove(i);
+                if let Some(item) = self.streaming.remove(i) {
+                    item.streamed();
+                }
             } else {
                 i += 1;
             }
@@ -1944,6 +2003,15 @@ impl MeshPass {
                     }
                     &depth_only.view
                 }
+                (Way::Normals { beside_visibility }, visible) => {
+                    let Some(normals) = depth_only.as_ref().and_then(|d| d.normals.as_ref()) else {
+                        continue;
+                    };
+                    if beside_visibility && visible.is_some() {
+                        continue;
+                    }
+                    normals
+                }
                 (Way::Visibility, Some(visible)) => visible,
                 (Way::Visibility, None) => continue,
             };
@@ -2050,6 +2118,12 @@ pub(crate) enum Way {
     /// visibility buffer, all but those drawn into it, whose depth the view's holds; and nothing
     /// of the rest.
     Depth { beside_visibility: bool },
+    /// Their normals, for the view's reflections, as their shading turns them, where they're nearest
+    /// in the depth [`Way::Depth`] drew, which they're tested against, by the normals' pipelines of
+    /// the opaque and masked model shaders: every such run, or, beside a visibility buffer, all but
+    /// those drawn into it, whose normals are found from it; and nothing of the rest, whose normals
+    /// the reflections find from the depth.
+    Normals { beside_visibility: bool },
     /// Into a visibility buffer: the culled runs drawn by their meshlets whose shaders have a
     /// pipeline for it, as the opaque and masked model shaders do, and nothing of the rest.
     Visibility,

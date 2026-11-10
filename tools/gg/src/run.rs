@@ -124,17 +124,22 @@ pub(crate) fn event(event: &Value) {
     crate::print(&event.to_string());
 }
 
-/// Builds `run`'s package, with dx while patches are on, as [`Patches::new`] says, and runs a copy
-/// of its executable, so that it can be built again meanwhile, supervising the game until it exits
-/// cleanly: returns whether it did, having printed a line for each event. While restarts are on, it
-/// snapshots the game every so often as it serves the API, and starts it again from a snapshot
-/// after a crash or a hang, and as its executable is rebuilt, as [`next`] says; with them off, the
-/// game's first end ends it. While patches are on, it patches the game, or rebuilds it, as its
-/// sources change, as [`Patches::tend`] says. Two peers run as one game: the host, given `--host`
-/// at a port of the loopback the OS picks, and the joiner, given `--join` there, each from a copy of
-/// its own, patched together, and stopped and started again together, as any of them ends, so
-/// that they always run the same code; each starts from its own snapshot, the joiner going on from
-/// the host's world as it joins.
+/// `duration` in whole milliseconds, as events give times.
+pub(crate) fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Builds `run`'s package, with dx while patches are on, as [`Patches::new`] says, printing `built`
+/// with how long that took, and runs a copy of its executable, so that it can be built again
+/// meanwhile, supervising the game until it exits cleanly: returns whether it did, having printed
+/// a line for each event. While restarts are on, it snapshots the game every so often as it serves
+/// the API, and starts it again from a snapshot after a crash or a hang, and as its executable is
+/// rebuilt, as [`next`] says; with them off, the game's first end ends it. While patches are on, it
+/// patches the game, or rebuilds it, as its sources change, as [`Patches::tend`] says. Two peers
+/// run as one game: the host, given `--host` at a port of the loopback the OS picks, and the
+/// joiner, given `--join` there, each from a copy of its own, patched together, and stopped and
+/// started again together, as any of them ends, so that they always run the same code; each starts
+/// from its own snapshot, the joiner going on from the host's world as it joins.
 ///
 /// Embedded, each game is given `--embedded`, for the tool that started gg, which shows its view,
 /// and the run ends cleanly once gg's stdin closes, as the tool ends, stopping its games, though a
@@ -152,11 +157,14 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let _lock = lock(&run.package, run.dir())?;
     // Before the build, which the tool may end under way.
     let closed = run.embedded.then(closes);
+    let building = Instant::now();
     let patches = Patches::new(run)?;
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
         None => build::build(&run.package, release(run.release), run.dir())?,
     };
+    let build_ms = millis(building.elapsed());
+    event(&json!({"event": "built", "exe": exe, "build_ms": build_ms}));
     let dir = exe.parent().unwrap_or(Path::new(".")).to_owned();
     let snapshots = dir.join("snapshots");
     let restarts = run.restarts();

@@ -377,6 +377,7 @@ mod open_scene {
     use std::fs;
     use std::mem;
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
 
     use tracing::info;
 
@@ -385,6 +386,7 @@ mod open_scene {
     use super::{Open, SceneFile, same_file};
     use crate::ecs::SceneEdit;
     use crate::layer::Stack;
+    use crate::perf;
     use crate::{Context, Entity, EntityId, Operation, World};
 
     /// The scene file that `path`, absolute or relative to the asset root, names for the tool
@@ -634,11 +636,12 @@ mod open_scene {
     }
 
     /// A scene file to open in place of the open scene, as [`check_open`] read it: its path, its
-    /// author and its text.
+    /// author and its text, and when the check started.
     pub(crate) struct Opening {
         path: PathBuf,
         author: String,
         text: String,
+        started: Instant,
     }
 
     /// Checks that the scene file `file`, a path and its author as [`resolve`] gives them, can
@@ -658,6 +661,7 @@ mod open_scene {
         discard: bool,
     ) -> Result<Opening> {
         let _zone = gg_core::zone!();
+        let started = Instant::now();
         let (path, author) = file;
         check_unsaved(cx, ticks, discard)?;
         let (_, files, open) = as_edited(cx);
@@ -686,7 +690,12 @@ mod open_scene {
             );
             return Err(Error::new("ecs.id_taken", message));
         }
-        Ok(Opening { path, author, text })
+        Ok(Opening {
+            path,
+            author,
+            text,
+            started,
+        })
     }
 
     /// Opens `opening` in place of the open scene, as the tool API's `scene open` asks, once a copy
@@ -695,12 +704,18 @@ mod open_scene {
     /// it or none; starts every author's edits afresh, as [`Stack::rewrite`] says; and has the file
     /// be the open scene's, watched from the watch's next look, in place of the file it had, no
     /// longer watched. The open scene's own file opens again as it is on disk, the scene reverting
-    /// to it. Logs `scene.opened`.
+    /// to it. Logs `scene.opened`, with how long it took from the check, the loads of what the
+    /// file names among it.
     ///
     /// Fails, changing nothing, as the change does.
     pub(crate) fn open(cx: &mut Context, stack: &mut Stack, opening: Opening) -> Result<()> {
         let _zone = gg_core::zone!();
-        let Opening { path, author, text } = opening;
+        let Opening {
+            path,
+            author,
+            text,
+            started,
+        } = opening;
         let (emptying, _) = emptying(cx.world(), &cx.scenes.files, &cx.scenes.open);
         stack.rewrite(cx, |world, log| {
             log.apply_all(world, emptying)?;
@@ -726,6 +741,7 @@ mod open_scene {
             code = "scene.opened",
             path = %path.display(),
             entities,
+            ms = perf::millis(started.elapsed()),
             "Opened the scene file in place of the open scene"
         );
         Ok(())

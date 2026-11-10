@@ -47,6 +47,10 @@ pub(super) struct Linked {
     pub(super) placed: Option<Placed>,
     /// The game a remote Inspector is to show from its next pass, which `Some(None)` leaves.
     pub(super) reach: Option<Option<gg_api::Session>>,
+    /// The entity the panels asked to frame in the view since a layer last took it.
+    pub(super) frame: Option<EntityId>,
+    /// Whether a layer has taken the panels' frames, so that they offer to frame.
+    pub(super) frames: bool,
 }
 
 /// A set, a create or a seal made through a link.
@@ -194,6 +198,16 @@ impl InspectorLink {
         linked
             .placed
             .filter(|placed| linked.picked == Some(placed.id))
+    }
+
+    /// The entity the Entities panel asked to frame in the view since the last call, which this
+    /// takes: by a double click on its row, its row's Frame in View, or F while the panel has the
+    /// keys, each of which picks it too. The panel offers Frame in View once a layer has called
+    /// this, so that an app with no view of its own to frame in doesn't.
+    pub fn framed(&self) -> Option<EntityId> {
+        let linked = &mut *self.0.borrow_mut();
+        linked.frames = true;
+        linked.frame.take()
     }
 
     /// How many undos and redos the Inspector's passes have asked for, from its Edit menu or its

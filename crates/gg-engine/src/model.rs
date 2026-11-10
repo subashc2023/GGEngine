@@ -159,25 +159,42 @@ impl Nodes {
     }
 }
 
-/// `corners` as [`Nodes::triangles`] gives them: canonical vertices, and triangles of them.
-fn canonical(mut corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
-    let bits = |point: Vec3| point.to_array().map(f32::to_bits);
-    corners.retain(|&[a, b, c]| bits(a) != bits(b) && bits(b) != bits(c) && bits(c) != bits(a));
-    for triangle in &mut corners {
-        let least = (0..3).min_by_key(|&corner| bits(triangle[corner]));
-        triangle.rotate_left(least.expect("three corners"));
-    }
-    corners.sort_unstable_by_key(|triangle| triangle.map(bits));
-    corners.dedup_by_key(|triangle| triangle.map(bits));
-    let mut vertices: Vec<Vec3> = corners.iter().flatten().copied().collect();
-    vertices.sort_unstable_by_key(|&point| bits(point));
-    vertices.dedup_by_key(|point| bits(*point));
-    let index = |point: Vec3| {
-        let found = vertices.binary_search_by_key(&bits(point), |&vertex| bits(vertex));
+/// `corners` as [`Nodes::triangles`] gives them: canonical vertices, and triangles of them. Each
+/// corner goes by its coordinates' bits, made once and packed into one number in their order, so
+/// that it's compared and found at a word's cost: ordering Sponza's 262,267 triangles by bits made
+/// again at each comparison took 9.6 s in a debug build, at each Play's first tick, against 1.1 s
+/// so. The vertices are found first, so that a triangle orders by its vertices' indices, which
+/// are in the order of their bits.
+fn canonical(corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let key = |point: Vec3| {
+        let [x, y, z] = point.to_array().map(|at| u128::from(at.to_bits()));
+        x << 64 | y << 32 | z
+    };
+    let mut keyed: Vec<[u128; 3]> = corners.iter().map(|triangle| triangle.map(key)).collect();
+    keyed.retain(|&[a, b, c]| a != b && b != c && c != a);
+    let mut keys: Vec<u128> = keyed.iter().flatten().copied().collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let index = |key: u128| {
+        let found = keys.binary_search(&key);
         u32::try_from(found.expect("each corner among the vertices")).expect("fewer than 2^32")
     };
-    let indices = corners.iter().map(|triangle| triangle.map(index)).collect();
-    (vertices, indices)
+    let mut indices: Vec<[u32; 3]> = keyed
+        .iter()
+        .map(|triangle| {
+            let mut triangle = triangle.map(index);
+            let least = (0..3).min_by_key(|&corner| triangle[corner]);
+            triangle.rotate_left(least.expect("three corners"));
+            triangle
+        })
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let unpack = |key: u128| {
+        let [x, y, z] = [64, 32, 0].map(|shift| f32::from_bits((key >> shift) as u32));
+        Vec3::new(x, y, z)
+    };
+    (keys.into_iter().map(unpack).collect(), indices)
 }
 
 /// What a model is made of on the renderer, which a reload replaces under the same handles, and a

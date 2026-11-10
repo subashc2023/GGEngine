@@ -10,7 +10,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use egui::{Align2, Response};
+use egui::{Align2, Response, Vec2};
 use gg_renderer::Viewport;
 
 #[path = "docked.rs"]
@@ -47,6 +47,7 @@ impl Ui<'_> {
         &mut self,
         _: impl Hash + Debug,
         _: Align2,
+        _: Vec2,
         _: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
         match self.never {}

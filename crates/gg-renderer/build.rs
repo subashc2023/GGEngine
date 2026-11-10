@@ -94,7 +94,7 @@ const COMPUTE: [(&str, &[&str]); 20] = [
     ("skin", &["skin_main"]),
     ("smaa", &["edges_main", "weights_main", "blend_main"]),
     ("taa", &["resolve_main"]),
-    ("visibility", &["shade_main"]),
+    ("visibility", &["shade_main", "normal_main"]),
     (
         "prefilter",
         &[
@@ -159,6 +159,19 @@ fn main() {
         let fragment = &[("visibility_primitive_main", "fragment")];
         let spirv = format!("{name}_visibility_primitive");
         compile(&slangc, &out, name, &spirv, fragment);
+        // Their normals, for the view's reflections, apart from them, as the masked one's shadows
+        // are: by their indices, and by their meshlets through vertex shaders, a mesh shader's
+        // pipelines taking the first's fragment shader.
+        let normals = &[("vertex_main", "vertex"), ("normal_main", "fragment")];
+        compile(&slangc, &out, name, &format!("{name}_normals"), normals);
+        let normals = &[meshlets, ("normal_main", "fragment")];
+        compile(
+            &slangc,
+            &out,
+            name,
+            &format!("{name}_meshlets_normals"),
+            normals,
+        );
     }
     let shadow = &[meshlets, ("shadow_main", "fragment")];
     let spirv = "model_masked_meshlets_shadow";

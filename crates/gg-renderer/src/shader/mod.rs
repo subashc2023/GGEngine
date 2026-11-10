@@ -134,7 +134,10 @@ pub(crate) struct Added {
 /// own modules' fragment shaders, as [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says. And
 /// what draws them into the visibility buffer: through vertex shaders, a module of
 /// `meshlet_visibility_main` and `visibility_main`; and through a mesh shader, a module of
-/// `mesh_visibility_main` alone, and one of `visibility_primitive_main` alone.
+/// `mesh_visibility_main` alone, and one of `visibility_primitive_main` alone. And what draws its
+/// normals, for the view's reflections where it draws otherwise than into the visibility buffer: by
+/// indices, a module of `vertex_main` and `normal_main`, whose fragment shader a mesh shader's
+/// pipeline takes too; and through vertex shaders, one of `meshlet_vertex_main` and `normal_main`.
 pub(crate) struct Meshlets {
     pub(crate) vertices: Vec<u8>,
     pub(crate) vertices_shadow: Option<Vec<u8>>,
@@ -142,6 +145,8 @@ pub(crate) struct Meshlets {
     pub(crate) visibility: Vec<u8>,
     pub(crate) visibility_mesh: Vec<u8>,
     pub(crate) visibility_primitive: Vec<u8>,
+    pub(crate) normals: Vec<u8>,
+    pub(crate) vertices_normals: Vec<u8>,
 }
 
 /// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
@@ -481,6 +486,8 @@ impl Shaders {
                     visibility: module(meshlets.visibility),
                     visibility_mesh: module(meshlets.visibility_mesh),
                     visibility_primitive: module(meshlets.visibility_primitive),
+                    normals: module(meshlets.normals),
+                    vertices_normals: module(meshlets.vertices_normals),
                 })
             }),
         }));
@@ -507,6 +514,8 @@ impl Shaders {
                 visibility: model::OPAQUE_VISIBILITY_SPIRV,
                 visibility_mesh: model::OPAQUE_VISIBILITY_MESH_SPIRV,
                 visibility_primitive: model::OPAQUE_VISIBILITY_PRIMITIVE_SPIRV,
+                normals: model::OPAQUE_NORMALS_SPIRV,
+                vertices_normals: model::OPAQUE_MESHLETS_NORMALS_SPIRV,
             }),
             AlphaMode::Mask { .. } => Some(model::MeshletSpirv {
                 vertices: model::MASKED_MESHLETS_SPIRV,
@@ -515,6 +524,8 @@ impl Shaders {
                 visibility: model::MASKED_VISIBILITY_SPIRV,
                 visibility_mesh: model::MASKED_VISIBILITY_MESH_SPIRV,
                 visibility_primitive: model::MASKED_VISIBILITY_PRIMITIVE_SPIRV,
+                normals: model::MASKED_NORMALS_SPIRV,
+                vertices_normals: model::MASKED_MESHLETS_NORMALS_SPIRV,
             }),
             AlphaMode::Blend => None,
         };
@@ -1242,6 +1253,8 @@ mod tests {
             ("opaque", model::OPAQUE_SPIRV),
             ("masked", model::MASKED_SPIRV),
             ("masked shadows", model::MASKED_SHADOW_SPIRV),
+            ("opaque normals", model::OPAQUE_NORMALS_SPIRV),
+            ("masked normals", model::MASKED_NORMALS_SPIRV),
             ("blended", model::BLENDED_SPIRV),
             ("masked visibility", model::MASKED_VISIBILITY_SPIRV),
             (

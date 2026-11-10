@@ -1277,12 +1277,18 @@ pub enum Operation {
         path: String,
         value: Value,
     },
-    /// Makes entity `id` the last of `parent`'s children, or a root for `null`.
+    /// Makes entity `id` the last of `parent`'s children, or a root for `null`: keeping its own
+    /// `Transform`, so that it moves as its new parent is placed; or, `in_place`, keeping where it
+    /// is in the world, as an editor's reparent does, its transform set, in the same edit, to its
+    /// place in its new parent's space as the request finds the two, any shear they give it
+    /// between them lost.
     Reparent {
         id: String,
         /// Given, `null` for a root, so that one left out isn't taken for a root.
         #[serde(deserialize_with = "Option::deserialize")]
         parent: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        in_place: bool,
     },
     /// Unlinks the instance of a prefab whose root is entity `id`: takes its `PrefabRoot` away,
     /// its entities staying as they are, under their IDs, its own from then on.
@@ -1778,8 +1784,24 @@ mod tests {
         let expected = Operation::Reparent {
             id: "a".to_owned(),
             parent: None,
+            in_place: false,
         };
         assert_eq!(root, expected);
+        let json = r#"{"reparent": {"id": "a", "parent": "b", "in_place": true}}"#;
+        let expected = Operation::Reparent {
+            id: "a".to_owned(),
+            parent: Some("b".to_owned()),
+            in_place: true,
+        };
+        assert_eq!(read(json).unwrap(), expected);
+        let kept = serde_json::to_value(&expected).unwrap();
+        assert_eq!(kept["reparent"]["in_place"], true);
+        let moved = serde_json::to_value(Operation::Reparent {
+            id: "a".to_owned(),
+            parent: Some("b".to_owned()),
+            in_place: false,
+        });
+        assert_eq!(moved.unwrap()["reparent"].get("in_place"), None, "left out");
         let revert = read(r#"{"revert": {"id": "a", "component": "Sprite"}}"#).unwrap();
         let expected = Operation::Revert {
             id: "a".to_owned(),

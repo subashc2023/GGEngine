@@ -7,7 +7,7 @@
 
 use std::ops::ControlFlow;
 
-use gg_engine::egui::{Align2, CursorIcon};
+use gg_engine::egui::{self, Align2, CursorIcon};
 use gg_engine::grid;
 use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::{Context, Event, Input, InspectorLink, Key, Ui, Viewpoint, Viewport};
@@ -76,8 +76,9 @@ impl<T, F> ViewTools<T, F> {
     /// and while a drag lasts, every other press, the wheel and Home, setting what the drag gives
     /// through the link and sealing its edit as it ends, or as the pick, the world or the
     /// Inspector's steps change; and which have a press off them ask for a pick. Then Q, W, E and
-    /// R, which pick a tool; then the camera, which the view goes back to as it takes a press, the
-    /// wheel or Home. `Break` for what the handles or the camera took.
+    /// R, which pick a tool; then F, which frames the pick, as [`frame`](Self::frame) does; then
+    /// the camera, which the view goes back to as it takes a press, the wheel or Home. `Break` for
+    /// what the handles, F or the camera took.
     pub fn take(
         &mut self,
         event: &Event<'_>,
@@ -111,6 +112,12 @@ impl<T, F> ViewTools<T, F> {
             Reply::Pass => {}
         }
         self.choose_tool(event, reading.command);
+        if let Some(picked) = picked.filter(|_| frames(event, reading.command))
+            && !self.handles.dragging()
+        {
+            self.frame(&picked);
+            return ControlFlow::Break(());
+        }
         let handled = self.camera.event(event, reading.screen, self.toolbar.tool);
         // What the editor's camera takes moves it, from where it was: the view goes back to it.
         if handled.is_break() {
@@ -143,6 +150,17 @@ impl<T, F> ViewTools<T, F> {
             Key::KeyR => Tool::Scale,
             _ => return,
         };
+    }
+
+    /// Eases the editor's camera to look at `picked`'s origin, the view going back to it, as F over
+    /// the view and the Entities panel ask, as [`OrbitCamera::frame`] says.
+    pub fn frame(&mut self, picked: &Picked) {
+        let origin = picked
+            .parent
+            .matrix
+            .transform_point3(picked.local.translation);
+        self.camera.frame(origin);
+        self.toolbar.world_camera = false;
     }
 
     /// Ends a drag of the handles as the pick, `picked` as the handles see it, changes or dies, the
@@ -189,16 +207,18 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Shows the toolbar over the view's top left, and while the view is through the editor's
-    /// camera, the gizmo over its top right, naming the side the camera looks squarely from, as
-    /// [`grid::square`] says, in `view`, where the view is in the main window. Then has the cursor
-    /// over the view say what the left button does, and while a drag goes on, what it does,
-    /// wherever the cursor is.
+    /// Shows the toolbar over the view's top left, or where its grip has moved it, and while the
+    /// view is through the editor's camera, the gizmo over its top right, naming the side the
+    /// camera looks squarely from, as [`grid::square`] says, in `view`, where the view is in the
+    /// main window. Then has the cursor over the view say what the left button does, and while a
+    /// drag goes on, what it does, wherever the cursor is.
     pub fn overlay(&mut self, ui: &mut Ui<'_>, view: Option<Viewport>) {
         let Self {
             camera, toolbar, ..
         } = self;
-        ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
+        let offset =
+            (ui.view()).map_or(egui::Vec2::ZERO, |view| toolbar.place(ui.egui(), view.rect));
+        ui.over_view("toolbar", Align2::LEFT_TOP, offset, |ui| {
             toolbar.show(ui, camera);
         });
         if !toolbar.world_camera {
@@ -207,7 +227,7 @@ impl<T, F> ViewTools<T, F> {
             let aligned = square
                 .then(|| Side::facing(seen.rotation * Vec3::NEG_Z))
                 .flatten();
-            ui.over_view("gizmo", Align2::RIGHT_TOP, |ui| {
+            ui.over_view("gizmo", Align2::RIGHT_TOP, egui::Vec2::ZERO, |ui| {
                 overlay::gizmo(ui, camera, aligned);
             });
         }
@@ -249,6 +269,20 @@ pub fn reading(cx: &Context, view: Option<Viewport>) -> Reading {
         command: command.into_iter().any(|key| input.key_down(key)),
         cursor: input.cursor(),
     }
+}
+
+/// Whether `event` is a press of F, not a repeat, without `command` held, which a shortcut's would
+/// have: as other editors frame what's selected.
+fn frames(event: &Event<'_>, command: bool) -> bool {
+    let press = matches!(
+        *event,
+        Event::Key {
+            key: Key::KeyF,
+            pressed: true,
+            repeat: false,
+        }
+    );
+    press && !command
 }
 
 /// Whether `input` has Alt held, by either of its keys.
@@ -453,6 +487,50 @@ mod tests {
         assert_eq!(left, ControlFlow::Continue(()));
         assert!(!tools.handles.dragging());
         assert_eq!(tools.picking, None);
+    }
+
+    /// F frames the pick, eased to look at its origin, turning the view to the editor's camera
+    /// from the game's: not without a pick, as it repeats, with Ctrl held, nor during a drag of the
+    /// handles.
+    #[test]
+    fn f_frames_the_pick_turning_the_view_to_the_editors_camera() {
+        let f = |repeat| Event::Key {
+            key: Key::KeyF,
+            pressed: true,
+            repeat,
+        };
+        let mut placed = at_the_origin().expect("picked");
+        placed.local.translation = Vec3::new(2.0, 0.0, 0.0);
+        placed.parent.matrix = gg_engine::math::Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0));
+        let mut tools = fresh();
+        let seen = tools.camera.viewpoint();
+        let mut ctrl = reading([0.0, 0.0]);
+        ctrl.command = true;
+        for (event, reading, picked) in [
+            (f(false), reading([0.0, 0.0]), None),
+            (f(true), reading([0.0, 0.0]), Some(placed)),
+            (f(false), ctrl, Some(placed)),
+        ] {
+            let _ = tools.take(&event, &reading, picked);
+            assert!(!tools.camera.eases(), "{event:?}");
+        }
+        let mut dragging = dragging();
+        let _ = dragging.take(&f(false), &reading(ON_X), Some(placed));
+        assert!(!dragging.camera.eases(), "dragging");
+        tools.toolbar.world_camera = true;
+        let handled = tools.take(&f(false), &reading([0.0, 0.0]), Some(placed));
+        assert_eq!(handled, ControlFlow::Break(()));
+        assert!(!tools.toolbar.world_camera, "the editor's camera");
+        tools.camera.update(Duration::from_secs(1));
+        let framed = tools.camera.viewpoint();
+        assert_eq!(framed.rotation, seen.rotation);
+        let ahead = framed.rotation * Vec3::NEG_Z;
+        let looked_at =
+            framed.position + ahead * (Vec3::new(2.0, 3.0, 0.0) - framed.position).dot(ahead);
+        assert!(
+            looked_at.abs_diff_eq(Vec3::new(2.0, 3.0, 0.0), 1e-4),
+            "{looked_at}"
+        );
     }
 
     /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,

@@ -121,6 +121,7 @@ fn main() -> ExitCode {
         reflections_follow_an_exposures_jump,
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
+        reflections_mirror_about_the_shading_normal,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -181,6 +182,7 @@ fn main() -> ExitCode {
         reflections_mirror_what_the_view_shows,
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
+        reflections_mirror_about_the_shading_normal,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -5832,10 +5834,12 @@ fn lenses_vignette_fringe_and_grain_the_view() {
         * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
     canvas.push_sprite(placed, Sprite::default());
     // `frames` frames of a renderer of its own, of `draws` over `clear` through `lens`, antialiased
-    // as `antialiasing` says.
+    // as `antialiasing` says. It uploads through the graphics queue, whose copies are drawable in
+    // the frame that makes them, so that its frames are of the same numbers each run, as the grain
+    // is: through a transfer queue, it settles in as many frames as the copies take to finish.
     let render_as =
         |draw: &dyn Fn(&mut Stores) -> Draws, clear: f32, lens, frames: usize, antialiasing| {
-            let mut renderer = renderer(WIDTH, HEIGHT);
+            let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(UploadPath::GraphicsQueue));
             let mut stores = Stores::default();
             let draws = draw(&mut stores);
             settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
@@ -7316,8 +7320,9 @@ fn ambient_occlusion_leaves_the_lights_alone() {
 /// low in front of it: a floor, models' squares, of a metal of 0.9 gray, in three strips along Z
 /// 2.4 units across each, from -3.6 along X, rough `roughness` each, from Z of 3 to -5; a red sphere
 /// of 0.5 on the first, a green one on the second and a blue panel a unit across and 1.6 high
-/// standing on the third, facing the camera. And the world's points where the red sphere's middle
-/// is, mirrored in the floor, and a point of the first strip whose mirror shows the sky alone.
+/// standing on the third, facing the camera; the strips normal-mapped by `normals`, if given. And
+/// the world's points where the red sphere's middle is, mirrored in the floor, and a point of the
+/// first strip whose mirror shows the sky alone.
 struct ReflectionScene {
     draws: Draws,
     viewpoint: Viewpoint,
@@ -7325,7 +7330,11 @@ struct ReflectionScene {
     open: Vec3,
 }
 
-fn reflection_scene(stores: &mut Stores, roughness: [f32; 3]) -> ReflectionScene {
+fn reflection_scene(
+    stores: &mut Stores,
+    roughness: [f32; 3],
+    normals: Option<Sampled>,
+) -> ReflectionScene {
     let [width, height] = [128, 64];
     let sky = sky_texture(&mut stores.textures, [width, height], |_, y| {
         let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
@@ -7352,8 +7361,12 @@ fn reflection_scene(stores: &mut Stores, roughness: [f32; 3]) -> ReflectionScene
     let mut draws = Draws::default();
     let turned = Quat::from_rotation_x(-FRAC_PI_2);
     for (i, roughness) in (0..).zip(roughness) {
-        let gray = Vec4::new(0.9, 0.9, 0.9, 1.0);
-        let floor = add(&mut stores.materials, gray, metallic(1.0, roughness));
+        let floor = stores.materials.add(&Material {
+            color: Vec4::new(0.9, 0.9, 0.9, 1.0),
+            workflow: metallic(1.0, roughness),
+            normal_texture: normals,
+            ..Material::default()
+        });
         let floor = MeshDraw::with_material(square, floor, &stores.materials, &mut stores.shaders);
         let at = Vec3::new(-2.4 + 2.4 * i as f32, 0.0, -1.0);
         let strip = Mat4::from_scale_rotation_translation(Vec3::new(2.4, 8.0, 1.0), turned, at);
@@ -7409,7 +7422,7 @@ fn reflections_mirror_what_the_view_shows() {
     const HEIGHT: u32 = 128;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4], None);
     let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
@@ -7529,7 +7542,7 @@ fn reflections_follow_an_exposures_jump() {
     const HEIGHT: u32 = 128;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4], None);
     let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
@@ -7581,7 +7594,7 @@ fn reflections_mirror_what_lights_light_under_a_dark_sky() {
     const HEIGHT: u32 = 128;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4]);
+    let scene = reflection_scene(&mut stores, [0.05, 0.2, 0.4], None);
     let sky = stores.sky.expect("the scene's sky");
     stores.sky = Some(Sky {
         luminance: 0.0,
@@ -7631,7 +7644,7 @@ fn reflections_leave_what_they_dont_take_as_it_is() {
     const HEIGHT: u32 = 64;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    let scene = reflection_scene(&mut stores, [0.8; 3]);
+    let scene = reflection_scene(&mut stores, [0.8; 3], None);
     let reflections = Reflections {
         roughness: 0.3,
         ..Reflections::default()
@@ -7665,6 +7678,106 @@ fn reflections_leave_what_they_dont_take_as_it_is() {
         let with = frame(Some(reflections));
         assert!(with == without, "reflections change the frame {name}");
     }
+    shut_down(renderer);
+}
+
+/// [`reflection_scene`], its floor's strips mirror-smooth and normal-mapped to face about 12°
+/// toward the camera, each way the view draws them: in the run by meshlets, by their meshlets, into
+/// the view's visibility buffer, their normals found from it; and otherwise by their indices, their
+/// normals drawn after their depth alone, alone and again beside a ball cut into meshlets, which the
+/// visibility buffer takes. Where the mirror of the map's normal shows the red sphere's middle, the
+/// floor shows the red sphere, which it doesn't without reflections; and where a flat mirror would
+/// show it, it doesn't, as the rays are traced about the shading's normal, its normal map's among
+/// it, and not about the depth's, which is the flat floor's.
+fn reflections_mirror_about_the_shading_normal() {
+    mirror_about_the_shading_normal(false);
+    if !CUT_MESHLETS.load(Ordering::Relaxed) {
+        mirror_about_the_shading_normal(true);
+    }
+}
+
+/// [`reflections_mirror_about_the_shading_normal`]'s check, its models cut as [`add_model`] cuts
+/// them, and, `beside_cut`, a ball cut into meshlets, high and to the right of what it checks.
+fn mirror_about_the_shading_normal(beside_cut: bool) {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    // A Y of 100/255, as a normal map holds it, about -0.22: toward the square's -Y.
+    let pixels = [[128, 100, 255, 255]; 16];
+    let texels = Texels::Map(Map::Normal);
+    let added = (stores.textures).add("tilted", [4, 4], pixels.as_flattened(), texels);
+    let map = Sampled::of(added.expect("a map"));
+    let mut scene = reflection_scene(&mut stores, [0.05; 3], Some(map));
+    if beside_cut {
+        let (vertices, indices) = sphere_of(0.4, 12, 24);
+        let packed = ModelMesh::pack("cut ball", &vertices, indices, Vec::new());
+        let mut packed = packed.expect("a mesh");
+        cut_meshlets(&mut packed);
+        let ball = stores
+            .meshes
+            .add_model("cut ball", &packed)
+            .expect("a mesh");
+        let white = stores.materials.add(&Material::default());
+        let ball = MeshDraw::with_material(ball, white, &stores.materials, &mut stores.shaders);
+        let high = Mat4::from_translation(Vec3::new(1.2, 2.0, -3.0));
+        scene.draws.push_draw(high, &ball, 0);
+    }
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    let mut frame = |reflections| {
+        let data = RenderData {
+            reflections,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(&mut renderer, data);
+        frame_pixels(&mut renderer)
+    };
+    let without = frame(None);
+    // The first frame keeps the colors the second traces against.
+    frame(Some(Reflections::default()));
+    let with = frame(Some(Reflections::default()));
+    // The map's normal in the world, as shading.slang's `shading_normal` bends the floor's, +Y, along
+    // its tangent, +X, and its bitangent, the square's +Y, -Z.
+    let mapped = Vec2::new(128.0, 100.0) / 255.0 * 2.0 - 1.0;
+    let up = (1.0 - mapped.length_squared()).sqrt();
+    let tilted = (Vec3::X * mapped.x - Vec3::Z * mapped.y + Vec3::Y * up).normalize();
+    // The point of the first strip whose mirror, facing `normal`, shows the red sphere's middle:
+    // whose ray from the camera, mirrored, passes nearest it.
+    let middle = Vec3::new(-2.4, 0.5, -1.0);
+    let mirror = |normal: Vec3| {
+        let mut nearest = (f32::INFINITY, Vec3::ZERO);
+        for i in 0..=240 {
+            for j in 0..=400 {
+                let at = Vec3::new(-3.6 + 0.01 * i as f32, 0.0, -1.0 + 0.01 * j as f32);
+                let way = (at - viewpoint.position).normalize();
+                let ray = way - 2.0 * way.dot(normal) * normal;
+                let along = (middle - at).dot(ray).max(0.0);
+                let apart = (at + ray * along - middle).length();
+                if apart < nearest.0 {
+                    nearest = (apart, at);
+                }
+            }
+        }
+        nearest.1
+    };
+    let shown = |frame: &[u8], at: Vec3| {
+        pixel_at(frame, WIDTH, pixel_of(viewpoint, [WIDTH, HEIGHT], at)).map(i32::from)
+    };
+    let red = |[r, g, b, _]: [i32; 4]| r > g + 40 && r > b + 40;
+    let [bent, flat] = [tilted, Vec3::Y].map(mirror);
+    let [seen, unseen] = [shown(&with, bent), shown(&without, bent)];
+    assert!(
+        red(seen) && !red(unseen),
+        "where the map's normal mirrors the red sphere, the floor shows {seen:?}, and without \
+         reflections {unseen:?}"
+    );
+    let seen = shown(&with, flat);
+    assert!(
+        !red(seen),
+        "where a flat mirror shows the red sphere, the floor shows {seen:?}"
+    );
     shut_down(renderer);
 }
 

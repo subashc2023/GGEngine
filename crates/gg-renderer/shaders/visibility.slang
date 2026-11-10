@@ -14,6 +14,11 @@
 // the frame before placed them too, for how far the pixel's point moved in the world since, which
 // the view's motion takes, as model.slang's fragments write it; 0 where nothing drew.
 //
+// Where the view reflects, `normal_main` finds each pixel's normal first, the same way, as its
+// shading turns it, for the reflections' rays (reflections.slang), which are traced before the view
+// shades: the smooth normal its corners' interpolate, which the depth's facets of a curved mesh
+// aren't, its normal map's bumps among it.
+//
 // `ShadePush` and `Shading` match `ShadePush` and `Shading` in src/mesh/visibility.rs, field for
 // field. A change here needs AMD's ISA of it checked again, under both slangc releases the build
 // may use, as model.slang's lighting does.
@@ -58,7 +63,7 @@ struct ShadePush {
     float4x4* transforms;
     uint* params;
     // The visibility buffer, a texture of the bindless set's, and the view's colors and motion,
-    // storage images of it.
+    // storage images of it; or for `normal_main`, its normals, and no motion.
     uint visibility;
     uint target;
     uint motion;
@@ -94,22 +99,27 @@ uint byte_of(uint word, uint byte) {
     return (word >> ((byte & 3) * 8)) & 0xFF;
 }
 
-[shader("compute")]
-[numthreads(GROUP, GROUP, 1)]
-void shade_main(uint3 pixel: SV_DispatchThreadID) {
-    Shading shading = *push.shading;
-    if (pixel.x >= shading.size.x || pixel.y >= shading.size.y) {
-        return;
-    }
-    uint3 at = uint3(pixel.xy, 0);
-    // Which run of the culling's drew it, and in which of the view's passes, 1 past twice the
-    // run's index, and that pass's 1 past it; and the meshlet and triangle it shows.
-    uint2 seen = visibilities[push.visibility].Load(int3(pixel.xy, 0));
-    if (seen.x == 0) {
-        storage[push.target][at] = shading.clear;
-        storage[push.motion][at] = float4(0.0);
-        return;
-    }
+// What a pixel shows of the triangle that drew into the visibility buffer there: its material; where
+// it is in the world, and where the instance's transform the frame before placed it; its texture
+// coordinates, and their change a pixel across and down; its vertices' color; its normal and
+// tangent, as interpolated; and whether its triangle shows its front.
+struct Shown {
+    Material material;
+    float3 world;
+    float3 was;
+    float2 uv;
+    float2 uv_across;
+    float2 uv_down;
+    float4 vertex_color;
+    float3 normal;
+    float4 tangent;
+    bool front;
+};
+
+// What `pixel` shows, of `frame` and as `shading` says, where the visibility buffer holds `seen`:
+// which run of the culling's drew it, and in which of the view's passes, 1 past twice the run's
+// index, and that pass's 1 past it; and the meshlet and triangle it shows.
+Shown shown_at(Shading shading, Frame frame, uint2 pixel, uint2 seen) {
     uint drawn = seen.x - 1;
     Run run = push.runs[drawn >> 1];
     bool second = (drawn & 1) != 0;
@@ -124,8 +134,8 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     uint before = second ? shading.previous.y : shading.previous.x;
     float4x4 previous = push.transforms[before * shading.instances + run.output + place];
     uint params = slot * shading.params_words + run.params_output + place * run.params_words;
-    Frame frame = *push.frame;
-    Material material = frame.materials[push.params[params]];
+    Shown out;
+    out.material = frame.materials[push.params[params]];
     // The mesh's buffer, as model.slang's draws read it through `push.vertices`: its address's
     // two words cast to a pointer, as a 64-bit integer would take the shaderInt64 feature.
     uint* words = bit_cast<uint*>(run.vertices);
@@ -161,25 +171,49 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     // negative, as the view's Y points down; whatever their W, as clipping keeps how they wind. It
     // shows its mesh's front so, or, of an instance whose transform mirrors it, its back. A run
     // that draws its fronts alone shows nothing else.
-    bool front = run.cones != 0 || ((dot(ha, ea) < 0.0) != (a.turned.side < 0.0));
-    float3 world = weight.x * a.world + weight.y * b.world + weight.z * c.world;
-    float3 was = weight.x * mul(previous, float4(a.vertex.position, 1.0)).xyz
+    out.front = run.cones != 0 || ((dot(ha, ea) < 0.0) != (a.turned.side < 0.0));
+    out.world = weight.x * a.world + weight.y * b.world + weight.z * c.world;
+    out.was = weight.x * mul(previous, float4(a.vertex.position, 1.0)).xyz
         + weight.y * mul(previous, float4(b.vertex.position, 1.0)).xyz
         + weight.z * mul(previous, float4(c.vertex.position, 1.0)).xyz;
-    storage[push.motion][at] = float4(world - was, 0.0);
-    float2 uv = weight.x * a.vertex.uv + weight.y * b.vertex.uv + weight.z * c.vertex.uv;
-    float2 uv_across = weight_across.x * a.vertex.uv + weight_across.y * b.vertex.uv
+    out.uv = weight.x * a.vertex.uv + weight.y * b.vertex.uv + weight.z * c.vertex.uv;
+    out.uv_across = weight_across.x * a.vertex.uv + weight_across.y * b.vertex.uv
         + weight_across.z * c.vertex.uv;
-    float2 uv_down = weight_down.x * a.vertex.uv + weight_down.y * b.vertex.uv
+    out.uv_down = weight_down.x * a.vertex.uv + weight_down.y * b.vertex.uv
         + weight_down.z * c.vertex.uv;
-    float4 vertex_color =
+    out.vertex_color =
         weight.x * a.vertex.color + weight.y * b.vertex.color + weight.z * c.vertex.color;
-    float3 normal =
+    out.normal =
         weight.x * a.turned.normal + weight.y * b.turned.normal + weight.z * c.turned.normal;
-    float4 tangent =
+    out.tangent =
         weight.x * a.turned.tangent + weight.y * b.turned.tangent + weight.z * c.turned.tangent;
+    return out;
+}
+
+[shader("compute")]
+[numthreads(GROUP, GROUP, 1)]
+void shade_main(uint3 pixel: SV_DispatchThreadID) {
+    Shading shading = *push.shading;
+    if (pixel.x >= shading.size.x || pixel.y >= shading.size.y) {
+        return;
+    }
+    uint3 at = uint3(pixel.xy, 0);
+    uint2 seen = visibilities[push.visibility].Load(int3(pixel.xy, 0));
+    if (seen.x == 0) {
+        storage[push.target][at] = shading.clear;
+        storage[push.motion][at] = float4(0.0);
+        return;
+    }
+    Frame frame = *push.frame;
+    Shown shown = shown_at(shading, frame, pixel.xy, seen);
+    storage[push.motion][at] = float4(shown.world - shown.was, 0.0);
+    Material material = shown.material;
+    float2 uv = shown.uv;
+    float2 uv_across = shown.uv_across;
+    float2 uv_down = shown.uv_down;
     // As `fragment_main` samples them, and an opaque or masked material's alpha of 1.
-    float4 color = sampled_by(material, 0, uv, uv_across, uv_down) * material.color * vertex_color;
+    float4 color =
+        sampled_by(material, 0, uv, uv_across, uv_down) * material.color * shown.vertex_color;
     float4 surface = sampled_by(material, 1, uv, uv_across, uv_down);
     float2 mapped = sampled_by(material, 2, uv, uv_across, uv_down).xy * 2.0 - 1.0;
     float occlusion = 1.0
@@ -189,6 +223,32 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     occlusion = ambient(frame, pixel.xy, occlusion);
     float4 reflected = reflection(frame, pixel.xy, roughness_of(material, surface));
     storage[push.target][at] =
-        lit(frame, material, world, normal, tangent, front, color, surface, mapped, occlusion,
-            emission, reflected);
+        lit(frame, material, shown.world, shown.normal, shown.tangent, shown.front, color, surface,
+            mapped, occlusion, emission, reflected);
+}
+
+// Each pixel's normal in the world, of unit length, as its shading turns it, its normal map's bumps
+// among it, in RGB, and 1 in alpha, where a meshlet's triangle drew into the visibility buffer; 0
+// elsewhere.
+[shader("compute")]
+[numthreads(GROUP, GROUP, 1)]
+void normal_main(uint3 pixel: SV_DispatchThreadID) {
+    Shading shading = *push.shading;
+    if (pixel.x >= shading.size.x || pixel.y >= shading.size.y) {
+        return;
+    }
+    uint3 at = uint3(pixel.xy, 0);
+    uint2 seen = visibilities[push.visibility].Load(int3(pixel.xy, 0));
+    if (seen.x == 0) {
+        storage[push.target][at] = float4(0.0);
+        return;
+    }
+    Frame frame = *push.frame;
+    Shown shown = shown_at(shading, frame, pixel.xy, seen);
+    float2 mapped =
+        sampled_by(shown.material, 2, shown.uv, shown.uv_across, shown.uv_down).xy * 2.0 - 1.0;
+    float3 surface_normal;
+    float3 normal = shading_normal(shown.material, shown.normal, shown.tangent, shown.front, mapped,
+                                   surface_normal);
+    storage[push.target][at] = float4(normal, 1.0);
 }

@@ -21,6 +21,7 @@ use crate::interrupt;
 use crate::layer::{Context, Stack, Tick};
 use crate::memory;
 use crate::perf::{self, Perf, Summary};
+use crate::pipeline_cache;
 use crate::render_thread::{Drawn, Render, RenderThread, TextureChanges};
 use crate::snapshot::Snapshot;
 use crate::{App, BUILD};
@@ -35,8 +36,8 @@ use crate::{App, BUILD};
 /// (`--connect`) steps its simulation in real time, its frames a tick apart, as its server's go.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
-/// with no UI, playing sound as one does, and its view fills its image, at the size the client
-/// it's published to asks for:
+/// with no UI, playing sound and keeping the pipeline cache as one does, and its view fills its
+/// image, at the size the client it's published to asks for:
 /// each frame then waits for the client to take it, as [`api::pace`] says, and until a client has
 /// it published, frames come a tick apart or more.
 pub(crate) fn run_headless(
@@ -49,7 +50,23 @@ pub(crate) fn run_headless(
     // A client's ticks keep pace with its server's, in real time.
     let real_time = embedded || matches!(args.net, Some(Net::Connect(_)));
     let [mut width, mut height] = args.size.unwrap_or([1280, 720]);
-    let renderer = Renderer::headless(&settings(app, args), width, height)?;
+    // An embedded run keeps the pipeline cache as a windowed run does, as a tool restarts it at
+    // each change it can't patch in; the rest keep none, as `pipeline_cache` says.
+    let pipelines = embedded
+        .then(|| {
+            pipeline_cache::path(app.name, std::env::consts::OS, |name| {
+                std::env::var_os(name)
+            })
+        })
+        .flatten();
+    let cached = pipelines.as_deref().map(pipeline_cache::load);
+    let settings = Settings {
+        pipeline_cache: cached.as_deref(),
+        ..settings(app, args)
+    };
+    let renderer = Renderer::headless(&settings, width, height)?;
+    // The device holds what it loaded of it.
+    drop(cached);
     let mut render = RenderThread::start(renderer)?;
     // An embedded run is the game a tool shows, as the editor plays it, which plays its sounds.
     let mut cx = Context::of_run(None, app, embedded);
@@ -193,6 +210,9 @@ pub(crate) fn run_headless(
     let stopping = Instant::now();
     let _zone = gg_core::zone!("shutdown");
     app.stack.detach(&mut cx);
+    if let Some(path) = &pipelines {
+        pipeline_cache::save(path, &renderer);
+    }
     rendered?;
     app.stack.recorded()?;
     let perf = mem::take(&mut cx.perf);

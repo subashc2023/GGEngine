@@ -506,7 +506,9 @@ fn tools() -> Value {
              \"value\"}}, {\"create\": {\"id\"?, \"parent\"?, \"components\": {name: value}}}, \
              {\"duplicate\": {\"id\", \"copies\"?}}, {\"delete\": {\"id\"}}, {\"add\": {\"id\", \
              \"component\", \"value\"?}}, {\"remove\": {\"id\", \"component\"}}, {\"reparent\": \
-             {\"id\", \"parent\"}}, {\"unlink\": {\"id\"}}, which unlinks a prefab's instance into \
+             {\"id\", \"parent\", \"in_place\"?}}, which keeps the entity's own transform, or with \
+             \"in_place\" true where it is in the world, {\"unlink\": {\"id\"}}, which unlinks a \
+             prefab's instance into \
              entities of its own, and {\"revert\": {\"id\", \"component\", \"path\"?}}, which sets \
              a field of an instance's entity back to its prefab's. Values are JSON as `entity` \
              shows them; a struct missing fields takes their defaults. Answers the IDs of the \

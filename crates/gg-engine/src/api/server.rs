@@ -1553,7 +1553,15 @@ fn operations(
 ) -> Result<Vec<Operation>, Failure> {
     let count = given.len();
     let operations = given.into_iter().enumerate().map(|(i, operation)| {
-        operation_of(world, names, operation).map_err(|error| {
+        let read = match operation {
+            gg_api::Operation::Reparent {
+                id,
+                parent,
+                in_place: true,
+            } => reparent_in_place(world, &id, parent.as_deref()),
+            operation => operation_of(world, names, operation).map(|operation| vec![operation]),
+        };
+        read.map_err(|error| {
             let failure = failure(&error);
             if count == 1 {
                 return failure;
@@ -1564,7 +1572,16 @@ fn operations(
             )
         })
     });
-    operations.collect()
+    let operations: Vec<Vec<Operation>> = operations.collect::<Result<_, _>>()?;
+    Ok(operations.into_iter().flatten().collect())
+}
+
+/// The operations a `reparent` `in_place` of entity `id` under `parent` asks for, as
+/// [`World::reparent_in_place`] finds them in `world` as the request comes, which an edit applies
+/// at once, outside a lockstep session.
+fn reparent_in_place(world: &World, id: &str, parent: Option<&str>) -> Result<Vec<Operation>> {
+    let parent = parent.map(str::parse).transpose()?;
+    Ok(world.reparent_in_place(id.parse()?, parent))
 }
 
 /// The engine's operation `given` asks for, as [`operations`] reads it.
@@ -1641,7 +1658,7 @@ fn operation_of(
             component: component.into(),
             path,
         },
-        Given::Reparent { id: of, parent } => Operation::Reparent {
+        Given::Reparent { id: of, parent, .. } => Operation::Reparent {
             entity: id(&of)?,
             parent: maybe(parent)?,
         },

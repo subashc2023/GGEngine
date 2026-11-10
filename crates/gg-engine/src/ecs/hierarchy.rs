@@ -11,7 +11,7 @@ use std::iter;
 use gg_core::math::{Mat4, Quat};
 use gg_core::{Error, Result};
 
-use super::{Component, Entity, World};
+use super::{Component, Entity, EntityId, Operation, World};
 use crate::Transform;
 use crate::reflect::Reflect;
 
@@ -238,6 +238,56 @@ impl World {
             matrix,
             rotation: rotation.normalize(),
         })
+    }
+
+    /// The operations that make the entity of ID `entity` the last of `parent`'s children, or a
+    /// root for `None`, keeping where it is in the world, as an editor's reparent does: the
+    /// reparent, which keeps its own [`Transform`], so that it moves as its new parent is placed,
+    /// and a set of that transform to where it is in its new parent's space, from its matrix in the
+    /// world and the new parent's, decomposed, which loses any shear the two give it between them
+    /// and rounds a little. Applied as one edit, they undo as one. The reparent alone where there's
+    /// nothing to keep, or nothing can be: for an entity without a transform, which goes to its
+    /// new parent's origin as one does; for one whose parent stays; under a parent flattened to no
+    /// size; and for an entity or a parent that isn't alive, or a parent that's the entity or one
+    /// of its descendants, which the reparent's apply refuses.
+    pub fn reparent_in_place(&self, entity: EntityId, parent: Option<EntityId>) -> Vec<Operation> {
+        let reparent = Operation::Reparent { entity, parent };
+        let Some(child) = self.entity(entity) else {
+            return vec![reparent];
+        };
+        let to = match parent.map(|parent| self.entity(parent)) {
+            Some(None) => return vec![reparent],
+            Some(Some(to)) => Some(to),
+            None => None,
+        };
+        let stays = self.parent(child).ok() == Some(to);
+        let (Some(_), false, Ok(placed)) = (self.get::<Transform>(child), stays, self.pose(child))
+        else {
+            return vec![reparent];
+        };
+        let space = match to.map(|to| self.pose(to)) {
+            Some(Ok(pose)) => pose.matrix,
+            Some(Err(_)) => return vec![reparent],
+            None => Mat4::IDENTITY,
+        };
+        let (scale, rotation, translation) =
+            (space.inverse() * placed.matrix).to_scale_rotation_translation();
+        let finite = scale.is_finite() && rotation.is_finite() && translation.is_finite();
+        if space.determinant() == 0.0 || !finite {
+            return vec![reparent];
+        }
+        let local = Transform {
+            translation,
+            rotation: rotation.normalize(),
+            scale,
+        };
+        let set = Operation::Set {
+            entity,
+            component: "Transform".into(),
+            path: String::new(),
+            value: local.to_value(),
+        };
+        vec![reparent, set]
     }
 
     /// Where `entity`, which is alive, is as the latest tick left it, as drawing places it: its
@@ -781,5 +831,51 @@ pub(super) mod tests {
         );
         world.despawn(root).expect("alive");
         assert!(!world.contains(deepest));
+    }
+
+    /// A reparent in place keeps where its entity is in the world, as its pose has it, under
+    /// another parent, moved, turned and scaled, and at the roots, a set of its transform joining
+    /// the reparent in one edit, which an undo takes back exactly; and is the reparent alone where
+    /// there's nothing to keep: for an entity without a transform, one whose parent stays, and
+    /// under a parent flattened to no size.
+    #[test]
+    fn a_reparent_in_place_keeps_where_its_entity_is_in_the_world() {
+        use gg_core::math::Vec3;
+
+        let mut world = World::default();
+        let placed = |translation, turn, scale| Transform {
+            translation,
+            rotation: Quat::from_rotation_y(turn),
+            scale,
+        };
+        let from = world.spawn(placed(Vec3::new(1.0, 2.0, 3.0), 0.7, Vec3::splat(2.0)));
+        let to = world.spawn(placed(Vec3::new(-4.0, 0.5, 2.0), -1.2, Vec3::splat(0.5)));
+        let flat = world.spawn(placed(Vec3::ZERO, 0.0, Vec3::new(1.0, 0.0, 1.0)));
+        let child = placed(Vec3::new(0.5, -1.0, 0.25), 0.3, Vec3::new(1.0, 2.0, 1.0));
+        let child = world.spawn(child);
+        world.set_parent(child, Some(from)).expect("no cycle");
+        let bare = world.spawn(Mark(0));
+        let id = |world: &World, entity| world.id(entity).expect("alive");
+        let before = state(&world);
+        let seen = world.pose(child).expect("alive").matrix;
+        let mut log = crate::Log::default();
+        for parent in [Some(to), None] {
+            let operations =
+                world.reparent_in_place(id(&world, child), parent.map(|p| id(&world, p)));
+            assert_eq!(operations.len(), 2, "{operations:?}");
+            log.apply_all(&mut world, operations).expect("applied");
+            assert_eq!(world.parent(child).expect("alive"), parent);
+            let now = world.pose(child).expect("alive").matrix;
+            assert!(now.abs_diff_eq(seen, 1e-4), "{now} from {seen}");
+        }
+        for _ in 0..2 {
+            assert!(log.undo(&mut world).expect("undone"));
+        }
+        assert!(same_snapshots(&state(&world), &before));
+        for (entity, parent) in [(bare, from), (child, from), (child, flat)] {
+            let (entity, parent) = (id(&world, entity), Some(id(&world, parent)));
+            let alone = vec![Operation::Reparent { entity, parent }];
+            assert_eq!(world.reparent_in_place(entity, parent), alone);
+        }
     }
 }

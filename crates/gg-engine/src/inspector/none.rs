@@ -29,8 +29,8 @@ impl Inspector {
 
 /// A link to an [`Inspector`], through which another layer picks and edits as its panels do, in a
 /// development build; in this one, which has no panels, a handle whose calls change nothing:
-/// nothing is ever picked or placed (`None`), nothing waits (`waiting` is false, `idle` true),
-/// nothing is stepped through (0), and nothing is pending.
+/// nothing is ever picked, placed or framed (`None`), nothing waits (`waiting` is false, `idle`
+/// true), nothing is stepped through (0), and nothing is pending.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct InspectorLink;
@@ -57,6 +57,10 @@ impl InspectorLink {
     }
 
     pub fn placed(&self) -> Option<Placed> {
+        None
+    }
+
+    pub fn framed(&self) -> Option<EntityId> {
         None
     }
 

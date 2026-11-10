@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+pub(crate) use gg_core::log::millis;
+
 use crate::Layer;
 use crate::render_thread::Rendered;
 #[cfg(feature = "dev")]
@@ -271,11 +273,6 @@ impl Stats {
             max: Some(ms(max as f64)),
         }
     }
-}
-
-/// `duration` in milliseconds, rounded to the microsecond.
-pub(crate) fn millis(duration: Duration) -> f64 {
-    ms(duration.as_nanos() as f64)
 }
 
 /// `nanos` in milliseconds, rounded to the microsecond.

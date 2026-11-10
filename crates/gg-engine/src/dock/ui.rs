@@ -144,8 +144,10 @@ impl<'a> Ui<'a> {
     }
 
     /// Shows what `add_contents` draws over the game's view, at `align` within it, 8 points in
-    /// from its edges: above the view, and below what else is over it, such as panels floating
-    /// over it, and menus. `id` tells it from other UI over the view. A press on it gives the view
+    /// from its edges, and moved from there by `offset`, in points, such as by a drag of a
+    /// toolbar's grip, but no further than the view's edges: above the view, and below what else
+    /// is over it, such as panels floating over it, and menus. `id` tells it from other UI over
+    /// the view. A press on it gives the view
     /// the keys, as a press on the view does, without reaching the layers, and the wheel over it
     /// doesn't reach them either, while keys follow the cursor over it as over the view: so a
     /// tool's toolbar or gizmo over the view leaves the view its keys, unless it opens a popup,
@@ -155,10 +157,11 @@ impl<'a> Ui<'a> {
         &mut self,
         id: impl Hash + Debug,
         align: Align2,
+        offset: Vec2,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
         self.dock
-            .show_over_view(self.root.ctx(), id, align, add_contents)
+            .show_over_view(self.root.ctx(), id, align, offset, add_contents)
     }
 
     /// Shows what `add_contents` draws over the main window below its title bar this frame, in
@@ -444,6 +447,7 @@ impl Dock {
         ctx: &Context,
         id: impl Hash + Debug,
         align: Align2,
+        offset: Vec2,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
         let spot = self.spot.as_ref()?;
@@ -451,7 +455,7 @@ impl Dock {
         let shown = Area::new(Id::unique(("gg dock over view", id)))
             .order(parent.order)
             .pivot(align)
-            .fixed_pos(align.pos_in_rect(&rect.shrink(OVER_VIEW)))
+            .fixed_pos(align.pos_in_rect(&rect.shrink(OVER_VIEW)) + offset)
             .constrain_to(rect)
             // Its own presses, so that egui's hit test doesn't take one near its edge for the
             // view's, a few points off.
@@ -1677,9 +1681,11 @@ mod tests {
         passes: Option<Rc<RefCell<Passes>>>,
         /// What egui asked of each window in the last frame.
         commands: Vec<(ViewportId, ViewportCommand)>,
-        /// Whether frames show a toolbar 100 by 30 points over the view, at its top left; and
-        /// last frame, where it showed, what egui made of the view, and where it was in pixels.
+        /// Whether frames show a toolbar 100 by 30 points over the view, at its top left, moved by
+        /// `offset`; and last frame, where it showed, what egui made of the view, and where it was
+        /// in pixels.
         toolbar: bool,
+        offset: Vec2,
         shown: Option<Rect>,
         view: Option<Response>,
         viewport: Option<Viewport>,
@@ -1740,6 +1746,7 @@ mod tests {
                 passes: None,
                 commands: Vec::new(),
                 toolbar: false,
+                offset: Vec2::ZERO,
                 shown: None,
                 view: None,
                 viewport: None,
@@ -1851,7 +1858,7 @@ mod tests {
             }
             self.frame += 1;
             let (dock, panels, menus) = (&mut self.dock, &self.panels, &self.menus);
-            let (toolbar, cover) = (self.toolbar, self.cover);
+            let (toolbar, offset, cover) = (self.toolbar, self.offset, self.cover);
             let (mut shown, mut view, mut viewport, mut covered) = (None, None, None, None);
             let mut output = self.ctx.run_ui(input, |root| {
                 dock.begin(root);
@@ -1868,7 +1875,7 @@ mod tests {
                 }
                 (view, viewport) = (ui.view(), ui.viewport());
                 if toolbar {
-                    shown = ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
+                    shown = ui.over_view("toolbar", Align2::LEFT_TOP, offset, |ui| {
                         ui.allocate_exact_size(vec2(100.0, 30.0), Sense::click()).0
                     });
                 }
@@ -2631,6 +2638,20 @@ mod tests {
         run.cover = false;
         run.frames(2);
         assert_eq!(run.dock.under(&run.ctx, pos2(600.0, 450.0)), Under::View);
+    }
+
+    #[test]
+    fn ui_over_the_view_moves_by_its_offset_but_no_further_than_the_view_s_edges() {
+        let mut run = Run::dockspace(Chrome::Os);
+        run.toolbar = true;
+        run.offset = vec2(50.0, 20.0);
+        run.frames(2);
+        let view = run.dock.view();
+        let toolbar = run.shown.expect("the view shows");
+        assert_eq!(toolbar.min, view.min + Vec2::splat(OVER_VIEW) + run.offset);
+        run.offset = vec2(10_000.0, 10_000.0);
+        run.frames(2);
+        assert_eq!(run.shown.expect("the view shows").max, view.max);
     }
 
     #[test]

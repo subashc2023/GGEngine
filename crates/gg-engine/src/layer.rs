@@ -55,7 +55,7 @@ use crate::net::Ticket;
 use crate::net::{Outside, Session, Turn};
 use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
-use crate::perf::Perf;
+use crate::perf::{self, Perf};
 use crate::physics::{
     self, BoxCollider3D, CapsuleCollider3D, CharacterController3D, CircleCollider2D, Joint2D,
     Joint3D, MeshCollider3D, Physics2D, Physics3D, RigidBody3D, SphereCollider3D,
@@ -1060,7 +1060,9 @@ impl Context {
     /// file's image again as the file changes, at whatever size, once frames have streamed it,
     /// drawing as it did until then, as ARCHITECTURE.md's Rendering says; one that doesn't decode
     /// warns, and the texture keeps drawing as it did. A test's context, [`Context::seeded`],
-    /// decodes it on the calling thread as it's added instead, warning at once.
+    /// decodes it on the calling thread as it's added instead, warning at once. A file's add logs
+    /// `asset.texture_loaded`, and its pixels' decode `asset.texture_decoded`, each with how long
+    /// it took, at the debug level.
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
     /// loading it again, as ARCHITECTURE.md's Rendering says, and so does an asset's file renamed
@@ -1084,6 +1086,7 @@ impl Context {
                 texture
             }
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let image = image::load_image(name, path, &self.files)?;
@@ -1097,6 +1100,7 @@ impl Context {
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
                 }
+                texture_loaded(&named, size, started);
                 texture
             }
         };
@@ -1134,6 +1138,7 @@ impl Context {
                 }
             }
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let image = image::load_image(name, path, &self.files)?;
@@ -1147,6 +1152,7 @@ impl Context {
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
                 }
+                texture_loaded(&named, size, started);
                 sheet
             }
         };
@@ -1205,11 +1211,12 @@ impl Context {
     /// read as far as its header as the model is, and decoded off the main thread, with mip levels
     /// made there too, so that one whose pixels don't decode warns and samples as white, as a
     /// texture's does; each draws once frames have streamed it to the GPU. `name` names the model
-    /// in errors and GPU captures. A run from a game's package
-    /// reads the model as the cooker cooked it instead, its meshes optimized, with levels of detail
-    /// that each draw picks by its size on screen, and its images compressed with their levels, BC7
-    /// of colors or values and BC5 of normal maps, but DDS images' blocks as they are, as
-    /// ARCHITECTURE.md's Project state says. A file
+    /// in errors and GPU captures. Its add logs `asset.model_loaded`, with how long it took and how
+    /// many meshes and images it added, whose decodes log as a texture's do. A run from a game's
+    /// package reads the model as the cooker cooked it instead, its meshes optimized, with levels
+    /// of detail that each draw picks by its size on screen, and its images compressed with their
+    /// levels, BC7 of colors or values and BC5 of normal maps, but DDS images' blocks as they are,
+    /// as ARCHITECTURE.md's Project state says. A file
     /// added again gives the model it gave first, until it's removed, as
     /// [`remove_model`](Self::remove_model) says.
     ///
@@ -1291,6 +1298,7 @@ impl Context {
                 model
             }
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 // A package's run watches nothing, so it lists no files.
@@ -1331,6 +1339,15 @@ impl Context {
                     }
                     assets.add_model(named.clone(), id, nodes)
                 });
+                // Its images are still decoding, each logging as it's done.
+                info!(
+                    code = "asset.model_loaded",
+                    model = &*named,
+                    meshes = made.meshes.len(),
+                    images = made.images.len(),
+                    ms = perf::millis(started.elapsed()),
+                    "Model loaded"
+                );
                 self.loaded.made.push(made);
                 if let Some(file) = file {
                     #[cfg(feature = "dev")]
@@ -1516,11 +1533,12 @@ impl Context {
     /// font's at its axes' defaults, unhinted, since the field draws them at any size. `name` names
     /// the font in errors and its field in GPU captures, as `<name> field`; frames stream the field
     /// to the GPU, and its text draws nothing until it's there, as its glyphs bake and the field
-    /// grows. A file added again, by whatever form of its path, gives the font it
-    /// gave first, without baking it again, as does an asset's file renamed or moved since, by the
-    /// ID that names it. Scenes, snapshots, recordings and the tool API name it by its asset ID,
-    /// where its file has one, and otherwise by its path, as a texture is. In a development run
-    /// that serves the tool API, it bakes again as its file changes, off the main thread.
+    /// grows. Its add logs `asset.font_loaded`, with how long it took. A file added again, by
+    /// whatever form of its path, gives the font it gave first, without baking it again, as does an
+    /// asset's file renamed or moved since, by the ID that names it. Scenes, snapshots, recordings
+    /// and the tool API name it by its asset ID, where its file has one, and otherwise by its path,
+    /// as a texture is. In a development run that serves the tool API, it bakes again as its file
+    /// changes, off the main thread.
     ///
     /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
     /// 256 MiB, isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone isn't,
@@ -1538,6 +1556,7 @@ impl Context {
                 font
             }
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let font::Bake {
@@ -1559,6 +1578,13 @@ impl Context {
                 if let Some(file) = file {
                     self.loaded.fonts.insert(file, font);
                 }
+                info!(
+                    code = "asset.font_loaded",
+                    font = &*named,
+                    ?size,
+                    ms = perf::millis(started.elapsed()),
+                    "Font loaded"
+                );
                 font
             }
         };
@@ -1574,7 +1600,8 @@ impl Context {
     /// where its file has one, or else by its path, as a texture is. Its text is read as it loads,
     /// and the textures, models, fonts and prefabs it names that none loaded has are loaded after
     /// it, as a scene's are; its entities' components are made as its instances spawn, of the types
-    /// the world has registered, as a scene's are, which refuses a text that doesn't load. In a
+    /// the world has registered, as a scene's are, which refuses a text that doesn't load. Its load
+    /// logs `asset.prefab_loaded`, with how long it took, the loads of what it names among it. In a
     /// development run that serves the tool API, it's read again as its file changes, and every
     /// instance takes what changed, as [`PrefabRoot`] says, unless the run is recorded, in a
     /// lockstep session or follows another.
@@ -1593,6 +1620,7 @@ impl Context {
                 prefab
             }
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let text: Arc<str> = prefab::read(name, path, &self.files)?.into();
@@ -1610,6 +1638,12 @@ impl Context {
                 // run loads them in the same order; a text that doesn't load is refused as its
                 // instances spawn.
                 let _ = self.load_scene_assets(&text);
+                info!(
+                    code = "asset.prefab_loaded",
+                    prefab = &*named,
+                    ms = perf::millis(started.elapsed()),
+                    "Prefab loaded"
+                );
                 return Ok(prefab);
             }
         };
@@ -1624,7 +1658,8 @@ impl Context {
     /// of the file, which is read once, by whatever form of its path. `name` names it in errors,
     /// the log and the tool API's `ui`. Its file is named by its asset ID, where it has one, or
     /// else by its path, as a texture's is. The fonts and textures its nodes name, by their IDs or
-    /// paths, are loaded with it, as a scene's are. In a development run that serves the tool API,
+    /// paths, are loaded with it, as a scene's are, and its file's load logs `asset.ui_loaded`, with
+    /// how long it took, theirs among it. In a development run that serves the tool API,
     /// its file is read again as it changes, every UI of it taking its nodes, each node keeping
     /// what code set of it by its name, and the focus staying on the button of its name, logging
     /// `UI reloaded`; a change that doesn't read warns with its code, the UI staying as it was.
@@ -1663,10 +1698,17 @@ impl Context {
         let found = match self.uis.file_of(&asset, file.as_deref()) {
             Some(found) => found,
             None => {
+                let started = Instant::now();
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let mut document = game_ui::read(name, &path, &self.files)?;
                 self.load_ui_assets(&mut document)?;
+                info!(
+                    code = "asset.ui_loaded",
+                    ui = &*named,
+                    ms = perf::millis(started.elapsed()),
+                    "UI loaded"
+                );
                 let found = self.uis.add_file(asset.clone(), named, document, file);
                 #[cfg(feature = "dev")]
                 self.watch_ui(found, name, &path, read_at, &asset);
@@ -1727,8 +1769,9 @@ impl Context {
     /// Loads the audio file at `path`, WAV, Ogg Vorbis, FLAC or MP3, as a sound for ticks to queue
     /// with [`World::play_sound`], and layers to play with [`play_sound`](Self::play_sound), from
     /// then on, through the handle, decoding it whole into memory, as a game's short sounds are.
-    /// `name` names it in errors and the log. A file added again, by whatever form of its path,
-    /// gives the sound it gave first, without decoding it again. In a development run that serves
+    /// `name` names it in errors and the log, and its add logs `asset.sound_loaded`, with how long
+    /// it took, at the debug level. A file added again, by whatever form of its path, gives the
+    /// sound it gave first, without decoding it again. In a development run that serves
     /// the tool API, the sound decodes again as its file changes, and plays as its file holds from
     /// its next play on; a change that doesn't decode warns, and the sound plays as it did.
     ///
@@ -1747,15 +1790,25 @@ impl Context {
         if let Some(&sound) = file.as_ref().and_then(|file| self.loaded.sounds.get(file)) {
             return Ok(sound);
         }
+        let started = Instant::now();
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
         let data = audio::decode(name, path, &self.files)?;
+        // Before the add, which opens the output for the first sound, logging `audio.opened`.
+        let ms = perf::millis(started.elapsed());
         let sound = self.audio.add(name, data);
         #[cfg(feature = "dev")]
         self.watch_sound(sound, name, path, read_at);
         if let Some(file) = file {
             self.loaded.sounds.insert(file, sound);
         }
+        // At the debug level, as a game may add many.
+        debug!(
+            code = "asset.sound_loaded",
+            sound = &*assets::name_of(self.root.as_deref(), path),
+            ms,
+            "Sound loaded"
+        );
         Ok(sound)
     }
 
@@ -1775,12 +1828,13 @@ impl Context {
     /// Loads the audio file at `path`, WAV, Ogg Vorbis, FLAC or MP3, as music for layers to play
     /// with [`play_music`](Self::play_music) from then on, through the handle: read whole into
     /// memory, as compressed as the file is, and decoded as it plays, on a thread of kira's, so
-    /// that a long piece takes little memory. `name` names it in errors and the log. A file added
-    /// again, by whatever form of its path, gives the music it gave first, without reading it
-    /// again. In a development run that serves the tool API, it's read again as its file changes,
-    /// a play of it crossfading to what the file holds from where it was; a change that doesn't
-    /// read warns, and it plays as it did. It plays as sounds do, as
-    /// [`add_sound`](Self::add_sound) says, its first loaded opening the output as a sound would.
+    /// that a long piece takes little memory. `name` names it in errors and the log, and its add
+    /// logs `asset.music_loaded`, with how long it took. A file added again, by whatever form of
+    /// its path, gives the music it gave first, without reading it again. In a development run
+    /// that serves the tool API, it's read again as its file changes, a play of it crossfading to
+    /// what the file holds from where it was; a change that doesn't read warns, and it plays as it
+    /// did. It plays as sounds do, as [`add_sound`](Self::add_sound) says, its first loaded opening
+    /// the output as a sound would.
     ///
     /// Fails with `engine.bad_music` if the file can't be read, isn't a regular file, is more than
     /// 64 MiB, or isn't WAV, Ogg Vorbis, FLAC or MP3 of one or two channels that says its rate and
@@ -1792,15 +1846,24 @@ impl Context {
         if let Some(&music) = file.as_ref().and_then(|file| self.loaded.music.get(file)) {
             return Ok(music);
         }
+        let started = Instant::now();
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
         let encoded = audio::read_music(name, path, &self.files)?;
+        // Before the add, which opens the output as a sound's does.
+        let ms = perf::millis(started.elapsed());
         let music = self.audio.add_music(name, encoded);
         #[cfg(feature = "dev")]
         self.watch_music(music, name, path, read_at);
         if let Some(file) = file {
             self.loaded.music.insert(file, music);
         }
+        info!(
+            code = "asset.music_loaded",
+            music = &*assets::name_of(self.root.as_deref(), path),
+            ms,
+            "Music loaded"
+        );
         Ok(music)
     }
 
@@ -3651,7 +3714,8 @@ impl Context {
     /// the file's path, as the app's root names it, such as `scenes/level.ron`, which the tool
     /// API's `undo` takes back. A run restored from a snapshot watches the files its run had
     /// loaded. The project's start scene, as [`load_start_scene`](Self::load_start_scene) loads it,
-    /// is the open scene too.
+    /// is the open scene too. It logs `scene.loaded`, with how many roots it made and how long it
+    /// took, the loads of what it names among it.
     ///
     /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message, as for
     /// a texture, a model, a font or a prefab that can't be loaded, `asset.no_texture`,
@@ -3665,6 +3729,7 @@ impl Context {
     ///
     /// Outside the layers' attach and detach, as [`world_mut`](Self::world_mut) does.
     pub fn load_scene_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>> {
+        let started = Instant::now();
         let path = path.as_ref();
         let text = crate::ecs::read_scene_from(path, &self.files)?;
         let mut loaded = self.world_mut().load_scene(&text);
@@ -3690,6 +3755,13 @@ impl Context {
         }
         self.scenes
             .loaded(SceneFile::new(path.to_owned(), author, text));
+        info!(
+            code = "scene.loaded",
+            path = %path.display(),
+            roots = roots.len(),
+            ms = perf::millis(started.elapsed()),
+            "Loaded the scene file"
+        );
         Ok(roots)
     }
 
@@ -3983,6 +4055,20 @@ impl Context {
             self.picked.push((pick, None));
         }
     }
+}
+
+/// Logs `asset.texture_loaded` at the debug level, as a game may add many: texture `named`, `size`
+/// pixels across and down, added from its file in the time since `started`. Its pixels decode on
+/// the loader's threads from then on, as [`Loader`] logs; where the loader decodes inline, as a
+/// test's or a replay's context's does, they decoded within that time.
+fn texture_loaded(named: &str, size: [u32; 2], started: Instant) {
+    debug!(
+        code = "asset.texture_loaded",
+        texture = named,
+        ?size,
+        ms = perf::millis(started.elapsed()),
+        "Texture loaded"
+    );
 }
 
 /// Adds `image`, sprite sheet `name`'s from `path`, read as far as its header, to `textures`
@@ -7132,6 +7218,90 @@ mod tests {
             .iter()
             .filter(|note| note.starts_with("model "));
         assert_eq!(models.count(), 2);
+    }
+
+    /// Each texture, model, scene file, prefab, font, UI, sound and music loaded logs how long it
+    /// took, a texture's image as it decodes too, a model's images among them, and a font's bake;
+    /// but a file added again, which loads nothing, logs nothing, and nor does a scene that fails
+    /// to load, whose error says why.
+    #[test]
+    fn loads_log_how_long_they_took() {
+        let logged = crate::testing::logged();
+        let scratch = crate::dirs::tests::Scratch::new("loads-logged");
+        let root = scratch.0.clone();
+        for dir in ["assets", "scenes"] {
+            std::fs::create_dir_all(root.join(dir)).expect("a directory");
+        }
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let write = |name: &str, bytes: &[u8]| std::fs::write(root.join(name), bytes);
+        write("assets/stone.png", &png).expect("written");
+        write("assets/plain.png", &png).expect("written");
+        write("assets/m.glb", &gltf::tests::model()).expect("written");
+        let inter = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter");
+        let font = std::fs::read(inter.join("Inter-Regular.ttf")).expect("the engine's font");
+        write("assets/inter.ttf", &font).expect("written");
+        write("assets/menu.ui", b"(nodes: [Button(name: \"play\")])").expect("written");
+        let wav = audio::tests::wav(&[0; 480]);
+        write("assets/chime.wav", &wav).expect("written");
+        write("assets/theme.wav", &wav).expect("written");
+        // A scene of a sprite of the texture named, whose ID is `id`, written to `file`.
+        let scene = |file: &str, id: u64, name: &str| -> PathBuf {
+            let sprite = format!("(Sprite: (texture: Some(\"{name}\")))");
+            let text = format!("(entities: {{\"{id:016x}\": {sprite}}})");
+            let path = root.join(file);
+            std::fs::write(&path, text).expect("written");
+            path
+        };
+        let mut cx = Context::seeded(0).root(root.clone());
+        let _ = logged.codes.try_iter().count();
+        cx.add_texture("stone", root.join("assets/stone.png"))
+            .expect("a texture");
+        cx.add_model("m", root.join("assets/m.glb"))
+            .expect("a model");
+        cx.add_texture("again", root.join("assets/stone.png"))
+            .expect("it again");
+        cx.add_model("again", root.join("assets/m.glb"))
+            .expect("it again");
+        cx.load_scene_file(scene("scenes/s.ron", 0x1000, "assets/plain.png"))
+            .expect("loaded");
+        let error = cx.load_scene_file(scene("scenes/s.ron", 0x2000, "assets/none.png"));
+        assert_eq!(error.expect_err("no file").code(), "asset.no_texture");
+        // Of a texture loaded already, which it loads nothing of.
+        let prefab = scene("assets/p.prefab", 0x3000, "assets/plain.png");
+        cx.add_prefab("p", &prefab).expect("a prefab");
+        cx.add_prefab("again", &prefab).expect("it again");
+        cx.add_font("inter", root.join("assets/inter.ttf"))
+            .expect("a font");
+        cx.add_ui("menu", root.join("assets/menu.ui"))
+            .expect("a UI");
+        cx.add_sound("chime", root.join("assets/chime.wav"))
+            .expect("a sound");
+        cx.add_music("theme", root.join("assets/theme.wav"))
+            .expect("music");
+        let codes: Vec<String> = (logged.codes.try_iter())
+            .filter(|code| code.starts_with("asset.") || code.starts_with("scene."))
+            .collect();
+        // A test's context decodes each image as it's added, so each logs before its add does.
+        let decoded = "asset.texture_decoded";
+        assert_eq!(
+            codes,
+            [
+                decoded,
+                "asset.texture_loaded",
+                decoded,
+                decoded,
+                "asset.model_loaded",
+                decoded,
+                "asset.texture_loaded",
+                "scene.loaded",
+                "asset.prefab_loaded",
+                "asset.font_baked",
+                "asset.font_loaded",
+                "asset.ui_loaded",
+                "asset.sound_loaded",
+                "asset.music_loaded",
+            ]
+        );
     }
 
     /// Frames handed off, as a run's do, at a view of 64 pixels square, until the context's loader

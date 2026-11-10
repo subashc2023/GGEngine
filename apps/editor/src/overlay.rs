@@ -1,20 +1,26 @@
-//! What the editor draws over its view: a toolbar at the view's top left, whose controls
-//! [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the camera faces, and
-//! turns it; at its bottom left, the name of what the view shows under the cursor; and round its
-//! edges, while a texture or a model from the Assets panel is held over it, an outline. And Play
-//! and Simulate, at the middle of the title bar, which play the game and stop it.
+//! What the editor draws over its view: a toolbar at the view's top left, or where its grip moves
+//! it, whose controls [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the
+//! camera faces, and turns it; at its bottom left, the name of what the view shows under the
+//! cursor; and round its edges, while a texture or a model from the Assets panel is held over it,
+//! an outline. And Play and Simulate, at the middle of the title bar, which play the game and stop
+//! it.
 
 use std::f32::consts::{PI, TAU};
 
+use gg_engine::Context;
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
     Rect, Response, Rgba, Sense, Shape, Stroke, StrokeKind, TextStyle, Visuals, vec2,
 };
 use gg_engine::grid::{self, Plane};
 use gg_engine::math::{self, Quat, libm};
+use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::camera::{OrbitCamera, Side, Tool};
 
+/// The file the editor keeps the toolbar's [`Placement`] in, as [`Context::read_state`] names it.
+const FILE: &str = "toolbar.json";
 /// The side of a toolbar icon, in points.
 const ICON: f32 = 16.0;
 /// How far the gizmo's balls are from its middle, in points.
@@ -33,7 +39,7 @@ const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
 /// which plane, whether the view sees through the game's camera, and whether the game's colliders'
-/// outlines show.
+/// outlines show; and where it is over the view, and whether it's folded.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -45,6 +51,7 @@ pub struct Toolbar {
     /// Whether the game's colliders' outlines show, over the rest of the view but a nearer
     /// opaque mesh, through either camera.
     pub colliders: bool,
+    pub placement: Placement,
 }
 
 impl Default for Toolbar {
@@ -55,7 +62,50 @@ impl Default for Toolbar {
             plane: Plane::XY,
             world_camera: false,
             colliders: false,
+            placement: Placement::default(),
         }
+    }
+}
+
+/// Where the toolbar is over the view, which a drag of its grip moves, as [`Toolbar::place`] keeps
+/// it, and whether it's folded to its grip and the button that unfolds it: which the editor keeps
+/// for the user from run to run, as [`Toolbar::save`] does.
+#[derive(Debug, Default, PartialEq)]
+pub struct Placement {
+    /// Where a drag of its grip last left it, from where
+    /// [`Ui::over_view`](gg_engine::Ui::over_view) places it, the view's top left, in points.
+    offset: egui::Vec2,
+    folded: bool,
+    /// Its size as it last showed, in points.
+    size: egui::Vec2,
+    /// The offset as a drag of the grip started, while it lasts.
+    from: Option<egui::Vec2>,
+    /// Whether it's moved or folded since it was last saved.
+    changed: bool,
+}
+
+impl Placement {
+    /// What `text`, the file's, holds: where the toolbar was and whether it was folded, either
+    /// left as it starts if it doesn't read.
+    fn parse(text: &str) -> serde_json::Result<Self> {
+        let value: Value = serde_json::from_str(text)?;
+        let offset = value["offset"]
+            .as_array()
+            .and_then(|xy| match xy.as_slice() {
+                [x, y] => Some(vec2(x.as_f64()? as f32, y.as_f64()? as f32)),
+                _ => None,
+            });
+        Ok(Self {
+            offset: offset.unwrap_or_default(),
+            folded: value["folded"].as_bool().unwrap_or(false),
+            ..Self::default()
+        })
+    }
+
+    /// Its file's text, which [`parse`](Self::parse) reads back.
+    fn text(&self) -> String {
+        let value = json!({"offset": [self.offset.x, self.offset.y], "folded": self.folded});
+        format!("{value:#}\n")
     }
 }
 
@@ -74,12 +124,70 @@ pub enum Mode {
 }
 
 impl Toolbar {
-    /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
-    /// camera's projection, which a click switches, the grid's switch and its plane, the switch
-    /// that sees through the game's camera, and the colliders' switch, each with a tooltip. While
-    /// the view sees through the game's camera, the projection's and the grid's buttons are off,
-    /// since what they change doesn't show. It opens nothing, since a popup would take the view's
-    /// keys.
+    /// Reads where the toolbar was and whether it was folded, as `cx` keeps it for the user,
+    /// warning (`editor.toolbar`) if it can't, the toolbar then starting at the view's top left,
+    /// unfolded.
+    pub fn read(&mut self, cx: &Context) {
+        let read = match cx.read_state(FILE) {
+            Ok(None) => return,
+            Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|error| error.to_string()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        let parsed = |text: String| Placement::parse(&text).map_err(|error| error.to_string());
+        match read.and_then(parsed) {
+            Ok(placement) => self.placement = placement,
+            Err(why) => warn!(
+                code = "editor.toolbar",
+                file = FILE,
+                "can't read where the toolbar was: {why}; it starts at the view's top left"
+            ),
+        }
+    }
+
+    /// Saves where the toolbar is and whether it's folded, as `cx` keeps it for the user, if it's
+    /// moved or folded since, warning (`editor.toolbar`) if it can't.
+    pub fn save(&mut self, cx: &Context) {
+        let placement = &mut self.placement;
+        if !placement.changed {
+            return;
+        }
+        placement.changed = false;
+        if let Err(error) = cx.save_state(FILE, placement.text().as_bytes()) {
+            warn!(code = "editor.toolbar", file = FILE, "{error:#}");
+        }
+    }
+
+    /// Moves the toolbar as far as the pointer has gone since a drag of its grip started, which
+    /// egui saw as the frame began, within `view`, where the view is, as far in from its edges as
+    /// from its top left. Returns how far it's moved, for
+    /// [`Ui::over_view`](gg_engine::Ui::over_view) to show it there, kept within the view as it is
+    /// now: unfolded, or in a smaller view, it shows further in than its grip left it, and goes
+    /// back as it folds or the view grows. Called before it shows, so that it keeps up with the
+    /// pointer.
+    pub fn place(&mut self, egui: &egui::Context, view: Rect) -> egui::Vec2 {
+        let placement = &mut self.placement;
+        let room = view.size() - egui::Vec2::splat(2.0 * INSET) - placement.size;
+        let room = room.max(egui::Vec2::ZERO);
+        let within = |offset: egui::Vec2| offset.clamp(egui::Vec2::ZERO, room);
+        let dragged = egui.read_response(grip_id());
+        match dragged.and_then(|grip| grip.total_drag_delta()) {
+            // From where it shows.
+            Some(by) => {
+                let from = *placement.from.get_or_insert(within(placement.offset));
+                placement.offset = within(from + by);
+            }
+            None => placement.changed |= placement.from.take().is_some(),
+        }
+        within(placement.offset)
+    }
+
+    /// Draws the toolbar into `ui`: its grip, which a drag of moves it, as [`place`](Self::place)
+    /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, whose
+    /// tooltips name the keys that pick them, the camera's projection, which a click switches, the
+    /// grid's switch and its plane, the switch that sees through the game's camera, and the
+    /// colliders' switch, each with a tooltip. While the view sees through the game's camera, the
+    /// projection's and the grid's buttons are off, since what they change doesn't show. It opens
+    /// nothing, since a popup would take the view's keys.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -87,8 +195,24 @@ impl Toolbar {
         } else {
             "Ctrl"
         };
-        panel(ui.visuals()).show(ui, |ui| {
+        let shown = panel(ui.visuals()).show(ui, |ui| {
             ui.horizontal(|ui| {
+                grip(ui);
+                // Beside the grip, so that it stays under the pointer as it folds and unfolds.
+                let placement = &mut self.placement;
+                let (icon, tip) = if placement.folded {
+                    (Icon::Unfold, "Unfold the toolbar")
+                } else {
+                    (Icon::Fold, "Fold the toolbar to its grip")
+                };
+                if icon_button(ui, icon, false).on_hover_text(tip).clicked() {
+                    placement.folded = !placement.folded;
+                    placement.changed = true;
+                }
+                if placement.folded {
+                    return;
+                }
+                ui.separator();
                 for (tool, icon, tip) in [
                     (
                         Tool::Select,
@@ -185,7 +309,34 @@ impl Toolbar {
                 }
             });
         });
+        self.placement.size = shown.response.rect.size();
     }
+}
+
+/// The id of the toolbar's grip, which [`Toolbar::place`] reads the drag of before it shows.
+fn grip_id() -> Id {
+    Id::unique("gg editor toolbar grip")
+}
+
+/// Draws the toolbar's grip into `ui`, as tall as its buttons: dots in two columns, lit as the
+/// pointer comes onto it, as a button lights.
+fn grip(ui: &mut egui::Ui) {
+    let size = vec2(ICON / 2.0, ICON + 2.0 * ui.spacing().button_padding.y);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, grip_id(), Sense::drag());
+    let color = ui.style().interact(&response).fg_stroke.color;
+    for x in [-2.0, 2.0] {
+        for y in [-4.0, 0.0, 4.0] {
+            ui.painter()
+                .circle_filled(rect.center() + vec2(x, y), 1.25, color);
+        }
+    }
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
+    }
+    response.on_hover_text("Move the toolbar: drag it within the view");
 }
 
 /// Draws Play and Simulate into `ui`, the title bar's middle, each with a tooltip, the one
@@ -268,6 +419,10 @@ enum Icon {
     Simulate,
     /// A square, as a player's.
     Stop,
+    /// A chevron pointing left, toward the grip.
+    Fold,
+    /// A chevron pointing right, away from the grip.
+    Unfold,
 }
 
 impl Icon {
@@ -363,6 +518,14 @@ impl Icon {
             Self::Stop => {
                 let square = Rect::from_min_max(at(3.0, 3.0), at(13.0, 13.0));
                 painter.rect_filled(square, 1.0, color);
+            }
+            Self::Fold => {
+                let chevron = vec![at(10.5, 3.0), at(5.5, 8.0), at(10.5, 13.0)];
+                painter.add(Shape::line(chevron, Stroke::new(2.0, color)));
+            }
+            Self::Unfold => {
+                let chevron = vec![at(5.5, 3.0), at(10.5, 8.0), at(5.5, 13.0)];
+                painter.add(Shape::line(chevron, Stroke::new(2.0, color)));
             }
         }
     }
@@ -732,6 +895,105 @@ mod tests {
             want.rotation
         );
         assert!(seen.position.abs_diff_eq(want.position, 1e-5));
+    }
+
+    /// Runs a pass of `toolbar` over `view`, placed as [`Ui::over_view`](gg_engine::Ui::over_view)
+    /// places it, with `events`. Returns the middle of its grip as it showed.
+    fn show_toolbar(
+        ctx: &egui::Context,
+        toolbar: &mut Toolbar,
+        view: Rect,
+        events: Vec<egui::Event>,
+    ) -> Pos2 {
+        let input = RawInput {
+            screen_rect: Some(view),
+            events,
+            ..RawInput::default()
+        };
+        let mut grip = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            let offset = toolbar.place(ui.ctx(), view);
+            egui::Area::new(Id::unique("gg editor test toolbar"))
+                .fixed_pos(view.min + egui::Vec2::splat(INSET) + offset)
+                .constrain_to(view)
+                .show(ui.ctx(), |ui| toolbar.show(ui, &mut OrbitCamera::new()));
+            // Before the pass ends, after which egui reads the pass before.
+            grip = ui.ctx().read_response(grip_id());
+        });
+        output.textures_delta.clear();
+        grip.expect("it shows").rect.center()
+    }
+
+    #[test]
+    fn dragging_the_grip_moves_the_toolbar_with_the_pointer_within_the_view() {
+        let ctx = egui::Context::default();
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0));
+        let mut toolbar = Toolbar::default();
+        // The first pass sizes it.
+        show_toolbar(&ctx, &mut toolbar, view, Vec::new());
+        let grip = show_toolbar(&ctx, &mut toolbar, view, Vec::new());
+        let moved = egui::Event::PointerMoved;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        show_toolbar(
+            &ctx,
+            &mut toolbar,
+            view,
+            vec![moved(grip), button(grip, true)],
+        );
+        // In the pass the pointer moves in.
+        let by = vec2(100.0, 50.0);
+        let shown = show_toolbar(&ctx, &mut toolbar, view, vec![moved(grip + by)]);
+        assert_eq!(shown, grip + by);
+        // Past the view's far corner, it stops as far in from it as from the top left.
+        show_toolbar(&ctx, &mut toolbar, view, vec![moved(pos2(5000.0, 5000.0))]);
+        let far = toolbar.placement.offset + toolbar.placement.size;
+        let room = view.size() - egui::Vec2::splat(2.0 * INSET);
+        assert!((far - room).length() < 1e-3, "{far:?} in {room:?}");
+        // Back, it's where the pointer holds it again.
+        let shown = show_toolbar(&ctx, &mut toolbar, view, vec![moved(grip + by)]);
+        assert_eq!(shown, grip + by);
+        // Let go, it stays, and is saved where it is.
+        assert!(!toolbar.placement.changed, "while dragged");
+        show_toolbar(&ctx, &mut toolbar, view, vec![button(grip + by, false)]);
+        assert!(toolbar.placement.changed, "let go");
+        let shown = show_toolbar(&ctx, &mut toolbar, view, vec![moved(grip)]);
+        assert_eq!(shown, grip + by);
+        // In a smaller view it shows further in, and where it was once the view's as big again.
+        let smaller = Rect::from_min_size(Pos2::ZERO, vec2(700.0, 60.0));
+        let shown = show_toolbar(&ctx, &mut toolbar, smaller, Vec::new());
+        assert!(
+            shown.x < grip.x + by.x && shown.y < grip.y + by.y,
+            "{shown:?}"
+        );
+        let shown = show_toolbar(&ctx, &mut toolbar, view, Vec::new());
+        assert_eq!(shown, grip + by);
+    }
+
+    /// Where the toolbar is and whether it's folded read back as they were, and what of a file
+    /// doesn't read is left as it starts.
+    #[test]
+    fn where_the_toolbar_is_and_whether_it_s_folded_read_back() {
+        let placement = Placement {
+            offset: vec2(120.5, 40.0),
+            folded: true,
+            ..Placement::default()
+        };
+        assert_eq!(
+            Placement::parse(&placement.text()).expect("read"),
+            placement
+        );
+        let partly = Placement::parse(r#"{"offset": [1, "a"], "folded": true}"#).expect("read");
+        let folded = Placement {
+            folded: true,
+            ..Placement::default()
+        };
+        assert_eq!(partly, folded);
+        assert!(Placement::parse("not json").is_err());
     }
 
     #[test]

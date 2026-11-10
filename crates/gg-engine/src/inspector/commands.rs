@@ -35,6 +35,12 @@ pub(super) enum Command {
     Revert(EntityId, String, String),
     /// Unlinks the instance whose root is the entity with this ID.
     Unlink(EntityId),
+    /// Makes the entity with this ID the last of the second's children, or a root for `None`,
+    /// keeping where it is in the world, as [`World::reparent_in_place`](crate::World::reparent_in_place)
+    /// says.
+    Reparent(EntityId, Option<EntityId>),
+    /// Names the entity with this ID: sets its [`Name`](crate::Name), or gives it one.
+    Rename(EntityId, String),
 }
 
 /// The Inspector's commands, which a recording reads as values: variants `Set`, with the
@@ -42,7 +48,9 @@ pub(super) enum Command {
 /// `Create`, with its parent's ID as text, if it has one, and its components as a struct, a field
 /// each named as its type; `Delete`, `Duplicate` and `Unlink`, with the entity's ID as text; `Add`,
 /// with the entity's ID as text, the component and its value; `Remove`, with the entity's ID as
-/// text and the component; and `Revert`, with the entity's ID as text, the component and the path.
+/// text and the component; `Revert`, with the entity's ID as text, the component and the path;
+/// `Reparent`, with the entity's ID as text and its parent's, if it's to have one; and `Rename`,
+/// with the entity's ID as text and its name.
 #[derive(Default)]
 pub(super) struct Queue(pub(super) Vec<Command>);
 
@@ -105,6 +113,14 @@ impl Commands for Queue {
                 "Remove",
                 vec![entity(id), ("component".into(), text(component))],
             ),
+            Command::Reparent(id, parent) => {
+                let parent = parent.map(|id| Box::new(text(&id.to_string())));
+                (
+                    "Reparent",
+                    vec![entity(id), ("parent".into(), Value::Option(parent))],
+                )
+            }
+            Command::Rename(id, name) => ("Rename", vec![entity(id), ("name".into(), text(name))]),
         };
         Value::Variant(name.into(), fields)
     }
@@ -118,6 +134,19 @@ impl Commands for Queue {
         let id = |value: &Value, field: &str| -> Result<EntityId> {
             let id = text(value, field)?.parse();
             id.map_err(|error| reflect::within(error, field))
+        };
+        // A parent's, as a create's and a reparent's have it.
+        let parent = |value: &Value| -> Result<Option<EntityId>> {
+            match value {
+                Value::Option(parent) => {
+                    let parent = parent.as_deref().map(|parent| id(parent, "parent"));
+                    parent.transpose()
+                }
+                other => {
+                    let error = reflect::wrong_kind("Option", other);
+                    Err(reflect::within(error, "parent"))
+                }
+            }
         };
         let command = match name {
             "Set" => {
@@ -140,17 +169,8 @@ impl Commands for Queue {
                 }
             }
             "Create" => {
-                let [parent, components] = reflect::pick(fields, ["parent", "components"])?;
-                let parent = match parent {
-                    Value::Option(parent) => {
-                        let parent = parent.as_deref().map(|parent| id(parent, "parent"));
-                        parent.transpose()?
-                    }
-                    other => {
-                        let error = reflect::wrong_kind("Option", other);
-                        return Err(reflect::within(error, "parent"));
-                    }
-                };
+                let [of, components] = reflect::pick(fields, ["parent", "components"])?;
+                let parent = parent(of)?;
                 let Value::Struct(components) = components else {
                     let error = reflect::wrong_kind("Struct", components);
                     return Err(reflect::within(error, "components"));
@@ -186,6 +206,14 @@ impl Commands for Queue {
                 let entity = id(entity, "entity")?;
                 Command::Remove(entity, text(component, "component")?)
             }
+            "Reparent" => {
+                let [entity, of] = reflect::pick(fields, ["entity", "parent"])?;
+                Command::Reparent(id(entity, "entity")?, parent(of)?)
+            }
+            "Rename" => {
+                let [entity, name] = reflect::pick(fields, ["entity", "name"])?;
+                Command::Rename(id(entity, "entity")?, text(name, "name")?)
+            }
             other => {
                 let names = [
                     "Set",
@@ -199,6 +227,8 @@ impl Commands for Queue {
                     "Remove",
                     "Revert",
                     "Unlink",
+                    "Reparent",
+                    "Rename",
                 ];
                 return Err(reflect::no_variant(other, &names));
             }

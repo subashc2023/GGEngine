@@ -509,6 +509,16 @@ impl OrbitCamera {
         self.ease_to(Pose::start());
     }
 
+    /// Eases to look at `point` from where it would be, keeping which way it faces and how far
+    /// back it is, as framing what's picked does: the size of what's there isn't known, so it
+    /// stays as big as the view showed things at the pivot.
+    pub fn frame(&mut self, point: Vec3) {
+        self.ease_to(Pose {
+            pivot: point,
+            ..self.pose
+        });
+    }
+
     /// In orthographic, slides the pivot along the view onto the plane through the origin that
     /// faces `normal`, which changes nothing in the view, but keeps the plane in its depth, however
     /// far it was panned off it; and so a switch to perspective orbits the point of the plane at
@@ -726,6 +736,29 @@ mod tests {
     fn eased(camera: &mut OrbitCamera) {
         camera.update(Duration::from_secs(1));
         assert!(camera.ease.is_none());
+    }
+
+    /// Framing a point eases to look at it, turned as the camera was and as far back, both ways
+    /// it sees: the point ends in the middle of the view, and the camera as far from it as it was
+    /// from the pivot.
+    #[test]
+    fn framing_eases_to_look_at_a_point_turned_and_as_far_back_as_it_was() {
+        for perspective in [false, true] {
+            let mut camera = turned(perspective);
+            let before = camera.viewpoint();
+            let point = Vec3::new(-4.0, 6.0, 2.5);
+            camera.frame(point);
+            assert!(camera.eases());
+            eased(&mut camera);
+            let after = camera.viewpoint();
+            assert!(after.rotation.abs_diff_eq(before.rotation, 1e-6));
+            assert_eq!(after.projection, before.projection);
+            let middle = Vec2::from(VIEW.origin.map(|at| at as f32))
+                + Vec2::from(VIEW.size.map(|side| side as f32)) / 2.0;
+            assert_near(pixel(&camera, point), middle, "the point");
+            let distance = eye(&camera).distance(point);
+            assert!((distance - 12.0).abs() < 1e-4, "{distance}");
+        }
     }
 
     #[test]

@@ -157,26 +157,8 @@ impl Fields<'_> {
                     _ => opaque(ui),
                 }
             }
-            (Type::Option(inner), Value::Option(Some(value))) => {
-                let default = match default {
-                    Some(Value::Option(Some(default))) => Some(&**default),
-                    _ => None,
-                };
-                let inside = Slot {
-                    ty: inner,
-                    meta,
-                    default,
-                };
-                let inner = ui.horizontal(|ui| {
-                    ui.label("Some");
-                    // As it's given: a set waiting at its path is the option's, which drew it.
-                    self.draw(ui, inside, value, path, true)
-                });
-                Some(Value::Option(Some(Box::new(inner.inner?))))
-            }
-            (Type::Option(_), Value::Option(None)) => {
-                ui.label("None");
-                None
+            (Type::Option(inner), Value::Option(given)) => {
+                self.option(ui, slot, inner, given.as_deref(), path)
             }
             (Type::List(inner) | Type::Array(inner, _), Value::List(items)) => {
                 let defaults = match default {
@@ -495,13 +477,94 @@ impl Fields<'_> {
                 .variant_default(variant)
                 .map_err(|error| error.to_string())?,
         };
-        match opaque_at(&made) {
-            // Refused as a make of it would be.
-            Some(at) => {
-                reflect::make_opaque(&made).map_err(|error| reflect::within(error, &at).to_string())
+        makeable(made)
+    }
+
+    /// An option, `given`, at `path`, holding `inner` when it's on, under the hints and default at
+    /// `slot`: a checkbox, labeled `Some` or `None`, that turns it on or off, and, while it's on,
+    /// what it holds, which is set whole with it. Turned on, it holds what it last held while the
+    /// entity was drawn, kept as [`variant`](Self::variant) keeps a variant's fields; or else its
+    /// default's, if that's on; or else its inside's type's default under the hints. One that can't
+    /// be turned on, as its inside has no default, as a texture, or holds what's opaque, shows its
+    /// checkbox disabled, saying why on hover: what it would hold is made each frame it's off, to
+    /// know.
+    fn option(
+        &mut self,
+        ui: &mut egui::Ui,
+        slot: Slot<'_>,
+        inner: &Type,
+        given: Option<&Value>,
+        path: &str,
+    ) -> Option<Value> {
+        type Kept = (EntityId, Value);
+        let id = egui::Id::unique(("inspector option", self.component, path));
+        let entity = self.entity;
+        let Some(value) = given else {
+            let kept = ui.data(|data| data.get_temp::<Kept>(id));
+            let kept = kept.filter(|(of, _)| *of == entity).map(|(_, kept)| kept);
+            let mut on = false;
+            return match self.turned_on(slot, inner, kept) {
+                Ok(held) => {
+                    let turned = ui.checkbox(&mut on, "None").changed();
+                    turned.then(|| Value::Option(Some(Box::new(held))))
+                }
+                Err(why) => {
+                    let checkbox = egui::Checkbox::new(&mut on, "None");
+                    ui.add_enabled(false, checkbox).on_disabled_hover_text(why);
+                    None
+                }
+            };
+        };
+        // Written only as it differs, so that a frame clones nothing while it's on.
+        ui.data_mut(|data| {
+            let kept = data.get_temp_mut_or_insert_with(id, || -> Kept { (entity, value.clone()) });
+            if kept.0 != entity || kept.1 != *value {
+                *kept = (entity, value.clone());
             }
-            None => Ok(made),
-        }
+        });
+        let default = match slot.default {
+            Some(Value::Option(Some(default))) => Some(&**default),
+            _ => None,
+        };
+        let inside = Slot {
+            ty: inner,
+            meta: slot.meta,
+            default,
+        };
+        // In a vertical, which starts at the top of a grid's row: the grid centers a horizontal in
+        // the row's height of the frame before as if it were a line high, which put what's taller,
+        // as a struct's fields, half a row down, over the rows below.
+        let new = ui.vertical(|ui| {
+            let new = ui.horizontal(|ui| {
+                let mut on = true;
+                if ui.checkbox(&mut on, "Some").changed() {
+                    return Some(Value::Option(None));
+                }
+                // As it's given: a set waiting at its path is the option's, which drew it.
+                let held = self.draw(ui, inside, value, path, true)?;
+                Some(Value::Option(Some(Box::new(held))))
+            });
+            new.inner
+        });
+        new.inner
+    }
+
+    /// What an option holding `inner`, under the hints and default at `slot`, holds as it's turned
+    /// on, as [`option`](Self::option) says: `kept`, what it last held on the entity, if it held
+    /// anything; or else its default's inside, if that's on; or else `inner`'s default under the
+    /// hints. Fails, saying why, as [`switched`](Self::switched) does.
+    fn turned_on(
+        &self,
+        slot: Slot<'_>,
+        inner: &Type,
+        kept: Option<Value>,
+    ) -> Result<Value, String> {
+        let made = match (kept, slot.default) {
+            (Some(kept), _) => kept,
+            (None, Some(Value::Option(Some(default)))) => (**default).clone(),
+            _ => (self.types.default_value(inner, slot.meta)).map_err(|error| error.to_string())?,
+        };
+        makeable(made)
     }
 
     /// A rotation as angles about x, y and z, in degrees, applied z first, each joined to a button
@@ -916,5 +979,16 @@ fn opaque_at(value: &Value) -> Option<String> {
             })
         }
         _ => None,
+    }
+}
+
+/// `made`, as a switch to it or a turn on of it makes it, or why it can't be: it holds what's
+/// opaque, which reflection doesn't make, so that a set of it would be refused, as a make of it is.
+fn makeable(made: Value) -> Result<Value, String> {
+    match opaque_at(&made) {
+        Some(at) => {
+            reflect::make_opaque(&made).map_err(|error| reflect::within(error, &at).to_string())
+        }
+        None => Ok(made),
     }
 }

@@ -10,7 +10,7 @@
 // each texel the nearest, the most, of the 2 by 2 under it, as many of them as there are past the
 // edge, so that each level's sides are half the one's before, rounded up, and texel `c` of level `n`
 // covers the pixels from `c * 2^n` to `(c + 1) * 2^n`; `trace_main` follows each pixel's mirror ray
-// through the pyramid, its surface's normal found from the depth round it, and writes, into the first
+// through the pyramid, about its surface's normal, and writes, into the first
 // level of the view's reflections, the colors it found, times how much it trusts them, and that
 // trust, and how far, in pixels, a reflection of it spreads for each unit of the tangent of a lobe's
 // angle, into an image of its own; `blur_main` averages each level of the reflections after the
@@ -25,6 +25,13 @@
 // https://github.com/GPUOpen-Effects/FidelityFX-SSSR/blob/master/ffx-sssr/ffx_sssr.h
 // Positions here are in pixels across and down, and the view's depth; the view's space is
 // ao.slang's, X right, Y up and Z ahead, so that depth is positive.
+//
+// A surface's normal is its shading's, where a pass before the trace found it: the smooth normal
+// its triangle's corners interpolate, its normal map's bumps among it. visibility.slang's
+// `normal_main` finds it where the view's visibility buffer drew, and model.slang's draws it where
+// the opaque and masked model shaders drew the depth alone of what's drawn otherwise. Elsewhere, as
+// where a game's shader drew what's nearest, it's found from the depth round the point, which is a
+// curved mesh's facets', each a flat mirror, whose rays step at its edges.
 //
 // The pyramid is reached as a pointer the push constants hold, indexed, and each entry point reads
 // what it reads through functions of its own, as pyramid.slang says why. `Push` and `Trace` match
@@ -44,6 +51,8 @@ struct Trace {
     // From the view's space, as this frame sees it, to the clip space of the frame before, without
     // its offset, as the colors it kept were drawn.
     float4x4 previous_clip_from_view;
+    // From the world to the view's space, which turns the shading's normals.
+    float4x4 view_from_world;
     // What takes a point's texture coordinates in the view, from its top left, to its X and Y in
     // the view's space, over its depth, `(view_mul * uv + view_add) * depth`; and the view's depth,
     // `z`, to its depth there, `depth_mul / (depth_add + z)`, as ao.slang's `Push` has them.
@@ -69,7 +78,12 @@ struct Trace {
     // What the colors the frame before kept are multiplied by to be of this frame's light: this
     // frame's exposure over theirs, which an adapting exposure changes.
     float scale;
-    uint unused;
+    // The normals in the world, as the shading turns them, of what drew each of the view's two
+    // depths, `Push`'s, and 1 in alpha, where they have one, and 0 elsewhere: as visibility.slang's
+    // `normal_main` found them from the visibility buffer, and model.slang's drew them; textures of
+    // the bindless set's, or 0 for none.
+    uint normals[2];
+    uint unused[3];
 };
 
 struct Push {
@@ -78,7 +92,7 @@ struct Push {
     // What `trace_main` reads.
     Trace* trace;
     // The view's two depths whose nearer is what's opaque at each pixel, textures of the bindless
-    // set's, that `depth_main` reads.
+    // set's, that `depth_main` reads, and `trace_main` beside its normals.
     uint2 depths;
     // The size of what's written, in texels.
     uint2 size;
@@ -208,6 +222,23 @@ float3 normal_at(Trace trace, int2 pixel, float3 center) {
     return length2 > 1.0e-30 ? normal * rsqrt(length2) : -normalize(center);
 }
 
+// The normal of the surface at `pixel`, inside the view, whose point is `center` and whose depth,
+// the nearer of the view's two, is `z`: the shading's, where what drew the nearer depth has normals
+// and drew one there, and otherwise as `normal_at` finds it from the depth round it.
+float3 surface_normal(Trace trace, int2 pixel, float3 center, float z) {
+    int3 at = int3(pixel, 0);
+    [unroll]
+    for (uint i = 0; i < 2; i++) {
+        if (trace.normals[i] != 0 && depths[push.depths[i]].Load(at) == z) {
+            float4 shaded = textures[trace.normals[i]].Load(at);
+            if (shaded.a > 0.0) {
+                return normalize(mul(trace.view_from_world, float4(shaded.xyz, 0.0)).xyz);
+            }
+        }
+    }
+    return normal_at(trace, pixel, center);
+}
+
 // FFX_SSSR_HierarchicalRaymarch: follows the ray from `origin` along `way`, both in pixels and depth,
 // `t` along it from 0 at its origin to 1 at its end, through the pyramid, from its first level,
 // climbing a level each time it crosses a texel wholly above what that holds, and stepping down one
@@ -284,7 +315,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     bool opaque = z > 0.0;
     float3 normal = float3(0.0);
     if (opaque) {
-        normal = normal_at(trace, int2(pixel), center);
+        normal = surface_normal(trace, int2(pixel), center, z);
     }
     // Nothing where nothing opaque is, nor where its normal is no number, as where the sky is on
     // both sides of it, whose points are as far as any.
@@ -319,8 +350,8 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     bool apart = any(abs(stopped.xy - origin.xy) >= 2.0);
     if (found && apart && surface > 0.0) {
         float3 seen = position(trace, stopped.xy / size, view_depth(trace, surface));
-        float3 facing = normal_at(trace, hit, position(trace, (float2(hit) + 0.5) / size,
-                                                       view_depth(trace, surface)));
+        float3 facing = surface_normal(trace, hit, position(trace, (float2(hit) + 0.5) / size,
+                                                            view_depth(trace, surface)), surface);
         if (dot(facing, ray) <= 0.0) {
             // Trusted less the farther behind what's there the ray passed, toward the view's edges,
             // and toward the ray's reach.

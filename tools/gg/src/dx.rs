@@ -1,7 +1,7 @@
 //! Dioxus's `dx`, for `gg run`'s patches: checking that the machine's is the release of the
 //! subsecond a game's build uses, building the game's development build so that it can take
-//! patches, and building patches of it, reading what dx says as it builds, and mending the thunks
-//! of those it builds for Windows on x86-64.
+//! patches, printing where the build has come to, and building patches of it, reading what dx says
+//! as it builds, and mending the thunks of those it builds for Windows on x86-64.
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -9,11 +9,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use gg_api::Failure;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::build::Package;
+use crate::run::{event, millis};
+
+/// How often a build prints how far through its crates it has come, at most: each stage it comes
+/// to prints as it does.
+const PROGRESS: Duration = Duration::from_secs(5);
 
 /// How dx builds a game's package: from the workspace's root, as its binary, with dx's session
 /// cache in a directory of gg's for the package, which patches are built from beside the build's
@@ -49,8 +55,9 @@ impl Dx {
     }
 
     /// Builds the package's development build with `dx build --fat-binary`, which patches can be
-    /// built against, and removes the environment dx wrote as it built, as [`forget`](Self::forget)
-    /// says, whether the build succeeded or not.
+    /// built against, printing `building` as it goes, as [`Progress`] says, and removes the
+    /// environment dx wrote as it built, as [`forget`](Self::forget) says, whether the build
+    /// succeeded or not.
     ///
     /// Fails with `gg.build` if dx can't run, or the build fails, with rustc's errors.
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
@@ -58,7 +65,12 @@ impl Dx {
         let _ = fs::create_dir_all(&self.cache);
         let args = ["build", "--fat-binary"];
         let mut child = self.command(&args).spawn().map_err(cant)?;
-        let said = said(child.stdout.take().expect("piped"));
+        let mut progress = Progress::new(Instant::now());
+        let said = said(child.stdout.take().expect("piped"), |stage| {
+            if let Some(building) = progress.take(stage, Instant::now()) {
+                event(&building);
+            }
+        });
         let status = child.wait();
         self.forget();
         let status = status.map_err(cant)?;
@@ -98,7 +110,8 @@ impl Dx {
             scope.spawn(move || {
                 let _ = stdin.write_all(fat.client.as_bytes());
             });
-            said(stdout)
+            // A patch builds the game's crate alone, and `patched` says how long it took.
+            said(stdout, |_| {})
         });
         let status = child.wait().map_err(cant)?;
         let table = match said.table {
@@ -125,7 +138,10 @@ impl Dx {
             .args(["-p", &self.package, "--bin", &self.bin])
             .arg("--session-cache-dir")
             .arg(&self.cache)
-            .arg("--json-output");
+            .arg("--json-output")
+            // Rather than reading each build and patch for the assets Dioxus's `asset!` declares,
+            // which games declare none of: 0.6 s or more a build of the showcase.
+            .arg("--skip-assets");
         // A console, as the game's cargo build has, which dx leaves out of a desktop app otherwise.
         if cfg!(windows) {
             command.args(["--windows-subsystem", "CONSOLE"]);
@@ -202,13 +218,15 @@ struct Said {
     errors: Vec<String>,
 }
 
-/// What dx says on `stdout`, read to its end.
-fn said(stdout: impl Read) -> Said {
+/// What dx says on `stdout`, read to its end, giving `stage` each stage the build comes to, as
+/// [`Record::Stage`] holds it, as dx says it.
+fn said(stdout: impl Read, mut stage: impl FnMut(Value)) -> Said {
     let mut said = Said::default();
     for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
         match record(&String::from_utf8_lossy(&line)) {
             Record::Built(fat) => said.fat = Some(fat),
             Record::Patch(table) => said.table = Some(table),
+            Record::Stage(at) => stage(at),
             Record::Error(error) if !said.errors.contains(&error) => said.errors.push(error),
             Record::Error(_) | Record::Other => {}
         }
@@ -222,10 +240,48 @@ enum Record {
     Built(Fat),
     /// A patch was built: its jump table.
     Patch(Value),
+    /// The build came to a stage, as `building`'s fields give it: its name, `stage`, in snake
+    /// case, as `linking`; as it starts, how many crates dx counts on its compiling, `crates`; and
+    /// as each is compiled, how many have been, fresh ones among them, `compiled`, of `crates`, and
+    /// the last one's name, `crate`.
+    Stage(Value),
     /// An error, rustc's, as rustc renders it, or dx's own, as plain text.
     Error(String),
-    /// Anything else, such as how far the build has come, or a warning.
+    /// Anything else, such as a warning.
     Other,
+}
+
+/// What a build prints of where it has come to, as [`Dx::build`] says: when it started, and the
+/// stage it last printed, and when.
+struct Progress {
+    started: Instant,
+    printed: Option<(String, Instant)>,
+}
+
+impl Progress {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            printed: None,
+        }
+    }
+
+    /// The `building` event to print at `now` for `stage`, a [`Record::Stage`]'s fields, with the
+    /// time since the build started, `ms`, if one's due: at each stage the build comes to, and
+    /// while it stays at one, as it compiles crate after crate, every [`PROGRESS`] at most; so the
+    /// event after a long wait names a crate that took that long.
+    fn take(&mut self, mut stage: Value, now: Instant) -> Option<Value> {
+        let name = stage["stage"].as_str().unwrap_or_default().to_owned();
+        let due = (self.printed.as_ref())
+            .is_none_or(|(last, at)| *last != name || now.duration_since(*at) >= PROGRESS);
+        if !due {
+            return None;
+        }
+        self.printed = Some((name, now));
+        stage["event"] = json!("building");
+        stage["ms"] = json!(millis(now.duration_since(self.started)));
+        Some(stage)
+    }
 }
 
 /// What `line` says: it's an object whose `json`, if it has one, is one of dx's records, as a
@@ -250,6 +306,9 @@ fn record(line: &str) -> Record {
     if let Some(table) = record.pointer("/Hotpatch/jump_table") {
         return Record::Patch(table.clone());
     }
+    if let Some(stage) = record.pointer("/BuildUpdate/stage").and_then(stage) {
+        return Record::Stage(stage);
+    }
     if let Some(message) = record.pointer("/RustcOutput/message")
         && (message["level"].as_str()).is_some_and(|level| level.starts_with("error"))
     {
@@ -260,6 +319,35 @@ fn record(line: &str) -> Record {
         Some(message) => Record::Error(plain(message)),
         None => Record::Other,
     }
+}
+
+/// The fields of a [`Record::Stage`] for `variant`, of dx's `BuildStage`: one without fields, as
+/// `"Linking"`, or one with, as `{"Compiling":{"current":3,"total":9,"krate":"gg_core"}}`, whose
+/// fields go but starting's and compiling's; `None` if it's neither.
+fn stage(variant: &Value) -> Option<Value> {
+    let (name, fields) = match variant {
+        Value::String(name) => (name, &Value::Null),
+        Value::Object(variant) if variant.len() == 1 => variant.iter().next()?,
+        _ => return None,
+    };
+    let mut snake = String::with_capacity(name.len() + 4);
+    for (at, c) in name.char_indices() {
+        if at > 0 && c.is_ascii_uppercase() {
+            snake.push('_');
+        }
+        snake.push(c.to_ascii_lowercase());
+    }
+    let mut stage = json!({"stage": snake});
+    match name.as_str() {
+        "Starting" => stage["crates"] = fields["crate_count"].clone(),
+        "Compiling" => {
+            stage["compiled"] = fields["current"].clone();
+            stage["crates"] = fields["total"].clone();
+            stage["crate"] = fields["krate"].clone();
+        }
+        _ => {}
+    }
+    Some(stage)
 }
 
 /// `text` without the ANSI escape sequences that color it, and without the whitespace that ends it.
@@ -437,12 +525,76 @@ mod tests {
             "ERROR dx tools: Cargo build failed - no output location."
         );
 
+        // The stages the build comes to, with the crates it counts on and has compiled.
+        let stages = [
+            (
+                r#"{"Starting":{"patch":false,"crate_count":530}}"#,
+                json!({"stage": "starting", "crates": 530}),
+            ),
+            (
+                r#"{"Compiling":{"current":212,"total":530,"krate":"gg_engine"}}"#,
+                json!({"stage": "compiling", "compiled": 212, "crates": 530, "crate": "gg_engine"}),
+            ),
+            (r#""Linking""#, json!({"stage": "linking"})),
+            (
+                r#"{"CopyingAssets":{"current":0,"total":2,"path":"a.png"}}"#,
+                json!({"stage": "copying_assets"}),
+            ),
+        ];
+        for (stage, fields) in stages {
+            let update = line(&format!(r#"{{"BuildUpdate":{{"stage":{stage}}}}}"#));
+            let Record::Stage(said) = record(&update) else {
+                panic!("a stage: {stage}");
+            };
+            assert_eq!(said, fields);
+        }
+
         // Anything else.
-        let linking = line(r#"{"BuildUpdate":{"stage":"Linking"}}"#);
         let message = r#"{"timestamp":"   1.000s","level":"INFO","message":"Compiling"}"#;
-        for other in [linking.as_str(), message, "not JSON", ""] {
+        let shapeless = line(r#"{"BuildUpdate":{"stage":{}}}"#);
+        for other in [message, shapeless.as_str(), "not JSON", ""] {
             assert!(matches!(record(other), Record::Other), "{other}");
         }
+    }
+
+    #[test]
+    fn a_build_prints_each_stage_and_its_progress_through_crates_now_and_then() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let compiled = |n: u32| json!({"stage": "compiling", "compiled": n, "crates": 9});
+        let mut progress = Progress::new(start);
+        let printed: Vec<_> = [
+            (json!({"stage": "starting", "crates": 9}), at(0)),
+            (compiled(1), at(100)),
+            // Within PROGRESS of the last printed, at 100.
+            (compiled(2), at(200)),
+            (compiled(3), at(5_099)),
+            (compiled(4), at(5_100)),
+            (compiled(5), at(9_000)),
+            // A crate that took long.
+            (compiled(6), at(40_000)),
+            (json!({"stage": "linking"}), at(40_500)),
+        ]
+        .into_iter()
+        .filter_map(|(stage, now)| progress.take(stage, now))
+        .map(|event| {
+            assert_eq!(event["event"], "building");
+            (
+                event["stage"].clone(),
+                event["compiled"].clone(),
+                event["ms"].clone(),
+            )
+        })
+        .collect();
+        let want = [
+            ("starting", None, 0),
+            ("compiling", Some(1), 100),
+            ("compiling", Some(4), 5_100),
+            ("compiling", Some(6), 40_000),
+            ("linking", None, 40_500),
+        ]
+        .map(|(stage, compiled, ms)| (json!(stage), json!(compiled), json!(ms)));
+        assert_eq!(printed, want);
     }
 
     #[test]

@@ -43,18 +43,27 @@ use crate::{
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities as
-/// the tree of its hierarchy, whose rows' arrows show and hide their children, or those with one
-/// component as a list, to pick one from, and finds one by an ID pasted into its Find field, from
-/// a scene or a log, opening the rows above its own; a click below the rows, or the Entity menu,
-/// unpicks. A row's context menu, the one below the rows and the Entity menu create empty
-/// entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
-/// copy, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants. The Inspector
+/// the tree of its hierarchy, whose rows' arrows show and hide their children, and its Collapse All
+/// hides them all, or those with one component as a list, to pick one from, and finds one by an ID
+/// pasted into its Find field, from a scene or a log, or by a part of its name, the next such at
+/// each Enter, opening the rows above its own; a click below the rows, or the Entity menu, unpicks.
+/// A row's context menu, the one below the rows, the panel's + menu and the Entity menu create
+/// empty entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
+/// copy, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants. A row's context
+/// menu also renames its entity in its row, copies its ID and moves it to the roots; a row dragged
+/// onto another makes its entity the other's last child, and onto the space below the rows a root,
+/// each keeping where it is in the world, as [`World::reparent_in_place`] says;
+/// and a double click on a row, or its menu's Frame in View, frames its entity in the view, through
+/// the link, as [`InspectorLink::framed`] says. While the panel has the keys, from a press in it
+/// until a press elsewhere, F frames the entity picked, F2 renames it and Delete deletes it. The
+/// Inspector
 /// panel shows the picked entity's components, each field with a widget for its type and hints, and
 /// sets a field as its widget changes it, through a [`Log`] of the edits, as [`World::set_field`]
 /// does. That checks the value: a value refused shows beside its field, and is logged, as an
 /// operation refused is, which shows above the components. An enum switches its variant from a
 /// choice of them, to the fields that variant last had while the entity was drawn, or else to
-/// their defaults; each of a vector's components, set at its own path, and each of a rotation's
+/// their defaults, and an option turns on and off by its checkbox, on to what it last held while
+/// the entity was drawn, or else to its default; each of a vector's components, set at its own path, and each of a rotation's
 /// angles has a button of its axis, which sets it to its default; the Add Component menu, below
 /// the components, adds one with its type's default; and the menu beside each one's header
 /// removes it. An entity of a prefab's instance, its root or one its prefab gives, says which
@@ -98,8 +107,13 @@ pub struct Inspector {
     with: Option<String>,
     /// What's typed into the Find field.
     find: String,
-    /// Why the last ID entered there found no entity.
+    /// Why the last ID or name entered there found no entity.
     not_found: Option<String>,
+    /// The name being typed into the picked entity's row, if it's being renamed.
+    renaming: Option<Renaming>,
+    /// Whether the Entities panel has the keys, for its own: from a press in it until a press
+    /// elsewhere, as the view has them from a press over it.
+    keys: bool,
     /// The last value refused of each field of the picked entity.
     refusals: Vec<Refusal>,
     /// The edits made, which undo and redo step through.
@@ -144,6 +158,16 @@ struct Left {
     expanded: HashSet<EntityId>,
 }
 
+/// The name being typed into an entity's row in place of its label, from F2 or its row's Rename
+/// until Enter or a click elsewhere names it, or Escape, or a pick of another, leaves it.
+struct Renaming {
+    id: EntityId,
+    name: String,
+    /// Whether its field is yet to take the keys, which it does as it's first drawn, its text all
+    /// selected, so that what's typed replaces it.
+    focus: bool,
+}
+
 /// Whose gesture an edit going on is: the panels', which their input ends, or the link's, which
 /// its seal ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +187,12 @@ const REDO: [KeyboardShortcut; 2] = [
 
 /// Duplicates the entity picked, as Hazel's Ctrl+D does.
 const DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::D);
+
+/// The Entities panel's own keys, while it has them, as other editors' hierarchies take them:
+/// frames the entity picked in the view, renames it, and deletes it.
+const FRAME: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::F);
+const RENAME: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::F2);
+const DELETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::Delete);
 
 /// A step through the log of edits, as the Edit menu or a key asks for one.
 #[derive(Clone, Copy)]
@@ -642,15 +672,43 @@ impl Inspector {
                 self.operate(world, revert);
             }
             Command::Unlink(entity) => self.operate(world, Operation::Unlink { entity }),
+            Command::Reparent(entity, parent) => {
+                let operations = world.reparent_in_place(entity, parent);
+                self.operate_all(world, operations);
+            }
+            // A set of the name it has, or an add of one, which the log undoes alike.
+            Command::Rename(entity, name) => {
+                let operation = match Inspected::name(&*world, entity) {
+                    Some(_) => Operation::Set {
+                        entity,
+                        component: "Name".into(),
+                        path: "0".to_owned(),
+                        value: Value::String(name),
+                    },
+                    None => Operation::Add {
+                        entity,
+                        component: "Name".into(),
+                        value: Name(name).to_value(),
+                    },
+                };
+                self.operate(world, operation);
+            }
         }
     }
 
-    /// Applies `operation`, which the panels chose, through the log, which ends the edit going on;
-    /// then picks the entity a create made, or a duplicate's copy of its entity, opening the rows
-    /// of its ancestors. A refusal shows above the components, and is logged.
+    /// Applies `operation`, which the panels chose, as [`operate_all`](Self::operate_all) does.
     fn operate(&mut self, world: &mut World, operation: Operation) {
-        let (entity, said) = (operation.entity().map(display), operation.to_string());
-        if let Err(error) = self.log.apply(world, operation) {
+        self.operate_all(world, vec![operation]);
+    }
+
+    /// Applies `operations`, which the panels chose, through the log, as one edit, which ends the
+    /// edit going on; then picks the entity a create made, or a duplicate's copy of its entity,
+    /// opening the rows of its ancestors. A refusal shows above the components, and is logged, of
+    /// the first operation.
+    fn operate_all(&mut self, world: &mut World, operations: Vec<Operation>) {
+        let first = operations.first().expect("an operation");
+        let (entity, said) = (first.entity().map(display), first.to_string());
+        if let Err(error) = self.log.apply_all(world, operations) {
             warn!(code = error.code(), entity, operation = %said, "{error}");
             self.not_done = Some(error.to_string());
             return;
@@ -712,6 +770,7 @@ impl Inspector {
         self.world = Some(serial);
         self.not_done = None;
         self.not_found = None;
+        self.renaming = None;
         self.open = None;
         self.queued.0.clear();
         let linked = &mut *self.link.borrow_mut();

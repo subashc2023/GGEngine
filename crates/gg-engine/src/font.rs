@@ -711,12 +711,13 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
     let (shaping, plan) = shaping(&bytes).map_err(bad)?;
     let [width, height] = field.size;
     debug!(
+        code = "asset.font_baked",
         font = name,
         path = %path.display(),
         glyphs = field.glyphs.len(),
         width,
         height,
-        ms = start.elapsed().as_millis() as u64,
+        ms = crate::perf::millis(start.elapsed()),
         "Font baked"
     );
     let baked = Baked {

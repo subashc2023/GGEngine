@@ -378,8 +378,8 @@ fn the_find_field_picks_an_entity_by_a_pasted_id() {
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
     let field = beside(&texts, find(&texts, "Find", "Find"));
-    let bad = "`5F3A9C0E12B47D68` isn't an entity's ID: an ID is 16 lowercase hex digits, not \
-               all zero, such as `5f3a9c0e12b47d68`";
+    let bad = "no entity's name has `5F3A9C0E12B47D68`, and `5F3A9C0E12B47D68` isn't an entity's \
+               ID: an ID is 16 lowercase hex digits, not all zero, such as `5f3a9c0e12b47d68`";
     let missing = format!("no entity has ID {gone}");
     // Quoted, as a scene writes it; refused, keeping the pick; and another.
     for (typed, picked, says) in [
@@ -1062,6 +1062,9 @@ fn its_commands_are_values_that_queue_them_again() {
         Command::Remove(picked, "Everything".to_owned()),
         Command::Revert(picked, "Everything".to_owned(), "count".to_owned()),
         Command::Unlink(picked),
+        Command::Reparent(picked, Some(picked)),
+        Command::Reparent(picked, None),
+        Command::Rename(picked, "Renamed".to_owned()),
     ];
     inspector.queue(Pass {
         operations,
@@ -1090,7 +1093,10 @@ fn its_commands_are_values_that_queue_them_again() {
             "Add",
             "Remove",
             "Revert",
-            "Unlink"
+            "Unlink",
+            "Reparent",
+            "Reparent",
+            "Rename"
         ]
     );
     let mut again = Queue::default();
@@ -1134,7 +1140,10 @@ fn its_commands_are_values_that_queue_them_again() {
     let error = again.push(&Value::Variant("Cut".into(), Vec::new()));
     let error = error.expect_err("no such command").to_string();
     assert!(
-        error.contains("`Create`, `Delete`, `Duplicate`, `Add`, `Remove`, `Revert` and `Unlink`"),
+        error.contains(
+            "`Create`, `Delete`, `Duplicate`, `Add`, `Remove`, `Revert`, `Unlink`, `Reparent` and \
+             `Rename`"
+        ),
         "{error}"
     );
     // The operations' values, refused where they're wrong.
@@ -1180,6 +1189,28 @@ fn its_commands_are_values_that_queue_them_again() {
             Value::Variant("Remove".into(), fields(&entity)[..1].to_vec()),
             "reflect.missing_field",
             "",
+        ),
+        (
+            Value::Variant(
+                "Reparent".into(),
+                vec![
+                    named("entity", text(&entity)),
+                    named("parent", text(&entity)),
+                ],
+            ),
+            "reflect.wrong_kind",
+            "parent",
+        ),
+        (
+            Value::Variant(
+                "Rename".into(),
+                vec![
+                    named("entity", text(&entity)),
+                    named("name", Value::UInt(1)),
+                ],
+            ),
+            "reflect.wrong_kind",
+            "name",
         ),
     ] {
         let error = again.push(&value).expect_err("refused");
@@ -2497,6 +2528,311 @@ fn finding_an_entity_opens_the_rows_above_it() {
     assert!(texts.iter().any(|(text, _)| *text == found), "{texts:?}");
 }
 
+/// `key` pressed alone.
+fn press(key: egui::Key) -> Vec<egui::Event> {
+    vec![egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }]
+}
+
+/// Where the text `name` is drawn in the Entities panel, the screen's left half.
+fn in_entities(texts: &[Text], name: &str) -> egui::Rect {
+    let found = texts
+        .iter()
+        .find(|(text, rect)| text == name && rect.max.x < 800.0);
+    found.unwrap_or_else(|| panic!("no {name}: {texts:?}")).1
+}
+
+/// The Find field finds an entity by a part of its name, ignoring case, the next such at each
+/// Enter, from the first again past the last, opening the rows above it; and says when neither a
+/// name has what's typed nor is it an ID.
+#[test]
+fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
+    let mut world = World::default();
+    let [first, rock, second] = ["Lamp A", "rock", "lamp b"].map(|name| world.spawn(called(name)));
+    world.set_parent(second, Some(rock)).expect("no cycle");
+    let [first, rock, second] = [first, rock, second].map(|entity| id(&world, entity));
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    let mut time = 0.0;
+    let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let field = beside(&texts, find(&texts, "Find", "Find"));
+    run(&mut inspector, &mut world, click(Primary, field));
+    run(
+        &mut inspector,
+        &mut world,
+        vec![egui::Event::Text("LAMP".to_owned())],
+    );
+    for expected in [first, second, first] {
+        run(&mut inspector, &mut world, enter());
+        assert_eq!(inspector.picked, Some(expected));
+        run(&mut inspector, &mut world, click(Primary, field));
+    }
+    assert!(inspector.expanded.contains(&rock), "found under it before");
+    inspector.find.clear();
+    run(
+        &mut inspector,
+        &mut world,
+        vec![egui::Event::Text("zzz".to_owned())],
+    );
+    let texts = run(&mut inspector, &mut world, enter());
+    assert_eq!(inspector.picked, Some(first), "kept");
+    let says = |(text, _): &Text| text.starts_with("no entity's name has `zzz`, and `zzz` isn't");
+    assert!(texts.iter().any(says), "{texts:?}");
+}
+
+/// F2, while the panel has the keys, and a row's Rename rename its entity in its row: what's
+/// typed replaces its name, all selected, and Enter names it so at the next tick, as a set of the
+/// name it has, or an add of one, which an undo takes back; Escape leaves it as it was.
+#[test]
+fn f2_and_a_rows_rename_name_its_entity_in_its_row() {
+    let mut world = creating();
+    let named = world.spawn((called("a"), Transform::IDENTITY));
+    let nameless = world.spawn(Transform::IDENTITY);
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    let mut time = 0.0;
+    let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let typed = |text: &str| vec![egui::Event::Text(text.to_owned())];
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    run(
+        &mut inspector,
+        &mut world,
+        click(Primary, in_entities(&texts, "a").center()),
+    );
+    assert_eq!(inspector.picked, Some(id(&world, named)));
+    for (left, name) in [(press(egui::Key::Escape), "a"), (enter(), "Apple")] {
+        run(&mut inspector, &mut world, press(egui::Key::F2));
+        run(&mut inspector, &mut world, typed("Apple"));
+        let texts = run(&mut inspector, &mut world, left);
+        assert_eq!(world.get::<Name>(named), Some(&called(name)));
+        in_entities(&texts, name);
+    }
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let row = in_entities(&texts, "Entity").center();
+    let texts = run(&mut inspector, &mut world, click(Secondary, row));
+    let item = in_menu(&ctx, &texts, "Rename");
+    run(&mut inspector, &mut world, click(Primary, item));
+    assert_eq!(inspector.picked, Some(id(&world, nameless)));
+    run(&mut inspector, &mut world, typed("Bee"));
+    run(&mut inspector, &mut world, enter());
+    assert_eq!(world.get::<Name>(nameless), Some(&called("Bee")));
+    run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+    assert_eq!(world.get::<Name>(nameless), None, "undone");
+}
+
+/// While the panel has the keys, from a press in it until a press elsewhere, Delete deletes the
+/// entity picked and F asks the link to frame it; a double click on a row frames its entity,
+/// picking it, and so does its menu's Frame in View, which shows once a layer takes frames; and its
+/// Copy ID copies its ID.
+#[test]
+fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
+    let mut world = World::default();
+    let [a, b, c] = ["a", "b", "c"].map(|name| world.spawn(called(name)));
+    let [a_id, b_id, c_id] = [a, b, c].map(|entity| id(&world, entity));
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    let link = inspector.link();
+    let clock = Cell::new(0.0);
+    let now = || {
+        clock.set(clock.get() + 1.0);
+        clock.get()
+    };
+    let run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            texts = frame(inspector, world, &ctx, now(), events).0;
+        }
+        texts
+    };
+    let row = |texts: &[Text], name| in_entities(texts, name).center();
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let menu = run(
+        &mut inspector,
+        &mut world,
+        click(Secondary, row(&texts, "c")),
+    );
+    assert!(
+        !menu.iter().any(|(text, _)| text == "Frame in View"),
+        "{menu:?}"
+    );
+    run(&mut inspector, &mut world, press(egui::Key::Escape));
+    // A press in it gives it the keys.
+    run(&mut inspector, &mut world, click(Primary, row(&texts, "a")));
+    run(&mut inspector, &mut world, press(egui::Key::Delete));
+    assert!(!world.contains(a));
+    // A press elsewhere, in the Inspector panel, takes them.
+    let texts = run(&mut inspector, &mut world, click(Primary, row(&texts, "b")));
+    run(
+        &mut inspector,
+        &mut world,
+        click(Primary, egui::pos2(1200.0, 3000.0)),
+    );
+    run(&mut inspector, &mut world, press(egui::Key::Delete));
+    run(&mut inspector, &mut world, press(egui::Key::F));
+    assert!(world.contains(b));
+    assert_eq!(link.framed(), None);
+    run(&mut inspector, &mut world, click(Primary, row(&texts, "b")));
+    run(&mut inspector, &mut world, press(egui::Key::F));
+    assert_eq!(link.framed(), Some(b_id));
+    assert_eq!(link.framed(), None, "taken");
+    let twice = [
+        click(Primary, row(&texts, "c")),
+        click(Primary, row(&texts, "c")),
+    ]
+    .concat();
+    run(&mut inspector, &mut world, twice);
+    assert_eq!((inspector.picked, link.framed()), (Some(c_id), Some(c_id)));
+    // Once a layer takes frames, as it has.
+    inspector.pick(b_id);
+    let menu = run(
+        &mut inspector,
+        &mut world,
+        click(Secondary, row(&texts, "c")),
+    );
+    run(
+        &mut inspector,
+        &mut world,
+        click(Primary, in_menu(&ctx, &menu, "Frame in View")),
+    );
+    assert_eq!((inspector.picked, link.framed()), (Some(c_id), Some(c_id)));
+    let menu = run(
+        &mut inspector,
+        &mut world,
+        click(Secondary, row(&texts, "c")),
+    );
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 4000.0));
+    let input = egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(now()),
+        events: click(Primary, in_menu(&ctx, &menu, "Copy ID")),
+        ..egui::RawInput::default()
+    };
+    let output = ctx.run_ui(input, |ui| {
+        panels(&mut inspector, &world, ui, &mut Pass::default());
+    });
+    let copy = egui::OutputCommand::CopyText(c_id.to_string());
+    let commands = output.platform_output.commands;
+    assert!(commands.contains(&copy), "{commands:?}");
+    assert_ne!(a_id, c_id);
+}
+
+/// A row dragged onto another makes its entity that one's last child, opening its row, and onto
+/// the space below the rows a root; but onto one of its descendants, nothing.
+#[test]
+fn a_row_dragged_onto_another_makes_its_entity_that_ones_child() {
+    let mut world = World::default();
+    let [a, b] = ["a", "b"].map(|name| world.spawn(called(name)));
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    let clock = Cell::new(0.0);
+    let run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            clock.set(clock.get() + 1.0);
+            texts = frame(inspector, world, &ctx, clock.get(), events).0;
+        }
+        texts
+    };
+    let drop = |inspector: &mut Inspector, world: &mut World, from, to| {
+        let mut texts = Vec::new();
+        for events in drag(from, to) {
+            texts = run(inspector, world, events);
+        }
+        texts
+    };
+    let row = |texts: &[Text], name| in_entities(texts, name).center();
+    let parent = |world: &World, entity| world.parent(entity).expect("alive");
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let texts = drop(
+        &mut inspector,
+        &mut world,
+        row(&texts, "b"),
+        row(&texts, "a"),
+    );
+    assert_eq!(parent(&world, b), Some(a));
+    assert!(inspector.expanded.contains(&id(&world, a)));
+    let texts = drop(
+        &mut inspector,
+        &mut world,
+        row(&texts, "a"),
+        row(&texts, "b"),
+    );
+    assert_eq!((parent(&world, a), parent(&world, b)), (None, Some(a)));
+    let below = egui::pos2(200.0, 3000.0);
+    drop(&mut inspector, &mut world, row(&texts, "b"), below);
+    assert_eq!(parent(&world, b), None);
+}
+
+/// The + menu creates an empty root, or an empty child of the entity picked, picking it; and
+/// Collapse All hides the rows under every root.
+#[test]
+fn the_plus_menu_creates_and_collapse_all_hides_every_roots_rows() {
+    let mut world = creating();
+    let top = world.spawn((called("top"), Transform::IDENTITY));
+    let kid = world.spawn((called("kid"), Transform::IDENTITY));
+    world.set_parent(kid, Some(top)).expect("no cycle");
+    let top_id = id(&world, top);
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.expanded.insert(top_id);
+    let mut time = 0.0;
+    let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    in_entities(&texts, "kid");
+    let collapse = in_entities(&texts, "Collapse All").center();
+    let texts = run(&mut inspector, &mut world, click(Primary, collapse));
+    assert!(inspector.expanded.is_empty());
+    assert!(!texts.iter().any(|(text, _)| text == "kid"), "{texts:?}");
+    let plus = in_entities(&texts, "+").center();
+    for (item, parent) in [
+        ("Create Empty Entity", None),
+        ("Create Empty Child", Some(top)),
+    ] {
+        if parent.is_some() {
+            inspector.pick(top_id);
+        }
+        let menu = run(&mut inspector, &mut world, click(Primary, plus));
+        run(
+            &mut inspector,
+            &mut world,
+            click(Primary, in_menu(&ctx, &menu, item)),
+        );
+        let made = inspector
+            .picked
+            .and_then(|made| world.entity(made))
+            .expect("made");
+        assert_eq!(world.get::<Name>(made), Some(&called("Empty Entity")));
+        assert_eq!(world.parent(made).expect("alive"), parent);
+    }
+}
+
 /// What a component that follows an entity holds: its handle, of which there's no default.
 #[derive(Clone, Component)]
 struct Follower(Entity);
@@ -2848,6 +3184,133 @@ fn an_environments_sky_switches_to_the_atmosphere() {
     let clear = in_menu(&ctx, &texts, "ClearColor");
     run(&mut inspector, &mut world, click(Primary, clear));
     assert_eq!(sky(&world), crate::Sky::ClearColor);
+}
+
+/// An option turns on and off by its checkbox, each an edit that an undo takes back: an
+/// environment's reflections, turned on, take their defaults; tuned, turned off and on again, what
+/// they last held; and on another entity, the defaults again. A sprite's texture, which has no
+/// default, shows its checkbox disabled, saying why on hover, and isn't turned on.
+#[test]
+fn options_turn_on_with_what_they_last_held_or_their_defaults() {
+    let mut world = World::default();
+    let [first, second] = [0, 1].map(|_| world.spawn(crate::Environment::default()));
+    let sprite = world.spawn(Sprite::default());
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.pick(id(&world, first));
+    let mut time = 0.0;
+    let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+        let mut texts = Vec::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let reflections = |world: &World, entity| {
+        let environment = world.get::<crate::Environment>(entity).expect("one");
+        environment.reflections
+    };
+    let defaults = Some(crate::Reflections::default());
+    // Clicks the checkbox of the reflections, labeled `label`, as they are.
+    let turn = |texts: &[Text], label| click(Primary, find(texts, "reflections", label).center());
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let texts = run(&mut inspector, &mut world, turn(&texts, "None"));
+    assert_eq!(reflections(&world, first), defaults);
+    // Its distance typed in; then turned off, and on again.
+    let distance = beside(&texts, find(&texts, "reflections", "distance"));
+    run(&mut inspector, &mut world, click(Primary, distance));
+    let typed = vec![egui::Event::Text("30".to_owned())];
+    run(&mut inspector, &mut world, typed);
+    let texts = run(&mut inspector, &mut world, enter());
+    let tuned = Some(crate::Reflections {
+        distance: 30.0,
+        ..crate::Reflections::default()
+    });
+    assert_eq!(reflections(&world, first), tuned);
+    let texts = run(&mut inspector, &mut world, turn(&texts, "Some"));
+    assert_eq!(reflections(&world, first), None);
+    run(&mut inspector, &mut world, turn(&texts, "None"));
+    assert_eq!(reflections(&world, first), tuned);
+    run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+    assert_eq!(reflections(&world, first), None);
+    inspector.pick(id(&world, second));
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    run(&mut inspector, &mut world, turn(&texts, "None"));
+    assert_eq!(reflections(&world, second), defaults);
+    inspector.pick(id(&world, sprite));
+    let texts = run(&mut inspector, &mut world, Vec::new());
+    let none = find(&texts, "texture", "None").center();
+    let texts = run(
+        &mut inspector,
+        &mut world,
+        vec![egui::Event::PointerMoved(none)],
+    );
+    let why = (texts.iter()).any(|(text, _)| text.contains("a texture has no default"));
+    assert!(why, "{texts:?}");
+    let edits = inspector.log.edits().len();
+    run(&mut inspector, &mut world, click(Primary, none));
+    assert_eq!(world.get::<Sprite>(sprite).expect("a sprite").texture, None);
+    assert_eq!(inspector.log.edits().len(), edits);
+}
+
+/// An option that's on, holding a struct, keeps its fields' rows within its own: each of an
+/// environment's rows, with every option on, ends above the next one's start, rather than a grid
+/// centering what an option holds in the height its row had a frame before, which put the last of
+/// its fields on the next row.
+#[test]
+fn options_holding_structs_keep_within_their_rows() {
+    let mut world = World::default();
+    let entity = world.spawn(crate::Environment {
+        adaptation: Some(crate::Adaptation::default()),
+        fog: Some(crate::Fog::default()),
+        reflections: Some(crate::Reflections::default()),
+        depth_of_field: Some(crate::DepthOfField::default()),
+        motion_blur: Some(crate::MotionBlur::default()),
+        ..crate::Environment::default()
+    });
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.pick(id(&world, entity));
+    // A grid measures its rows' heights in one frame, and places them by those in the next.
+    let mut texts = Vec::new();
+    for time in 1..=3 {
+        texts = frame(&mut inspector, &mut world, &ctx, time.into(), Vec::new()).0;
+    }
+    // Where each row starts in what's drawn: its field's label, the first drawn at or after the
+    // row before it's.
+    let rows = [
+        "exposure",
+        "adaptation",
+        "tonemapper",
+        "ambient_occlusion",
+        "fog",
+        "reflections",
+        "depth_of_field",
+        "motion_blur",
+        "lens",
+    ];
+    let mut starts = Vec::new();
+    for row in rows {
+        let after = starts.last().copied().unwrap_or(0);
+        let found = texts[after..].iter().position(|(text, _)| text == row);
+        starts.push(after + found.unwrap_or_else(|| panic!("no {row}: {texts:?}")));
+    }
+    for (i, pair) in starts.windows(2).enumerate() {
+        let next = rows.get(i + 2).map_or(texts.len(), |_| starts[i + 2]);
+        let bottom = texts[pair[0]..pair[1]].iter().map(|(_, rect)| rect.max.y);
+        let top = texts[pair[1]..next].iter().map(|(_, rect)| rect.min.y);
+        let (bottom, top) = (
+            bottom.fold(f32::MIN, f32::max),
+            top.fold(f32::MAX, f32::min),
+        );
+        assert!(
+            bottom <= top,
+            "{}'s row ends at {bottom}, below {}'s start at {top}",
+            rows[i],
+            rows[i + 1]
+        );
+    }
 }
 
 /// A variant that holds what's opaque, which no value makes, shows disabled in its enum's
@@ -3968,5 +4431,56 @@ mod remote {
             |texts, _| texts.iter().any(refused),
         );
         assert!(inspector.refusals.is_empty());
+        // One without a name, which the list shows as nameless.
+        let nameless = game.cx.world_mut().spawn(Transform::IDENTITY);
+        let nameless = id(game.cx.world(), nameless);
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| has(texts, "Entity"),
+        );
+        // The hero placed away from the world's origin, turned and scaled, which the rock is kept
+        // clear of as it's made its child.
+        let away = Transform {
+            translation: Vec3::new(10.0, 0.0, -2.0),
+            rotation: Quat::from_rotation_z(0.5),
+            scale: Vec3::splat(2.0),
+        };
+        game.cx.world_mut().insert(hero, away).expect("alive");
+        // The rock renamed, made the hero's last child and a root again, where it is in the world,
+        // and the nameless one given a name, each as the game takes it.
+        let entity = |game: &Game, id| game.cx.world().entity(id).expect("alive");
+        let name = |game: &Game, id| game.cx.world().get::<Name>(entity(game, id)).cloned();
+        let parent = |game: &Game, id| game.cx.world().parent(entity(game, id)).expect("alive");
+        let kept = |game: &Game| {
+            let pose = game.cx.world().pose(entity(game, rock)).expect("alive");
+            let at = pose.matrix.w_axis.truncate();
+            at.abs_diff_eq(made.translation, 1e-4)
+        };
+        let mut operate = |command: Command, done: &dyn Fn(&Game) -> bool| {
+            let give = |pass: &mut Pass| pass.operations.push(command);
+            until(
+                &mut inspector,
+                &mut game,
+                &ctx,
+                &mut time,
+                give,
+                |_, game| done(game),
+            );
+        };
+        let stone = Command::Rename(rock, "Stone".to_owned());
+        operate(stone, &|game| name(game, rock) == Some(called("Stone")));
+        let under = Command::Reparent(rock, Some(hero_id));
+        operate(under, &|game| {
+            parent(game, rock) == Some(hero) && kept(game)
+        });
+        operate(Command::Reparent(rock, None), &|game| {
+            parent(game, rock).is_none() && kept(game)
+        });
+        let found = Command::Rename(nameless, "Found".to_owned());
+        operate(found, &|game| name(game, nameless) == Some(called("Found")));
     }
 }

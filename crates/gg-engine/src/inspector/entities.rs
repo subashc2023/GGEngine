@@ -2,28 +2,41 @@
 //! list or of them all as the tree of its hierarchy, of which a frame finds only those in view.
 
 use std::collections::HashSet;
+use std::mem;
 use std::ops::Range;
 
 use super::commands::Command;
 use super::inspected::Inspected;
-use super::{Inspector, Pass, empty};
+use super::{DELETE, DUPLICATE, FRAME, Inspector, Pass, RENAME, Renaming, empty};
 use crate::EntityId;
 
+/// An entity's row dragged, as egui's drag and drop holds it: a row it's let go on makes it a
+/// child of that row's entity, and the space below the rows a root.
+struct Moved(EntityId);
+
 impl Inspector {
-    /// The Entities panel: a field that finds an entity by its ID, which component the entities
-    /// listed have, how many there are, and a row for each of them, or for each of the tree's, of
-    /// which only those in view are drawn; and below them, where they leave room, space whose
-    /// click unpicks, and whose context menu makes a root. The operations its menus choose, and
-    /// what the input of the window it draws in says of the edits, go in `pass`.
+    /// The Entities panel: a field that finds an entity by its ID or a part of its name, which
+    /// component the entities listed have, how many there are, beside the + menu and, for the
+    /// tree, Collapse All, and a row for each of them, or for each of the tree's, of which only
+    /// those in view are drawn; and below them, where they leave room, space whose click unpicks,
+    /// whose context menu makes a root, and which a row let go on makes a root. Its keys, while it
+    /// has them, frame, rename and delete the entity picked. The operations its menus, keys and
+    /// drags choose, and what the input of the window it draws in says of the edits, go in `pass`.
     pub(super) fn entities(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, pass: &mut Pass) {
         pass.cues.read(ui.ctx());
+        let (operations, saves) = (&mut pass.operations, &mut pass.saves);
+        self.take_keys(world, ui, operations);
+        // The rename of an entity no longer picked is left, as Escape leaves it.
+        if (self.renaming.as_ref()).is_some_and(|renaming| self.picked != Some(renaming.id)) {
+            self.renaming = None;
+        }
         if let Some(waiting) = world.waiting() {
             ui.label(waiting);
         }
         ui.horizontal(|ui| {
             ui.label("Find");
-            let field = egui::TextEdit::singleline(&mut self.find).hint_text("an entity's ID");
-            let field = ui.add(field);
+            let hint = "an entity's ID or name";
+            let field = ui.add(egui::TextEdit::singleline(&mut self.find).hint_text(hint));
             if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                 self.not_found = self.find(world).err();
             }
@@ -49,12 +62,15 @@ impl Inspector {
                 return;
             }
         };
-        ui.label(match count {
-            1 => "1 entity".to_owned(),
-            n => format!("{n} entities"),
+        ui.horizontal(|ui| {
+            ui.label(match count {
+                1 => "1 entity".to_owned(),
+                n => format!("{n} entities"),
+            });
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            ui.with_layout(right, |ui| self.header(world, ui, operations));
         });
         let height = ui.spacing().interact_size.y;
-        let (operations, saves) = (&mut pass.operations, &mut pass.saves);
         let scroll = egui::ScrollArea::vertical();
         if self.with.is_some() {
             scroll.show_rows(ui, height, count, |ui, shown| {
@@ -75,6 +91,7 @@ impl Inspector {
         if below.clicked() {
             self.unpick();
         }
+        self.drop_on(world, ui, &below, None, operations);
         let menu = egui::Popup::context_menu(&below).style(crate::menu_style);
         menu.show(|ui| {
             if ui.button("Create Empty Entity").clicked() {
@@ -83,11 +100,44 @@ impl Inspector {
         });
     }
 
+    /// The end of the line that counts the entities, from its right: the + menu, which creates an
+    /// empty root, or, while the entity picked is alive, an empty child of it, the create going in
+    /// `operations`; and, for the tree, Collapse All, which hides the rows under every root.
+    fn header(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, operations: &mut Vec<Command>) {
+        let live = self.picked.filter(|&id| world.alive(id) == Some(true));
+        let config = egui::menu::MenuConfig::new().style(crate::menu_style);
+        let create = egui::menu::MenuButton::new("+").config(config);
+        let (create, _) = create.ui(ui, |ui| {
+            if ui.button("Create Empty Entity").clicked() {
+                operations.push(empty(None));
+            }
+            let child = ui.add_enabled(live.is_some(), egui::Button::new("Create Empty Child"));
+            if let Some(id) = live.filter(|_| child.clicked()) {
+                operations.push(empty(Some(id)));
+            }
+        });
+        create.on_hover_text("Creates an entity");
+        if self.with.is_none() {
+            let collapse = egui::Button::new("Collapse All");
+            let collapse = ui.add_enabled(!self.expanded.is_empty(), collapse);
+            if collapse
+                .on_hover_text("Hides the rows under every root")
+                .clicked()
+            {
+                self.expanded.clear();
+            }
+        }
+    }
+
     /// Draws the row of the entity of ID `id`: its label, across the rest of the row, which picks
-    /// it, and whose context menu makes an empty child of it, duplicates it or deletes it, the
-    /// operation chosen going in `operations`, or, where `world` saves prefabs, saves it and its
-    /// descendants as a prefab, linked in their place, the entity going in `saves`; in the tree, at
-    /// `depth`, after an arrow that shows and hides its children's rows, if it has any.
+    /// it, a double click framing it in the view too, and which drags, a row let go on it making
+    /// the entity dragged its child; and whose context menu frames it in the view, while a layer
+    /// takes frames, renames it, copies its ID, makes an empty child of it, duplicates it, makes
+    /// it a root, if it isn't one, or deletes it, the operation chosen going in `operations`, or,
+    /// where `world` saves prefabs, saves it and its descendants as a prefab, linked in their
+    /// place, the entity going in `saves`; while it's renamed, the field its name is typed into in
+    /// place of its label; in the tree, at `depth`, after an arrow that shows and hides its
+    /// children's rows, if it has any.
     fn row(
         &mut self,
         world: &dyn Inspected,
@@ -106,25 +156,58 @@ impl Inspector {
                 if let Some(depth) = depth {
                     self.arrow(world, ui, id, depth);
                 }
+                let across = egui::Layout::top_down_justified(egui::Align::LEFT);
+                if (self.renaming.as_ref()).is_some_and(|renaming| renaming.id == id) {
+                    ui.with_layout(across, |ui| self.rename_field(world, ui, operations));
+                    return;
+                }
                 let picked = self.picked == Some(id);
                 // On one line, as a horizontal row has it, since the rows' paging takes each to be
                 // one tall: a vertical layout would wrap it.
                 let label = egui::Button::selectable(picked, row_label(world, id))
                     .wrap_mode(egui::TextWrapMode::Extend);
-                let across = egui::Layout::top_down_justified(egui::Align::LEFT);
+                // Dragged as well as clicked, as one widget: one that senses drags alone over it
+                // would take its clicks.
                 let label = ui.with_layout(across, |ui| ui.add(label)).inner;
+                let label = label.interact(egui::Sense::drag());
+                label.dnd_set_drag_payload(Moved(id));
+                if label.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
                 if label.clicked() {
                     self.pick(id);
                 }
+                if label.double_clicked() {
+                    self.frame(id);
+                }
+                self.drop_on(world, ui, &label, Some(id), operations);
                 let menu = egui::Popup::context_menu(&label).style(crate::menu_style);
                 menu.show(|ui| {
+                    let item = |ui: &mut egui::Ui, name: &str, shortcut| {
+                        let shortcut = ui.ctx().format_shortcut(shortcut);
+                        ui.add(egui::Button::new(name).shortcut_text(shortcut))
+                    };
+                    let frames = self.link.borrow().frames;
+                    if frames && item(ui, "Frame in View", &FRAME).clicked() {
+                        self.frame(id);
+                    }
+                    if item(ui, "Rename", &RENAME).clicked() {
+                        self.rename(world, id);
+                    }
+                    if ui.button("Copy ID").clicked() {
+                        ui.ctx().copy_text(id.to_string());
+                    }
+                    ui.separator();
                     if ui.button("Create Empty Child").clicked() {
                         operations.push(empty(Some(id)));
                     }
-                    if ui.button("Duplicate Entity").clicked() {
+                    if item(ui, "Duplicate Entity", &DUPLICATE).clicked() {
                         operations.push(Command::Duplicate(id));
                     }
-                    if ui.button("Delete Entity").clicked() {
+                    if world.parent(id).is_some() && ui.button("Move to Root").clicked() {
+                        operations.push(Command::Reparent(id, None));
+                    }
+                    if item(ui, "Delete Entity", &DELETE).clicked() {
                         operations.push(Command::Delete(id));
                     }
                     if world.saves_prefabs() {
@@ -140,6 +223,113 @@ impl Inspector {
                 });
             });
         });
+    }
+
+    /// The field the name of the entity being renamed is typed into, across its row: it takes the
+    /// keys as it's first drawn, its text all selected, so that what's typed replaces it; then
+    /// Enter, or a click elsewhere, names the entity what's typed, if that's another name, the
+    /// rename going in `operations`, and Escape leaves it as it was.
+    fn rename_field(
+        &mut self,
+        world: &dyn Inspected,
+        ui: &mut egui::Ui,
+        operations: &mut Vec<Command>,
+    ) {
+        let Some(renaming) = &mut self.renaming else {
+            return;
+        };
+        let mut output = egui::TextEdit::singleline(&mut renaming.name).show(ui);
+        if mem::take(&mut renaming.focus) {
+            output.response.request_focus();
+            let end = egui::text::CCursor::new(renaming.name.chars().count());
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), end);
+            output.state.cursor.set_char_range(Some(all));
+            output.state.store(ui.ctx(), output.response.id);
+        }
+        if !output.response.lost_focus() {
+            return;
+        }
+        let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let Renaming { id, name, .. } = self.renaming.take().expect("a rename");
+        if !escaped && world.name(id).unwrap_or_default() != name {
+            operations.push(Command::Rename(id, name));
+        }
+    }
+
+    /// Takes the panel's keys at a press in it, `ui`'s whole, and lets them go at a press
+    /// elsewhere; and while it has them, and no text field has the keys, has F frame the entity
+    /// picked in the view, F2 rename it in its row, and Delete delete it, while it's alive, the
+    /// delete going in `operations`.
+    fn take_keys(&mut self, world: &dyn Inspected, ui: &egui::Ui, operations: &mut Vec<Command>) {
+        // Where the pointer is, as a tap's release in the same frame forgets where it pressed.
+        let pressed = ui.input(|input| {
+            let at = input.pointer.interact_pos();
+            at.filter(|_| input.pointer.any_pressed())
+        });
+        if let Some(at) = pressed {
+            self.keys = ui.max_rect().contains(at);
+        }
+        let live = self.picked.filter(|&id| world.alive(id) == Some(true));
+        let free = self.keys && !ui.ctx().text_edit_focused();
+        let Some(id) = live.filter(|_| free) else {
+            return;
+        };
+        let [frame, rename, delete] =
+            ui.input_mut(|input| [FRAME, RENAME, DELETE].map(|key| input.consume_shortcut(&key)));
+        if frame {
+            self.frame(id);
+        }
+        if rename {
+            self.rename(world, id);
+        }
+        if delete {
+            operations.push(Command::Delete(id));
+        }
+    }
+
+    /// Picks the entity of ID `id` and asks the link to frame it in the view, as
+    /// [`InspectorLink::framed`](super::InspectorLink::framed) says.
+    fn frame(&mut self, id: EntityId) {
+        self.pick(id);
+        self.link.borrow_mut().frame = Some(id);
+    }
+
+    /// Picks the entity of ID `id` and has its row show the field its name is typed into, holding
+    /// its name, as `world` has it.
+    fn rename(&mut self, world: &dyn Inspected, id: EntityId) {
+        self.pick(id);
+        let name = world.name(id).unwrap_or_default();
+        self.renaming = Some(Renaming {
+            id,
+            name,
+            focus: true,
+        });
+    }
+
+    /// Makes the entity of a row let go on `target`, a row's label or the space below the rows,
+    /// the last child of `parent`, the row's entity, opening its row, or a root for `None`, the
+    /// reparent going in `operations`; and outlines `target` while a row is held over it, if its
+    /// entity would go there: not onto itself, one of its descendants, or the parent it has.
+    fn drop_on(
+        &mut self,
+        world: &dyn Inspected,
+        ui: &egui::Ui,
+        target: &egui::Response,
+        parent: Option<EntityId>,
+        operations: &mut Vec<Command>,
+    ) {
+        if let Some(moved) = target.dnd_release_payload::<Moved>() {
+            if moves(world, moved.0, parent) {
+                operations.push(Command::Reparent(moved.0, parent));
+                self.expanded.extend(parent);
+            }
+            return;
+        }
+        let held = target.dnd_hover_payload::<Moved>();
+        if held.is_some_and(|moved| moves(world, moved.0, parent)) {
+            let stroke = ui.visuals().selection.stroke;
+            (ui.painter()).rect_stroke(target.rect, 2.0, stroke, egui::StrokeKind::Inside);
+        }
     }
 
     /// Indents a row of the tree to `depth`, and draws the arrow of the entity of ID `id`, if it
@@ -168,19 +358,54 @@ impl Inspector {
     }
 
     /// Picks the entity whose ID is in the Find field, which may be quoted, as a scene writes it,
-    /// and opens the rows of its ancestors; or says why it finds none.
+    /// or else whose name has what's there, ignoring case, the next such after the one picked at
+    /// each Enter, as [`named`] finds it; and opens the rows of its ancestors; or says why it finds
+    /// none.
     fn find(&mut self, world: &dyn Inspected) -> Result<(), String> {
         let text = self.find.trim().trim_matches('"');
-        let id: EntityId = text
-            .parse()
-            .map_err(|error: crate::Error| error.to_string())?;
-        if world.alive(id) != Some(true) {
-            return Err(format!("no entity has ID {id}"));
-        }
+        let id = match text.parse::<EntityId>() {
+            Ok(id) if world.alive(id) == Some(true) => id,
+            Ok(id) => return Err(format!("no entity has ID {id}")),
+            Err(error) if text.is_empty() => return Err(error.to_string()),
+            Err(error) => named(world, text, self.picked)
+                .ok_or_else(|| format!("no entity's name has `{text}`, and {error}"))?,
+        };
         self.pick(id);
         self.open_ancestors(world, id);
         Ok(())
     }
+}
+
+/// The entity whose name has `text`, ignoring case, next after `after` in the order queries find
+/// them, and from the first again past the last, so that each Enter in the Find field finds the
+/// next; `None` if no name has it.
+fn named(world: &dyn Inspected, text: &str, after: Option<EntityId>) -> Option<EntityId> {
+    let text = text.to_lowercase();
+    let ids = world.page(None, 0..world.count(None).ok()?);
+    let start = after.and_then(|after| ids.iter().position(|&id| id == after));
+    let (before, from) = ids.split_at(start.map_or(0, |at| at + 1));
+    let has =
+        |id: &EntityId| (world.name(*id)).is_some_and(|name| name.to_lowercase().contains(&text));
+    from.iter().chain(before).copied().find(has)
+}
+
+/// Whether making the entity of ID `moved` the last child of `parent`, or a root for `None`,
+/// changes its parent and makes no cycle: `parent` neither it nor one of its descendants, up to
+/// an ancestor met again, as a hierarchy put together from reads of a game's world at two moments
+/// may have it.
+fn moves(world: &dyn Inspected, moved: EntityId, parent: Option<EntityId>) -> bool {
+    if world.parent(moved) == parent {
+        return false;
+    }
+    let mut met = HashSet::new();
+    let mut up = parent;
+    while let Some(at) = up.filter(|&at| met.insert(at)) {
+        if at == moved {
+            return false;
+        }
+        up = world.parent(at);
+    }
+    true
 }
 
 /// The rows of the Entities panel's tree, for a frame: the roots, in the order [`World::roots`]
