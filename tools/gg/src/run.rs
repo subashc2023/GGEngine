@@ -1214,8 +1214,19 @@ mod tests {
         let refused = lock_at(&path, "shards").err().map(|failure| failure.code);
         assert_eq!(refused.as_deref(), Some("gg.running"));
         drop(first);
-        lock_at(&path, "shards").expect("the lock, once the first run has ended");
+        // A process another test spawns meanwhile copies every open file, `first`'s too, and holds
+        // them until it execs, as posix_spawn does on macOS and Linux: the lock comes free then.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let again = loop {
+            let again = lock_at(&path, "shards").map(drop);
+            let held = matches!(&again, Err(failure) if failure.code == "gg.running");
+            if !held || Instant::now() >= deadline {
+                break again;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
         let _ = fs::remove_dir_all(&dir);
+        again.expect("the lock, once the first run has ended");
     }
 
     #[test]
