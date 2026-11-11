@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use gg_api::view::{Frame, Reader};
 use gg_api::{Captured, Client, Looked, Session};
-use gg_engine::{App, Context, Key, Layer};
+use gg_engine::{App, Context, Key, Layer, Tick};
 use serde_json::{Value, json};
 
 /// How long the test waits for what should come soon, past which it fails rather than hangs: a
@@ -104,7 +104,8 @@ fn session() -> Session {
 }
 
 /// Has the view published to memory of its own, and checks the frames it takes from it: green, at
-/// the size it asks, the next only once it has taken the last, and red once it holds W.
+/// the size it asks, the next only once it has taken the last, red once it holds W, and coming as
+/// fast paused as playing.
 fn check(client: &mut Client) {
     let mut reader = Reader::create(64, 32).expect("memory for the view");
     let memory = json!({"memory": reader.name()});
@@ -140,4 +141,30 @@ fn check(client: &mut Client) {
     let held = json!({"events": [{"key": {"key": "KeyW", "pressed": true}}]});
     client.call("input", held).expect("the input");
     take_until(&mut reader, |_, pixels| all(pixels, [255, 0, 0, 255]));
+
+    // Paused, the frames come as the client takes them, as fast as playing, rather than a tick
+    // apart or more, as a paused headless run's do while no request comes.
+    let playing = shortest_apart(&mut reader);
+    client.call("pause", Value::Null).expect("paused");
+    let paused = shortest_apart(&mut reader);
+    assert!(
+        paused < playing + Tick::DT / 2,
+        "frames {paused:?} apart at the least paused, {playing:?} playing"
+    );
+}
+
+/// The shortest time, by the run's clock, between the starts of two frames one after the other,
+/// among the next 16 it renders, taking each as it comes.
+fn shortest_apart(reader: &mut Reader) -> Duration {
+    let (mut last, _) = take_until(reader, |_, _| true);
+    let mut shortest = Duration::MAX;
+    for _ in 0..16 {
+        let (frame, _) = take_until(reader, |_, _| true);
+        if frame.number == last.number + 1 {
+            let apart = Duration::from_nanos(frame.started.saturating_sub(last.started));
+            shortest = shortest.min(apart);
+        }
+        last = frame;
+    }
+    shortest
 }

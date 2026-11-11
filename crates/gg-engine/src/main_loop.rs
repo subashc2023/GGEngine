@@ -107,7 +107,11 @@ pub(crate) fn run_headless(
     );
     let rendered = started.and_then(|()| {
         while args.frames.is_none_or(|limit| handed < limit) {
-            api::idle(&mut api, &stepper);
+            // A frame its client takes waits for that instead, paused or stopped as much as
+            // playing, as `api::pace` says.
+            if !embedded || api::handing(&api).is_none() {
+                api::idle(&mut api, &stepper);
+            }
             if api::serve(&mut api, &mut cx, &mut app.stack, &mut stepper) {
                 debug!("A tool asked the run to end");
                 break;
