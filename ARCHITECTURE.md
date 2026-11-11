@@ -264,7 +264,9 @@ makes; anyone else's game depends on the engine from its own repository.
   matching each changed component to its new layout by field name. An edit inside a layer's
   `attach`, which builds the world as a run starts afresh, is patched, but the world a run keeps,
   as its restarts start from snapshots, never shows it: `gg run` says so, having the game log
-  `gg.attach_changed`, and a run started afresh shows it.
+  `gg.attach_changed`, and a run started afresh shows it. Where patches can't reach the game, as
+  without `dx`, `gg run` builds it with cargo and watches its sources all the same, every change
+  rebuilding and restarting it.
 - **Luau, in every build, for mods and quick scripts.** Players can install sandboxed mods, and
   quests, dialogue and level events reload in milliseconds. A script file declares one component:
   its fields, with their defaults, and a tick run for each entity that has it, as a native
@@ -439,14 +441,23 @@ in the editor is out of an agent's reach.
   code](#game-code) describes, having the game log a patch or a rebuild that failed, so that a
   client following its logs learns of it; snapshots it every few seconds from its first frame;
   and starts it again from its last snapshot after a crash or a hang, and from one taken then as
-  it's rebuilt, telling of each, or waits for a rebuild if the game would only end the same way
-  again, as one that ends before its first snapshot would. A game started again so comes back
-  stopped if it was, or playing a copy with the world as edited held, as its snapshot keeps both.
+  it's rebuilt, in the request that has it quit, so that no edit lands between the two, telling of
+  each, or waits for a rebuild if the game would only end the same way again, as one that ends
+  before its first snapshot would. A game that waits where it can't answer, at a script's
+  breakpoint or in a dialog, is killed at once instead, starting again from the snapshot before. A
+  game started again so comes back paused if it was, and stopped if it was, or playing a copy with
+  the world as edited held, as its snapshot keeps them.
   A game that comes to its own end, as its window closes, ends the supervision, as one that never
   serves does; so does the end of the tool a run embeds the game in (`--embedded`), as the editor
   ends, which closes gg's stdin. Its games end as gg does, however gg ends, killed too: each is
   given `--supervised`, which ends a run as its stdin, which gg holds, closes. One `gg run` runs a
-  game at a time; a second is refused. It runs headless checks, talks to running games, all with
+  game at a time; a second is refused. It tells what it's doing, as building or running the game,
+  whether the game's code holds every edit, and the last build's errors, in a file beside its
+  lock, which the commands that talk to a game read while none answers, failing with a code that
+  says so (`gg.rebuilding`, `gg.build_failed`), and `wait` waits on until an edit's code runs. It
+  keeps its snapshots in a directory of its own, removing those of runs that were killed; a game
+  keeps the newest of the captures and snapshots it writes without a path. It runs headless
+  checks, talks to running games, all with
   machine-readable results, and makes new games. Inside a game's
   [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
   project's directory, builds the project's game, and reaches the project's games alone, those whose
@@ -835,7 +846,11 @@ A project's state is text that people and agents edit, diff and merge with ordin
   what they took out, typed, so that what's opaque comes back too; a set's keeps the component it
   changed, whole, until nothing can roll its edit back, so that an edit refused partway rolls back
   exactly what the world held, though code had stored in it what a set refuses, such as a rotation
-  no longer a unit. A component can name a `bool`
+  no longer a unit; and, where the set may take something opaque out, as a list's element or an
+  enum's variant, for good, so that an undo the world refuses for making what's opaque swaps the
+  field back from it, what's opaque in it too, the rest of the component staying as it is. A set of a list of another length keeps what's
+  opaque of the elements alike at its start and end, by their values, so that an element taken out
+  takes its own. A component can name a `bool`
   field of its own exclusive, as a camera's `primary` is, so that one edit, a person's or an
   agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
   applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
@@ -904,6 +919,9 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   another way. A snapshot and the commands after it replay from there, for rollback; so a command
   is data, never a closure. A command its replay couldn't make again, as one holding something
   opaque, which no value makes, ends the recording before it, and the run with `record.bad_command`.
+  A patch of the run's code that the tool API applies is recorded before the tick after it, which a
+  replay, running its own code, doesn't run, ending at it with `replay.patched` once every tick
+  before it has replayed to its hash.
 - **Determinism:** the fixed timestep, a fixed order of systems and of iteration, and math that
   gives identical results on every platform, so lockstep games and rollback netcode stay in sync.
   So glam is built without SIMD and with libm's functions, for the whole build
@@ -1369,7 +1387,11 @@ steps from its `min`, or to its `max` past the grid's last, and a drop-down's ch
 focuses what it's over, but a text field, which takes the focus by a click and keeps it as the
 cursor passes over the rest; it presses what it's let go over after going down on it, drags a
 slider and a text field's selection, while they show and are enabled, and its wheel scrolls the
-list it's over, which keeps its scroll while it's hidden. A focused text field takes what's
+list it's over, which keeps its scroll while it's hidden. The mouse's buttons and wheel over a
+button, a widget or a list, or anywhere while a drop-down is open, count as handled by the layer
+that sent the UI the event, so that a click on a button isn't a click on the world below, and
+`GameUi::pointer_over` and `Context::pointer_over_ui` say whether the cursor is over one, for a
+game that reads the mouse itself. A focused text field takes what's
 typed (`Event::Text`, winit's text, not keys' positions) at its caret, as many characters as it
 holds, its caret moved by the arrows, Home and End, Shift selecting and Ctrl+A selecting it all, and
 Backspace and Delete cutting; the OS's composition of what's typed, IME, doesn't reach it. A hidden
@@ -1483,7 +1505,11 @@ kind, which snapshots copy, as [ECS](#ecs) describes: bodies made again from the
 alone wouldn't step as the world did. A snapshot file holds them through rapier's own
 serialization, which writes a mesh collider's triangles whole, at a cost
 [DEFECTS.md](docs/DEFECTS.md) weighs. A body under a parent isn't moved, since its transform is
-in its parent's space (`physics.child_body`).
+in its parent's space (`physics.child_body`). A body's component that isn't finite, holding a
+NaN or an infinity, as its transform, its velocities or a collider's size, is refused, warned of
+once while it stays so (`physics.not_finite`), so that it doesn't spread through contacts: the
+body keeps the last it took that was, and an entity without one gets none until it's finite. A
+body that moves goes on from its last pose, which it writes over a transform refused as it moves.
 
 A joint is a `Joint2D` or a `Joint3D`, a component naming the two bodies it holds together,
 `body_a` and `body_b`, by their entities, which rapier's impulse joints hold: fixed; revolute, a
@@ -1513,7 +1539,9 @@ character's sweep passes through what it's joined to so, as rapier's contacts do
 entity that isn't a body that physics moves joins nothing, warned of once for each reason
 (`physics.joint_no_body`), as does one naming one body twice, by its handle
 (`physics.joint_one_body`), until it joins two; and its joint goes as it does, or its entity, or
-either body.
+either body. An edit's delete of a body clears the field of each joint naming it, as
+`Component::cleared` names fields a delete clears, so that the scene still saves; and names the
+entity the edit makes again under its ID, as a scene file's relink of an instance does.
 
 A body's `continuous_collision` makes it a bullet, as rapier calls it: at each step it goes fast
 in, rapier sweeps its colliders along its way against every other body but bullets, stopping it at
@@ -1528,7 +1556,11 @@ kinematic character controller moves at each step as fast as the controller's `v
 which its game sets, as from its player's input: sliding along what it moves into, climbing slopes
 up to a limit and steps up to a height, kept to the ground going down, and pushing what's dynamic,
 against the colliders as the last step left them; gravity pulls its velocity down while it's off
-the ground, and the ground and what's above it stop it, `grounded` saying whether it stands. Its
+the ground, and the ground and what's above it stop it, `grounded` saying whether it stands. A
+kinematic body it stands on, as a moving platform, a lift or a carousel, carries it as the body's
+pose goes in the step, turning its facing as the body turns about up, its own move made as though
+that body stood still; and one moving into it pushes it before it, each swept against the rest, so
+that a lift rising under it lifts it rather than passing through. Its
 body is kinematic, moved to where the controller took it as rapier steps, so that the rest of
 physics meets it there. Its state is the controller's and the world's, as a body's is, so that
 replays, snapshots and peers move it alike. An entity with a `RigidBody3D` is a body, its

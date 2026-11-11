@@ -92,6 +92,18 @@ pub trait Component: Reflect + Clone {
         None
     }
 
+    /// The names of its fields that a delete clears, each an `Option<Entity>` field of its own, of
+    /// a struct with named fields: a [`Log`]'s delete of an entity, or of what's under it, sets
+    /// each to `None` on every entity it doesn't delete whose field names one it does, before it
+    /// deletes them, as the same edit, which undoes with it; and to the entity the edit makes
+    /// again under the ID of the one it named, if it does, as a scene file's relink of an instance
+    /// does. So a component that holds two
+    /// entities together, as a [`Joint3D`](crate::Joint3D)'s bodies, names nothing gone once
+    /// either is deleted, which a scene couldn't save (`ecs.no_entity`). None, the derive's.
+    fn cleared() -> &'static [&'static str] {
+        &[]
+    }
+
     /// What a snapshot file keeps of a component of a type that's opaque as a whole, as
     /// [`MeshDraw`](crate::MeshDraw) is, a line of text of its own, which
     /// [`load_opaque`](Self::load_opaque) makes it again from, in a run restored from the file
@@ -662,8 +674,11 @@ impl World {
     /// under its next generation, as [`free_slot`](Self::free_slot) frees it, its ID let go. The
     /// world is then another, as `clear` says, which refuses every log's entries from before,
     /// freeing nothing; so whoever keeps a log of it drops the log, for history that starts
-    /// afresh, as after the tool API's `scene open` and `scene new`.
-    #[cfg(feature = "dev")]
+    /// afresh, as after the tool API's `scene open` and `scene new`, and on a lockstep host as it
+    /// sends its joiner its world. The slots are freed in slot order, after the free ones, as a
+    /// load of the world's text frees those it names vacant, which no log there gives back: so
+    /// that a host and its joiner give the same slots to the entities spawned after, as code
+    /// ordering by [`Entity`] needs. A retired slot stays retired.
     pub(crate) fn renew(&mut self) {
         let mut free = vec![false; self.meta.len()];
         for &index in &self.free {

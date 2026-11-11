@@ -201,10 +201,14 @@ enum Undo {
     Apply(Operation),
     /// Applies `set`, as `Apply` does, a set of the field's value before, checked as any set is;
     /// `kept` is the component, whole, as it was before, in a one-row column of its own, which a
-    /// [roll back](World::roll_back) puts back unchecked, until it's settled.
+    /// [roll back](World::roll_back) puts back unchecked, until it's settled; and `before`, the
+    /// same, kept whatever settles it where the field's value before held something opaque, which
+    /// the set may have taken out with an element or a variant: an undo the world refuses for
+    /// making what's opaque sets the field back from it, as [`World::set_back_from`] does.
     Set {
         set: Operation,
         kept: Option<Box<dyn AnyColumn>>,
+        before: Option<Box<dyn AnyColumn>>,
     },
     /// Gives `entity` back the component a remove took, in a one-row column of its own.
     Put {
@@ -309,6 +313,55 @@ impl World {
         })
     }
 
+    /// The sets that clear, ahead of `operation`, a delete, the fields that
+    /// [`Component::cleared`](super::Component::cleared) names on the entities it doesn't delete
+    /// that name one it does, each to `None`, with the ID of the entity each named: by entity, as
+    /// queries find them, then by component type, as they registered, then by field. None for
+    /// another operation, or a delete of no living entity, which is refused.
+    pub(super) fn clears(&self, operation: &Operation) -> Vec<(Operation, EntityId)> {
+        let Operation::Delete { entity } = operation else {
+            return Vec::new();
+        };
+        let Some(root) = self.entity(*entity) else {
+            return Vec::new();
+        };
+        let mut sets = Vec::new();
+        let mut gone: Option<HashSet<Entity>> = None;
+        for (id, fields) in self.components.cleared() {
+            let name = self.components.name(id);
+            let Ok(holding) = self.entities(Some(name)) else {
+                continue;
+            };
+            for holder in holding {
+                let gone = gone.get_or_insert_with(|| {
+                    let subtree = self.subtree(root).into_iter();
+                    subtree.map(|(entity, _)| entity).collect()
+                });
+                if gone.contains(&holder) {
+                    continue;
+                }
+                for &field in fields {
+                    let named = self.get_field(holder, name, field);
+                    let Ok(Value::Option(Some(named))) = named else {
+                        continue;
+                    };
+                    if let Value::Entity(named) = *named
+                        && gone.contains(&named)
+                    {
+                        let set = Operation::Set {
+                            entity: self.id(holder).expect("alive"),
+                            component: name.to_owned().into(),
+                            path: field.to_owned(),
+                            value: Value::Option(None),
+                        };
+                        sets.push((set, self.id(named).expect("alive, to be deleted")));
+                    }
+                }
+            }
+        }
+        sets
+    }
+
     /// Applies `inverse`, undoing its operation, and leaves in its place what undoes that, which
     /// redoes it. Refused, it changes neither the world nor `inverse`: with `ops.other_world` for
     /// another world's inverse, as one from before the world was restored is; as its operation is
@@ -384,6 +437,7 @@ impl World {
             && let Undo::Set {
                 set,
                 kept: Some(kept),
+                ..
             } = undo
         {
             return self.put_back(set, &mut **kept);
@@ -412,7 +466,14 @@ impl World {
                 self.can_put(*entity, id)?;
                 Undo::Apply(Operation::Unlink { entity: *entity })
             }
-            Undo::Apply(operation) | Undo::Set { set: operation, .. } => self.applied(operation)?,
+            Undo::Apply(operation) => self.applied(operation)?,
+            Undo::Set { set, before, .. } => match self.applied(set) {
+                Err(error) if error.code() == "reflect.opaque" => match before {
+                    Some(before) => self.set_back_from(set, &**before)?,
+                    None => return Err(error),
+                },
+                applied => applied?,
+            },
             Undo::Put {
                 entity, component, ..
             } => {
@@ -530,6 +591,69 @@ impl World {
         }
         *value = now;
         Ok(())
+    }
+
+    /// What undoes `set`, a set's inverse, applied as [`undo`](Self::undo) applies it where the
+    /// world refused it for making what's opaque, as a set that took out an element of a list or
+    /// switched an enum's variant leaves it: the field, the part at `set`'s path, goes back as
+    /// `before`, the component as it was before the set, held it, whole, what's opaque in it too,
+    /// swapped into its place; the rest of the component stays as it is, what's opaque in it too.
+    ///
+    /// Fails, changing nothing, as [`get_field`](Self::get_field) does, and as the field's hints
+    /// refuse its value, as hints changed since may.
+    fn set_back_from(&mut self, set: &Operation, before: &dyn AnyColumn) -> Result<Undo> {
+        let Operation::Set {
+            entity,
+            component,
+            path,
+            value,
+        } = set
+        else {
+            unreachable!("a set's inverse is a set")
+        };
+        let handle = self.living(*entity)?;
+        let now = self.get_field(handle, component, path)?;
+        let id = self.named(component).expect("its field was read");
+        let types = self.components.types();
+        let to = reflect::resolve(types, &self.components.ty(id), path)?;
+        reflect::check(types, &to.ty, &to.meta, value)?;
+        let kept = self.copy_of(handle, component).expect("its field was read");
+        let mut set_back = before.cloned();
+        let at = self.location(handle).expect("alive");
+        let tick = self.change_tick;
+        let table = &mut self.tables[at.table as usize];
+        let column = table.position(id).expect("its field was read");
+        let row = at.row as usize;
+        let column = table.row_mut(column, row, tick);
+        match to.steps.split_first() {
+            None => column.swap_row(row, &mut *set_back),
+            Some((&first, rest)) => {
+                let field = column.part_mut(row, first).expect("its field was read");
+                let field = reflect::reach_mut(field, rest)?;
+                let held = set_back.part_mut(0, first).expect("a field of its type");
+                let held = reflect::reach_mut(held, rest).expect("where its value was read");
+                let swapped = field.swap_reflected(held);
+                assert!(
+                    swapped,
+                    "a field and the same field of a copy are of one type"
+                );
+            }
+        }
+        if Some(id) == self.component::<ModelRoot>() && now != *value {
+            self.despawn_nodes(handle);
+            self.fit_nodes(handle, None);
+        }
+        let before = drops_opaque(value, &now).then(|| kept.cloned());
+        Ok(Undo::Set {
+            set: Operation::Set {
+                entity: *entity,
+                component: component.clone(),
+                path: path.clone(),
+                value: now,
+            },
+            kept: Some(kept),
+            before,
+        })
     }
 
     /// Drops `inverse`, which won't be applied: if it's this world's, the slots a delete's keeps
@@ -794,6 +918,9 @@ impl World {
                 let kept = self.copy_of(handle, component);
                 // A link too, which the relink below spawns the instance of.
                 let old = self.write_field(handle, component, path, value, true)?;
+                let before = drops_opaque(&old, value)
+                    .then(|| kept.as_ref().map(|kept| kept.cloned()))
+                    .flatten();
                 let undo = Undo::Set {
                     set: Operation::Set {
                         entity: *entity,
@@ -802,6 +929,7 @@ impl World {
                         value: old,
                     },
                     kept,
+                    before,
                 };
                 let (
                     Undo::Set {
@@ -1675,9 +1803,10 @@ impl Inverse {
         fn copied(undo: &Undo) -> Undo {
             match undo {
                 Undo::Apply(operation) => Undo::Apply(operation.clone()),
-                Undo::Set { set, kept } => Undo::Set {
+                Undo::Set { set, kept, before } => Undo::Set {
                     set: set.clone(),
                     kept: kept.as_ref().map(|kept| kept.cloned()),
+                    before: before.as_ref().map(|before| before.cloned()),
                 },
                 Undo::Put {
                     entity,
@@ -1755,6 +1884,49 @@ impl Inverse {
     }
 }
 
+/// Whether `value` holds [`Value::Opaque`] anywhere, which a set of it may take out.
+fn holds_opaque(value: &Value) -> bool {
+    match value {
+        Value::Opaque => true,
+        Value::Option(Some(value)) => holds_opaque(value),
+        Value::List(items) => items.iter().any(holds_opaque),
+        Value::Struct(fields) | Value::Variant(_, fields) => {
+            fields.iter().any(|(_, value)| holds_opaque(value))
+        }
+        _ => false,
+    }
+}
+
+/// Whether setting what holds `old` to `new` may take out something opaque, which a set's undo
+/// then can't make: where it takes an element out of a list, or puts one in, switches an enum's
+/// variant, or makes an option `None`, or gives a value of another kind, over what holds
+/// something opaque. A struct's fields go by name, as a set takes them.
+fn drops_opaque(old: &Value, new: &Value) -> bool {
+    match (old, new) {
+        (Value::List(old), Value::List(new)) if old.len() == new.len() => {
+            old.iter().zip(new).any(|(old, new)| drops_opaque(old, new))
+        }
+        (Value::Struct(old), Value::Struct(new)) => fields_drop_opaque(old, new),
+        (Value::Variant(was, old), Value::Variant(is, new)) if was == is => {
+            fields_drop_opaque(old, new)
+        }
+        (Value::Option(Some(old)), Value::Option(Some(new))) => drops_opaque(old, new),
+        (Value::Opaque, Value::Opaque) => false,
+        (old, _) => holds_opaque(old),
+    }
+}
+
+/// Whether setting fields `old` to `new`, by name, may take out something opaque, as
+/// [`drops_opaque`] says.
+fn fields_drop_opaque(old: &[(Ident, Value)], new: &[(Ident, Value)]) -> bool {
+    old.iter().any(
+        |(name, old)| match new.iter().find(|(given, _)| given == name) {
+            Some((_, new)) => drops_opaque(old, new),
+            None => holds_opaque(old),
+        },
+    )
+}
+
 #[cfg(test)]
 impl Inverse {
     /// How many slots it keeps.
@@ -1775,6 +1947,17 @@ impl Inverse {
             }
         }
         kept(&self.undo)
+    }
+
+    /// Whether a set's inverse keeps the component as it was before, for its undo.
+    pub(super) fn keeps_before(&self) -> bool {
+        matches!(
+            &self.undo,
+            Undo::Set {
+                before: Some(_),
+                ..
+            }
+        )
     }
 }
 
@@ -2654,5 +2837,244 @@ pub(super) mod tests {
         // Nor are their descriptions kept, which would take their names.
         assert_eq!(world.types().iter().len(), described);
         world.register::<Lamp>().expect("registered");
+    }
+
+    /// Naming a field that isn't an `Option<Entity>` one a delete clears.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Leash {
+        to: Option<Entity>,
+        length: u32,
+    }
+
+    impl crate::Component for Leash {
+        fn cleared() -> &'static [&'static str] {
+            &["to", "length"]
+        }
+    }
+
+    #[test]
+    fn a_field_a_delete_clears_is_an_optional_entity_of_its_own() {
+        let mut world = World::default();
+        let error = world.register::<Leash>().expect_err("refused");
+        assert_eq!(error.code(), "ecs.bad_cleared", "{error}");
+    }
+
+    /// An element of [`Slots`]' list: a number, and a handle of its own, opaque.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Slot {
+        at: u32,
+        #[reflect(opaque)]
+        handle: Handle,
+    }
+
+    /// A list of slots, each keeping its handle, and a form that may keep one too.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Slots {
+        slots: Vec<Slot>,
+        form: crate::reflect::tests::Form,
+    }
+
+    impl crate::Component for Slots {
+        fn base() -> Option<Self> {
+            Some(Self {
+                slots: Vec::new(),
+                form: crate::reflect::tests::Form::Point,
+            })
+        }
+    }
+
+    impl crate::Writable for Slots {}
+
+    /// A set that takes an element out of a list leaves each element after it its own opaque
+    /// state, not the one before's, and one that puts an element back in, as its undo does, keeps
+    /// theirs too; the undo gives back the element taken out, its state too, as it does the
+    /// variant a set switched from, whose state the variant switched to hasn't, and its redo
+    /// takes them out again.
+    #[test]
+    fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
+        use crate::reflect::tests::Form;
+        let mut world = World::seeded(0x5107);
+        world.register::<Slots>().expect("registered");
+        let slot = |at, handle| Slot {
+            at,
+            handle: Handle(handle),
+        };
+        let held = Slots {
+            slots: vec![slot(1, 10), slot(2, 20), slot(3, 30)],
+            form: Form::Held(Handle(7)),
+        };
+        let entity = world.spawn(held.clone());
+        let id = world.id(entity).expect("alive");
+        let set = |path: &str, value: Value| Operation::Set {
+            entity: id,
+            component: "Slots".into(),
+            path: path.to_owned(),
+            value,
+        };
+        let get = |world: &World| world.get::<Slots>(entity).expect("slots").clone();
+        let slots = |slots: &[Slot]| Slots {
+            slots: slots.to_vec(),
+            form: Form::Held(Handle(7)),
+        };
+        // The middle one taken out: the last keeps its own.
+        let shrunk = vec![slot(1, 10), slot(3, 30)];
+        let value = slots(&shrunk).to_value();
+        let field = |value: &Value| match value {
+            Value::Struct(fields) => fields[0].1.clone(),
+            _ => unreachable!("a struct's"),
+        };
+        let mut inverse = world.apply(&mut set("slots", field(&value))).expect("set");
+        assert_eq!(get(&world), slots(&shrunk));
+        // The first one taken out, by a set of the whole component.
+        let mut first = world
+            .apply(&mut set("", slots(&[slot(3, 30)]).to_value()))
+            .expect("set whole");
+        assert_eq!(get(&world), slots(&[slot(3, 30)]));
+        world.undo(&mut first).expect("undone");
+        assert_eq!(get(&world), slots(&shrunk));
+        world.release(first);
+        // Undone, the element comes back with its handle; redone, it goes again.
+        world.undo(&mut inverse).expect("undone");
+        assert_eq!(get(&world), held);
+        world.undo(&mut inverse).expect("redone");
+        assert_eq!(get(&world), slots(&shrunk));
+        world.undo(&mut inverse).expect("undone again");
+        assert_eq!(get(&world), held);
+        world.release(inverse);
+        // One put in keeps those after it theirs, but can't make its own.
+        let grown = slots(&[slot(1, 10), slot(9, 0), slot(2, 20), slot(3, 30)]);
+        let Err(error) = world.apply(&mut set("slots", field(&grown.to_value()))) else {
+            panic!("an opaque handle made");
+        };
+        assert_eq!(error.code(), "reflect.opaque", "{error}");
+        assert_eq!(get(&world), held);
+        // The variant switched from comes back, its handle too, though the world has changed
+        // otherwise meanwhile.
+        let mut switched = world
+            .apply(&mut set("form", Form::Point.to_value()))
+            .expect("switched");
+        assert_eq!(get(&world).form, Form::Point);
+        let mut other = world
+            .apply(&mut set("slots[0].at", Value::UInt(5)))
+            .expect("set");
+        world.release(other);
+        world.undo(&mut switched).expect("undone");
+        let back = get(&world);
+        assert_eq!(back.form, Form::Held(Handle(7)));
+        assert_eq!(back.slots[0], slot(5, 10), "the rest as it is now");
+        world.undo(&mut switched).expect("redone");
+        assert_eq!(get(&world).form, Form::Point);
+        world.undo(&mut switched).expect("undone again");
+        assert_eq!(get(&world).form, Form::Held(Handle(7)));
+        world.release(switched);
+        // A set of a field that holds nothing opaque keeps no copy for its undo, which needs none.
+        other = world
+            .apply(&mut set("slots[1].at", Value::UInt(6)))
+            .expect("set");
+        assert!(!other.keeps_before());
+        world.release(other);
+    }
+
+    /// A form that may keep a handle, beside a list of slots, a slot alone and a turn, all of
+    /// which code changes as it likes.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Rigged {
+        form: crate::reflect::tests::Form,
+        slots: Vec<Slot>,
+        cursor: Slot,
+        turn: Quat,
+    }
+
+    impl crate::Component for Rigged {
+        fn base() -> Option<Self> {
+            None
+        }
+    }
+
+    impl crate::Writable for Rigged {}
+
+    /// The undo of a set that switched a variant from one keeping something opaque puts back the
+    /// field alone, what's opaque in it too: the rest of the component stays as code left it since,
+    /// a handle it swapped in, a list it grew, of elements a value couldn't make, and a turn it
+    /// left off unit length, which a set would refuse. A set keeps the component for its undo only
+    /// where it may take something opaque out, as a variant switched or a list of another length.
+    #[test]
+    fn an_undo_from_the_component_kept_puts_back_its_field_alone() {
+        use crate::reflect::tests::Form;
+        let mut world = World::seeded(0x5108);
+        world.register::<Rigged>().expect("registered");
+        let slot = |at, handle| Slot {
+            at,
+            handle: Handle(handle),
+        };
+        let entity = world.spawn(Rigged {
+            form: Form::Held(Handle(7)),
+            slots: vec![slot(1, 10)],
+            cursor: slot(0, 50),
+            turn: Quat::IDENTITY,
+        });
+        let id = world.id(entity).expect("alive");
+        let set = |path: &str, value: Value| Operation::Set {
+            entity: id,
+            component: "Rigged".into(),
+            path: path.to_owned(),
+            value,
+        };
+        let mut switched = world
+            .apply(&mut set("form", Form::Point.to_value()))
+            .expect("switched");
+        assert!(switched.keeps_before());
+        let rigged = world.get_mut::<Rigged>(entity).expect("rigged");
+        rigged.cursor.handle = Handle(77);
+        rigged.slots.push(slot(2, 20));
+        rigged.turn = Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
+        world.undo(&mut switched).expect("undone");
+        let rigged = world.get::<Rigged>(entity).expect("rigged");
+        assert_eq!(rigged.form, Form::Held(Handle(7)));
+        assert_eq!(rigged.cursor, slot(0, 77), "the handle code swapped in");
+        assert_eq!(
+            rigged.slots,
+            [slot(1, 10), slot(2, 20)],
+            "the list code grew"
+        );
+        assert_eq!(rigged.turn, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0));
+        world.undo(&mut switched).expect("redone");
+        assert_eq!(
+            world.get::<Rigged>(entity).expect("rigged").form,
+            Form::Point
+        );
+        world.release(switched);
+        // Same length, the same variants: nothing opaque can go, so nothing's kept.
+        let slots = vec![slot(3, 0), slot(4, 0)];
+        let same = |slots: &[Slot]| Value::List(slots.iter().map(Reflect::to_value).collect());
+        let mut kept = world.apply(&mut set("slots", same(&slots))).expect("set");
+        assert!(!kept.keeps_before());
+        world.release(kept);
+        let cursor = slot(5, 0).to_value();
+        kept = world.apply(&mut set("cursor", cursor)).expect("set");
+        assert!(!kept.keeps_before());
+        world.release(kept);
+        let rigged = world.get::<Rigged>(entity).expect("rigged");
+        assert_eq!(rigged.slots, [slot(3, 10), slot(4, 20)]);
+        assert_eq!(rigged.cursor, slot(5, 77));
+        // Shorter, or a variant switched, keeps it.
+        kept = world
+            .apply(&mut set("slots", same(&slots[..1])))
+            .expect("set");
+        assert!(kept.keeps_before());
+        world.release(kept);
+        kept = world
+            .apply(&mut set("form", Form::Circle(1.0).to_value()))
+            .expect("set");
+        assert!(
+            !kept.keeps_before(),
+            "switched from a variant holding nothing opaque"
+        );
+        world.release(kept);
+        // Of a list of another length, an element taken out as the one after it changes leaves
+        // its state to that one, as the values can't tell them apart.
+        let list = vec![slot(1, 10), slot(2, 20), slot(3, 30)];
+        let set_to = list.with_value(&same(&[slot(1, 0), slot(9, 0)]));
+        assert_eq!(set_to.expect("set"), [slot(1, 10), slot(9, 20)]);
     }
 }

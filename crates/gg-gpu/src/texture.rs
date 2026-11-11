@@ -159,12 +159,16 @@ impl TextureFormat {
 /// another image, shown when it's there in place of the one before, which keeps showing until
 /// then; and the slot can show a stand-in again
 /// ([`Frame::hide_texture`](crate::Frame::hide_texture)). Dropping it retires its images, and its
-/// slot, until the GPU is done with them.
+/// slot, until the GPU is done with them; an image that slots of other textures show as their
+/// stand-in retires once none does.
 pub struct Texture {
     device: Arc<Device>,
     index: u32,
     /// Its own image, which its slot shows: none while the slot shows a stand-in.
     shown: Option<Image>,
+    /// The stand-in's image its slot shows while it has none of its own, held so that it lives
+    /// while the slot shows it, however long the stand-in itself does.
+    stood_in: Option<Arc<Owned>>,
     /// The image being streamed into it, which its slot shows once the last part is copied.
     pending: Option<Pending>,
     /// Its debug name, which its errors name it by.
@@ -175,13 +179,35 @@ pub struct Texture {
 pub(crate) struct Image {
     pub(crate) raw: vk::Image,
     pub(crate) view: vk::ImageView,
-    allocation: Allocation,
+    /// The image, its view and its memory, which the slots that show it as a stand-in hold too.
+    owned: Arc<Owned>,
     pub(crate) extent: vk::Extent2D,
     /// How many mip levels it has.
     pub(crate) levels: u32,
     pub(crate) format: TextureFormat,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     pub(crate) written: bool,
+}
+
+/// A texture's image and view in GPU memory, held by the texture whose image it is and by the
+/// textures whose slots show it as their stand-in: it retires, until the GPU is done with the
+/// frames and copies that may use it, once none of them holds it. A slot that stops showing it
+/// has the new view in the set of the frame being recorded at once and in each other set as its
+/// next frame begins, which retiring by frames covers, as for a texture's own image.
+pub(crate) struct Owned {
+    device: Arc<Device>,
+    raw: vk::Image,
+    view: vk::ImageView,
+    /// Taken as it retires.
+    allocation: Option<Allocation>,
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if let Some(allocation) = self.allocation.take() {
+            (self.device).retire(Retired::Image(self.raw, self.view, allocation));
+        }
+    }
 }
 
 /// An image being streamed into a texture.
@@ -234,6 +260,7 @@ impl Texture {
             device: device.clone(),
             index,
             shown: Some(image),
+            stood_in: None,
             pending: None,
             name: name.to_owned(),
         })
@@ -241,9 +268,10 @@ impl Texture {
 
     /// A texture in placed slot `slot`, one of the first [`PLACED_TEXTURES`](crate::PLACED_TEXTURES),
     /// so that its index is known before it's made, with `name` as its debug name. It has no image
-    /// of its own: its slot shows `stand_in`'s, a texture [`Texture::new`] made, until an image
-    /// streamed into it is shown. The stand-in must outlive the frames that may sample the slot
-    /// while it shows it: a texture dropped retires its own image, not the slots that show it.
+    /// of its own: its slot shows the image `stand_in` shows, as a texture [`Texture::new`] made
+    /// does, until an image streamed into it is shown. The texture holds that image while its slot
+    /// shows it, so the stand-in may be dropped, refilled or hidden meanwhile: the image retires
+    /// once neither it nor a slot that shows it holds it.
     ///
     /// # Panics
     ///
@@ -255,13 +283,14 @@ impl Texture {
         let bindless = device.bindless();
         let index = bindless.reserve(Some(slot), name)?;
         // SAFETY: the view is of a live sampled image, which frames write before any shader
-        // samples it, as for the texture it's of. No frame uses the slot, which was free when it
-        // was reserved.
+        // samples it, as for the texture it's of, and which the texture holds while its slot shows
+        // it. No frame uses the slot, which was free when it was reserved.
         unsafe { bindless.write(device.raw(), stood_in.view, index) };
         Ok(Self {
             device: device.clone(),
             index,
             shown: None,
+            stood_in: Some(stood_in.owned.clone()),
             pending: None,
             name: name.to_owned(),
         })
@@ -292,7 +321,7 @@ impl Texture {
             released: 0,
         };
         if let Some(old) = self.pending.replace(pending) {
-            old.image.retire(&self.device);
+            old.image.retire();
         }
         Ok(())
     }
@@ -302,7 +331,7 @@ impl Texture {
     /// showing what it shows. For an image given up on before it's shown, as one replaced is.
     pub fn discard(&mut self) {
         if let Some(pending) = self.pending.take() {
-            pending.image.retire(&self.device);
+            pending.image.retire();
         }
     }
 
@@ -360,9 +389,19 @@ impl Texture {
     }
 
     /// Shows `image` in its slot's place in the texture's own state, taking the image it showed
-    /// before, which the caller retires: the slot's rewrite is the frame's.
+    /// before, which the caller retires, and letting go of the stand-in's, which retires once
+    /// nothing else holds it: the slot's rewrite is the frame's, and comes first.
     pub(crate) fn show(&mut self, image: Image) -> Option<Image> {
+        self.stood_in = None;
         self.shown.replace(image)
+    }
+
+    /// Shows `stand_in`'s image in its slot's place in the texture's own state, holding it while
+    /// the slot shows it, and letting go of the stand-in's it showed before, if it did: the slot's
+    /// rewrite is the frame's, and comes first. The image it showed of its own is the caller's to
+    /// take and retire.
+    pub(crate) fn stand_in(&mut self, stand_in: &Image) {
+        self.stood_in = Some(stand_in.owned.clone());
     }
 
     /// Takes the image being streamed into it, if one is: to show, or to retire.
@@ -385,7 +424,7 @@ impl Image {
     ///
     /// If a side is 0, or more than [`MAX_TEXTURE_SIZE`].
     fn new(
-        device: &Device,
+        device: &Arc<Device>,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -442,7 +481,12 @@ impl Image {
         Ok(Self {
             raw,
             view,
-            allocation,
+            owned: Arc::new(Owned {
+                device: device.clone(),
+                raw,
+                view,
+                allocation: Some(allocation),
+            }),
             extent,
             levels,
             format,
@@ -472,26 +516,25 @@ impl Image {
         self.format.bytes(self.size(), self.levels > 1)
     }
 
-    /// Retires the image until the GPU is done with the frames and copies that may use it.
-    pub(crate) fn retire(self, device: &Device) {
-        device.retire(Retired::Image(self.raw, self.view, self.allocation));
+    /// Retires the image until the GPU is done with the frames and copies that may use it, once
+    /// no slot that shows it as a stand-in holds it.
+    pub(crate) fn retire(self) {
+        drop(self);
     }
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
+        // The slot first, retired by the same frames as the images it may show, which go once
+        // nothing else holds them.
+        self.device.retire(Retired::Slot(self.index));
         if let Some(pending) = self.pending.take() {
-            pending.image.retire(&self.device);
+            pending.image.retire();
         }
-        match self.shown.take() {
-            Some(image) => self.device.retire(Retired::Texture(
-                image.raw,
-                image.view,
-                image.allocation,
-                self.index,
-            )),
-            None => self.device.retire(Retired::Slot(self.index)),
+        if let Some(image) = self.shown.take() {
+            image.retire();
         }
+        self.stood_in = None;
     }
 }
 

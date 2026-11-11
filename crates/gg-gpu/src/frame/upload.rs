@@ -461,7 +461,7 @@ impl<'a> Frame<'a> {
                 .rewrite(device.raw(), image.view, texture.index(), self.slot)
         };
         if let Some(old) = texture.show(image) {
-            old.retire(device);
+            old.retire();
         }
         Ok(true)
     }
@@ -470,7 +470,8 @@ impl<'a> Frame<'a> {
     /// image, if it had one, retires, and so does any image being streamed into it, with whatever
     /// was copied. The stand-in reaches the frame's bindless set at once, and each other set as
     /// its next frame begins, so frames before this one draw what the slot showed. The texture is
-    /// then as [`Texture::placed`] made it, and can be refilled again.
+    /// then as [`Texture::placed`] made it, holding the stand-in's image while its slot shows it,
+    /// and can be refilled again.
     ///
     /// # Panics
     ///
@@ -481,19 +482,22 @@ impl<'a> Frame<'a> {
         device.check_made("the stand-in", stand_in.device());
         let stood_in = stand_in.image_shown("a stand-in");
         // SAFETY: the stand-in's view is of a live sampled image, which frames write before any
-        // shader samples it, as for the texture it's of, and which retires by frames, so it lives
-        // until this frame has finished; the slot of the frame being recorded is this one's, whose
-        // set's last frame has finished.
+        // shader samples it, as for the texture it's of. The texture holds it from here on while
+        // its slot shows it, and the image retires by frames once nothing holds it, so it lives
+        // until every frame that may sample it through the slot has finished, however long the
+        // stand-in itself does. The slot of the frame being recorded is this one's, whose set's
+        // last frame has finished.
         unsafe {
             device
                 .bindless()
                 .rewrite(device.raw(), stood_in.view, texture.index(), self.slot)
         };
+        texture.stand_in(stood_in);
         if let Some(pending) = texture.take_pending() {
-            pending.image.retire(device);
+            pending.image.retire();
         }
         if let Some(image) = texture.take_shown() {
-            image.retire(device);
+            image.retire();
         }
     }
 

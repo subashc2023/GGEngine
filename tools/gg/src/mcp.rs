@@ -1,17 +1,20 @@
 //! `gg mcp`: the tool API served to agents that speak MCP, the Model Context Protocol, over stdio:
 //! JSON-RPC 2.0 messages, a line each, read on stdin and answered on stdout, as MCP's stdio
 //! transport has them. Each tool is a method of the API, or `gg`'s `sessions`, and answers what
-//! they answer, as JSON text, a capture its PNG too. Each call connects afresh to the game the
-//! options choose, so that one `gg run` restarted is the one it reaches, as the MCP client its
-//! `initialize` names, the author of the edits it applies; `mcp` if it names none.
+//! they answer, as JSON text, a capture its PNG too if it's asked to inline it. Each call connects
+//! afresh to the game the options choose, so that one `gg run` restarted is the one it reaches, as
+//! the MCP client its `initialize` names, the author of the edits it applies; `mcp` if it names
+//! none.
 
 use std::fs;
 use std::io::{self, BufRead, Write as _};
+use std::time::Duration;
 
 use gg_api::{Failure, LogEvents};
 use serde_json::{Map, Value, json};
 
 use crate::game::{self, Pick};
+use crate::runs;
 
 /// The versions of MCP served, the latest first: a client's own, if it's one of them, or else the
 /// latest. Those that `initialize`, `tools/list` and `tools/call` are the same in, which is all
@@ -31,7 +34,8 @@ takes back your last; a scene file saved while the game runs is an edit too, its
 path, which `undo` with that author takes back. While the game plays a copy of its world as \
 edited, as after the editor's Play, an edit goes with the copy at `stop`; a scene file's save \
 lasts. `edits` lists each author's edits. `scene` saves the open scene, the scene file `status` \
-names, whose `unsaved` says whether it differs from the file, writing its entities, never those \
+names, whose `unsaved` says whether it differs from the file, and `edited` whether you or another \
+author edited it since, as play changes it too, writing its entities, never those \
 the game's code made; or opens another scene file in its place, or empties it, neither of which \
 can be undone. `look` sets parts of the view's look, its viewpoint, an outline round an entity, a \
 grid, and whether colliders' outlines show, which the editor and any other client set too, the \
@@ -59,7 +63,10 @@ logs say each sound and music it starts, `Sound started` and `Music started`, at
 `debug` debugs its Luau scripts: set a script's breakpoints by its path and lines, then wait for \
 a stop with `wait_ms`, and read the stack's locals; while a script has stopped, the game waits \
 inside its tick, and so do the other tools' requests, but `logs` and `sessions`, until `debug` \
-continues or steps.";
+continues or steps. Under `gg run`, an edit to the game's code is patched in, or rebuilt and the \
+game started again from a snapshot: `wait` waits until the game runs it, or says why it doesn't, \
+with rustc's errors; while it rebuilds, the other tools fail with `gg.rebuilding`, and once a build \
+has failed and the game has ended, with `gg.build_failed`.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -256,9 +263,22 @@ fn tools() -> Value {
         tool(
             "status",
             "The game's ticks, whether it's paused, whether it's stopped, its frames, its \
-             entities, its view's size, its open scene's file, as `scene` names it, and whether \
-             the open scene is unsaved.",
+             entities, its view's size, its open scene's file, as `scene` names it, whether \
+             the open scene is unsaved, which a game playing from its start is as soon as its \
+             ticks move what the file holds, and whether authors have edited it, `edited`, since \
+             it was saved or opened, which ticks don't change.",
             json!({}),
+            &[],
+        ),
+        tool(
+            "wait",
+            "Waits until the game under `gg run` runs the code of every edit to its sources saved \
+             before the call, patched or rebuilt and started again, and answers what the run is \
+             doing; fails with `gg.build_failed` and rustc's errors if the edits don't build, the \
+             game running its code as it was, with `gg.waiting` if the game ended and waits for \
+             a change, and with `gg.timeout` after `timeout_s` seconds (300). Call it after \
+             editing the game's code, before checking what the edit does.",
+            json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300}}),
             &[],
         ),
         tool("pause", "Pauses the game's simulation.", json!({}), &[]),
@@ -324,10 +344,16 @@ fn tools() -> Value {
         ),
         tool(
             "capture",
-            "The game's view as a PNG, once a frame renders it, and where it's written: as it's \
-             shown, the look included, but without the game's UI; or with `own`, as the game shows \
-             it on its own, through its own viewpoint, without the look.",
-            json!({"own": {"type": "boolean", "default": false}}),
+            "Writes the game's view as a PNG, once a frame renders it, and answers where, its \
+             `path`, which a tool that reads images opens: as it's shown, the look included, but \
+             without the game's UI; or with `own`, as the game shows it on its own, through its \
+             own viewpoint, without the look. With `inline`, the answer holds the image too, \
+             which a large view makes large. The game keeps its newest 32 captures.",
+            json!({
+                "own": {"type": "boolean", "default": false},
+                "inline": {"type": "boolean", "default": false,
+                           "description": "Whether the answer holds the PNG itself"},
+            }),
             &[],
         ),
         tool(
@@ -694,20 +720,35 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             call("apply", json!({"operations": [{"set": arguments}]}))
         }
         "capture" => {
+            let inline = match arguments.remove("inline") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(inline)) => inline,
+                Some(given) => {
+                    let message = format!("`inline` is true or false, not {given}");
+                    return Err(Failure::new("gg.args", message));
+                }
+            };
             let params = match arguments.remove("own") {
                 None | Some(Value::Null) => json!({}),
                 Some(own) => json!({"own": own}),
             };
             let captured = game::call(pick, "capture", params)?;
-            let result: Value = serde_json::from_str(captured.get()).unwrap_or(Value::Null);
-            let path = result
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let png = fs::read(path).map_err(|error| {
-                Failure::new("gg.io", format!("can't read the capture {path}: {error}"))
-            })?;
-            Ok(Ran::Image(captured.get().to_owned(), png))
+            captured_as(captured.get(), inline)
+        }
+        "wait" => {
+            let timeout = match arguments.get("timeout_s") {
+                None | Some(Value::Null) => 300,
+                Some(given) => given
+                    .as_u64()
+                    .filter(|&seconds| seconds > 0)
+                    .ok_or_else(|| {
+                        let message =
+                            format!("`timeout_s` is a whole number of seconds, not {given}");
+                        Failure::new("gg.args", message)
+                    })?,
+            };
+            let told = runs::wait(pick, Duration::from_secs(timeout))?;
+            Ok(Ran::Json(told.to_string()))
         }
         "logs" => {
             let level = arguments.get("level").and_then(Value::as_str);
@@ -751,6 +792,26 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
     }
 }
 
+/// What a capture that the game answered `captured` gives: its answer, which names the PNG's path,
+/// for a tool that reads images to open, so that an agent's context doesn't hold every capture it
+/// takes; and with `inline`, the PNG too.
+///
+/// Fails with `gg.io` if the PNG it inlines can't be read.
+fn captured_as(captured: &str, inline: bool) -> Result<Ran, Failure> {
+    if !inline {
+        return Ok(Ran::Json(captured.to_owned()));
+    }
+    let result: Value = serde_json::from_str(captured).unwrap_or(Value::Null);
+    let path = result
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let png = fs::read(path).map_err(|error| {
+        Failure::new("gg.io", format!("can't read the capture {path}: {error}"))
+    })?;
+    Ok(Ran::Image(captured.to_owned(), png))
+}
+
 /// `bytes` in base64, as MCP's images are.
 fn base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -773,8 +834,6 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     fn pick() -> Pick {
@@ -786,6 +845,23 @@ mod tests {
             grant: None,
             project: None,
         }
+    }
+
+    /// A capture answers where its PNG is, and inlines the PNG only if it's asked to.
+    #[test]
+    fn a_capture_inlines_its_png_only_if_asked() {
+        let path = std::env::temp_dir().join(format!("gg-mcp-capture-{}.png", std::process::id()));
+        fs::write(&path, b"a png").expect("written");
+        let captured = json!({"path": path, "ticks": 3}).to_string();
+        let named = captured_as(&captured, false);
+        let inlined = captured_as(&captured, true);
+        let _ = fs::remove_file(&path);
+        assert!(matches!(named, Ok(Ran::Json(answer)) if answer == captured));
+        assert!(matches!(inlined, Ok(Ran::Image(_, png)) if png == b"a png"));
+        let gone = captured_as(&captured, true)
+            .err()
+            .map(|failure| failure.code);
+        assert_eq!(gone.as_deref(), Some("gg.io"));
     }
 
     #[test]
@@ -941,9 +1017,15 @@ mod tests {
             r#"{"level":"loud"}"#,
             r#"{"from":"later"}"#,
             r#"{"from":3}"#,
+            r#"{"inline":"yes"}"#,
         ] {
+            let name = if arguments.contains("inline") {
+                "capture"
+            } else {
+                "logs"
+            };
             let call = format!(
-                r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"logs","arguments":{arguments}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             );
             let answer = answer(&mut pick(), &call).expect("answered");
             assert_eq!(answer["result"]["isError"], true, "{arguments}");

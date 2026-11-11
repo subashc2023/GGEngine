@@ -92,7 +92,7 @@ use gg_core::{Error, Result};
 use tracing::{debug, error, info, warn};
 
 use crate::args::{Conditions, Net};
-use crate::assets::Counts;
+use crate::assets::{Asset, Counts};
 use crate::edits::{Done, Edit};
 use crate::layer::Commands;
 use crate::recording::text::{self, Text};
@@ -199,40 +199,118 @@ struct Predicted {
 #[derive(Default)]
 pub(crate) struct Merged {
     pub(crate) inputs: Vec<(Option<Ticket>, Outside)>,
-    commands: Vec<(usize, String)>,
+    commands: Vec<Queued>,
     /// The patches that apply before the tick, in order, with their tickets.
     #[cfg(feature = "dev")]
     pub(crate) patches: Vec<(Ticket, subsecond::JumpTable)>,
 }
 
+/// A layer's command for a tick, as text, and whose it is.
+struct Queued {
+    layer: usize,
+    /// The player whose command it is, `None` for a server's own.
+    player: Option<u8>,
+    /// Whether it's a server's client's, which the server took or the client predicts: its text may
+    /// name only the assets loaded, as [`unloaded`] says, so that a client predicts what its server
+    /// refuses as refused. A lockstep peer's and a server's own name assets as a run that follows
+    /// another does, loading what they name, as each peer loads alike what both peers' inputs name,
+    /// and a replay what its recording's name.
+    remote: bool,
+    text: String,
+}
+
+impl Queued {
+    /// The commands `commands` of player `player`, each with its layer's index, `remote` as
+    /// [`Queued::remote`] says.
+    fn of(
+        commands: impl IntoIterator<Item = (usize, String)>,
+        player: Option<u8>,
+        remote: bool,
+    ) -> impl Iterator<Item = Self> {
+        commands.into_iter().map(move |(layer, text)| Self {
+            layer,
+            player,
+            remote,
+            text,
+        })
+    }
+}
+
 impl Merged {
-    /// Empties `queue`, layer `layer`'s, and fills it with the layer's commands for the tick, read
-    /// against `cx`'s world, once the textures they name are loaded, as a run that follows another
-    /// loads them.
+    /// Empties `queue`, layer `layer`'s, of the type `name` names, and fills it with the layer's
+    /// commands for the tick, read against `cx`'s world: a client's of a server's as names alone,
+    /// those it names that the server hasn't loaded refused, and the others once the assets they
+    /// name are loaded, as a run that follows another loads them.
     ///
-    /// Fails with `net.bad_command` for a command the layer refuses, or that isn't one.
+    /// A command the layer refuses, or that isn't one, is refused alone, and the commands after it
+    /// go on; those refused are logged once a layer and tick, as `net.bad_command`, with how many
+    /// and the first's player and why, as a client may send thousands a packet.
     pub(crate) fn fill(
         &self,
         layer: usize,
+        name: &str,
         queue: &mut dyn Commands,
         cx: &mut Context,
-    ) -> Result<()> {
+    ) {
         queue.clear();
-        let commands = self.commands.iter().filter(|(of, _)| *of == layer);
-        for (_, command) in commands {
-            let value = Text::parse(command, 1).map(|text| {
-                cx.load_followed(&text);
-                text.value(cx.world())
+        let mut refused = 0;
+        let mut first = None;
+        let commands = self.commands.iter().filter(|queued| queued.layer == layer);
+        for queued in commands {
+            let pushed = Text::parse(&queued.text, 1).and_then(|text| {
+                if queued.remote {
+                    unloaded(&text, cx.world())?;
+                } else {
+                    cx.load_followed(&text);
+                }
+                queue.push(&text.value(cx.world()))
             });
-            value
-                .and_then(|value| queue.push(&value))
-                .map_err(|error| {
-                    let message = format!("layer {layer} refuses a peer's command: {error}");
-                    Error::new("net.bad_command", message)
-                })?;
+            if let Err(error) = pushed {
+                refused += 1;
+                first.get_or_insert((queued.player, error));
+            }
         }
-        Ok(())
+        if let Some((player, error)) = first {
+            let whose = match player {
+                Some(player) => format!("player {player}'s"),
+                None => "the server's own".to_owned(),
+            };
+            error!(
+                code = "net.bad_command",
+                layer = name,
+                player,
+                refused,
+                "Refused {refused} commands for layer {name}, the first {whose}: {error:#}"
+            );
+        }
     }
+}
+
+/// Fails with `net.bad_command` if `text`, a command a server's client sent, or its own as it
+/// predicts it, names a texture, model, font or prefab that `world` hasn't loaded: a server's
+/// client names only those its server has, as its state does, so that it can't have its server
+/// load or stand in for whatever it names. A name the server would find in the game, but hasn't
+/// loaded, is refused too: once loaded, the server's states would name it, and a client that
+/// hasn't loaded it can't read them.
+fn unloaded(text: &Text, world: &World) -> Result<()> {
+    let mut names = Vec::new();
+    text.assets(&mut names);
+    let assets = world.assets();
+    let Some(unloaded) = names.iter().find(|named| !assets.has(named)) else {
+        return Ok(());
+    };
+    let kind = match unloaded {
+        Asset::Texture(_) => "texture",
+        Asset::Model(_) => "model",
+        Asset::Font(_) => "font",
+        Asset::Prefab(_) => "prefab",
+    };
+    let message = format!(
+        "it names {kind} `{}`, which the server hasn't loaded, and a client's commands name only \
+         those it has",
+        unloaded.name()
+    );
+    Err(Error::new("net.bad_command", message))
 }
 
 /// A connection to the other peer: what writes to it, and the lines its thread reads; and the
@@ -1163,8 +1241,15 @@ impl Lockstep {
             [theirs, ours]
         };
         let mut merged = Merged::default();
-        for peer in peers.into_iter().flatten() {
-            merged.commands.extend(peer.commands.iter().cloned());
+        for (player, peer) in (0..).zip(peers) {
+            let Some(peer) = peer else {
+                continue;
+            };
+            merged.commands.extend(Queued::of(
+                peer.commands.iter().cloned(),
+                Some(player),
+                false,
+            ));
             if !settled {
                 continue;
             }
@@ -3339,5 +3424,130 @@ mod tests {
         }
         let kept: Vec<u64> = peer.theirs.keys().copied().collect();
         assert_eq!(kept, [0, 2, 63]);
+    }
+
+    /// A command that shows a texture.
+    #[derive(Reflect)]
+    struct Show(crate::Texture);
+
+    /// A tick's commands fill their layer's queue each alone: one that isn't one, or that the layer
+    /// refuses, is refused, logged with its player, and those after it are queued still. A server's
+    /// client's name only the assets the server has loaded, one naming another refused before
+    /// anything loads it, where a peer's loads what it names, standing in for what can't be, as a
+    /// replay's does.
+    #[test]
+    fn commands_fill_their_queue_each_alone_a_client_s_naming_only_what_s_loaded() {
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let mut cx = Context::seeded(1);
+        let missing = "assets/missing.png";
+        let shows = format!("Struct([(\"0\", Texture(\"{missing}\"))])");
+        let queued = |player: u8, remote: bool, text: &str| Queued {
+            layer: 0,
+            player: Some(player),
+            remote,
+            text: text.to_owned(),
+        };
+        let fill = |commands: Vec<Queued>, cx: &mut Context| {
+            let merged = Merged {
+                commands,
+                ..Merged::default()
+            };
+            let mut queue: Vec<Show> = Vec::new();
+            merged.fill(0, "Shows", &mut queue, cx);
+            queue.len()
+        };
+        let loaded = |cx: &Context| cx.world().assets().has(&Asset::Texture(missing));
+        let refused = [queued(1, true, "Struct("), queued(2, true, &shows)];
+        assert_eq!(fill(refused.into(), &mut cx), 0);
+        assert!(!loaded(&cx), "a client's command loads nothing");
+        let codes: Vec<String> = logged.try_iter().collect();
+        let bad = codes.iter().filter(|code| *code == "net.bad_command");
+        assert_eq!(bad.count(), 1, "one for the layer and tick: {codes:?}");
+        let taken = [
+            queued(1, false, "UInt(3)"),
+            queued(0, false, &shows),
+            queued(2, true, &shows),
+        ];
+        assert_eq!(fill(taken.into(), &mut cx), 2);
+        assert!(loaded(&cx), "a peer's command stands in for it");
+    }
+
+    /// The entities a joiner and its host spawn after it joins take the same slots, as code that
+    /// orders by [`Entity`] needs: the host's authors' logs go as it sends its world, warning how
+    /// many edits went, and the slots they kept vacant for their undos are freed, as the joiner's
+    /// load frees them; and no undo reaches past the world the joiner started from.
+    #[test]
+    fn a_joiner_and_its_host_spawn_into_the_same_slots() {
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        // Entities made and deleted by an edit, as a peer's are between ticks, behind the session's
+        // back.
+        let edit = |peer: &mut Peer, operations: Vec<Operation>| {
+            let edit = Edit::Apply {
+                author: "editor".to_owned(),
+                operations,
+            };
+            match peer.cx.apply_edit(edit).expect("applied") {
+                Done::Applied(made) => made,
+                Done::Stepped(_) => panic!("an apply"),
+            }
+        };
+        let create = || Operation::Create {
+            entity: None,
+            parent: None,
+            components: Vec::new(),
+        };
+        let spawned = |peer: &mut Peer| {
+            let made = edit(peer, vec![create(), create(), create(), create()]);
+            let world = peer.cx.world();
+            let made = made.into_iter().map(|id| world.entity(id).expect("alive"));
+            made.collect::<Vec<_>>()
+        };
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let gone = edit(&mut host, vec![create(), create(), create()]);
+        let delete = gone.into_iter().map(|entity| Operation::Delete { entity });
+        edit(&mut host, delete.collect());
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+        let at = host.next.max(joiner.next) + 1;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let undo = Edit::Undo {
+            author: "editor".to_owned(),
+        };
+        let undone = host.cx.apply_edit(undo).expect("stepped");
+        assert_eq!(undone, Done::Stepped(None));
+        assert_eq!(spawned(&mut host), spawned(&mut joiner));
+        let cleared = logged
+            .try_iter()
+            .filter(|code| code == "edits.history_cleared");
+        assert_eq!(cleared.count(), 1);
+    }
+
+    /// A renewal, as a lockstep host's as it sends its joiner its world, refuses the entries of
+    /// every log from before, a layer's as the Inspector keeps its own among them, not only the
+    /// authors': its undo is refused, and its clear frees nothing the renewal freed, so that no two
+    /// entities take one slot. It's an edit, which a recording keeps, so that a replay renews its
+    /// world where the run did.
+    #[test]
+    fn a_renewal_refuses_every_log_s_entries_from_before() {
+        let mut cx = Context::seeded(1);
+        let world = cx.world_mut();
+        let gone = world.spawn(crate::Transform::IDENTITY);
+        let id = world.id(gone).expect("an ID");
+        let mut log = crate::Log::default();
+        let delete = Operation::Delete { entity: id };
+        log.apply(world, delete).expect("deleted");
+        let renew = Edit::from_value(&Edit::Renew.to_value()).expect("an edit");
+        cx.apply_edit(renew).expect("renewed");
+        let world = cx.world_mut();
+        assert!(log.undo(world).is_err(), "refused");
+        log.clear(world);
+        let [a, b] = [0, 1].map(|_| world.spawn(crate::Transform::IDENTITY));
+        assert_ne!(a.slot(), b.slot());
+        assert!(world.entity(id).is_none());
     }
 }

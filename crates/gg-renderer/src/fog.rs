@@ -82,9 +82,29 @@ impl Default for Fog {
 }
 
 impl Fog {
-    /// Whether it fogs anything, as fog of a density of 0 or less, or of none, doesn't.
+    /// The name of the first of its fields that isn't finite, a NaN or an infinity, which would
+    /// turn the whole view black, if any is: such fog shows as none does.
+    pub fn non_finite(&self) -> Option<&'static str> {
+        let numbers = [
+            ("density", self.density),
+            ("falloff", self.falloff),
+            ("height", self.height),
+            ("start", self.start),
+            ("opacity", self.opacity),
+            ("color.x", self.color.x),
+            ("color.y", self.color.y),
+            ("color.z", self.color.z),
+            ("luminance", self.luminance),
+            ("sun", self.sun),
+            ("sharpness", self.sharpness),
+        ];
+        (numbers.into_iter()).find_map(|(name, number)| (!number.is_finite()).then_some(name))
+    }
+
+    /// Whether it fogs anything, as fog of a density of 0 or less, or of none, or whose numbers
+    /// aren't finite, doesn't.
     pub(crate) fn shows(&self) -> bool {
-        self.density > 0.0
+        self.density > 0.0 && self.non_finite().is_none()
     }
 }
 
@@ -290,5 +310,87 @@ mod tests {
             ..fog
         };
         assert_eq!(FogData::new(Some(sharp), None, &[], 1.0).lobe, SHARPEST);
+    }
+
+    /// Fog with a NaN or an infinity in any of its numbers names it, doesn't show and fogs nothing,
+    /// as its light would turn the whole view black.
+    #[test]
+    fn fog_with_a_number_that_isnt_finite_names_it_and_fogs_nothing() {
+        let finite = Fog::default();
+        assert_eq!(finite.non_finite(), None);
+        let broken = [
+            (
+                Fog {
+                    density: f32::INFINITY,
+                    ..finite
+                },
+                "density",
+            ),
+            (
+                Fog {
+                    falloff: f32::NAN,
+                    ..finite
+                },
+                "falloff",
+            ),
+            (
+                Fog {
+                    height: f32::NEG_INFINITY,
+                    ..finite
+                },
+                "height",
+            ),
+            (
+                Fog {
+                    start: f32::NAN,
+                    ..finite
+                },
+                "start",
+            ),
+            (
+                Fog {
+                    opacity: f32::NAN,
+                    ..finite
+                },
+                "opacity",
+            ),
+            (
+                Fog {
+                    color: Vec3::new(1.0, f32::NAN, 1.0),
+                    ..finite
+                },
+                "color.y",
+            ),
+            (
+                Fog {
+                    luminance: f32::INFINITY,
+                    ..finite
+                },
+                "luminance",
+            ),
+            (
+                Fog {
+                    sun: f32::NAN,
+                    ..finite
+                },
+                "sun",
+            ),
+            (
+                Fog {
+                    sharpness: f32::NAN,
+                    ..finite
+                },
+                "sharpness",
+            ),
+        ];
+        for (fog, name) in broken {
+            assert_eq!(fog.non_finite(), Some(name), "{fog:?}");
+            assert!(!fog.shows(), "{fog:?} shows");
+            assert_eq!(
+                FogData::new(Some(fog), None, &[], 1.0),
+                FogData::default(),
+                "{fog:?}"
+            );
+        }
     }
 }

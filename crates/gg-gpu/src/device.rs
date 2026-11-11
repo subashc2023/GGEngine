@@ -34,7 +34,8 @@ pub(crate) enum Retired {
     StorageView(vk::ImageView, u32),
     /// Memory that images were made in, which goes once they're done with.
     Memory(Allocation),
-    /// A slot in the bindless sets that shows another texture's image.
+    /// A texture's slot in the bindless sets, which goes apart from the images it showed: they go
+    /// once nothing holds them.
     Slot(u32),
     Pipeline(vk::Pipeline),
 }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 use gg_core::{Error, Result};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{COLOR_RANGE, Device, Surface, vk_error};
 
@@ -19,6 +19,9 @@ pub struct Swapchain {
     /// Signaled by each paced acquire once the display has let go of the image, and reset after
     /// the wait on it.
     available: vk::Fence,
+    /// Whether a paced acquire's wait on `available`, or its reset, failed: the next waits for it
+    /// and resets it before acquiring, so that no acquire signals it while it may be signaled.
+    available_owed: bool,
     extent: vk::Extent2D,
     /// The window's size, for surfaces that take their size from the swapchain.
     window_extent: vk::Extent2D,
@@ -32,6 +35,13 @@ pub struct Swapchain {
     rendered: Vec<vk::Semaphore>,
     /// Set when the swapchain no longer matches the window and must be rebuilt.
     stale: bool,
+    /// Set when the window's surface was lost, so that the next acquire makes another for the
+    /// window, and the swapchain again.
+    surface_lost: bool,
+    /// Set once acquiring, rebuilding or presenting failed for good, as [`Swapchain::lost`] says:
+    /// the swapchain presents nothing again, and frames leave it out, but for one it's the first
+    /// target of, which [`Swapchain::acquire`] fails.
+    lost: bool,
 }
 
 impl Swapchain {
@@ -62,50 +72,11 @@ impl Swapchain {
             ));
         }
         let name = surface.name();
-        // The surface, by the debug name it's given below.
-        let surface_named = format_args!("surface \"{name} surface\" on device {gpu:?}");
-        // SAFETY: the physical device and the surface are live, and the family is the device's.
-        let presents = unsafe {
-            surface.surface_fn().get_physical_device_surface_support(
-                device.physical(),
-                device.graphics_family(),
-                surface.raw(),
-            )
-        }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", surface_named, e))?;
-        if !presents {
-            return Err(Error::new(
-                "gpu.no_present",
-                format!(
-                    "{}'s graphics queue can't present to the window",
-                    device.name()
-                ),
-            ));
-        }
-        // SAFETY: the physical device and the surface are live.
-        let formats = unsafe {
-            surface
-                .surface_fn()
-                .get_physical_device_surface_formats(device.physical(), surface.raw())
-        }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", surface_named, e))?;
+        let (formats, present_modes) = support(device, &surface)?;
         let format = choose_format(&formats).ok_or_else(|| {
             Error::new(
                 "gpu.no_surface_format",
                 format!("{} offers no formats for the window", device.name()),
-            )
-        })?;
-        // SAFETY: the physical device and the surface are live.
-        let present_modes = unsafe {
-            surface
-                .surface_fn()
-                .get_physical_device_surface_present_modes(device.physical(), surface.raw())
-        }
-        .map_err(|e| {
-            vk_error(
-                "vkGetPhysicalDeviceSurfacePresentModesKHR",
-                surface_named,
-                e,
             )
         })?;
         debug!(modes = ?present_modes, "Present modes");
@@ -133,12 +104,15 @@ impl Swapchain {
             format,
             present_mode,
             available,
+            available_owed: false,
             extent: vk::Extent2D::default(),
             window_extent: vk::Extent2D { width, height },
             images: Vec::new(),
             views: Vec::new(),
             rendered: Vec::new(),
             stale: true,
+            surface_lost: false,
+            lost: false,
         };
         swapchain.rebuild()?;
         Ok(swapchain)
@@ -147,6 +121,16 @@ impl Swapchain {
     /// The format of the images it presents, which pipelines that draw into them are made for.
     pub fn format(&self) -> crate::Format {
         crate::Format::new(self.format.format)
+    }
+
+    /// Whether the swapchain is lost for good, so it presents nothing again: acquiring, rebuilding
+    /// or presenting failed other than by running out of memory, after which it's rebuilt, or by
+    /// the device's loss, which fails every frame; or its window's surface was lost, and another
+    /// couldn't be made for the window, as when the window is gone. Frames go on without it, into
+    /// their other targets; a frame it's the first target of fails to begin, with
+    /// `gpu.swapchain_lost`. Only another swapchain, with another surface, presents to the window.
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     /// Tells the swapchain that the window is now `width` by `height`, so that it's rebuilt
@@ -165,6 +149,14 @@ impl Swapchain {
     /// next frame, or, without `pace`, no image is free yet. With `pace`, it adds how long it
     /// waited for the display to `waited`, which a rebuild first isn't part of.
     ///
+    /// A failure leaves `acquired` unsignaled. A surface lost is made again for the window, and
+    /// the swapchain with it, then acquired from once more; running out of memory leaves the
+    /// swapchain to rebuild at the next acquire; the device's loss fails every frame; any other
+    /// failure, or a surface that can't be made again, leaves the swapchain lost
+    /// ([`Swapchain::lost`]), and every acquire after fails with `gpu.swapchain_lost`. An image
+    /// acquired is given whatever follows, so that it's presented and its semaphore waited on: a
+    /// failed wait for the display only goes unpaced, and the next paced acquire waits first.
+    ///
     /// # Safety
     ///
     /// `acquired` must be unsignaled, with no wait on it pending.
@@ -174,8 +166,127 @@ impl Swapchain {
         pace: bool,
         waited: &mut Duration,
     ) -> Result<Option<u32>> {
+        if self.lost {
+            let name = self.surface.name();
+            return Err(Error::new(
+                "gpu.swapchain_lost",
+                format!(
+                    "swapchain \"{name} swapchain\" was lost, as a failure before said, and \
+                     presents nothing again; drop it and make another for the window"
+                ),
+            ));
+        }
+        let mut remade = false;
+        loop {
+            if self.surface_lost {
+                remade = true;
+                if let Err(error) = self.remake_surface() {
+                    // Lost for good, but for running out of memory, after which the next acquire
+                    // tries again: a window gone has no surface to make.
+                    let again = matches!(failure(&error), Failure::Device | Failure::Memory);
+                    self.lost |= !again;
+                    return Err(error);
+                }
+            }
+            // SAFETY: the caller guarantees the semaphore, which a failure leaves unsignaled.
+            let tried = unsafe { self.try_acquire(acquired, pace, waited) };
+            if let Err(error) = &tried {
+                self.note(error);
+                // A surface lost again, just after it was made, is lost for good.
+                if self.surface_lost && !remade {
+                    continue;
+                }
+                self.lost |= self.surface_lost;
+            }
+            return tried;
+        }
+    }
+
+    /// Notes what `error`, of the swapchain's, leaves it to do, as [`failure`] sorts it.
+    fn note(&mut self, error: &Error) {
+        match failure(error) {
+            Failure::Device => {}
+            Failure::Surface => self.surface_lost = true,
+            Failure::Memory => self.stale = true,
+            Failure::Lost => self.lost = true,
+        }
+    }
+
+    /// Makes another surface for the window, in place of one lost, once the device is idle and the
+    /// swapchain and its objects, the lost surface's, are destroyed: the next acquire rebuilds the
+    /// swapchain on it, in the format and present mode chosen before. Fails if the window is gone,
+    /// or the new surface can't take that format or present from the graphics queue.
+    fn remake_surface(&mut self) -> Result<()> {
+        let _zone = gg_core::zone!();
+        self.device.wait_idle()?;
+        // SAFETY: the device is idle, so nothing uses the swapchain or its objects; the surface
+        // goes after it, as it's replaced below.
+        unsafe {
+            self.destroy_views_and_semaphores();
+            self.swapchain_fn().destroy_swapchain(self.raw, None);
+        }
+        self.raw = vk::SwapchainKHR::null();
+        self.images.clear();
+        self.stale = true;
+        let surface = self.surface.remake()?;
+        // SAFETY: the surface is live, and of the device's instance.
+        unsafe { (self.device).set_name(surface.raw(), &format!("{} surface", surface.name())) };
+        let (formats, modes) = support(&self.device, &surface)?;
+        if !formats.contains(&self.format) {
+            let name = surface.name();
+            return Err(Error::new(
+                "gpu.no_surface_format",
+                format!(
+                    "surface \"{name} surface\", made again, offers no {:?} for the swapchain",
+                    self.format.format
+                ),
+            ));
+        }
+        if !modes.contains(&self.present_mode) {
+            self.present_mode = vk::PresentModeKHR::FIFO;
+        }
+        // The lost surface goes here, after the swapchain made on it.
+        self.surface = surface;
+        self.surface_lost = false;
+        info!(window = self.surface.name(), "Surface made again");
+        Ok(())
+    }
+
+    /// Waits for the fence a paced acquire signaled, and resets it, noting a failure for the next
+    /// paced acquire to wait again.
+    fn wait_available(&mut self) -> Result<()> {
+        let fences = [self.available];
+        let raw = self.device.raw();
+        // SAFETY: an acquire signaled the fence, or will, and nothing else uses it.
+        let waited = unsafe {
+            raw.wait_for_fences(&fences, true, u64::MAX)
+                .and_then(|()| raw.reset_fences(&fences))
+        };
+        self.available_owed = waited.is_err();
+        waited.map_err(|e| {
+            let name = self.surface.name();
+            let fence = format_args!("fence \"{name} swapchain image available\"");
+            vk_error("vkWaitForFences", fence, e)
+        })
+    }
+
+    /// As [`Swapchain::acquire`], but for what a failure leaves the swapchain to do.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Swapchain::acquire`].
+    unsafe fn try_acquire(
+        &mut self,
+        acquired: vk::Semaphore,
+        pace: bool,
+        waited: &mut Duration,
+    ) -> Result<Option<u32>> {
         if self.stale && !self.rebuild()? {
             return Ok(None);
+        }
+        if pace && self.available_owed {
+            // Nothing is acquired yet, so a failure here leaves nothing behind.
+            self.wait_available()?;
         }
         let swapchain_fn = self.swapchain_fn();
         let (timeout, fence) = if pace {
@@ -193,23 +304,18 @@ impl Swapchain {
             // A suboptimal image is still presented; the swapchain is rebuilt after it.
             Ok((image, suboptimal)) => {
                 self.stale |= suboptimal;
-                if pace {
-                    // Waits until the display has let go of the image, which under FIFO is at a
-                    // vertical sync, so that frames start once per refresh. Waiting only for the
-                    // GPU to finish the frame before last let them start in pairs, 1 ms apart and
-                    // then 7 ms at 240 Hz, though the display still showed one per refresh.
-                    let fences = [self.available];
-                    let raw = self.device.raw();
-                    // SAFETY: the acquire signals the fence, which nothing else uses.
-                    unsafe {
-                        raw.wait_for_fences(&fences, true, u64::MAX)
-                            .and_then(|()| raw.reset_fences(&fences))
-                    }
-                    .map_err(|e| {
-                        let name = self.surface.name();
-                        let fence = format_args!("fence \"{name} swapchain image available\"");
-                        vk_error("vkWaitForFences", fence, e)
-                    })?;
+                // Waits until the display has let go of the image, which under FIFO is at a
+                // vertical sync, so that frames start once per refresh. Waiting only for the GPU
+                // to finish the frame before last let them start in pairs, 1 ms apart and then
+                // 7 ms at 240 Hz, though the display still showed one per refresh. The image is
+                // acquired, and its semaphore signaled, whether or not the wait goes: a failure
+                // leaves it to the next paced acquire, and the image is still given, to present.
+                if pace && let Err(error) = self.wait_available() {
+                    warn!(
+                        code = error.code(),
+                        swapchain = self.surface.name(),
+                        "{error:#}; the frame goes unpaced"
+                    );
                 }
                 Some(image)
             }
@@ -232,9 +338,20 @@ impl Swapchain {
         Ok(image)
     }
 
-    /// Notes how presenting one of its images went: a suboptimal or out-of-date swapchain is
-    /// rebuilt before the next frame.
+    /// Notes how presenting one of its images went: a suboptimal or out-of-date swapchain, or
+    /// one whose present ran out of memory, which left its image acquired and its semaphore
+    /// signaled, is rebuilt before the next frame, and its semaphores with it; a surface lost is
+    /// made again at the next acquire; any other failure, but the device's loss, leaves the
+    /// swapchain lost ([`Swapchain::lost`]).
     pub(crate) fn presented(&mut self, result: vk::Result) -> Result<()> {
+        let presented = self.present_result(result);
+        if let Err(error) = &presented {
+            self.note(error);
+        }
+        presented
+    }
+
+    fn present_result(&mut self, result: vk::Result) -> Result<()> {
         match result {
             vk::Result::SUCCESS => Ok(()),
             // An out-of-date present's semaphore wait still happens, so the frame's resources
@@ -352,7 +469,17 @@ impl Swapchain {
         // its views or its semaphores. Creating the new swapchain retires the old one; the new
         // one's objects are live as they're named.
         unsafe {
-            let raw = swapchain_fn.create_swapchain(&info, None).map_err(|e| {
+            let created = swapchain_fn.create_swapchain(&info, None);
+            if created.is_err() {
+                // The old swapchain is retired whether or not the new one is made, and a create
+                // may name only one that isn't (VUID-VkSwapchainCreateInfoKHR-oldSwapchain-01933),
+                // so it goes, and the next rebuild starts afresh.
+                self.destroy_views_and_semaphores();
+                swapchain_fn.destroy_swapchain(self.raw, None);
+                self.raw = vk::SwapchainKHR::null();
+                self.images.clear();
+            }
+            let raw = created.map_err(|e| {
                 let subject = format_args!(
                     "swapchain \"{name} swapchain\" of {}x{} {:?} pixels, presenting by {:?}",
                     extent.width, extent.height, self.format.format, self.present_mode
@@ -440,15 +567,94 @@ impl Drop for Swapchain {
     fn drop(&mut self) {
         // Frames in flight may still use the images and semaphores.
         let _ = self.device.wait_idle();
-        // SAFETY: the device is idle, so nothing uses the swapchain or its objects, and every
-        // acquire that signaled the fence was waited on. The surface, a field, is destroyed after
-        // it.
+        // An acquire whose wait on the fence failed may still signal it: waited for again, for a
+        // second at most, and otherwise left undestroyed, a fence's leak rather than a signal
+        // into a destroyed fence.
+        let fence_done = !self.available_owed || {
+            let fences = [self.available];
+            // SAFETY: the fence is live, and nothing else uses it.
+            unsafe { (self.device.raw()).wait_for_fences(&fences, true, 1_000_000_000) }.is_ok()
+        };
+        if !fence_done {
+            warn!(
+                code = "gpu.fence_leaked",
+                swapchain = self.surface.name(),
+                "The swapchain's acquire fence never signaled, so it's left undestroyed"
+            );
+        }
+        // SAFETY: the device is idle, so nothing uses the swapchain or its objects, and the fence
+        // is destroyed only once every acquire that signaled it was waited on. The surface, a
+        // field, is destroyed after it.
         unsafe {
             self.destroy_views_and_semaphores();
             self.swapchain_fn().destroy_swapchain(self.raw, None);
-            self.device.raw().destroy_fence(self.available, None);
+            if fence_done {
+                self.device.raw().destroy_fence(self.available, None);
+            }
         }
     }
+}
+
+/// What a swapchain's failure leaves it to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// The device was lost, which fails every frame.
+    Device,
+    /// Its window's surface was lost: the next acquire makes another, and the swapchain on it.
+    Surface,
+    /// Memory ran out: the next acquire rebuilds the swapchain.
+    Memory,
+    /// Lost for good ([`Swapchain::lost`]).
+    Lost,
+}
+
+/// What `error`, a swapchain's, leaves it to do, by its code.
+pub(crate) fn failure(error: &Error) -> Failure {
+    match error.code() {
+        "gpu.device_lost" => Failure::Device,
+        "gpu.surface_lost" => Failure::Surface,
+        "gpu.out_of_memory" => Failure::Memory,
+        _ => Failure::Lost,
+    }
+}
+
+/// What `surface` offers `device`: its formats and present modes, checking first that the device's
+/// graphics queue presents to it.
+fn support(
+    device: &Device,
+    surface: &Surface,
+) -> Result<(Vec<vk::SurfaceFormatKHR>, Vec<vk::PresentModeKHR>)> {
+    let (name, gpu) = (surface.name(), device.name());
+    // The surface, by its debug name.
+    let surface_named = format_args!("surface \"{name} surface\" on device {gpu:?}");
+    let (surface_fn, physical) = (surface.surface_fn(), device.physical());
+    // SAFETY: the physical device and the surface are live, and the family is the device's.
+    let presents = unsafe {
+        surface_fn.get_physical_device_surface_support(
+            physical,
+            device.graphics_family(),
+            surface.raw(),
+        )
+    }
+    .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", surface_named, e))?;
+    if !presents {
+        return Err(Error::new(
+            "gpu.no_present",
+            format!("{gpu}'s graphics queue can't present to the window"),
+        ));
+    }
+    // SAFETY: the physical device and the surface are live.
+    let formats =
+        unsafe { surface_fn.get_physical_device_surface_formats(physical, surface.raw()) }
+            .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", surface_named, e))?;
+    // SAFETY: the physical device and the surface are live.
+    let modes =
+        unsafe { surface_fn.get_physical_device_surface_present_modes(physical, surface.raw()) }
+            .map_err(|e| {
+                let call = "vkGetPhysicalDeviceSurfacePresentModesKHR";
+                vk_error(call, surface_named, e)
+            })?;
+    Ok((formats, modes))
 }
 
 /// FIFO with `vsync`, and otherwise mailbox where the device has it, which renders as fast as
@@ -475,4 +681,28 @@ fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKH
         })
         .or(formats.first())
         .copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A surface lost is made again, memory run out rebuilds, the device's loss fails every frame,
+    /// and the rest lose the swapchain for good.
+    #[test]
+    fn a_swapchains_failures_remake_its_surface_rebuild_it_or_lose_it() {
+        let failed = |result| failure(&vk_error("vkAcquireNextImageKHR", "a swapchain", result));
+        assert_eq!(failed(vk::Result::ERROR_SURFACE_LOST_KHR), Failure::Surface);
+        assert_eq!(
+            failed(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY),
+            Failure::Memory
+        );
+        assert_eq!(
+            failed(vk::Result::ERROR_OUT_OF_HOST_MEMORY),
+            Failure::Memory
+        );
+        assert_eq!(failed(vk::Result::ERROR_DEVICE_LOST), Failure::Device);
+        let in_use = failed(vk::Result::ERROR_NATIVE_WINDOW_IN_USE_KHR);
+        assert_eq!(in_use, Failure::Lost);
+    }
 }

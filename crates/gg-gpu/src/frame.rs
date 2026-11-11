@@ -27,9 +27,11 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 use gg_core::{Error, Result};
-use tracing::error;
+use tracing::{error, warn};
 
+use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
+use crate::swapchain::{Failure, failure};
 use crate::vma::Memory;
 use crate::{COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error};
 use batches::{Plan, Timelines};
@@ -152,8 +154,10 @@ pub struct Frames {
     /// Whether a frame begun is still being recorded: cleared as it's submitted or dropped, so
     /// that one forgotten instead is caught as the next begins.
     recording: bool,
-    /// Whether a frame failed after acquiring an image, or to submit or present, which can leave
-    /// the semaphores its acquires signaled with no wait pending: no frame begins after that. A
+    /// Whether a frame failed after acquiring an image, other than by another target's swapchain
+    /// failing, or to submit, or the device was lost, which can leave the semaphores its acquires
+    /// signaled with no wait pending: no frame begins after that. A swapchain's own failure is its
+    /// alone, since a failed acquire signals nothing and a present waits on nothing of the frame's. A
     /// failed submit can leave batches of the frame's running too, which the frame timeline never
     /// counts, so the drop waits for the device whole after one.
     failed: bool,
@@ -399,12 +403,17 @@ impl Frames {
     /// display has let go of an image. The others are rendered into only if their swapchains have
     /// an image to give at once, so that a window on a slower display doesn't slow the frame; an
     /// offscreen image is always rendered into. Returns `None` if the first target has nothing to
-    /// render into this time, as with the swapchain of a minimized window.
+    /// render into this time, as with the swapchain of a minimized window. A swapchain after the
+    /// first that's lost for good ([`Swapchain::lost`]), or whose acquire fails other than by the
+    /// device's loss, is left out as one without an image free is, warning as it fails; the first
+    /// target's failure fails the frame, with its error, before anything is acquired. A swapchain
+    /// whose surface was lost makes another for its window as it acquires.
     ///
     /// The graph's own images are those an earlier frame made, for a graph that declared them
     /// alike, by their names, kinds and sizes, while the uses of those that share memory still
     /// don't overlap; otherwise they're made again, as the frame begins, and those before retire.
-    /// A failure to make them fails the frame before it acquires anything.
+    /// A failure to make them fails the frame before it acquires anything, as one of a side past
+    /// the device's most does, with `gpu.image_too_large`.
     ///
     /// Once the frame that last used this one's resources has finished, it copies what that frame
     /// read back ([`Frame::read_ids`], [`Frame::read_back`]), which the frame begun gives
@@ -412,9 +421,10 @@ impl Frames {
     /// ([`Frames::gpu_time`]). A frame that doesn't begin leaves what was read for the next that
     /// does: the slot forgets it only as one begins.
     ///
-    /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, or to
-    /// submit or present: the semaphores its acquires signaled may have no wait pending, so no
-    /// frame can begin again, and the frames can only be dropped.
+    /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, other than
+    /// by another target's swapchain failing, or to submit, or the device was lost: the semaphores
+    /// its acquires signaled may have no wait pending, so no frame can begin again, and the frames
+    /// can only be dropped. A swapchain's present that fails otherwise is that swapchain's alone.
     ///
     /// # Panics
     ///
@@ -435,9 +445,9 @@ impl Frames {
         if self.failed {
             return Err(Error::new(
                 "gpu.frame_failed",
-                "a frame failed after acquiring an image, or to submit or present, which can \
-                 leave its semaphores signaled, so no frame begins after it; the frames can only \
-                 be dropped",
+                "a frame failed after acquiring an image, or to submit, or the device was lost, \
+                 which can leave its semaphores signaled, so no frame begins after it; the frames \
+                 can only be dropped",
             ));
         }
         let slot = (self.submitted % FRAMES_IN_FLIGHT) as usize;
@@ -556,17 +566,18 @@ impl Frames {
         for (i, target) in targets.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
+                // Left out, as one without an image free is, since it presents nothing again.
+                Target::Swapchain(swapchain) if i > 0 && swapchain.lost() => None,
                 Target::Swapchain(swapchain) => {
                     // SAFETY: the semaphore is new, or the frame that last used this slot waited
                     // on it or left it unsignaled and has finished, so it's unsignaled with no
                     // wait pending: a frame forgotten or failed, which could have left it
                     // signaled, keeps frames from beginning.
-                    unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) }?.map(|index| {
-                        Tracked {
-                            index,
-                            layout: vk::ImageLayout::UNDEFINED,
-                            hazard: Hazard::ACQUIRED,
-                        }
+                    let acquired = unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) };
+                    skip_lost(acquired, i)?.map(|index| Tracked {
+                        index,
+                        layout: vk::ImageLayout::UNDEFINED,
+                        hazard: Hazard::ACQUIRED,
                     })
                 }
                 Target::Image(image) => Some(Tracked {
@@ -628,7 +639,7 @@ impl Frames {
                 Queue::Compute => &[vk::PipelineBindPoint::COMPUTE],
             };
             // SAFETY: the command buffer's pool was just reset, and the sets and layout live as
-            // long as the device.
+            // long as the device; the push constants are the layout's whole range, in every stage.
             unsafe {
                 begin_commands(device, batch_commands, name)?;
                 for &bind_point in bind_points {
@@ -641,6 +652,17 @@ impl Frames {
                         &[],
                     );
                 }
+                // Every push constant set, to zeros, before any pass: without maintenance4, a
+                // draw or dispatch whose shader uses one a pass didn't push is invalid
+                // (VUID-vkCmdDraw-maintenance4-08602), and with it reads what's undefined. Every
+                // pipeline shares the layout, so what's pushed holds across the batch.
+                raw.cmd_push_constants(
+                    batch_commands,
+                    bindless.pipeline_layout(),
+                    vk::ShaderStageFlags::ALL,
+                    0,
+                    &[0; PUSH_CONSTANTS as usize],
+                );
             }
             if nth == 0 {
                 let timer = &mut self.timers[queue];
@@ -745,6 +767,25 @@ impl Frames {
     /// Waits until the GPU has finished the `frame`th frame.
     fn wait(&self, frame: u64) -> Result<()> {
         wait_on(&self.device, self.timeline, "frame timeline", frame)
+    }
+}
+
+/// What a frame takes of how acquiring the image of its target `target`, a swapchain's, went:
+/// the image, or none, as acquired; for a target after the first, none in place of a failure
+/// other than the device's loss, which is logged, so that the other targets' images, acquired
+/// already, are presented, and the frame goes on without the window, whose swapchain tries again
+/// at the next acquire or is lost for good, as [`Failure`] says; and otherwise the failure, which
+/// fails the frame, the first target's before it has acquired anything.
+fn skip_lost(acquired: Result<Option<u32>>, target: usize) -> Result<Option<u32>> {
+    match acquired {
+        Err(error) if target > 0 && failure(&error) != Failure::Device => {
+            warn!(
+                code = error.code(),
+                target, "{error:#}; the frame goes on without the swapchain"
+            );
+            Ok(None)
+        }
+        acquired => acquired,
     }
 }
 
@@ -1429,12 +1470,14 @@ impl<'a> Frame<'a> {
     /// Ends the frame: submits and presents it, unless a forgotten pass is still open, whose
     /// rendering never ended, so that the frame's commands can't end either and its images go
     /// unpresented; that's an error rather than a panic, since a drop may already be unwinding.
-    /// After any failure, no frame begins again.
+    /// After a failure to submit, or the device's loss, no frame begins again; a present that
+    /// fails otherwise is its swapchain's alone, as [`Frame::present`] says, since the submission
+    /// waited on what the frame's acquires signaled.
     fn finish(&mut self) -> Result<()> {
         // Set first, so that dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
         self.frames.recording = false;
-        let finished = if self.rendering {
+        let sent = if self.rendering {
             Err(Error::new(
                 "gpu.pass_forgotten",
                 "a pass was forgotten rather than dropped, so its rendering never ended and the \
@@ -1443,11 +1486,16 @@ impl<'a> Frame<'a> {
         } else {
             self.send()
         };
-        self.frames.failed |= finished.is_err();
-        finished
+        if sent.is_err() {
+            self.frames.failed = true;
+            return sent;
+        }
+        let presented = self.present();
+        self.frames.failed |= fails_frames(&presented);
+        presented
     }
 
-    /// Submits the frame's copies and batches, and presents its swapchains' images.
+    /// Submits the frame's copies and batches, readying its swapchains' images to present.
     fn send(&mut self) -> Result<()> {
         let Frames {
             device,
@@ -1689,6 +1737,23 @@ impl<'a> Frame<'a> {
                 _ => {}
             }
         }
+        Ok(())
+    }
+
+    /// Presents the images of the frame's swapchains, which its submission readied. Each
+    /// swapchain's result says how its own present went, and each swapchain tries again at its
+    /// next acquire, or is lost for good, as [`Failure`] says. Returns the device's loss, whether
+    /// a swapchain's result or the whole present's said it, else the first target's failure
+    /// that lost its swapchain for good; the other failures are logged, as [`heard`] sorts them.
+    fn present(&mut self) -> Result<()> {
+        let Frames {
+            device,
+            submitted,
+            images,
+            scratch,
+            ..
+        } = &mut *self.frames;
+        let frame = *submitted;
         if scratch.swapchains.is_empty() {
             return Ok(());
         }
@@ -1708,25 +1773,96 @@ impl<'a> Frame<'a> {
             // semaphore.
             unsafe { device.present(&info) }
         };
+        // A present that failed for lack of memory enqueued nothing, and may not have said so of
+        // each swapchain: each left as presented takes the failure, so that none goes on with an
+        // image it never presented.
+        if let Err(
+            e @ (vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY),
+        ) = presented
+        {
+            for result in &mut scratch.results {
+                if *result == vk::Result::SUCCESS {
+                    *result = e;
+                }
+            }
+        }
+        let (mut device_lost, mut first) = (None, None);
+        // The device's loss, which no swapchain's own result need say.
+        if let Err(e @ vk::Result::ERROR_DEVICE_LOST) = presented {
+            let swapchains = scratch.swapchains.len();
+            let subject = format_args!("frame {frame}'s presents to {swapchains} swapchain(s)");
+            device_lost = Some(vk_error("vkQueuePresentKHR", subject, e));
+        }
         let mut results = scratch.results.iter();
-        for (target, image) in self.targets.iter_mut().zip(images.iter()) {
+        for (i, (target, image)) in self.targets.iter_mut().zip(images.iter()).enumerate() {
             if let (Target::Swapchain(swapchain), Some(_)) = (target, image) {
                 let result = results
                     .next()
                     .expect("a result for each swapchain presented");
-                swapchain.presented(*result)?;
+                // Every swapchain hears how its present went, whatever another's did.
+                let Err(error) = swapchain.presented(*result) else {
+                    continue;
+                };
+                match heard(i, &error, swapchain.lost()) {
+                    Heard::Device => drop(device_lost.get_or_insert(error)),
+                    Heard::Returned => drop(first.get_or_insert(error)),
+                    Heard::Logged => warn!(
+                        code = error.code(),
+                        target = i,
+                        "{error:#}; the frames go on without the swapchain until it's made again"
+                    ),
+                }
             }
         }
-        match presented {
-            // Each swapchain's own result says how its present went.
-            Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(()),
-            Err(e) => {
-                let swapchains = scratch.swapchains.len();
-                let subject = format_args!("frame {frame}'s presents to {swapchains} swapchain(s)");
-                Err(vk_error("vkQueuePresentKHR", subject, e))
-            }
-        }
+        outcome(device_lost, first)
     }
+}
+
+/// How a frame's present takes the failure of target `target`'s, a swapchain's that `lost` says
+/// is lost for good after it.
+#[derive(Debug, PartialEq, Eq)]
+enum Heard {
+    /// The device's loss, which the present returns before any other failure, and which fails
+    /// every frame after.
+    Device,
+    /// The first target's swapchain lost for good, which the present returns, unless the device
+    /// was lost.
+    Returned,
+    /// Logged: another target's, or one the swapchain tries again from at its next acquire.
+    Logged,
+}
+
+fn heard(target: usize, error: &Error, lost: bool) -> Heard {
+    match failure(error) {
+        Failure::Device => Heard::Device,
+        _ if target == 0 && lost => Heard::Returned,
+        _ => Heard::Logged,
+    }
+}
+
+/// What a frame's present returns, given the device's loss and the first target's failure it
+/// heard ([`heard`]), if any: the device's loss wins, so that it fails the frames after, as
+/// [`fails_frames`] says, with the first target's logged.
+fn outcome(device_lost: Option<Error>, first: Option<Error>) -> Result<()> {
+    match (device_lost, first) {
+        (Some(device_lost), first) => {
+            if let Some(error) = first {
+                warn!(code = error.code(), "{error:#}");
+            }
+            Err(device_lost)
+        }
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(()),
+    }
+}
+
+/// Whether a frame's present that went as `presented` did keeps frames from beginning: only the
+/// device's loss does, since the frame's submission waited on what its acquires signaled, and a
+/// swapchain's failure otherwise is its alone.
+fn fails_frames(presented: &Result<()>) -> bool {
+    presented
+        .as_ref()
+        .is_err_and(|error| failure(error) == Failure::Device)
 }
 
 impl Drop for Frame<'_> {
@@ -1864,5 +2000,64 @@ mod tests {
         assert_eq!((next.as_ptr().addr(), next.capacity()), (memory, capacity));
         let never_filled: Vec<&'static str> = emptied(Vec::<&str>::new());
         assert_eq!(never_filled.capacity(), 0);
+    }
+
+    /// A swapchain after the first that's lost is left out, and the frame goes on with the images
+    /// acquired before it; the first target's, or the device's loss, fails the frame.
+    #[test]
+    fn a_swapchain_lost_alone_is_left_out_unless_its_the_first_target() {
+        let failed = |result| vk_error("vkAcquireNextImageKHR", "a swapchain", result);
+        let surface_lost = || Err(failed(vk::Result::ERROR_SURFACE_LOST_KHR));
+        assert_eq!(skip_lost(surface_lost(), 1).ok(), Some(None));
+        assert_eq!(skip_lost(surface_lost(), 2).ok(), Some(None));
+        let memory = Err(failed(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        assert_eq!(skip_lost(memory, 1).ok(), Some(None));
+        let first = skip_lost(surface_lost(), 0).expect_err("the frame fails");
+        assert_eq!(first.code(), "gpu.surface_lost");
+        let device_lost = Err(failed(vk::Result::ERROR_DEVICE_LOST));
+        let device = skip_lost(device_lost, 1).expect_err("the frame fails");
+        assert_eq!(device.code(), "gpu.device_lost");
+        assert_eq!(skip_lost(Ok(Some(3)), 1).ok(), Some(Some(3)));
+        assert_eq!(skip_lost(Ok(None), 0).ok(), Some(None));
+    }
+
+    /// The device's loss in a present wins over the first target's failure, however the targets
+    /// come, so that the frames after fail; the first target's swapchain lost for good is
+    /// returned otherwise, and the rest, which their swapchains try again from, are logged.
+    #[test]
+    fn a_presents_device_loss_wins_over_a_surface_lost() {
+        let failed = |result| vk_error("vkQueuePresentKHR", "a swapchain", result);
+        let surface = failed(vk::Result::ERROR_SURFACE_LOST_KHR);
+        let device = failed(vk::Result::ERROR_DEVICE_LOST);
+        assert_eq!(heard(0, &surface, true), Heard::Returned);
+        assert_eq!(heard(0, &surface, false), Heard::Logged);
+        assert_eq!(heard(1, &surface, true), Heard::Logged);
+        assert_eq!(heard(1, &device, false), Heard::Device);
+        assert_eq!(heard(0, &device, false), Heard::Device);
+        // Target 0's surface lost for good, then target 1's device lost.
+        let presented = outcome(Some(device), Some(surface));
+        assert_eq!(
+            presented.as_ref().err().map(Error::code),
+            Some("gpu.device_lost")
+        );
+        assert!(fails_frames(&presented));
+        let first = outcome(None, Some(failed(vk::Result::ERROR_SURFACE_LOST_KHR)));
+        assert_eq!(
+            first.as_ref().err().map(Error::code),
+            Some("gpu.surface_lost")
+        );
+        assert!(!fails_frames(&first));
+        assert!(outcome(None, None).is_ok());
+    }
+
+    /// Only the device's loss in a frame's present keeps frames from beginning: a swapchain whose
+    /// present fails otherwise is lost alone.
+    #[test]
+    fn only_the_devices_loss_in_a_present_fails_the_frames_after() {
+        let failed = |result| Err(vk_error("vkQueuePresentKHR", "a swapchain", result));
+        assert!(fails_frames(&failed(vk::Result::ERROR_DEVICE_LOST)));
+        assert!(!fails_frames(&failed(vk::Result::ERROR_SURFACE_LOST_KHR)));
+        assert!(!fails_frames(&failed(vk::Result::ERROR_OUT_OF_HOST_MEMORY)));
+        assert!(!fails_frames(&Ok(())));
     }
 }

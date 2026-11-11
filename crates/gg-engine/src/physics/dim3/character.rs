@@ -4,10 +4,14 @@
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
-use gg_core::math::Vec3;
+use gg_core::math::{Quat, Vec3};
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
+use rapier3d::parry::bounding_volume::BoundingVolume;
+use rapier3d::parry::query::ShapeCastOptions;
+use rapier3d::pipeline::QueryPipeline;
 use rapier3d::prelude::{
-    Collider, ColliderHandle, Pose, QueryFilter, RigidBodyBuilder, RigidBodyHandle, Vector,
+    Collider, ColliderHandle, Pose, QueryFilter, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
+    RigidBodyVelocity, Shape, Vector,
 };
 use tracing::warn;
 
@@ -15,7 +19,7 @@ use super::{
     CapsuleCollider3D, Physics3D, Rapier, RigidBody3D, remove_body, replace, rotation, user_data,
     vector,
 };
-use crate::physics::Link;
+use crate::physics::{Link, kept, unfinite};
 use crate::{Component, Entity, Tick, Transform, World};
 
 /// A character that 3D physics moves, at each tick a layer runs
@@ -24,7 +28,9 @@ use crate::{Component, Entity, Tick, Transform, World};
 /// `max_slope` and steps up to `step_height`, and kept on the ground going down as far as `snap`.
 /// It moves as its entity's [`CapsuleCollider3D`], its body kinematic, which pushes what's dynamic
 /// in its way as it goes and stops for the rest, characters among them, but passes through what a
-/// [`Joint3D`](super::Joint3D) joins it to without colliding. Its entity needs no
+/// [`Joint3D`](super::Joint3D) joins it to without colliding. A kinematic [`RigidBody3D`] it
+/// stands on, as a moving platform, a lift or a carousel, carries it as it goes and turns, and one
+/// moving into it pushes it before it. Its entity needs no
 /// [`RigidBody3D`]: one with one is moved as a body, and its controller does nothing, warned of
 /// once (`physics.not_character`), as is one without a `CapsuleCollider3D`; one under a parent
 /// isn't moved (`physics.child_body`), as a body under one isn't.
@@ -32,7 +38,8 @@ use crate::{Component, Entity, Tick, Transform, World};
 /// Its state is the world's, as the rest of physics' is, so that replays and peers move it alike:
 /// `velocity`, which gravity pulls down while it's off the ground, and `grounded`, whether it
 /// stood on something after it last moved. Its entity's rotation is the game's to set, as which
-/// way it faces; physics moves its translation alone.
+/// way it faces; physics moves its translation, and turns it only as a body it stands on turns
+/// about up, as a carousel turns what rides it.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct CharacterController3D {
     /// How fast it means to go, in units a second, which its game sets, as from its player's
@@ -161,8 +168,15 @@ impl Physics3D {
             controlled && unmoved(world, entity).is_some()
         });
         let name = "CharacterController3D";
-        self.characters
-            .find::<CharacterController3D>(world, name, |characters, entity| {
+        let refused = |entity| {
+            (unfinite::<Transform>(world, entity, "Transform"))
+                .or_else(|| unfinite::<CapsuleCollider3D>(world, entity, "CapsuleCollider3D"))
+        };
+        self.characters.find::<CharacterController3D>(
+            world,
+            name,
+            refused,
+            |characters, entity| {
                 if let Some(why) = unmoved(world, entity) {
                     if !warned.contains(&entity) {
                         let id = world.id(entity).expect("found alive");
@@ -179,16 +193,20 @@ impl Physics3D {
                     Some(character) => character.take_changes(rapier, world),
                     None => characters.push(Character::make(rapier, world, entity)),
                 }
-            });
+            },
+        );
     }
 
     /// Moves each character, in their order, as far as its controller lets it go toward where its
     /// velocity takes it this step, against the colliders as the last step left them but those of
     /// the bodies joined to it without colliding, as a [`Joint3D`](super::Joint3D)'s
     /// `bodies_collide` says: its body goes there as rapier steps, pushing what's dynamic that it
-    /// hit on the way. Writes what that left of its controller into its entity's, as it changed:
-    /// its velocity, pulled down by gravity and stopped by the ground and by what's above it, and
-    /// whether it's grounded.
+    /// hit on the way. One that stood on a kinematic body, as a moving platform or a lift, goes on
+    /// as far as that body carries it this step, against the rest; and a kinematic body moving into
+    /// one pushes it as far as it would go into it, against the rest, so that a platform rising
+    /// under it lifts it rather than passing through it. Writes what its own move left of its
+    /// controller into its entity's, as it changed: its velocity, pulled down by gravity and
+    /// stopped by the ground and by what's above it, and whether it's grounded.
     pub(super) fn move_characters(&mut self, world: &mut World) {
         let dt = Tick::DT.as_secs_f32();
         let Rapier {
@@ -199,6 +217,29 @@ impl Physics3D {
             impulse_joints,
             ..
         } = &mut self.rapier;
+        // The kinematic bodies that go by their velocities, held still while the characters make
+        // their own moves, so that each moves against them as they are, and is carried and pushed
+        // by them after, alike whether it walks or stands: rapier's controller takes a kinematic
+        // body's motion into a move that hits it, but not into one that stands still. As it takes
+        // it, it sets what's left of the move along the body's normal to the body's motion there,
+        // which, at none, takes away the nudge off the surface that its slide along any other
+        // gives, and so holds it at the surface, walking nowhere; so they go up by that nudge
+        // meanwhile, as a slide along what's static leaves it.
+        let held = &mut self.moving;
+        held.clear();
+        if !self.characters.linked.is_empty() {
+            let nudge =
+                Vector::Y * (KinematicCharacterController::default().normal_nudge_factor / dt);
+            for linked in &self.links.linked {
+                let body = &mut bodies[linked.body];
+                if body.body_type() == RigidBodyType::KinematicVelocityBased {
+                    held.push((linked.body, body.linvel(), body.angvel()));
+                    body.set_linvel(nudge, false);
+                    body.set_angvel(Vector::ZERO, false);
+                }
+            }
+        }
+        let held = &*held;
         for character in &mut self.characters.linked {
             let mut controller = character.controller;
             // Gravity pulls it as it walks too, as rapier's controller keeps its gap from the
@@ -230,6 +271,7 @@ impl Physics3D {
             // What a joint keeps it from colliding with, as rapier's contacts leave out but its
             // queries don't: asked only of a character joined to something, so that the rest sweep
             // as they did.
+            let joined = impulse_joints.attached_joints(own).next().is_some();
             let apart = |_: ColliderHandle, other: &Collider| {
                 let joined = other
                     .parent()
@@ -238,21 +280,133 @@ impl Physics3D {
                     .is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
             };
             let mut alone = QueryFilter::new().exclude_rigid_body(own);
-            if impulse_joints.attached_joints(own).next().is_some() {
+            if joined {
                 alone = alone.predicate(&apart);
             }
             let dispatcher = narrow_phase.query_dispatcher();
             let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, alone);
+            // The gap rapier's controller keeps from what it moves against, its default's, a
+            // hundredth of its height.
+            let gap = 0.01 * shape.compute_local_aabb().extents().y;
+            let ground = if controller.grounded {
+                let under = platform(&queries, &*shape, &at, gap);
+                under.and_then(|under| held.iter().find(|(by, ..)| *by == under))
+            } else {
+                None
+            };
+            // How fast what moves goes where the character's middle is.
+            let speed_at = |&(by, linvel, angvel): &Moving, point: Vector| {
+                linvel + angvel.cross(point - bodies[by].center_of_mass())
+            };
             self.hits.clear();
             let hits = &mut self.hits;
             let moved = moving.move_shape(dt, &queries, &*shape, &at, vector(way), |hit| {
                 hits.push(hit);
             });
+            // Carried and pushed by what moves it, swept against the rest: without stepping or
+            // snapping, which its own move did.
+            let carried = KinematicCharacterController {
+                autostep: None,
+                snap_to_ground: None,
+                ..moving
+            };
+            let mut total = moved.translation;
+            // Carried as the body it stands on goes this step, from its pose to the one its
+            // velocities reach, as rapier moves it: its middle where that takes the point of the
+            // body it's over, so that one turning carries it round, at the same distance from its
+            // axis, and its facing turned as far about up as the body turns.
+            let mut turned = None;
+            if let Some(&(under, linvel, angvel)) = ground {
+                let body = &bodies[under];
+                let was = *body.position();
+                let velocities = RigidBodyVelocity { linvel, angvel };
+                let will = velocities.integrate(dt, &was, &body.local_center_of_mass());
+                let middle = (Pose::from_translation(total) * at).translation;
+                let way = will.transform_point(was.inverse_transform_point(middle)) - middle;
+                let turn = will.rotation * was.rotation.inverse();
+                let yaw = Quat::from_xyzw(0.0, turn.y, 0.0, turn.w);
+                turned = (yaw.length() > 0.0)
+                    .then(|| yaw.normalize())
+                    .filter(|yaw| yaw.is_finite() && *yaw != Quat::IDENTITY);
+                if way != Vector::ZERO && way.is_finite() {
+                    let beside = |handle: ColliderHandle, other: &Collider| {
+                        other.parent() != Some(under) && (!joined || apart(handle, other))
+                    };
+                    let filter = QueryFilter::new()
+                        .exclude_rigid_body(own)
+                        .predicate(&beside);
+                    let queries =
+                        broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+                    let from = Pose::from_translation(total) * at;
+                    let went = carried.move_shape(dt, &queries, &*shape, &from, way, |hit| {
+                        hits.push(hit);
+                    });
+                    total += went.translation;
+                }
+            }
+            for pusher in held {
+                let by = pusher.0;
+                if ground.is_some_and(|(under, ..)| *under == by) {
+                    continue;
+                }
+                let from = Pose::from_translation(total) * at;
+                let speed = speed_at(pusher, from.translation);
+                if speed == Vector::ZERO || !speed.is_finite() {
+                    continue;
+                }
+                // Only one near enough to reach it this step, as their boxes tell, is cast.
+                let reach = shape
+                    .compute_aabb(&from)
+                    .loosened(speed.length() * dt + gap);
+                let near = bodies[by].colliders().iter().any(|&collider| {
+                    let collider = colliders.get(collider);
+                    collider.is_some_and(|it| it.compute_aabb().intersects(&reach))
+                });
+                if !near {
+                    continue;
+                }
+                // How soon it would reach the character, in the character's frame, which it
+                // closes on as fast as it goes.
+                let on_it = |handle: ColliderHandle, other: &Collider| {
+                    other.parent() == Some(by) && (!joined || apart(handle, other))
+                };
+                let filter = QueryFilter::new().predicate(&on_it);
+                let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+                let toward = ShapeCastOptions {
+                    max_time_of_impact: dt,
+                    target_distance: gap,
+                    stop_at_penetration: false,
+                    compute_impact_geometry_on_penetration: true,
+                };
+                let Some((_, hit)) = queries.cast_shape(&from, -speed, &*shape, toward) else {
+                    continue;
+                };
+                let beside = |handle: ColliderHandle, other: &Collider| {
+                    other.parent() != Some(by) && (!joined || apart(handle, other))
+                };
+                let filter = QueryFilter::new()
+                    .exclude_rigid_body(own)
+                    .predicate(&beside);
+                let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+                let push = speed * (dt - hit.time_of_impact);
+                let went = carried.move_shape(dt, &queries, &*shape, &from, push, |hit| {
+                    hits.push(hit);
+                });
+                total += went.translation;
+            }
             let mut pushing =
                 broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
             moving.solve_character_collision_impulses(dt, &mut pushing, &*shape, mass, &self.hits);
             let body = &mut bodies[character.body];
-            body.set_next_kinematic_translation(body.translation() + moved.translation);
+            body.set_next_kinematic_translation(body.translation() + total);
+            if let Some(yaw) = turned {
+                let facing = yaw * character.transform.rotation;
+                body.set_next_kinematic_rotation(rotation(facing));
+                let transform = world.get_mut::<Transform>(character.entity);
+                let transform = transform.expect("linked this step: alive, with one");
+                transform.rotation = facing;
+                character.transform.rotation = facing;
+            }
             let went = Vec3::from_array(moved.translation.to_array());
             if moved.grounded && velocity.y < 0.0 {
                 velocity.y = 0.0;
@@ -270,6 +424,11 @@ impl Physics3D {
                 character.controller = *kept;
             }
         }
+        for &(by, linvel, angvel) in &self.moving {
+            let body = &mut bodies[by];
+            body.set_linvel(linvel, false);
+            body.set_angvel(angvel, false);
+        }
     }
 
     /// Writes where each character went into its entity's translation, as it changed.
@@ -281,10 +440,37 @@ impl Physics3D {
                 let transform = world.get_mut::<Transform>(character.entity);
                 let transform = transform.expect("linked this step: alive, with one");
                 transform.translation = at;
-                character.transform = *transform;
+                character.transform.translation = at;
             }
         }
     }
+}
+
+/// A kinematic body that goes by its velocity, as a [`RigidBody3D`]'s does: its handle, and how
+/// fast it goes and turns this step.
+pub(super) type Moving = (RigidBodyHandle, Vector, Vector);
+
+/// The kinematic body that `shape`, at `at`, stands on, of those `queries` sees: what a cast of the
+/// shape straight down meets within `gap`, the gap rapier's controller keeps from the ground, and
+/// as far again as its prediction of the ground reaches, if that's a kinematic body's that goes by
+/// its velocity.
+fn platform(
+    queries: &QueryPipeline<'_>,
+    shape: &dyn Shape,
+    at: &Pose,
+    gap: f32,
+) -> Option<RigidBodyHandle> {
+    let down = ShapeCastOptions {
+        // rapier's controller's reach for the ground, its `predict_ground`.
+        max_time_of_impact: gap + 0.05,
+        target_distance: 0.0,
+        stop_at_penetration: false,
+        compute_impact_geometry_on_penetration: false,
+    };
+    let (hit, _) = queries.cast_shape(at, -Vector::Y, shape, down)?;
+    let under = queries.colliders.get(hit)?.parent()?;
+    let body = queries.bodies.get(under)?;
+    (body.body_type() == RigidBodyType::KinematicVelocityBased).then_some(under)
 }
 
 impl Character {
@@ -327,7 +513,10 @@ impl Character {
             .get::<CharacterController3D>(entity)
             .expect("found with one");
         let transform = *world.get::<Transform>(entity).expect("found with one");
+        // What isn't finite is refused, as `Links` warns, and taken as it was.
+        let transform = kept(transform, self.transform);
         let capsule = *world.get::<CapsuleCollider3D>(entity).expect("not unmoved");
+        let capsule = kept(capsule, self.capsule);
         let body = &mut rapier.bodies[self.body];
         if transform.translation != self.transform.translation {
             body.set_translation(vector(transform.translation), true);
@@ -353,7 +542,7 @@ impl Character {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use gg_core::math::{Quat, libm, to_radians};
+    use gg_core::math::{libm, to_radians};
 
     use super::super::BoxCollider3D;
     use super::super::tests::{crate_at, floor, step, transform};
@@ -660,6 +849,239 @@ pub(super) mod tests {
         let moved = transform(&world, pushed).translation;
         assert!(moved.x > 2.0, "pushed: {moved}");
         assert!(transform(&world, walker).translation.x > 1.0);
+    }
+
+    /// A kinematic box of `size` around `at`, going at `velocity`.
+    fn platform(world: &mut World, at: Vec3, size: Vec3, velocity: Vec3) -> Entity {
+        let at = Transform {
+            translation: at,
+            ..Transform::IDENTITY
+        };
+        let body = RigidBody3D {
+            body_type: BodyType::Kinematic,
+            velocity,
+            ..RigidBody3D::default()
+        };
+        let boxed = BoxCollider3D {
+            size,
+            ..BoxCollider3D::default()
+        };
+        world.spawn((at, body, boxed))
+    }
+
+    fn set_platform_velocity(world: &mut World, platform: Entity, velocity: Vec3) {
+        let body = world.get_mut::<RigidBody3D>(platform).expect("alive");
+        body.velocity = velocity;
+    }
+
+    /// A character standing on a kinematic body is carried as it goes, grounded all the while and
+    /// where it stood on it: across, as a moving platform carries it, up, as a lift, and down; and
+    /// it walks on it as it would on the ground, as far again as the platform takes it.
+    #[test]
+    fn a_character_rides_what_it_stands_on() {
+        let mut world = World::default();
+        let carrier = platform(&mut world, Vec3::ZERO, Vec3::new(6.0, 0.5, 6.0), Vec3::ZERO);
+        // Its top at y 0.25.
+        let rider = character(&mut world, Vec3::new(0.0, ON_FLOOR - 0.25, 0.0));
+        step(&mut world, 8);
+        assert!(controller(&world, rider).grounded);
+        let on = |world: &World| {
+            transform(world, rider).translation - transform(world, carrier).translation
+        };
+        let stood = on(&world);
+        for velocity in [
+            Vec3::new(1.5, 0.0, -1.0),
+            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::new(0.0, -2.0, 0.0),
+        ] {
+            set_platform_velocity(&mut world, carrier, velocity);
+            let mut left = 0;
+            for _ in 0..64 {
+                step(&mut world, 1);
+                left += u32::from(!controller(&world, rider).grounded);
+            }
+            assert_eq!(left, 0, "grounded on it going {velocity}");
+            let held = on(&world);
+            assert!(
+                held.abs_diff_eq(stood, 0.02),
+                "{held}, not {stood}, going {velocity}"
+            );
+        }
+        set_platform_velocity(&mut world, carrier, Vec3::new(1.0, 0.0, 0.0));
+        set_velocity(&mut world, rider, Vec3::new(0.0, 0.0, 1.0));
+        step(&mut world, 64);
+        let walked = on(&world) - stood;
+        assert!(
+            walked.abs_diff_eq(Vec3::new(0.0, 0.0, 1.0), 0.05),
+            "a unit along it: {walked}"
+        );
+    }
+
+    /// A character standing on a turning body, as a carousel, is carried round at the distance
+    /// from its axis that it stood at, over many turns, rather than drifting out as it would along
+    /// the body's velocity where it stands; and turns as far as the carousel does, facing as it
+    /// faced on it, grounded all the while.
+    #[test]
+    fn a_character_rides_a_carousel_round() {
+        let mut world = World::default();
+        let carousel = platform(
+            &mut world,
+            Vec3::ZERO,
+            Vec3::new(12.0, 0.5, 12.0),
+            Vec3::ZERO,
+        );
+        let rider = character(&mut world, Vec3::new(3.0, ON_FLOOR - 0.25, 0.0));
+        step(&mut world, 8);
+        let stood = transform(&world, rider).translation;
+        let body = world.get_mut::<RigidBody3D>(carousel).expect("alive");
+        body.angular_velocity = Vec3::new(0.0, 1.0, 0.0);
+        let mut left = 0;
+        // Ten seconds, a turn and a half.
+        for _ in 0..640 {
+            step(&mut world, 1);
+            left += u32::from(!controller(&world, rider).grounded);
+        }
+        assert_eq!(left, 0, "grounded on it");
+        let at = transform(&world, rider);
+        let radius = Vec3::new(at.translation.x, 0.0, at.translation.z).length();
+        assert!((radius - 3.0).abs() < 0.05, "{radius}, not 3");
+        assert!((at.translation.y - stood.y).abs() < 0.01, "{at:?}");
+        let turned = transform(&world, carousel).rotation;
+        assert!(at.rotation.angle_between(turned) < 0.01, "{at:?} {turned}");
+        let round = Quat::from_rotation_y(10.0) * stood;
+        assert!(
+            at.translation.abs_diff_eq(round, 0.05),
+            "{at:?}, not {round}"
+        );
+    }
+
+    /// Two characters on one moving platform are each carried as it goes, keeping where they
+    /// stood on it, and apart.
+    #[test]
+    fn characters_ride_a_platform_together() {
+        let mut world = World::default();
+        let carrier = platform(&mut world, Vec3::ZERO, Vec3::new(8.0, 0.5, 4.0), Vec3::ZERO);
+        let riders = [-2.0, 2.0].map(|x| character(&mut world, Vec3::new(x, ON_FLOOR - 0.25, 0.0)));
+        step(&mut world, 8);
+        let on = |world: &World, rider| {
+            transform(world, rider).translation - transform(world, carrier).translation
+        };
+        let stood = riders.map(|rider| on(&world, rider));
+        set_platform_velocity(&mut world, carrier, Vec3::new(1.5, 0.0, -1.0));
+        step(&mut world, 64);
+        for (rider, stood) in riders.into_iter().zip(stood) {
+            let held = on(&world, rider);
+            assert!(held.abs_diff_eq(stood, 0.02), "{held}, not {stood}");
+            assert!(controller(&world, rider).grounded);
+        }
+    }
+
+    /// A character a rising platform carries into a ceiling is crushed between them: it isn't
+    /// carried through the ceiling, nor left below the lift's top as the lift passes into it, and
+    /// stays finite; its middle between the lift's top and the ceiling's face, while the lift
+    /// goes on and once it stops.
+    #[test]
+    fn a_character_a_lift_carries_into_a_ceiling_stops_under_it() {
+        let mut world = World::default();
+        let lift = platform(&mut world, Vec3::ZERO, Vec3::new(4.0, 0.5, 4.0), Vec3::ZERO);
+        // Its bottom face at y 3.5.
+        wall(
+            &mut world,
+            Vec3::new(0.0, 4.0, 0.0),
+            Vec3::new(6.0, 1.0, 6.0),
+            Quat::IDENTITY,
+        );
+        let rider = character(&mut world, Vec3::new(0.0, ON_FLOOR - 0.25, 0.0));
+        step(&mut world, 8);
+        set_platform_velocity(&mut world, lift, Vec3::new(0.0, 2.0, 0.0));
+        // Up 1.5, its top at 1.75, the rider's head, 2 above it, past the ceiling.
+        step(&mut world, 48);
+        let between = |world: &World| {
+            let at = transform(world, rider).translation;
+            let top = transform(world, lift).translation.y + 0.25;
+            assert!(at.is_finite(), "{at}");
+            assert!(
+                at.y < 3.5 && at.y + 1.0 < 4.5,
+                "not through the ceiling: {at}"
+            );
+            assert!(at.y > top, "not below the lift's top, {top}: {at}");
+        };
+        between(&world);
+        set_platform_velocity(&mut world, lift, Vec3::ZERO);
+        step(&mut world, 32);
+        between(&world);
+    }
+
+    /// A character walking into a kinematic wall that moves toward it stops at the wall and is
+    /// pushed back before it, rather than passing into it.
+    #[test]
+    fn a_character_walking_into_a_moving_wall_stops_before_it() {
+        let mut world = World::default();
+        floor(&mut world);
+        let oncoming = platform(
+            &mut world,
+            Vec3::new(3.0, 1.5, 0.0),
+            Vec3::new(0.5, 2.0, 2.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+        );
+        let walker = character(&mut world, Vec3::new(0.0, ON_FLOOR, 0.0));
+        set_velocity(&mut world, walker, Vec3::new(2.0, 0.0, 0.0));
+        step(&mut world, 64);
+        let face = transform(&world, oncoming).translation.x - 0.25;
+        let at = transform(&world, walker).translation;
+        assert!(face < 2.0, "the wall came on: {face}");
+        assert!(
+            at.x + 0.5 < face + 0.01,
+            "before the wall: {at}, its face at {face}"
+        );
+        assert!(
+            at.x + 0.5 > face - 0.1,
+            "against it: {at}, its face at {face}"
+        );
+    }
+
+    /// A kinematic body moving into a character pushes it rather than passing through it: a wall
+    /// across the floor pushes one standing there along before it, and a platform rising under one
+    /// in the air, as a lift under one that doesn't fall, lifts it on its top.
+    #[test]
+    fn kinematic_bodies_push_characters() {
+        let mut world = World::default();
+        floor(&mut world);
+        let wall = platform(
+            &mut world,
+            Vec3::new(-2.0, 1.5, 0.0),
+            Vec3::new(0.5, 2.0, 2.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        );
+        let pushed = character(&mut world, Vec3::new(0.0, ON_FLOOR, 0.0));
+        step(&mut world, 64);
+        let face = transform(&world, wall).translation.x + 0.25;
+        let at = transform(&world, pushed).translation;
+        assert!(face > -0.1, "the wall went on: {face}");
+        assert!(
+            at.x > face + 0.5 - 0.03,
+            "before the wall: {at}, its face at {face}"
+        );
+        let mut world = World::default();
+        let lift = platform(
+            &mut world,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.5, 4.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        );
+        let floating = character(&mut world, Vec3::new(0.0, 3.0, 0.0));
+        world
+            .get_mut::<CharacterController3D>(floating)
+            .expect("alive")
+            .gravity = 0.0;
+        step(&mut world, 96);
+        let top = transform(&world, lift).translation.y + 0.25;
+        let at = transform(&world, floating).translation;
+        assert!(top > 3.0, "the lift went on: {top}");
+        assert!(
+            at.y - 1.0 > top - 0.03,
+            "on its top: {at}, its top at {top}"
+        );
     }
 
     /// An entity with a controller and a `RigidBody3D`, or without a `CapsuleCollider3D`, isn't a

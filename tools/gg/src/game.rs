@@ -10,7 +10,7 @@ use gg_api::{Client, Failure, LogEvents, Pulse, Session};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
-use crate::build;
+use crate::{build, runs};
 
 /// How long a connection to a game may take: it's on the loopback, where only one that has ended
 /// takes any time, refusing it.
@@ -123,8 +123,9 @@ fn answering(
 
 /// Connects to the running game `pick` picks, waiting for its answers as long as it says.
 ///
-/// Fails with `gg.no_game` if none runs that it picks, and `gg.which_game` if more than one does;
-/// and as [`answering`] does.
+/// Fails with `gg.no_game` if none runs that it picks, but while a `gg run` that runs it says why
+/// none answers, as [`runs::down`] says, with `gg.rebuilding`, `gg.build_failed`, `gg.waiting` or
+/// `gg.starting`; `gg.which_game` if more than one does; and as [`answering`] does.
 pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     let picked = session_files(pick.project.as_deref())?
         .into_iter()
@@ -132,23 +133,17 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
             pick.pid.is_none_or(|pid| session.pid == pid)
                 && (pick.app.as_ref()).is_none_or(|app| session.app.eq_ignore_ascii_case(app))
         });
-    let answered = answering(picked, &pick.client, pick.grant.as_deref())?.into_iter();
-    let mut running: Vec<_> = answered
-        .map(|(session, client)| (session.player, client))
-        .collect();
-    // A lockstep session's peers, of one game, are reached through the host, whose edits and
-    // patches both peers apply.
-    let peers = running.iter().all(|(player, _)| player.is_some());
-    let hosts = running
-        .iter()
-        .filter(|(player, _)| *player == Some(0))
-        .count();
-    if running.len() > 1 && peers && hosts == 1 {
-        running.retain(|(player, _)| *player == Some(0));
+    let mut running = answering(picked, &pick.client, pick.grant.as_deref())?;
+    let sessions: Vec<&Session> = running.iter().map(|(session, _)| session).collect();
+    if let Some(host) = host_of(&sessions) {
+        running = vec![running.swap_remove(host)];
     }
     let mut running: Vec<Client> = running.into_iter().map(|(_, client)| client).collect();
     let mut client = match running.len() {
         0 => {
+            if let Some(down) = runs::down(pick) {
+                return Err(down);
+            }
             let of = (pick.project.as_ref())
                 .map(|project| format!(" of the project {}", project.display()))
                 .unwrap_or_default();
@@ -187,6 +182,18 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     Ok(client)
 }
 
+/// Which of `sessions` is the host, if they're the two peers of one lockstep session, a host and a
+/// joiner of one app, which are reached through the host, whose edits and patches both peers apply;
+/// `None` for any others, more than one of which is a choice to make.
+fn host_of(sessions: &[&Session]) -> Option<usize> {
+    let [a, b] = sessions else {
+        return None;
+    };
+    let players = (a.player, b.player);
+    let peers = a.app == b.app && matches!(players, (Some(0), Some(1)) | (Some(1), Some(0)));
+    peers.then_some(if a.player == Some(0) { 0 } else { 1 })
+}
+
 /// Sends `method` with `params` to the game `pick` picks, and returns what it answers.
 ///
 /// Fails as the call does; an answer that didn't come in time saying what the game waits for, if
@@ -214,7 +221,10 @@ fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
         Some("menu") => "it waits for its window menu to close",
         _ => return failure,
     };
-    let message = format!("the game didn't answer `{method}` in time: {why}");
+    let message = format!(
+        "the game didn't answer `{method}` in time: {why}{}",
+        gg_api::unanswered(method)
+    );
     Failure::new(failure.code, message)
 }
 
@@ -409,6 +419,40 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!((a, b), (vec![1], vec![2]));
         assert!(none.is_empty());
+    }
+
+    /// The two peers of one lockstep session are reached through the host; any other games, more
+    /// than one, are a choice to make, as two hosts, a host and another app's joiner, or three.
+    #[test]
+    fn a_lockstep_sessions_peers_alone_are_reached_through_the_host() {
+        let session = |pid: u32, app: &str, player: Option<u8>| Session {
+            app: app.to_owned(),
+            pid,
+            address: "127.0.0.1:4000".parse().expect("an address"),
+            token: "t".to_owned(),
+            log: None,
+            engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0,
+            player,
+            project: None,
+        };
+        let host = session(1, "Shards", Some(0));
+        let joiner = session(2, "Shards", Some(1));
+        let other = session(3, "Foxball", Some(1));
+        let alone = session(4, "Shards", None);
+        let second = session(5, "Shards", Some(0));
+        assert_eq!(host_of(&[&host, &joiner]), Some(0));
+        assert_eq!(host_of(&[&joiner, &host]), Some(1));
+        for sessions in [
+            &[&host][..],
+            &[&host, &other],
+            &[&host, &alone],
+            &[&host, &second],
+            &[&host, &joiner, &other],
+        ] {
+            let pids: Vec<u32> = sessions.iter().map(|session| session.pid).collect();
+            assert_eq!(host_of(sessions), None, "{pids:?}");
+        }
     }
 
     /// Serves the API's `hello` on the loopback as a game does, on a thread for each connection,

@@ -15,19 +15,21 @@ use std::time::{Duration, Instant, SystemTime};
 use gg_api::{Client, Failure, Pulse, Session, Snapshot, Snapshotted};
 use serde_json::{Value, json};
 
-use crate::patch::{Patches, Process};
+use crate::patch::{Patches, Process, Watcher};
+use crate::runs::{self, State, Told};
 use crate::{Scope, build, game};
 
 /// What `gg run` runs: a package, the project gg works in, if any, the package's profile, whether
-/// it's patched, unless `--no-patch`, how long its frames may stop before it has hung, how often
-/// it's snapshotted, zero for never, how many peers of a lockstep session it runs, 1 for a game
-/// alone, whether it's embedded in the tool that started gg, and the arguments each is given.
+/// it's patched, unless `--no-patch`, how long its frames may stop before it has hung, `None` for
+/// as long as they stop, how often it's snapshotted, zero for never, how many peers of a lockstep
+/// session it runs, 1 for a game alone, whether it's embedded in the tool that started gg, and the
+/// arguments each is given.
 pub(crate) struct Run {
     pub(crate) package: String,
     pub(crate) project: Option<Scope>,
     pub(crate) release: bool,
     pub(crate) patches: bool,
-    pub(crate) hang: Duration,
+    pub(crate) hang: Option<Duration>,
     pub(crate) snapshot: Duration,
     pub(crate) peers: usize,
     pub(crate) embedded: bool,
@@ -62,7 +64,7 @@ impl Run {
 
     /// Whether the game starts again after a crash, a hang or a rebuild: only if it's snapshotted,
     /// which takes the API, and doesn't record, as a restart would truncate the recording.
-    fn restarts(&self) -> bool {
+    pub(crate) fn restarts(&self) -> bool {
         self.serves() && !self.given("--record") && !self.snapshot.is_zero()
     }
 
@@ -154,11 +156,24 @@ pub(crate) fn millis(duration: Duration) -> u64 {
 /// peers.
 pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     check_game(&run.package, run.project.as_ref())?;
-    let _lock = lock(&run.package, run.dir())?;
+    let (_lock, target) = lock(&run.package, run.dir())?;
+    let pid = std::process::id();
+    // Told before the build, as gg's other commands find no game while it builds.
+    let manifest = run.project.as_ref().map(|scope| scope.manifest.as_path());
+    let told = Told::start(
+        runs::path(&target, &run.package),
+        pid,
+        &run.package,
+        manifest,
+        &State::new("building"),
+    );
     // Before the build, which the tool may end under way.
     let closed = run.embedded.then(closes);
     let building = Instant::now();
-    let patches = Patches::new(run)?;
+    let First::Built(patches) = first_build(run, &told, closed.as_deref())? else {
+        event(&json!({"event": "closed", "why": CLOSED}));
+        return Ok(true);
+    };
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
         None => build::build(&run.package, release(run.release), run.dir())?,
@@ -166,14 +181,15 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let build_ms = millis(building.elapsed());
     event(&json!({"event": "built", "exe": exe, "build_ms": build_ms}));
     let dir = exe.parent().unwrap_or(Path::new(".")).to_owned();
-    let snapshots = dir.join("snapshots");
+    // A directory of its own, which the game's own pruning of `snapshots` leaves alone.
+    let snapshots = dir.join("snapshots").join("gg");
     let restarts = run.restarts();
     if restarts {
         // A snapshot that can't be written there says why.
         let _ = fs::create_dir_all(&snapshots);
     }
-    let pid = std::process::id();
     remove_leftovers(&exe, pid);
+    remove_snapshots_left(&snapshots, &run.package, pid);
     let peers = peers_args(run.peers)?.into_iter().enumerate();
     let peers = peers.map(|(peer, mut args)| {
         args.insert(0, "--supervised".to_owned());
@@ -203,8 +219,9 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         restarts,
         served: false,
         failed: None,
-        patches,
+        patches: patches.map(|patches| *patches),
         closed,
+        told: Some(told),
     };
     let supervised = supervisor.supervise();
     if let Some(patches) = &mut supervisor.patches {
@@ -224,17 +241,67 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     supervised
 }
 
+/// What the first build of a run's game came to.
+enum First {
+    /// It built, with these patches, if they're on.
+    Built(Option<Box<Patches>>),
+    /// The tool an embedded run is for ended as it waited for a change to build it again.
+    Closed,
+}
+
+/// Builds `run`'s game the first time, as [`Patches::new`] does, and returns its patches. While it watches the game's sources, as without `--no-patch`
+/// and with restarts on, a build that fails doesn't end the run: it prints `build_failed`, with
+/// rustc's errors, and tells it, as `waiting`, with them, until the sources change, and builds the
+/// game again then; [`First::Closed`] if the tool an embedded run is for ends meanwhile, which
+/// `closed`, if it's given, says.
+///
+/// Fails as `Patches::new` does, but with `gg.build` for a build that fails while it watches.
+fn first_build(run: &Run, told: &Told, closed: Option<&AtomicBool>) -> Result<First, Failure> {
+    let watches = run.patches && run.restarts();
+    loop {
+        let failure = match Patches::new(run) {
+            Ok(patches) => return Ok(First::Built(patches.map(Box::new))),
+            Err(failure) if watches && failure.code == "gg.build" => failure,
+            Err(failure) => return Err(failure),
+        };
+        let error = json!({"code": failure.code, "message": failure.message});
+        event(&json!({"event": "build_failed", "error": error}));
+        let mut watcher = Watcher::new(run)?;
+        let waiting = State {
+            why: Some("its first build failed; a change to its sources builds it again".to_owned()),
+            current: Some(false),
+            error: Some(failure),
+            ..State::new("waiting")
+        };
+        loop {
+            let (now, looked) = (Instant::now(), runs::now_ms());
+            if closed.is_some_and(|closed| closed.load(Ordering::Relaxed)) {
+                return Ok(First::Closed);
+            }
+            if watcher.changed(now) {
+                break;
+            }
+            told.tell(&waiting, looked);
+            thread::sleep(Duration::from_millis(100));
+        }
+        told.tell(&State::new("building"), runs::now_ms());
+    }
+}
+
 /// Takes the lock of `package`'s `gg run`, a file in the target directory cargo builds the
 /// workspace into, as `cargo metadata` run in `dir` says, which the process holds until it ends,
 /// however it ends, so that a second `gg run` of the game is refused: the two would build, patch
 /// and restart it over each other.
 ///
+/// Returns it with the target directory.
+///
 /// Fails with `gg.running` if another process holds it, `gg.cargo` if cargo can't say where the
 /// target directory is, and `gg.run` if the file can't be opened or locked.
-fn lock(package: &str, dir: Option<&Path>) -> Result<fs::File, Failure> {
+fn lock(package: &str, dir: Option<&Path>) -> Result<(fs::File, PathBuf), Failure> {
     let target = build::target_dir(dir)?;
     let _ = fs::create_dir_all(&target);
-    lock_at(&target.join(format!("gg-run-{package}.lock")), package)
+    let lock = lock_at(&target.join(format!("gg-run-{package}.lock")), package)?;
+    Ok((lock, target))
 }
 
 /// Takes the lock of `package`'s `gg run` at `path`, as [`lock`] says.
@@ -322,6 +389,8 @@ struct Supervisor<'a> {
     patches: Option<Patches>,
     /// Set once gg's stdin closes, while the run's embedded.
     closed: Option<Arc<AtomicBool>>,
+    /// What the run tells of itself, for gg's other commands to read while no game answers.
+    told: Option<Told>,
 }
 
 /// A peer of the game under `gg run`, or the game alone: the arguments it's given beside the run's,
@@ -372,8 +441,10 @@ impl Supervisor<'_> {
         let mut games = self.start(vec![None; self.peers.len()])?;
         // Set once the executable is rebuilt, until the game starts again from the new build.
         let mut rebuilt = false;
+        // Why the game waits for a rebuild, while it does.
+        let mut waits = None;
         loop {
-            let now = Instant::now();
+            let (now, looked) = (Instant::now(), runs::now_ms());
             // While patches are on, the run makes the builds itself.
             if let Some(patches) = &mut self.patches {
                 let processes: Vec<Process> = games.iter().map(Game::process).collect();
@@ -382,6 +453,7 @@ impl Supervisor<'_> {
                 event(&json!({"event": "rebuilt", "exe": self.exe}));
                 rebuilt = true;
             }
+            self.tell(&games, waits, looked);
             let mut happened = None;
             for (peer, game) in games.iter_mut().enumerate() {
                 if let Some(what) = self.tend(peer, game)? {
@@ -403,6 +475,15 @@ impl Supervisor<'_> {
             // or all of them, not, as the run ends.
             let all = matches!(happened, Happened::Rebuilt | Happened::Closed);
             let snapshot = !matches!(happened, Happened::Closed);
+            let stopping = if matches!(happened, Happened::Rebuilt) {
+                "restarting"
+            } else {
+                "stopping"
+            };
+            self.told(State {
+                pids: games.iter().map(|game| game.pid).collect(),
+                ..State::new(stopping)
+            });
             for (peer, game) in games.iter_mut().enumerate() {
                 if all || peer != ended {
                     self.stop(peer, game, snapshot)?;
@@ -420,9 +501,11 @@ impl Supervisor<'_> {
                     });
                     games = self.start(froms.collect())?;
                     rebuilt = false;
+                    waits = None;
                 }
                 Next::Wait(why) => {
                     event(&json!({"event": "waiting", "for": "rebuild", "why": why}));
+                    waits = Some(why);
                     if let Some(patches) = &mut self.patches {
                         patches.waiting();
                     }
@@ -436,6 +519,45 @@ impl Supervisor<'_> {
                     return Ok(clean);
                 }
             }
+        }
+    }
+
+    /// Tells what the run is doing, given the game's processes, `games`, none while it waits for a
+    /// rebuild, for `waits`, as of a look at the sources at `looked`, as [`Patches::state`] says
+    /// while patches are on; else starting until every process serves, then running.
+    fn tell(&self, games: &[Game], waits: Option<&'static str>, looked: u64) {
+        let Some(told) = &self.told else {
+            return;
+        };
+        let state = match &self.patches {
+            Some(patches) => {
+                let processes: Vec<Process> = games.iter().map(Game::process).collect();
+                patches.state(&processes)
+            }
+            None => {
+                let serving = games.iter().all(|game| game.session.is_some());
+                let phase = match games {
+                    [] => "waiting",
+                    _ if serving => "running",
+                    _ => "starting",
+                };
+                State {
+                    pids: games.iter().map(|game| game.pid).collect(),
+                    ..State::new(phase)
+                }
+            }
+        };
+        let why = match (state.phase, &state.why) {
+            ("waiting", None) => waits.map(str::to_owned),
+            (_, why) => why.clone(),
+        };
+        told.tell(&State { why, ..state }, looked);
+    }
+
+    /// Tells `state`, as of now.
+    fn told(&self, state: State) {
+        if let Some(told) = &self.told {
+            told.tell(&state, runs::now_ms());
         }
     }
 
@@ -545,7 +667,7 @@ impl Supervisor<'_> {
         {
             game.snapped = Instant::now();
             let (session, path) = (session.clone(), self.peers[peer].snapshot.clone());
-            game.snapshotting = Some(thread::spawn(move || snapshot(&session, &path)));
+            game.snapshotting = Some(thread::spawn(move || snapshot(&session, &path, false)));
         }
         if game.pinged.elapsed() < PING {
             return Ok(None);
@@ -562,11 +684,11 @@ impl Supervisor<'_> {
             }
             game.waiting = pulse.waiting;
         }
-        let limit = if game.frames == 0 {
-            STARTUP
-        } else {
-            self.run.hang
+        // With hangs not told, as `--hang 0` asks, a run that never runs a frame isn't either.
+        let Some(hang) = self.run.hang else {
+            return Ok(None);
         };
+        let limit = if game.frames == 0 { STARTUP } else { hang };
         if game.moved.elapsed() <= limit {
             return Ok(None);
         }
@@ -650,31 +772,82 @@ impl Supervisor<'_> {
     }
 
     /// Stops `game`, peer `peer`'s, as its executable has been rebuilt, another peer ended or the
-    /// run ends: if it serves, snapshots it first if `snapshot`, once a snapshot in flight is done,
-    /// and asks it to quit, killing it if it hasn't ended within [`QUIT`]; if it doesn't serve yet,
-    /// kills it.
+    /// run ends: if it serves, once a snapshot in flight is done, asks it to end, snapshotted first
+    /// if `snapshot`, as [`end`] does, killing it if it hasn't ended within [`QUIT`]; if it doesn't
+    /// serve yet, kills it. One that waits where it can't answer, as [`holding`] says, before it's
+    /// asked or while the snapshots wait, is killed at once, printing `killed`, with the snapshot it
+    /// starts again from, if any, past which what changed in it is lost.
     fn stop(&mut self, peer: usize, game: &mut Game, snapshot: bool) -> Result<(), Failure> {
+        let mut asked = None;
         match game.session.clone() {
-            Some(session) => {
-                if let Some(taken) = game.landed() {
-                    self.note(peer, game, taken);
+            Some(session) => match self.ask_to_end(peer, game, &session, snapshot) {
+                Ok(ended) => asked = ended,
+                Err(waiting) => {
+                    let _ = game.child.kill();
+                    // Its connection closes as it ends, which ends the snapshot in flight too.
+                    if let Some(Ok(taken)) = game.landed() {
+                        self.note(peer, game, Ok(taken));
+                    }
+                    event(&killed(
+                        game.pid,
+                        &waiting,
+                        self.peers[peer].latest.as_ref(),
+                    ));
                 }
-                if snapshot {
-                    let taken = self::snapshot(&session, &self.peers[peer].snapshot);
-                    self.note(peer, game, taken);
-                }
-                if let Ok(mut client) = Client::connect(&session, "gg", PULSE) {
-                    let _ = client.call("quit", Value::Null);
-                }
-            }
+            },
             None => {
                 let _ = game.child.kill();
             }
         }
         let waited = wait(&mut game.child, QUIT);
         waited.map_err(|error| failed(&self.peers[peer].copy, error))?;
+        // A snapshot whose answer didn't come, as one that came too late, may have been written
+        // all the same, before the game ended.
+        if let Some((taken, sent)) = asked {
+            let path = &self.peers[peer].snapshot;
+            let taken = taken.or_else(|failure| {
+                let unanswered = matches!(failure.code.as_str(), "api.closed" | "api.timeout");
+                (unanswered.then(|| written_since(path, sent)).flatten()).ok_or(failure)
+            });
+            self.note(peer, game, taken);
+        }
         self.forget(game.pid);
         Ok(())
+    }
+
+    /// Asks `game`, peer `peer`'s, which serves as `session` says, to end, once the snapshot in
+    /// flight is done, snapshotted first if `snapshot`, as [`end`] does; and returns what that
+    /// snapshot gave, if one was asked, with when it was, which the caller notes once the game has
+    /// ended.
+    ///
+    /// Fails with what the game waits for if it waits where it can't answer, as [`holding`] says,
+    /// before it's asked or while either snapshot waits, as at a breakpoint a tick hits meanwhile.
+    fn ask_to_end(
+        &mut self,
+        peer: usize,
+        game: &mut Game,
+        session: &Session,
+        snapshot: bool,
+    ) -> Result<Option<SnapshotAsked>, String> {
+        if let Some(waiting) = holding(&mut game.client, session) {
+            return Err(waiting);
+        }
+        if let Some(taking) = game.snapshotting.take() {
+            let taken =
+                awaiting(taking, &mut game.client, session).map_err(|(waiting, taking)| {
+                    // Joined as the game's killed, which ends it.
+                    game.snapshotting = Some(taking);
+                    waiting
+                })?;
+            if let Some(taken) = taken {
+                self.note(peer, game, taken);
+            }
+        }
+        let path = snapshot.then(|| self.peers[peer].snapshot.clone());
+        let (ending, sent) = (session.clone(), SystemTime::now());
+        let ended = thread::spawn(move || end(&ending, path.as_deref()));
+        let ended = awaiting(ended, &mut game.client, session).map_err(|(waiting, _)| waiting)?;
+        Ok(ended.flatten().map(|taken| (taken, sent)))
     }
 
     /// Notes what a snapshot of `game`, peer `peer`'s, gave, `taken`: the snapshot, which restarts
@@ -754,6 +927,10 @@ enum Happened {
     /// stopped.
     Closed,
 }
+
+/// What a snapshot a game was asked for as it ended gave, and when it was asked, which tells a file
+/// it wrote before it ended from an older one, should its answer not have come.
+type SnapshotAsked = (Result<Snapshotted, Failure>, SystemTime);
 
 /// What `gg run` does next.
 #[derive(Debug, PartialEq)]
@@ -883,6 +1060,28 @@ fn remove_leftovers(exe: &Path, pid: u32) {
     }
 }
 
+/// Removes the snapshots in `dir` that the `gg run`s of `package` in processes other than `pid`
+/// left, as one that was killed, or whose game crashed for good, leaves its own: no other run of
+/// the package runs while this one holds its lock, so none of them is another's to start from.
+fn remove_snapshots_left(dir: &Path, package: &str, pid: u32) {
+    let prefix = format!("{package}-");
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let theirs = rest
+            .split(['.', '-'])
+            .next()
+            .and_then(|pid| pid.parse().ok());
+        if let Some(theirs) = theirs.filter(|&theirs| theirs != pid)
+            && (0..2).any(|peer| dir.join(snapshot_name(package, theirs, peer)) == entry.path())
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Copies executable `exe` to `to`, trying again for [`COPYING`] while it fails.
 ///
 /// Fails with `gg.run` if it still can't.
@@ -916,10 +1115,107 @@ pub(crate) fn retrying(mut what: impl FnMut() -> io::Result<()>) -> io::Result<(
 }
 
 /// Has the game `session` names write a snapshot at `path`, through a connection of its own, which
-/// waits as long as a large world's snapshot may take, and returns what it answers.
-fn snapshot(session: &Session, path: &Path) -> Result<Snapshotted, Failure> {
+/// waits as long as a large world's snapshot may take, and returns what it answers; and end once
+/// it's written, if `quit`.
+fn snapshot(session: &Session, path: &Path, quit: bool) -> Result<Snapshotted, Failure> {
     let path = Some(path.to_owned());
-    Client::connect(session, "gg", SNAPSHOT)?.call_as("snapshot", Snapshot { path })
+    Client::connect(session, "gg", SNAPSHOT)?.call_as("snapshot", Snapshot { path, quit })
+}
+
+/// Asks the game `session` names to end, snapshotted at `path` first if it's given, as one
+/// request, so that nothing it's asked between the two applies, to be lost as it starts again
+/// from the snapshot, as it refuses whatever it's asked after; and returns what the snapshot gave,
+/// if one was asked. One the game didn't take, as before its first tick, leaves it running, so
+/// it's then asked to quit alone.
+fn end(session: &Session, path: Option<&Path>) -> Option<Result<Snapshotted, Failure>> {
+    let taken = path.map(|path| snapshot(session, path, true));
+    if !matches!(taken, Some(Ok(_)))
+        && let Ok(mut client) = Client::connect(session, "gg", PULSE)
+    {
+        let _ = client.call("quit", Value::Null);
+    }
+    taken
+}
+
+/// What `taking`, a thread that asks the game `session` names for something, gives, once it's
+/// done, or `None` if it panicked; pinging the game through `client` meanwhile, every [`PING`].
+///
+/// Fails with what the game waits for, and the thread, if it comes to wait where it can't answer,
+/// as [`holding`] says, which the thread would only wait out.
+fn awaiting<T>(
+    taking: JoinHandle<T>,
+    client: &mut Option<Client>,
+    session: &Session,
+) -> Result<Option<T>, (String, JoinHandle<T>)> {
+    let mut pinged = Instant::now();
+    while !taking.is_finished() {
+        if pinged.elapsed() >= PING {
+            pinged = Instant::now();
+            if let Some(waiting) = holding(client, session) {
+                return Err((waiting, taking));
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(taking.join().ok())
+}
+
+/// The `killed` event of the game in process `pid`, killed as it waited for `waiting`, which starts
+/// again from `latest`, its last snapshot, if it has one, and else afresh.
+fn killed(pid: u32, waiting: &str, latest: Option<&Snapshotted>) -> Value {
+    let from = latest.map(|latest| json!({"snapshot": latest.path, "ticks": latest.ticks}));
+    let lost = match latest {
+        Some(_) => "what changed in it after its last snapshot, `from`, is lost",
+        None => "it has no snapshot, so what changed in it is lost, and it starts afresh",
+    };
+    json!({
+        "event": "killed",
+        "pid": pid,
+        "waiting": waiting,
+        "from": from,
+        "why": format!(
+            "it waits where it can't answer a snapshot or a quit, which would only wait out their \
+             time; {lost}"
+        ),
+    })
+}
+
+/// The snapshot at `path`, if it was written whole there since `since`, as one the game wrote
+/// before it ended, whose answer it didn't give: its ticks, its entities, as its world's rows count
+/// them, and its size.
+fn written_since(path: &Path, since: SystemTime) -> Option<Snapshotted> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.modified().ok()? < since {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if !lines.next()?.starts_with("gg-snapshot ") || text.lines().last() != Some("end") {
+        return None;
+    }
+    let ticks = text.lines().find_map(|line| line.strip_prefix("ticks "))?;
+    // The run's world's rows, before what follows it.
+    let ends = ["stopped", "paused", "end"];
+    let world = text
+        .lines()
+        .take_while(|line| !ends.contains(line) && !line.starts_with("edited "));
+    Some(Snapshotted {
+        path: path.to_owned(),
+        ticks: ticks.parse().ok()?,
+        entities: world.filter(|line| line.starts_with("row ")).count(),
+        bytes: metadata.len(),
+    })
+}
+
+/// What the game `session` names waits for, as a ping through `client` answers, if it's what holds
+/// its main thread, which then answers no request but those its connections' threads do: a script
+/// stopped at a breakpoint, a file dialog, or the window menu Windows runs; `None` for anything
+/// else, as a minimized window, between whose frames it answers.
+fn holding(client: &mut Option<Client>, session: &Session) -> Option<String> {
+    let waiting = ping(client, session)?.waiting?;
+    ["breakpoint", "dialog", "menu"]
+        .contains(&waiting.as_str())
+        .then_some(waiting)
 }
 
 /// The pulse of the game `session` names, through `client`, which this connects again once it
@@ -1063,7 +1359,7 @@ mod tests {
             project: None,
             release: false,
             patches: true,
-            hang: Duration::from_secs(10),
+            hang: Some(Duration::from_secs(10)),
             snapshot: Duration::from_secs(snapshot),
             peers: 1,
             embedded: false,
@@ -1192,6 +1488,30 @@ mod tests {
         assert_eq!(left, [false, false, true, true, true, true, true]);
     }
 
+    /// The snapshots other runs of the game left go, and the run's own, other games' and other
+    /// files stay.
+    #[test]
+    fn a_run_removes_the_snapshots_others_left() {
+        let dir = std::env::temp_dir().join(format!("gg-snapshots-left-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a directory");
+        let names = [
+            "shards-7.snapshot",
+            "shards-7-1.snapshot",
+            "shards-42.snapshot",
+            "shards-42-1.snapshot",
+            "foxball-7.snapshot",
+            "shards-7.snapshot.tmp",
+            "shards-notes.txt",
+        ];
+        for name in names {
+            fs::write(dir.join(name), b"").expect("written");
+        }
+        remove_snapshots_left(&dir, "shards", 42);
+        let left: Vec<bool> = names.iter().map(|name| dir.join(name).exists()).collect();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(left, [false, false, true, true, true, true, true]);
+    }
+
     #[test]
     fn an_executable_is_rebuilt_once_its_change_has_settled() {
         let start = Instant::now();
@@ -1235,6 +1555,285 @@ mod tests {
         };
         let _ = fs::remove_dir_all(&dir);
         again.expect("the lock, once the first run has ended");
+    }
+
+    /// What a fake game, as [`faking`] serves it, was asked: each request's method and parameters.
+    type Asked = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    /// What a fake game, as [`faking_with`] serves it, says it waits for, which a test may change.
+    type Waits = Arc<std::sync::Mutex<Option<&'static str>>>;
+
+    /// How a fake game answers `snapshot`.
+    #[derive(Clone, Copy)]
+    enum Snapshots {
+        /// With a snapshot where it's asked.
+        Taken,
+        /// Refusing it with `api.not_ticked`.
+        Refused,
+        /// Never, as a game whose main thread a breakpoint holds.
+        Never,
+    }
+
+    /// As [`faking_with`], waiting for `waiting` for good, and answering `snapshot` with a snapshot
+    /// if `snapshots`, else refusing it.
+    fn faking(waiting: Option<&'static str>, snapshots: bool) -> (Session, Asked) {
+        let snapshots = if snapshots {
+            Snapshots::Taken
+        } else {
+            Snapshots::Refused
+        };
+        faking_with(Arc::new(waiting.into()), snapshots)
+    }
+
+    /// Serves the tool API on the loopback as a game would, on a thread for each connection, while
+    /// the tests run: welcoming every `hello`, answering `ping` as `waits` says as it comes,
+    /// `snapshot` as `snapshots` says, and anything else with `{}`; and returns its session and
+    /// what it's asked.
+    fn faking_with(waits: Waits, snapshots: Snapshots) -> (Session, Asked) {
+        use std::io::{BufReader, Write as _};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = listener.local_addr().expect("its address");
+        let asked = Asked::default();
+        let noting = asked.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (noting, waits) = (noting.clone(), waits.clone());
+                thread::spawn(move || {
+                    let mut writer = stream.try_clone().expect("a writer");
+                    let mut reader = BufReader::new(stream);
+                    while let Ok(Some(line)) = gg_api::read_line(&mut reader) {
+                        let request: gg_api::Request =
+                            serde_json::from_str(&line).expect("a request");
+                        let (method, params) = (request.method.as_str(), &request.params);
+                        noting
+                            .lock()
+                            .expect("noted")
+                            .push((method.to_owned(), params.clone()));
+                        let refused = Failure::new("api.not_ticked", "it hasn't ticked");
+                        let answer = match method {
+                            "hello" => {
+                                Ok(r#"{"app":"Sandbox","pid":1,"engine":"0.1.0","log":null}"#
+                                    .to_owned())
+                            }
+                            "ping" => {
+                                let waiting = *waits.lock().expect("set");
+                                Ok(json!({"frames": 3, "waiting": waiting}).to_string())
+                            }
+                            "snapshot" => match snapshots {
+                                Snapshots::Taken => Ok(json!({
+                                    "path": params["path"],
+                                    "ticks": 3,
+                                    "entities": 1,
+                                    "bytes": 10,
+                                })
+                                .to_string()),
+                                Snapshots::Refused => Err(&refused),
+                                Snapshots::Never => {
+                                    thread::sleep(Duration::from_secs(120));
+                                    return;
+                                }
+                            },
+                            _ => Ok("{}".to_owned()),
+                        };
+                        let answer = answer
+                            .as_ref()
+                            .map(String::as_str)
+                            .map_err(|&failure| failure);
+                        let line = gg_api::answer_line(request.id, answer);
+                        if writer.write_all(line.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let session = Session {
+            app: "Sandbox".to_owned(),
+            pid: 1,
+            address,
+            token: "t".to_owned(),
+            log: None,
+            engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0,
+            player: None,
+            project: None,
+        };
+        (session, asked)
+    }
+
+    /// The methods `asked` holds, but `hello`, each with whether it asked to quit.
+    fn methods(asked: &Asked) -> Vec<(String, bool)> {
+        let asked = asked.lock().expect("noted");
+        let asked = asked.iter().filter(|(method, _)| method != "hello");
+        let quits = |params: &Value| params["quit"].as_bool().unwrap_or(false);
+        asked
+            .map(|(method, params)| (method.clone(), quits(params)))
+            .collect()
+    }
+
+    /// A game stopped to start again from a snapshot is snapshotted and asked to quit in one
+    /// request, so that no edit lands between the two to be lost; one that refuses the snapshot is
+    /// asked to quit alone after, as one stopped without a snapshot is.
+    #[test]
+    fn a_game_is_snapshotted_and_quits_in_one_request() {
+        let path = std::env::temp_dir().join("gg-ends.snapshot");
+        let (session, asked) = faking(None, true);
+        let taken = end(&session, Some(&path)).map(|taken| taken.map(|taken| taken.path));
+        assert_eq!(taken, Some(Ok(path.clone())));
+        assert_eq!(methods(&asked), [("snapshot".to_owned(), true)]);
+        let (session, asked) = faking(None, false);
+        let refused = end(&session, Some(&path)).map(|taken| taken.map_err(|failure| failure.code));
+        assert_eq!(refused, Some(Err("api.not_ticked".to_owned())));
+        let both = [("snapshot".to_owned(), true), ("quit".to_owned(), false)];
+        assert_eq!(methods(&asked), both);
+        let (session, asked) = faking(None, true);
+        assert!(end(&session, None).is_none());
+        assert_eq!(methods(&asked), [("quit".to_owned(), false)]);
+    }
+
+    /// A game waiting at a breakpoint, in a file dialog or in the window menu holds its main thread,
+    /// which answers neither a snapshot nor a quit; one minimized, or waiting for nothing, doesn't.
+    #[test]
+    fn a_game_waiting_where_it_cant_answer_is_told_apart() {
+        for (waiting, holds) in [
+            (Some("breakpoint"), true),
+            (Some("dialog"), true),
+            (Some("menu"), true),
+            (Some("minimized"), false),
+            (None, false),
+        ] {
+            let (session, _) = faking(waiting, true);
+            let held = holding(&mut None, &session);
+            assert_eq!(held.is_some(), holds, "{waiting:?}");
+        }
+        // One that doesn't answer a ping at all, as one that has ended, isn't.
+        let (mut gone, _) = faking(None, true);
+        gone.address = "127.0.0.1:1".parse().expect("an address");
+        assert_eq!(holding(&mut None, &gone), None);
+    }
+
+    /// A script that stops at a breakpoint while the game is asked for a snapshot ends the wait for
+    /// it, which would otherwise wait out its time.
+    #[test]
+    fn a_breakpoint_hit_while_a_snapshot_waits_ends_the_wait() {
+        let waits = Waits::default();
+        let (session, _) = faking_with(waits.clone(), Snapshots::Never);
+        let path = std::env::temp_dir().join("gg-held.snapshot");
+        let ending = session.clone();
+        let asked = thread::spawn(move || end(&ending, Some(&path)));
+        let start = Instant::now();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            *waits.lock().expect("set") = Some("breakpoint");
+        });
+        let held = awaiting(asked, &mut None, &session)
+            .err()
+            .map(|(waiting, _)| waiting);
+        assert_eq!(held.as_deref(), Some("breakpoint"));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "it waited it out"
+        );
+    }
+
+    /// A game waiting where it can't answer is killed at once as it's stopped, the snapshot in
+    /// flight joined, and noted as the one it starts again from, which `killed` names.
+    #[test]
+    fn a_game_held_at_a_breakpoint_is_killed_as_its_stopped() {
+        let dir = std::env::temp_dir().join(format!("gg-killed-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a directory");
+        #[cfg(windows)]
+        let mut command = Command::new("ping");
+        #[cfg(windows)]
+        command.args(["-n", "60", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let mut command = Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("60");
+        let child = command.stdin(Stdio::piped()).spawn().expect("it starts");
+        let (session, asked) = faking(Some("breakpoint"), true);
+        let latest = Snapshotted {
+            path: dir.join("sandbox-1.snapshot"),
+            ticks: 300,
+            entities: 7,
+            bytes: 4096,
+        };
+        let taken = latest.clone();
+        let (pid, now) = (child.id(), Instant::now());
+        let mut game = Game {
+            child,
+            pid,
+            restored: None,
+            session: Some(session),
+            client: None,
+            frames: 3,
+            moved: now,
+            pinged: now,
+            waiting: None,
+            snapped: now,
+            snapshotted: false,
+            snapshotting: Some(thread::spawn(move || Ok(taken))),
+        };
+        let run = run(&[], 5);
+        let mut supervisor = Supervisor {
+            run: &run,
+            exe: dir.join("gg-sandbox"),
+            peers: vec![Peer {
+                args: Vec::new(),
+                copy: dir.join("gg-sandbox-running"),
+                snapshot: latest.path.clone(),
+                latest: None,
+            }],
+            dir: dir.clone(),
+            serves: true,
+            restarts: true,
+            served: true,
+            failed: None,
+            patches: None,
+            closed: None,
+            told: None,
+        };
+        let stopped = supervisor.stop(0, &mut game, true);
+        let ended = game.child.try_wait().expect("waited for");
+        let _ = fs::remove_dir_all(&dir);
+        stopped.expect("stopped");
+        assert!(ended.is_some(), "killed");
+        assert!(
+            now.elapsed() < Duration::from_secs(20),
+            "it waited out its time"
+        );
+        assert!(game.snapshotting.is_none() && game.snapshotted);
+        assert_eq!(supervisor.peers[0].latest.as_ref(), Some(&latest));
+        // It was asked for nothing but pings.
+        assert!(methods(&asked).iter().all(|(method, _)| method == "ping"));
+        let event = killed(pid, "breakpoint", Some(&latest));
+        assert_eq!(
+            event["from"],
+            json!({"snapshot": latest.path, "ticks": 300})
+        );
+        assert_eq!(killed(pid, "menu", None)["from"], Value::Null);
+    }
+
+    /// A snapshot written whole since a time counts, as one whose answer was lost as the game
+    /// ended; one written before, or cut short, doesn't.
+    #[test]
+    fn a_snapshot_written_since_it_was_asked_counts_unanswered() {
+        let dir = std::env::temp_dir().join(format!("gg-written-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a directory");
+        let path = dir.join("sandbox-1.snapshot");
+        let before = SystemTime::now() - Duration::from_secs(60);
+        let text = "gg-snapshot 2\napp Sandbox\nengine 0.1.0\nlayers\nticks 42\nhash 0 0\n\
+                    table Transform\nrow 1 a ()\nrow 2 b ()\nstopped\npaused\nend\n";
+        fs::write(&path, text).expect("written");
+        let whole = written_since(&path, before);
+        let late = written_since(&path, SystemTime::now() + Duration::from_secs(60));
+        fs::write(&path, &text[..text.len() - 4]).expect("written");
+        let cut = written_since(&path, before);
+        let _ = fs::remove_dir_all(&dir);
+        let whole = whole.expect("whole");
+        assert_eq!((whole.ticks, whole.entities), (42, 2));
+        assert!(late.is_none() && cut.is_none());
     }
 
     #[test]

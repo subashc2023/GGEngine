@@ -39,6 +39,11 @@ pub(crate) enum Edit {
     /// Reloads the script whose path from the project's root is `path`, its text now `text`,
     /// through the [`Scripts`](crate::Scripts) that loaded it, as the context applies it.
     Script { path: String, text: String },
+    /// Drops every author's log, and what they kept, and renews the world, as
+    /// [`World::renew`](crate::World::renew) says, through the context: as a lockstep host does as
+    /// it sends its joiner its world, which no log of the joiner's could undo into, and a replay
+    /// of its recording does at the same place.
+    Renew,
 }
 
 /// What an edit did: the IDs of the entities an apply's creates and duplicates spawned, in order,
@@ -90,6 +95,7 @@ impl Authors {
         }
         match edit {
             Edit::Script { .. } => unreachable!("a context reloads scripts itself"),
+            Edit::Renew => unreachable!("a context renews its world itself"),
             Edit::Amend {
                 author,
                 gesture,
@@ -167,6 +173,14 @@ impl Authors {
         &mut self.logs[at]
     }
 
+    /// How many edits the logs hold, done and undone, for `world`: none for another world's.
+    pub(crate) fn entries(&self, world: &World) -> usize {
+        let current = self.world == Some(world.serial());
+        let logs = self.logs.iter().filter(|_| current);
+        logs.map(|author| author.log.edits().len() + author.log.undone().len())
+            .sum()
+    }
+
     /// Drops every log, and what they kept, from `world`, if they're its.
     pub(crate) fn clear(&mut self, world: &mut World) {
         if self.world == Some(world.serial()) {
@@ -190,7 +204,7 @@ fn made(log: &Log) -> Vec<EntityId> {
 }
 
 impl Edit {
-    /// Its author's name.
+    /// Its author's name: none for a renewal, which no author makes.
     fn author(&self) -> &str {
         match self {
             Self::Apply { author, .. }
@@ -199,12 +213,13 @@ impl Edit {
             | Self::Undo { author }
             | Self::Redo { author } => author,
             Self::Script { path, .. } => path,
+            Self::Renew => "",
         }
     }
 
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
     /// and its operations, `Amend`, with its author, its gesture and its operation, `Undo` and
-    /// `Redo`, with their author, and `Script`, with its path and its text; each operation a
+    /// `Redo`, with their author, `Script`, with its path and its text, and `Renew`; each operation a
     /// variant named as its [`Operation`]'s, with its entities' IDs as text.
     pub(crate) fn to_value(&self) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
@@ -247,6 +262,7 @@ impl Edit {
                 "Script".into(),
                 vec![("path".into(), text(path)), ("text".into(), text(script))],
             ),
+            Self::Renew => Value::Variant("Renew".into(), Vec::new()),
         }
     }
 
@@ -306,9 +322,12 @@ impl Edit {
                     text: text(script, "text")?,
                 })
             }
+            "Renew" => Ok(Self::Renew),
             other => Err(reflect::no_variant(
                 other,
-                &["Apply", "Append", "Amend", "Undo", "Redo", "Script"],
+                &[
+                    "Apply", "Append", "Amend", "Undo", "Redo", "Script", "Renew",
+                ],
             )),
         }
     }

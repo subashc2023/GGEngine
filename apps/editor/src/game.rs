@@ -2622,6 +2622,7 @@ mod tests {
             view: None,
             scene: None,
             unsaved: false,
+            edited: false,
         };
         Ok(json!(status))
     }
@@ -2638,6 +2639,7 @@ mod tests {
             view: None,
             scene: scene.map(str::to_owned),
             unsaved,
+            edited: unsaved,
         };
         Ok(json!(status))
     }

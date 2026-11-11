@@ -103,6 +103,11 @@ pub(crate) struct Open {
     /// those a save left out as they were gone, and those its file's saves took out of the text;
     /// each once, in ID order, those gone kept, as an undo may bring them back.
     pub(crate) made: Vec<EntityId>,
+    /// Whether an author's edit has applied to its world since it was last saved, opened or made
+    /// new, or its file's save applied: what the tool API's status calls `edited`. Ticks never set
+    /// it, nor a script's reload; an undo back to the saved scene leaves it set. A snapshot keeps
+    /// it, as the world as edited that a copy plays in place of keeps its own.
+    pub(crate) edited: bool,
 }
 
 /// The open scene of a world whose snapshot holds none, as one written before the open scene was:
@@ -112,6 +117,7 @@ pub(crate) fn opened(start: Option<&Path>, files: &[SceneFile]) -> Open {
     Open {
         author: start.map(|file| file.author.clone()),
         made: Vec::new(),
+        edited: false,
     }
 }
 
@@ -237,6 +243,9 @@ mod watch {
         author: &str,
         text: String,
     ) -> Result<Done> {
+        // An edit of the file's author, which isn't the open scene's authors' unless it's the open
+        // scene's file, whose save leaves the scene as saved.
+        let edited = cx.scenes.open.edited && cx.scenes.open.author.as_deref() != Some(author);
         let mut files = mem::take(&mut cx.scenes.files);
         let applied = match files.iter_mut().find(|file| file.author == author) {
             Some(file) => apply(cx, edit, file, text),
@@ -249,6 +258,7 @@ mod watch {
         cx.scenes.files = files;
         // Its text as last applied, which the open scene is compared with, may be another.
         cx.scenes.changed();
+        cx.scenes.open.edited = edited;
         applied.map(|()| Done::Applied(Vec::new()))
     }
 
@@ -556,11 +566,13 @@ mod open_scene {
             Some(edited) => {
                 follow(&mut edited.scenes, &mut edited.open, old, &saved);
                 edited.open.made = made;
+                edited.open.edited = false;
                 follow(&mut scenes.files, &mut scenes.open, old, &saved);
             }
             None => {
                 follow(&mut scenes.files, &mut scenes.open, old, &saved);
                 scenes.open.made = made;
+                scenes.open.edited = false;
             }
         }
         scenes.changed();
@@ -1749,6 +1761,7 @@ pub(crate) mod tests {
         let start = Open {
             author: Some("scenes/main.ron".to_owned()),
             made: Vec::new(),
+            edited: false,
         };
         assert_eq!(restored.scenes.open, start);
         assert_eq!(
@@ -1790,5 +1803,80 @@ pub(crate) mod tests {
             open_scene::unsaved(&mut cx, 1),
             "a text that no longer loads"
         );
+    }
+    /// A tick's change to the world makes the open scene unsaved but not edited; an author's apply
+    /// makes it edited, which a reload of a script, a renewal, another scene file's save, a play
+    /// and its stop leave as they found it, an edit of the copy that played going with it; and a
+    /// save, the open scene's file's applying and New clear it.
+    #[test]
+    fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
+        let dir = Scratch::new("open-scene-edited");
+        let (_, ids) = project(&dir.0, 1);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        assert!(!cx.scenes.open.edited, "as loaded");
+        // What a tick's physics does: the world changes, with no edit.
+        let entity = cx.world().entity(ids[0]).expect("alive");
+        cx.world_mut()
+            .insert(
+                entity,
+                Transform {
+                    translation: [3.0, 0.0, 0.0].into(),
+                    ..Transform::IDENTITY
+                },
+            )
+            .expect("alive");
+        cx.scenes.changed();
+        assert!(open_scene::unsaved(&mut cx, 1), "unsaved");
+        assert!(!cx.scenes.open.edited, "but no author's edit");
+        apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 5.0)]);
+        assert!(cx.scenes.open.edited, "an author's apply");
+        // Edits of no author of the open scene's.
+        let script = Edit::Script {
+            path: "scripts/none.luau".to_owned(),
+            text: "return 1".to_owned(),
+        };
+        let _ = cx.apply_edit(script);
+        cx.apply_edit(Edit::Renew).expect("renewed");
+        let other = "(entities: {\n})\n".to_owned();
+        let path = dir.0.join("scenes/other.ron");
+        cx.scenes.loaded(SceneFile::new(
+            path,
+            "scenes/other.ron".to_owned(),
+            other.clone(),
+        ));
+        let saved = super::apply_save(
+            &mut cx,
+            &mut |cx, edit| cx.apply_edit(edit),
+            "scenes/other.ron",
+            other,
+        );
+        saved.expect("applied");
+        assert!(cx.scenes.open.edited, "kept by others' edits");
+        // A play and its stop bring back the world as edited's, whatever the copy's edits did.
+        stack.play(&mut cx, 1);
+        stack.stop(&mut cx);
+        assert!(cx.scenes.open.edited, "kept across a play");
+        open_scene::save(&mut cx, None).expect("saved");
+        assert!(!cx.scenes.open.edited, "a save clears it");
+        stack.play(&mut cx, 1);
+        apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 7.0)]);
+        assert!(cx.edited.as_ref().is_some_and(|edited| !edited.open.edited));
+        stack.stop(&mut cx);
+        assert!(!cx.scenes.open.edited, "the copy's edit went with it");
+        apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 6.0)]);
+        assert!(cx.scenes.open.edited);
+        let text = cx.scenes.files[0].text.clone();
+        let applied = super::apply_save(
+            &mut cx,
+            &mut |cx, edit| cx.apply_edit(edit),
+            "scenes/main.ron",
+            text,
+        );
+        applied.expect("applied");
+        assert!(!cx.scenes.open.edited, "its file applied");
+        apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 8.0)]);
+        open_scene::new(&mut cx, &mut stack).expect("emptied");
+        assert!(!cx.scenes.open.edited, "New clears it");
     }
 }

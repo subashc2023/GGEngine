@@ -119,6 +119,7 @@ fn main() {
         );
     };
     println!("cargo::rustc-env=GG_SLANGC={name}");
+    check_release(&slangc);
     // The whole directory, so that a change to a file the shaders include compiles them again too.
     println!("cargo::rerun-if-changed=shaders");
     let drawing: &[(&str, &str)] = &[("vertex_main", "vertex"), ("fragment_main", "fragment")];
@@ -213,6 +214,43 @@ fn compile(slangc: &Path, out: &Path, shader: &str, spirv: &str, entries: &[(&st
             "slangc failed on {source}:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Warns where `slangc` isn't the release CI builds with, as the `SLANG` of its action pins: each
+/// release's SPIR-V differs, so a shader test can pass under one and fail under another, as
+/// `the_model_shaders_load_the_frame_whole` did under 2025.23.2 and 2026.20. Says nothing where
+/// either release can't be read.
+fn check_release(slangc: &Path) {
+    const ACTION: &str = "../../.github/actions/slangc/action.yml";
+    println!("cargo::rerun-if-changed={ACTION}");
+    let Ok(action) = std::fs::read_to_string(ACTION) else {
+        return;
+    };
+    let Some(pinned) = action.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("SLANG:")?.trim();
+        Some(value.trim_matches('"').to_owned())
+    }) else {
+        return;
+    };
+    // slangc prints its release to stderr, as `2026.17-25-gc7954ebd1` or `2025.23.2`.
+    let Ok(output) = Command::new(slangc).arg("-version").output() else {
+        return;
+    };
+    let printed = String::from_utf8_lossy(&output.stderr);
+    let release = printed.trim();
+    if release.is_empty() {
+        return;
+    }
+    let same = release
+        .strip_prefix(&pinned)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']));
+    if !same {
+        println!(
+            "cargo::warning=slangc {release}, at {}, isn't {pinned}, the release CI builds with: \
+             shaders' tests may pass here and fail there. Set SLANGC to a slangc {pinned}",
+            slangc.display()
         );
     }
 }

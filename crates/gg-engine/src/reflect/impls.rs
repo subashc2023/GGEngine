@@ -328,6 +328,41 @@ fn index(i: usize) -> String {
     format!("[{i}]")
 }
 
+/// Which of `current`'s elements each of `items`, a list set in its place, is: the one whose
+/// opaque state it keeps, by its index, or `None` for one that's new. A list of the same length
+/// keeps each in its place. Otherwise, as an element taken out, put in or replaced leaves the
+/// rest as they were, those alike at the start, by their values, which read what's opaque as
+/// [`Value::Opaque`], are the same ones, and so are those alike at the end, after the same; those
+/// between keep their places from the first of them, as a set of one of them changed in place
+/// does, and those past the elements between are new. So an element taken out takes its state
+/// with it, rather than leaving it to the one after; of elements alike, whose values can't tell
+/// them apart, the first keep theirs. Neither the Inspector, which sets an element in its place,
+/// nor the tool API, which sets values whole, knows more of which element a set took out, so the
+/// limits [`Reflect::with_value`] gives hold.
+fn kept_from<T: Reflect>(current: &[T], items: &[Value]) -> impl Fn(usize) -> Option<usize> {
+    let (old, new) = (current.len(), items.len());
+    let (mut start, mut end) = (old.min(new), 0);
+    if old != new {
+        let same = |at: usize, item: &Value| current[at].to_value() == *item;
+        start = (0..old.min(new))
+            .find(|&i| !same(i, &items[i]))
+            .unwrap_or(old.min(new));
+        let tail = old.min(new) - start;
+        end = (0..tail)
+            .find(|&i| !same(old - 1 - i, &items[new - 1 - i]))
+            .unwrap_or(tail);
+    }
+    move |i| {
+        if i < start {
+            Some(i)
+        } else if i >= new - end {
+            Some(i + old - new)
+        } else {
+            Some(i).filter(|&i| i < old - end)
+        }
+    }
+}
+
 /// Its elements are its parts.
 impl<T: Reflect> Reflect for Vec<T> {
     fn describe(types: &mut Types) -> Result<Type> {
@@ -344,10 +379,12 @@ impl<T: Reflect> Reflect for Vec<T> {
         made.collect()
     }
 
+    // Each element keeps what's opaque of the one it is, as `kept_from` finds it.
     fn with_value(&self, value: &Value) -> Result<Self> {
-        let items = elements(value)?.iter().enumerate();
-        let kept = items.map(|(i, item)| {
-            match self.get(i) {
+        let items = elements(value)?;
+        let from = kept_from(self, items);
+        let kept = items.iter().enumerate().map(|(i, item)| {
+            match from(i).and_then(|at| self.get(at)) {
                 Some(current) => current.with_value(item),
                 None => T::from_value(item),
             }

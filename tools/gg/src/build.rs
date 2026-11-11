@@ -6,14 +6,14 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use gg_api::Failure;
 use serde_json::Value;
 
-use crate::Scope;
+use crate::{Scope, dx};
 
 /// Cargo, run in directory `dir`, or in `gg`'s own: the one running `gg`, as `cargo gg` does, or
 /// else the first on the `PATH`.
@@ -27,41 +27,125 @@ pub(crate) fn cargo(dir: Option<&Path>) -> Command {
 }
 
 /// Builds package `package`, with `args`, cargo's flags that pick its profile and features, as
-/// `--release`, through cargo run in `dir`, whose messages about the code go to stderr as cargo
-/// renders them; and returns its executable.
+/// `--release`, through cargo run in `dir`, whose messages about the code go to stderr as rustc
+/// renders them, in color on a terminal; and returns its executable.
 ///
-/// Fails with `gg.build` if cargo can't run, the build fails, or it makes no executable.
+/// Fails with `gg.build` if cargo can't run, the build fails, with rustc's errors, or it makes no
+/// executable.
 pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<PathBuf, Failure> {
     let mut command = cargo(dir);
     command.args(["build", "--package", package]).args(args);
-    command.arg("--message-format=json-render-diagnostics");
+    let format = if io::stderr().is_terminal() {
+        "--message-format=json-diagnostic-rendered-ansi"
+    } else {
+        "--message-format=json"
+    };
+    command.arg(format);
     let failed = |what: String| Failure::new("gg.build", what);
     let mut child = command
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|error| failed(format!("can't run cargo: {error}")))?;
-    let mut exe = None;
     let messages = BufReader::new(child.stdout.take().expect("piped"));
-    for line in messages.lines().map_while(Result::ok) {
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if message["reason"] == "compiler-artifact"
-            && let Some(path) = message["executable"].as_str()
-        {
-            exe = Some(PathBuf::from(path));
-        }
-    }
+    let built = read_messages(messages.lines().map_while(Result::ok), |rendered| {
+        let _ = io::stderr().lock().write_all(rendered.as_bytes());
+    });
     let status = child
         .wait()
         .map_err(|error| failed(format!("cargo didn't finish: {error}")))?;
     if !status.success() {
         let args = args.iter().map(|arg| format!(" {arg}")).collect::<String>();
-        return Err(failed(format!(
-            "`cargo build --package {package}{args}` failed, as cargo said above"
-        )));
+        let what = format!("cargo build --package {package}{args}");
+        return Err(failed(if built.errors.is_empty() {
+            format!("`{what}` failed, as cargo said above")
+        } else {
+            format!("`{what}` failed:\n\n{}", listed_errors(&built.errors))
+        }));
     }
-    exe.ok_or_else(|| failed(format!("package `{package}` has no executable")))
+    built
+        .exe
+        .ok_or_else(|| failed(format!("package `{package}` has no executable")))
+}
+
+/// How many of a build's errors its failure gives, the first, as rustc reports them: the rest, which
+/// an error early on often causes, are counted.
+const MOST_ERRORS: usize = 5;
+
+/// How long each error a build's failure gives may be, in bytes.
+const MOST_ERROR: usize = 2_000;
+
+/// `text`, cut to at most `most` bytes at a character's boundary, saying so where it's cut, as a
+/// note's message is bounded, and a build's errors may run past it.
+pub(crate) fn fit(text: &str, most: usize) -> String {
+    const CUT: &str = "\n\n(cut short: `gg run`'s output holds the rest)";
+    if text.len() <= most {
+        return text.to_owned();
+    }
+    let end = text.floor_char_boundary(most.saturating_sub(CUT.len()));
+    format!("{}{CUT}", &text[..end])
+}
+
+/// Whether `error`, one of rustc's, plain, is its summary of the others, `error: aborting due to 2
+/// previous errors`, which says nothing they don't.
+pub(crate) fn summary(error: &str) -> bool {
+    error.starts_with("error: aborting due to")
+}
+
+/// A build's `errors`, rustc's, plain, as its failure gives them: the first [`MOST_ERRORS`], each
+/// cut to [`MOST_ERROR`] bytes, as [`fit`] cuts it, then how many more there are, so that a
+/// failure, which `gg run` tells of with each call while no game answers, stays small.
+pub(crate) fn listed_errors(errors: &[String]) -> String {
+    let shown = errors
+        .iter()
+        .take(MOST_ERRORS)
+        .map(|error| fit(error, MOST_ERROR));
+    let mut listed = shown.collect::<Vec<_>>().join("\n\n");
+    match errors.len().saturating_sub(MOST_ERRORS) {
+        0 => {}
+        1 => listed.push_str("\n\n(and 1 more error)"),
+        more => listed.push_str(&format!("\n\n(and {more} more errors)")),
+    }
+    listed
+}
+
+/// What a build's messages, cargo's lines of JSON, said: the executable it made, the last, and
+/// rustc's errors, each once, as plain text.
+#[derive(Debug, Default, PartialEq)]
+struct Built {
+    exe: Option<PathBuf>,
+    errors: Vec<String>,
+}
+
+/// Reads `lines`, cargo's messages, giving `show` each of rustc's, as rustc rendered it.
+fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)) -> Built {
+    let mut built = Built::default();
+    for line in lines {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match message["reason"].as_str() {
+            Some("compiler-artifact") => {
+                if let Some(path) = message["executable"].as_str() {
+                    built.exe = Some(PathBuf::from(path));
+                }
+            }
+            Some("compiler-message") => {
+                let diagnostic = &message["message"];
+                let Some(rendered) = diagnostic["rendered"].as_str() else {
+                    continue;
+                };
+                show(rendered);
+                let level = diagnostic["level"].as_str().unwrap_or_default();
+                let error = dx::plain(rendered);
+                if level.starts_with("error") && !summary(&error) && !built.errors.contains(&error)
+                {
+                    built.errors.push(error);
+                }
+            }
+            _ => {}
+        }
+    }
+    built
 }
 
 /// The directory cargo builds the workspace into, as `cargo metadata`, run in `dir`, says.
@@ -273,6 +357,51 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A build's messages give its executable and rustc's errors, each once and plain, every one of
+    /// rustc's messages shown as rendered, warnings too.
+    #[test]
+    fn a_builds_messages_give_its_executable_and_errors() {
+        let error = |text: &str| json!({"reason": "compiler-message", "message": {"level": "error", "rendered": text}});
+        let lines = [
+            json!({"reason": "compiler-message", "message": {"level": "warning", "rendered": "w"}}),
+            error("\u{1b}[31merror[E0308]\u{1b}[0m: mismatched types\n"),
+            error("\u{1b}[31merror[E0308]\u{1b}[0m: mismatched types\n"),
+            error("error: aborting due to 1 previous error\n"),
+            json!({"reason": "compiler-artifact", "executable": "target/debug/gg-shards"}),
+            json!({"reason": "build-finished", "success": false}),
+        ];
+        let mut shown = Vec::new();
+        let lines = lines
+            .iter()
+            .map(Value::to_string)
+            .chain(["not JSON".to_owned()]);
+        let built = read_messages(lines, |rendered| shown.push(rendered.to_owned()));
+        assert_eq!(
+            built,
+            Built {
+                exe: Some(PathBuf::from("target/debug/gg-shards")),
+                errors: vec!["error[E0308]: mismatched types".to_owned()],
+            }
+        );
+        assert_eq!(shown.len(), 4);
+    }
+
+    /// A failure gives a build's first errors, each cut short if it's long, and counts the rest.
+    #[test]
+    fn a_builds_errors_are_bounded() {
+        let errors: Vec<String> = (0..8).map(|at| format!("error {at}")).collect();
+        let listed = listed_errors(&errors);
+        assert!(listed.starts_with("error 0\n\nerror 1"), "{listed}");
+        assert!(
+            listed.contains("error 4") && !listed.contains("error 5"),
+            "{listed}"
+        );
+        assert!(listed.ends_with("(and 3 more errors)"), "{listed}");
+        assert_eq!(listed_errors(&errors[..1]), "error 0");
+        let long = listed_errors(&["x".repeat(10_000)]);
+        assert!(long.len() <= MOST_ERROR && long.ends_with("holds the rest)"));
+    }
 
     /// A workspace's metadata: a game whose binary depends on an engine, which builds with macros
     /// and depends on subsecond, and whose tests depend on a tool; and a game with two binaries and

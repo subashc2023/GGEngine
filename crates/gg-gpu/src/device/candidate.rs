@@ -363,7 +363,9 @@ fn has_extension(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
 /// without graphics that can copy, as compute families can without saying so, the one that does
 /// the fewest other kinds of work, then the first. A family for transfers alone is the GPU's copy
 /// engine. Sparse binding and protected memory are features rather than kinds of work, and don't
-/// count.
+/// count. A family whose least image transfer granularity is (0, 0, 0), which copies images only
+/// whole, a level at a time, takes no uploads, since textures stream by rows within a frame's
+/// budget (VUID-vkCmdCopyBufferToImage-imageOffset-07738).
 fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
     let copies = vk::QueueFlags::TRANSFER | vk::QueueFlags::COMPUTE;
     let features = vk::QueueFlags::SPARSE_BINDING | vk::QueueFlags::PROTECTED;
@@ -371,9 +373,17 @@ fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
         .iter()
         .zip(0u32..)
         .filter(|(family, _)| {
+            let vk::Extent3D {
+                width,
+                height,
+                depth,
+            } = family.min_image_transfer_granularity;
             family.queue_count > 0
                 && family.queue_flags.intersects(copies)
                 && !family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                && width > 0
+                && height > 0
+                && depth > 0
         })
         .min_by_key(|&(family, index)| {
             let mut work = family.queue_flags & !features;
@@ -620,6 +630,11 @@ mod tests {
                 .map(|&queue_flags| vk::QueueFamilyProperties {
                     queue_flags,
                     queue_count: 1,
+                    min_image_transfer_granularity: vk::Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
                     ..Default::default()
                 })
                 .collect::<Vec<_>>()
@@ -661,6 +676,14 @@ mod tests {
         // Video before transfers alone.
         let video = families(&[all, Q::TRANSFER | Q::VIDEO_DECODE_KHR, Q::TRANSFER]);
         assert_eq!(transfer_family(&video), Some(2));
+        // A family that copies images only whole takes no uploads, which stream by rows: the
+        // compute family does, and no compute passes run beside the graphics queue.
+        let mut whole = families(&[all, Q::TRANSFER, Q::COMPUTE]);
+        whole[1].min_image_transfer_granularity = vk::Extent3D::default();
+        assert_eq!(transfer_family(&whole), Some(2));
+        assert_eq!(compute_family(&whole, Some(2)), None);
+        whole[2].min_image_transfer_granularity = vk::Extent3D::default();
+        assert_eq!(transfer_family(&whole), None);
     }
 
     #[test]

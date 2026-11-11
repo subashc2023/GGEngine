@@ -4,6 +4,8 @@
 //! one that flies, as 3D tools do.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+use std::fmt::Display;
+use std::mem;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
@@ -233,6 +235,66 @@ impl Tie {
         let news = now.is_some() && now != *warned;
         *warned = now;
         news
+    }
+}
+
+/// What [`checked`] remembers of the view's projection, of the source of the viewpoint it saw
+/// last, `S`: a camera, a layer or the look, each its own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Projected<S> {
+    /// The source of the last viewpoint checked.
+    source: Option<S>,
+    /// The projection of the last frame's viewpoint from that source that could project.
+    good: Option<Projection>,
+    /// Whether the frames since that one that couldn't have warned of it.
+    warned: bool,
+}
+
+impl<S> Default for Projected<S> {
+    fn default() -> Self {
+        Self {
+            source: None,
+            good: None,
+            warned: false,
+        }
+    }
+}
+
+/// `viewpoint`, which `source` gave, as a frame draws it: itself if its projection can project,
+/// as the renderer panics on one that can't, which code can set whole, where reflection refuses
+/// it; else it from where it is, through the last projection of `source` that could, or the
+/// default's, warning (`engine.bad_projection`) once, until one can again. What `projected`
+/// remembers is of one source: another's forgets it, so that one's projection isn't another's,
+/// and each warns.
+pub(crate) fn checked<S: Display + PartialEq + Copy>(
+    viewpoint: Viewpoint,
+    source: S,
+    projected: &mut Projected<S>,
+) -> Viewpoint {
+    if projected.source != Some(source) {
+        *projected = Projected {
+            source: Some(source),
+            ..Projected::default()
+        };
+    }
+    if viewpoint.projection.projects() {
+        projected.good = Some(viewpoint.projection);
+        projected.warned = false;
+        return viewpoint;
+    }
+    let instead = projected.good.unwrap_or(Viewpoint::default().projection);
+    if !mem::replace(&mut projected.warned, true) {
+        warn!(
+            code = "engine.bad_projection",
+            source = %source,
+            "{source} has a projection that can't project, {:?}: the view draws through \
+             {instead:?} instead",
+            viewpoint.projection
+        );
+    }
+    Viewpoint {
+        projection: instead,
+        ..viewpoint
     }
 }
 

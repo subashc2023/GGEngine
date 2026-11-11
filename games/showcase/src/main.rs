@@ -874,7 +874,7 @@ impl Layer for Showcase {
             Event::MouseButton {
                 button: MouseButton::Left,
                 pressed: true,
-            } if looks => self.grab = true,
+            } if looks && !cx.pointer_over_ui() => self.grab = true,
             Event::Key {
                 key: Key::Escape,
                 pressed: true,

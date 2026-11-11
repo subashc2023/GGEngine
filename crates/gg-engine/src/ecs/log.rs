@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 use super::World;
 use super::ops::{Inverse, Operation};
+use crate::reflect::Value;
 
 /// The edits applied to a world, in order, each its operations with what undoes them: undo and redo,
 /// an edit's operations together, and a gesture's sets of one field, as a drag makes, merged into
@@ -37,10 +38,14 @@ pub struct Log {
     open: bool,
 }
 
-/// An edit: its operations, as applied, and what undoes each, in the same order.
+/// An edit: its operations, as applied, and what undoes each of them and of the sets a delete
+/// clears with, as [`Log::apply_all`] says, in the order they applied, each with the index of its
+/// operation in `of`: so that what shows the edit, as the Inspector's undo does, shows the
+/// operations its author gave.
 struct Entry {
     operations: Vec<Operation>,
     inverses: Vec<Inverse>,
+    of: Vec<usize>,
 }
 
 impl Log {
@@ -57,33 +62,86 @@ impl Log {
     /// stored in a component a set changed what a set refuses, which goes back as it was. An edit
     /// of none logs nothing.
     ///
-    /// Fails as the first operation refused is, naming it if there are others.
-    pub fn apply_all(&mut self, world: &mut World, mut operations: Vec<Operation>) -> Result<()> {
+    /// Each delete clears, just before it, the fields that their components'
+    /// [`cleared`](crate::Component::cleared) names on the entities it doesn't delete that name one
+    /// it does, by sets that undo and redo with it, which the log keeps with the delete rather than
+    /// among the operations it shows. One whose entity the edit makes again under its ID, as a
+    /// scene file's relink of an instance does, is set to name that entity once the edit's
+    /// operations have applied, as a scene file names it by its ID.
+    ///
+    /// Fails as the first operation refused is, naming it if there are others; a set a delete
+    /// clears with that's refused, as the delete.
+    pub fn apply_all(&mut self, world: &mut World, operations: Vec<Operation>) -> Result<()> {
         if operations.is_empty() {
             return Ok(());
         }
         let count = operations.len();
         let mut inverses = Vec::with_capacity(count);
-        for (i, operation) in operations.iter_mut().enumerate() {
-            match world.apply(operation) {
-                Ok(inverse) => inverses.push(inverse),
+        let mut of = Vec::with_capacity(count);
+        let mut applied: Vec<Operation> = Vec::with_capacity(count);
+        // Each set a delete cleared with, the delete's index, and the ID of what it named.
+        let mut cleared = Vec::new();
+        for (i, mut operation) in operations.into_iter().enumerate() {
+            for (mut set, named) in world.clears(&operation) {
+                match world.apply(&mut set) {
+                    Ok(inverse) => {
+                        inverses.push(inverse);
+                        of.push(i);
+                        cleared.push((i, set, named));
+                    }
+                    Err(error) => {
+                        roll_back(world, inverses);
+                        return Err(refused(error, count, i, &operation, true));
+                    }
+                }
+            }
+            match world.apply(&mut operation) {
+                Ok(inverse) => {
+                    inverses.push(inverse);
+                    of.push(i);
+                    applied.push(operation);
+                }
                 Err(error) => {
-                    // Rolled back in reverse, each puts the world back as the one before it found
-                    // it, which a world that nothing else has changed meanwhile takes.
-                    for mut inverse in inverses.into_iter().rev() {
-                        world
-                            .roll_back(&mut inverse)
-                            .expect("an operation just applied rolls back");
-                        world.release(inverse);
-                    }
-                    if count == 1 {
-                        return Err(error);
-                    }
-                    let message = format!("operation {}, {operation}: {error}", i + 1);
-                    return Err(error.with_message(message));
+                    roll_back(world, inverses);
+                    return Err(refused(error, count, i, &operation, false));
                 }
             }
         }
+        for (i, set, named) in cleared {
+            let Operation::Set {
+                entity,
+                component,
+                path,
+                ..
+            } = set
+            else {
+                unreachable!("a clear is a set");
+            };
+            let (Some(holder), Some(remade)) = (world.entity(entity), world.entity(named)) else {
+                continue;
+            };
+            let now = world.get_field(holder, &component, &path);
+            if !matches!(now, Ok(Value::Option(None))) {
+                continue;
+            }
+            let mut set = Operation::Set {
+                entity,
+                component,
+                path,
+                value: Value::Option(Some(Box::new(Value::Entity(remade)))),
+            };
+            match world.apply(&mut set) {
+                Ok(inverse) => {
+                    inverses.push(inverse);
+                    of.push(i);
+                }
+                Err(error) => {
+                    roll_back(world, inverses);
+                    return Err(refused(error, count, i, &applied[i], true));
+                }
+            }
+        }
+        let operations = applied;
         for operation in &operations {
             debug!(
                 code = "ops.applied",
@@ -98,6 +156,7 @@ impl Log {
         self.push_done(Entry {
             operations,
             inverses,
+            of,
         });
         self.open = false;
         Ok(())
@@ -124,9 +183,12 @@ impl Log {
                 let entry = entry.unwrap_or(Entry {
                     operations: Vec::new(),
                     inverses: Vec::new(),
+                    of: Vec::new(),
                 });
+                let before = last.operations.len();
                 last.operations.extend(entry.operations);
                 last.inverses.extend(entry.inverses);
+                last.of.extend(entry.of.into_iter().map(|i| before + i));
                 self.done.push(last);
                 self.open = false;
                 Ok(())
@@ -136,7 +198,7 @@ impl Log {
                 match turn(world, &mut last.inverses, &order, World::roll_back) {
                     Ok(()) => release(world, last),
                     Err((i, refused)) => {
-                        let operation = &last.operations[i];
+                        let operation = &last.operations[last.of[i]];
                         warn!(
                             code = "ops.kept",
                             refused = refused.code(),
@@ -251,6 +313,7 @@ impl Log {
             let entry = |entry: &Entry| Entry {
                 operations: entry.operations.clone(),
                 inverses: entry.inverses.iter().map(Inverse::copied).collect(),
+                of: entry.of.clone(),
             };
             entries.iter().map(entry).collect()
         };
@@ -304,7 +367,7 @@ impl Log {
             Step::Redo => (0..entry.inverses.len()).collect(),
         };
         if let Err((i, error)) = turn(world, &mut entry.inverses, &order, World::undo) {
-            let operation = &entry.operations[i];
+            let operation = &entry.operations[entry.of[i]];
             let message = format!("can't {doing} {operation}: {error}");
             warn!(
                 code = "ops.dropped",
@@ -362,6 +425,34 @@ fn turn(
         }
     }
     Ok(())
+}
+
+/// Rolls back `inverses`, those of an edit refused partway, in reverse: each puts the world back as
+/// the one before it found it, which a world that nothing else has changed meanwhile takes.
+fn roll_back(world: &mut World, inverses: Vec<Inverse>) {
+    for mut inverse in inverses.into_iter().rev() {
+        world
+            .roll_back(&mut inverse)
+            .expect("an operation just applied rolls back");
+        world.release(inverse);
+    }
+}
+
+/// `error`, which refused `operation`, the `i`th of `count`, or a set it clears with, if
+/// `clearing`, said as `operation`'s refusal, naming it if there are others.
+fn refused(error: Error, count: usize, i: usize, operation: &Operation, clearing: bool) -> Error {
+    // The set's own refusal says which set: `can't set ... of ...: ...`.
+    let error = if clearing {
+        let message = format!("can't {operation}: {error}");
+        error.with_message(message)
+    } else {
+        error
+    };
+    if count == 1 {
+        return error;
+    }
+    let message = format!("operation {}, {operation}: {error}", i + 1);
+    error.with_message(message)
 }
 
 /// Releases what `entry`'s inverses keep from `world`.

@@ -116,10 +116,13 @@ struct Shown {
     bool front;
 };
 
-// What `pixel` shows, of `frame` and as `shading` says, where the visibility buffer holds `seen`:
-// which run of the culling's drew it, and in which of the view's passes, 1 past twice the run's
-// index, and that pass's 1 past it; and the meshlet and triangle it shows.
-Shown shown_at(Shading shading, Frame frame, uint2 pixel, uint2 seen) {
+// What `pixel` shows, of the frame's `materials` and as `shading` says, where the visibility buffer
+// holds `seen`: which run of the culling's drew it, and in which of the view's passes, 1 past twice
+// the run's index, and that pass's 1 past it; and the meshlet and triangle it shows. It takes the
+// material table's address, not the frame: reading the table from a frame passed in, slangc 2026
+// reaches it through a pointer into the frame, as model.slang's `shadow_main` says AMD's driver
+// miscompiles.
+Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
     uint drawn = seen.x - 1;
     Run run = push.runs[drawn >> 1];
     bool second = (drawn & 1) != 0;
@@ -135,7 +138,7 @@ Shown shown_at(Shading shading, Frame frame, uint2 pixel, uint2 seen) {
     float4x4 previous = push.transforms[before * shading.instances + run.output + place];
     uint params = slot * shading.params_words + run.params_output + place * run.params_words;
     Shown out;
-    out.material = frame.materials[push.params[params]];
+    out.material = materials[push.params[params]];
     // The mesh's buffer, as model.slang's draws read it through `push.vertices`: its address's
     // two words cast to a pointer, as a 64-bit integer would take the shaderInt64 feature.
     uint* words = bit_cast<uint*>(run.vertices);
@@ -204,8 +207,9 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
         storage[push.motion][at] = float4(0.0);
         return;
     }
-    Frame frame = *push.frame;
-    Shown shown = shown_at(shading, frame, pixel.xy, seen);
+    // Loaded whole, as model.slang's `shadow_main` says why.
+    Frame frame = loadAligned<8>(push.frame);
+    Shown shown = shown_at(shading, frame.materials, pixel.xy, seen);
     storage[push.motion][at] = float4(shown.world - shown.was, 0.0);
     Material material = shown.material;
     float2 uv = shown.uv;
@@ -243,8 +247,9 @@ void normal_main(uint3 pixel: SV_DispatchThreadID) {
         storage[push.target][at] = float4(0.0);
         return;
     }
-    Frame frame = *push.frame;
-    Shown shown = shown_at(shading, frame, pixel.xy, seen);
+    // Loaded whole, as model.slang's `shadow_main` says why.
+    Frame frame = loadAligned<8>(push.frame);
+    Shown shown = shown_at(shading, frame.materials, pixel.xy, seen);
     float2 mapped =
         sampled_by(shown.material, 2, shown.uv, shown.uv_across, shown.uv_down).xy * 2.0 - 1.0;
     float3 surface_normal;

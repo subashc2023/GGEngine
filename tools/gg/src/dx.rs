@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use gg_api::Failure;
 use serde_json::{Value, json};
 
-use crate::build::Package;
+use crate::build::{self, Package};
 use crate::run::{event, millis};
 
 /// How often a build prints how far through its crates it has come, at most: each stage it comes
@@ -41,6 +41,16 @@ pub(crate) struct Dx {
 pub(crate) struct Fat {
     pub(crate) exe: PathBuf,
     client: String,
+}
+
+impl Fat {
+    /// A build that patches can't be built against, as cargo makes: its executable alone.
+    pub(crate) fn unpatchable(exe: PathBuf) -> Self {
+        Self {
+            exe,
+            client: String::new(),
+        }
+    }
 }
 
 impl Dx {
@@ -163,7 +173,7 @@ impl Dx {
         let message = if errors.is_empty() {
             format!("`{what}` failed ({status}), saying no more; run by hand, it says why")
         } else {
-            format!("`{what}` failed:\n\n{}", errors.join("\n\n"))
+            format!("`{what}` failed:\n\n{}", build::listed_errors(&errors))
         };
         Failure::new("gg.build", message)
     }
@@ -227,7 +237,9 @@ fn said(stdout: impl Read, mut stage: impl FnMut(Value)) -> Said {
             Record::Built(fat) => said.fat = Some(fat),
             Record::Patch(table) => said.table = Some(table),
             Record::Stage(at) => stage(at),
-            Record::Error(error) if !said.errors.contains(&error) => said.errors.push(error),
+            Record::Error(error) if !build::summary(&error) && !said.errors.contains(&error) => {
+                said.errors.push(error);
+            }
             Record::Error(_) | Record::Other => {}
         }
     }
@@ -351,7 +363,7 @@ fn stage(variant: &Value) -> Option<Value> {
 }
 
 /// `text` without the ANSI escape sequences that color it, and without the whitespace that ends it.
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

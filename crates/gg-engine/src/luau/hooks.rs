@@ -362,6 +362,8 @@ unsafe fn number(state: *mut ffi::lua_State, arg: c_int, cast: Cast) -> Option<f
 /// long long`, that wouldn't cast alike everywhere; or one it writes as a float, `%e`, `%E`, `%f`,
 /// `%g` and `%G`, that isn't finite, which C libraries write each their own way. The format string
 /// is read as Luau's `str_format` reads it, a conversion's flags, width and precision skipped.
+/// Each argument `%*` writes as `tostring` would is put in its place as the scripts' `tostring`
+/// writes it, as [`named`] says, where Luau's would write its address.
 ///
 /// # Safety
 ///
@@ -392,6 +394,7 @@ unsafe fn formatted(state: *mut ffi::lua_State) -> Option<(c_int, String)> {
                 Some(b'*') => {
                     i += 1;
                     arg += 1;
+                    named(state, arg);
                     continue;
                 }
                 _ => {}
@@ -440,6 +443,53 @@ unsafe fn formatted(state: *mut ffi::lua_State) -> Option<(c_int, String)> {
             }
         }
         None
+    }
+}
+
+/// Puts in argument `arg`'s place, if it's a table or userdata without a `__tostring` metamethod,
+/// a function, a thread or a buffer, its type's name, or userdata's metatable's `__type`, if it's
+/// a string, as the scripts' `tostring` writes it, which [`super`]'s `written` says why of: Luau's
+/// own, which `string.format`'s `%*` calls, writes its address.
+///
+/// # Safety
+///
+/// `state` runs a C function.
+unsafe fn named(state: *mut ffi::lua_State, arg: c_int) {
+    // SAFETY: as the caller promises; `arg` is checked to be one of its arguments, `lua_rawcheckstack`
+    // makes room for the metafield `luaL_getmetafield` pushes, which is popped, or, a `__type`
+    // string, takes the argument's place, as does a static string Luau's own type names are.
+    unsafe {
+        if arg > ffi::lua_gettop(state) {
+            return;
+        }
+        ffi::lua_rawcheckstack(state, 1);
+        let ty = ffi::lua_type(state, arg);
+        let has = |field: &CStr| {
+            let found = ffi::luaL_getmetafield(state, arg, field.as_ptr());
+            if found != ffi::LUA_TNIL {
+                ffi::lua_pop(state, 1);
+            }
+            found != ffi::LUA_TNIL
+        };
+        let opaque = match ty {
+            ffi::LUA_TTABLE | ffi::LUA_TUSERDATA => !has(c"__tostring"),
+            ffi::LUA_TFUNCTION | ffi::LUA_TTHREAD | ffi::LUA_TBUFFER => true,
+            _ => false,
+        };
+        if !opaque {
+            return;
+        }
+        if ty == ffi::LUA_TUSERDATA
+            && ffi::luaL_getmetafield(state, arg, c"__type".as_ptr()) != ffi::LUA_TNIL
+        {
+            if ffi::lua_type(state, -1) == ffi::LUA_TSTRING {
+                ffi::lua_replace(state, arg);
+                return;
+            }
+            ffi::lua_pop(state, 1);
+        }
+        ffi::lua_pushstring(state, ffi::lua_typename(state, ty));
+        ffi::lua_replace(state, arg);
     }
 }
 

@@ -13,7 +13,7 @@ use rapier2d::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{BodyType, Link, Links, Outline};
+use super::{BodyType, Finite, Link, Links, Outline, kept, kept_collider, unfinite};
 use crate::draw::Poses;
 use crate::recording::text;
 use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
@@ -436,8 +436,14 @@ impl Physics2D {
     fn step(&mut self, world: &mut World) {
         self.unlink_gone(world);
         let rapier = &mut self.rapier;
+        let refused = |entity| {
+            (unfinite::<Transform>(world, entity, "Transform"))
+                .or_else(|| unfinite::<RigidBody2D>(world, entity, "RigidBody2D"))
+                .or_else(|| unfinite::<BoxCollider2D>(world, entity, "BoxCollider2D"))
+                .or_else(|| unfinite::<CircleCollider2D>(world, entity, "CircleCollider2D"))
+        };
         self.links
-            .find::<RigidBody2D>(world, "RigidBody2D", |links, entity| {
+            .find::<RigidBody2D>(world, "RigidBody2D", refused, |links, entity| {
                 match links.get_mut(entity) {
                     Some(linked) => take_changes(rapier, linked, world),
                     None => links.push(make_body(rapier, world, entity)),
@@ -498,7 +504,11 @@ impl Physics2D {
         });
     }
 
-    /// Writes where each body that moves went, and how fast it goes, into its entity's components.
+    /// Writes where each body that moves went, how it's turned, and how fast it goes, into its
+    /// entity's components: each only as it changed, to the bit, so that a body at rest, as one
+    /// asleep, leaves its entity's rows unchanged, as the hash's incremental parts and the open
+    /// scene's check read them. It writes from what the step took in, which a transform refused
+    /// leaves as it was, so that the refused one's NaNs aren't carried into what it writes.
     fn write_back(&mut self, world: &mut World) {
         for linked in &mut self.links.linked {
             let body = &self.rapier.bodies[linked.body];
@@ -508,21 +518,33 @@ impl Physics2D {
             let at = body.translation();
             let turned = body.rotation().angle();
             let (velocity, angular_velocity) = (body.linvel(), body.angvel());
-            let transform = world.get_mut::<Transform>(linked.entity);
-            let transform = transform.expect("linked this step: alive, with one");
-            transform.translation.x = at.x;
-            transform.translation.y = at.y;
-            if turned != linked.angle {
-                let by = Quat::from_rotation_z(turned - linked.angle);
-                transform.rotation = by * transform.rotation;
-                linked.angle = turned;
+            let was = &mut linked.transform;
+            let bits = |a: f32, b: f32| a.to_bits() != b.to_bits();
+            let moved = bits(at.x, was.translation.x) || bits(at.y, was.translation.y);
+            if moved || turned != linked.angle {
+                if turned != linked.angle {
+                    let by = Quat::from_rotation_z(turned - linked.angle);
+                    was.rotation = by * was.rotation;
+                    linked.angle = turned;
+                }
+                was.translation.x = at.x;
+                was.translation.y = at.y;
+                let transform = world.get_mut::<Transform>(linked.entity);
+                let transform = transform.expect("linked this step: alive, with one");
+                transform.translation.x = at.x;
+                transform.translation.y = at.y;
+                transform.rotation = was.rotation;
             }
-            linked.transform = *transform;
-            let rigid_body = world.get_mut::<RigidBody2D>(linked.entity);
-            let rigid_body = rigid_body.expect("linked this step: alive, with one");
-            rigid_body.velocity = Vec2::new(velocity.x, velocity.y);
-            rigid_body.angular_velocity = angular_velocity;
-            linked.rigid_body = *rigid_body;
+            let went = &mut linked.rigid_body;
+            let sped = bits(velocity.x, went.velocity.x) || bits(velocity.y, went.velocity.y);
+            if sped || bits(angular_velocity, went.angular_velocity) {
+                went.velocity = Vec2::new(velocity.x, velocity.y);
+                went.angular_velocity = angular_velocity;
+                let rigid_body = world.get_mut::<RigidBody2D>(linked.entity);
+                let rigid_body = rigid_body.expect("linked this step: alive, with one");
+                rigid_body.velocity = went.velocity;
+                rigid_body.angular_velocity = angular_velocity;
+            }
         }
     }
 }
@@ -566,13 +588,18 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
 }
 
 /// Takes in what changed of `linked`'s components since the last step left them, which the last
-/// step didn't make, into its body: waking it, so that it moves from there.
+/// step didn't make, into its body: waking it, so that it moves from there. A component that isn't
+/// finite is taken as it was, as [`Links`] refuses it.
 fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let entity = linked.entity;
     let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
+    let rigid_body = kept(rigid_body, linked.rigid_body);
     let transform = *world.get::<Transform>(entity).expect("found with one");
+    let transform = kept(transform, linked.transform);
     let box_collider = world.get::<BoxCollider2D>(entity).copied();
+    let box_collider = kept_collider(box_collider, linked.box_collider);
     let circle_collider = world.get::<CircleCollider2D>(entity).copied();
+    let circle_collider = kept_collider(circle_collider, linked.circle_collider);
     let body = &mut rapier.bodies[linked.body];
     let was = linked.rigid_body;
     if rigid_body.body_type != was.body_type {
@@ -612,6 +639,26 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     linked.transform = transform;
     linked.box_collider = box_collider;
     linked.circle_collider = circle_collider;
+}
+
+impl Finite for RigidBody2D {
+    fn finite(&self) -> bool {
+        self.velocity.is_finite() && self.angular_velocity.is_finite()
+    }
+}
+
+impl Finite for BoxCollider2D {
+    fn finite(&self) -> bool {
+        let numbers = [self.density, self.friction, self.restitution];
+        self.offset.is_finite() && self.size.is_finite() && numbers.iter().all(|it| it.is_finite())
+    }
+}
+
+impl Finite for CircleCollider2D {
+    fn finite(&self) -> bool {
+        let numbers = [self.radius, self.density, self.friction, self.restitution];
+        self.offset.is_finite() && numbers.iter().all(|it| it.is_finite())
+    }
 }
 
 /// rapier's kind of body for `body_type`: kinematic by its velocity, as Box2D's kinematic bodies go.
@@ -776,6 +823,120 @@ mod tests {
                 ..Transform::IDENTITY
             }
         );
+    }
+
+    /// A body at rest, asleep, leaves its entity's components unchanged as the steps go on, so that
+    /// what follows their changes, as the hash's incremental parts and the open scene's check do,
+    /// has nothing to do for it; one moving changes them.
+    #[test]
+    fn bodies_at_rest_change_nothing() {
+        let mut world = World::default();
+        floor(&mut world);
+        let dropped = crate_at(&mut world, 0.0, 1.2, 0.0);
+        let pushed = crate_at(&mut world, 3.0, 1.0, 0.0);
+        step(&mut world, 480);
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let linked = physics.links.get(dropped).expect("linked");
+        assert!(physics.rapier.bodies[linked.body].is_sleeping());
+        world
+            .get_mut::<RigidBody2D>(pushed)
+            .expect("alive")
+            .velocity = Vec2::new(2.0, 0.0);
+        world.advance();
+        let tick = world.change_tick();
+        step(&mut world, 8);
+        let changed = |entity: Entity| {
+            let mut tables = world.tables().iter();
+            let table = tables.find(|table| table.entities().contains(&entity));
+            let table = table.expect("in a table");
+            let row = table.entities().iter().position(|&it| it == entity);
+            let row = row.expect("a row");
+            [
+                world.component::<Transform>(),
+                world.component::<RigidBody2D>(),
+            ]
+            .map(|id| {
+                let changed = table.changed(id.expect("registered")).expect("a column");
+                changed.row(row) >= tick
+            })
+        };
+        assert_eq!(changed(dropped), [false, false], "at rest");
+        assert_eq!(changed(pushed), [true, true], "moving");
+    }
+
+    /// A component set to a NaN or an infinity is refused, warned of once while it stays so
+    /// (`physics.not_finite`): a body at rest whose transform isn't stays where it was, through 30
+    /// steps that warn once, and the box touching it stays finite, as it would not were the NaN
+    /// taken into rapier; set finite, it's taken. An angular velocity keeps the last that was, and
+    /// a circle given with a radius that isn't is made only once it is. A body whose transform
+    /// isn't finite as it comes isn't made until it is.
+    #[test]
+    fn what_isnt_finite_is_refused() {
+        let logged = crate::testing::logged();
+        let warned = || {
+            let codes = logged.codes.try_iter();
+            codes.filter(|code| code == "physics.not_finite").count()
+        };
+        let mut world = World::default();
+        floor(&mut world);
+        let blown = crate_at(&mut world, 0.0, 1.0, 0.0);
+        let touching = crate_at(&mut world, 1.0, 1.0, 0.0);
+        step(&mut world, 240);
+        let held = transform(&world, blown);
+        world
+            .get_mut::<Transform>(blown)
+            .expect("alive")
+            .translation
+            .x = f32::NAN;
+        step(&mut world, 30);
+        assert_eq!(warned(), 1, "once, though it stepped 30 times");
+        assert!(
+            transform(&world, blown).translation.x.is_nan(),
+            "left to the game"
+        );
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let body = &physics.rapier.bodies[physics.links.get(blown).expect("linked").body];
+        assert!(
+            body.is_sleeping() && body.translation().is_finite(),
+            "where it was"
+        );
+        assert!((body.translation().x - held.translation.x).abs() < 1e-4);
+        assert!(transform(&world, touching).translation.is_finite());
+        // A velocity, and a circle's radius, each kept as it was.
+        let rigid_body = world.get_mut::<RigidBody2D>(touching).expect("alive");
+        rigid_body.angular_velocity = f32::INFINITY;
+        let round = CircleCollider2D {
+            radius: f32::NAN,
+            ..CircleCollider2D::default()
+        };
+        world.insert(touching, round).expect("alive");
+        step(&mut world, 30);
+        assert_eq!(warned(), 1, "once for both");
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let linked = physics.links.get(touching).expect("linked");
+        let body = &physics.rapier.bodies[linked.body];
+        assert!(body.angvel().is_finite() && body.translation().is_finite());
+        assert!(linked.colliders[1].is_none(), "no circle made");
+        world
+            .get_mut::<Transform>(blown)
+            .expect("alive")
+            .translation = Vec3::new(-2.0, 1.0, 2.0);
+        step(&mut world, 1);
+        let taken = transform(&world, blown).translation;
+        assert!((taken.x - -2.0).abs() < 1e-3, "{taken}");
+        let spawned = Transform {
+            scale: Vec3::new(1.0, f32::INFINITY, 1.0),
+            ..Transform::IDENTITY
+        };
+        let unmade = world.spawn((spawned, RigidBody2D::default(), BoxCollider2D::default()));
+        step(&mut world, 4);
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        assert!(physics.links.get(unmade).is_none(), "not made");
+        assert_eq!(warned(), 1);
+        world.get_mut::<Transform>(unmade).expect("alive").scale = Vec3::ONE;
+        step(&mut world, 1);
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        assert!(physics.links.get(unmade).is_some(), "made once it's finite");
     }
 
     /// A pile of boxes and balls, every third a ball, turned and overlapping as they start, over a

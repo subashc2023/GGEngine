@@ -33,7 +33,8 @@ use crate::{App, BUILD};
 /// paused or stopped the simulation with nothing asked of the frames, each waits up to a tick's
 /// time for a request, rather than spinning. The run starts as [`start`] says, and ends at
 /// `--frames`, at Ctrl+C, or, under `--supervised`, as stdin ends. A server's client
-/// (`--connect`) steps its simulation in real time, its frames a tick apart, as its server's go.
+/// (`--connect`) steps its simulation in real time, its frames a tick apart, as its server's go,
+/// and so does a run given `--real-time`.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
 /// with no UI, playing sound and keeping the pipeline cache as one does, and its view fills its
@@ -47,8 +48,9 @@ pub(crate) fn run_headless(
     snapshot: Option<Snapshot>,
 ) -> Result<Ran> {
     let embedded = args.embedded;
-    // A client's ticks keep pace with its server's, in real time.
-    let real_time = embedded || matches!(args.net, Some(Net::Connect(_)));
+    // A client's ticks keep pace with its server's, in real time, and `--real-time` paces a
+    // headless run's so, as for an agent that watches it play.
+    let real_time = embedded || args.real_time || matches!(args.net, Some(Net::Connect(_)));
     let [mut width, mut height] = args.size.unwrap_or([1280, 720]);
     // An embedded run keeps the pipeline cache as a windowed run does, as a tool restarts it at
     // each change it can't patch in; the rest keep none, as `pipeline_cache` says.
@@ -283,7 +285,8 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
 
 /// Starts the run in `cx`, windowed or not: from `snapshot`'s world, at its ticks, if it's given
 /// one, rather than the one `stack`'s layers attach, stopped or playing as the snapshot's run was,
-/// as [`Stack::restore`] says, given whether a tool API `serves` the run, dropping it once it has;
+/// as [`Stack::restore`] says, given whether a tool API `serves` the run, and paused if it was in a
+/// development build, which alone pauses, dropping it once it has;
 /// or else from the world the layers attach, stopped if `stopped` says so, as `--stopped` asks.
 /// In a development build it first scans the assets under the app's root, before the layers load,
 /// and has a thread watch them if the API serves the run, as `Context::start_assets` says, writing
@@ -316,22 +319,26 @@ pub(crate) fn start(
             cx.name_as([]);
         }
     }
-    let stopped = match snapshot {
+    let (stopped, paused) = match snapshot {
         Some(snapshot) => {
             let (ticks, stopped) = stack.restore(cx, &snapshot, serves)?;
             stepper.start_at(ticks);
-            stopped
+            (stopped, snapshot.paused)
         }
         None => {
             stack.attach(cx);
-            stopped
+            (stopped, false)
         }
     };
     #[cfg(feature = "dev")]
     if stopped {
         stepper.stop();
     }
-    let _ = stopped;
+    #[cfg(feature = "dev")]
+    if paused {
+        stepper.pause();
+    }
+    let _ = (stopped, paused);
     Ok(())
 }
 
@@ -605,6 +612,12 @@ pub(crate) struct Stepper {
     pub(crate) ticks: u64,
     /// The ticks the run has run, in whichever world, since it started.
     ticked: u64,
+    /// Whether the run started from a snapshot, rather than from the world its layers attached.
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(dead_code, reason = "only the tool API asks")
+    )]
+    restored: bool,
     /// The whole ticks the time owed held that no frame ran.
     dropped: u64,
     /// One tick every frame, whatever its time.
@@ -632,6 +645,7 @@ impl Stepper {
     /// Numbers the ticks on from `ticks`, those a snapshot that the run starts from had run.
     pub(crate) fn start_at(&mut self, ticks: u64) {
         self.ticks = ticks;
+        self.restored = true;
     }
 
     /// Numbers the ticks on from `ticks`, those of a world that took the world's place as the run
@@ -645,6 +659,14 @@ impl Stepper {
     /// The ticks the run has run, in whichever world, since it started.
     pub(crate) fn ran(&self) -> u64 {
         self.ticked
+    }
+
+    /// Whether the run started afresh, from the world its layers attached, and hasn't ticked
+    /// since: what they queued as they attached is still to apply, at its first tick. A run
+    /// restored from a snapshot attached nothing.
+    #[cfg(feature = "dev")]
+    pub(crate) fn fresh(&self) -> bool {
+        !self.restored && self.ticked == 0
     }
 
     /// Runs, through `tick`, the ticks owed by a frame `dt` after the last, numbered on from the

@@ -83,6 +83,8 @@ fn main() -> ExitCode {
         textures_refill_between_rgba8_and_bc7_on_every_path,
         textures_and_buffers_stream_by_parts_on_every_path,
         textures_come_to_show_images_before_the_frames_passes,
+        stand_ins_live_while_slots_show_them,
+        images_past_the_devices_most_are_refused,
         forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
         frames_that_began_none_leave_the_device_to_another,
@@ -2149,6 +2151,134 @@ fn textures_come_to_show_images_before_the_frames_passes() {
     }
     assert!(refused, "the copies never finished");
     drop((frames, texture, stand_in, image, device));
+
+    drop(instance);
+    check(&validation);
+}
+
+/// Drops the stand-in a placed texture's slot shows a frame after writing it, and the one a
+/// hidden texture's slot shows in the frame that hides it: each slot holds its stand-in's image,
+/// which draws white in every frame after, with nothing for validation to say, until the slot
+/// shows an image of its own, and its stand-in's goes. Textures of the stand-ins' size, written
+/// blue, are made once each stand-in's frames have finished, so that the memory of one freed too
+/// soon is taken and written over, rather than left reading white.
+fn stand_ins_live_while_slots_show_them() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = device(&instance);
+    let pipeline = sampling_pipeline(&device, &sampling_spirv());
+    let probe = |expected| {
+        [Probe {
+            level: 0,
+            uv: [0.5, 0.5],
+            expected,
+        }]
+    };
+    let mut image = ColorImage::new(&device, 1, 1, "stand-in probes").expect("an image");
+    let mut dropped = Some(stand_in(&device, "dropped stand-in"));
+    let placed = Texture::placed(&device, 8, dropped.as_ref().expect("made"), "stood in for");
+    let mut placed = placed.expect("a texture");
+    let mut frames = Frames::new(&device).expect("frames");
+    let (graph, passes) = clearing(1, [0.0; 4]);
+    let red = [255, 0, 0, 255];
+    let (mut shown, mut hidden_at) = (false, None);
+    let mut reusing = Vec::new();
+    for i in 0..24 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        match i {
+            0 => write_stand_in(&mut frame, dropped.as_mut().expect("made")),
+            1 => drop(dropped.take()),
+            6 => {
+                placed
+                    .refill(1, 1, TextureFormat::Rgba8Srgb, false)
+                    .expect("an image");
+                stream_whole(&mut frame, &mut placed, &red);
+            }
+            _ => {}
+        }
+        if i >= 6 && hidden_at.is_none() {
+            shown = frame.finish_texture(&mut placed).expect("a finish");
+        }
+        // Two frames after it shows its own image, hidden behind a stand-in dropped at once.
+        if shown && hidden_at.is_none() && i >= 8 {
+            let mut again = stand_in(&device, "hiding stand-in");
+            write_stand_in(&mut frame, &mut again);
+            frame.hide_texture(&mut placed, &again);
+            drop(again);
+            hidden_at = Some(i);
+        }
+        let after_hidden = hidden_at.is_some_and(|at| (at + 3..at + 6).contains(&i));
+        if (3..6).contains(&i) || after_hidden {
+            let format = TextureFormat::Rgba8Srgb;
+            let texture = Texture::new(&device, 1, 1, format, false, "reusing stand-ins' memory");
+            let mut texture = texture.expect("a texture");
+            let blue = [0, 0, 255, 255];
+            frame
+                .write_texture(&mut texture, [0, 0], [1, 1], &blue)
+                .expect("a write");
+            reusing.push(texture);
+        }
+        let expected = if shown && hidden_at.is_none() {
+            red
+        } else {
+            [255; 4]
+        };
+        draw_probes(
+            &mut frame,
+            passes[0],
+            &pipeline,
+            &placed,
+            &probe(expected),
+            None,
+        );
+        frame.submit().expect("the frame's submission");
+        check_probes(&mut image, &probe(expected), &format!("frame {i}"));
+        if hidden_at.is_some_and(|at| i >= at + 6) {
+            break;
+        }
+    }
+    assert!(
+        hidden_at.is_some(),
+        "the texture never showed its own image"
+    );
+    drop((frames, placed, reusing, image, pipeline, device));
+
+    drop(instance);
+    check(&validation);
+}
+
+/// An offscreen image, and an image of a graph's own, of a side past any device's most, are
+/// refused with `gpu.image_too_large` before Vulkan is asked to make them, and the frames go on
+/// with a graph whose images fit.
+fn images_past_the_devices_most_are_refused() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = device(&instance);
+    let past = 1 << 20;
+    let error = ColorImage::new(&device, past, 1, "too wide")
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), "gpu.image_too_large", "{error:#}");
+    assert!(error.to_string().contains("\"too wide\""), "{error}");
+    let mut image = ColorImage::new(&device, 1, 1, "too large target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let (mut graph, _) = clearing(1, [0.0; 4]);
+    let tall = graph.color("too tall", [1, past]);
+    graph.render(label!("too tall")).clear(tall, [0.0; 4]).add();
+    let error = frames
+        .begin([Target::Image(&mut image)], &graph)
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), "gpu.image_too_large", "{error:#}");
+    let (graph, passes) = clearing(1, [0.0; 4]);
+    let frame = frames.begin([Target::Image(&mut image)], &graph);
+    let mut frame = frame.expect("a frame").expect("an offscreen image");
+    drop(frame.render(passes[0]));
+    frame.submit().expect("the frame's submission");
+    drop((frames, image, device));
 
     drop(instance);
     check(&validation);

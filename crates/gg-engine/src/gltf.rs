@@ -16,7 +16,7 @@ use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
 use gg_renderer::{AlphaMode, Map, ModelMesh, Workflow, Wrap};
 
-use crate::animation::{Channel, Clip, Interpolation, Path as Moved, Skin, placed, skinned_box};
+use crate::animation::{Channel, Clip, Influences, Interpolation, Path as Moved, Skin, place};
 use crate::image::{self, Image};
 use crate::package::Files;
 use crate::{Light, LightKind, Transform};
@@ -564,10 +564,15 @@ impl Memory<'_> {
     /// further than a byte past the room left, an image's, of at most [`image::MAX_FILE`], or a
     /// data URI's bytes, fewer than the model's own file holds.
     fn hold(&mut self, bytes: usize) -> Result<()> {
+        self.hold_for(bytes, "its buffers, images, vertices and nodes")
+    }
+
+    /// Counts `bytes` more held as [`hold`](Self::hold) does, for `what`, which the error names.
+    fn hold_for(&mut self, bytes: usize, what: &str) -> Result<()> {
         let held = self.held.saturating_add(bytes as u64);
         if held > self.most {
             return Err(self.model.unsupported(format!(
-                "takes more than {} MiB to read, of its buffers, images, vertices and nodes",
+                "takes more than {} MiB to read, of {what}",
                 self.most >> 20
             )));
         }
@@ -624,6 +629,13 @@ const REPEAT: u32 = 10497;
 /// fraction of each column's length: past what rounding gives, as of a matrix printed to four
 /// places, and short of a shear that would show.
 const DECOMPOSES_WITHIN: f32 = 1e-3;
+
+/// The most steps finding a model's skinned meshes' reach may take, each a part placed, a leaf of
+/// [`Influences`] posed or a channel set, for one of its clips' poses: some seconds in a debug
+/// build, past what a model of fifty clips of 64 poses, two hundred parts and 50,000 skinned
+/// vertices takes, so that a small file of many clips and many skinned parts can't take minutes to
+/// read.
+const MAX_POSE_WORK: u64 = 1 << 27;
 
 /// The model that errors name, with its file.
 #[derive(Clone, Copy)]
@@ -1072,47 +1084,130 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     /// Gives each primitive a skinned part draws its reach: the box its vertices span as the part's
     /// skin moves them, as the model rests and posed at each clip's keys' times, or at as many as
     /// [`Clip::pose_times`] gives, each clip's from the model at rest; grown by a tenth of its
-    /// longest side each way, for the poses between those times, and between clips blended.
+    /// longest side each way, for the poses between those times, and between clips blended. Each
+    /// pose bounds the vertices by the leaves [`Influences`] parts each joint's into, so that a
+    /// pose costs some of the vertices; and the poses are found one at a time, of the parts that
+    /// place the joints alone, in memory counted as the rest of reading is, so that a small file of
+    /// many clips and parts can't ask for their product. A model whose poses would take more than
+    /// [`MAX_POSE_WORK`] to bound is refused, as one of more memory is.
     fn reach(&mut self) -> Result<()> {
+        let Self {
+            model,
+            imported,
+            memory,
+            ..
+        } = self;
         let Imported {
             parts,
             primitives,
             skins,
             clips,
             ..
-        } = &mut self.imported;
+        } = imported;
+        let skinned = || {
+            (parts.iter().enumerate())
+                .filter_map(|(part, skinned)| Some((part, skinned.skin?, skinned.primitive?)))
+        };
+        if skinned().next().is_none() {
+            return Ok(());
+        }
+        // The parts' rest, posed and placed transforms, their parents, and which of them place the
+        // skins' joints, as a flag and in order; each skinned part, its leaves and its box; and
+        // a clip's keys' times, as its poses' are found.
+        let each_part = 2 * size_of::<Transform>()
+            + size_of::<Option<usize>>()
+            + size_of::<bool>()
+            + size_of::<usize>()
+            + size_of::<Mat4>();
+        let each_skinned =
+            size_of::<(usize, usize, usize)>() + size_of::<Influences>() + size_of::<[Vec3; 2]>();
+        let (mut leaves, mut leaf_bytes) = (0, 0);
+        for (_, skin, primitive) in skinned() {
+            let (count, primitive) = (skins[skin].joints.len(), &primitives[primitive]);
+            let moved = Influences::moved(count, &primitive.joints, &primitive.weights);
+            leaves += Influences::most_leaves(count, moved);
+            leaf_bytes += each_skinned + Influences::bytes(count, moved);
+        }
+        let keys = clips.iter().map(Clip::keys).max().unwrap_or(0);
+        let held = parts.len() * each_part + leaf_bytes + keys * size_of::<f32>();
+        memory.hold_for(held, "its skinned meshes' poses")?;
+        let skinned: Vec<(usize, usize, usize)> = skinned().collect();
         let rest: Vec<Transform> = parts.iter().map(|part| part.transform).collect();
         let parents: Vec<Option<usize>> = parts.iter().map(|part| part.parent).collect();
-        let mut poses = vec![placed(&rest, &parents)];
+        let mut needed = vec![false; parts.len()];
+        for &(part, skin, _) in &skinned {
+            needed[part] = true;
+            for &joint in &skins[skin].joints {
+                needed[joint as usize] = true;
+            }
+        }
+        // Each part's parent after it, as parents come first.
+        for part in (0..parts.len()).rev() {
+            if let (true, Some(parent)) = (needed[part], parents[part]) {
+                needed[parent] = true;
+            }
+        }
+        let order: Vec<usize> = (0..parts.len()).filter(|&part| needed[part]).collect();
+        // What each pose takes: its clip's channels set, its parts placed and its leaves posed.
+        let each_pose = (order.len() + leaves) as u64;
+        let work = (clips.iter()).fold(each_pose, |work, clip| {
+            let pose = each_pose + clip.channels.len() as u64;
+            work.saturating_add(pose.saturating_mul(clip.most_poses() as u64))
+        });
+        if work > MAX_POSE_WORK {
+            return Err(model.unsupported(format!(
+                "takes {work} steps to bound its skinned meshes as its clips pose them, past the \
+                 {MAX_POSE_WORK} the engine takes: each pose's parts placed and leaves of vertices \
+                 posed"
+            )));
+        }
+        let influences: Vec<Influences> = (skinned.iter())
+            .map(|&(_, skin, primitive)| {
+                let primitive = &primitives[primitive];
+                let (positions, joints) = (&primitive.positions, &primitive.joints);
+                Influences::new(&skins[skin], positions, joints, &primitive.weights)
+            })
+            .collect();
+        let mut boxes = vec![[Vec3::INFINITY, Vec3::NEG_INFINITY]; skinned.len()];
+        let mut locals = rest.clone();
+        let mut placed = vec![Mat4::IDENTITY; parts.len()];
+        let mut bound = |placed: &[Mat4]| {
+            for ((&(part, skin, _), influences), [low, high]) in
+                (skinned.iter().zip(&influences)).zip(&mut boxes)
+            {
+                let [l, h] = influences.posed(placed, part, &skins[skin]);
+                (*low, *high) = (low.min(l), high.max(h));
+            }
+        };
+        place(&rest, &parents, &order, &mut placed);
+        bound(&placed);
+        let mut times = Vec::with_capacity(keys);
         for clip in clips.iter() {
-            for time in clip.pose_times() {
-                let mut locals = rest.clone();
-                for channel in &clip.channels {
+            let channels = || (clip.channels.iter()).filter(|c| needed[c.part as usize]);
+            clip.pose_times(&mut times);
+            for &time in &times {
+                for channel in channels() {
+                    locals[channel.part as usize] = rest[channel.part as usize];
+                }
+                for channel in channels() {
                     let local = &mut locals[channel.part as usize];
                     channel.apply(local, channel.sample(time));
                 }
-                poses.push(placed(&locals, &parents));
+                place(&locals, &parents, &order, &mut placed);
+                bound(&placed);
+            }
+            for channel in channels() {
+                locals[channel.part as usize] = rest[channel.part as usize];
             }
         }
-        for (part, skinned) in parts.iter().enumerate() {
-            let (Some(skin), Some(primitive)) = (skinned.skin, skinned.primitive) else {
-                continue;
-            };
+        for (&(_, _, primitive), &posed) in skinned.iter().zip(&boxes) {
             let primitive = &mut primitives[primitive];
-            let skin = &skins[skin];
-            let positions = &primitive.positions;
-            let (joints, weights) = (&primitive.joints, &primitive.weights);
-            let bounds = poses
-                .iter()
-                .map(|pose| skinned_box(pose, part, skin, positions, joints, weights))
-                .chain(primitive.reach);
-            let [low, high] = bounds
-                .fold([Vec3::INFINITY, Vec3::NEG_INFINITY], |[l, h], [a, b]| {
-                    [l.min(a), h.max(b)]
-                });
+            let [low, high] =
+                (primitive.reach.into_iter()).fold(posed, |[l, h], [a, b]| [l.min(a), h.max(b)]);
             let spare = Vec3::splat((high - low).max_element() / 10.0);
             primitive.reach = Some([low - spare, high + spare]);
         }
+        memory.release(held);
         Ok(())
     }
 
@@ -3264,8 +3359,10 @@ pub(crate) mod tests {
         let ignored = "channel 2 of animation 0, of node 3 outside the scene";
         assert_eq!(imported.ignored, [ignored]);
         // Lifted two at half a second, its first corner at (0, 2) and its second at (1, 2); and
-        // its third, the child turned an eighth, at (1 - √2, 2): within its reach, which spares a
-        // tenth of its longest side, 2, each way.
+        // its third, the child turned an eighth, at (1 - √2, 2): within its reach. That's the box
+        // round what the child moves, its second corner and its third, turned with it, a unit
+        // square turned an eighth, which reaches √½ past the child's center at (1 - √½, 2); with
+        // a tenth of its longest side, 2 + √½, to spare each way.
         let [low, high] = primitive.reach.expect("a skinned primitive reaches");
         let turned = Vec3::new(1.0 - std::f32::consts::SQRT_2, 2.0, 0.0);
         let held = [Vec3::ZERO, Vec3::Y * 2.0, Vec3::new(1.0, 2.0, 0.0), turned];
@@ -3275,15 +3372,18 @@ pub(crate) mod tests {
                 "{point} in {low}..{high}"
             );
         }
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let spare = Vec3::splat((2.0 + half) / 10.0);
+        let expected = [
+            Vec3::new(turned.x, 0.0, 0.0),
+            Vec3::new(1.0, 2.0 + half, 0.0),
+        ];
         assert!(
-            (low - Vec3::new(turned.x - 0.2, -0.2, -0.2))
-                .abs()
-                .max_element()
-                < 1e-5,
+            (low - (expected[0] - spare)).abs().max_element() < 1e-5,
             "{low}"
         );
         assert!(
-            (high - Vec3::new(1.2, 2.2, 0.2)).abs().max_element() < 1e-5,
+            (high - (expected[1] + spare)).abs().max_element() < 1e-5,
             "{high}"
         );
     }
@@ -3757,6 +3857,162 @@ pub(crate) mod tests {
         let error = read.expect_err("a buffer past the memory");
         assert_eq!(error.code(), "engine.unsupported_model");
         assert_eq!(asked, memory + 1);
+    }
+
+    /// The Fox's vertices, each where the skin pass moves it, in each pose its reach is found from,
+    /// are within the box its leaves bound that pose by, which is little larger than the box round
+    /// the vertices themselves.
+    #[test]
+    fn a_skinned_meshs_leaves_hold_its_vertices_in_every_pose() {
+        let fox =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox/Fox.gltf");
+        let imported = read("fox", &fox, crate::dirs::read_file, MAX_MEMORY).expect("the Fox");
+        let (part, skinned) = (imported.parts.iter().enumerate())
+            .find(|(_, part)| part.skin.is_some())
+            .expect("a skinned part");
+        let skin = &imported.skins[skinned.skin.expect("a skin")];
+        let primitive = &imported.primitives[skinned.primitive.expect("a primitive")];
+        let (positions, joints) = (&primitive.positions, &primitive.joints);
+        let influences = Influences::new(skin, positions, joints, &primitive.weights);
+        let rest: Vec<Transform> = (imported.parts.iter()).map(|p| p.transform).collect();
+        let parents: Vec<Option<usize>> = imported.parts.iter().map(|p| p.parent).collect();
+        let all: Vec<usize> = (0..rest.len()).collect();
+        let mut poses = vec![rest.clone()];
+        let mut times = Vec::new();
+        for clip in &imported.clips {
+            clip.pose_times(&mut times);
+            for &time in &times {
+                let mut locals = rest.clone();
+                for channel in &clip.channels {
+                    channel.apply(&mut locals[channel.part as usize], channel.sample(time));
+                }
+                poses.push(locals);
+            }
+        }
+        let [mut exact, mut bound] = [[Vec3::INFINITY, Vec3::NEG_INFINITY]; 2];
+        for locals in &poses {
+            let mut placed = vec![Mat4::IDENTITY; rest.len()];
+            place(locals, &parents, &all, &mut placed);
+            let [low, high] = influences.posed(&placed, part, skin);
+            let into_mesh = placed[part].inverse();
+            for ((&position, joints), weights) in
+                positions.iter().zip(joints).zip(&primitive.weights)
+            {
+                let total: f32 = weights.iter().sum();
+                let moved: Vec3 = (joints.iter().zip(weights))
+                    .map(|(&joint, &weight)| {
+                        let joint = usize::from(joint);
+                        let matrix = into_mesh
+                            * placed[skin.joints[joint] as usize]
+                            * skin.inverse_binds[joint];
+                        matrix.transform_point3(Vec3::from_array(position)) * (weight / total)
+                    })
+                    .sum();
+                let within = 1e-3 * (high - low).max_element();
+                assert!(
+                    moved.cmpge(low - within).all() && moved.cmple(high + within).all(),
+                    "{moved} in {low}..{high}"
+                );
+                exact = [exact[0].min(moved), exact[1].max(moved)];
+            }
+            bound = [bound[0].min(low), bound[1].max(high)];
+        }
+        // Within a twentieth of its longest side, which the reach spares a tenth of each way.
+        let longest = (exact[1] - exact[0]).max_element();
+        let past = (exact[0] - bound[0]).max(bound[1] - exact[1]).max_element();
+        assert!(past < longest / 20.0, "{bound:?} round {exact:?}");
+    }
+
+    /// [`skinned`]'s model, as a GLB, with `clips` clips that each turn the child joint along 65
+    /// keys, all from one pair of accessors, in place of its own; `parts` more parts, that place
+    /// nothing; and `drawn` more nodes that draw its mesh, skinned by its skin.
+    fn many(clips: usize, parts: usize, drawn: usize) -> Vec<u8> {
+        let (mut gltf, bin) = skinned();
+        let mut view = Bin {
+            bytes: bin,
+            views: serde_json::from_value(gltf["bufferViews"].take()).expect("views"),
+        };
+        let times: Vec<f32> = (0..65).map(|key| key as f32 / 64.0).collect();
+        let turns: Vec<f32> = (0..65)
+            .flat_map(|key| Quat::from_rotation_z(key as f32 / 64.0).to_array())
+            .collect();
+        let times = view.view(&floats(&times), None);
+        let turns = view.view(&floats(&turns), None);
+        let accessors = gltf["accessors"].as_array_mut().expect("accessors");
+        let accessor = |view, kind| json!({"bufferView": view, "componentType": 5126, "count": 65, "type": kind});
+        accessors.push(accessor(times, "SCALAR"));
+        accessors.push(accessor(turns, "VEC4"));
+        let (times, turns) = (accessors.len() - 2, accessors.len() - 1);
+        let clip = json!({
+            "channels": [{"sampler": 0, "target": {"node": 1, "path": "rotation"}}],
+            "samplers": [{"input": times, "output": turns}],
+        });
+        gltf["animations"] = json!(vec![clip; clips]);
+        let nodes = gltf["nodes"].as_array_mut().expect("nodes");
+        let first = nodes.len();
+        nodes.extend(std::iter::repeat_n(json!({}), parts));
+        nodes.extend(std::iter::repeat_n(json!({"mesh": 0, "skin": 0}), drawn));
+        let scene = (gltf["scenes"][0]["nodes"].as_array_mut()).expect("the scene's nodes");
+        scene.extend((first..first + parts + drawn).map(|node| json!(node)));
+        gltf["bufferViews"] = json!(view.views);
+        gltf["buffers"][0]["byteLength"] = json!(view.bytes.len());
+        glb(&gltf.to_string(), &view.bytes)
+    }
+
+    /// A small file of many clips and many parts, which would take the product of the poses its
+    /// clips' keys make and its parts, each pose's 64 bytes a part, to find its skinned mesh's
+    /// reach, as some 33 GB, reads within the memory reading may take; and what finding its reach
+    /// holds counts against that memory, so that the least that reads the model with fewer clips
+    /// fails, a byte less, as its skinned meshes' poses are bound.
+    #[test]
+    fn a_skinned_model_of_many_clips_and_parts_reaches_within_the_memory_reading_may_take() {
+        let read_with =
+            |model: &[u8], memory| read("m", Path::new("m.glb"), |_, _| Ok(model.to_vec()), memory);
+        let model = many(2_000, 4_000, 0);
+        assert!(model.len() < 1 << 20, "{} bytes", model.len());
+        let imported = read_with(&model, MAX_MEMORY).expect("the model");
+        assert_eq!((imported.clips.len(), imported.parts.len()), (2_000, 4_003));
+        let [low, high] = imported.primitives[0].reach.expect("a reach");
+        for corner in [Vec3::ZERO, Vec3::X, Vec3::Y] {
+            assert!(
+                corner.cmpge(low).all() && corner.cmple(high).all(),
+                "{low}..{high}"
+            );
+        }
+        let model = many(2, 4_000, 0);
+        let (mut fails, mut reads) = (0, MAX_MEMORY);
+        while reads - fails > 1 {
+            let memory = fails + (reads - fails) / 2;
+            match read_with(&model, memory) {
+                Ok(_) => reads = memory,
+                Err(_) => fails = memory,
+            }
+        }
+        let error = read_with(&model, fails).expect_err("a byte less than it reads in");
+        assert_eq!(error.code(), "engine.unsupported_model", "{error}");
+        let poses = "MiB to read, of its skinned meshes' poses";
+        assert!(error.to_string().contains(poses), "{error}");
+    }
+
+    /// A small file of many clips and many nodes that draw a skinned mesh, whose poses would take
+    /// minutes to bound, is refused as it would take more than the engine takes, before it poses
+    /// any; with fewer, it reads.
+    #[test]
+    fn a_skinned_model_whose_poses_take_too_long_to_bound_is_refused() {
+        let read_with = |model: Vec<u8>| {
+            read(
+                "m",
+                Path::new("m.glb"),
+                |_, _| Ok(model.clone()),
+                MAX_MEMORY,
+            )
+        };
+        let error = read_with(many(100, 0, 10_000)).expect_err("too long to bound");
+        assert_eq!(error.code(), "engine.unsupported_model", "{error}");
+        let past = "to bound its skinned meshes as its clips pose them, past the 134217728";
+        assert!(error.to_string().contains(past), "{error}");
+        let imported = read_with(many(100, 0, 100)).expect("fewer");
+        assert_eq!(imported.parts.len(), 103);
     }
 
     #[test]

@@ -712,7 +712,7 @@ struct Declared;
             component with `#[derive(Clone, gg_engine::Component)]`; a field of a type that isn't \
             reflected can be kept with `#[reflect(opaque)]`"
 )]
-pub trait Reflect: std::any::Any + Send + Sync {
+pub trait Reflect: std::any::Any + Send + Sync + Swap {
     /// The type's description, which it adds to `types` if it's a struct or an enum.
     fn describe(types: &mut Types) -> Result<Type>
     where
@@ -728,10 +728,17 @@ pub trait Reflect: std::any::Any + Send + Sync {
         Self: Sized;
 
     /// One like this one, with `value`'s parts, keeping its own opaque ones where they are, a
-    /// list's by index: set to a list with an element taken out, the elements after it keep what's
-    /// opaque of those that were in their places. A variant of an enum switched to, an option's
-    /// value that was `None`, and a list's elements past its end are made with
-    /// [`from_value`](Self::from_value). Fails, at the part that failed, with
+    /// list's by which element each is: set to a list of another length, the elements alike at
+    /// its start and at its end, by their values, keep their own, so that an element taken out
+    /// or put in moves no other's to the wrong one; set to a list of the same length, each keeps
+    /// its place's. Values are all that tell elements apart, as no set says which it took out,
+    /// moved or changed: so elements swapped in a list of the same length trade what's opaque;
+    /// elements alike keep theirs first to last; and an element taken out in the same set as one
+    /// after it changes, as `[a, b, c]` set to `[a, c2]`, leaves its own to the one that changed,
+    /// whose own is gone. A variant of an enum switched to, an option's value that was `None`, and a
+    /// list's elements that are new are made with [`from_value`](Self::from_value), so what's
+    /// opaque of the variant left or the element taken out is gone: an operation's undo puts it
+    /// back from the component it keeps. Fails, at the part that failed, with
     /// `reflect.wrong_kind` for a value of another kind; `reflect.out_of_range` for an integer that
     /// doesn't fit; `reflect.not_normalized` for a quaternion that isn't a unit;
     /// `reflect.missing_field`, `reflect.no_field` and `reflect.duplicate_field` for a struct's
@@ -769,6 +776,23 @@ pub trait Reflect: std::any::Any + Send + Sync {
     /// duplicate points its copies' at each other, keeping every other bit as it is, where setting
     /// a value again would check it all, and refuse what code stored that a set refuses.
     fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity));
+}
+
+/// Swaps a value with another of its type through `dyn Reflect`, which no generic swap reaches, as
+/// an operation's undo puts a field back whole, what's opaque in it too. Every type has it.
+#[doc(hidden)]
+pub trait Swap {
+    /// Swaps this with `other`, if it's of this type; returns whether it was.
+    fn swap_reflected(&mut self, other: &mut dyn std::any::Any) -> bool;
+}
+
+impl<T: std::any::Any> Swap for T {
+    fn swap_reflected(&mut self, other: &mut dyn std::any::Any) -> bool {
+        other
+            .downcast_mut::<T>()
+            .map(|other| std::mem::swap(self, other))
+            .is_some()
+    }
 }
 
 /// Types whose fields `#[reflect(min = ..)]` and `#[reflect(max = ..)]` bound: numbers, vectors,

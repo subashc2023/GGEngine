@@ -6,7 +6,7 @@
 //! A recording is text, a line at a time:
 //!
 //! ```text
-//! gg-recording 4
+//! gg-recording 5
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
@@ -25,7 +25,9 @@
 //! installed; then come the world's hash once the layers attached, its content then its layout,
 //! and each tick's commands, `>`, the index of the layer whose tick applied them and their value as
 //! [`text`] writes it, before the tick's number and the world's hash after it; and `end`, once the
-//! run ended. Before the first line that may
+//! run ended. A patch of the run's code applied between ticks, through the tool API, has a `patch`
+//! line, the name of the patch's library, before the tick after, where a replay, which can't apply it, stops.
+//! Before the first line that may
 //! name it, each texture the run named otherwise than by its path, as by its ID, has a `named` line,
 //! its name and the path it names, which a replay names it by, scanning no ID file, so that it goes
 //! as the run went wherever the ID files differ.
@@ -54,7 +56,10 @@ use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 4";
+const FORMAT: &str = "gg-recording 5";
+
+/// The format of the recordings before patches, `patch` lines, which this engine reads too.
+const BEFORE_PATCHES: &str = "gg-recording 4";
 
 /// The format of the recordings before mods, `mod` lines, which this engine reads too, as runs
 /// without mods.
@@ -211,6 +216,20 @@ impl Recorder {
         self.flush();
     }
 
+    /// Writes that the run's code was patched between ticks, with the patch's library at
+    /// `library`, by its file's name alone, which says which patch it was without where the
+    /// machine kept it: it belongs to the tick after, before its edits and commands, where a
+    /// replay, which can't apply the patch, stops.
+    #[cfg(feature = "dev")]
+    pub(crate) fn patched(&mut self, library: &Path) {
+        let name = library.file_name().unwrap_or(library.as_os_str());
+        self.line.clear();
+        self.line.push_str("patch ");
+        text::write_patch(&mut self.line, &name.to_string_lossy());
+        self.line.push('\n');
+        self.flush();
+    }
+
     /// Writes the world's hash after `tick`.
     pub(crate) fn ticked(&mut self, tick: Tick, world: &World) {
         self.names(world);
@@ -283,6 +302,9 @@ struct Recording {
 /// of a recording cut short as their tick ran.
 #[derive(Default)]
 struct Ticked {
+    /// The library of the first patch of the run's code applied before it, and the line that
+    /// gives it, which a replay stops at.
+    patch: Option<(String, usize)>,
     /// The edits from outside the layers applied before it, each a value and the line that gives it.
     edits: Vec<(Text, usize)>,
     commands: Vec<Recorded>,
@@ -342,7 +364,7 @@ impl Recording {
     fn parse(text: &str) -> Result<Self> {
         let mut lines = whole_lines(text).peekable();
         match lines.next() {
-            Some((_, FORMAT | BEFORE_MODS | BEFORE_NAMES | BEFORE_EDITS)) => {}
+            Some((_, FORMAT | BEFORE_PATCHES | BEFORE_MODS | BEFORE_NAMES | BEFORE_EDITS)) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
                     "it's a recording of format `{line}`, but this engine reads `{FORMAT}`"
@@ -415,6 +437,10 @@ impl Recording {
                 recording.complete = true;
             } else if let Some(texture) = line.strip_prefix("named ") {
                 recording.names.push(named(number, texture)?);
+            } else if let Some(library) = line.strip_prefix("patch ") {
+                let library = text::read_patch(library, "patch ".len() + 1);
+                let library = library.ok_or_else(|| syntax(number, "a patch's is its library"))?;
+                ticked.patch.get_or_insert((library, number));
             } else if let Some(command) = line.strip_prefix("> ") {
                 ticked.commands.push(recording.command(number, command)?);
             } else if let Some(edit) = line.strip_prefix("@ ") {
@@ -432,8 +458,8 @@ impl Recording {
                         number,
                         format!(
                             "expected a command, `> <layer> <value>`, an edit, `@ <value>`, a tick's hash, \
-                             `<tick> <content> <layout>`, a texture's name, `named <value>`, or \
-                             `end`; found `{line}`"
+                             `<tick> <content> <layout>`, a texture's name, `named <value>`, a \
+                             patch, `patch <library>`, or `end`; found `{line}`"
                         ),
                     ));
                 };
@@ -449,7 +475,8 @@ impl Recording {
             }
         }
         // A tick cut short, whose commands run again unchecked, so that what stopped it stops the
-        // replay too; but not edits alone, applied after the last tick, which no tick ran with.
+        // replay too; but not edits or patches alone, applied after the last tick, which no tick
+        // ran with.
         if !ticked.commands.is_empty() {
             recording.ticks.push(ticked);
         }
@@ -560,7 +587,9 @@ impl Replay {
     /// last hash of a recording cut short.
     ///
     /// Fails, saying at which line, with `replay.bad_command` for a command recorded for a layer
-    /// that queues none, or that its layer refuses; and with `replay.diverged` if the world's hash
+    /// that queues none, or that its layer refuses; with `replay.patched`, running nothing, at a
+    /// tick that the run's code was patched before, as the replay runs its own code, which can't
+    /// follow; and with `replay.diverged` if the world's hash
     /// isn't the one recorded, saying which part of it differs, with both hashes, and both engines'
     /// builds where another build recorded it, with the world as the tick left it.
     pub fn step(&mut self) -> Result<Option<Tick>> {
@@ -579,6 +608,14 @@ impl Replay {
         let tick = Tick {
             number: self.ran as u64,
         };
+        if let Some((library, line)) = &ticked.patch {
+            let message = format!(
+                "line {line}: the run's code was patched before tick {}, with {library}, which a \
+                 replay can't apply, running its own code: it follows the run only to there",
+                tick.number
+            );
+            return Err(Error::new("replay.patched", message));
+        }
         self.ran += 1;
         // As the run did, refused where it refused them, which the hash after the tick checks; each
         // read once the textures it names are loaded, as the run had them.
@@ -1381,6 +1418,48 @@ mod tests {
         assert_eq!(replay_all(two_layers(), &older).ok(), Some((ticks, hash)));
     }
 
+    /// A recording whose run's code was patched between ticks replays the ticks before the patch,
+    /// to their hashes, and stops at the tick after it with `replay.patched`, naming the line and
+    /// the tick, rather than run its own code on from there and go another way unsaid; one patched
+    /// after its last tick replays whole, as no tick ran on the patch.
+    #[test]
+    fn a_replay_stops_where_its_run_was_patched() {
+        let (text, ticks, hash) = recorded(two_layers(), &[Tick::DT; 4]);
+        assert!(ticks > 2, "{ticks}");
+        let lines: Vec<&str> = text.lines().collect();
+        let first = lines.iter().position(|line| line.starts_with("1 "));
+        let first = first.expect("tick 1's hash");
+        let patch = r#"patch String("lib\"patch\".dylib")"#;
+        let patched = changed(&text, first, &format!("{}\n{patch}", lines[first]));
+        let (ran, error) = replay_all(two_layers(), &patched).expect_err("stopped");
+        assert_eq!((ran, error.code()), (2, "replay.patched"), "{error}");
+        let says = format!(
+            "line {}: the run's code was patched before tick 2, with lib\"patch\".dylib, ",
+            first + 2
+        );
+        assert!(error.to_string().starts_with(&says), "{error}");
+        // After the last tick, before `end`.
+        let end = lines.len() - 1;
+        assert_eq!(lines[end], "end");
+        let after = changed(&text, end, &format!("{patch}\nend"));
+        assert_eq!(replay_all(two_layers(), &after).ok(), Some((ticks, hash)));
+        // A patch's line names its library.
+        let bad = changed(&text, first, &format!("{}\npatch 12", lines[first]));
+        let (_, error) = replay_all(two_layers(), &bad).expect_err("refused");
+        assert_eq!(error.code(), "replay.syntax", "{error}");
+        // As the recorder writes it, the library by its file's name alone.
+        #[cfg(feature = "dev")]
+        {
+            let dir = Scratch::new("recording-patched");
+            fs::create_dir_all(&dir.0).expect("a directory");
+            let path = dir.0.join("run.recording");
+            let mut recorder = Recorder::create(&path, "Recorded").expect("created");
+            recorder.patched(&dir.0.join(r#"lib"patch".dylib"#));
+            let written = fs::read_to_string(&path).expect("written");
+            assert_eq!(written, "patch String(\"lib\\\"patch\\\".dylib\")\n");
+        }
+    }
+
     /// A layer whose Luau script, at `path`, moves its entity at each tick.
     #[cfg(feature = "dev")]
     struct Stepped {
@@ -1555,7 +1634,7 @@ mod tests {
         let after_end = format!("{text}0 {hash}\n");
         let named = |line: &str| changed(&text, 4, &format!("{}\n{line}", lines[4]));
         let cases = [
-            (changed(&text, 0, "gg-recording 5"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 6"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),

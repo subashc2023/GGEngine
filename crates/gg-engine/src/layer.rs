@@ -3,6 +3,7 @@
 use std::any::type_name;
 #[cfg(feature = "dev")]
 use std::collections::HashMap;
+use std::fmt;
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -302,6 +303,19 @@ enum Seer {
     Default,
 }
 
+impl fmt::Display for Seer {
+    /// What it names a frame's viewpoint by, in a diagnostic.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layer => f.write_str("a layer's viewpoint"),
+            #[cfg(feature = "dev")]
+            Self::Look(_) => f.write_str("the look's viewpoint"),
+            Self::Camera(id) => write!(f, "camera {id}"),
+            Self::Default => f.write_str("the default viewpoint"),
+        }
+    }
+}
+
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
@@ -322,6 +336,12 @@ pub struct Context {
     seer: Option<(Seer, bool)>,
     /// The tie among the world's cameras last warned of, while they've tied since.
     tie: Option<Tie>,
+    /// What the view's projection was in the last frame of its source whose projection could
+    /// project, and whether this streak of frames whose can't has warned: as [`camera::checked`]
+    /// says.
+    projection: camera::Projected<Seer>,
+    /// Whether the fog's current streak of frames with numbers that aren't finite has warned.
+    fog_warned: bool,
     /// The world's environment as the world was last drawn, if it has one.
     environment: Option<Environment>,
     /// The tie among the world's environments last warned of, while they've tied since.
@@ -675,6 +695,8 @@ impl Context {
             seen: None,
             seer: None,
             tie: None,
+            projection: camera::Projected::default(),
+            fog_warned: false,
             environment: None,
             environment_tie: None,
             lit: light::Lit::default(),
@@ -900,7 +922,8 @@ impl Context {
     /// Sets what the game's view sees the world from this frame, in place of the world's camera,
     /// which it sees through in frames no layer sets one: of the entities with a [`Camera`] and a
     /// [`Transform`], the one that's primary; without one, [`Viewpoint::default`]. A projection
-    /// that can't project panics as the frame renders, as [`Projection`](crate::Projection) says.
+    /// that can't project, as [`Projection`](crate::Projection) says, is drawn as the last that
+    /// could, or the default's, once for a warning (`engine.bad_projection`) as the frame takes it.
     pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
         self.viewpoint = Some(viewpoint);
     }
@@ -3556,6 +3579,15 @@ impl Context {
         )
     }
 
+    /// Whether the cursor is over what a game UI draws that a pointer works on, in any UI that
+    /// takes input and drew in the last frame: a button, a widget or a list, within what clips it,
+    /// or anywhere while a drop-down's options are open, as [`GameUi::pointer_over`] says of one.
+    /// A game that reads the mouse itself, to aim, pick or drag, leaves it alone while it's over.
+    pub fn pointer_over_ui(&mut self) -> bool {
+        let (view, cursor) = (self.view, self.input.cursor());
+        self.uis.pointer_over(&mut self.fonts, view, cursor)
+    }
+
     /// What the UIs the layers added lay out, draw and take input with, lent apart: the UIs, the
     /// fonts their texts are measured and drawn in, the canvas and the shaders it draws with,
     /// where the view was as the last frame handed it off, and the input as the layers are sent
@@ -3811,7 +3843,29 @@ impl Context {
                 self.hosts.reload(&mut self.world, &path, text)?;
                 Ok(Done::Applied(Vec::new()))
             }
-            edit => self.authors.edit(&mut self.world, edit),
+            // Every log goes, the authors' and those of layers, such as the Inspector's, which the
+            // world renewed refuses, freeing nothing twice.
+            Edit::Renew => {
+                let dropped = self.authors.entries(&self.world);
+                self.authors.clear(&mut self.world);
+                self.world.renew();
+                if dropped > 0 {
+                    warn!(
+                        code = "edits.history_cleared",
+                        dropped,
+                        "Dropped the {dropped} edits the authors could undo or redo, as a lockstep \
+                         joiner joined, or the peers' worlds were made the same again: no log of \
+                         the joiner's holds them"
+                    );
+                }
+                Ok(Done::Applied(Vec::new()))
+            }
+            edit => {
+                let done = self.authors.edit(&mut self.world, edit)?;
+                // Of the world in the context's place: a copy's goes with it at `stop`.
+                self.scenes.open.edited = true;
+                Ok(done)
+            }
         }
     }
 
@@ -3959,7 +4013,21 @@ impl Context {
         frame.bloom = self.environment.map_or(0.0, |seen| seen.bloom);
         frame.grade = self.environment.map_or(Grade::IDENTITY, |seen| seen.grade);
         frame.ambient_occlusion = self.environment.and_then(|seen| seen.ambient_occlusion);
-        frame.fog = self.environment.and_then(|seen| seen.fog);
+        let fog = self.environment.and_then(|seen| seen.fog);
+        let broken = fog.and_then(|fog| Some((fog, fog.non_finite()?)));
+        if let Some((fog, field)) = broken
+            && !mem::replace(&mut self.fog_warned, true)
+        {
+            warn!(
+                code = "engine.bad_fog",
+                field,
+                "the world's fog has a {field} that isn't finite, {fog:?}: the view draws without \
+                 fog"
+            );
+        }
+        // The next streak of broken fog warns anew.
+        self.fog_warned &= broken.is_some();
+        frame.fog = fog.filter(|_| broken.is_none());
         frame.reflections = self.environment.and_then(|seen| seen.reflections);
         frame.atmosphere = self.environment.and_then(|seen| seen.atmosphere());
         frame.depth_of_field = (self.environment)
@@ -3990,6 +4058,7 @@ impl Context {
             (looked.unwrap_or(seen), self.look.outline.or(outline))
         };
         let (seer, viewpoint) = seen;
+        let viewpoint = camera::checked(viewpoint, seer, &mut self.projection);
         frame.viewpoint = viewpoint;
         let perspective = matches!(viewpoint.projection, crate::Projection::Perspective { .. });
         frame.cut = self.seer != Some((seer, perspective));
@@ -4122,6 +4191,20 @@ fn layout<T>() -> String {
 /// The types a model's draws hold the bytes of, as its `asset` line says them after its path.
 pub(crate) fn model_types() -> String {
     format!("{} {}", layout::<ModelVertex>(), layout::<ModelParams>())
+}
+
+/// Applies the patch `table` names, the simulation having run `ticks` ticks, as
+/// [`patch::apply`](crate::patch::apply) does, and has `recorder`, if the run is recorded, write it
+/// once it has applied, so that the recording's replay, which can't apply it, stops where the run's
+/// code changed rather than going another way from there unsaid.
+#[cfg(feature = "dev")]
+fn patched(recorder: &mut Option<Recorder>, table: subsecond::JumpTable, ticks: u64) -> Result<()> {
+    let library = table.lib.clone();
+    crate::patch::apply(table, ticks)?;
+    if let Some(recorder) = recorder {
+        recorder.patched(&library);
+    }
+    Ok(())
 }
 
 /// The name of type `L`, without its path or its generics: such as `Inspector`.
@@ -4308,6 +4391,19 @@ impl Stack {
         match net.turn(next) {
             Turn::None => {}
             Turn::Send => {
+                // A lockstep host's logs go, and the slots they kept vacant for their undos with
+                // them, freed as the joiner's load of the world frees them, so that the peers give
+                // the same slots to the entities spawned after; and no undo reaches past the world
+                // the joiner starts from, which its own logs don't hold. Recorded, as an edit
+                // between ticks, so that a replay drops them there too. A server's clients take
+                // its world again with each state.
+                if matches!(net, Session::Peer(_)) {
+                    if let Some(recorder) = &mut self.recorder {
+                        recorder.edited(&Edit::Renew.to_value(), &cx.world);
+                    }
+                    cx.apply_edit(Edit::Renew)
+                        .expect("a renewal is never refused");
+                }
                 let scripts = cx.hosts.applied();
                 let mods = cx.mods.applied();
                 let of = crate::snapshot::Of {
@@ -4485,6 +4581,15 @@ impl Stack {
             Some(Session::Peer(net)) => Ok(net.offer_patch(table, next)),
             _ => Err(table),
         }
+    }
+
+    /// Applies the patch `table` names, the simulation having run `ticks` ticks, as
+    /// [`patch::apply`](crate::patch::apply) does, outside a lockstep session, which
+    /// [`offer_patch`](Self::offer_patch) offers it to; a recording gets it once it has applied,
+    /// as [`Recorder::patched`] says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn patch(&mut self, table: subsecond::JumpTable, ticks: u64) -> Result<()> {
+        patched(&mut self.recorder, table, ticks)
     }
 
     /// What the edit or the patch offered with `ticket` did, and the tick it applied before, once
@@ -4888,7 +4993,7 @@ impl Stack {
                 }
                 #[cfg(feature = "dev")]
                 for (ticket, table) in merged.patches.iter().cloned() {
-                    let patched = crate::patch::apply(table, tick.number);
+                    let patched = patched(recorder, table, tick.number);
                     net.did(
                         ticket,
                         tick.number,
@@ -4905,9 +5010,8 @@ impl Stack {
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(merged) = &merged
                 && let Some(queue) = layer.commands()
-                && let Err(error) = merged.fill(index, queue, cx)
             {
-                error!(code = error.code(), layer = names[index], "{error:#}");
+                merged.fill(index, names[index], queue, cx);
             }
             if let Some(recorder) = recorder.as_mut()
                 && let Some(commands) = layer.commands()
@@ -5099,7 +5203,8 @@ impl Stack {
     /// until a layer handles it. `Break` means one did. A release, a gamepad's stick or trigger
     /// back at rest, and the loss of focus, go on to the layers below one that handles them, as
     /// releases go past the UI, so that none is left holding what it saw pressed: a release without
-    /// its press changes nothing.
+    /// its press changes nothing. A game UI that takes the mouse's buttons or its wheel from the
+    /// layers below, as [`GameUi::event`] says, handles them for the layer that sent it them.
     pub(crate) fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         cx.input.record(event);
         let lets_go = match *event {
@@ -5113,7 +5218,9 @@ impl Stack {
         };
         let mut handled = ControlFlow::Continue(());
         for layer in self.layers.iter_mut().rev() {
-            if layer.event(cx, event).is_break() {
+            cx.uis.forget_consumed();
+            // A UI a layer sent the event to took it, if the layer let it go on.
+            if layer.event(cx, event).is_break() || cx.uis.consumed() {
                 handled = ControlFlow::Break(());
                 if !lets_go {
                     break;
@@ -5186,7 +5293,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::{Key, Projection, Transform, render_thread};
+    use crate::{Fog, Key, Projection, Transform, render_thread};
 
     /// A frame of `cx`'s world, drawn and handed off with its view at 64 by 32.
     fn handed_off(cx: &mut Context) -> Extracted {
@@ -5245,6 +5352,215 @@ mod tests {
                 primary,
             },
         )
+    }
+
+    /// A projection set from code that can't project, as a near plane of 0 or a field of view that
+    /// isn't a number, which would panic the render thread, is drawn through the last that could,
+    /// or the default's, from where the camera is, and warns once (`engine.bad_projection`) until
+    /// one can again.
+    #[test]
+    fn a_projection_that_cant_project_is_replaced_by_the_last_that_could_with_a_warning() {
+        let logged = crate::testing::logged();
+        let mut cx = Context::seeded(1);
+        let good = Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        };
+        let camera = cx.world_mut().spawn((
+            Transform {
+                translation: Vec3::X,
+                ..Transform::IDENTITY
+            },
+            Camera {
+                projection: Projection::Perspective {
+                    fov: f32::NAN,
+                    near: 0.1,
+                },
+                primary: true,
+            },
+        ));
+        let seen = |cx: &mut Context| handed_off(cx).viewpoint;
+        let warnings = || logged.codes.try_iter().collect::<Vec<_>>();
+        let first = seen(&mut cx);
+        assert_eq!(first.projection, Viewpoint::default().projection, "no last");
+        assert_eq!(first.position, Vec3::X, "from where the camera is");
+        assert_eq!(warnings(), ["engine.bad_projection"]);
+        let set = |cx: &mut Context, projection| {
+            let camera = cx.world_mut().get_mut::<Camera>(camera).expect("alive");
+            camera.projection = projection;
+        };
+        set(&mut cx, good);
+        assert_eq!(seen(&mut cx).projection, good);
+        assert!(warnings().is_empty());
+        let near_nothing = Projection::Perspective {
+            fov: 1.0,
+            near: 0.0,
+        };
+        set(&mut cx, near_nothing);
+        assert_eq!(seen(&mut cx).projection, good, "the last that could");
+        assert_eq!(seen(&mut cx).projection, good);
+        assert_eq!(warnings(), ["engine.bad_projection"], "once");
+        // A layer's viewpoint, which a game sets whole, as the frame takes it: of a source of its
+        // own, which has no good projection of the camera's to fall back to, and warns anew, as
+        // does the camera as the view comes back to it.
+        let flat = Viewpoint::default().projection;
+        cx.set_viewpoint(Viewpoint {
+            projection: Projection::Orthographic {
+                height: 0.0,
+                near: -1.0,
+                far: 1.0,
+            },
+            ..Viewpoint::default()
+        });
+        assert_eq!(seen(&mut cx).projection, flat, "not the camera's");
+        assert_eq!(warnings(), ["engine.bad_projection"], "a layer's own");
+        assert_eq!(seen(&mut cx).projection, flat, "the camera, with none good");
+        assert_eq!(warnings(), ["engine.bad_projection"], "the camera's own");
+        set(&mut cx, good);
+        assert_eq!(seen(&mut cx).projection, good);
+        assert!(warnings().is_empty());
+    }
+
+    /// Fog with a number that isn't finite, set from code, would turn the whole view black: the
+    /// frame is drawn without it, with one warning (`engine.bad_fog`) for as long as it lasts.
+    #[test]
+    fn fog_that_isnt_finite_is_left_out_of_the_frame_with_a_warning() {
+        let logged = crate::testing::logged();
+        let mut cx = Context::seeded(1);
+        let environment = |fog| Environment {
+            fog: Some(fog),
+            ..Environment::default()
+        };
+        let broken = Fog {
+            falloff: f32::NAN,
+            ..Fog::default()
+        };
+        let id = cx.world_mut().spawn(environment(broken));
+        let fog = |cx: &mut Context| handed_off(cx).fog;
+        let warnings = || logged.codes.try_iter().collect::<Vec<_>>();
+        assert_eq!(fog(&mut cx), None);
+        assert_eq!(fog(&mut cx), None);
+        assert_eq!(warnings(), ["engine.bad_fog"], "once");
+        *cx.world_mut().get_mut::<Environment>(id).expect("alive") = environment(Fog::default());
+        assert_eq!(fog(&mut cx), Some(Fog::default()));
+        assert!(warnings().is_empty());
+        let infinite = Fog {
+            density: f32::INFINITY,
+            ..Fog::default()
+        };
+        *cx.world_mut().get_mut::<Environment>(id).expect("alive") = environment(infinite);
+        assert_eq!(fog(&mut cx), None);
+        assert_eq!(warnings(), ["engine.bad_fog"], "anew after good fog");
+    }
+
+    /// A layer that sends each event to its UI and lets it go on, as a game that doesn't ask what
+    /// the UI did.
+    struct Sends(crate::GameUi);
+
+    impl Layer for Sends {
+        fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+            self.0.event(cx, event);
+            ControlFlow::Continue(())
+        }
+    }
+
+    /// A game UI takes the mouse's presses and wheel over its buttons and lists from the layers
+    /// below the layer that sent it them, which see those elsewhere, and releases go on; whether
+    /// the cursor is over it is asked of the UI and of the context.
+    #[test]
+    fn a_game_ui_takes_the_mouse_over_what_it_draws_from_the_layers_below() {
+        use crate::MouseButton;
+
+        let scratch = crate::dirs::tests::Scratch::new("ui-takes-the-mouse");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("menu.ui");
+        // A button in the view's middle, a list in its top left corner and a text in its top right,
+        // in canvas units of a view 1,920 by 1,080 pixels.
+        let file = r#"(nodes: [
+            Button(name: "play", width: Fixed(400.0), height: Fixed(80.0)),
+            List(
+                name: "scores",
+                anchor: (Start, Start),
+                width: Fixed(300.0),
+                height: Fixed(200.0),
+                children: [Text(name: "score", text: "120")],
+            ),
+            Text(name: "title", anchor: (End, Start), text: "TITLE"),
+        ])"#;
+        std::fs::write(&path, file).expect("written");
+        let mut cx = Context::seeded(1);
+        let ui = cx.add_ui("menu", &path).expect("added");
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = Stack::default();
+        stack.push_layer(Probe {
+            name: "world",
+            handles: false,
+            calls: calls.clone(),
+        });
+        stack.push_layer(Sends(ui));
+        // Drawn and handed off, so that the view is known and the UI drew in the last frame.
+        ui.draw(&mut cx);
+        let mut frame = Extracted::default();
+        let view = Viewport {
+            origin: [0, 0],
+            size: [1920, 1080],
+        };
+        cx.extract(&mut frame, view);
+        let button = |pressed| Event::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+        };
+        let wheel = Event::Scroll(crate::Scroll::Lines { x: 0.0, y: -1.0 });
+        let reached = || !calls.borrow().is_empty();
+        let at = |cx: &mut Context, stack: &mut Stack, x: f64, y: f64| {
+            let _ = stack.event(cx, &Event::CursorMoved { x, y });
+            calls.borrow_mut().clear();
+        };
+
+        at(&mut cx, &mut stack, 960.0, 540.0);
+        assert!(ui.pointer_over(&mut cx), "over the button");
+        assert!(cx.pointer_over_ui());
+        let handled = stack.event(&mut cx, &button(true));
+        assert_eq!(handled, ControlFlow::Break(()), "a press over a button");
+        assert!(!reached(), "a press over a button reaches the world");
+        // A release goes on, as the layers below let go of what they saw pressed.
+        let _ = stack.event(&mut cx, &button(false));
+        assert!(reached(), "a release goes on down");
+        calls.borrow_mut().clear();
+
+        at(&mut cx, &mut stack, 100.0, 100.0);
+        assert!(ui.pointer_over(&mut cx) && cx.pointer_over_ui(), "the list");
+        let _ = stack.event(&mut cx, &wheel);
+        assert!(!reached(), "the wheel over a list reaches the world");
+
+        for (x, y, what) in [(960.0, 100.0, "nothing"), (1850.0, 20.0, "a text")] {
+            at(&mut cx, &mut stack, x, y);
+            assert!(!ui.pointer_over(&mut cx) && !cx.pointer_over_ui(), "{what}");
+            let handled = stack.event(&mut cx, &button(true));
+            assert_eq!(handled, ControlFlow::Continue(()), "{what}");
+            assert!(reached(), "a press over {what} doesn't reach the world");
+            calls.borrow_mut().clear();
+            let _ = stack.event(&mut cx, &wheel);
+            assert!(reached(), "the wheel over {what} doesn't reach the world");
+            calls.borrow_mut().clear();
+        }
+
+        // Not drawn for two frames: it takes nothing and is over nothing.
+        at(&mut cx, &mut stack, 960.0, 540.0);
+        cx.extract(&mut frame, view);
+        cx.extract(&mut frame, view);
+        assert!(!ui.pointer_over(&mut cx) && !cx.pointer_over_ui());
+        let _ = stack.event(&mut cx, &button(true));
+        assert!(reached(), "a UI that no longer draws takes no press");
+        calls.borrow_mut().clear();
+        ui.draw(&mut cx);
+        assert!(ui.pointer_over(&mut cx), "drawn again");
+
+        // Input off: it takes nothing and is over nothing.
+        ui.set_input(&mut cx, false);
+        assert!(!ui.pointer_over(&mut cx) && !cx.pointer_over_ui());
+        let _ = stack.event(&mut cx, &button(true));
+        assert!(reached(), "a UI without input takes no press");
     }
 
     /// The view is cut to its viewpoint as it comes from elsewhere than the last frame's, which
@@ -5394,12 +5710,113 @@ mod tests {
             cx.draws.skins().map(|(mesh, _)| mesh).collect::<Vec<_>>(),
             [*own]
         );
-        assert_eq!(cx.skins.held(), 1);
+        assert_eq!(cx.skins.held(), (1, 0));
         cx.world_mut().despawn(root).expect("alive");
         cx.draws.clear();
         cx.draw_world(1.0, 0.0, 0);
         assert_eq!(cx.draws.skins().count(), 0);
-        assert_eq!(cx.skins.held(), 0);
+        assert_eq!(cx.skins.held(), (0, 1), "its copy spare");
+        // Another Fox takes the spare copy, which the renderer has, adding no mesh.
+        let meshes = cx.meshes.count();
+        model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0, 0);
+        assert_eq!(
+            cx.draws.skins().map(|(mesh, _)| mesh).collect::<Vec<_>>(),
+            [*own]
+        );
+        assert_eq!((cx.meshes.count(), cx.skins.held()), (meshes, (1, 0)));
+    }
+
+    /// A Fox's context, the Fox's model added, after a frame of a Fox spawned and despawned, which
+    /// leaves its skinned copy spare.
+    fn spare_fox() -> (Context, Model) {
+        let mut cx = Context::seeded(1);
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let model = cx
+            .add_model("fox", fox.join("Fox.gltf"))
+            .expect("the Fox reads");
+        let root = model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.draw_world(1.0, 0.0, 0);
+        cx.world_mut().despawn(root).expect("alive");
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0, 0);
+        assert_eq!(cx.skins.held(), (0, 1));
+        (cx, model)
+    }
+
+    /// A spare copy of a skinned model's mesh goes, and the renderer removes it, once its model's
+    /// mesh is another, as the model read again makes it.
+    #[test]
+    fn a_spare_skinned_copy_goes_once_its_models_mesh_is_another() {
+        let (mut cx, model) = spare_fox();
+        let kept = cx.meshes.kept();
+        cx.loaded.made[model.index()].skinned[0] = Some(Arc::new(
+            cx.loaded.made[model.index()].skinned[0]
+                .as_deref()
+                .expect("a skinned mesh")
+                .clone(),
+        ));
+        cx.draw_world(1.0, 0.0, 0);
+        assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 0), kept - 1));
+    }
+
+    /// A spare copy of a skinned model's mesh that no entity takes goes, and the renderer removes
+    /// it, after `SPARE_FRAMES`, so that the copies of a crowd that went give back their memory.
+    #[test]
+    fn a_spare_skinned_copy_goes_once_its_time_is_up() {
+        let (mut cx, _) = spare_fox();
+        let kept = cx.meshes.kept();
+        for _ in 1..crate::skins::SPARE_FRAMES {
+            cx.draws.clear();
+            cx.draw_world(1.0, 0.0, 0);
+        }
+        assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 1), kept));
+        cx.draw_world(1.0, 0.0, 0);
+        assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 0), kept - 1));
+    }
+
+    /// A skinned part's copy whose entity is alive, and no longer skinned, as its draw was changed
+    /// to another mesh, goes rather than being spare, as the scene may still draw it: the next Fox
+    /// has a copy of its own.
+    #[test]
+    fn a_skinned_copy_of_an_entity_still_alive_goes_rather_than_being_spare() {
+        let mut cx = Context::seeded(1);
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let model = cx
+            .add_model("fox", fox.join("Fox.gltf"))
+            .expect("the Fox reads");
+        model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.draw_world(1.0, 0.0, 0);
+        let model_mesh = cx.loaded.made[model.index()].meshes[0].index();
+        let (part, draw) = (cx.world().query::<(Entity, &MeshDraw)>())
+            .find(|(_, draw)| draw.parts().0 == model_mesh)
+            .map(|(part, draw)| (part, *draw))
+            .expect("the skinned part");
+        let (_, shader, opaque, culls, params) = draw.parts();
+        let quad = MeshDraw::from_parts(0, shader, opaque, culls, params).expect("a draw");
+        let [(own, _)] = cx
+            .draws
+            .skins()
+            .map(|(mesh, _)| (mesh, ()))
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("a skin");
+        };
+        let kept = cx.meshes.kept();
+        cx.world_mut().insert(part, quad).expect("alive");
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0, 0);
+        assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 0), kept - 1));
+        model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.draws.clear();
+        cx.draw_world(1.0, 0.0, 0);
+        let skins: Vec<u32> = cx.draws.skins().map(|(mesh, _)| mesh).collect();
+        assert!(
+            skins.len() == 1 && skins[0] != own,
+            "{skins:?} beside {own}"
+        );
+        assert_eq!(cx.meshes.kept(), kept);
     }
 
     /// Records each call it gets, by layer name, and handles events if `handles` is set.

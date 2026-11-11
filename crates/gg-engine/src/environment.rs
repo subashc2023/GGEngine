@@ -67,7 +67,8 @@ pub struct Environment {
     pub ambient_occlusion: Option<AmbientOcclusion>,
     /// The height fog the view is in, densest low down and thinning with height, lit by the sky
     /// from all around, or without one by a luminance of its own, and by the sun, the brightest
-    /// directional light, as [`Fog`] says: `None`, the default, for none.
+    /// directional light, as [`Fog`] says: `None`, the default, for none. Fog with a number that
+    /// isn't finite, a NaN or an infinity, is drawn as none, with a warning (`engine.bad_fog`).
     pub fog: Option<Fog>,
     /// How what's opaque reflects what the view shows: each point seen in its mirror, by a ray
     /// traced through the view's depth, in place of the sky's specular light where it finds

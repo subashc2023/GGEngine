@@ -306,6 +306,13 @@ impl Meshes {
         self.count
     }
 
+    /// How many of those it has handed out aren't removed: for the engine's tests of what it
+    /// keeps.
+    #[doc(hidden)]
+    pub fn kept(&self) -> u32 {
+        self.count - self.removed.len() as u32
+    }
+
     /// The engine's grid mesh, a unit square as four triangles from its center, added as a game's
     /// meshes are the first time it's asked for: a renderer draws grids with it, but uploads
     /// nothing for it without them, and games' handles come where they would have.

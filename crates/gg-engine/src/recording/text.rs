@@ -172,6 +172,23 @@ pub(crate) fn read_named(text: &str, from: usize) -> Option<(Arc<str>, Arc<str>)
     }
 }
 
+/// Writes `library`, a patch's, as a recording's `patch` line has it, after `out`: a string.
+#[cfg(feature = "dev")]
+pub(crate) fn write_patch(out: &mut String, library: &str) {
+    out.push_str("String(");
+    quote(out, library);
+    out.push(')');
+}
+
+/// The library that `text`, written by [`write_patch`] and starting at column `from` of its line,
+/// names, if it's that.
+pub(crate) fn read_patch(text: &str, from: usize) -> Option<String> {
+    match Text::parse(text, from).ok()? {
+        Text::String(library) => Some(library),
+        _ => None,
+    }
+}
+
 /// Writes `text`, a mod as a snapshot's or a recording's `mod` line has it, after `out`: a list of
 /// its manifest's text, then each of its scripts' path and text.
 pub(crate) fn write_mod(out: &mut String, text: &ModText) {

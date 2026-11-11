@@ -59,7 +59,10 @@ const NONE: u32 = u32::MAX;
 /// Which of a world's entities a physics resource has bodies for, as 2D and 3D physics keep them
 /// alike: a link for each entity with a body's component and a [`Transform`], but those under a
 /// parent, whose transforms are in their parents' space, which it warns of once each and leaves
-/// where they are.
+/// where they are. A component that isn't finite, holding a NaN or an infinity, as a divide by
+/// zero gives, as its transform, its velocities or a collider's size, is refused, so that it
+/// doesn't spread through contacts to what its body touches: warned of once while it stays so, its
+/// body keeps the last it took that was, and an entity without one has none made until it is.
 struct Links<L> {
     /// A link to each body, in the order their entities came.
     linked: Vec<L>,
@@ -69,6 +72,8 @@ struct Links<L> {
     found: Vec<Entity>,
     /// The bodies under a parent, which aren't moved, warned of once each as they're found there.
     children: Vec<Entity>,
+    /// The entities whose transforms aren't finite, warned of once each while they stay so.
+    refused: Vec<Entity>,
 }
 
 /// A link of [`Links`], to its entity's body.
@@ -83,6 +88,7 @@ impl<L> Default for Links<L> {
             by_slot: Vec::new(),
             found: Vec::new(),
             children: Vec::new(),
+            refused: Vec::new(),
         }
     }
 }
@@ -95,6 +101,7 @@ impl<L: Clone> Clone for Links<L> {
             by_slot: self.by_slot.clone(),
             found: Vec::new(),
             children: self.children.clone(),
+            refused: self.refused.clone(),
         }
     }
 
@@ -103,13 +110,14 @@ impl<L: Clone> Clone for Links<L> {
         self.linked.clone_from(&source.linked);
         self.by_slot.clone_from(&source.by_slot);
         self.children.clone_from(&source.children);
+        self.refused.clone_from(&source.refused);
     }
 }
 
 impl<L: Link> Links<L> {
     /// The links of a resource as a snapshot file held it: `linked`, an entity gone since its last
-    /// step [`Entity::DEAD`]'s, and `children`, the bodies it warned of. Fails with an entity linked
-    /// twice.
+    /// step [`Entity::DEAD`]'s, and `children`, the bodies it warned of, the transforms it refused
+    /// warned of again. Fails with an entity linked twice.
     fn new(linked: Vec<L>, children: Vec<Entity>) -> Result<Self, Entity> {
         let mut by_slot = Vec::new();
         for (index, link) in (0..).zip(&linked) {
@@ -130,6 +138,7 @@ impl<L: Link> Links<L> {
             by_slot,
             found: Vec::new(),
             children,
+            refused: Vec::new(),
         })
     }
 
@@ -147,11 +156,15 @@ impl<L: Link> Links<L> {
 
     /// Gives `link` each entity with a `B` and a [`Transform`], in the order queries find them,
     /// with these links, to make its body or take in what changed of it: but those under a parent,
-    /// which it warns of once each, naming `B` as `name`.
+    /// which it warns of once each, naming `B` as `name`; and those of which `unfinite` names a
+    /// component that isn't finite, which it warns of once while it stays so
+    /// (`physics.not_finite`), giving `link` those with a body, to take in the rest, and making none
+    /// for those without.
     fn find<B: Component>(
         &mut self,
         world: &World,
         name: &str,
+        unfinite: impl Fn(Entity) -> Option<&'static str>,
         mut link: impl FnMut(&mut Self, Entity),
     ) {
         let mut found = std::mem::take(&mut self.found);
@@ -161,6 +174,11 @@ impl<L: Link> Links<L> {
         self.children.retain(|&child| {
             let body = world.get::<B>(child).is_some();
             body && matches!(world.parent(child), Ok(Some(_)))
+        });
+        self.refused.retain(|&entity| {
+            let found =
+                world.get::<B>(entity).is_some() && world.get::<Transform>(entity).is_some();
+            found && unfinite(entity).is_some()
         });
         for &entity in &found {
             if matches!(world.parent(entity), Ok(Some(_))) {
@@ -175,6 +193,22 @@ impl<L: Link> Links<L> {
                     self.children.push(entity);
                 }
                 continue;
+            }
+            if let Some(what) = unfinite(entity) {
+                if !self.refused.contains(&entity) {
+                    let id = world.id(entity).expect("found alive");
+                    warn!(
+                        code = "physics.not_finite",
+                        entity = %id,
+                        component = what,
+                        "Entity {id}'s {what} isn't finite, holding a NaN or an infinity: its \
+                         {name}'s body keeps the last it took that was, or isn't made, until it is"
+                    );
+                    self.refused.push(entity);
+                }
+                if self.get(entity).is_none() {
+                    continue;
+                }
             }
             link(self, entity);
         }
@@ -204,6 +238,51 @@ impl<L: Link> Links<L> {
         }
         self.by_slot[slot] = index;
         self.linked.push(link);
+    }
+}
+
+/// A component physics takes only while it's finite, as [`Links`] refuses one that isn't.
+trait Finite: Copy {
+    /// Whether it holds no NaN or infinity, in any number physics takes of it.
+    fn finite(&self) -> bool;
+}
+
+impl Finite for Transform {
+    fn finite(&self) -> bool {
+        let Transform {
+            translation,
+            rotation,
+            scale,
+        } = self;
+        translation.is_finite() && rotation.is_finite() && scale.is_finite()
+    }
+}
+
+/// The name of the first of `world`'s `entity`'s components, of type `C`, that isn't finite, if
+/// it has one that isn't.
+fn unfinite<C: Finite + Component>(
+    world: &World,
+    entity: Entity,
+    name: &'static str,
+) -> Option<&'static str> {
+    world
+        .get::<C>(entity)
+        .is_some_and(|it| !it.finite())
+        .then_some(name)
+}
+
+/// `now`, a component as its entity holds it, if it's finite, or else `was`, what was taken of it
+/// last: so that a component that isn't finite is taken as it was, as [`Links`] refuses it.
+fn kept<C: Finite>(now: C, was: C) -> C {
+    if now.finite() { now } else { was }
+}
+
+/// [`kept`], for a collider, which an entity may have or not: one that isn't finite is taken as it
+/// was, or as none where it had none.
+fn kept_collider<C: Finite>(now: Option<C>, was: Option<C>) -> Option<C> {
+    match now {
+        Some(now) if !now.finite() => was,
+        now => now,
     }
 }
 

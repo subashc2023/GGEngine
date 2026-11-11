@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{Physics2D, Rapier, vector};
 use crate::draw::Poses;
 use crate::physics::{Link, joined, lines_between, warn_unjoined};
-use crate::{Component, Entity, Reflect, World};
+use crate::{Component, Entity, Reflect, World, Writable};
 
 /// What a [`Joint2D`] lets the bodies it joins do, from where it holds them, its anchors in each
 /// body's space.
@@ -50,8 +50,9 @@ pub enum JointKind2D {
 /// `RigidBody2D` or one under a parent, joins nothing, warned of once for each reason
 /// (`physics.joint_no_body`), as does one naming one body twice (`physics.joint_one_body`). A change
 /// to it is taken at the next step, as is a body made again; and its joint goes as it does, or its
-/// entity, or either body.
-#[derive(Clone, Copy, Debug, PartialEq, Component)]
+/// entity, or either body. An edit's delete of either body clears the field naming it, as
+/// [`Component::cleared`] says, so that it names nothing gone, which a scene wouldn't save.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Joint2D {
     /// The first body it joins.
     pub body_a: Option<Entity>,
@@ -100,6 +101,15 @@ pub struct Joint2D {
     /// Whether the bodies it joins collide with each other.
     pub bodies_collide: bool,
 }
+
+/// `body_a` and `body_b` are cleared by a delete of what they name.
+impl Component for Joint2D {
+    fn cleared() -> &'static [&'static str] {
+        &["body_a", "body_b"]
+    }
+}
+
+impl Writable for Joint2D {}
 
 impl Default for Joint2D {
     fn default() -> Self {

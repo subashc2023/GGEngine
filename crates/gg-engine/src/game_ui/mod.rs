@@ -281,6 +281,9 @@ pub(crate) struct Uis {
     pub(crate) disc: Option<Texture>,
     /// How many frames have been handed off, which says whether a UI drew in the last.
     frames: u64,
+    /// Whether a UI took the event the layer being sent it is handling, as [`GameUi::event`] says,
+    /// which the layer stack reads as the layer handling it.
+    consumed: bool,
 }
 
 /// A UI's file, as the UIs added from it share it: its name, its asset ID or else its path, as
@@ -366,6 +369,36 @@ impl Uis {
     /// Counts a frame handed off, after its layers drew.
     pub(crate) fn handed_off(&mut self) {
         self.frames += 1;
+    }
+
+    /// Forgets that a UI took the event, as a layer is about to be sent one.
+    pub(crate) fn forget_consumed(&mut self) {
+        self.consumed = false;
+    }
+
+    /// Whether a UI took the event since [`forget_consumed`](Self::forget_consumed).
+    pub(crate) fn consumed(&self) -> bool {
+        self.consumed
+    }
+
+    /// Whether the cursor at `cursor`, on a view at `view`, is over what a UI that takes input and
+    /// drew in the last frame draws, as [`GameUi::pointer_over`] says.
+    pub(crate) fn pointer_over(
+        &mut self,
+        fonts: &mut Fonts,
+        view: Option<Viewport>,
+        cursor: Option<[f64; 2]>,
+    ) -> bool {
+        let Some(at) = cursor_on(view, cursor) else {
+            return false;
+        };
+        let (units, frames) = (units(view), self.frames);
+        self.states.iter_mut().any(|state| {
+            state.takes_input(frames) && {
+                state.lay_out(fonts, units);
+                state.pointer_over(at)
+            }
+        })
     }
 
     /// The file named `asset` that a UI was added from, if one was.
@@ -1322,6 +1355,55 @@ impl State {
             .then(|| (((at.y - first.at.y) / first.size.y) as usize).min(count - 1))
     }
 
+    /// Whether the UI takes input and drew in the last of `frames` frames handed off, or this one:
+    /// one that didn't, as a menu that's no longer drawn, takes nothing from the layers below.
+    fn takes_input(&self, frames: u64) -> bool {
+        self.input && self.drawn.is_some_and(|drawn| drawn + 1 >= frames)
+    }
+
+    /// Whether a drop-down's options are open over the rest, which take every event: not those of
+    /// one that's hidden or disabled since it opened, which close as the next event comes.
+    fn options_open(&self) -> bool {
+        self.open.is_some_and(|open| self.focusable(open.node))
+    }
+
+    /// Whether `at` is over what the UI draws that a pointer works on: a button or a widget that
+    /// shows, disabled or not, or a list, within what clips it; or anywhere, while a drop-down's
+    /// options are open, which take every event. Panels, texts and images aren't, so that a HUD
+    /// doesn't take the game's clicks.
+    fn pointer_over(&self, at: Vec2) -> bool {
+        self.options_open()
+            || self.list_at(at).is_some()
+            || (0..self.nodes.len()).any(|i| {
+                self.nodes[i].kind.focuses()
+                    && self.shows(i)
+                    && self.laid.rects[i].contains(at)
+                    && self.laid.within(i, at)
+            })
+    }
+
+    /// Whether it takes `event`, the cursor at `cursor`, away from the layers below: the mouse's
+    /// buttons, pressed or let go, and its wheel, over what [`pointer_over`](Self::pointer_over)
+    /// says, wherever while a drop-down is open, and a button let go after a press it holds,
+    /// wherever; the keys and the text typed, pad aside, while a text field has the focus; nothing
+    /// while it takes no input or didn't draw in the last of `frames` frames.
+    fn takes(&self, event: &Event<'_>, cursor: Option<Vec2>, frames: u64) -> bool {
+        if !self.takes_input(frames) {
+            return false;
+        }
+        let held = matches!(self.pressed, Some((_, Press::Mouse)));
+        match *event {
+            Event::MouseButton { .. } => {
+                self.options_open() || held || cursor.is_some_and(|at| self.pointer_over(at))
+            }
+            Event::Scroll(_) => {
+                self.options_open() || cursor.is_some_and(|at| self.pointer_over(at))
+            }
+            Event::Key { .. } | Event::Text(_) => self.typing().is_some(),
+            _ => false,
+        }
+    }
+
     /// The topmost node that takes the focus whose rectangle `at` is in, within what clips it.
     fn widget_at(&self, at: Vec2) -> Option<usize> {
         (0..self.nodes.len()).rev().find(|&i| {
@@ -1796,6 +1878,15 @@ impl GameUi {
     /// none, a move focuses the node the file names, or else the first. Each event does one thing
     /// at most, which it gives back, `None` for nothing, so that the layer plays a sound, queues a
     /// command or lets the event go on down the stack.
+    ///
+    /// A UI that takes input and drew in the last frame takes the mouse's buttons, pressed or let
+    /// go, and its wheel, away from the layers below the layer that sent it the event, as that
+    /// layer handling it: those over a button, a widget or a list, as
+    /// [`pointer_over`](Self::pointer_over) says, those anywhere while a drop-down's options are
+    /// open, and a button let go after a press it holds, so that a click on a button isn't a click
+    /// on the world behind it; and, while a text field has the focus, the keys and the text typed,
+    /// so that typing a name doesn't walk the player. A layer that handles the event itself too
+    /// sees it as well, and asks `pointer_over` of its own.
     pub fn event(self, cx: &mut Context, event: &Event<'_>) -> Option<UiEvent> {
         let Parts {
             uis,
@@ -1804,12 +1895,45 @@ impl GameUi {
             input,
             ..
         } = cx.ui_parts();
+        let frames = uis.frames;
         let state = uis.state(self);
         if !state.input {
             return None;
         }
         state.lay_out(fonts, units(view));
-        state.event(event, cursor_on(view, input.cursor()), input, fonts)
+        let cursor = cursor_on(view, input.cursor());
+        let takes = state.takes(event, cursor, frames);
+        let done = state.event(event, cursor, input, fonts);
+        uis.consumed |= takes;
+        done
+    }
+
+    /// Whether the cursor is over what the UI draws that a pointer works on, a button, a widget or
+    /// a list that shows, within what clips it, or anywhere while a drop-down's options are open:
+    /// as the mouse's buttons and wheel over it don't reach the layers below, a game keeps its own
+    /// clicks and aiming off it. `false` while the UI takes no input, as
+    /// [`set_input`](Self::set_input) says, or didn't draw in the last frame, or the cursor is
+    /// outside the view; a panel, a text or
+    /// an image isn't, so that a HUD of them doesn't take the game's clicks. As the UI is laid out
+    /// for the view as the last frame handed it off.
+    pub fn pointer_over(self, cx: &mut Context) -> bool {
+        let Parts {
+            uis,
+            fonts,
+            view,
+            input,
+            ..
+        } = cx.ui_parts();
+        let frames = uis.frames;
+        let state = uis.state(self);
+        if !state.takes_input(frames) {
+            return false;
+        }
+        let Some(at) = cursor_on(view, input.cursor()) else {
+            return false;
+        };
+        state.lay_out(fonts, units(view));
+        state.pointer_over(at)
     }
 
     /// Draws the UI on the game's view's canvas this frame, as it updates, laid out for the view as

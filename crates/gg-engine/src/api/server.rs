@@ -130,6 +130,19 @@ const MOST_WAIT_MS: u64 = 10_000;
 /// saying so.
 const CAPTURE_WAIT: Duration = Duration::from_secs(10);
 
+/// How many PNGs the `captures` directory beside the executable keeps, the newest, as each capture
+/// without a path is written there: older ones, a long session's and those of runs before, go.
+const KEPT_CAPTURES: usize = 32;
+
+/// How many snapshots the `snapshots` directory beside the executable keeps, the newest, as each
+/// snapshot without a path is written there; those `gg run` takes, in a directory of its own
+/// inside it, are its to remove.
+const KEPT_SNAPSHOTS: usize = 8;
+
+/// The longest a run that ends once it has answered a `snapshot` with `quit` waits for the answer
+/// to be written to its connection, which takes as long as a client that doesn't read holds it.
+const ANSWERING: Duration = Duration::from_secs(5);
+
 /// The levels of `tracing`, in the order [`gg_api::LEVELS`] names them.
 const LEVELS: [Level; 5] = [
     Level::ERROR,
@@ -309,7 +322,11 @@ enum Call {
         take: usize,
     },
     Ui,
-    Snapshot(Option<PathBuf>),
+    /// A snapshot, at the path given, if one is, and whether the run ends once it's written.
+    Snapshot {
+        path: Option<PathBuf>,
+        quit: bool,
+    },
     Patch(JumpTable),
     /// An edit's operations, and the gesture it's part of, if it's a set of one.
     Apply(Vec<gg_api::Operation>, Option<u64>),
@@ -351,6 +368,14 @@ impl Reply {
             serde_json::to_string(result).expect("a result serializes")
         ));
     }
+
+    /// What's told once its answer is written to its connection, or can't be, the connection
+    /// gone: so that a run that ends once it has answered ends after the client has its answer.
+    fn landing(&mut self) -> Receiver<()> {
+        let (landed, landing) = mpsc::channel();
+        self.flight.1 = Some(landed);
+        landing
+    }
 }
 
 /// A snapshot for the thread that writes them: the copy of the world, the ticks the simulation had
@@ -366,9 +391,15 @@ struct Taken {
     /// What the run was doing, with a copy of the world as edited it held, if any, which the
     /// restored run goes on doing.
     run: Run,
+    /// Whether the simulation was paused, as the restored run is then.
+    paused: bool,
     ticks: u64,
     path: PathBuf,
+    /// Whether the engine named the path, the request giving none, which prunes the directory.
+    named: bool,
     reply: Reply,
+    /// Told whether the snapshot was written once it's answered, for a snapshot the run waits for.
+    written: Option<Sender<bool>>,
 }
 
 /// A capture's PNG for the thread that writes them: the view, where it goes, the ticks the frame
@@ -377,6 +408,8 @@ struct Taken {
 struct Png {
     shot: Arc<Shot>,
     path: PathBuf,
+    /// Whether the engine named the path, the request giving none, which prunes the directory.
+    named: bool,
     ticks: u64,
     streaming: bool,
     reply: Reply,
@@ -642,6 +675,14 @@ impl Api {
         {
             let world = cx.world();
             match call {
+                // What a quit leaves would go with the run, and a snapshot that quits is what a
+                // run started again goes on from: so nothing past either applies, nor says so.
+                _ if quit => {
+                    let message = "the game is quitting, as a request before this one asked, and \
+                                   took nothing of it; a run `gg run` starts again takes requests \
+                                   once it serves";
+                    reply.send(Err(Failure::new("api.quitting", message)));
+                }
                 Call::Step(_) | Call::Capture { .. } | Call::Pick(_) if paused => {
                     let message = "frames have paused while the window is minimized, and steps, \
                                    captures and picks run in frames; restore the window first";
@@ -783,16 +824,19 @@ impl Api {
                 Call::Ui => reply.result(&cx.ui_list()),
                 // A run stopped, or playing a copy, is snapshotted before its first tick too, so
                 // that a restart keeps the world as edited; what the layers queued as they attached
-                // goes, as it does at a `stop` that brings that world back.
-                Call::Snapshot(_)
-                    if stepper.ran() == 0 && !stepper.stopped() && cx.edited.is_none() =>
+                // goes, as it does at a `stop` that brings that world back. One restored from a
+                // snapshot, whose layers attached nothing, is too, as one restored paused may not
+                // tick for a while.
+                Call::Snapshot { .. }
+                    if stepper.fresh() && !stepper.stopped() && cx.edited.is_none() =>
                 {
                     let message = "the simulation hasn't ticked since the run started, and a \
                                    snapshot before then would miss what the layers queued for its \
                                    first tick; ask once it has";
                     reply.send(Err(Failure::new("api.not_ticked", message)));
                 }
-                Call::Snapshot(path) => {
+                Call::Snapshot { path, quit: quits } => {
+                    let named = path.is_none();
                     let path = path.unwrap_or_else(|| {
                         self.snapshotted += 1;
                         let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
@@ -808,6 +852,8 @@ impl Api {
                         None if stepper.stopped() => Run::Stopped,
                         None => Run::Playing,
                     };
+                    let mut reply = reply;
+                    let landing = quits.then(|| reply.landing());
                     let taken = Taken {
                         world: world.clone(),
                         scenes: cx.scenes.files.clone(),
@@ -815,17 +861,38 @@ impl Api {
                         scripts: cx.hosts.applied(),
                         mods: cx.mods.applied(),
                         run,
+                        paused: stepper.paused(),
                         ticks: stepper.ticks,
                         path,
+                        named,
                         reply,
+                        written: None,
                     };
-                    // The thread runs until the API drops.
-                    let _ = self.taken.send(taken);
+                    if quits {
+                        // Written before the run ends, which ends the thread with it: the main
+                        // thread waits for it, as the run would only end anyway, and the snapshots
+                        // asked before it are written first.
+                        let (written, done) = mpsc::channel();
+                        let taken = Taken {
+                            written: Some(written),
+                            ..taken
+                        };
+                        // One that fails leaves the run going, as one that isn't taken does.
+                        quit = self.taken.send(taken).is_ok() && done.recv().unwrap_or(false);
+                        // Its answer goes out before the run ends, which would end the thread that
+                        // writes it, and a client would take the snapshot for one that failed.
+                        if quit && let Some(landing) = landing {
+                            let _ = landing.recv_timeout(ANSWERING);
+                        }
+                    } else {
+                        // The thread runs until the API drops.
+                        let _ = self.taken.send(taken);
+                    }
                 }
                 Call::Patch(table) => match stack.offer_patch(table, stepper.ticks) {
                     Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
                     Err(table) => {
-                        let patched = patch::apply(table, stepper.ticks);
+                        let patched = stack.patch(table, stepper.ticks);
                         let done = patched.map(|()| Done::Applied(Vec::new()));
                         answer_done(reply, &Offer::Patch, stepper.ticks, done);
                     }
@@ -1047,6 +1114,11 @@ impl Api {
             view: cx.view().map(|view| view.size),
             scene: scene_files::title(cx).map(str::to_owned),
             unsaved,
+            // The world as edited's, as `unsaved` is.
+            edited: cx
+                .edited
+                .as_ref()
+                .map_or(cx.scenes.open.edited, |edited| edited.open.edited),
         }
     }
 
@@ -1092,6 +1164,7 @@ impl Api {
                     !streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT
                 });
                 for Capturing { reply, path, .. } in taken {
+                    let named = path.is_none();
                     let path = path.unwrap_or_else(|| {
                         self.numbered += 1;
                         let name = format!("{}-{}.png", self.stem, self.numbered);
@@ -1100,6 +1173,7 @@ impl Api {
                     let png = Png {
                         shot: shot.clone(),
                         path,
+                        named,
                         ticks: self.riding_ticks,
                         streaming,
                         reply,
@@ -1826,18 +1900,22 @@ impl InFlight {
             count = (self.landed.wait(count)).expect("no thread panics holding it");
         }
         *count += 1;
-        Flight(self.clone())
+        Flight(self.clone(), None)
     }
 }
 
 /// A request's place among those its connection has in flight, given up as it drops: once its
-/// answer is written, or as it goes unanswered, as when the connection has gone.
-struct Flight(Arc<InFlight>);
+/// answer is written, or as it goes unanswered, as when the connection has gone; and what's told
+/// then, if anything waits for it, as [`Reply::landing`] has it.
+struct Flight(Arc<InFlight>, Option<Sender<()>>);
 
 impl Drop for Flight {
     fn drop(&mut self) {
         *self.0.count.lock().expect("no thread panics holding it") -= 1;
         self.0.landed.notify_one();
+        if let Some(landed) = self.1.take() {
+            let _ = landed.send(());
+        }
     }
 }
 
@@ -1904,11 +1982,13 @@ fn connection(
             continue;
         }
         if request.method == "ping" {
-            let waiting = Waiting::now().map(Waiting::name);
-            let stopped = || shared.debugger.stopped().then_some("breakpoint");
+            // A script stopped first, which holds the main thread even while the window's
+            // minimized, between whose frames it answers otherwise.
+            let stopped = shared.debugger.stopped().then_some("breakpoint");
+            let waiting = || Waiting::now().map(Waiting::name);
             let pulse = Pulse {
                 frames: shared.frames.load(Ordering::Relaxed),
-                waiting: waiting.or_else(stopped).map(str::to_owned),
+                waiting: stopped.or_else(waiting).map(str::to_owned),
             };
             reply.result(&pulse);
             continue;
@@ -1939,7 +2019,7 @@ fn connection(
                     reply,
                 };
                 if let Err(mpsc::SendError(incoming)) = to_main.send(incoming) {
-                    let message = "the game is ending";
+                    let message = "the game is ending, and took nothing of the request";
                     incoming
                         .reply
                         .send(Err(Failure::new("api.closed", message)));
@@ -1986,10 +2066,14 @@ fn needs(call: &Call) -> Vec<Capability> {
         | Call::Edits(_) => {
             vec![Read(None)]
         }
-        Call::Snapshot(path) => [Some(Snapshot), path.as_ref().map(|_| Files)]
-            .into_iter()
-            .flatten()
-            .collect(),
+        Call::Snapshot { path, quit } => [
+            Some(Snapshot),
+            path.as_ref().map(|_| Files),
+            quit.then_some(Quit),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         Call::Patch(_) => vec![Patch],
         Call::Apply(operations, _) => operations
             .iter()
@@ -2319,7 +2403,7 @@ fn write_answers(mut stream: TcpStream, answers: &Receiver<Answer>) {
 fn write_pngs(pngs: &Receiver<Png>) {
     for png in pngs {
         let [width, height] = png.shot.size;
-        let written = write_png(&png.path, &png.shot).map(|()| Captured {
+        let written = write_png(&png.path, &png.shot, png.named).map(|()| Captured {
             path: png.path,
             width,
             height,
@@ -2345,9 +2429,12 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
         scripts,
         mods,
         run,
+        paused,
         ticks,
         path,
+        named,
         reply,
+        written: told,
     } in taken
     {
         let of = snapshot::Of {
@@ -2357,7 +2444,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
             scripts: &scripts,
             mods: &mods,
         };
-        let written = snapshot::write(&of, &run, app, &layers, ticks);
+        let written = snapshot::write_paused(&of, &run, paused, app, &layers, ticks);
         let written = written.and_then(|text| {
             if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
                 fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {
@@ -2366,8 +2453,12 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
                 })?;
             }
             snapshot::save(&path, &text)?;
+            if named && let Some(dir) = path.parent() {
+                prune(dir, "snapshot", KEPT_SNAPSHOTS);
+            }
             Ok(text.len() as u64)
         });
+        let whole = written.is_ok();
         match written {
             Ok(bytes) => reply.result(&Snapshotted {
                 path,
@@ -2376,6 +2467,9 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
                 bytes,
             }),
             Err(error) => reply.send(Err(failure(&error))),
+        }
+        if let Some(told) = told {
+            let _ = told.send(whole);
         }
     }
 }
@@ -2386,7 +2480,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
 /// opaque.
 ///
 /// Fails with `api.capture_file` if it can't.
-fn write_png(path: &Path, shot: &Shot) -> Result<()> {
+fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
     let failed = |error: Box<dyn std::error::Error + Send + Sync>| {
         let message = format!("can't write the capture {}", path.display());
         Error::new("api.capture_file", message).with_source(error)
@@ -2405,10 +2499,52 @@ fn write_png(path: &Path, shot: &Shot) -> Result<()> {
         writer.finish()
     });
     encoded.map_err(|error| failed(error.into()))?;
-    if path.parent() == Some(crate::beside_exe("captures").as_path()) {
-        fs::create_dir_all(crate::beside_exe("captures")).map_err(|error| failed(error.into()))?;
+    let captures = crate::beside_exe("captures");
+    if path.parent() == Some(captures.as_path()) {
+        fs::create_dir_all(&captures).map_err(|error| failed(error.into()))?;
     }
-    crate::dirs::write_whole(path, &data).map_err(|error| failed(error.into()))
+    crate::dirs::write_whole(path, &data).map_err(|error| failed(error.into()))?;
+    if named && let Some(dir) = path.parent() {
+        prune(dir, "png", KEPT_CAPTURES);
+    }
+    Ok(())
+}
+
+/// Removes the files of directory `dir` that the engine named, as [`engine_named`] tells, whose
+/// extension is `extension`, but the newest `keep`, by when they were last written: those a client
+/// named, and the directories in it, are left alone, and a file that can't be removed, as one a
+/// client reads on Windows, stays, for the next to try again.
+fn prune(dir: &Path, extension: &str, keep: usize) {
+    let entries = fs::read_dir(dir).into_iter().flatten().flatten();
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| engine_named(&entry.file_name().to_string_lossy(), extension))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    // The newest first, two written at once by their names.
+    files.sort_by(|a, b| b.cmp(a));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Whether a file named `name` is one the engine named for a capture or a snapshot given no path,
+/// whose extension is `extension`: a run's session file's stem, its app and its process, then the
+/// capture's or snapshot's number, as `sandbox-4242-7.png`.
+fn engine_named(name: &str, extension: &str) -> bool {
+    let Some(stem) = name
+        .strip_suffix(extension)
+        .and_then(|stem| stem.strip_suffix('.'))
+    else {
+        return false;
+    };
+    let mut parts = stem.rsplitn(3, '-');
+    let numbered = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    numbered(parts.next())
+        && numbered(parts.next())
+        && parts.next().is_some_and(|app| !app.is_empty())
 }
 
 /// The look `given`, method `method`'s, checked, its viewpoint's rotation normalized.
@@ -2477,13 +2613,13 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "hash" => none(method, params).map(|()| Call::Hash)?,
         "ui" => none(method, params).map(|()| Call::Ui)?,
         "snapshot" => {
-            let gg_api::Snapshot { path } = take(method, params)?;
+            let gg_api::Snapshot { path, quit } = take(method, params)?;
             if path.as_deref().is_some_and(|path| !path.is_absolute()) {
                 let what = "takes an absolute path, since the game's working directory may not be \
                             the tool's";
                 return Err(bad_params(method, what));
             }
-            Call::Snapshot(path)
+            Call::Snapshot { path, quit }
         }
         "patch" => {
             let gg_api::Patch { table } = take(method, params)?;
@@ -2724,12 +2860,63 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
     use crate::args::Net;
     use crate::dirs::tests::Scratch;
     use crate::net::Lockstep;
     use crate::recording::Recorder;
     use crate::scene_files::tests as scenes;
     use crate::{BoxCollider2D, Sprite, Tick, Transform, Viewport};
+
+    /// A directory of captures or snapshots keeps the newest of those the engine named alone,
+    /// and whatever else is in it: files a client named, others' kinds and directories.
+    #[test]
+    fn the_newest_captures_alone_are_kept() {
+        let dir = std::env::temp_dir().join(format!("gg-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("gg")).expect("a directory");
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        let files = [
+            ("sandbox-7-1.png", 1),
+            ("sandbox-7-2.png", 4),
+            ("sandbox-9-1.png", 2),
+            ("sandbox-9-2.png", 3),
+            ("view.png", 0),
+            ("my-shot-1.png", 0),
+        ];
+        for (name, secs) in files {
+            let file = fs::File::create(dir.join(name)).expect("written");
+            file.set_modified(epoch + Duration::from_secs(secs))
+                .expect("its time set");
+        }
+        fs::write(dir.join("notes.txt"), "kept").expect("written");
+        prune(&dir, "png", 2);
+        let mut left: Vec<String> = (fs::read_dir(&dir).expect("listed").flatten())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            left,
+            [
+                "gg",
+                "my-shot-1.png",
+                "notes.txt",
+                "sandbox-7-2.png",
+                "sandbox-9-2.png",
+                "view.png"
+            ]
+        );
+        assert!(engine_named("shards-42-3.snapshot", "snapshot"));
+        for name in [
+            "shards-42.snapshot",
+            "a-1-2.png",
+            "-1-2.snapshot",
+            "x-1-.snapshot",
+        ] {
+            assert!(!engine_named(name, "snapshot"), "{name}");
+        }
+    }
 
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
     const DEADLINE: Duration = Duration::from_secs(20);
@@ -3882,6 +4069,84 @@ mod tests {
         assert_eq!(restored.world().hash(), cx.world().hash());
     }
 
+    /// A `snapshot` with `quit` is written, and answered, before the frame that took it ends the
+    /// run, and what came after it in that frame is refused, applying nothing, so that a run
+    /// started again from it loses no edit it answered; it keeps the pause, which the run started
+    /// from it takes again.
+    #[test]
+    fn a_snapshot_that_quits_is_written_first_and_nothing_after_it_applies() {
+        let (mut api, session) = started("Api Snapshot Quits");
+        let (passed, wakes) = mpsc::channel();
+        api.set_waker(Box::new(move || {
+            let _ = passed.send(());
+        }));
+        let mut cx = Context::seeded(21);
+        let hero = cx.world_mut().spawn(Transform::IDENTITY);
+        let hero = cx.world().id(hero).expect("alive").to_string();
+        let mut stepper = Stepper::default();
+        stepper.step(Tick::DT, |_| true, || Duration::ZERO);
+        stepper.pause();
+        let dir = Scratch::new("api-snapshot-quits");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("world.snapshot");
+        let (mut stream, mut answers) = said_hello(&session);
+        let set = json!({"set": {"id": hero, "component": "Transform", "path": "translation.x",
+                                 "value": 5.0}});
+        for request in [
+            json!({"id": 1, "method": "snapshot", "params": {"path": path, "quit": true}}),
+            json!({"id": 2, "method": "apply", "params": {"operations": [set]}}),
+        ] {
+            stream
+                .write_all(format!("{request}\n").as_bytes())
+                .expect("written");
+            wakes.recv_timeout(DEADLINE).expect("passed on");
+        }
+        let hash = cx.world().hash();
+        let quits = api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+        let [taken, refused] = [1, 2].map(|_| {
+            let line = gg_api::read_line(&mut answers).expect("an answer");
+            serde_json::from_str::<Value>(&line.expect("a line")).expect("JSON")
+        });
+        assert!(quits, "the run ends");
+        assert_eq!(taken["result"]["path"], json!(path));
+        assert_eq!(refused["error"]["code"], "api.quitting");
+        assert_eq!(cx.world().hash(), hash, "nothing applied after it");
+        let snapshot = crate::snapshot::Snapshot::read(&path, "Api Snapshot Quits");
+        let snapshot = snapshot.expect("written before the run ended");
+        assert!(snapshot.paused);
+        let (mut restored, mut again) = (Stepper::default(), Context::new(None));
+        let mut stack = Stack::default();
+        crate::main_loop::start(
+            &mut stack,
+            &mut again,
+            &mut restored,
+            Some(snapshot),
+            false,
+            true,
+        )
+        .expect("restored");
+        assert!(restored.paused() && !restored.stopped());
+        assert_eq!(restored.ticks, 1);
+        // Restored paused, it runs no tick, and is snapshotted all the same, as it attached
+        // nothing that its first tick would apply.
+        drop(api);
+        let (mut api, session) = started("Api Snapshot Quits Again");
+        let again_path = dir.0.join("again.snapshot");
+        let asked = again_path.clone();
+        let taken = serving(
+            &mut api,
+            &mut again,
+            &mut stack,
+            &mut restored,
+            session,
+            move |mut client| client.call_as::<Snapshotted>("snapshot", json!({"path": asked})),
+            |_, _, _| {},
+        );
+        let taken = taken.expect("a snapshot of the run restored paused");
+        assert_eq!((&taken.path, taken.ticks), (&again_path, 1));
+        assert_eq!(restored.ran(), 0, "no tick ran");
+    }
+
     /// What [`stop_brings_back_the_world_as_edited_that_play_copied`]'s client gets.
     struct Stopped {
         stopped: Status,
@@ -4511,12 +4776,17 @@ mod tests {
 
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
     /// past where any process's `main` is, which a test's build refuses whether its executable
-    /// exports `main` or not, as `patch`'s own tests say.
+    /// exports `main` or not, as `patch`'s own tests say. In a recorded run, the recording holds
+    /// no patch that didn't apply, which changed nothing.
     #[test]
     fn a_patch_that_cant_apply_is_refused() {
         let (mut api, session) = started("Api Patches");
-        let mut cx = Context::seeded(7);
         let mut stepper = Stepper::default();
+        let dir = Scratch::new("api-patch-recorded");
+        std::fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("run.recording");
+        let mut recorded = Stack::default();
+        recorded.record(Recorder::create(&path, "Tested").expect("created"));
         let client = |mut client: Client| {
             let table = json!({
                 "lib": std::env::temp_dir().join("patch.dll"),
@@ -4528,16 +4798,23 @@ mod tests {
             let call = client.call("patch", json!({ "table": table }));
             call.expect_err("refused")
         };
-        let refused = serving(
-            &mut api,
-            &mut cx,
-            &mut Stack::default(),
-            &mut stepper,
-            session,
-            client,
-            |_, _, _| {},
+        for stack in [&mut Stack::default(), &mut recorded] {
+            let refused = serving(
+                &mut api,
+                &mut Context::seeded(7),
+                stack,
+                &mut stepper,
+                session.clone(),
+                client,
+                |_, _, _| {},
+            );
+            assert_eq!(refused.code, "api.patch", "{}", refused.message);
+        }
+        let text = std::fs::read_to_string(&path).expect("the recording");
+        assert!(
+            !text.lines().any(|line| line.starts_with("patch ")),
+            "{text}"
         );
-        assert_eq!(refused.code, "api.patch", "{}", refused.message);
     }
 
     /// A capture rides with the frames handed off until one that rendered brings the view back: an

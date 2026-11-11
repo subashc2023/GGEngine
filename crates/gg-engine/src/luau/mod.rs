@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 #[cfg(feature = "dev")]
 use std::ffi::c_int;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 #[cfg(feature = "dev")]
@@ -220,6 +221,10 @@ struct Held {
 /// The most lines a mod prints a second of ticks, past which its prints go unprinted.
 const PRINTS: u32 = 32;
 
+/// The most bytes of a line a script prints, past which it's cut, saying so: so that a mod's
+/// lines, each up to as many bytes as its VM may hold, can't fill the log.
+const PRINTED: usize = 4096;
+
 /// The ticks of a second.
 const TICKS_A_SECOND: u32 = (1_000_000_000 / Tick::DT.as_nanos()) as u32;
 
@@ -282,7 +287,7 @@ pub(crate) struct Hosts {
 /// running, what a mod's scripts are held to, and what the VM keeps for the debugger.
 struct Shared {
     world: RefCell<World>,
-    /// By handle.
+    /// In the order of their handles' bits.
     fields: RefCell<Vec<FieldRef>>,
     /// The script loading, while one is.
     loading: RefCell<Option<Loading>>,
@@ -391,6 +396,8 @@ fn stopped(why: StopReason, depth: c_int, frames: Vec<hooks::Frame>) {
 /// A field a handle names: field `name` of component type `component`, which holds `ty`; and
 /// whether the scripts may read it and write it, as [`Shared::may`] says.
 struct FieldRef {
+    /// The bits of its handle, as [`handle_of`] gives them.
+    handle: u32,
     component: Ident,
     /// The type's id in the world scripts last ran in, and the field's index there; `None` if it
     /// has no such type, or no such field, there.
@@ -705,7 +712,13 @@ impl Host {
         for name in REMOVED {
             globals.raw_remove(name)?;
         }
+        // Both write as Luau's `tostring` does, but for what holds an address, as `written` says.
+        let luau: Function = globals.raw_get("tostring")?;
+        let to = luau.clone();
+        let print = move |lua: &Lua, values: Variadic<Lua_>| print(lua, &to, &values);
         globals.raw_set("print", lua.create_function(print)?)?;
+        let tostring = move |lua: &Lua, value: Lua_| written(lua, &luau, value);
+        globals.raw_set("tostring", lua.create_function(tostring)?)?;
         let math: Table = globals.raw_get("math")?;
         math.raw_remove("random")?;
         math.raw_remove("randomseed")?;
@@ -1452,21 +1465,35 @@ fn entity_of(data: LightUserData) -> mlua::Result<Entity> {
     })
 }
 
-/// The index of the field `key` is the handle of.
-fn field_of(key: &Lua_) -> mlua::Result<usize> {
-    match key {
-        &Lua_::LightUserData(data) if bits(data) != 0 && bits(data) >> 32 == 0 => {
-            Ok(bits(data) as usize - 1)
+/// The field of `fields`, in the order of their handles' bits, that `key` is the handle of.
+fn field_of<'f>(fields: &'f [FieldRef], key: &Lua_) -> mlua::Result<&'f FieldRef> {
+    let at = match key {
+        &Lua_::LightUserData(data) if bits(data) >> 32 == 0 => {
+            let bits = bits(data) as u32;
+            fields
+                .binary_search_by_key(&bits, |field| field.handle)
+                .ok()
         }
-        _ => Err(mlua::Error::runtime(
+        _ => None,
+    };
+    at.map(|at| &fields[at]).ok_or_else(|| {
+        mlua::Error::runtime(
             "an entity's fields are reached by handles, such as `gg.component(\"Shard\").angle`",
-        )),
-    }
+        )
+    })
 }
 
 /// The handle of field `name` of component type `id`, named `component`, which is its field `index`
 /// and holds `ty`, and which the scripts may read and write as `may` says: the one `fields` has, or
-/// one made.
+/// one made, kept in the order of their handles' bits.
+///
+/// Its bits are the low 32, never 0, which no entity's are, as [`Entity::to_bits`] says, and are
+/// those of the field itself, as [`hashed`] gives them: not its place among the handles the VM
+/// made before, which would go by what the VM ran, so that a table the handles key, which Luau
+/// orders by their bits' hashes, iterates alike in a lockstep host's VM, which may have loaded and
+/// reloaded scripts as it ran, and in its joiner's, which starts afresh, as in a run restored from
+/// a snapshot and in a replay. Two fields whose hashes are the same, about one pair in 2^32, take
+/// the next bits free in the order the VM made them, which alone goes by what it ran.
 fn handle_of(
     fields: &mut Vec<FieldRef>,
     component: &str,
@@ -1474,22 +1501,55 @@ fn handle_of(
     (index, name, ty): (u32, &Ident, Field),
     (reads, writes): (bool, bool),
 ) -> LightUserData {
-    let at = fields
-        .iter()
-        .position(|field| field.component == component && field.name == *name && field.ty == ty);
-    let at = at.unwrap_or_else(|| {
-        fields.push(FieldRef {
-            component: Ident::Owned(component.to_owned()),
-            id: Some(id),
-            index,
-            name: name.clone(),
-            ty,
-            reads,
-            writes,
-        });
-        fields.len() - 1
-    });
-    handle(at as u64 + 1)
+    let same =
+        |field: &&FieldRef| field.component == component && field.name == *name && field.ty == ty;
+    if let Some(field) = fields.iter().find(same) {
+        return handle(u64::from(field.handle));
+    }
+    let mut bits = hashed(component, name, ty);
+    while bits == 0
+        || fields
+            .binary_search_by_key(&bits, |field| field.handle)
+            .is_ok()
+    {
+        bits = bits.wrapping_add(1);
+    }
+    let at = fields.partition_point(|field| field.handle < bits);
+    let field = FieldRef {
+        handle: bits,
+        component: Ident::Owned(component.to_owned()),
+        id: Some(id),
+        index,
+        name: name.clone(),
+        ty,
+        reads,
+        writes,
+    };
+    fields.insert(at, field);
+    handle(u64::from(bits))
+}
+
+/// A hash of field `name` of the component type named `component`, which holds `ty`: 32-bit
+/// FNV-1a, of the names' bytes, each ended by a 0, which no name holds, and of what it holds.
+fn hashed(component: &str, name: &str, ty: Field) -> u32 {
+    let held = match ty {
+        Field::Bool => 0,
+        Field::F32 => 1,
+        Field::F64 => 2,
+        Field::Int { signed: false } => 3,
+        Field::Int { signed: true } => 4,
+        Field::Vec2 => 5,
+        Field::Vec3 => 6,
+        Field::Vec4 => 7,
+        Field::Quat => 8,
+        Field::Entity => 9,
+        Field::MaybeEntity => 10,
+        Field::MaybeVec3 => 11,
+    };
+    let names = component.bytes().chain([0]).chain(name.bytes()).chain([0]);
+    names.chain([held]).fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// The error that a mod's scripts aren't granted what `capability` names, which `what` needs.
@@ -1706,7 +1766,7 @@ fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Result<Lua_> {
     shared(|shared| {
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
-        let field = &fields[field_of(&key)?];
+        let field = field_of(&fields, &key)?;
         if !field.reads {
             let (component, name) = (&field.component, &field.name);
             let what = format!("reading `{component}.{name}`");
@@ -1727,7 +1787,7 @@ fn write(_: &Lua, (entity, key, value): (LightUserData, Lua_, Lua_)) -> mlua::Re
     shared(|shared| {
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
-        let field = &fields[field_of(&key)?];
+        let field = field_of(&fields, &key)?;
         if !field.writes {
             let (component, name) = (&field.component, &field.name);
             let what = format!("writing `{component}.{name}`");
@@ -1752,23 +1812,89 @@ fn describe(_: &Lua, data: LightUserData) -> mlua::Result<String> {
     })
 }
 
-/// `print(...)`: logs what it's given, as `tostring` writes each, between tabs; a mod's, naming
-/// it, unless it has printed as much as it may this second of ticks, as [`Mods`] says.
-fn print(_: &Lua, values: Variadic<Lua_>) -> mlua::Result<()> {
+/// `print(...)`: logs what it's given, as `tostring` writes each, between tabs, cut at
+/// [`PRINTED`] bytes, as [`printed`] cuts it; a mod's, naming it, unless it has printed as much as
+/// it may this second of ticks, as [`Mods`] says. `luau` is Luau's own `tostring`.
+fn print(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Result<()> {
     shared(|shared| {
         if shared.held.as_ref().is_some_and(|held| !held.prints()) {
             return Ok(());
         }
-        let texts: Vec<String> = values
-            .iter()
-            .map(|value| value.to_string())
-            .collect::<mlua::Result<_>>()?;
+        let line = printed(lua, luau, values)?;
         match &shared.held {
-            Some(held) => info!("mod" = held.name, "{}", texts.join("\t")),
-            None => info!("{}", texts.join("\t")),
+            Some(held) => info!("mod" = held.name, "{line}"),
+            None => info!("{line}"),
         }
         Ok(())
     })
+}
+
+/// The line `print` logs of `values`: each as `tostring` writes it, as [`written`] says, `luau`
+/// being Luau's own, between tabs, but cut at [`PRINTED`] bytes, at a character's start, saying so
+/// and how many bytes the line had; of a string past them, only as many of its bytes as fit are
+/// read.
+fn printed(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Result<String> {
+    let mut line = String::new();
+    let mut bytes = 0;
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            line.push('\t');
+            bytes += 1;
+        }
+        let text = match value {
+            Lua_::String(string) => string.clone(),
+            value => written(lua, luau, value.clone())?,
+        };
+        let text = text.as_bytes();
+        bytes += text.len();
+        let room = (PRINTED + 1).saturating_sub(line.len()).min(text.len());
+        line.push_str(&String::from_utf8_lossy(&text[..room]));
+    }
+    if bytes > PRINTED {
+        let mut end = PRINTED.min(line.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        write!(line, " [cut at {PRINTED} bytes of {bytes}]").expect("a string takes any text");
+    }
+    Ok(line)
+}
+
+/// `tostring(value)`: as `luau`, Luau's own, writes it, a `__tostring` metamethod's text where it
+/// has one, but a table, function, thread, buffer or userdata without one by its type's name
+/// alone, as `table`, or userdata by its metatable's `__type`, if it's a string, where Luau's writes
+/// its address, which differs from run to run and from peer to peer, so that a script whose state
+/// took it would desync them. Not a count of the objects in the order the VM made them, which
+/// would be the same within a run: a lockstep joiner's VM, or a run restored from a snapshot,
+/// starts afresh, having made none of those its host's did before, and a tick run again, as
+/// rollback runs it, makes them again. The rest Luau's writes, as its builtin, which takes nil,
+/// booleans, numbers and strings, writes them where it can, alike.
+fn written(lua: &Lua, luau: &Function, value: Lua_) -> mlua::Result<LuaString> {
+    let has = |field: &Lua_| !field.is_nil();
+    let name = match &value {
+        Lua_::Table(table) => {
+            let to = table
+                .metatable()
+                .map(|metatable| metatable.raw_get("__tostring"));
+            match to.transpose()? {
+                Some(to) if has(&to) => None,
+                _ => Some(Lua_::Nil),
+            }
+        }
+        Lua_::UserData(data) => match data.metatable() {
+            Ok(metatable) if has(&metatable.get("__tostring")?) => None,
+            Ok(metatable) => Some(metatable.get("__type")?),
+            Err(_) => Some(Lua_::Nil),
+        },
+        Lua_::Function(_) | Lua_::Thread(_) | Lua_::Buffer(_) => Some(Lua_::Nil),
+        _ => None,
+    };
+    match name {
+        Some(Lua_::String(name)) => Ok(name),
+        Some(_) => lua.create_string(value.type_name()),
+        None => luau.call(value),
+    }
 }
 
 /// The id of the component type `field` is of, in the world scripts run in.
@@ -2034,7 +2160,7 @@ fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Resul
     shared(|shared| {
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
-        let field = &fields[field_of(&key)?];
+        let field = field_of(&fields, &key)?;
         let (component, name) = (&field.component, &field.name);
         if !field.writes {
             let what = format!("tweening `{component}.{name}`");
@@ -3614,5 +3740,135 @@ return Many
             assert_eq!(set, Some(ParamValue::Float(i as f32)), "p{i}");
         }
         assert_eq!(host.host.borrow().shared.params.borrow().len(), PARAMS);
+    }
+
+    /// Writes what `tostring` and `string.format`'s `%*` write of a table, a function, a thread
+    /// and a buffer, and of a table with a `__tostring` metamethod, as defaults of its own.
+    const SHOWN: &str = r#"
+local mine = setmetatable({}, { __tostring = function() return "mine" end })
+return gg.declare("Shown", {
+    named = tostring({}) == "table" and tostring(print) == "function"
+        and tostring(coroutine.create(function() end)) == "thread"
+        and tostring(buffer.create(1)) == "buffer",
+    formatted = string.format("%* %* %*", {}, print, 1) == "table function 1"
+        and ("%*"):format(buffer.create(1)) == "buffer",
+    metamethod = tostring(mine) .. string.format("%*", mine) == "minemine",
+    entity = tostring(gg.entity) == "gg.entity",
+})
+"#;
+
+    /// A script's `tostring` and `string.format`'s `%*` write a table, a function, a thread or a
+    /// buffer by its type's name, the same in every run and on every peer, where Luau's write its
+    /// address; and a table with a `__tostring` metamethod, and an entity, as Luau's do.
+    #[test]
+    fn tostring_writes_what_holds_an_address_by_its_type_alone() {
+        let dir = Scratch::new("luau-tostring");
+        let (cx, _host) = loaded(&dir, &[("scripts/shown.luau", SHOWN)]);
+        let world = cx.world();
+        assert_eq!(default(world, "Shown", "named"), Some(Value::Bool(true)));
+        assert_eq!(
+            default(world, "Shown", "formatted"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            default(world, "Shown", "metamethod"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(default(world, "Shown", "entity"), Some(Value::Bool(true)));
+    }
+
+    /// Userdata of a type that names itself, by `__type`.
+    struct Typed;
+
+    impl mlua::UserData for Typed {
+        fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+            fields.add_meta_field("__type", "Typed");
+        }
+    }
+
+    /// Userdata of a type that writes itself, by `__tostring`.
+    struct Shown;
+
+    impl mlua::UserData for Shown {
+        fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+            methods.add_meta_method(mlua::MetaMethod::ToString, |_, _, ()| Ok("shown"));
+        }
+    }
+
+    /// Userdata is written as Luau's `tostring` writes it, by its `__tostring` metamethod, if it
+    /// has one, or else by its `__type`, by `tostring` and by `string.format`'s `%*` alike.
+    #[test]
+    fn userdata_is_written_by_its_tostring_or_its_type() {
+        let lua = Host::vm().expect("Luau starts");
+        let tostring: Function = lua.globals().get("tostring").expect("tostring");
+        let string: Table = lua.globals().get("string").expect("string");
+        let format: Function = string.get("format").expect("format");
+        let [typed, shown] = [
+            lua.create_userdata(Typed).expect("userdata"),
+            lua.create_userdata(Shown).expect("userdata"),
+        ];
+        for (data, written) in [(typed, "Typed"), (shown, "shown")] {
+            let text: String = tostring.call(&data).expect("written");
+            assert_eq!(text, written);
+            let text: String = format.call(("%*", &data)).expect("formatted");
+            assert_eq!(text, written);
+        }
+    }
+
+    /// A printed line past [`PRINTED`] bytes is cut there, at a character's start, saying so and
+    /// how long it was, however long the strings it's given; one within them is printed whole.
+    #[test]
+    fn a_printed_line_is_cut_at_a_few_kilobytes() {
+        let lua = Host::vm().expect("Luau starts");
+        let tostring: Function = lua.globals().get("tostring").expect("tostring");
+        let printed = |values: &[Lua_]| printed(&lua, &tostring, values).expect("printed");
+        let long = lua.create_string("é".repeat(PRINTED)).expect("a string");
+        let values = [Lua_::Number(1.5), Lua_::String(long)];
+        let line = printed(&values);
+        let whole = 4 + PRINTED * 2;
+        let cut = format!(" [cut at {PRINTED} bytes of {whole}]");
+        assert!(line.ends_with(&cut), "{}", &line[line.len() - 64..]);
+        assert!(line.starts_with("1.5\té"));
+        assert!(line.len() <= PRINTED + cut.len());
+        let table = Lua_::Table(lua.create_table().expect("a table"));
+        let short = [Lua_::Number(0.25), table, Lua_::LightUserData(handle(0))];
+        assert_eq!(printed(&short), "0.25\ttable\tgg.entity");
+    }
+
+    /// Declares a component of two fields, whose handles a VM makes as it loads.
+    const PAIR: &str = "return gg.declare(\"Pair\", { a = 0, b = 0 })\n";
+
+    /// Iterates a table keyed by the handles of `Mover`'s fields, and keeps the order it found them
+    /// in as a default of its own.
+    const ORDER: &str = r#"
+local Mover = gg.component("Mover")
+local keys = {
+    [Mover.angle] = 1, [Mover.speed] = 2, [Mover.steps] = 3, [Mover.on] = 4, [Mover.at] = 5,
+    [Mover.turn] = 6, [Mover.target] = 7,
+}
+local order = 0
+for _, n in pairs(keys) do
+    order = order * 10 + n
+end
+return gg.declare("Order", { order = order })
+"#;
+
+    /// The handles of a component's fields are the same in every VM, whatever handles it made
+    /// before, as a lockstep host's VM, which has loaded and reloaded scripts as it ran, and its
+    /// joiner's, which starts afresh, make others first: so that a table they key iterates alike.
+    #[test]
+    fn the_handles_of_fields_are_the_same_whatever_a_vm_made_before() {
+        let order = |name: &str, scripts: &[(&str, &str)]| {
+            let dir = Scratch::new(name);
+            let (cx, _host) = loaded(&dir, scripts);
+            default(cx.world(), "Order", "order")
+        };
+        let afresh = order("luau-handles-afresh", &[("scripts/order.luau", ORDER)]);
+        let after = order(
+            "luau-handles-after",
+            &[("scripts/pair.luau", PAIR), ("scripts/order.luau", ORDER)],
+        );
+        assert!(afresh.is_some());
+        assert_eq!(afresh, after);
     }
 }

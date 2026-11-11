@@ -49,6 +49,8 @@ struct Info {
     index: TypeIndex,
     /// Its exclusive field's name, as [`Component::exclusive`] gives it.
     exclusive: Option<&'static str>,
+    /// The fields a delete clears, as [`Component::cleared`] gives them.
+    cleared: &'static [&'static str],
     /// Makes an empty column of the type, for a new table.
     new_column: NewColumn,
 }
@@ -98,6 +100,7 @@ impl Components {
             name: name.clone(),
             index,
             exclusive: T::exclusive(),
+            cleared: T::cleared(),
             new_column: NewColumn::Rust(|| Box::new(Vec::<T>::new())),
         });
         self.ids.insert(TypeId::of::<T>(), id);
@@ -156,6 +159,27 @@ impl Components {
                 ));
             }
         }
+        for &field in T::cleared() {
+            let fields = match &self.types.info(index).shape {
+                Shape::Struct {
+                    fields,
+                    tuple: false,
+                } => &fields[..],
+                _ => &[],
+            };
+            let entity = Type::Option(Box::new(Type::Entity));
+            let named = fields.iter().find(|of| of.name == field);
+            if named.is_none_or(|of| of.ty != entity) {
+                return Err(Error::new(
+                    "ecs.bad_cleared",
+                    format!(
+                        "`{name}` names `{field}` a field a delete clears, but it has no \
+                         `Option<Entity>` field `{field}`: a field a delete clears is an \
+                         `Option<Entity>` of its own, of a struct with named fields"
+                    ),
+                ));
+            }
+        }
         Ok(index)
     }
 
@@ -194,6 +218,7 @@ impl Components {
             name: name.clone(),
             index,
             exclusive: None,
+            cleared: &[],
             new_column: NewColumn::Declared(declared),
         });
         self.by_name.insert(name, id);
@@ -275,6 +300,14 @@ impl Components {
     /// The name of its exclusive field, if it has one.
     pub(super) fn exclusive(&self, id: ComponentId) -> Option<&'static str> {
         self.infos[id.0 as usize].exclusive
+    }
+
+    /// Each component type whose fields a delete clears, with their names, in the order they
+    /// registered.
+    pub(super) fn cleared(&self) -> impl Iterator<Item = (ComponentId, &'static [&'static str])> {
+        let ids = (0..).map(ComponentId);
+        let cleared = ids.zip(&self.infos).map(|(id, info)| (id, info.cleared));
+        cleared.filter(|(_, fields)| !fields.is_empty())
     }
 
     /// An empty column of its type.

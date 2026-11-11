@@ -26,7 +26,9 @@
 //!   played across a `stop`.
 //!
 //!   A game playing from its start, which no `play` started, holds no world as edited: `stop` stops
-//!   it where it is, and that world is the world as edited from then on.
+//!   it where it is, and that world is the world as edited from then on. Its ticks change the
+//!   very world `unsaved` compares, so `unsaved` is true there once physics moves a body:
+//!   [`Status::edited`] says whether an author's edit has applied, which ticks never set.
 //!
 //!   `stop` fails the `step`s waiting with `api.stopped`. It fails itself with `api.no_stop` in a
 //!   recorded run or a lockstep peer, which play from start to end.
@@ -138,8 +140,10 @@
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
 //!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
 //!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run
-//!   restored from it goes on as it was. Before the first tick of a game playing from its start,
-//!   which applies what the layers queued as they started, it fails with `api.not_ticked`.
+//!   restored from it goes on as it was, paused if it was. Before the first tick of a game playing
+//!   from its start, which applies what the layers queued as they started, it fails with
+//!   `api.not_ticked`. With `quit`, the run ends once the snapshot is written, as `quit` ends it,
+//!   which then needs `quit` too.
 //! - `patch`, [`Patch`]: applies a patch of the game's code, which `dx tools hotpatch` built for the
 //!   game's process, between ticks, and answers [`Patched`]; fails with `api.bad_params` if the
 //!   table's library, `lib`, isn't an absolute path, and with `api.patch` if the build can't take
@@ -195,7 +199,8 @@
 //!   [`MOST_NOTE_CODE`] bytes, for an empty message, and for a message or fields longer than
 //!   [`MOST_NOTE`] bytes.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
-//!   its layers, which may keep a window open.
+//!   its layers, which may keep a window open. The requests the main thread takes after a `quit`,
+//!   or a `snapshot` with `quit`, fail with `api.quitting`, applying nothing.
 //! - `debug`, [`Debug`](struct@Debug): debugs the game's Luau scripts, as ARCHITECTURE.md's Game
 //!   code describes,
 //!   and answers [`Debugging`]: sets a script's breakpoints, then pauses the scripts, or goes on from
@@ -224,8 +229,8 @@
 //! need; `save_prefab` needs `write` and `scene`, as it writes a file of the project's as `scene`
 //! does; `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and
 //! `pick` need `view`, a `pick` answering its entity's name only with `read` of `Name` too;
-//! `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and a `capture`
-//! or a `snapshot` given a path needs `files` too.
+//! `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; a `capture` or a
+//! `snapshot` given a path needs `files` too, and a `snapshot` with `quit` needs `quit`.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -493,7 +498,8 @@ pub struct Welcome {
 /// What `ping` answers: the frames the game has run, which a hung game's main thread stops
 /// counting, and what frames have paused for, if they've paused for the user: `minimized`, while
 /// the main window has no area, `dialog`, while a file dialog is open, `menu`, while the window
-/// menu Windows runs is, or `breakpoint`, while a script has stopped, as `debug` says.
+/// menu Windows runs is, or `breakpoint`, while a script has stopped, as `debug` says, which it
+/// says before any other, as a stopped script holds the main thread whatever else frames wait for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pulse {
     pub frames: u64,
@@ -527,9 +533,19 @@ pub struct Status {
     #[serde(default)]
     pub scene: Option<String>,
     /// Whether the open scene, in the world as edited, differs from its file, as `save` would
-    /// write it, or, untitled, holds entities. False from an engine older than `scene`.
+    /// write it, or, untitled, holds entities. False from an engine older than `scene`. In a game
+    /// that plays from its start the world as edited is the world that ticks change, so a body its
+    /// physics moves makes this true from the first tick: `edited` says what authors changed.
     #[serde(default)]
     pub unsaved: bool,
+    /// Whether an author's edit (`apply`, `append`, `amend`, `undo` or `redo`, from a client or
+    /// the editor's Inspector) has applied to the world as edited since the open scene was last
+    /// saved, opened or made new, or its own file's save applied. Ticks don't set it, nor scripts'
+    /// reloads or other scene files' saves; an edit of a copy that plays goes with the copy at
+    /// `stop`; a snapshot keeps it, as across `gg run`'s restarts. An undo back to the saved state
+    /// leaves it true. False from an engine older than it.
+    #[serde(default)]
+    pub edited: bool,
 }
 
 /// What `scene` takes: what to do to the open scene; the file to open, or to save it as, absolute
@@ -569,7 +585,9 @@ fn one() -> u64 {
 }
 
 /// What `capture` takes: where to write the PNG, an absolute path, whose directory exists; without
-/// one, a file in the `captures` directory beside the game's executable.
+/// one, a file in the `captures` directory beside the game's executable, named for the run, as
+/// `sandbox-4242-7.png`, the newest 32 of which it keeps, removing older ones as each is written:
+/// those a client named stay.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
@@ -1194,13 +1212,44 @@ pub enum UiValue {
     Choice(usize),
 }
 
+/// The methods that change nothing of the game but what they're asked to read, which a client may
+/// send again whether or not the first was taken.
+const READS: [&str; 13] = [
+    "hello", "ping", "status", "entities", "entity", "get", "types", "hash", "assets", "ui",
+    "edits", "logs", "pick",
+];
+
+/// Whether `method` may change the game, its world, its run or its files, as every method but those
+/// that only read does, and one there's none of may: a request of it that went unanswered may have
+/// applied, so it's sent again only once a read says it hasn't.
+pub fn changes(method: &str) -> bool {
+    !READS.contains(&method)
+}
+
+/// What an error of `method` that went unanswered adds, as [`Client::call`] says: that it may have
+/// applied, if it [`changes`] the game; else nothing.
+pub fn unanswered(method: &str) -> &'static str {
+    if changes(method) {
+        "; the game may have taken it, and it may yet apply, or have applied: read what it changes \
+         before sending it again"
+    } else {
+        ""
+    }
+}
+
 /// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;
-/// without one, a file in the `snapshots` directory beside the game's executable.
+/// without one, a file in the `snapshots` directory beside the game's executable, named for the
+/// run, as `sandbox-4242-7.snapshot`, the newest 8 of which it keeps, removing older ones as each
+/// is written: those a client named stay, as `gg run`'s, in a directory of its own. With `quit`, the run ends cleanly once the snapshot is
+/// written and answered, as `quit` ends it, nothing applying between the two, so that a run started
+/// again from the snapshot loses no edit answered before.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     #[serde(default)]
     pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quit: bool,
 }
 
 /// What `snapshot` answers: where the snapshot is, the ticks the simulation had run as it was taken,
@@ -1643,7 +1692,8 @@ impl Client {
     /// Fails with the error the game answers; with `api.timeout` if its answer doesn't come in
     /// time; with `api.closed` if the connection closes first, as when the game ends; and with
     /// `api.protocol` for an answer that isn't one. After `api.timeout` or `api.closed`, every
-    /// call fails with `api.closed`.
+    /// call fails with `api.closed`. Unanswered, a request the game took may still apply, as one
+    /// answered late does: the message of either says so of a method that [`changes`] the game.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
         let closed = || Failure::new("api.closed", "the connection to the game closed");
         if self.broken {
@@ -1666,7 +1716,11 @@ impl Client {
             Ok(Some(line)) => line,
             Ok(None) => {
                 self.broken = true;
-                return Err(closed());
+                let message = format!(
+                    "the connection to the game closed before it answered `{method}`{}",
+                    unanswered(method)
+                );
+                return Err(Failure::new("api.closed", message));
             }
             Err(error)
                 if matches!(
@@ -1675,13 +1729,18 @@ impl Client {
                 ) =>
             {
                 self.broken = true;
-                let message =
-                    format!("the game didn't answer `{method}` in time; it may be hung or busy");
+                let message = format!(
+                    "the game didn't answer `{method}` in time; it may be hung or busy{}",
+                    unanswered(method)
+                );
                 return Err(Failure::new("api.timeout", message));
             }
             Err(error) => {
                 self.broken = true;
-                let message = format!("the connection to the game broke: {error}");
+                let message = format!(
+                    "the connection to the game broke before it answered `{method}`: {error}{}",
+                    unanswered(method)
+                );
                 return Err(Failure::new("api.closed", message));
             }
         };
@@ -2040,7 +2099,10 @@ mod tests {
         }
         let older = r#"{"ticks": 1, "paused": false, "frames": 2, "entities": 3, "view": null}"#;
         let status: Status = serde_json::from_str(older).unwrap();
-        assert_eq!((status.scene, status.unsaved), (None, false));
+        assert_eq!(
+            (status.scene, status.unsaved, status.edited),
+            (None, false, false)
+        );
     }
 
     /// `assets` takes a kind there is, or none, and a page, defaulting each; and its answer gives
@@ -2149,7 +2211,8 @@ mod tests {
     }
 
     /// Answers `hello` with the token `secret`, `status` with an object whose keys aren't in order,
-    /// `slow` never, and anything else with an error; `close` closes the connection.
+    /// `slow`, `apply` and `hash` late, and anything else with an error; `close` closes the
+    /// connection.
     fn game(request: Request) -> Option<String> {
         let answer = match request.method.as_str() {
             "hello" if request.params["token"] == "secret" => {
@@ -2157,7 +2220,7 @@ mod tests {
             }
             "hello" => Err(Failure::new("api.unauthorized", "not the token")),
             "status" => Ok(r#"{"zebra":1,"apple":2}"#.to_owned()),
-            "slow" => {
+            "slow" | "apply" | "hash" => {
                 thread::sleep(Duration::from_millis(500));
                 Ok("{}".to_owned())
             }
@@ -2210,5 +2273,31 @@ mod tests {
             error.map(|error| error.code).as_deref(),
             Some("api.connect")
         );
+    }
+
+    /// A call that changes the game, answered too late or not at all, may have applied, which its
+    /// error says, and a read's doesn't.
+    #[test]
+    fn an_unanswered_change_is_said_to_maybe_have_applied() {
+        let mut said = Vec::new();
+        for method in ["apply", "hash", "close"] {
+            let session = serve(game);
+            let mut client = Client::connect(&session, "test", Duration::from_secs(10)).unwrap();
+            client.set_timeout(Some(Duration::from_millis(50))).unwrap();
+            let error = client.call(method, Value::Null).unwrap_err();
+            said.push((error.code, error.message.contains("may yet apply")));
+        }
+        let said: Vec<(&str, bool)> = (said.iter())
+            .map(|(code, may)| (code.as_str(), *may))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("api.timeout", true),
+                ("api.timeout", false),
+                ("api.closed", true)
+            ]
+        );
+        assert!(changes("apply") && changes("snapshot") && !changes("status"));
     }
 }

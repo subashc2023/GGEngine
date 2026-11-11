@@ -15,7 +15,7 @@
 //! writes it; then, of a run the tool API had stopped, `stopped`, or of one playing a copy of the
 //! world as edited, which it held aside, `edited`, the ticks that world was at and its hash,
 //! followed by its scene files, its open scene and that world, written as the run's are; then
-//! `end`. A snapshot written before the open scene was holds no `open` line: the start scene's
+//! `paused`, if its simulation was, as the tool API's `pause` leaves it; then `end`. A snapshot written before the open scene was holds no `open` line: the start scene's
 //! file is open, if its scene files hold it.
 //!
 //! ```text
@@ -92,10 +92,26 @@ pub(crate) struct Of<'r> {
 }
 
 /// The text of the snapshot file of what `of` says, app `app`'s, whose layers are `layers`, from
-/// the bottom up, as the simulation had run `ticks` ticks, as its run does what `run` says.
+/// the bottom up, as the simulation had run `ticks` ticks, as its run does what `run` says, its
+/// simulation not paused.
 ///
 /// Fails as [`World::save_whole`] does.
 pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) -> Result<String> {
+    write_paused(of, run, false, app, layers, ticks)
+}
+
+/// As [`write()`], of a run whose simulation is paused if `paused`, which the file's `paused` line
+/// says, as the restored run then is.
+///
+/// Fails as `write` does.
+pub(crate) fn write_paused(
+    of: &Of,
+    run: &Run,
+    paused: bool,
+    app: &str,
+    layers: &[&str],
+    ticks: u64,
+) -> Result<String> {
     use std::fmt::Write as _;
 
     use crate::recording::engine;
@@ -153,6 +169,9 @@ pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) 
             world.save_whole(&mut out)?;
         }
     }
+    if paused {
+        out.push_str("paused\n");
+    }
     out.push_str("end\n");
     Ok(out)
 }
@@ -192,7 +211,11 @@ fn write_scenes(out: &mut String, scenes: &[SceneFile], open: &Open, world: &Wor
     let author = open.author.as_ref().filter(|_| left_out.is_none());
     let author = author.map(|author| Box::new(Value::String(author.clone())));
     let made = made.iter().map(|id| Value::String(id.to_string()));
-    let open = Value::List(vec![Value::Option(author), Value::List(made.collect())]);
+    let mut parts = vec![Value::Option(author), Value::List(made.collect())];
+    if open.edited {
+        parts.push(Value::Bool(true));
+    }
+    let open = Value::List(parts);
     out.push_str("open ");
     text::write(out, &open, world);
     out.push('\n');
@@ -205,7 +228,16 @@ fn read_open(line: &str) -> Option<Open> {
     let Value::List(parts) = text.value(&World::default()) else {
         return None;
     };
-    let [Value::Option(author), Value::List(made)] = <[Value; 2]>::try_from(parts).ok()? else {
+    // Whether it was edited, last, which a snapshot written before it was doesn't say.
+    let (author, made, edited) = match <[Value; 3]>::try_from(parts) {
+        Ok([author, made, Value::Bool(edited)]) => (author, made, edited),
+        Ok(_) => return None,
+        Err(parts) => {
+            let [author, made] = <[Value; 2]>::try_from(parts).ok()?;
+            (author, made, false)
+        }
+    };
+    let (Value::Option(author), Value::List(made)) = (author, made) else {
         return None;
     };
     let author = match author.map(|author| *author) {
@@ -220,6 +252,7 @@ fn read_open(line: &str) -> Option<Open> {
     Some(Open {
         author,
         made: made.collect::<Option<_>>()?,
+        edited,
     })
 }
 
@@ -325,6 +358,12 @@ pub(crate) struct Snapshot {
     world: Range<usize>,
     /// Whether the run it was taken of was stopped.
     pub(crate) stopped: bool,
+    /// Whether that run's simulation was paused, which lasts across a stop.
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(dead_code, reason = "only development builds pause")
+    )]
+    pub(crate) paused: bool,
     /// The world as edited it holds, if it was taken while a copy of that world played.
     pub(crate) held: Option<Held>,
 }
@@ -361,7 +400,7 @@ impl Snapshot {
     /// and what follows its world: `stopped`, followed by `end` alone, or `edited`, the ticks and
     /// the hash of the world as edited, followed by its scene files, its open scene and its lines,
     /// the file holding no `stopped` or other `edited` after it; or `end`, of a run playing from
-    /// its start.
+    /// its start; any of them followed by `paused` before `end`, of a run that was paused.
     ///
     /// Fails with `snapshot.format` as [`read`](Self::read) does, for a scene file's or the open
     /// scene's line that isn't one, and for what follows its world otherwise.
@@ -500,16 +539,31 @@ impl Snapshot {
             Ok((scenes, open, at))
         };
         let (scenes, open, world) = read_scenes(world)?;
-        // The world's lines end at `end`, `stopped` or `edited`, which none of them is or starts
-        // with.
-        let tails = |line: &str| line == "stopped" || line.starts_with("edited ");
-        let end = (world..lines.len())
-            .find(|&at| lines[at] == "end" || tails(lines[at]))
-            .expect("the last line is `end`");
+        // The line that ends what the run was doing: `paused`, which comes last before `end`, if
+        // the run was, or else `end`.
+        let mut last = lines.len() - 1;
+        let paused = last > world && lines[last - 1] == "paused";
+        if paused {
+            last -= 1;
+        }
+        // The world's lines end at `end`, `paused`, `stopped` or `edited`, which none of them is
+        // or starts with.
+        let tails =
+            |line: &str| line == "stopped" || line == "paused" || line.starts_with("edited ");
+        let end = (world..=last)
+            .find(|&at| at == last || tails(lines[at]))
+            .expect("the last is");
         let (mut stopped, mut held) = (false, None);
+        if end != last && lines[end] == "paused" {
+            let what = format!("line {}: `paused` comes last, before `end`", end + 1);
+            return Err(refused(what));
+        }
         if lines[end] == "stopped" {
-            if end + 2 != lines.len() {
-                let what = format!("line {}: `stopped` is followed by `end` alone", end + 1);
+            if end + 1 != last {
+                let what = format!(
+                    "line {}: `stopped` is followed by `end` alone, or by `paused` and `end`",
+                    end + 1
+                );
                 return Err(refused(what));
             }
             stopped = true;
@@ -525,7 +579,6 @@ impl Snapshot {
                 ))
             })?;
             let (scenes, open, first) = read_scenes(end + 1)?;
-            let last = lines.len() - 1;
             if let Some(at) = (first..last).find(|&at| tails(lines[at])) {
                 return Err(refused(format!(
                     "line {}: a snapshot holds one world as edited, or is stopped, but not both",
@@ -553,6 +606,7 @@ impl Snapshot {
             open,
             world: world..end,
             stopped,
+            paused,
             held,
             text,
         })
@@ -833,9 +887,11 @@ mod tests {
             "(entities: {\n})\n".to_owned(),
         );
         let scenes = [scene];
+        // Edited by an author since it was saved, which the restored run's status says.
         let open = Open {
             author: Some("scenes/grid.ron".to_owned()),
             made: vec![saved.world().id(made).expect("alive")],
+            edited: true,
         };
         let scripts = [(
             "scripts/a \"spin\".luau".to_owned(),
@@ -890,6 +946,10 @@ mod tests {
             text.replace("\nend\n", "\n"),
             text.replace(&open_line, "open List([None])\n"),
             text.replace(&open_line, "open List([None, List([String(\"nope\")])])\n"),
+            text.replace(
+                &open_line,
+                "open List([None, List([]), String(\"edited\")])\n",
+            ),
             text.replace(&script_line, pathless),
             text.replace(&mod_line, textless),
         ] {
@@ -933,6 +993,7 @@ mod tests {
         let open = Open {
             author: Some("scenes/a.ron".to_owned()),
             made: vec![b],
+            edited: false,
         };
         let text = write(&world, &scenes, &open, &Run::Playing, "Tested", &[], 0);
         let snapshot = Snapshot::parse(text.expect("written"), "left".to_owned(), "Tested");
@@ -940,7 +1001,14 @@ mod tests {
         assert!(snapshot.scenes.is_empty());
         let mut made = vec![a, b];
         made.sort_unstable();
-        assert_eq!(snapshot.open, Some(Open { author: None, made }));
+        assert_eq!(
+            snapshot.open,
+            Some(Open {
+                author: None,
+                made,
+                edited: false
+            })
+        );
     }
 
     /// A snapshot taken while a copy of the world as edited played holds that world too, which
@@ -964,9 +1032,12 @@ mod tests {
                 "(entities: {\n})\n".to_owned(),
             )
         };
+        // The world as edited's edited by an author, the copy's not, whose line is then as one
+        // written before the flag was.
         let open = |author: &str| Open {
             author: Some(author.to_owned()),
             made: Vec::new(),
+            edited: author == "edited",
         };
         let run = Run::Held {
             world: Box::new(edited.world().clone()),
@@ -1014,6 +1085,59 @@ mod tests {
             let refused = refused.err().map(|error| error.code().to_owned());
             assert_eq!(refused.as_deref(), Some("snapshot.format"), "{broken}");
         }
+    }
+
+    /// A snapshot of a run whose simulation was paused says so, whatever else its run was doing,
+    /// and one of a run that wasn't says nothing of it, as one written before pauses were kept.
+    #[test]
+    fn a_snapshot_keeps_whether_its_run_was_paused() {
+        let mut world = World::seeded(1);
+        world.spawn(Transform::IDENTITY);
+        let none = Open::default();
+        let of = Of {
+            world: &world,
+            scenes: &[],
+            open: &none,
+            scripts: &[],
+            mods: &[],
+        };
+        let held = Run::Held {
+            world: Box::new(world.clone()),
+            scenes: Vec::new(),
+            open: Open::default(),
+            ticks: 3,
+        };
+        let mut kept = Vec::new();
+        for run in [Run::Playing, Run::Stopped, held] {
+            for paused in [false, true] {
+                let text = write_paused(&of, &run, paused, "Tested", &[], 5).expect("written");
+                assert_eq!(text.contains("\npaused\n"), paused);
+                let snapshot = Snapshot::parse(text, "paused".to_owned(), "Tested");
+                let snapshot = snapshot.expect("read");
+                let mut restored = Context::seeded(2);
+                snapshot
+                    .restore(restored.world_mut(), &[])
+                    .expect("restored");
+                assert_eq!(restored.world().hash(), world.hash());
+                kept.push((snapshot.paused, snapshot.stopped, snapshot.held.is_some()));
+            }
+        }
+        assert_eq!(
+            kept,
+            [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (true, true, false),
+                (false, false, true),
+                (true, false, true),
+            ]
+        );
+        let stopped = write_paused(&of, &Run::Stopped, true, "Tested", &[], 5).expect("written");
+        let broken = stopped.replace("stopped\npaused\n", "paused\nstopped\n");
+        let refused = Snapshot::parse(broken, "broken".to_owned(), "Tested");
+        let refused = refused.err().map(|error| error.code().to_owned());
+        assert_eq!(refused.as_deref(), Some("snapshot.format"));
     }
 
     /// A layer that adds a mesh as it loads, whose vertices are `N` floats.

@@ -18,7 +18,7 @@ use super::graph::{Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId,
 use crate::Device;
 use crate::buffer::Buffer;
 use crate::device::Retired;
-use crate::image::{image_info, image_view};
+use crate::image::{check_size, image_info, image_view};
 use crate::vma::{Allocation, Memory};
 
 /// The images made for a graph's own, the blocks of memory they're in, and which of the graph being
@@ -188,6 +188,12 @@ impl Transients {
     /// Makes the images for `graph`'s own and the blocks they're in, in place of those made
     /// before, which retire.
     fn make(&mut self, graph: &Graph) -> Result<()> {
+        // Before anything retires, so that a graph refused leaves the images made before.
+        for decl in &graph.images {
+            if let &ImageDecl::Transient { name, size, .. } = decl {
+                check_size(&self.device, size, name)?;
+            }
+        }
         self.retire();
         let raw = self.device.raw();
         let mut wanted = Vec::new();

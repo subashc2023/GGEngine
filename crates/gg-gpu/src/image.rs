@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use ash::vk;
-use gg_core::Result;
+use gg_core::{Error, Result};
 
 use crate::buffer::Buffer;
 use crate::device::Retired;
@@ -37,7 +37,8 @@ impl ColorImage {
     pub const FORMAT: Format = Format::new(vk::Format::R8G8B8A8_SRGB);
 
     /// An image of `width` by `height` pixels, in a free slot of the bindless set past the placed
-    /// ones, with `name` as its debug name.
+    /// ones, with `name` as its debug name. Fails with `gpu.image_too_large` if a side is past the
+    /// device's most.
     ///
     /// # Panics
     ///
@@ -47,6 +48,7 @@ impl ColorImage {
             width > 0 && height > 0,
             "a {width}x{height} image, but an image has an area"
         );
+        check_size(device, [width, height], name)?;
         let format = Self::FORMAT.color;
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
             | vk::ImageUsageFlags::SAMPLED
@@ -185,6 +187,25 @@ impl Drop for ColorImage {
             ));
         }
     }
+}
+
+/// Checks that a 2D image of `size` pixels, of one layer, named `name`, fits `device`'s limits,
+/// failing with `gpu.image_too_large` otherwise, before Vulkan is asked to make it
+/// (VUID-VkImageCreateInfo-extent-02252 and -02253).
+pub(crate) fn check_size(device: &Device, size: [u32; 2], name: &str) -> Result<()> {
+    let most = device.limits().max_image_dimension2_d;
+    let [width, height] = size;
+    if width <= most && height <= most {
+        return Ok(());
+    }
+    Err(Error::new(
+        "gpu.image_too_large",
+        format!(
+            "image {name:?} is {width}x{height}, but device {:?} makes 2D images of at most {most} \
+             pixels a side",
+            device.name()
+        ),
+    ))
 }
 
 /// How an image of `size` pixels, of `format`, for `usage`, is made: one level and one layer,

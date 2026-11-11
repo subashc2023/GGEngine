@@ -15,6 +15,7 @@ mod mcp;
 mod new;
 mod patch;
 mod run;
+mod runs;
 mod ship;
 
 use std::io::Write as _;
@@ -31,7 +32,9 @@ use run::{Check, Run};
 use ship::Ship;
 
 const USAGE: &str = "\
-Usage: gg <command> [options]
+Usage: gg [options] <command> [options]
+
+Options go before the command or after it, as `gg --pid 4242 status` or `gg status --pid 4242`.
 
 In a game's project, the directory that holds its `project.ron` beside its `Cargo.toml`, and those
 below it, or in the project that `--project <PATH>` names, by its directory or its `project.ron`,
@@ -45,11 +48,15 @@ Build and run:
       (`built`), and run a copy of it with ARGS, printing a line as it starts, as it serves the tool
       API, and as it ends: `exited`, or `crashed` or `hung`, with the errors its log holds. A run
       whose frames stop for `--hang` seconds (10), while it waits for nothing the user does, has
-      hung, and is ended. It's snapshotted every `--snapshot` seconds (5) from its first frame,
-      `snapshot_failed` saying why they fail, and started again from its last snapshot after a crash
-      or a hang, and from one taken then as PACKAGE is rebuilt (`rebuilt`). One that ends before its
-      first snapshot waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh
-      (`refused`). `run` ends as the game comes to its own end, as its window closes, `quit` asks or
+      hung, and is ended; `--hang 0` takes none for hung, nor one that never runs its first frame,
+      which otherwise has 120 seconds. It's snapshotted every `--snapshot` seconds (5) from its first
+      frame, `snapshot_failed` saying why they fail, and started again from its last snapshot after
+      a crash or a hang, and from one taken then as PACKAGE is rebuilt (`rebuilt`), as it's asked to
+      quit, in one request, so that no edit lands between the two to be lost; one waiting where it
+      can't answer, at a script's breakpoint, in a file dialog or in the window menu, is killed at
+      once instead (`killed`, with what it waits for), starting again from its last snapshot before.
+      One that ends before its first snapshot waits for a rebuild (`waiting`); one that refuses its
+      snapshot starts afresh (`refused`). A pause lasts across a restart, as a stop does. `run` ends as the game comes to its own end, as its window closes, `quit` asks or
       its frames run out, whatever its status; as one that has never served the API ends; and as it
       ends at all with `--snapshot 0` or ARGS with `--record`, `--replay` or `--no-api`, which turn
       restarts off. With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE
@@ -70,7 +77,17 @@ Build and run:
       `gg.rebuild_failed`, which `logs` shows. An edit inside a layer's `attach`, which builds the
       world as a run starts afresh, is patched, `patched` naming its module in `attach` and the game
       warning `gg.attach_changed`, but shows only in a run started afresh, as the run keeps its
-      world, its restarts starting from snapshots. With `--peers 2`, it runs the two peers of a
+      world, its restarts starting from snapshots. Without dx, or where patches can't reach the
+      game, as for `--release`, but with restarts on and no `--no-patch`, `run` builds PACKAGE with
+      cargo and watches its sources all the same (`watching`, `patches` false), every change
+      rebuilding it and starting it again from a snapshot, a build's rustc errors in
+      `rebuild_failed`; a first build that fails waits for a change to build again (`build_failed`).
+      A patch whose answer never comes (`patch_unanswered`) is sent again with every edit since
+      the build. While no game answers, as during a build, the commands that talk to it say
+      what `run` is doing, with a code: `gg.rebuilding`, `gg.starting`, `gg.waiting`, or
+      `gg.build_failed` with the last build's errors; `wait` waits until the game runs an edit's
+      code. A headless game given `--real-time` among ARGS ticks in real time, rather than as fast
+      as it can, for an agent to watch it play. With `--peers 2`, it runs the two peers of a
       lockstep session from one build, the host given `--host` and the joiner `--join` at a free
       port of the loopback, each `started` naming its `player`: patched together, and stopped and
       started again together as either ends or the game is rebuilt. With `--embedded`, for the tool
@@ -113,7 +130,15 @@ Make a game:
 Talk to a running game, through its tool API:
   sessions                       List the running games
   status                         Its ticks, whether it's paused or stopped, its frames, entities and
-                                 view, and its open scene's file and whether it has unsaved edits
+                                 view, and its open scene's file, whether it differs from the file,
+                                 `unsaved`, as a playing game's ticks make it, and whether authors
+                                 edited it since it was saved or opened, `edited`
+  wait [--timeout <SECONDS>]     Wait until the game under `gg run` runs the code of every edit to
+                                 its sources saved before, patched or rebuilt, for at most SECONDS
+                                 (300), and print what `run` is doing; fails with `gg.build_failed`
+                                 and rustc's errors if the edits don't build, `gg.waiting` if the
+                                 game ended and waits for a change, `gg.no_run` without a `gg run`,
+                                 and `gg.timeout`
   pause                          Pause its simulation
   resume                         Run its simulation in real time again
   play                           Play a copy of its world as edited in its place, until `stop`, if
@@ -132,9 +157,9 @@ Talk to a running game, through its tool API:
                                  to its file, or to PATH, its file from then on
   scene new [--discard]          Delete the open scene's entities, leaving it untitled; refused as
                                  `scene open` is
-  capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it: as
-                                 it's shown, the look included, or with `--own`, as the game shows
-                                 it on its own
+  capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it, which
+                                 keeps the newest 32: as it's shown, the look included, or with
+                                 `--own`, as the game shows it on its own
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
                                  takes them, `viewpoint`, `outline`, `grid` or `colliders`, those set
@@ -151,7 +176,8 @@ Talk to a running game, through its tool API:
                                  `{\"button\":{\"button\":\"left\",\"pressed\":true}}`, a scroll,
                                  `{\"scroll\":{\"lines\":[0,1]}}`, and the keys' focus,
                                  `{\"focused\":true}`
-  snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it
+  snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it,
+                                 which keeps the newest 8
   entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
                                  List its entities, those with COMPONENT, N at a time (100)
   entity <ID>                    An entity and its components' values; for an instance's, its root
@@ -229,14 +255,18 @@ Talk to a running game, through its tool API:
 Serve agents:
   mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
                                  a tool for each command that talks to a game but `quit`, `call`,
-                                 `logs --follow` and the PATHs of `capture` and `snapshot`, with
+                                 `logs --follow` and the PATHs of `capture` and `snapshot`, its
+                                 `capture` answering the PNG's path, and with `inline` the PNG, with
                                  `scene`'s and `save-prefab`'s PATHs from the game's asset root,
                                  which reaches the game the options choose at each call, as the
                                  agent, its MCP client's name, the author of the edits it applies,
                                  kept to what `--grant` grants
 
 Options for talking to a game:
-  --pid <PID>           The game in process PID, when more than one runs
+  --pid <PID>           The game in process PID, when more than one runs: more than one is
+                        refused (`gg.which_game`), naming each one's process, but the two peers of
+                        a lockstep session of one app, which are reached through the host, player
+                        0, whose edits and patches both apply
   --app <NAME>          The game whose app is NAME, when more than one runs
   --timeout <SECONDS>   How long to wait for its answer (30)
   --grant <LIST>        Keep the connection to the capabilities LIST names, between commas, as
@@ -287,6 +317,9 @@ enum Command {
         params: Value,
     },
     Mcp(Pick),
+    /// Waiting, for at most the time given, until the game of the `gg run` the pick reaches runs
+    /// the code of the edits saved before.
+    Wait(Pick, Duration),
 }
 
 fn main() -> ExitCode {
@@ -331,6 +364,10 @@ fn main() -> ExitCode {
             true
         }),
         Command::Mcp(pick) => mcp::serve(pick).map(|()| true),
+        Command::Wait(pick, timeout) => runs::wait(&pick, timeout).map(|told| {
+            print(&told.to_string());
+            true
+        }),
     };
     match done {
         Ok(true) => ExitCode::SUCCESS,
@@ -564,11 +601,41 @@ impl Parsed {
     }
 }
 
+/// `args`, the arguments after `gg`, with the command's name first: the options before it, each
+/// with its value if it takes one, as `--pid 7` in `gg --pid 7 status`, go after it, where its own
+/// are read, and `--help` stays where it is, as the command it names.
+///
+/// Fails with `gg.args` for options that no command follows.
+fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at)
+        && arg.starts_with("--")
+        && arg != "--"
+        && arg != "--help"
+    {
+        let valued = VALUED.contains(&arg.as_str());
+        at += if valued { 2 } else { 1 };
+    }
+    let Some(name) = args.get(at) else {
+        if at == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(bad(format!(
+            "`{}` comes with a command",
+            args.first().map_or("", String::as_str)
+        )));
+    };
+    let options = &args[..at];
+    let rest = &args[at + 1..];
+    Ok([std::slice::from_ref(name), options, rest].concat())
+}
+
 /// The command `args`, the arguments after `gg`, give, in the project gg works in, as
 /// [`Parsed::scope`] finds it.
 ///
 /// Fails with `gg.args` for arguments that aren't a command's, and as `Parsed::scope` does.
 fn parse(args: &[String]) -> Result<Command, Failure> {
+    let args = command_first(args)?;
     let Some((name, args)) = args.split_first() else {
         return Ok(Command::Help);
     };
@@ -589,7 +656,10 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 project,
                 release: parsed.switch("--release"),
                 patches: !parsed.switch("--no-patch"),
-                hang: parsed.seconds("--hang", 10)?,
+                // 0 for never, which tells no hang.
+                hang: Some(parsed.number("--hang", 10)?)
+                    .filter(|&seconds| seconds > 0)
+                    .map(Duration::from_secs),
                 // 0 for none, which turns restarts off.
                 snapshot: Duration::from_secs(parsed.number("--snapshot", 5)?),
                 peers: parsed.number("--peers", 1)?,
@@ -680,6 +750,11 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 level,
                 follow: parsed.switch("--follow"),
             }
+        }
+        "wait" => {
+            parsed.positional(0, 0, "wait [--timeout <SECONDS>]")?;
+            let timeout = parsed.seconds("--timeout", 300)?;
+            Command::Wait(parsed.pick()?, timeout)
         }
         method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui"
         | "quit") => {
@@ -901,6 +976,20 @@ mod tests {
         parse(&args)
     }
 
+    /// `wait` waits 300 seconds, or as long as `--timeout` says, for the game `--pid` picks.
+    #[test]
+    fn wait_takes_a_timeout_and_a_pick() {
+        let Ok(Command::Wait(pick, timeout)) = parsed(&["wait"]) else {
+            panic!("a wait");
+        };
+        assert_eq!((pick.pid, timeout), (None, Duration::from_secs(300)));
+        let Ok(Command::Wait(pick, timeout)) = parsed(&["--pid", "7", "wait", "--timeout=5"])
+        else {
+            panic!("a wait");
+        };
+        assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(5)));
+    }
+
     /// `--grant` keeps a command's connection, or `mcp`'s, to the capabilities it names.
     #[test]
     fn grant_names_the_capabilities_a_connection_is_kept_to() {
@@ -944,6 +1033,26 @@ mod tests {
             panic!("a call");
         };
         assert_eq!(params, json!({"with": "Sprite", "skip": 0, "take": 5}));
+        // Options before the command, as after it.
+        let Ok(Command::Call {
+            pick,
+            method,
+            params,
+        }) = parsed(&["--pid", "7", "--timeout=5", "step", "2", "--app", "Sandbox"])
+        else {
+            panic!("a call");
+        };
+        assert_eq!(
+            (pick.pid, pick.app.as_deref(), pick.timeout),
+            (Some(7), Some("Sandbox"), Duration::from_secs(5))
+        );
+        assert_eq!((method.as_str(), params), ("step", json!({"ticks": 2})));
+        let Ok(Command::Run(run)) = parsed(&["--no-patch", "run", "sandbox", "--", "--vsync"])
+        else {
+            panic!("a run");
+        };
+        assert_eq!((run.patches, run.args), (false, vec!["--vsync".to_owned()]));
+        assert!(matches!(parsed(&["--help"]), Ok(Command::Help)));
         let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--hang", "30", "--", "--vsync"])
         else {
             panic!("a run");
@@ -955,11 +1064,21 @@ mod tests {
         assert_eq!(
             (run.hang, run.snapshot, run.args),
             (
-                Duration::from_secs(30),
+                Some(Duration::from_secs(30)),
                 Duration::from_secs(5),
                 vec!["--vsync".to_owned()]
             )
         );
+        // `--hang 0` tells no hang, however long the frames stop.
+        for (args, hang) in [
+            (&["run", "sandbox"][..], Some(Duration::from_secs(10))),
+            (&["run", "sandbox", "--hang", "0"], None),
+        ] {
+            let Ok(Command::Run(run)) = parsed(args) else {
+                panic!("a run");
+            };
+            assert_eq!(run.hang, hang, "{args:?}");
+        }
         let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--snapshot=0", "--no-patch"])
         else {
             panic!("a run");
@@ -1114,14 +1233,20 @@ mod tests {
     fn bad_arguments_are_refused_with_a_code() {
         for args in [
             &["nonsense"][..],
+            &["--pid", "7"],
+            &["--pid"],
+            &["--release", "status"],
+            &["wait", "now"],
+            &["wait", "--timeout", "0"],
+            &["wait", "--follow"],
             &["run"],
             &["run", "a", "b"],
             &["run", "a", "--snapshot", "often"],
             &["run", "a", "--peers", "3"],
             &["run", "a", "--peers", "0"],
-            // Waits of no time, which would take a game for hung at its first ping, kill a check
-            // as it starts, and give up on an answer before it could come.
-            &["run", "a", "--hang", "0"],
+            // Waits of no time, which would kill a check as it starts, and give up on an answer
+            // before it could come.
+            &["run", "a", "--hang", "soon"],
             &["check", "a", "--timeout", "0"],
             &["status", "--timeout", "0"],
             &["mcp", "--timeout=0"],

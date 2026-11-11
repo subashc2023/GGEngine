@@ -61,7 +61,8 @@ use gg_core::Result;
 use tracing::{info, warn};
 
 use super::{
-    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Turn, engine, listen, port_of, read_batches, tick_of,
+    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Queued, Turn, engine, listen, port_of, read_batches,
+    tick_of,
 };
 use crate::World;
 use crate::args::Conditions;
@@ -292,7 +293,7 @@ impl Server {
     /// came late at the first tick after theirs that has them.
     pub(crate) fn inputs(&mut self, tick: u64) -> Merged {
         let mut merged = Merged {
-            commands: mem::take(&mut self.ours),
+            commands: Queued::of(mem::take(&mut self.ours), None, false).collect(),
             ..Merged::default()
         };
         let mut joined: Vec<&mut Remote> = (self.clients.iter_mut())
@@ -303,7 +304,8 @@ impl Server {
             while client.next <= tick
                 && let Some(commands) = client.inputs.remove(&client.next)
             {
-                merged.commands.extend(commands);
+                let player = client.player;
+                merged.commands.extend(Queued::of(commands, player, true));
                 client.next += 1;
             }
         }

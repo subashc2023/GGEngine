@@ -418,6 +418,24 @@ impl<'a> Reader<'a> {
         {
             return Err(format!("a part is skinned by skin {skin}, which it hasn't"));
         }
+        // Each skinned part's vertices moved by its skin's joints alone, as glTF's reader checks.
+        for part in &parts {
+            let (Some(skin), Some(primitive)) = (part.skin, part.primitive) else {
+                continue;
+            };
+            let joints = skins[skin].joints.len();
+            let mesh = primitives[primitive].mesh.as_ref();
+            let moved = mesh.into_iter().flat_map(|mesh| &mesh.skin);
+            if let Some(past) = moved
+                .flat_map(|vertex| vertex.joints)
+                .find(|&j| usize::from(j) >= joints)
+            {
+                return Err(format!(
+                    "has primitive {primitive} moved by joint {past}, past the {joints} of skin \
+                     {skin}, which skins it"
+                ));
+            }
+        }
         let clips = (0..self.count(12)?)
             .map(|i| {
                 self.clip(parts.len())
@@ -1138,6 +1156,26 @@ mod tests {
             edited(&mesh(|mesh| mesh.meshlets.meshlets[1].triangle_count = 2)),
         ));
         cases.push(("a step of 0", edited(&mesh(|mesh| mesh.packing.step = 0.0))));
+        // Its skinned part's mesh skinned, without meshlets, which skinning would leave behind:
+        // moved by the skin's two joints, it reads; by a third, it's refused, as glTF's would be.
+        let skinned = |joint| {
+            move |imported: &mut Imported| {
+                let mesh = imported.primitives[0].mesh.as_mut().expect("a mesh");
+                mesh.meshlets = Meshlets::default();
+                let moved = SkinVertex::new([0, 1, joint, 0], [0.5, 0.25, 0.25, 0.0]);
+                mesh.skin = vec![moved; mesh.vertices.len()];
+            }
+        };
+        let read = decode("m", Path::new("m.glb"), &edited(&skinned(1)));
+        assert_eq!(read.expect("moved by its skin's joints").primitives[0], {
+            let mut imported = imported.clone();
+            skinned(1)(&mut imported);
+            imported.primitives[0].clone()
+        });
+        cases.push((
+            "a vertex moved by a joint past its skin's",
+            edited(&skinned(2)),
+        ));
         cases.push((
             "a material sampling what it hasn't",
             edited(&|imported| {
@@ -1182,6 +1220,10 @@ mod tests {
             if case == "a light of a kind it hasn't" {
                 let kind = error.to_string().contains("has a light of kind 9");
                 assert!(kind, "{case}: {error}");
+            }
+            if case == "a vertex moved by a joint past its skin's" {
+                let past = "has primitive 0 moved by joint 2, past the 2 of skin 0, which skins it";
+                assert!(error.to_string().contains(past), "{case}: {error}");
             }
         }
     }

@@ -1289,3 +1289,121 @@ fn values_are_read_and_set_by_name_and_kept_through_a_reload() {
     let list = state.named("saves").expect("a node");
     assert_eq!(state.nodes[list].scroll, 280.0, "kept");
 }
+
+/// What the mouse does over a UI is taken from the layers below, as [`State::takes`] says: its
+/// buttons and wheel over a button, a widget, a disabled one too, or a list, and not over a panel,
+/// a stack or nothing; a button let go after a press it holds, wherever; every button and the
+/// wheel, wherever, while a drop-down's options are open; and nothing while it takes no input.
+#[test]
+fn the_mouse_over_a_button_a_widget_or_a_list_is_taken_from_the_layers_below() {
+    let mut menu = laid(MENU, 1920.0);
+    menu.drawn = Some(0);
+    let scroll = Event::Scroll(crate::Scroll::Lines { x: 0.0, y: -1.0 });
+    let takes = |state: &State, event: &Event<'_>, at: Option<Vec2>| state.takes(event, at, 0);
+    for name in ["play", "credits", "left"] {
+        let at = on(&menu, name, 0.5);
+        assert!(takes(&menu, &click(true), at), "a press on {name}");
+        assert!(takes(&menu, &click(false), at), "a release on {name}");
+        assert!(menu.pointer_over(at.expect("a point")), "over {name}");
+    }
+    for name in ["room", "inside", "corner"] {
+        let at = on(&menu, name, 0.5);
+        assert!(!takes(&menu, &click(true), at), "a press on {name}");
+        assert!(!takes(&menu, &scroll, at), "the wheel over {name}");
+    }
+    assert!(
+        !takes(&menu, &click(true), None),
+        "a press outside the view"
+    );
+    // Held: a button let go away from where it went down, as a slider's drag ends outside it.
+    let _ = menu.send(&click(true), on(&menu, "play", 0.5), &Input::default());
+    assert!(takes(&menu, &click(false), on(&menu, "room", 0.5)), "held");
+    let _ = menu.send(&click(false), on(&menu, "room", 0.5), &Input::default());
+    assert!(
+        !takes(&menu, &click(false), on(&menu, "room", 0.5)),
+        "let go"
+    );
+    menu.input = false;
+    assert!(
+        !takes(&menu, &click(true), on(&menu, "play", 0.5)),
+        "no input"
+    );
+
+    let mut widgets = laid(WIDGETS, 1920.0);
+    widgets.drawn = Some(0);
+    assert!(
+        takes(&widgets, &scroll, on(&widgets, "saves", 0.5)),
+        "a list"
+    );
+    assert!(!takes(&widgets, &scroll, Some(Vec2::new(100.0, 100.0))));
+    let at = on(&widgets, "difficulty", 0.5);
+    let _ = widgets.send(&click(true), at, &Input::default());
+    let _ = widgets.send(&click(false), at, &Input::default());
+    assert!(widgets.open.is_some(), "the options are open");
+    let far = Some(Vec2::new(100.0, 100.0));
+    assert!(
+        takes(&widgets, &click(true), far),
+        "a click outside the options"
+    );
+    assert!(takes(&widgets, &scroll, far), "the wheel");
+}
+
+/// A drop-down's open options take the mouse everywhere only while the drop-down shows and isn't
+/// disabled, as a game that hides or disables it with its options open doesn't lose its clicks.
+#[test]
+fn options_left_open_under_a_hidden_or_disabled_drop_down_take_nothing() {
+    let mut state = laid(WIDGETS, 1920.0);
+    state.drawn = Some(0);
+    let at = on(&state, "difficulty", 0.5);
+    let _ = state.send(&click(true), at, &Input::default());
+    let _ = state.send(&click(false), at, &Input::default());
+    let far = Some(Vec2::new(100.0, 100.0));
+    assert!(state.takes(&click(true), far, 0), "open");
+    assert!(state.pointer_over(Vec2::new(100.0, 100.0)));
+    let difficulty = state.named("difficulty").expect("a node");
+    state.nodes[difficulty].disabled = true;
+    assert!(!state.takes(&click(true), far, 0), "disabled");
+    assert!(!state.pointer_over(Vec2::new(100.0, 100.0)));
+    state.nodes[difficulty].disabled = false;
+    state.nodes[difficulty].visible = false;
+    assert!(!state.takes(&click(true), far, 0), "hidden");
+    assert!(!state.pointer_over(Vec2::new(100.0, 100.0)));
+}
+
+/// A UI that didn't draw in the last frame, or takes no input, takes nothing and is over nothing,
+/// as a menu no longer drawn doesn't swallow clicks over its invisible buttons.
+#[test]
+fn a_ui_that_didnt_draw_in_the_last_frame_takes_nothing() {
+    let mut state = laid(MENU, 1920.0);
+    let at = on(&state, "play", 0.5);
+    assert!(!state.takes(&click(true), at, 0), "never drawn");
+    state.drawn = Some(3);
+    assert!(state.takes(&click(true), at, 3), "drawn this frame");
+    assert!(state.takes(&click(true), at, 4), "drawn in the last");
+    assert!(!state.takes(&click(true), at, 5), "not for two frames");
+}
+
+/// While a text field has the focus, the keys and the text typed are taken from the layers below,
+/// so that a name typed doesn't walk the player, and a pad's buttons aren't; without the focus, a
+/// key isn't.
+#[test]
+fn keys_and_text_are_taken_while_a_text_field_has_the_focus() {
+    let mut state = laid(WIDGETS, 1920.0);
+    state.drawn = Some(0);
+    let typed = Event::Text("w");
+    assert!(
+        !state.takes(&press(Key::KeyW), None, 0),
+        "the slider's focus"
+    );
+    assert!(!state.takes(&typed, None, 0));
+    let at = on(&state, "player", 0.5);
+    let _ = state.send(&click(true), at, &Input::default());
+    let _ = state.send(&click(false), at, &Input::default());
+    assert!(state.typing().is_some(), "the field has the focus");
+    assert!(state.takes(&press(Key::KeyW), None, 0), "a key");
+    assert!(state.takes(&typed, None, 0), "text");
+    assert!(
+        !state.takes(&pad(PadButton::South), None, 0),
+        "a pad's button"
+    );
+}

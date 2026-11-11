@@ -13,7 +13,7 @@ mod tween;
 
 pub use animator::{Animator, Play};
 pub use flipbook::Flipbook;
-pub(crate) use skeleton::{Channel, Clip, Interpolation, Path, Skin, placed, skinned_box};
+pub(crate) use skeleton::{Channel, Clip, Influences, Interpolation, Path, Skin, place};
 pub use states::{
     AnimationParam, AnimationState, AnimationStates, BlendPoint, ParamCondition, ParamTest,
     ParamValue, StateMotion, StateTransition,

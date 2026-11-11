@@ -21,7 +21,8 @@ pub struct Surface {
     raw: vk::SurfaceKHR,
     /// What the surface's and its swapchain's debug names and errors call the window.
     name: String,
-    _window: Arc<dyn Window>,
+    /// Held so that it outlives the surface, and so that a surface lost can be made again for it.
+    window: Arc<dyn Window>,
 }
 
 impl Surface {
@@ -52,8 +53,14 @@ impl Surface {
             instance: instance.clone(),
             raw,
             name: name.to_owned(),
-            _window: window,
+            window,
         })
+    }
+
+    /// Another surface for the same window, of the same name, in place of this one, lost: fails if
+    /// the window is gone, as a closed window's handles are.
+    pub(crate) fn remake(&self) -> Result<Self> {
+        Self::new(&self.instance, self.window.clone(), &self.name)
     }
 
     pub(crate) fn raw(&self) -> vk::SurfaceKHR {

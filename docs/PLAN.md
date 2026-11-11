@@ -152,7 +152,24 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 
 ## Now
 
-The next phase is the user's to choose, as Open questions has it.
+**Ready for games**: the defects an audit of the engine found (2026-11-10) that a first game would
+hit, fixed before Phase 19, whose choice stays open, as Open questions has it. Each fix removes its
+row from [DEFECTS.md](DEFECTS.md) and has a test. *Done when* what's below is done, CI is green on
+every platform, and a game made with `cargo gg new` and built through `gg run` takes a HUD's clicks,
+its edits, rebuilds and restarts without losing any.
+
+The agent loop's, a game's input's, networking's and scripts', assets', the GPU's and state's
+defects are fixed, but for what their rows in DEFECTS.md keep. Left:
+
+- **The toolchain.** visibility.slang's change of 2026-11-10, which keeps its frame whole as
+  model.slang's does, has AMD's ISA checked under both slangc releases, as its header asks, and
+  passes CI's shader tests under the release CI pins.
+- **The check.** The game `cargo gg new` makes, with a HUD, run under `gg run`, edited, rebuilt and
+  restarted, as the *done when* says, on macOS and Windows.
+
+Then, from Deferred, what the audit's game needed first: physics' sensors, contact events and
+collision groups for scripts and code; a scene changed from a game's code as it plays; scripts
+that spawn and despawn entities; and a reference of the Luau API.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{Physics3D, Rapier, vector};
 use crate::draw::Poses;
 use crate::physics::{Link, joined, lines_between, warn_unjoined};
-use crate::{Component, Entity, Reflect, World};
+use crate::{Component, Entity, Reflect, World, Writable};
 
 /// What a [`Joint3D`] lets the bodies it joins do, from where it holds them, its anchors and axis
 /// in each body's space.
@@ -53,8 +53,9 @@ pub enum JointKind3D {
 /// `RigidBody3D` or one under a parent, joins nothing, warned of once for each reason
 /// (`physics.joint_no_body`), as does one naming one body twice (`physics.joint_one_body`). A change
 /// to it is taken at the next step, as is a body made again; and its joint goes as it does, or its
-/// entity, or either body.
-#[derive(Clone, Copy, Debug, PartialEq, Component)]
+/// entity, or either body. An edit's delete of either body clears the field naming it, as
+/// [`Component::cleared`] says, so that it names nothing gone, which a scene wouldn't save.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Joint3D {
     /// The first body it joins.
     pub body_a: Option<Entity>,
@@ -103,6 +104,15 @@ pub struct Joint3D {
     /// Whether the bodies it joins collide with each other.
     pub bodies_collide: bool,
 }
+
+/// `body_a` and `body_b` are cleared by a delete of what they name.
+impl Component for Joint3D {
+    fn cleared() -> &'static [&'static str] {
+        &["body_a", "body_b"]
+    }
+}
+
+impl Writable for Joint3D {}
 
 impl Default for Joint3D {
     fn default() -> Self {
@@ -578,6 +588,67 @@ mod tests {
             ["physics.joint_one_body"],
             "again, having joined two meanwhile"
         );
+    }
+
+    /// An edit's delete of a jointed body clears the field of each joint naming it, as sets of the
+    /// same edit, so that the scene saves, where a field naming an entity gone would be refused
+    /// (`ecs.no_entity`): a joint on an entity of its own and one on the other body's, but not one
+    /// the delete takes with it. Undone, they name it again and join it as before; redone, they're
+    /// cleared again.
+    #[test]
+    fn a_delete_of_a_body_clears_the_joints_naming_it() {
+        let mut world = World::default();
+        let held = post(&mut world, Vec3::new(0.0, 4.0, 0.0));
+        let hung = crate_at(&mut world, Vec3::new(0.0, 2.5, 0.0), Quat::IDENTITY);
+        let ball = Joint3D {
+            kind: JointKind3D::Spherical,
+            anchor_b: Vec3::new(0.0, 1.5, 0.0),
+            ..Joint3D::default()
+        };
+        let apart = join(&mut world, held, hung, ball);
+        let other = post(&mut world, Vec3::new(3.0, 4.0, 0.0));
+        let on_other = Joint3D {
+            body_a: Some(hung),
+            body_b: Some(other),
+            ..ball
+        };
+        world.insert(other, on_other).expect("alive");
+        // Under the body deleted, which goes with it.
+        let under = join(&mut world, held, hung, ball);
+        world.set_parent(under, Some(hung)).expect("no cycle");
+        step(&mut world, 4);
+        let id = world.id(hung).expect("alive");
+        let mut log = crate::Log::default();
+        let delete = crate::Operation::Delete { entity: id };
+        log.apply(&mut world, delete.clone()).expect("deleted");
+        // Shown as its author gave it, as the Inspector's undo names it.
+        assert_eq!(log.undoable(), Some(&[delete][..]));
+        let named = |world: &World, joint: Entity| {
+            let joint = world.get::<Joint3D>(joint).expect("kept");
+            [joint.body_a, joint.body_b]
+        };
+        assert_eq!(named(&world, apart), [Some(held), None]);
+        assert_eq!(named(&world, other), [None, Some(other)]);
+        assert!(!world.contains(under), "taken with it");
+        let roots: Vec<Entity> = world.roots().collect();
+        world
+            .save_scene(&roots)
+            .expect("nothing names an entity gone");
+        step(&mut world, 4);
+        let joints = |world: &World| {
+            let physics = world.resource::<Physics3D>().expect("stepped");
+            physics.rapier.impulse_joints.len()
+        };
+        assert_eq!(joints(&world), 0);
+        log.undo(&mut world).expect("undone");
+        assert_eq!(named(&world, apart), [Some(held), Some(hung)]);
+        assert_eq!(named(&world, other), [Some(hung), Some(other)]);
+        assert!(world.contains(under));
+        step(&mut world, 4);
+        assert_eq!(joints(&world), 3, "joined again");
+        log.redo(&mut world).expect("redone");
+        assert_eq!(named(&world, apart), [Some(held), None]);
+        assert_eq!(named(&world, other), [None, Some(other)]);
     }
 
     /// A spring without stiffness or damping, as by default, pulls nothing: a box hung 3 below a

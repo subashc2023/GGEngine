@@ -58,10 +58,11 @@ cargo gg fetch                    # in games/showcase: Sponza and Bistro, which 
 ```
 
 Building needs a C and C++ compiler, for VMA, Luau, zstd and meshoptimizer, and `slangc` for the
-shaders: the one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders
-compile with that slangc as development builds run, so it stays where the build found it; builds
-without `dev` run those their package holds compiled. On Linux, gamepads and sound need pkg-config,
-libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and `libasound2-dev` on Debian or Ubuntu.
+shaders: the one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. The build
+warns of one that isn't the release [CI's action](.github/actions/slangc/action.yml) pins, whose
+SPIR-V can differ. Games' shaders compile with that slangc as development builds run, so it stays
+where the build found it; builds without `dev` run those their package holds compiled. On Linux,
+gamepads and sound need `pkgconf`, `libudev-dev` and `libasound2-dev`, as Debian names them.
 
 Each run writes a JSON log, a build without `dev` in the user's state directory, and logs its path
 as it starts; filter it on `level`, `code` or `vuid`. `RUST_LOG` sets what's logged: in debug builds
@@ -74,11 +75,11 @@ replay that goes another way names the tick and the part of the hash; `--replay 
 whose worlds part log `net.desync`, the joiner `net.desync_field`; `--sync-test` runs each tick
 again on a copy, ending where they part (`sync_test.diverged`): both name the field and values.
 
-The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
-root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
-start `tracy-capture -o target/run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
+The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the root
+Cargo.toml names, and connect it to the running app. To capture a headless run instead, start
+`tracy-capture -o target/run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
 `tracy-csvexport target/run.tracy` lists its zones' times, and with `-u` each time a zone ran, when,
-and on which thread, such as the render thread's `render_frame` beside the main thread's ticks.
+and on which thread.
 
 RenderDoc captures a frame of a run it starts: `renderdoccmd capture -w -d . -c
 target/captures/sandbox target/debug/gg-sandbox --headless --frames 60 --capture 60` captures
@@ -90,18 +91,18 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 
 Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a scene
 file or script a layer loaded (`Context::load_scene_file`, `Scripts::load`) as it's saved, and,
-serving the API, reload a game's assets as their files change (`Shader reloaded`,
-`Texture reloaded`, `Model reloaded`, `Font reloaded`, `Prefab reloaded`, `UI reloaded`,
-`Sound reloaded`, `Music reloaded`), warning at a change that fails. Windowed and embedded runs play sound, which an
-agent can't hear: each sound or music started logs `Sound started` or `Music started` at the debug
-level. Run a game under `cargo gg run`, in the background: it patches in an edit inside function
-bodies as it's saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names
-its install), and restarts it from a snapshot after any other change, a crash or a hang (without
-`dx`, after a `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow`
-and the rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets;
-its `attach`, which a restart skips, builds the world, so an edit to it shows only in a run started
-afresh; a patch or a rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`,
-`gg.rebuild_failed`, `gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
+serving the API, reload a game's assets as their files change, logging `Shader reloaded`,
+`Model reloaded` and the like for each kind, or warning at a change that fails. Windowed and
+embedded runs play sound, which an agent can't hear: each sound or music started logs
+`Sound started` or `Music started` at the debug level. Run a game under `cargo gg run`, in the
+background: it patches in an edit inside function bodies as it's saved, with Dioxus's `dx` of the
+root Cargo.toml's `subsecond` release (`gg` names its install), and restarts it from a snapshot
+after any other change, a crash or a hang (without `dx`, at every change); `cargo gg wait` waits for
+an edit's code. `cargo gg status`, `capture`, `set`, `undo`, `logs --follow` and the rest answer in
+JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its `attach`, which a
+restart skips, builds the world, so an edit to it shows only in a run started afresh; a patch or a
+rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`, `gg.rebuild_failed`,
+`gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
 
 A change is done when all seven pass:
 
@@ -115,17 +116,17 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-it
 cargo test --workspace
 ```
 
-The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos validation layer.
-Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and
-`vulkan-validationlayers`. When a test's image differs from its reference, the test says where it
-wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the references, which you
-look at before committing them. The sandbox's and the demos' world hashes, at each tick of a seeded
-run, are references too, which CI checks on every platform: a change to their simulations, to what
-the hash reads, or to glam, libm, rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
-test -p sandbox -p shards -p foxball` rewrites them and the demos' live recordings' alone.
-gg-engine's `physics/` holds five more, its `animation/` three and its `navigation/` one, edited
-by hand. A difference on
-some platforms alone is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
+The tests include GPU tests, rendering offscreen against reference images within a tolerance: they
+need a Vulkan 1.4 driver and the Khronos validation layer. Without a GPU, lavapipe serves: on Debian
+or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and `vulkan-validationlayers`. When a test's
+image differs from its reference, the test says where it wrote its own; after an intended change,
+`GG_UPDATE_REFERENCES=1` rewrites the references, which you look at before committing them. The
+sandbox's and the demos' world hashes, at each tick of a seeded run, are references too, which CI
+checks on every platform: a change to their simulations, to what the hash reads, or to glam, libm,
+rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox -p shards -p foxball`
+rewrites them and the demos' live recordings' alone. gg-engine's `physics/` holds five more, its
+`animation/` three and its `navigation/` one, edited by hand. A difference on some platforms alone
+is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
 and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate, and the
@@ -160,8 +161,6 @@ only for what another OS could break, and run [ship.yml](.github/workflows/ship.
 - Validation errors are test failures: debug builds and tests run under the Khronos validation
   layer with synchronization validation, and a test fails on any validation message. GPU tests fail
   without synchronization validation too, which needs a layer that takes `VK_EXT_layer_settings`.
-- GPU tests run headless: they render offscreen and compare against reference images within a
-  tolerance, so lavapipe can run them without a GPU.
 - Name and time everything: every Vulkan object gets a debug name and every pass a debug label,
   so captures and Tracy timelines read clearly. Work that takes about 10 µs or more gets a zone
   (`gg_core::zone!`), but no draw, sprite or other item of a loop over a frame's content does.
@@ -193,9 +192,8 @@ only for what another OS could break, and run [ship.yml](.github/workflows/ship.
   milestone's details go in its commit message.
 - Docs record decisions, not the research behind them: no feature matrices, version surveys or
   source lists. A source that justifies some code goes in a comment beside that code.
-- This file loads into every agent session, so keep it under 200 lines, the size Anthropic
-  recommends. `CLAUDE.md` only imports it, for Claude Code. A rule for one crate goes in an
-  `AGENTS.md` inside that crate, beside a `CLAUDE.md` that imports it, so it loads only when an
-  agent works there.
+- This file loads into every agent session, so keep it under 200 lines. `CLAUDE.md` only imports
+  it, for Claude Code. A rule for one crate goes in an `AGENTS.md` inside that crate, beside a
+  `CLAUDE.md` that imports it, so it loads only when an agent works there.
 - No session logs, ADR files or agent notes in the repo. A lesson that holds only on one
   machine goes in the agent's own memory.

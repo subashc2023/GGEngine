@@ -1939,6 +1939,70 @@ mod tests {
         check_ids(world);
     }
 
+    /// A scene file's relink of an instance, whose delete of the entities of the world's own that
+    /// hold the IDs the prefab gives would clear what names them from outside, as a joint's bodies
+    /// (`Component::cleared`), has what it cleared name the entities the link makes again under
+    /// those IDs: the world is the one the file holds, as it was before the unlink; and an undo
+    /// takes it back to the unlinked world, naming its own entity again.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_relink_keeps_what_names_its_entities_from_outside() {
+        let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
+        let world = cx.world_mut();
+        let root = lamp.spawn(world, Transform::IDENTITY).expect("spawned");
+        let root_id = world.id(root).expect("alive");
+        let bulb = of(world, root, 0xb2);
+        let joint = crate::Joint3D {
+            body_a: Some(root),
+            body_b: Some(bulb),
+            ..crate::Joint3D::default()
+        };
+        let tie = world.spawn(joint);
+        let linked_text = world.save_scene(&[root, tie]).expect("saved");
+        let content = world.hash().content;
+        let mut unlinked = world.clone();
+        let unlink = Operation::Unlink { entity: root_id };
+        Log::default()
+            .apply(&mut unlinked, unlink)
+            .expect("unlinked");
+        let own = unlinked.entity(root_id).expect("alive");
+        let unlinked_text = unlinked.save_scene(&[own, tie]).expect("saved");
+        let edit = |world: &mut World, log: &mut Log, old: &str, new: &str| {
+            let crate::ecs::SceneEdit::Creates(creates) =
+                world.scene_edit(Some(old), new).expect("an edit")
+            else {
+                panic!("the link first");
+            };
+            log.apply_all(world, creates).expect("linked");
+            let crate::ecs::SceneEdit::Changes(rest) =
+                world.scene_edit(Some(old), new).expect("an edit")
+            else {
+                panic!("the rest");
+            };
+            log.apply_all(world, rest).expect("applied");
+        };
+        let mut log = Log::default();
+        edit(world, &mut log, &linked_text, &unlinked_text);
+        let held = world.get::<crate::Joint3D>(tie).expect("kept").body_b;
+        assert_eq!(held, Some(bulb), "its own bulb, unlinked");
+        edit(world, &mut log, &unlinked_text, &linked_text);
+        let remade = of(world, root, 0xb2);
+        assert_ne!(remade, bulb, "made again");
+        let held = world.get::<crate::Joint3D>(tie).expect("kept").body_b;
+        assert_eq!(held, Some(remade), "naming the bulb made again");
+        assert_eq!(world.hash().content, content, "the file's world");
+        let roots: Vec<Entity> = world.roots().collect();
+        world
+            .save_scene(&roots)
+            .expect("nothing names an entity gone");
+        assert!(log.undo(world).expect("undone"));
+        assert!(log.undo(world).expect("undone"));
+        let held = world.get::<crate::Joint3D>(tie).expect("kept").body_b;
+        assert_eq!(held, Some(bulb), "its own bulb again");
+        log.clear(world);
+        check_ids(world);
+    }
+
     /// Sets of an instance's link that a gesture amends are each an edit of its own: each undo
     /// puts back the prefab before, its entities under their handles.
     #[test]

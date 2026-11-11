@@ -17,6 +17,9 @@ pub(crate) struct Args {
     /// Whether the run ends once stdin ends, as it does as the supervisor that holds it, such as
     /// `gg run`, ends, however it ends.
     pub(crate) supervised: bool,
+    /// Whether a headless run paces its ticks to real time, its frames a tick apart, rather than
+    /// running a tick each frame as fast as it can.
+    pub(crate) real_time: bool,
     pub(crate) frames: Option<u64>,
     /// A headless run's view, its width and height in pixels, if not 1280 by 720.
     pub(crate) size: Option<[u32; 2]>,
@@ -84,10 +87,11 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 20] = [
+const NOT_REPLAYED: [&str; 21] = [
     "--record",
     "--restore",
     "--headless",
+    "--real-time",
     "--embedded",
     "--frames",
     "--size",
@@ -120,6 +124,11 @@ Options:
   --supervised      End the run, as the tool API's `quit` does, once stdin ends, as it does as the
                     supervisor that holds it, such as `gg run`, ends, however it ends; a replay
                     ends at its recording's end alone
+  --real-time       With --headless, step the simulation in real time, its frames a tick apart,
+                    rather than a tick a frame as fast as frames run, so that a game watched
+                    through the tool API plays at its own pace; --frames and --capture count
+                    frames as they come, a tick's time apart or more. Not for --host or --join,
+                    whose headless peers step in lockstep
   --frames <N>      Exit after N frames
   --size <WxH>      With --headless, render the view W by H pixels, such as `--size 320x180`,
                     rather than 1280 by 720
@@ -181,6 +190,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         headless: false,
         embedded: false,
         supervised: false,
+        real_time: false,
         frames: None,
         size: None,
         capture: None,
@@ -230,6 +240,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--headless" => parsed.headless = true,
             "--embedded" => parsed.embedded = true,
             "--supervised" => parsed.supervised = true,
+            "--real-time" => parsed.real_time = true,
             "--validation" => parsed.validation = true,
             "--no-validation" => parsed.validation = false,
             "--vsync" => parsed.vsync = true,
@@ -369,6 +380,20 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         return Err(bad(
             "`--headless` and `--embedded` each run without a window, a tick a frame or in real \
              time, so a run takes one"
+                .to_owned(),
+        ));
+    }
+    if parsed.real_time && !parsed.headless {
+        return Err(bad(
+            "`--real-time` paces a headless run's ticks, as windowed and embedded runs step in \
+             real time already, so it needs `--headless`"
+                .to_owned(),
+        ));
+    }
+    if parsed.real_time && matches!(parsed.net, Some(Net::Host(_) | Net::Join(_))) {
+        return Err(bad(
+            "`--real-time` steps a run by the clock, and a headless lockstep peer a tick a frame, \
+             as its other peer's inputs come, so `--host` and `--join` take no `--real-time`"
                 .to_owned(),
         ));
     }
@@ -538,6 +563,13 @@ mod tests {
         assert_eq!(args.record, Some(PathBuf::from("run.recording")));
         // Development builds serve the tool API unless told not to.
         assert!(args.api);
+        // A headless run ticks as fast as it can unless it's paced to real time.
+        assert!(!args.real_time);
+        let paced = parse_strs(&["--headless", "--real-time"]).unwrap().unwrap();
+        assert!(paced.headless && paced.real_time);
+        // Counting its frames as they come.
+        let paced = parse_strs(&["--headless", "--real-time", "--frames", "60"]);
+        assert_eq!(paced.unwrap().unwrap().frames, Some(60));
         assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
         // A run embedded in a tool publishes its view through the API, which only they serve.
         let embedded = parse_strs(&["--embedded"]).map(|args| args.unwrap().embedded);
@@ -674,6 +706,11 @@ mod tests {
             &["--join", "127.0.0.1:7700", "--record", "run.recording"],
             &["--host"],
             &["--embedded", "--headless"],
+            &["--real-time"],
+            &["--embedded", "--real-time"],
+            &["--real-time=yes", "--headless"],
+            &["--headless", "--real-time", "--host", "0.0.0.0:7700"],
+            &["--headless", "--real-time", "--join", "127.0.0.1:7700"],
             &["--embedded", "--no-api"],
             &["--stopped", "--no-api"],
             &["--stopped", "--record", "run.recording"],

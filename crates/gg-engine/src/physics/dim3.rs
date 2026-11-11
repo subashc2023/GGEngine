@@ -17,7 +17,7 @@ use rapier3d::prelude::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::{BodyType, Link, Links, Outline};
+use super::{BodyType, Finite, Link, Links, Outline, kept, kept_collider, unfinite};
 use crate::draw::Poses;
 use crate::model::{ModelRoot, Surface};
 use crate::recording::text;
@@ -305,6 +305,24 @@ fn model_of(world: &World, entity: Entity) -> Option<crate::Model> {
     world.get::<ModelRoot>(entity).map(|root| root.0)
 }
 
+/// Whether `collider` holds the triangles of the model `entity`'s [`ModelRoot`] names, for an
+/// entity of `scale`, as [`MeshCollider3D`] makes them of it now, to the bit.
+fn made_of(collider: &Collider, world: &World, entity: Entity, scale: Vec3) -> bool {
+    let Some(mesh) = collider.shape().as_trimesh() else {
+        return false;
+    };
+    let nodes = model_of(world, entity).and_then(|model| world.assets().nodes(model));
+    let Some(nodes) = nodes else {
+        return false;
+    };
+    let (vertices, indices) = nodes.triangles();
+    let bits = |at: Vector| at.to_array().map(f32::to_bits);
+    mesh.indices() == indices.as_slice()
+        && mesh.vertices().len() == vertices.len()
+        && (vertices.iter().zip(mesh.vertices()))
+            .all(|(&at, &held)| bits(vector(at * scale)) == bits(held))
+}
+
 /// The surfaces of the model `entity`'s [`ModelRoot`] names, as the world's assets hold them now.
 fn surfaces(world: &World, entity: Entity) -> Option<Arc<Vec<Surface>>> {
     let nodes = world.assets().nodes(model_of(world, entity)?)?;
@@ -349,6 +367,9 @@ pub struct Physics3D {
     unmoved: Vec<Entity>,
     /// What a character hit as it moved, a workspace as `pipeline` is.
     hits: Vec<CharacterCollision>,
+    /// The kinematic bodies that go by their velocities, with those velocities, which the
+    /// characters' moves hold them from meanwhile: a workspace too.
+    moving: Vec<character::Moving>,
 }
 
 /// What rapier keeps from one step to the next.
@@ -418,6 +439,7 @@ impl Default for Physics3D {
             joints: Links::default(),
             unmoved: Vec::new(),
             hits: Vec::new(),
+            moving: Vec::new(),
         }
     }
 }
@@ -433,6 +455,7 @@ impl Clone for Physics3D {
             joints: self.joints.clone(),
             unmoved: self.unmoved.clone(),
             hits: Vec::new(),
+            moving: Vec::new(),
         }
     }
 
@@ -682,6 +705,7 @@ impl Saved for Physics3D {
             joints,
             unmoved: entities(saved.unmoved),
             hits: Vec::new(),
+            moving: Vec::new(),
         })
     }
 }
@@ -707,8 +731,16 @@ impl Physics3D {
         self.unlink_gone(world);
         self.unlink_gone_characters(world);
         let rapier = &mut self.rapier;
+        let refused = |entity| {
+            (unfinite::<Transform>(world, entity, "Transform"))
+                .or_else(|| unfinite::<RigidBody3D>(world, entity, "RigidBody3D"))
+                .or_else(|| unfinite::<BoxCollider3D>(world, entity, "BoxCollider3D"))
+                .or_else(|| unfinite::<SphereCollider3D>(world, entity, "SphereCollider3D"))
+                .or_else(|| unfinite::<CapsuleCollider3D>(world, entity, "CapsuleCollider3D"))
+                .or_else(|| unfinite::<MeshCollider3D>(world, entity, "MeshCollider3D"))
+        };
         self.links
-            .find::<RigidBody3D>(world, "RigidBody3D", |links, entity| {
+            .find::<RigidBody3D>(world, "RigidBody3D", refused, |links, entity| {
                 match links.get_mut(entity) {
                     Some(linked) => take_changes(rapier, linked, world),
                     None => links.push(make_body(rapier, world, entity)),
@@ -782,14 +814,16 @@ impl Physics3D {
             let turned = Quat::from_array(body.rotation().to_array());
             let velocity = Vec3::from_array(body.linvel().to_array());
             let angular_velocity = Vec3::from_array(body.angvel().to_array());
-            // The entity's components as they are, as this step took them in.
+            // The entity's components as this step took them in: as they are, but a transform
+            // refused, which stays as it was here, so that its NaNs aren't kept as taken.
             let (was, went) = (&linked.transform, &linked.rigid_body);
             if (at, turned) != (was.translation, was.rotation) {
                 let transform = world.get_mut::<Transform>(linked.entity);
                 let transform = transform.expect("linked this step: alive, with one");
                 transform.translation = at;
                 transform.rotation = turned;
-                linked.transform = *transform;
+                linked.transform.translation = at;
+                linked.transform.rotation = turned;
             }
             if (velocity, angular_velocity) != (went.velocity, went.angular_velocity) {
                 let rigid_body = world.get_mut::<RigidBody3D>(linked.entity);
@@ -873,12 +907,16 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
 }
 
 /// Takes in what changed of `linked`'s components since the last step left them, which the last
-/// step didn't make, into its body: waking it, so that it moves from there. Its mesh collider is
-/// made again as its model is read again too.
+/// step didn't make, into its body: waking it, so that it moves from there. A component that isn't
+/// finite is taken as it was, as [`Links`] refuses it. Its mesh collider is made again as its model
+/// is read again too, but for one a snapshot restored before its model's surfaces were there, which
+/// keeps the shape the snapshot had, and its contacts, as its model's come, if they make it.
 fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let entity = linked.entity;
     let rigid_body = *world.get::<RigidBody3D>(entity).expect("found with one");
+    let rigid_body = kept(rigid_body, linked.rigid_body);
     let transform = *world.get::<Transform>(entity).expect("found with one");
+    let transform = kept(transform, linked.transform);
     let body = &mut rapier.bodies[linked.body];
     let was = linked.rigid_body;
     if rigid_body.body_type != was.body_type {
@@ -903,9 +941,13 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
         body.set_rotation(rotation(transform.rotation), true);
     }
     let box_collider = world.get::<BoxCollider3D>(entity).copied();
+    let box_collider = kept_collider(box_collider, linked.box_collider);
     let sphere_collider = world.get::<SphereCollider3D>(entity).copied();
+    let sphere_collider = kept_collider(sphere_collider, linked.sphere_collider);
     let capsule_collider = world.get::<CapsuleCollider3D>(entity).copied();
+    let capsule_collider = kept_collider(capsule_collider, linked.capsule_collider);
     let mesh_collider = world.get::<MeshCollider3D>(entity).copied();
+    let mesh_collider = kept_collider(mesh_collider, linked.mesh_collider);
     let rescaled = transform.scale != linked.transform.scale;
     let [boxed, round, capsuled, meshed] = &mut linked.colliders;
     if box_collider != linked.box_collider || rescaled {
@@ -923,6 +965,17 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let now = mesh_collider.and_then(|_| surfaces(world, entity));
     let remodeled = match (&now, &linked.surfaces) {
         (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
+        // Restored with its shape, before its model's surfaces were there to make it of: kept,
+        // with its contacts, if it's the one they make, as the snapshot's run made it of them;
+        // made again of them if the model has changed since, as its file may have.
+        (Some(now), None) if meshed.is_some() => {
+            let restored = meshed.and_then(|meshed| rapier.colliders.get(meshed));
+            let same = restored.is_some_and(|it| made_of(it, world, entity, transform.scale));
+            if same {
+                linked.surfaces = Some(Arc::clone(now));
+            }
+            !same
+        }
         (now, was) => now.is_some() != was.is_some(),
     };
     if mesh_collider != linked.mesh_collider || rescaled || remodeled {
@@ -938,6 +991,45 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     linked.sphere_collider = sphere_collider;
     linked.capsule_collider = capsule_collider;
     linked.mesh_collider = mesh_collider;
+}
+
+impl Finite for RigidBody3D {
+    fn finite(&self) -> bool {
+        self.velocity.is_finite() && self.angular_velocity.is_finite()
+    }
+}
+
+impl Finite for BoxCollider3D {
+    fn finite(&self) -> bool {
+        let numbers = [self.density, self.friction, self.restitution];
+        self.offset.is_finite() && self.size.is_finite() && numbers.iter().all(|it| it.is_finite())
+    }
+}
+
+impl Finite for SphereCollider3D {
+    fn finite(&self) -> bool {
+        let numbers = [self.radius, self.density, self.friction, self.restitution];
+        self.offset.is_finite() && numbers.iter().all(|it| it.is_finite())
+    }
+}
+
+impl Finite for CapsuleCollider3D {
+    fn finite(&self) -> bool {
+        let numbers = [
+            self.height,
+            self.radius,
+            self.density,
+            self.friction,
+            self.restitution,
+        ];
+        self.offset.is_finite() && numbers.iter().all(|it| it.is_finite())
+    }
+}
+
+impl Finite for MeshCollider3D {
+    fn finite(&self) -> bool {
+        self.friction.is_finite() && self.restitution.is_finite()
+    }
 }
 
 /// rapier's kind of body for `body_type`: kinematic by its velocity, as Box2D's kinematic bodies go.
@@ -1154,6 +1246,115 @@ mod tests {
             let changed = table.changed(id.expect("registered")).expect("a column");
             assert!(changed.row(row) < tick, "{} {tick}", changed.row(row));
         }
+    }
+
+    /// A component set to a NaN or an infinity is refused, warned of once while it stays so
+    /// (`physics.not_finite`), and doesn't reach rapier, where it would spread through contacts:
+    /// a body at rest whose transform isn't finite stays where it was, at rest, its neighbor
+    /// finite, through 30 steps that warn once, as does a character's; a falling body's goes on
+    /// falling from its last, writing where it goes over the refused value at the next step; a
+    /// velocity keeps the last that was, and a box's size the box it had. A body whose transform
+    /// isn't finite as it comes isn't made until it is.
+    #[test]
+    fn what_isnt_finite_is_refused() {
+        let logged = crate::testing::logged();
+        let warned = || {
+            let codes = logged.codes.try_iter();
+            codes.filter(|code| code == "physics.not_finite").count()
+        };
+        let mut world = World::default();
+        floor(&mut world);
+        let resting = crate_at(&mut world, Vec3::new(0.0, 1.0, 0.0), Quat::IDENTITY);
+        let touching = crate_at(&mut world, Vec3::new(1.0, 1.0, 0.0), Quat::IDENTITY);
+        let walker = super::character::tests::character(&mut world, Vec3::new(-3.0, 1.52, 0.0));
+        step(&mut world, 240);
+        let body_of = |world: &World, entity| {
+            let physics = world.resource::<Physics3D>().expect("stepped");
+            physics.links.get(entity).expect("linked").body
+        };
+        let held = transform(&world, resting);
+        let stood = transform(&world, walker);
+        let nan = Quat::from_xyzw(0.0, f32::NAN, 0.0, 1.0);
+        world.get_mut::<Transform>(resting).expect("alive").rotation = nan;
+        world
+            .get_mut::<Transform>(walker)
+            .expect("alive")
+            .translation
+            .y = f32::INFINITY;
+        step(&mut world, 30);
+        assert_eq!(warned(), 2, "once each, though they stepped 30 times");
+        assert!(
+            transform(&world, resting).rotation.is_nan(),
+            "left to the game"
+        );
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        let body = &physics.rapier.bodies[body_of(&world, resting)];
+        let at = Vec3::from_array(body.translation().to_array());
+        assert!(
+            body.is_sleeping() && body.rotation().is_finite(),
+            "where it was"
+        );
+        assert!(at.abs_diff_eq(held.translation, 1e-4), "{at}");
+        let character = physics.characters.get(walker).expect("linked");
+        let stands = physics.rapier.bodies[character.body].translation();
+        assert!(Vec3::from_array(stands.to_array()).abs_diff_eq(stood.translation, 1e-3));
+        assert!(transform(&world, touching).translation.is_finite());
+        world.get_mut::<Transform>(resting).expect("alive").rotation = Quat::IDENTITY;
+        world
+            .get_mut::<Transform>(resting)
+            .expect("alive")
+            .translation = Vec3::new(-1.0, 1.0, 2.0);
+        step(&mut world, 1);
+        let taken = transform(&world, resting).translation;
+        assert!(
+            taken.abs_diff_eq(Vec3::new(-1.0, 1.0, 2.0), 0.05),
+            "{taken}"
+        );
+        // Falling, its body's pose is written over the value refused.
+        let falling = crate_at(&mut world, Vec3::new(3.0, 6.0, 0.0), Quat::IDENTITY);
+        step(&mut world, 8);
+        world
+            .get_mut::<Transform>(falling)
+            .expect("alive")
+            .translation
+            .y = f32::NAN;
+        step(&mut world, 1);
+        assert_eq!(warned(), 1);
+        let fell = transform(&world, falling).translation;
+        assert!(fell.is_finite() && fell.y < 6.0 && fell.y > 4.0, "{fell}");
+        // A velocity and a box's size, each kept as it was.
+        let rigid_body = world.get_mut::<RigidBody3D>(touching).expect("alive");
+        rigid_body.velocity = Vec3::new(f32::NAN, 0.0, 0.0);
+        world
+            .get_mut::<BoxCollider3D>(touching)
+            .expect("alive")
+            .size
+            .x = f32::INFINITY;
+        step(&mut world, 30);
+        assert_eq!(warned(), 1, "once for both");
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        let body = &physics.rapier.bodies[body_of(&world, touching)];
+        assert!(body.linvel().is_finite() && body.translation().is_finite());
+        let collider = body.colliders()[0];
+        let aabb = physics.rapier.colliders[collider].compute_aabb();
+        assert!(aabb.maxs.is_finite() && aabb.mins.is_finite(), "{aabb:?}");
+        let spawned = Transform {
+            translation: Vec3::new(f32::NAN, 3.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let unmade = world.spawn((spawned, RigidBody3D::default(), BoxCollider3D::default()));
+        step(&mut world, 4);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        assert!(physics.links.get(unmade).is_none(), "not made");
+        assert_eq!(warned(), 1);
+        world
+            .get_mut::<Transform>(unmade)
+            .expect("alive")
+            .translation
+            .x = 3.0;
+        step(&mut world, 1);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        assert!(physics.links.get(unmade).is_some(), "made once it's finite");
     }
 
     /// A pile of boxes, spheres and capsules in turn, turned and overlapping as they start, over a
@@ -1718,6 +1919,63 @@ mod tests {
                 (hit.expect("the floor").point.y - 1.0).abs() < 1e-5,
                 "{hit:?}"
             );
+        }
+    }
+
+    /// A world standing on a model's triangles, its physics saved to text and loaded before the
+    /// model's surfaces are there, as a snapshot restored while its model loads is, keeps the
+    /// triangles the text holds, and its contacts with them, as the surfaces come: it steps as the
+    /// world it was saved from does, bit for bit, where a collider made again of them would drop
+    /// its contacts' warm starts.
+    #[test]
+    fn a_mesh_collider_restored_before_its_model_keeps_its_shape() {
+        let (mut cx, root) = level_at(Transform::IDENTITY);
+        let world = cx.world_mut();
+        for i in 0..4u8 {
+            let i = f32::from(i);
+            crate_at(
+                world,
+                Vec3::new(i - 1.5, 1.0 + i, 0.5 * i),
+                Quat::from_rotation_x(i),
+            );
+        }
+        step(world, 40);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        let text = physics.save(world).expect("saved");
+        let mut loaded = Physics3D::load(&text, world).expect("loaded");
+        // As a load finds it while its model is still loading, without its surfaces.
+        let restored = loaded.links.get_mut(root).expect("linked");
+        assert!(restored.surfaces.is_some() && restored.colliders[3].is_some());
+        restored.surfaces = None;
+        let mut copy = world.clone();
+        copy.insert_resource(loaded);
+        step(world, 60);
+        step(&mut copy, 60);
+        assert_eq!(copy.hash(), world.hash());
+        let physics = copy.resource::<Physics3D>().expect("stepped");
+        assert!(physics.links.get(root).expect("linked").surfaces.is_some());
+        // One whose model changed while it was saved, as its file may have, is made again of the
+        // model's triangles as they are now: its floor a unit higher.
+        #[cfg(feature = "dev")]
+        {
+            let mut loaded = Physics3D::load(&text, world).expect("loaded");
+            loaded.links.get_mut(root).expect("linked").surfaces = None;
+            let mut copy = world.clone();
+            copy.insert_resource(loaded);
+            let ModelRoot(model) = *copy.get::<ModelRoot>(root).expect("a root");
+            let raised = crate::model::tests::surface(
+                vec![[-10.0, 1.0, -10.0], [-10.0, 1.0, 10.0], [10.0, 1.0, 10.0]],
+                vec![0, 1, 2],
+                Transform::IDENTITY,
+            );
+            let mut other = crate::Context::seeded(1);
+            let (read, _) = crate::model::tests::added(&mut other, "raised", raised);
+            let nodes = other.world().assets().nodes(read).expect("added").clone();
+            copy.assets_mut().set_nodes(model, nodes);
+            step(&mut copy, 1);
+            let hit = copy.cast_ray(Cast::new(Vec3::new(-5.0, 5.0, 5.0), Vec3::NEG_Y));
+            let hit = hit.expect("the raised floor");
+            assert!((hit.point.y - 1.0).abs() < 1e-5, "{hit:?}");
         }
     }
 

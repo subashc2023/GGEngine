@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::{
-    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, REFUSED, Turn, connect, hello, tick_of,
+    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, Queued, REFUSED, Turn, connect, hello, tick_of,
     write_inputs,
 };
 use crate::args::Conditions;
@@ -135,8 +135,12 @@ struct Header {
     size: usize,
 }
 
-/// The parts of a state that have come.
-struct Parts(Vec<Option<Vec<u8>>>);
+/// The parts of a state that have come, by their numbers, of how many: kept as they come, so that
+/// a state's line, which anyone at the server's address can forge, holds no memory but what came.
+struct Parts {
+    of: usize,
+    come: BTreeMap<usize, Vec<u8>>,
+}
 
 /// The poses of the other players' entities in a state, by their IDs, and the tick it's after.
 struct Sample {
@@ -397,9 +401,9 @@ impl Client {
         let mut merged = Merged::default();
         if self.local <= tick {
             for inputs in self.ours.range(self.local..=tick).map(|(_, inputs)| inputs) {
-                let theirs = inputs.commands.iter();
-                let theirs = theirs.filter(|(layer, _)| !self.edits.contains(layer));
-                merged.commands.extend(theirs.cloned());
+                let theirs = Queued::of(inputs.commands.iter().cloned(), self.player, true);
+                let theirs = theirs.filter(|queued| !self.edits.contains(&queued.layer));
+                merged.commands.extend(theirs);
             }
             self.local = tick + 1;
         }
@@ -439,15 +443,18 @@ impl Client {
             return Some(());
         }
         let parts = self.parts.entry(header.tick);
-        let parts = parts.or_insert_with(|| Parts(vec![None; header.parts]));
-        if parts.0.len() != header.parts {
+        let parts = parts.or_insert_with(|| Parts {
+            of: header.parts,
+            come: BTreeMap::new(),
+        });
+        if parts.of != header.parts {
             return None;
         }
-        parts.0[header.part] = Some(packet[split + 1..].to_vec());
-        if parts.0.iter().all(Option::is_some) {
-            let Parts(parts) = self.parts.remove(&header.tick)?;
+        (parts.come).insert(header.part, packet[split + 1..].to_vec());
+        if parts.come.len() == parts.of {
+            let parts = self.parts.remove(&header.tick)?;
             self.parts = self.parts.split_off(&header.tick);
-            self.decode(header, parts.into_iter().flatten().flatten().collect(), now);
+            self.decode(header, parts.come.into_values().flatten().collect(), now);
         }
         while self.parts.len() > GATHERED {
             self.parts.pop_first();
@@ -459,7 +466,7 @@ impl Client {
     /// after its tick, against the state it names, as the latest whole.
     fn decode(&mut self, header: Header, bytes: Vec<u8>, now: Instant) {
         let tick = header.tick;
-        let text = match header.base {
+        let base = match header.base {
             Some(base) => {
                 let Some(base) = self.texts.get(&base) else {
                     debug!(
@@ -468,12 +475,11 @@ impl Client {
                     );
                     return;
                 };
-                zstd::bulk::Decompressor::with_dictionary(base.as_bytes())
-                    .and_then(|mut decompressor| decompressor.decompress(&bytes, header.size))
+                Some(base.as_bytes())
             }
-            None => zstd::bulk::decompress(&bytes, header.size),
+            None => None,
         };
-        let text = text
+        let text = decompress(&bytes, base, header.size)
             .map_err(|error| error.to_string())
             .and_then(|text| String::from_utf8(text).map_err(|error| error.to_string()));
         match text {
@@ -706,6 +712,36 @@ impl Client {
     }
 }
 
+/// The `size` bytes that `bytes`, as zstd compresses them, against the dictionary `base` if it's
+/// given, decompress to: read as they decompress, rather than into `size` bytes held at once, so
+/// that a state's line, which anyone at the server's address can forge, takes no more memory than
+/// its bytes decompress to.
+///
+/// Fails as zstd does, and for bytes that decompress to more or fewer than `size`.
+fn decompress(bytes: &[u8], base: Option<&[u8]>, size: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    // Room for up to a MiB at once, which a forged line can't make more of; past it, the text
+    // grows as its bytes decompress.
+    let mut text = Vec::with_capacity(size.min(1 << 20));
+    match base {
+        Some(base) => zstd::stream::read::Decoder::with_dictionary(bytes, base)?
+            .take(size as u64 + 1)
+            .read_to_end(&mut text)?,
+        None => zstd::stream::read::Decoder::with_buffer(bytes)?
+            .take(size as u64 + 1)
+            .read_to_end(&mut text)?,
+    };
+    if text.len() != size {
+        let message = format!("its bytes aren't the {size} its line says");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        ));
+    }
+    Ok(text)
+}
+
 /// Reads a state's line, which [`server`](super::server)'s states start with; `None` if it isn't
 /// one.
 fn header(line: &str) -> Option<Header> {
@@ -777,6 +813,38 @@ mod tests {
         assert!(!client.ready(101), "not joined");
         client.read_packet(&state(101), now).expect("a state");
         assert_eq!(client.texts.keys().copied().collect::<Vec<_>>(), [101]);
+    }
+
+    /// A state's line, which anyone at the server's address can forge, holds the client to no more
+    /// memory than its packets bring, however many parts and bytes it says the state has: its parts
+    /// are kept as they come, and its bytes read as they decompress, a state whose bytes come to
+    /// more or fewer than its line says dropped.
+    #[test]
+    fn a_forged_state_s_line_holds_no_memory_but_what_came() {
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        let now = Instant::now();
+        (client.since, client.came) = (100, now);
+        let text = "gg-snapshot 2\n";
+        let bytes = zstd::bulk::compress(text.as_bytes(), 3).expect("compressed");
+        let state = |tick: u64, part: usize, parts: usize, size: usize| {
+            let line = format!("s {tick} - 0 0 0 0 {part} {parts} {size}\n");
+            [line.as_bytes(), &bytes].concat()
+        };
+        let most = MAX_WORLD / PART;
+        client.read_packet(&state(101, 7, most, MAX_WORLD), now);
+        assert_eq!(client.parts[&101].come.len(), 1);
+        for size in [MAX_WORLD, text.len() + 1, text.len() - 1] {
+            client.read_packet(&state(102, 0, 1, size), now);
+            assert!(client.texts.is_empty(), "{size}");
+        }
+        client.read_packet(&state(103, 0, 1, text.len()), now);
+        assert_eq!(client.texts.keys().copied().collect::<Vec<_>>(), [103]);
+        let base = Some(text.as_bytes());
+        let against = zstd::bulk::Compressor::with_dictionary(3, text.as_bytes())
+            .and_then(|mut compressor| compressor.compress(text.as_bytes()))
+            .expect("compressed");
+        let read = decompress(&against, base, text.len()).expect("decompressed");
+        assert_eq!(read, text.as_bytes());
     }
 
     /// The other players' entities draw between the two states [`INTERPOLATION`] ticks behind the
