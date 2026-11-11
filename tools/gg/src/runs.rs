@@ -418,8 +418,12 @@ mod tests {
     /// fails with `gg.no_run`.
     #[test]
     fn a_wait_without_a_run_waits_for_its_file_a_moment() {
+        // A project in gg's own directory, which holds none, so that no run's is it, as that of the
+        // `gg run` the editor keeps going for its project; the directory is in the workspace, so
+        // that cargo names its target directory.
+        let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("project.ron");
         let start = Instant::now();
-        let waited = wait(&pick(None), Duration::from_secs(1));
+        let waited = wait(&pick(Some(project)), Duration::from_secs(1));
         let failed = waited.err().map(|failure| failure.code);
         assert_eq!(failed.as_deref(), Some("gg.no_run"));
         assert!(start.elapsed() >= Duration::from_secs(1) && start.elapsed() < GRACE * 2);
