@@ -580,8 +580,8 @@ pub fn run(app: App) -> ExitCode {
 }
 
 /// Runs `app` as [`run`] does, with `args` in place of the arguments the process was given after
-/// its name: for tests, whose own are their harness's.
-#[doc(hidden)]
+/// its name: for tests, whose own are their harness's, and for an app that takes flags of its own
+/// off them first, as the editor does; `--help`'s usage names the program after the app.
 pub fn run_with(app: App, args: impl IntoIterator<Item = impl Into<OsString>>) -> ExitCode {
     let program = app.name.to_lowercase();
     let args = args.into_iter().map(Into::into);

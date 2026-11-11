@@ -1,19 +1,20 @@
 //! The game of the project the editor is started in, run as an agent runs it: under `cargo gg run
 //! --embedded` in the project's directory, which builds it, patches it as its code changes and
 //! restarts it after any other change, and which ends, with the game, as the editor ends, closing
-//! its stdin. The game starts stopped, as `--stopped` has it: its world is the world as edited,
-//! which only edits, scene files' saves and the File menu's New and Open change, until Play. It
-//! renders offscreen for the editor, which shows its view in the Viewport from memory the two
-//! share, as the tool API's `view` asks. The Entities and Inspector panels show the game's world,
-//! and edit it, through the API, as a remote [`Inspector`] does; the Logs panel shows `gg run`'s
-//! events, the build's errors among them, the game's events as it logs them, which the tool API's
-//! `logs` follows, and what the game and the build print; the Assets panel, the files in the
-//! project's asset root; the [Debugger](crate::debugger) panel, its scripts; and the title bar, how
-//! the run goes, or while a game serves, whether it's stopped, playing or simulating, and whether
-//! it's paused, as the game answers the editor's requests and the `status` it asks for every
-//! quarter second, which catches another client's, or that it waits at a script's stop, as the
-//! Debugger panel learns; with the controls [`overlay::show_run`] draws: Play, which pauses and
-//! resumes the game while it plays, Simulate, Stop and Step.
+//! its stdin; or, given `--release-game`, under `cargo gg run --release --embedded`, which builds
+//! it optimized, without patches. The game starts stopped, as `--stopped` has it: its world is the
+//! world as edited, which only edits, scene files' saves and the File menu's New and Open change,
+//! until Play. It renders offscreen for the editor, which shows its view in the Viewport from
+//! memory the two share, as the tool API's `view` asks. The Entities and Inspector panels show the
+//! game's world, and edit it, through the API, as a remote [`Inspector`] does; the Logs panel
+//! shows `gg run`'s events, the build's errors among them, the game's events as it logs them,
+//! which the tool API's `logs` follows, and what the game and the build print; the Assets panel,
+//! the files in the project's asset root; the [Debugger](crate::debugger) panel, its scripts; and
+//! the title bar, how the run goes, or while a game serves, whether it's stopped, playing or
+//! simulating, and whether it's paused, as the game answers the editor's requests and the `status`
+//! it asks for every quarter second, which catches another client's, or that it waits at a
+//! script's stop, as the Debugger panel learns; with the controls [`overlay::show_run`] draws:
+//! Play, which pauses and resumes the game while it plays, Simulate, Stop and Step.
 //!
 //! Started outside a project, the editor shows the [`hub`] over its panels, where a
 //! project is picked, unless it's to open the latest as it starts; and the File menu's Open Project
@@ -144,8 +145,9 @@ const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// window 1920 by 1080 points as it opens, the game's view in the Viewport, its entities left of
 /// it, above its scenes, the one picked right of it, above the Performance panel, and the Logs
 /// below it, the Assets and the Debugger among their tabs; the sides wide enough, at that size,
-/// for the Inspector's vectors and the Entities panel's header.
-pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
+/// for the Inspector's vectors and the Entities panel's header. Its game is built optimized if
+/// `release`.
+pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>, release: bool) -> App {
     let app = App::new("Editor")
         .custom_title_bar()
         .view_panel("Viewport")
@@ -161,6 +163,7 @@ pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
     let inspector = Inspector::remote(CLIENT);
     let mut game = Game::new(dir, inspector.link());
     game.hub = Hub::new(workspace);
+    game.release = release;
     app.layer(game).overlay(PerfPanel).overlay(inspector)
 }
 
@@ -175,6 +178,8 @@ const CLIENT: &str = "editor";
 struct Game {
     /// The project's directory, while one's open: the one it was started in, or the hub opened.
     dir: Option<PathBuf>,
+    /// Whether `gg run` builds the game optimized, as the editor's `--release-game` asks.
+    release: bool,
     /// `gg run`, until it ends, with its stdin, which the editor closes as it ends.
     run: Option<(Child, ChildStdin)>,
     /// The `gg run`s of the projects open before, each with its project's directory, which go on
@@ -443,6 +448,7 @@ impl Game {
         let debugger = Debugger::new(folders.as_ref().map(|folders| folders.root.clone()), CLIENT);
         Self {
             dir,
+            release: false,
             run: None,
             ending: Vec::new(),
             waiting: false,
@@ -495,7 +501,7 @@ impl Game {
         }
     }
 
-    /// Starts `cargo gg run --embedded -- --stopped` in the project's directory, once, with threads
+    /// Starts `cargo` with [`gg_run`]'s arguments in the project's directory, once, with threads
     /// that read what it prints, saying why if it can't start it; but nothing outside a project,
     /// and while the run of the project open before in the same directory goes on ending, it waits,
     /// each update starting it again, until that has ended.
@@ -511,8 +517,9 @@ impl Game {
             return;
         };
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let args = gg_run(self.release);
         let started = Command::new(cargo)
-            .args(["gg", "run", "--embedded", "--", "--stopped"])
+            .args(&args)
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -527,7 +534,7 @@ impl Game {
                 return;
             }
         };
-        let started = format!("cargo gg run --embedded -- --stopped, in {}", dir.display());
+        let started = format!("cargo {}, in {}", args.join(" "), dir.display());
         self.log(Level::Info, started);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -1036,6 +1043,7 @@ impl Game {
         self.measures.report();
         cx.hide_pixels();
         let mut opened = Game::new(Some(dir.clone()), self.view.link.clone());
+        opened.release = self.release;
         opened.hub = mem::take(&mut self.hub);
         opened.ending = mem::take(&mut self.ending);
         opened.logs = mem::take(&mut self.logs);
@@ -2290,6 +2298,18 @@ impl Layer for Game {
     }
 }
 
+/// What the editor gives `cargo` to run its game: `gg run`, optimized if `release`, embedded, the
+/// game starting stopped.
+fn gg_run(release: bool) -> Vec<&'static str> {
+    let optimized: &[&str] = if release { &["--release"] } else { &[] };
+    [
+        &["gg", "run"],
+        optimized,
+        &["--embedded", "--", "--stopped"],
+    ]
+    .concat()
+}
+
 /// Reads `from` a line at a time on a thread of its own, until it ends, sending each to `send` as
 /// `line` makes it one.
 fn read_lines(from: impl Read + Send + 'static, send: Sender<Line>, line: fn(String) -> Line) {
@@ -2625,6 +2645,16 @@ mod tests {
     use crate::assets::tests::{Scratch, find, texts};
     use crate::camera::Tool;
     use crate::tests::{SCALE, VIEW, reading};
+
+    /// The game runs embedded and starts stopped either way; `--release-game` has `gg run` build
+    /// it optimized, by its `--release`, which goes before the game's own arguments.
+    #[test]
+    fn the_game_runs_optimized_where_the_editor_is_given_release_game() {
+        let as_built = ["gg", "run", "--embedded", "--", "--stopped"];
+        assert_eq!(gg_run(false), as_built);
+        let optimized = ["gg", "run", "--release", "--embedded", "--", "--stopped"];
+        assert_eq!(gg_run(true), optimized);
+    }
 
     /// The game's ends of the connections of a layer that [`serving`] gives: the requests the layer
     /// sends, where their answers go back, the picks it asks for, and where their answers go back.

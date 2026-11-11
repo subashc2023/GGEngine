@@ -78,8 +78,9 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   a grid from its scene file.
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
   the game's view in a panel among the others. Started in a game's project, it runs the project's
-  game as an agent does, under `gg run --embedded`, which ends as the editor does, the game
-  starting stopped (`--stopped`), its world the world as edited; and shows the game's view; the
+  game as an agent does, under `gg run --embedded`, or optimized with `--release`, as the editor's
+  own flag `--release-game` asks, which ends as the editor does, the game starting stopped
+  (`--stopped`), its world the world as edited; and shows the game's view; the
   game's world in its Entities and Inspector panels, a remote Inspector's, which edit it through
   the API as the editor's own edits, as the handles in the view do, a click picking what the view
   shows under the cursor through the API; its camera, the pick's outline, its grid and the
