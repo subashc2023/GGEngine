@@ -318,6 +318,14 @@ pub(crate) fn start(
         if !own {
             cx.name_as([]);
         }
+        // Before the layers load, so that music they have play as they load waits for the run to
+        // play; the first frame follows a snapshot's run that plays all the same.
+        let snapshot = snapshot.as_ref();
+        let paused = snapshot.is_some_and(|snapshot| snapshot.paused);
+        cx.follow_playback(
+            stopped || snapshot.is_some_and(|snapshot| snapshot.stopped),
+            paused,
+        );
     }
     let (stopped, paused) = match snapshot {
         Some(snapshot) => {
@@ -400,6 +408,9 @@ pub(crate) fn run_frame(
         stepper.jump_to(ticks);
     }
     let owed = stack.paced(dt);
+    // As the requests served before the frame left the run, before its ticks queue sounds.
+    #[cfg(feature = "dev")]
+    cx.follow_playback(stepper.stopped(), stepper.paused());
     let tick = |tick: Tick| {
         if stack.net_waits(tick.number) {
             return false;

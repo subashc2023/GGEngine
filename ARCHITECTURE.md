@@ -94,7 +94,9 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   a prefab through the API's `save_prefab`, linked in their place, which a game's own Inspector
   doesn't, as a save writes files that neither a replay nor a lockstep peer of its commands would
   have; each an edit of the editor's. Its Play and Simulate are the API's
-  `play`, and Stop its `stop`, which brings back the world as edited. Its File menu's New, Open
+  `play`, and Stop its `stop`, which brings back the world as edited; while the game plays, Play
+  is `pause` and `resume`, and Step is `step`, a stopped game played paused first, as other editors'
+  controls are. Its File menu's New, Open
   and Save are the API's `scene`, on the game's open scene, which its title bar names, marked
   while unsaved; and since closing it ends the game, it asks before New, Open or closing loses
   unsaved edits. Play sees through the game's camera, which gets all of the view's input. For a
@@ -1498,10 +1500,11 @@ it has focus, which a press on it gives, or the cursor is over it, so that keys 
 onto the view. Layers know where the view is from `Context::view`, in the window's pixels, as the
 cursor's position is.
 
-A panel the layout doesn't hold yet floats, unless the app docks it with `App::dock`, which is how
-an app makes its first layout. The layout is saved as RON in the OS's directory for per-user state,
-as are the layouts saved by name, never beside the executable; headless runs neither read nor write
-layouts.
+A panel the layout doesn't hold yet floats, unless the app docks it with `App::dock`, beside a
+panel, taking the share of its place the app gives, or among its tabs, which is how an app makes
+its first layout, for the window's size as it opens, which `App::window_size` gives. The layout is
+saved as RON in the OS's directory for per-user state, as are the layouts saved by name, never
+beside the executable; headless runs neither read nor write layouts.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
 window's, and the main window's frame renders them all, paced by the main window's swapchain alone.
@@ -2962,9 +2965,13 @@ it is gone.
 
 Windowed and embedded runs play sound, the editor's game among them, opening the system's default
 output device as their first sound or music loads, so that a game without either opens none;
-headless runs, replays and tests play none. In development runs, music reloads as its file
-changes, its play crossfading to what the file holds now from where it was, so that an edit is heard
-at once, as a shader's is seen.
+headless runs, replays and tests play none. What plays follows how the run plays, as the tool API
+sets it: paused, the music's and the sounds' tracks hold what's on them, and no sound starts;
+stopped, as `--stopped` starts a run, what plays stops and nothing starts, the music the layers last
+had play waiting for the run to play, which starts it from its start, as a game's load did; so the
+editor's Stop silences the game, and each Play starts its music again. In development runs, music
+reloads as its file changes, its play crossfading to what the file holds now from where it was, so
+that an edit is heard at once, as a shader's is seen.
 
 ## Threads
 

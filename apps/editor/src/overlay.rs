@@ -2,8 +2,8 @@
 //! it, whose controls [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the
 //! camera faces, and turns it; at its bottom left, the name of what the view shows under the
 //! cursor; and round its edges, while a texture or a model from the Assets panel is held over it,
-//! an outline. And Play and Simulate, at the middle of the title bar, which play the game and stop
-//! it.
+//! an outline. And the controls at the middle of the title bar, which play the game, pause it,
+//! step it and stop it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -419,37 +419,84 @@ fn grip(ui: &mut egui::Ui) {
     response.on_hover_text("Move the toolbar: drag it within the view");
 }
 
-/// Draws Play and Simulate into `ui`, the title bar's middle, each with a tooltip, the one
-/// `current`, how the game runs, names lit, showing Stop. Returns the mode a click asks for: Play's
-/// or Simulate's, or `Edit` for the lit one's Stop.
-pub fn show_run(ui: &mut egui::Ui, current: Mode) -> Option<Mode> {
-    let mut clicked = None;
-    for (mode, icon, tip) in [
-        (
-            Mode::Play,
+/// What a click of the title bar's controls asks: Play or Simulate, which play the game, or switch
+/// between them while it plays, or Stop, as [`Mode::Edit`]; a pause, the game playing; a resume,
+/// the game paused; or a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clicked {
+    To(Mode),
+    Pause,
+    Resume,
+    Step,
+}
+
+/// Draws the controls of how the game runs into `ui`, the title bar's middle, each with a tooltip,
+/// as `current`, how it runs, and `paused` have them, as other editors' are: Play, which plays the
+/// game while it's stopped, and while it plays pauses it, or resumes it while it's paused;
+/// Simulate, lit while the game plays through the editor's camera, which plays it so while it's
+/// stopped, and switches between the two while it plays; Stop, while it plays; and Step, while
+/// it's paused or stopped. Returns what a click asks.
+pub fn show_run(ui: &mut egui::Ui, current: Mode, paused: bool) -> Option<Clicked> {
+    let stopped = current == Mode::Edit;
+    let (icon, tip, play) = match (stopped, paused) {
+        (true, _) => (
             Icon::Play,
             "Play: a copy of the world as edited plays in its place, through the game's camera, \
              which gets the view's input, until Stop; what's edited meanwhile goes with the copy, \
              but a scene file's save",
+            Clicked::To(Mode::Play),
         ),
-        (
+        (false, false) => (Icon::Pause, "Pause the game's simulation", Clicked::Pause),
+        (false, true) => (
+            Icon::Play,
+            "Resume: runs the game's simulation in real time again",
+            Clicked::Resume,
+        ),
+    };
+    let mut clicked = icon_button(ui, icon, false)
+        .on_hover_text(tip)
+        .clicked()
+        .then_some(play);
+    let simulating = current == Mode::Simulate;
+    let (tip, to) = match current {
+        Mode::Edit => (
+            "Simulate: a copy plays as in Play, through the editor's camera, the game getting no \
+             input",
             Mode::Simulate,
-            Icon::Simulate,
-            "Simulate: the same, through the editor's camera, the game getting no input",
         ),
-    ] {
-        let lit = current == mode;
-        let (icon, tip) = if lit {
-            (
-                Icon::Stop,
-                "Stop: brings back the world as edited, with its edits' history",
-            )
-        } else {
-            (icon, tip)
-        };
-        if icon_button(ui, icon, lit).on_hover_text(tip).clicked() {
-            clicked = Some(if lit { Mode::Edit } else { mode });
-        }
+        Mode::Play => (
+            "Simulate: the game plays on through the editor's camera, getting no input",
+            Mode::Simulate,
+        ),
+        Mode::Simulate => (
+            "Simulating: a click plays on through the game's camera, which gets the view's input",
+            Mode::Play,
+        ),
+    };
+    if icon_button(ui, Icon::Simulate, simulating)
+        .on_hover_text(tip)
+        .clicked()
+    {
+        clicked = Some(Clicked::To(to));
+    }
+    let stop = ui.add_enabled_ui(!stopped, |ui| icon_button(ui, Icon::Stop, false));
+    let stop = (stop.inner)
+        .on_hover_text("Stop: brings back the world as edited, with its edits' history")
+        .on_disabled_hover_text("Stopped: the world is the world as edited");
+    if stop.clicked() {
+        clicked = Some(Clicked::To(Mode::Edit));
+    }
+    let tip = if stopped {
+        "Step: plays the game paused, as the view's camera shows it, and runs a tick"
+    } else {
+        "Step: runs a tick of the game's simulation"
+    };
+    let step = ui.add_enabled_ui(stopped || paused, |ui| icon_button(ui, Icon::Step, false));
+    let step = (step.inner)
+        .on_hover_text(tip)
+        .on_disabled_hover_text("Pause first: a step runs a tick of a paused game");
+    if step.clicked() {
+        clicked = Some(Clicked::Step);
     }
     clicked
 }
@@ -495,10 +542,14 @@ enum Icon {
     Colliders,
     /// A triangle pointing right, as a player's.
     Play,
+    /// Two bars, as a player's.
+    Pause,
     /// A ball falling onto the ground, smaller where it was.
     Simulate,
     /// A square, as a player's.
     Stop,
+    /// A triangle pointing right against a bar, as a player's skip.
+    Step,
     /// A chevron pointing left, toward the grip.
     Fold,
     /// A chevron pointing right, away from the grip.
@@ -589,6 +640,17 @@ impl Icon {
                 painter.circle_stroke(at(10.5, 10.5), 4.5 * scale, line);
             }
             Self::Play => triangle([at(3.5, 2.0), at(3.5, 14.0), at(14.0, 8.0)]),
+            Self::Pause => {
+                for x in [3.5, 9.5] {
+                    let bar = Rect::from_min_max(at(x, 2.5), at(x + 3.0, 13.5));
+                    painter.rect_filled(bar, 1.0, color);
+                }
+            }
+            Self::Step => {
+                triangle([at(2.5, 2.5), at(2.5, 13.5), at(10.5, 8.0)]);
+                let bar = Rect::from_min_max(at(11.0, 2.5), at(13.5, 13.5));
+                painter.rect_filled(bar, 1.0, color);
+            }
             Self::Simulate => {
                 painter.line_segment([at(1.0, 14.5), at(15.0, 14.5)], line);
                 painter.circle_filled(at(10.5, 9.5), 3.5 * scale, color);
@@ -1052,6 +1114,93 @@ mod tests {
         );
         let shown = show_toolbar(&ctx, &mut toolbar, view, Vec::new());
         assert_eq!(shown, grip + by);
+    }
+
+    /// What a click of the title bar's control `i`, of Play, Simulate, Stop and Step, asks, as
+    /// `current` and `paused` have them: a pass each of the pointer moving onto it, pressing and
+    /// letting go, the controls laid out from (10, 10).
+    fn click_control(current: Mode, paused: bool, i: usize) -> Option<Clicked> {
+        let ctx = egui::Context::default();
+        let spacing = ctx.global_style().spacing.clone();
+        let width = ICON + 2.0 * spacing.button_padding.x;
+        let height = (ICON + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y);
+        let across = i as f32 * (width + spacing.item_spacing.x) + width / 2.0;
+        let at = pos2(10.0 + across, 10.0 + height / 2.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut clicked = None;
+        for event in [egui::Event::PointerMoved(at), button(true), button(false)] {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 100.0))),
+                events: vec![event],
+                ..RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let place = Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, height));
+                let row = UiBuilder::new()
+                    .max_rect(place)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center));
+                let shown = ui.scope_builder(row, |ui| show_run(ui, current, paused));
+                clicked = clicked.or(shown.inner);
+            });
+            output.textures_delta.clear();
+        }
+        clicked
+    }
+
+    /// The title bar's controls, as other editors' are: stopped, Play and Simulate play the game,
+    /// Stop is off and Step steps it; playing, Play pauses it, Simulate switches between the
+    /// cameras, Stop stops it and Step is off; and paused, Play resumes it and Step steps it.
+    #[test]
+    fn the_title_bars_controls_play_pause_stop_and_step_as_the_game_runs() {
+        use Clicked::{Pause, Resume, Step, To};
+        let stopped = [
+            Some(To(Mode::Play)),
+            Some(To(Mode::Simulate)),
+            None,
+            Some(Step),
+        ];
+        for (current, paused, expected) in [
+            (Mode::Edit, false, stopped),
+            (Mode::Edit, true, stopped),
+            (
+                Mode::Play,
+                false,
+                [
+                    Some(Pause),
+                    Some(To(Mode::Simulate)),
+                    Some(To(Mode::Edit)),
+                    None,
+                ],
+            ),
+            (
+                Mode::Play,
+                true,
+                [
+                    Some(Resume),
+                    Some(To(Mode::Simulate)),
+                    Some(To(Mode::Edit)),
+                    Some(Step),
+                ],
+            ),
+            (
+                Mode::Simulate,
+                false,
+                [
+                    Some(Pause),
+                    Some(To(Mode::Play)),
+                    Some(To(Mode::Edit)),
+                    None,
+                ],
+            ),
+        ] {
+            let clicked = [0, 1, 2, 3].map(|i| click_control(current, paused, i));
+            assert_eq!(clicked, expected, "{current:?}, paused {paused}");
+        }
     }
 
     /// Where the toolbar is and whether it's folded read back as they were, and what of a file

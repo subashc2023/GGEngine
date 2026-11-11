@@ -268,6 +268,8 @@ pub struct App {
     /// Where panels dock as they first show, in the order the app gave them.
     #[cfg(feature = "dev")]
     docked: Vec<(&'static str, Docked)>,
+    /// The window's size as it opens, in points, as [`window_size`](Self::window_size) gives it.
+    window_size: [u32; 2],
     /// What the world's IDs are drawn from, rather than a seed drawn at random.
     seed: Option<u64>,
     /// How far apart headless frames are, rather than a tick each.
@@ -304,6 +306,7 @@ impl App {
             view_panel: None,
             #[cfg(feature = "dev")]
             docked: Vec::new(),
+            window_size: [1280, 720],
             seed: None,
             headless_step: None,
             root: None,
@@ -513,19 +516,30 @@ impl App {
         }
     }
 
+    /// Opens the window `width` by `height` points inside its frame, rather than 1280 by 720, or
+    /// as large as the monitor it opens on where that's smaller. Headless and embedded runs, which
+    /// have no window, ignore it.
+    #[must_use]
+    pub fn window_size(self, width: u32, height: u32) -> Self {
+        Self {
+            window_size: [width, height],
+            ..self
+        }
+    }
+
     /// Docks panel `panel` where `docked` says as it first shows in a layout that doesn't hold
     /// it: on the app's first run, after the View menu's Reset layout, and with a layout saved
-    /// before the app had the panel. Beside the game's view, a panel takes a quarter of the view's
-    /// panel, and beside another panel, half of it; tabbed with another, it leaves the tab that
-    /// showed showing. Panels that first show in the same frame dock in the order the app gives
-    /// them, whatever order the layers show them in. A target the layout doesn't hold yet stands
-    /// for its own target, if the app gives it one, and so on: a panel that shows before its
-    /// target docks beside the target's target, where it stays once the target shows. A panel
-    /// whose target floats, or comes to none, floats, as the panels the app doesn't dock do. A
-    /// build without `dev`, which has no UI, changes nothing.
+    /// before the app had the panel. Beside another panel, it takes the share of that panel's
+    /// place that `docked` gives; tabbed with another, it leaves the tab that showed showing.
+    /// Panels that first show in the same frame dock in the order the app gives them, whatever
+    /// order the layers show them in. A target the layout doesn't hold yet stands for its own
+    /// target, if the app gives it one, and so on: a panel that shows before its target docks
+    /// beside the target's target, where it stays once the target shows. A panel whose target
+    /// floats, or comes to none, floats, as the panels the app doesn't dock do. A build without
+    /// `dev`, which has no UI, changes nothing.
     ///
     /// Three of the editor's panels dock around its view, the Inspector taking a quarter of the
-    /// window, Entities a quarter of the rest, and Performance below the Inspector:
+    /// window, Entities a fifth of the rest, and Performance the bottom half of the Inspector's:
     ///
     /// ```
     /// use gg_engine::{App, Docked};
@@ -533,9 +547,9 @@ impl App {
     /// let app = App::new("Editor")
     ///     .custom_title_bar()
     ///     .view_panel("Viewport")
-    ///     .dock("Inspector", Docked::RightOf("Viewport"))
-    ///     .dock("Entities", Docked::LeftOf("Viewport"))
-    ///     .dock("Performance", Docked::Below("Inspector"));
+    ///     .dock("Inspector", Docked::RightOf("Viewport", 0.25))
+    ///     .dock("Entities", Docked::LeftOf("Viewport", 0.2))
+    ///     .dock("Performance", Docked::Below("Inspector", 0.5));
     /// ```
     #[must_use]
     pub fn dock(self, panel: &'static str, docked: Docked) -> Self {

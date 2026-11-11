@@ -308,11 +308,13 @@ impl Layer for PerfPanel {}
 #[cfg(feature = "dev")]
 type Time = fn(&Sample) -> u64;
 
-/// A part of a frame the panel shows: its name, how it's read from a sample, and its color in the
-/// graph, on a light background and on a dark one.
+/// A part of a frame the panel shows: its name, short, so that the times beside it fit a narrow
+/// panel, what it is, which its name's tooltip says, how it's read from a sample, and its color in
+/// the graph, on a light background and on a dark one.
 #[cfg(feature = "dev")]
 struct Part {
     name: &'static str,
+    tip: &'static str,
     time: Time,
     light: egui::Color32,
     dark: egui::Color32,
@@ -338,30 +340,35 @@ impl Part {
 const PARTS: [Part; 5] = [
     Part {
         name: "Ticks",
+        tip: "The simulation's ticks, on the main thread",
         time: |s| s.ticks,
         light: egui::Color32::from_rgb(0x1b, 0xaf, 0x7a),
         dark: egui::Color32::from_rgb(0x19, 0x9e, 0x70),
     },
     Part {
         name: "UI",
+        tip: "The layers' UI and egui's, and tessellating it, on the main thread",
         time: |s| s.ui,
         light: egui::Color32::from_rgb(0xeb, 0x68, 0x34),
         dark: egui::Color32::from_rgb(0xd9, 0x59, 0x26),
     },
     Part {
         name: "Update",
+        tip: "The layers' updates and drawing the world, on the main thread",
         time: |s| s.update,
         light: egui::Color32::from_rgb(0x2a, 0x78, 0xd6),
         dark: egui::Color32::from_rgb(0x39, 0x87, 0xe5),
     },
     Part {
         name: "Other",
+        tip: "The rest of the main thread's frame: the OS's events, the gamepads, torn-off windows",
         time: Sample::other,
         light: egui::Color32::from_rgb(0xed, 0xa1, 0x00),
         dark: egui::Color32::from_rgb(0xc9, 0x85, 0x00),
     },
     Part {
-        name: "Waiting for rendering",
+        name: "Handoff",
+        tip: "The main thread waiting for the render thread to finish the frame before",
         time: |s| s.handoff,
         light: egui::Color32::from_rgb(0xc3, 0xc2, 0xb7),
         dark: egui::Color32::from_rgb(0x38, 0x38, 0x35),
@@ -369,14 +376,30 @@ const PARTS: [Part; 5] = [
 ];
 
 /// What the render thread spent on the frame before each frame, beside it, and the GPU on a frame
-/// two before that: the panel lists them, but the graph doesn't stack them on the main thread's
-/// parts, which they overlap.
+/// two before that, each with its name and what it is: the panel lists them, but the graph
+/// doesn't stack them on the main thread's parts, which they overlap.
 #[cfg(feature = "dev")]
-const RENDERING: [(&str, Time); 3] = [
-    ("Render thread: rendering", |s| s.render),
-    ("Render thread: waiting for the GPU and display", |s| s.wait),
-    ("GPU: the frame's passes", |s| s.gpu),
+const RENDERING: [(&str, &str, Time); 3] = [
+    (
+        "Render",
+        "The render thread rendering the frame before, but its waits",
+        |s| s.render,
+    ),
+    (
+        "Render wait",
+        "The render thread waiting for the GPU and the display",
+        |s| s.wait,
+    ),
+    (
+        "GPU",
+        "The GPU's time on the frame's passes, two frames before",
+        |s| s.gpu,
+    ),
 ];
+
+/// What the frame's row is, which its name's tooltip says.
+#[cfg(feature = "dev")]
+const FRAME_TIP: &str = "The whole frame on the main thread, from its start to the next's";
 
 /// The sum and the maximum of some times.
 #[cfg(feature = "dev")]
@@ -415,7 +438,7 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         for (total, part) in parts.iter_mut().zip(&PARTS) {
             total.add((part.time)(sample));
         }
-        for (total, (_, time)) in rendering.iter_mut().zip(&RENDERING) {
+        for (total, (.., time)) in rendering.iter_mut().zip(&RENDERING) {
             total.add(time(sample));
         }
     }
@@ -430,23 +453,24 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         .striped(true)
         .show(ui, |ui| {
             ui.label("");
-            ui.label(format!("Last {frames} frames"));
+            ui.label(format!("{frames} frames"))
+                .on_hover_text("The frames of the last second");
             ui.label("Mean");
             ui.label("Max");
             ui.end_row();
-            let row = |ui: &mut egui::Ui, color, name: &str, total: Total| {
-                row_name(ui, color, name);
+            let row = |ui: &mut egui::Ui, color, (name, tip): (&str, &str), total: Total| {
+                row_name(ui, color, name).on_hover_text(tip);
                 ui.label(millis_text(total.sum as f64 / frames as f64));
                 ui.label(millis_text(total.max as f64));
                 ui.end_row();
             };
-            row(ui, None, "Frame", frame);
+            row(ui, None, ("Frame", FRAME_TIP), frame);
             for (part, total) in PARTS.iter().zip(parts) {
                 let color = part.color(ui.visuals());
-                row(ui, Some(color), part.name, total);
+                row(ui, Some(color), (part.name, part.tip), total);
             }
-            for ((name, _), total) in RENDERING.iter().zip(rendering) {
-                row(ui, None, name, total);
+            for (&(name, tip, _), total) in RENDERING.iter().zip(rendering) {
+                row(ui, None, (name, tip), total);
             }
         });
 }
@@ -591,24 +615,25 @@ fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
             let color = part.color(ui.visuals());
             row(ui, Some(color), part.name, (part.time)(sample));
         }
-        for (name, time) in &RENDERING {
+        for (name, _, time) in &RENDERING {
             row(ui, None, name, time(sample));
         }
     });
     ui.label(draws_text(sample));
 }
 
-/// A row's first two cells: a square of `color`, its part's in the graph, and its name; a row the
-/// graph doesn't stack, such as the frame's, the parts summed up, has no square.
+/// A row's first two cells: a square of `color`, its part's in the graph, and its name, whose
+/// label it returns; a row the graph doesn't stack, such as the frame's, the parts summed up, has
+/// no square.
 #[cfg(feature = "dev")]
-fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) {
+fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) -> egui::Response {
     if let Some(color) = color {
         let (square, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
         ui.painter().rect_filled(square, 2.0, color);
     } else {
         ui.label("");
     }
-    ui.label(name);
+    ui.label(name)
 }
 
 /// `nanos` in milliseconds, to the microsecond, as the panel shows it: after a figure space for

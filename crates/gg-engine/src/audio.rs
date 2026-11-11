@@ -2,7 +2,7 @@
 //! queue them in the world and layers play them as they update, each panned and faded as the game's
 //! view hears it: by where it shows in a view without perspective, and by its direction and
 //! distance from a camera with perspective. Music decodes as it plays, which layers play one at a
-//! time, looping.
+//! time, looping. What plays follows how the run plays, as the tool API pauses and stops it.
 //! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
 //! ARCHITECTURE.md's Audio says.
 
@@ -17,6 +17,7 @@ use gg_core::math::libm::log10f;
 use gg_core::math::{Mat4, Vec3};
 use gg_core::{Error, Result};
 use gg_renderer::{Projection, Viewpoint};
+use kira::backend::Backend;
 use kira::backend::cpal::CpalBackend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::streaming::{Decoder, StreamingSoundData, StreamingSoundHandle};
@@ -516,21 +517,38 @@ where
 /// A play of music, as kira's handle to it.
 type MusicHandle = StreamingSoundHandle<FromFileError>;
 
+/// How the run plays, which what plays follows: playing; paused, which holds what plays where it
+/// is and starts no sound; or stopped, which stops what plays and starts nothing, the music the
+/// layers last had play starting afresh, from its start, as the run plays again. Only development
+/// builds, whose tool API pauses and stops runs, pause or stop it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "dev"),
+    allow(dead_code, reason = "only development builds pause and stop")
+)]
+pub(crate) enum Playback {
+    #[default]
+    Playing,
+    Paused,
+    Stopped,
+}
+
 /// The run's sounds and music: those the layers loaded, by their handles, kira's output, which
-/// plays them in a run that plays sound, where the sounds playing from a place are, which each
-/// frame pans and fades as the game's view hears them, the music playing, and the buses' volumes.
-pub(crate) struct Audio {
-    output: Output,
+/// plays them in a run that plays sound, on cpal's backend but in tests, the sounds playing, and
+/// where those from a place are, which each frame pans and fades as the game's view hears them,
+/// the music playing, the buses' volumes, and how the run plays.
+pub(crate) struct Audio<B: Backend = CpalBackend> {
+    output: Output<B>,
     /// Each sound loaded, by its index: its name, and what it holds, which each play shares.
     sounds: Vec<(Box<str>, StaticSoundData)>,
     /// Each music loaded, by its index: its name, and its file as it was read, which each play
     /// decodes.
     music: Vec<(Box<str>, Encoded)>,
-    /// The sounds playing from a place, with where.
+    /// The sounds playing, with where from, so that a stop stops them all.
     playing: Vec<(StaticSoundHandle, Spot)>,
-    /// The music layers last had play, if any, with its play, while the output's open and it
-    /// started.
-    now_playing: Option<(Music, Option<MusicHandle>)>,
+    /// The music layers last had play, if any, with the fade it started with, and its play, while
+    /// the output's open and it started, which it hasn't while the run's stopped.
+    now_playing: Option<(Music, Duration, Option<MusicHandle>)>,
     /// Each bus's volume as layers last set it, in [`Bus`]'s order, which the output takes as it
     /// opens.
     volumes: [f32; 3],
@@ -541,12 +559,14 @@ pub(crate) struct Audio {
     queued: Vec<(Sound, Spot)>,
     /// Whether kira's mixer was full as the last sound started, so that it warns as it fills.
     full: bool,
+    /// How the run plays, as [`follow`](Self::follow) was last told.
+    playback: Playback,
 }
 
-impl Default for Audio {
+impl<B: Backend> Default for Audio<B> {
     fn default() -> Self {
         Self {
-            output: Output::default(),
+            output: Output::Silent,
             sounds: Vec::new(),
             music: Vec::new(),
             playing: Vec::new(),
@@ -555,6 +575,7 @@ impl Default for Audio {
             listener: None,
             queued: Vec::new(),
             full: false,
+            playback: Playback::default(),
         }
     }
 }
@@ -590,24 +611,52 @@ impl Listener {
 }
 
 /// kira's output, which plays a run's sounds and music.
-#[derive(Default)]
-enum Output {
+enum Output<B: Backend> {
     /// None: the run plays no sound, as headless runs, replays and tests don't, or its output
     /// couldn't be opened.
-    #[default]
     Silent,
     /// None yet: the run plays sound from its first sound or music loaded, which opens it.
     Unopened,
-    /// Open, its mixer on cpal's audio thread.
-    Open(Box<Mixer>),
+    /// Open, its mixer on the backend's audio thread.
+    Open(Box<Mixer<B>>),
 }
 
 /// kira's output, open: its manager, and the tracks under its main track that the music and the
 /// sounds play on, the three of them the buses.
-struct Mixer {
-    manager: AudioManager<CpalBackend>,
+struct Mixer<B: Backend> {
+    manager: AudioManager<B>,
     music: TrackHandle,
     sounds: TrackHandle,
+}
+
+impl<B: Backend> Mixer<B> {
+    /// The settings of a manager whose main track, the main bus, is at its volume in `volumes`,
+    /// in [`Bus`]'s order.
+    fn settings(volumes: [f32; 3]) -> AudioManagerSettings<B>
+    where
+        B::Settings: Default,
+    {
+        AudioManagerSettings {
+            main_track_builder: MainTrackBuilder::new().volume(decibels(volumes[0])),
+            ..AudioManagerSettings::default()
+        }
+    }
+
+    /// The mixer of `manager`, made with [`settings`](Self::settings), with a track under its main
+    /// track for the music and one for the sounds, each bus at its volume in `volumes`.
+    fn new(mut manager: AudioManager<B>, volumes: [f32; 3]) -> Self {
+        let [_, music, sounds] = volumes.map(decibels);
+        let mut track = |volume: Decibels| {
+            let track = manager.add_sub_track(TrackBuilder::new().volume(volume));
+            track.expect("two of the 128 tracks kira's mixer takes")
+        };
+        let (music, sounds) = (track(music), track(sounds));
+        Self {
+            manager,
+            music,
+            sounds,
+        }
+    }
 }
 
 impl Audio {
@@ -619,26 +668,70 @@ impl Audio {
         }
     }
 
-    /// Opens the output, as the first sound or music is added to a run that plays sound, as
-    /// [`open`] says.
-    fn adding(&mut self) {
+    /// Opens the output of a run that plays sound, as [`open`] says, if it isn't yet: as the first
+    /// sound or music is added.
+    pub(crate) fn open(&mut self) {
         if matches!(self.output, Output::Unopened) {
             self.output = open(self.volumes);
         }
     }
 
-    /// Adds `data`, sound `name`'s, opening the output as the first sound or music is added to a
-    /// run that plays sound, as [`open`] says.
+    /// Has the sounds playing from a place pan and fade as the view of the frame being handed off
+    /// hears them, seeing from `viewpoint`, `size` pixels across and down, while it has an area,
+    /// following each on an entity of `world` that's alive to where the latest tick left it, as
+    /// [`Place::On`] says; and forgets those that have ended. Warns `audio.output_failed` of what
+    /// went wrong with the output since, which kira opens again on the system's default output
+    /// device, as it does as that changes, and `audio.music_failed` of what went wrong decoding
+    /// the music playing, which stops it. It allocates nothing unless something went wrong.
+    pub(crate) fn hear_from(&mut self, viewpoint: &Viewpoint, size: [u32; 2], world: &World) {
+        let Output::Open(mixer) = &mut self.output else {
+            return;
+        };
+        while let Some(error) = mixer.manager.backend_mut().pop_error() {
+            warn!(
+                code = "audio.output_failed",
+                "The sound's output failed: {error}; it opens again on the default output device"
+            );
+        }
+        if let Some((music, _, Some(handle))) = &mut self.now_playing {
+            while let Some(error) = handle.pop_error() {
+                let name = &*self.music[music.0 as usize].0;
+                warn!(
+                    code = "audio.music_failed",
+                    music = name,
+                    "Music {name:?} failed as it played: {error}; it stops"
+                );
+            }
+        }
+        if let Some(listener) = Listener::new(viewpoint, size) {
+            self.listener = Some(listener);
+        }
+        let listener = self.listener.as_ref();
+        self.playing.retain_mut(|(handle, spot)| {
+            if handle.state() == PlaybackState::Stopped {
+                return false;
+            }
+            if !matches!(spot, Spot::Nowhere) {
+                let (panning, volume) = heard(listener, spot.follow(world));
+                // Over kira's default 10 ms, rather than at once, which would click.
+                handle.set_panning(panning, Tween::default());
+                handle.set_volume(volume, Tween::default());
+            }
+            true
+        });
+    }
+}
+
+impl<B: Backend> Audio<B> {
+    /// Adds `data`, sound `name`'s.
     pub(crate) fn add(&mut self, name: &str, data: StaticSoundData) -> Sound {
-        self.adding();
         let index = u32::try_from(self.sounds.len()).expect("fewer than 2³² sounds");
         self.sounds.push((name.into(), data));
         Sound(index)
     }
 
-    /// Adds `encoded`, music `name`'s, opening the output as [`add`](Self::add) does.
+    /// Adds `encoded`, music `name`'s.
     pub(crate) fn add_music(&mut self, name: &str, encoded: Encoded) -> Music {
-        self.adding();
         let index = u32::try_from(self.music.len()).expect("fewer than 2³² pieces of music");
         self.music.push((name.into(), encoded));
         Music(index)
@@ -652,21 +745,68 @@ impl Audio {
     }
 
     /// Puts `encoded` in place of what `music` holds, which its plays take from then on: one
-    /// playing crossfades to it over [`RELOAD_FADE`], from where it was, or as far into its loop.
+    /// playing crossfades to it over [`RELOAD_FADE`], from where it was, or as far into its loop;
+    /// while the run's stopped, none plays, and the next play starts it from its start.
     #[cfg(feature = "dev")]
     pub(crate) fn replace_music(&mut self, music: Music, encoded: Encoded) {
         self.music[music.0 as usize].1 = encoded;
+        let stopped = self.playback == Playback::Stopped;
         let playing = self.now_playing.as_mut();
-        let Some((_, handle)) = playing.filter(|(playing, _)| *playing == music) else {
+        let Some((_, fade, handle)) = playing.filter(|(playing, ..)| *playing == music && !stopped)
+        else {
             return;
         };
+        let fade = *fade;
         let at = handle.take().map_or(0.0, |mut handle| {
             let at = handle.position();
             handle.stop(tween(RELOAD_FADE));
             at
         });
         let handle = self.start_music(music, at, RELOAD_FADE);
-        self.now_playing = Some((music, handle));
+        self.now_playing = Some((music, fade, handle));
+    }
+
+    /// Has what plays follow how the run plays, as `playback` says it now does, as [`Playback`]
+    /// says, at once but for kira's 10 ms against a click: a run paused holds the music and the
+    /// sounds, a run stopped stops them, and a run played after a stop starts the music the layers
+    /// last had play from its start, fading in as it did as they had it play.
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(dead_code, reason = "only development builds pause and stop")
+    )]
+    pub(crate) fn follow(&mut self, playback: Playback) {
+        let was = mem::replace(&mut self.playback, playback);
+        if was == playback {
+            return;
+        }
+        let Output::Open(mixer) = &mut self.output else {
+            return;
+        };
+        let quickest = tween(Duration::ZERO);
+        if playback == Playback::Stopped {
+            for (mut handle, _) in self.playing.drain(..) {
+                handle.stop(quickest);
+            }
+            if let Some((_, _, handle)) = &mut self.now_playing
+                && let Some(mut handle) = handle.take()
+            {
+                handle.stop(quickest);
+            }
+        }
+        // Paused, the tracks hold what's on them, and what starts on them, until they resume.
+        if playback == Playback::Paused {
+            mixer.music.pause(quickest);
+            mixer.sounds.pause(quickest);
+        } else if was == Playback::Paused {
+            mixer.music.resume(quickest);
+            mixer.sounds.resume(quickest);
+        }
+        if was == Playback::Stopped
+            && let Some((music, fade, None)) = self.now_playing
+        {
+            let handle = self.start_music(music, 0.0, fade);
+            self.now_playing = Some((music, fade, handle));
+        }
     }
 
     /// How many frames `sound` holds, at its own rate.
@@ -740,8 +880,9 @@ impl Audio {
     }
 
     /// Starts `sound` from `spot`, following it in `world`, panned and faded as the listener hears
-    /// it there, if the output's open: past the 128 sounds kira's mixer plays at once, it's left
-    /// out, warning `audio.full` as the mixer fills.
+    /// it there, if the output's open and the run plays, rather than being paused or stopped: past
+    /// the 128 sounds kira's mixer plays at once, it's left out, warning `audio.full` as the mixer
+    /// fills.
     fn start(&mut self, sound: Sound, mut spot: Spot, world: &World) {
         let loaded = self.sounds.len();
         let Some((name, data)) = self.sounds.get(sound.0 as usize) else {
@@ -753,14 +894,15 @@ impl Audio {
         let Output::Open(mixer) = &mut self.output else {
             return;
         };
+        if self.playback != Playback::Playing {
+            return;
+        }
         let (panning, volume) = heard(self.listener.as_ref(), spot.follow(world));
         match mixer.sounds.play(data.panning(panning).volume(volume)) {
             Ok(handle) => {
                 self.full = false;
                 debug!(sound = &**name, "Sound started");
-                if !matches!(spot, Spot::Nowhere) {
-                    self.playing.push((handle, spot));
-                }
+                self.playing.push((handle, spot));
             }
             // A static sound always makes one: the mixer is full.
             Err(_) => {
@@ -777,7 +919,7 @@ impl Audio {
     }
 
     /// Plays `music`, or none, in place of the music playing, fading over `fade`, as
-    /// [`Context::play_music`] says.
+    /// [`Context::play_music`] says: while the run's stopped, it starts at the next play.
     ///
     /// # Panics
     ///
@@ -796,16 +938,24 @@ impl Audio {
         if self.music_playing() == music {
             return;
         }
-        if let Some((_, Some(mut handle))) = self.now_playing.take() {
+        if let Some((_, _, Some(mut handle))) = self.now_playing.take() {
             handle.stop(tween(fade));
         }
-        let started = music.map(|music| (music, self.start_music(music, 0.0, fade)));
+        let stopped = self.playback == Playback::Stopped;
+        let started = music.map(|music| {
+            let handle = if stopped {
+                None
+            } else {
+                self.start_music(music, 0.0, fade)
+            };
+            (music, fade, handle)
+        });
         self.now_playing = started;
     }
 
     /// The music layers last had play, if any.
     pub(crate) fn music_playing(&self) -> Option<Music> {
-        self.now_playing.as_ref().map(|&(music, _)| music)
+        self.now_playing.as_ref().map(|&(music, ..)| music)
     }
 
     /// Starts `music` from `at` seconds into it, or as far into its loop, fading in over `fade`, on
@@ -872,49 +1022,6 @@ impl Audio {
     pub(crate) fn volume(&self, bus: Bus) -> f32 {
         self.volumes[bus as usize]
     }
-
-    /// Has the sounds playing from a place pan and fade as the view of the frame being handed off
-    /// hears them, seeing from `viewpoint`, `size` pixels across and down, while it has an area,
-    /// following each on an entity of `world` that's alive to where the latest tick left it, as
-    /// [`Place::On`] says; and forgets those that have ended. Warns `audio.output_failed` of what
-    /// went wrong with the output since, which kira opens again on the system's default output
-    /// device, as it does as that changes, and `audio.music_failed` of what went wrong decoding
-    /// the music playing, which stops it. It allocates nothing unless something went wrong.
-    pub(crate) fn hear_from(&mut self, viewpoint: &Viewpoint, size: [u32; 2], world: &World) {
-        let Output::Open(mixer) = &mut self.output else {
-            return;
-        };
-        while let Some(error) = mixer.manager.backend_mut().pop_error() {
-            warn!(
-                code = "audio.output_failed",
-                "The sound's output failed: {error}; it opens again on the default output device"
-            );
-        }
-        if let Some((music, Some(handle))) = &mut self.now_playing {
-            while let Some(error) = handle.pop_error() {
-                let name = &*self.music[music.0 as usize].0;
-                warn!(
-                    code = "audio.music_failed",
-                    music = name,
-                    "Music {name:?} failed as it played: {error}; it stops"
-                );
-            }
-        }
-        if let Some(listener) = Listener::new(viewpoint, size) {
-            self.listener = Some(listener);
-        }
-        let listener = self.listener.as_ref();
-        self.playing.retain_mut(|(handle, spot)| {
-            if handle.state() == PlaybackState::Stopped {
-                return false;
-            }
-            let (panning, volume) = heard(listener, spot.follow(world));
-            // Over kira's default 10 ms, rather than at once, which would click.
-            handle.set_panning(panning, Tween::default());
-            handle.set_volume(volume, Tween::default());
-            true
-        });
-    }
 }
 
 /// Opens kira's output on the system's default output device, its mixer on cpal's audio thread,
@@ -922,31 +1029,18 @@ impl Audio {
 /// in `volumes`, in [`Bus`]'s order; or, if it can't, as on a machine without one, warns
 /// `audio.no_output` with why, and the run plays no sound. Opened, it logs `audio.opened`, with how
 /// long that took, at the debug level.
-fn open(volumes: [f32; 3]) -> Output {
+fn open(volumes: [f32; 3]) -> Output<CpalBackend> {
     let _zone = gg_core::zone!("open the sound's output");
     let started = std::time::Instant::now();
-    let [main, music, sounds] = volumes.map(decibels);
-    let settings = AudioManagerSettings {
-        main_track_builder: MainTrackBuilder::new().volume(main),
-        ..AudioManagerSettings::default()
-    };
-    match AudioManager::<CpalBackend>::new(settings) {
-        Ok(mut manager) => {
-            let mut track = |volume: Decibels| {
-                let track = manager.add_sub_track(TrackBuilder::new().volume(volume));
-                track.expect("two of the 128 tracks kira's mixer takes")
-            };
-            let (music, sounds) = (track(music), track(sounds));
+    match AudioManager::<CpalBackend>::new(Mixer::settings(volumes)) {
+        Ok(manager) => {
+            let mixer = Mixer::new(manager, volumes);
             debug!(
                 code = "audio.opened",
                 ms = crate::perf::millis(started.elapsed()),
                 "The sound's output opened"
             );
-            Output::Open(Box::new(Mixer {
-                manager,
-                music,
-                sounds,
-            }))
+            Output::Open(Box::new(mixer))
         }
         Err(error) => {
             warn!(
@@ -1025,6 +1119,8 @@ fn heard(listener: Option<&Listener>, at: Option<Vec3>) -> (Panning, Decibels) {
 pub(crate) mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use kira::backend::mock::{MockBackend, MockBackendSettings};
+    use kira::track::TrackPlaybackState;
     use symphonia::core::codecs::CodecInfo;
     use symphonia::core::codecs::audio::{AudioCodecParameters, FinalizeResult};
     use symphonia::core::packet::PacketRef;
@@ -1176,7 +1272,7 @@ pub(crate) mod tests {
     /// keep their memory, so that queuing as many again allocates nothing.
     #[test]
     fn a_worlds_queue_empties_as_its_sounds_play() {
-        let mut audio = Audio::default();
+        let mut audio: Audio = Audio::default();
         let sound = audio.add("chime", silence(480));
         assert_eq!(audio.frames(sound), 480);
         let mut world = World::default();
@@ -1325,7 +1421,7 @@ pub(crate) mod tests {
     /// keeps them as well.
     #[test]
     fn music_plays_one_at_a_time_and_buses_keep_their_volumes() {
-        let mut audio = Audio::default();
+        let mut audio: Audio = Audio::default();
         let encoded = |frames| Encoded {
             bytes: Arc::from(wav(&vec![0; frames])),
             frames,
@@ -1353,6 +1449,107 @@ pub(crate) mod tests {
         assert_eq!(audio.volume(Bus::Music), 0.25);
         assert_eq!(audio.volume(Bus::Sounds), 0.0);
         assert_eq!(audio.volume(Bus::Main), 1.0);
+    }
+
+    /// Audio whose output is kira's mock, which plays only as [`render`] renders it, at 12,800
+    /// frames a second, so that each of its renders of 128 frames takes 10 ms, kira's quickest
+    /// fade.
+    fn mocked() -> Audio<MockBackend> {
+        let volumes = [1.0; 3];
+        let settings = AudioManagerSettings {
+            backend_settings: MockBackendSettings {
+                sample_rate: 12_800,
+            },
+            ..Mixer::settings(volumes)
+        };
+        let manager = AudioManager::new(settings).expect("a mock output");
+        Audio {
+            output: Output::Open(Box::new(Mixer::new(manager, volumes))),
+            ..Audio::default()
+        }
+    }
+
+    /// Renders `audio`'s mock output for 30 ms, as its audio thread would: long enough for what
+    /// it was told to take hold, its quickest fades to end and what stopped to go.
+    fn render(audio: &mut Audio<MockBackend>) {
+        let Output::Open(mixer) = &mut audio.output else {
+            panic!("a mock output");
+        };
+        for _ in 0..3 {
+            let backend = mixer.manager.backend_mut();
+            backend.on_start_processing();
+            backend.process();
+        }
+    }
+
+    /// The plays on the music's track and on the sounds', and whether each track holds them
+    /// paused.
+    fn tracks(audio: &Audio<MockBackend>) -> [(usize, bool); 2] {
+        let Output::Open(mixer) = &audio.output else {
+            panic!("a mock output");
+        };
+        [&mixer.music, &mixer.sounds].map(|track| {
+            (
+                track.num_sounds(),
+                track.state() == TrackPlaybackState::Paused,
+            )
+        })
+    }
+
+    /// What plays follows how the run plays: stopped, nothing starts, though the music the layers
+    /// had play is still theirs; played, that music starts, and sounds do; paused, the tracks hold
+    /// what plays, and no sound starts; and stopped again, what plays stops, the next play starting
+    /// the music again from its start.
+    #[test]
+    fn what_plays_follows_the_run_as_it_plays_pauses_and_stops() {
+        let mut audio = mocked();
+        // A second long, a hundred renders.
+        let sound = audio.add("chime", silence(48_000));
+        let music = audio.add_music(
+            "theme",
+            Encoded {
+                bytes: Arc::from(wav(&vec![0; 4_800])),
+                frames: 4_800,
+            },
+        );
+        let world = World::default();
+        let sounds = |audio: &mut Audio<MockBackend>| {
+            audio.play(sound, Place::Nowhere, &world);
+            audio.play(sound, Place::At(Vec3::X), &world);
+        };
+        audio.follow(Playback::Stopped);
+        audio.play_music(Some(music), Duration::from_secs(1));
+        sounds(&mut audio);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(0, false), (0, false)], "stopped");
+        assert_eq!(audio.music_playing(), Some(music));
+        audio.follow(Playback::Playing);
+        sounds(&mut audio);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(1, false), (2, false)], "played");
+        audio.follow(Playback::Paused);
+        sounds(&mut audio);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(1, true), (2, true)], "paused");
+        audio.follow(Playback::Playing);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(1, false), (2, false)], "resumed");
+        audio.follow(Playback::Stopped);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(0, false), (0, false)], "stopped again");
+        assert_eq!(audio.music_playing(), Some(music));
+        audio.follow(Playback::Playing);
+        render(&mut audio);
+        assert_eq!(tracks(&audio), [(1, false), (0, false)], "played again");
+        let Some((_, fade, Some(handle))) = &audio.now_playing else {
+            panic!("the music plays");
+        };
+        assert_eq!(*fade, Duration::from_secs(1), "as the layer had it play");
+        assert!(
+            handle.position() < 0.1,
+            "from its start: {} s",
+            handle.position()
+        );
     }
 
     /// A tick that rollback runs again plays only what its runs before didn't: a sound they played,

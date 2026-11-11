@@ -1816,7 +1816,8 @@ impl Context {
     /// Windowed and embedded runs play sound, as ARCHITECTURE.md's Audio says: the first sound
     /// loaded opens the system's default output device, so that a game without sounds opens none,
     /// and a run that can't open one plays none, warning `audio.no_output`. Headless runs, replays
-    /// and tests play none.
+    /// and tests play none. What plays follows how the run plays, as the tool API's `pause` and
+    /// `stop` leave it: paused, it holds where it is, and stopped, it stops.
     ///
     /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is more than
     /// 16 MiB, doesn't decode, or decodes to more than 2²⁴ frames, some 6 minutes at 48 kHz, which
@@ -1832,8 +1833,9 @@ impl Context {
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
         let data = audio::decode(name, path, &self.files)?;
-        // Before the add, which opens the output for the first sound, logging `audio.opened`.
+        // Before the output opens for the first sound, logging `audio.opened`.
         let ms = perf::millis(started.elapsed());
+        self.audio.open();
         let sound = self.audio.add(name, data);
         #[cfg(feature = "dev")]
         self.watch_sound(sound, name, path, read_at);
@@ -1854,7 +1856,8 @@ impl Context {
     /// [`add_sound`](Self::add_sound) says: as a layer's UI plays its sounds as it updates, panned
     /// and faded as the game's view hears it there, as [`Place`] says, following an entity of the
     /// world it's on. Ticks queue theirs in the world, with [`World::play_sound`]. Past the 128
-    /// sounds that play at once, it's left out, warning `audio.full`.
+    /// sounds that play at once, it's left out, warning `audio.full`; and while the run is paused
+    /// or stopped, as the tool API's `pause` and `stop` leave it, it isn't played.
     ///
     /// # Panics
     ///
@@ -1888,8 +1891,9 @@ impl Context {
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
         let encoded = audio::read_music(name, path, &self.files)?;
-        // Before the add, which opens the output as a sound's does.
+        // Before the output opens, as for a sound.
         let ms = perf::millis(started.elapsed());
+        self.audio.open();
         let music = self.audio.add_music(name, encoded);
         #[cfg(feature = "dev")]
         self.watch_music(music, name, path, read_at);
@@ -1910,7 +1914,9 @@ impl Context {
     /// `fade` as `music` fades in from its start, on the music's bus, or at once for a fade of
     /// none, which takes kira's 10 ms against a click. Playing the music playing goes on as it
     /// was, so that a layer can say each frame which plays. Ticks don't play music: a layer that
-    /// reads the world as it updates plays what the world calls for.
+    /// reads the world as it updates plays what the world calls for. While the run is stopped, as
+    /// `--stopped` and the tool API's `stop` leave it, it doesn't play; as the run plays, the
+    /// music the layers last had play starts from its start, fading in over the fade it was given.
     ///
     /// # Panics
     ///
@@ -1955,6 +1961,20 @@ impl Context {
     /// adding those it plays to `played`.
     pub(crate) fn play_queued_again(&mut self, played: &mut Vec<Sound>) {
         self.audio.play_queued_again(&mut self.world, played);
+    }
+
+    /// Has what plays follow how the run plays, as `stopped` and `paused` say it now does, as
+    /// [`Playback`](audio::Playback) says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn follow_playback(&mut self, stopped: bool, paused: bool) {
+        let playback = if stopped {
+            audio::Playback::Stopped
+        } else if paused {
+            audio::Playback::Paused
+        } else {
+            audio::Playback::Playing
+        };
+        self.audio.follow(playback);
     }
 
     /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types

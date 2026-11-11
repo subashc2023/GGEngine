@@ -14,14 +14,65 @@ use crate::EntityId;
 /// child of that row's entity, and the space below the rows a root.
 struct Moved(EntityId);
 
+/// The side of the header's glyphs, in points.
+const GLYPH: f32 = 12.0;
+
+/// A glyph of the header's buttons, painted, as neither Inter nor egui's fonts have it.
+#[derive(Clone, Copy)]
+enum Glyph {
+    /// A magnifier: a ring, and its handle, down to the right.
+    Find,
+    /// Two chevrons pointing up, one over the other, as rows folding away.
+    Collapse,
+}
+
+impl Glyph {
+    /// Paints it in `rect`, a square, in `color`.
+    fn paint(self, painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+        let scale = rect.width() / GLYPH;
+        // From the top left of a square 12 across.
+        let at = |x: f32, y: f32| rect.min + egui::vec2(x, y) * scale;
+        let line = egui::Stroke::new(1.5 * scale, color);
+        match self {
+            Self::Find => {
+                painter.circle_stroke(at(5.0, 5.0), 3.75 * scale, line);
+                let handle = egui::Stroke::new(2.0 * scale, color);
+                painter.line_segment([at(7.75, 7.75), at(11.0, 11.0)], handle);
+            }
+            Self::Collapse => {
+                for y in [1.5, 6.5] {
+                    let chevron = vec![at(2.0, y + 4.0), at(6.0, y), at(10.0, y + 4.0)];
+                    painter.add(egui::Shape::line(chevron, line));
+                }
+            }
+        }
+    }
+}
+
+/// A button showing `glyph`, square, as tall as one with text, so that the header leaves its
+/// component filter the room a text's padding across would take.
+fn glyph_button(ui: &mut egui::Ui, glyph: Glyph) -> egui::Response {
+    let atom = egui::Atom::paint(egui::Vec2::splat(GLYPH), move |ui, args| {
+        glyph.paint(ui.painter(), args.rect, args.fallback_text_color);
+    });
+    let size = egui::Vec2::splat(ui.spacing().interact_size.y);
+    let button = |ui: &mut egui::Ui| {
+        ui.spacing_mut().button_padding.x = ((size.x - GLYPH) / 2.0).max(0.0);
+        ui.add(egui::Button::new(atom).min_size(size))
+    };
+    ui.scope(button).inner
+}
+
 impl Inspector {
-    /// The Entities panel: a field that finds an entity by its ID or a part of its name, which
-    /// component the entities listed have, how many there are, beside the + menu and, for the
-    /// tree, Collapse All, and a row for each of them, or for each of the tree's, of which only
-    /// those in view are drawn; and below them, where they leave room, space whose click unpicks,
-    /// whose context menu makes a root, and which a row let go on makes a root. Its keys, while it
-    /// has them, frame, rename and delete the entity picked. The operations its menus, keys and
-    /// drags choose, and what the input of the window it draws in says of the edits, go in `pass`.
+    /// The Entities panel: a header of one row, and a row for each of the entities listed, or for
+    /// each of the tree's, of which only those in view are drawn; and below them, where they leave
+    /// room, space whose click unpicks, whose context menu makes a root, and which a row let go on
+    /// makes a root. The header has the magnifier, which opens the Find field in place of the
+    /// rest of it, as [`find_field`](Self::find_field) says; which component the entities listed
+    /// have, taking the room the rest leaves, its text cut short to fit; how many there are; and,
+    /// for the tree, Collapse All, and the + menu. Its keys, while it has them, frame, rename and
+    /// delete the entity picked. The operations its menus, keys and drags choose, and what the
+    /// input of the window it draws in says of the edits, go in `pass`.
     pub(super) fn entities(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, pass: &mut Pass) {
         pass.cues.read(ui.ctx());
         let (operations, saves) = (&mut pass.operations, &mut pass.saves);
@@ -33,28 +84,33 @@ impl Inspector {
         if let Some(waiting) = world.waiting() {
             ui.label(waiting);
         }
+        // Counted before the header picks a component, whose count the rows take below.
+        let counted = world.count(self.with.as_deref());
         ui.horizontal(|ui| {
-            ui.label("Find");
-            let hint = "an entity's ID or name";
-            let field = ui.add(egui::TextEdit::singleline(&mut self.find).hint_text(hint));
-            if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                self.not_found = self.find(world).err();
+            if self.finding {
+                self.find_field(world, ui);
+                return;
             }
+            let find = glyph_button(ui, Glyph::Find)
+                .on_hover_text("Find an entity by its ID or a part of its name");
+            if find.clicked() {
+                (self.finding, self.focus_find) = (true, true);
+            }
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            ui.with_layout(right, |ui| {
+                self.header(world, ui, operations);
+                if let Ok(count) = counted {
+                    ui.label(match count {
+                        1 => "1 entity".to_owned(),
+                        n => format!("{n} entities"),
+                    });
+                }
+                self.with_menu(world, ui);
+            });
         });
         if let Some(not_found) = &self.not_found {
             ui.label(not_found.as_str());
         }
-        egui::ComboBox::from_label("With")
-            .selected_text(self.with.as_deref().unwrap_or("Any component"))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.with, None, "Any component");
-                for name in world.component_types() {
-                    let picked = self.with.as_deref() == Some(name);
-                    if ui.selectable_label(picked, name).clicked() {
-                        self.with = Some(name.to_owned());
-                    }
-                }
-            });
         let count = match world.count(self.with.as_deref()) {
             Ok(count) => count,
             Err(error) => {
@@ -62,14 +118,6 @@ impl Inspector {
                 return;
             }
         };
-        ui.horizontal(|ui| {
-            ui.label(match count {
-                1 => "1 entity".to_owned(),
-                n => format!("{n} entities"),
-            });
-            let right = egui::Layout::right_to_left(egui::Align::Center);
-            ui.with_layout(right, |ui| self.header(world, ui, operations));
-        });
         let height = ui.spacing().interact_size.y;
         let scroll = egui::ScrollArea::vertical();
         if self.with.is_some() {
@@ -100,9 +148,55 @@ impl Inspector {
         });
     }
 
-    /// The end of the line that counts the entities, from its right: the + menu, which creates an
-    /// empty root, or, while the entity picked is alive, an empty child of it, the create going in
-    /// `operations`; and, for the tree, Collapse All, which hides the rows under every root.
+    /// The Find field, in place of the rest of the header, taking the keys as it opens, and its ×:
+    /// each Enter there finds the next entity whose ID or a part of whose name is typed, as
+    /// [`find`](Self::find) says; the × and Escape close it, emptying it.
+    fn find_field(&mut self, world: &dyn Inspected, ui: &mut egui::Ui) {
+        let right = egui::Layout::right_to_left(egui::Align::Center);
+        ui.with_layout(right, |ui| {
+            let close = ui.button("×").on_hover_text("Close the Find field");
+            let field = egui::TextEdit::singleline(&mut self.find)
+                .hint_text("ID or name")
+                .desired_width(ui.available_width());
+            let field = ui.add(field);
+            if mem::take(&mut self.focus_find) {
+                field.request_focus();
+            }
+            let pressed = |key| field.lost_focus() && ui.input(|input| input.key_pressed(key));
+            if pressed(egui::Key::Enter) {
+                self.not_found = self.find(world).err();
+            }
+            if close.clicked() || pressed(egui::Key::Escape) {
+                self.finding = false;
+                self.find.clear();
+                self.not_found = None;
+            }
+        });
+    }
+
+    /// Which component the entities listed have, or All, for all of them, as a tree, taking the
+    /// room left of what `ui` holds already, laid out from its right, its text cut short to fit.
+    fn with_menu(&mut self, world: &dyn Inspected, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt("entities with")
+            .width(ui.available_width())
+            .truncate()
+            .selected_text(self.with.as_deref().unwrap_or("All"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.with, None, "All");
+                for name in world.component_types() {
+                    let picked = self.with.as_deref() == Some(name);
+                    if ui.selectable_label(picked, name).clicked() {
+                        self.with = Some(name.to_owned());
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Lists all the entities, as a tree, or those with the component picked");
+    }
+
+    /// The end of the header, from its right: the + menu, which creates an empty root, or, while
+    /// the entity picked is alive, an empty child of it, the create going in `operations`; and,
+    /// for the tree, Collapse All, which hides the rows under every root.
     fn header(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, operations: &mut Vec<Command>) {
         let live = self.picked.filter(|&id| world.alive(id) == Some(true));
         let config = egui::menu::MenuConfig::new().style(crate::menu_style);
@@ -118,10 +212,12 @@ impl Inspector {
         });
         create.on_hover_text("Creates an entity");
         if self.with.is_none() {
-            let collapse = egui::Button::new("Collapse All");
-            let collapse = ui.add_enabled(!self.expanded.is_empty(), collapse);
+            let collapse = ui.add_enabled_ui(!self.expanded.is_empty(), |ui| {
+                glyph_button(ui, Glyph::Collapse)
+            });
             if collapse
-                .on_hover_text("Hides the rows under every root")
+                .inner
+                .on_hover_text("Collapse All: hides the rows under every root")
                 .clicked()
             {
                 self.expanded.clear();

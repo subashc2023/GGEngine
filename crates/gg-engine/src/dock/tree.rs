@@ -60,21 +60,33 @@ pub(crate) enum Zone {
 impl Docked {
     /// The panel it docks beside, or among the tabs of.
     fn target(self) -> &'static str {
-        let (Self::LeftOf(target)
-        | Self::RightOf(target)
-        | Self::Above(target)
-        | Self::Below(target)
+        let (Self::LeftOf(target, _)
+        | Self::RightOf(target, _)
+        | Self::Above(target, _)
+        | Self::Below(target, _)
         | Self::With(target)) = self;
         target
     }
 
     fn zone(self) -> Zone {
         match self {
-            Self::LeftOf(_) => Zone::Side(Side::Left),
-            Self::RightOf(_) => Zone::Side(Side::Right),
-            Self::Above(_) => Zone::Side(Side::Top),
-            Self::Below(_) => Zone::Side(Side::Bottom),
+            Self::LeftOf(..) => Zone::Side(Side::Left),
+            Self::RightOf(..) => Zone::Side(Side::Right),
+            Self::Above(..) => Zone::Side(Side::Top),
+            Self::Below(..) => Zone::Side(Side::Bottom),
             Self::With(_) => Zone::Center,
+        }
+    }
+
+    /// The share of its target's place it takes beside it, kept between 0 and 1; none among its
+    /// tabs.
+    fn share(self) -> Option<f32> {
+        match self {
+            Self::LeftOf(_, share)
+            | Self::RightOf(_, share)
+            | Self::Above(_, share)
+            | Self::Below(_, share) => Some(share.clamp(0.0, 1.0)),
+            Self::With(_) => None,
         }
     }
 }
@@ -374,18 +386,20 @@ impl Layout {
     }
 
     /// Adds `panel`, which the layout doesn't hold, where the app's `docked` says: beside the
-    /// group of the panel it names, docked in the main tree, taking its [share](Layout::share), or
-    /// among its tabs, which go on showing the tab they showed. A target the layout doesn't hold
-    /// stands for its own target, and so on. A panel the app doesn't place, or whose target floats
-    /// or comes to none, floats at `place`.
+    /// group of the panel it names, docked in the main tree, taking the share of its place the app
+    /// gives, or among its tabs, which go on showing the tab they showed. A target the layout
+    /// doesn't hold stands for its own target, and so on, a panel beside it taking its
+    /// [share](Layout::share), since the app's is of the panel it names. A panel the app doesn't
+    /// place, or whose target floats or comes to none, floats at `place`.
     pub(crate) fn add(&mut self, panel: String, place: Place, docked: &[(&'static str, Docked)]) {
         let to = self.docking(&panel, docked);
         let group = self.float(panel, place);
-        let Some((target, zone)) = to else {
+        let Some((target, zone, share)) = to else {
             return;
         };
         let active = self.group(target).map(|tabs| tabs.active);
-        let moved = self.dock(group, target, zone);
+        let share = share.unwrap_or_else(|| self.share(target));
+        let moved = self.dock_taking(group, target, zone, share);
         debug_assert!(
             moved,
             "a group of the main tree takes panels beside it and among its tabs"
@@ -399,8 +413,13 @@ impl Layout {
     }
 
     /// Where the app's `docked` docks `panel`: the group, docked in the main tree, of the panel it
-    /// names or of the one that stands for it, and the zone there.
-    fn docking(&self, panel: &str, docked: &[(&'static str, Docked)]) -> Option<(NodeId, Zone)> {
+    /// names or of the one that stands for it, the zone there, and the share the app gives of the
+    /// panel it names, if that's the target.
+    fn docking(
+        &self,
+        panel: &str,
+        docked: &[(&'static str, Docked)],
+    ) -> Option<(NodeId, Zone, Option<f32>)> {
         let entry = |panel: &str| {
             docked
                 .iter()
@@ -408,16 +427,18 @@ impl Layout {
         };
         let how = entry(panel)?;
         let mut target = how.target();
+        let mut share = how.share();
         // A step for each of the app's panels at most, so that targets standing for one another
         // come to none.
         for _ in 0..=docked.len() {
             if let Some(group) = self.main.find(target) {
-                return Some((group, how.zone()));
+                return Some((group, how.zone(), share));
             }
             if self.find(target).is_some() {
                 return None;
             }
             target = entry(target)?.target();
+            share = None;
         }
         None
     }
@@ -440,6 +461,13 @@ impl Layout {
     /// which take no room until one shows again, and then the share a group docked beside the one
     /// dropped would take.
     pub(crate) fn dock(&mut self, group: NodeId, target: NodeId, zone: Zone) -> bool {
+        let share = self.share(target);
+        self.dock_taking(group, target, zone, share)
+    }
+
+    /// Moves the panels of floating group `group` to `target`, as [`dock`](Self::dock) does, but
+    /// beside it taking `share` of its place.
+    fn dock_taking(&mut self, group: NodeId, target: NodeId, zone: Zone, share: f32) -> bool {
         let dockspace = self.view.is_some();
         let fits = match zone {
             Zone::Center if target == CENTRAL => dockspace,
@@ -476,7 +504,6 @@ impl Layout {
             }
             Zone::Side(side) => {
                 let id = self.new_id();
-                let share = self.share(target);
                 let node = self.main.get_mut(target).expect("checked above");
                 let old = mem::replace(node, Node::Central);
                 let new = Node::Tabs(moved);
@@ -1220,15 +1247,25 @@ mod tests {
         );
     }
 
-    /// Where the editor docks three of its panels.
+    /// Where an editor docks three of its panels: beside the view a quarter of its place, and
+    /// beside another panel half.
     const EDITOR: [(&str, Docked); 3] = [
-        ("Inspector", Docked::RightOf(VIEW)),
-        ("Entities", Docked::LeftOf(VIEW)),
-        ("Performance", Docked::Below("Inspector")),
+        ("Inspector", Docked::RightOf(VIEW, 0.25)),
+        ("Entities", Docked::LeftOf(VIEW, 0.25)),
+        ("Performance", Docked::Below("Inspector", 0.5)),
     ];
 
+    /// Panels dock as the app says, each taking the share of its target's place it gives.
     #[test]
-    fn panels_dock_as_the_app_says_beside_the_view_a_quarter_and_beside_others_half() {
+    fn panels_dock_as_the_app_says_taking_the_shares_it_gives() {
+        let mut layout = Layout::new(Some(VIEW));
+        let narrow = [("Inspector", Docked::RightOf(VIEW, 0.2))];
+        layout.add("Inspector".to_owned(), AT, &narrow);
+        assert!(
+            matches!(layout.main, Node::Split { ratio, .. } if ratio == 0.8),
+            "{:?}",
+            layout.main
+        );
         let mut layout = Layout::new(Some(VIEW));
         for (panel, _) in EDITOR {
             layout.add(panel.to_owned(), AT, &EDITOR);
@@ -1252,7 +1289,8 @@ mod tests {
 
     #[test]
     fn a_target_the_layout_doesnt_hold_stands_for_its_own_and_one_floating_or_none_floats() {
-        // Performance, below the Inspector, which isn't there yet: below the view, where it stays.
+        // Performance, below the Inspector, which isn't there yet: below the view, where it stays,
+        // taking a quarter of it rather than the half it'd take of the Inspector's place.
         let mut layout = Layout::new(Some(VIEW));
         layout.add("Performance".to_owned(), AT, &EDITOR);
         let Node::Split {
@@ -1276,7 +1314,7 @@ mod tests {
         let cycle = [("A", Docked::With("B")), ("B", Docked::With("A"))];
         layout.add("A".to_owned(), AT, &cycle);
         assert!(floats(&layout, "A"));
-        layout.add("B".to_owned(), AT, &[("B", Docked::Below("Nowhere"))]);
+        layout.add("B".to_owned(), AT, &[("B", Docked::Below("Nowhere", 0.5))]);
         assert!(floats(&layout, "B"));
         layout.add("C".to_owned(), AT, &[("C", Docked::With("A"))]);
         assert!(floats(&layout, "C"));
@@ -1301,7 +1339,7 @@ mod tests {
     #[test]
     fn a_panel_docked_beside_the_view_on_the_way_to_it_is_on_that_side() {
         let mut layout = Layout::new(Some(VIEW));
-        let docked = [&EDITOR[..], &[("Assets", Docked::Below(VIEW))]].concat();
+        let docked = [&EDITOR[..], &[("Assets", Docked::Below(VIEW, 0.25))]].concat();
         for &(panel, _) in &docked {
             layout.add(panel.to_owned(), AT, &docked);
         }

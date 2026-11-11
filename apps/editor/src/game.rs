@@ -12,7 +12,8 @@
 //! the run goes, or while a game serves, whether it's stopped, playing or simulating, and whether
 //! it's paused, as the game answers the editor's requests and the `status` it asks for every
 //! quarter second, which catches another client's, or that it waits at a script's stop, as the
-//! Debugger panel learns; with Play, Simulate, pause and step.
+//! Debugger panel learns; with the controls [`overlay::show_run`] draws: Play, which pauses and
+//! resumes the game while it plays, Simulate, Stop and Step.
 //!
 //! Started outside a project, the editor shows the [`hub`] over its panels, where a
 //! project is picked, unless it's to open the latest as it starts; and the File menu's Open Project
@@ -25,14 +26,17 @@
 //! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
 //! seeing through the game's own camera, which gets all the input the view gets, the view's tools
 //! only what lets go of what they hold; Simulate plays it the same, through the editor's camera,
-//! the game getting no input. Play from Simulate, or Simulate from Play, carries on, moving the
-//! camera and the input over, the game letting go of what's held as the input leaves it, as the
-//! toolbar's camera switch does while the game plays. Stop, lit in place of either, stops the
-//! input at once, and brings back the world as edited, as `stop` does, with its edits' history,
-//! the view going to the editor's camera, as it does at any client's `stop` that no Play clicked
-//! since follows. Stopped, the camera switch has the view show what the game's camera sees, as it
-//! does at first and as a New or an Open opens a scene, the input staying the editor's, until the
-//! editor's camera takes some, which turns the view to it.
+//! the game getting no input. Simulate, while the game plays, switches between the two, carrying
+//! on, moving the camera and the input over, the game letting go of what's held as the input
+//! leaves it, as the toolbar's camera switch does while the game plays. Play from stopped plays a
+//! game paused since before its stop in real time, as Play plays; while it plays, Play is Pause,
+//! and while it's paused, Resume. Step, while it's paused, runs a tick, and while it's stopped
+//! plays it paused first, through the camera the view shows. Stop stops the input at once, and
+//! brings back the world as edited, as `stop` does, with its edits' history, the view going to the
+//! editor's camera, as it does at any client's `stop` that no Play clicked since follows. Stopped,
+//! the camera switch has the view show what the game's camera sees, as it does at first and as a
+//! New or an Open opens a scene, the input staying the editor's, until the editor's camera takes
+//! some, which turns the view to it.
 //!
 //! A game that asks for the cursor grabbed, for looking about with the mouse, as the view's memory
 //! says it does, has the editor grab its own window's in Play while the view has the keys, the
@@ -133,18 +137,22 @@ const MEASURED: usize = 16_384;
 const STATUS_EVERY: Duration = Duration::from_millis(250);
 
 /// The editor of the project in directory `dir`, if it's started in one, and otherwise of the one
-/// the hub picks, the hub finding projects in `workspace`, the engine's, if it runs in one: the
-/// game's view in the Viewport, its entities left of it, above its scenes, the one picked right of
-/// it, above the Performance panel, and the Logs below it, the Assets and the Debugger among their
-/// tabs.
+/// the hub picks, the hub finding projects in `workspace`, the engine's, if it runs in one: in a
+/// window 1920 by 1080 points as it opens, the game's view in the Viewport, its entities left of
+/// it, above its scenes, the one picked right of it, above the Performance panel, and the Logs
+/// below it, the Assets and the Debugger among their tabs; the sides wide enough, at that size,
+/// for the Inspector's vectors and the Entities panel's header.
 pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
-    let app = App::new("Editor").custom_title_bar().view_panel("Viewport");
+    let app = App::new("Editor")
+        .custom_title_bar()
+        .view_panel("Viewport")
+        .window_size(1920, 1080);
     let app = app
-        .dock("Inspector", Docked::RightOf("Viewport"))
-        .dock("Entities", Docked::LeftOf("Viewport"))
-        .dock("Scenes", Docked::Below("Entities"))
-        .dock("Performance", Docked::Below("Inspector"))
-        .dock("Logs", Docked::Below("Viewport"))
+        .dock("Inspector", Docked::RightOf("Viewport", 0.22))
+        .dock("Entities", Docked::LeftOf("Viewport", 0.2))
+        .dock("Scenes", Docked::Below("Entities", 0.5))
+        .dock("Performance", Docked::Below("Inspector", 0.5))
+        .dock("Logs", Docked::Below("Viewport", 0.32))
         .dock("Assets", Docked::With("Logs"))
         .dock("Debugger", Docked::With("Logs"));
     let inspector = Inspector::remote(CLIENT);
@@ -844,27 +852,74 @@ impl Game {
         self.mode() == Mode::Play
     }
 
+    /// Does what a click of the title bar's controls asks, while a game serves, as
+    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it.
+    fn click(&mut self, clicked: overlay::Clicked) {
+        match clicked {
+            overlay::Clicked::To(to) => self.run(to),
+            overlay::Clicked::Pause => self.ask("pause"),
+            overlay::Clicked::Resume => self.ask("resume"),
+            overlay::Clicked::Step => self.step(),
+        }
+    }
+
+    /// Asks the game `method`, without params, while one serves.
+    fn ask(&self, method: &str) {
+        if let Some(talker) = &self.talker {
+            talker.ask(method, Value::Null);
+        }
+    }
+
     /// Does what a click of the title bar's `to` asks, while a game serves, whatever the editor
-    /// last knew of how it runs: Play and Simulate ask the game to play, which changes nothing
-    /// while it plays, so that a switch between them carries on, and turn the view to the game's
-    /// camera or the editor's; Stop asks it to stop, and stops the view's input going to it at
-    /// once, dropping what wasn't sent yet but its letting go, until it answers.
+    /// last knew of how it runs: Play and Simulate ask the game to play, as
+    /// [`play`](Self::play) says, a stopped game resuming first if it's paused, as Play plays;
+    /// Stop asks it to stop, and stops the view's input going to it at once, dropping what wasn't
+    /// sent yet but its letting go, until it answers.
     fn run(&mut self, to: Mode) {
-        let Some(talker) = &self.talker else {
+        if self.talker.is_none() {
             return;
-        };
+        }
         match to {
             Mode::Play | Mode::Simulate => {
-                talker.ask("play", Value::Null);
-                self.playing += 1;
-                self.view.toolbar.world_camera = to == Mode::Play;
+                if self.mode() == Mode::Edit && self.paused {
+                    self.ask("resume");
+                }
+                self.play(to);
             }
             Mode::Edit => {
-                talker.ask("stop", Value::Null);
+                self.ask("stop");
                 self.stopping = true;
                 self.drop_unsent();
             }
         }
+    }
+
+    /// Asks the game to play, which changes nothing while it plays, so that a switch between Play
+    /// and Simulate carries on, and turns the view to the game's camera for `to`'s Play, or the
+    /// editor's for Simulate.
+    fn play(&mut self, to: Mode) {
+        self.ask("play");
+        self.playing += 1;
+        self.view.toolbar.world_camera = to == Mode::Play;
+    }
+
+    /// Asks the game for a step, a tick, which pauses it; a stopped game is first paused, then
+    /// played, as Play does, or Simulate while the view sees through the editor's camera, so that
+    /// no frame plays it in real time before the step.
+    fn step(&mut self) {
+        if self.talker.is_none() {
+            return;
+        }
+        if self.mode() == Mode::Edit {
+            self.ask("pause");
+            let world_camera = self.view.toolbar.world_camera;
+            self.play(if world_camera {
+                Mode::Play
+            } else {
+                Mode::Simulate
+            });
+        }
+        self.ask("step");
     }
 
     /// Drops the input meant for the game that wasn't sent, but its letting go of what's held,
@@ -2083,8 +2138,7 @@ impl Layer for Game {
             };
             (scene, tip)
         });
-        let paused = self.paused;
-        let talker = self.talker.as_ref();
+        let (paused, serves) = (self.paused, self.talker.is_some());
         // None over the hub, where the bar shows the editor's title.
         let bar = !self.hub_shows();
         let title_bar = |ui: &mut egui::Ui| {
@@ -2092,43 +2146,12 @@ impl Layer for Game {
                 ui.label(scene).on_hover_text(tip);
             }
             ui.label(label);
-            let serves = talker.is_some();
-            let clicked = ui.add_enabled_ui(serves, |ui| overlay::show_run(ui, mode));
-            let (method, label, tip) = if paused {
-                (
-                    "resume",
-                    "Resume",
-                    "Run the game's simulation in real time again",
-                )
-            } else {
-                ("pause", "Pause", "Pause the game's simulation")
-            };
-            let button = ui
-                .add_enabled(serves, egui::Button::new(label))
-                .on_hover_text(tip);
-            if button.clicked()
-                && let Some(talker) = talker
-            {
-                talker.ask(method, Value::Null);
-            }
-            let step = ui
-                .add_enabled(serves && mode != Mode::Edit, egui::Button::new("Step"))
-                .on_hover_text("Run a tick of the game's simulation, and pause it");
-            let step = if serves {
-                step.on_disabled_hover_text("Play first: a stopped game runs no ticks")
-            } else {
-                step
-            };
-            if step.clicked()
-                && let Some(talker) = talker
-            {
-                talker.ask("step", Value::Null);
-            }
+            let clicked = ui.add_enabled_ui(serves, |ui| overlay::show_run(ui, mode, paused));
             clicked.inner
         };
         let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();
-        if let Some(to) = clicked.flatten() {
-            self.run(to);
+        if let Some(clicked) = clicked.flatten() {
+            self.click(clicked);
         }
         // A click on a scene, once the menus' choices are done, as a New of the File menu.
         let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());
@@ -2873,6 +2896,35 @@ mod tests {
         game.take_answers();
         assert_eq!(game.mode(), Mode::Play, "the last click's");
         assert!(game.view.toolbar.world_camera, "the game's camera");
+    }
+
+    /// The title bar's controls ask the game for what they show: Pause and Resume while it plays;
+    /// Play from stopped, which resumes a game paused since before its stop first; and Step a
+    /// step, a stopped game paused and played first, through the camera the view shows.
+    #[test]
+    fn the_controls_pause_resume_and_step_the_game() {
+        let (mut game, ends) = serving();
+        game.click(overlay::Clicked::Pause);
+        game.click(overlay::Clicked::Resume);
+        assert_eq!(methods(&ends), ["pause", "resume"]);
+        game.paused = true;
+        game.click(overlay::Clicked::Step);
+        assert_eq!(methods(&ends), ["step"], "paused");
+        for (paused, asked) in [(true, &["resume", "play"][..]), (false, &["play"])] {
+            (game.stopped, game.paused) = (true, paused);
+            game.click(overlay::Clicked::To(Mode::Play));
+            assert_eq!(methods(&ends), asked, "paused {paused}");
+        }
+        for world_camera in [true, false] {
+            (game.stopped, game.paused) = (true, false);
+            game.view.toolbar.world_camera = world_camera;
+            game.click(overlay::Clicked::Step);
+            assert_eq!(methods(&ends), ["pause", "play", "step"]);
+            assert_eq!(
+                game.view.toolbar.world_camera, world_camera,
+                "the view's camera"
+            );
+        }
     }
 
     /// Another client's `play`, `pause` and `stop` reach the editor in the `status` it asks for:

@@ -218,9 +218,15 @@ struct Handler<'a> {
 impl Handler<'_> {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let _zone = gg_core::zone!();
+        // The app's size, or the primary monitor's, where windows open, if that's smaller.
+        let [mut width, mut height] = self.app.window_size.map(f64::from);
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let most: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+            (width, height) = (width.min(most.width), height.min(most.height));
+        }
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
-            .with_inner_size(LogicalSize::new(1280.0, 720.0));
+            .with_inner_size(LogicalSize::new(width, height));
         #[cfg(feature = "dev")]
         let attributes = chrome::attributes(self.chrome, attributes);
         let window = event_loop.create_window(attributes).map_err(|error| {

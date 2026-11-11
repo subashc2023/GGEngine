@@ -377,7 +377,12 @@ fn the_find_field_picks_an_entity_by_a_pasted_id() {
         texts
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
-    let field = beside(&texts, find(&texts, "Find", "Find"));
+    let texts = run(
+        &mut inspector,
+        &mut world,
+        click(Primary, magnifier(&texts)),
+    );
+    let field = find_field(&texts);
     let bad = "no entity's name has `5F3A9C0E12B47D68`, and `5F3A9C0E12B47D68` isn't an entity's \
                ID: an ID is 16 lowercase hex digits, not all zero, such as `5f3a9c0e12b47d68`";
     let missing = format!("no entity has ID {gone}");
@@ -1608,7 +1613,12 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     assert!(on(&world));
     assert_eq!(inspector.log.edits().len(), 2);
     // While the Find field has the keys, they undo its own text, not an edit.
-    let field = beside(&texts, find(&texts, "Find", "Find"));
+    run(
+        &mut inspector,
+        &mut world,
+        click(Primary, magnifier(&texts)),
+    );
+    let field = find_field(&run(&mut inspector, &mut world, Vec::new()));
     run(&mut inspector, &mut world, click(Primary, field));
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(inspector.log.edits().len(), 2);
@@ -2517,7 +2527,12 @@ fn finding_an_entity_opens_the_rows_above_it() {
     let found = row_text(&world, bottom);
     let texts = run(&mut inspector, &mut world, Vec::new());
     assert!(!texts.iter().any(|(text, _)| *text == found));
-    let field = beside(&texts, find(&texts, "Find", "Find"));
+    let texts = run(
+        &mut inspector,
+        &mut world,
+        click(Primary, magnifier(&texts)),
+    );
+    let field = find_field(&texts);
     run(&mut inspector, &mut world, click(Primary, field));
     let typed = vec![egui::Event::Text(id(&world, bottom).to_string())];
     run(&mut inspector, &mut world, typed);
@@ -2547,9 +2562,27 @@ fn in_entities(texts: &[Text], name: &str) -> egui::Rect {
     found.unwrap_or_else(|| panic!("no {name}: {texts:?}")).1
 }
 
+/// How far left of the text of a button in the Entities panel's header the middle of the glyph's
+/// button before it is, in egui's default spacing: the text's button's padding, 8 points, the
+/// space between widgets, 8, and half the glyph's button, square and as tall as a text's, 10.
+const GLYPH_BEFORE: f32 = 26.0;
+
+/// Where the Entities panel's magnifier is, which opens its Find field: at the start of its
+/// header, before its component filter, which lists them all.
+fn magnifier(texts: &[Text]) -> egui::Pos2 {
+    let filter = in_entities(texts, "All");
+    egui::pos2(filter.min.x - GLYPH_BEFORE, filter.center().y)
+}
+
+/// Where the Find field is, once the magnifier has opened it, while its hint shows.
+fn find_field(texts: &[Text]) -> egui::Pos2 {
+    in_entities(texts, "ID or name").center()
+}
+
 /// The Find field finds an entity by a part of its name, ignoring case, the next such at each
 /// Enter, from the first again past the last, opening the rows above it; and says when neither a
-/// name has what's typed nor is it an ID.
+/// name has what's typed nor is it an ID. The magnifier opens it in place of the rest of the
+/// header, and its × closes it, emptied, the rest coming back.
 #[test]
 fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
     let mut world = World::default();
@@ -2568,8 +2601,15 @@ fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
         texts
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
-    let field = beside(&texts, find(&texts, "Find", "Find"));
-    run(&mut inspector, &mut world, click(Primary, field));
+    let texts = run(
+        &mut inspector,
+        &mut world,
+        click(Primary, magnifier(&texts)),
+    );
+    let filter = |(text, rect): &Text| text == "All" && rect.max.x < 800.0;
+    assert!(!texts.iter().any(filter), "covered: {texts:?}");
+    let field = find_field(&texts);
+    // Open, it has the keys.
     run(
         &mut inspector,
         &mut world,
@@ -2591,6 +2631,11 @@ fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
     assert_eq!(inspector.picked, Some(first), "kept");
     let says = |(text, _): &Text| text.starts_with("no entity's name has `zzz`, and `zzz` isn't");
     assert!(texts.iter().any(says), "{texts:?}");
+    let close = in_entities(&texts, "×").center();
+    let texts = run(&mut inspector, &mut world, click(Primary, close));
+    assert!(!inspector.finding && inspector.find.is_empty());
+    assert!(!texts.iter().any(says), "{texts:?}");
+    in_entities(&texts, "All");
 }
 
 /// F2, while the panel has the keys, and a row's Rename rename its entity in its row: what's
@@ -2806,7 +2851,9 @@ fn the_plus_menu_creates_and_collapse_all_hides_every_roots_rows() {
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
     in_entities(&texts, "kid");
-    let collapse = in_entities(&texts, "Collapse All").center();
+    // Its glyph's button, just before the + menu's.
+    let plus = in_entities(&texts, "+");
+    let collapse = egui::pos2(plus.min.x - GLYPH_BEFORE, plus.center().y);
     let texts = run(&mut inspector, &mut world, click(Primary, collapse));
     assert!(inspector.expanded.is_empty());
     assert!(!texts.iter().any(|(text, _)| text == "kid"), "{texts:?}");

@@ -45,8 +45,9 @@ use crate::{
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities as
 /// the tree of its hierarchy, whose rows' arrows show and hide their children, and its Collapse All
 /// hides them all, or those with one component as a list, to pick one from, and finds one by an ID
-/// pasted into its Find field, from a scene or a log, or by a part of its name, the next such at
-/// each Enter, opening the rows above its own; a click below the rows, or the Entity menu, unpicks.
+/// pasted into its Find field, which its magnifier opens over the rest of its header, from a scene
+/// or a log, or by a part of its name, the next such at each Enter, opening the rows above its
+/// own; a click below the rows, or the Entity menu, unpicks.
 /// A row's context menu, the one below the rows, the panel's + menu and the Entity menu create
 /// empty entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
 /// copy, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants. A row's context
@@ -109,6 +110,10 @@ pub struct Inspector {
     find: String,
     /// Why the last ID or name entered there found no entity.
     not_found: Option<String>,
+    /// Whether the Find field shows, in place of the rest of the Entities panel's header, and
+    /// whether it's to take the keys as it next shows, as it does as it opens.
+    finding: bool,
+    focus_find: bool,
     /// The name being typed into the picked entity's row, if it's being renamed.
     renaming: Option<Renaming>,
     /// Whether the Entities panel has the keys, for its own: from a press in it until a press

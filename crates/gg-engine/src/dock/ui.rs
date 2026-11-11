@@ -3094,11 +3094,12 @@ mod tests {
         assert!(run.layout().closed.is_empty());
     }
 
-    /// Where the editor docks three of its panels, around the view.
+    /// Where an editor docks three of its panels, around the view: beside it a quarter of its
+    /// place, and beside another panel half.
     const EDITOR: [(&str, Docked); 3] = [
-        ("Inspector", Docked::RightOf(VIEW)),
-        ("Entities", Docked::LeftOf(VIEW)),
-        ("Performance", Docked::Below("Inspector")),
+        ("Inspector", Docked::RightOf(VIEW, 0.25)),
+        ("Entities", Docked::LeftOf(VIEW, 0.25)),
+        ("Performance", Docked::Below("Inspector", 0.5)),
     ];
 
     #[test]
@@ -3125,7 +3126,7 @@ mod tests {
     /// off.
     #[test]
     fn the_title_bars_buttons_hide_and_show_the_panels_around_the_view() {
-        let editor = [&EDITOR[..], &[("Assets", Docked::Below(VIEW))]].concat();
+        let editor = [&EDITOR[..], &[("Assets", Docked::Below(VIEW, 0.25))]].concat();
         let dock = Dock::new(None, Chrome::Drawn, Some(VIEW), true, &editor);
         let showing = ["Performance", "Entities", "Inspector", "Assets", "Log"];
         let mut run = Run::showing(dock, &showing);
