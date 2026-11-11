@@ -1,7 +1,7 @@
 //! The command-line flags every app shares.
 
 use std::ffi::OsString;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -28,6 +28,9 @@ pub(crate) struct Args {
     pub(crate) gpu: Option<String>,
     pub(crate) validation: bool,
     pub(crate) vsync: bool,
+    /// The most frames a second a windowed run renders, as
+    /// [`Context::set_max_fps`](crate::Context::set_max_fps) says, if capped.
+    pub(crate) max_fps: Option<NonZeroU32>,
     /// The threads the simulation's jobs run on, the main thread among them.
     pub(crate) threads: NonZeroUsize,
     /// Where the run is recorded: its seed, its layers' commands and the world's hash at each tick.
@@ -87,7 +90,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 21] = [
+const NOT_REPLAYED: [&str; 22] = [
     "--record",
     "--restore",
     "--headless",
@@ -100,6 +103,7 @@ const NOT_REPLAYED: [&str; 21] = [
     "--validation",
     "--no-validation",
     "--vsync",
+    "--max-fps",
     "--no-api",
     "--stopped",
     "--host",
@@ -137,6 +141,9 @@ Options:
   --validation      Run under Vulkan validation (the default in debug builds)
   --no-validation   Run without Vulkan validation (the default in release builds)
   --vsync           Present at the display's refresh rate, rather than uncapped
+  --max-fps <N>     Render at most N frames a second in a window, such as `--max-fps 60`, in place
+                    of the cap the title bar's settings keep in a development build; an embedded
+                    run goes at its tool's pace, so an editor capped caps its game
   --threads <N>     Run the simulation's jobs on N threads, the main one among them (one per CPU
                     but the one the render thread has)
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
@@ -197,6 +204,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         gpu: None,
         validation: cfg!(debug_assertions),
         vsync: false,
+        max_fps: None,
         threads: std::thread::available_parallelism()
             .ok()
             .and_then(|cpus| NonZeroUsize::new(cpus.get() - 1))
@@ -284,6 +292,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                     ))
                 })?);
             }
+            "--max-fps" => {
+                let max = value_of(flag)?;
+                parsed.max_fps = Some(max.parse().map_err(|_| {
+                    bad(format!(
+                        "`--max-fps` takes a whole number of frames a second, 1 or more, not \
+                         `{max}`"
+                    ))
+                })?);
+            }
             "--threads" => {
                 let threads = value_of(flag)?;
                 parsed.threads = threads.parse().map_err(|_| {
@@ -366,6 +383,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             (parsed.size.is_some(), "--size"),
             (parsed.gpu.is_some(), "--gpu"),
             (parsed.vsync, "--vsync"),
+            (parsed.max_fps.is_some(), "--max-fps"),
         ];
         if let Some((_, flag)) = renders.iter().find(|(given, _)| *given) {
             let why = if *flag == "--record" {
@@ -401,6 +419,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         return Err(bad(
             "`--size` is of a headless run's view, as a window's view is the window's and an \
              embedded run's the size its tool asks, so it needs `--headless`"
+                .to_owned(),
+        ));
+    }
+    if parsed.max_fps.is_some() && (parsed.headless || parsed.embedded) {
+        return Err(bad(
+            "`--max-fps` caps a window's frames, as `--real-time` paces a headless run's and an \
+             embedded run goes at its tool's pace, so it takes no `--headless` or `--embedded`"
                 .to_owned(),
         ));
     }
@@ -532,6 +557,12 @@ mod tests {
             Some(60)
         );
         assert_eq!(args.size, None);
+        // A window's frames go uncapped unless capped.
+        assert_eq!(args.max_fps, None);
+        for args in [&["--max-fps", "60"][..], &["--max-fps=60"]] {
+            let max_fps = parse_strs(args).unwrap().unwrap().max_fps;
+            assert_eq!(max_fps, NonZeroU32::new(60), "{args:?}");
+        }
         for (size, expected) in [("320x180", [320, 180]), ("1x8192", [1, 8192])] {
             let args = parse_strs(&["--headless", "--size", size]);
             assert_eq!(args.unwrap().unwrap().size, Some(expected), "{size}");
@@ -655,6 +686,7 @@ mod tests {
                 "--size",
                 "--capture",
                 "--gpu",
+                "--max-fps",
                 "--record",
                 "--restore",
                 "--host",
@@ -688,6 +720,13 @@ mod tests {
             &["--frames", "2", "--capture", "3"],
             &["--threads", "0"],
             &["--threads", "x"],
+            &["--max-fps"],
+            &["--max-fps", "0"],
+            &["--max-fps", "-60"],
+            &["--max-fps", "sixty"],
+            &["--max-fps", "59.94"],
+            &["--headless", "--max-fps", "60"],
+            &["--embedded", "--max-fps", "60"],
             &["--size", "320x180"],
             &["--embedded", "--size", "320x180"],
             &["--headless", "--size"],
@@ -743,6 +782,7 @@ mod tests {
             &["--serve", "0.0.0.0:7700", "--capture", "3"],
             &["--serve", "0.0.0.0:7700", "--gpu", "amd"],
             &["--serve", "0.0.0.0:7700", "--vsync"],
+            &["--serve", "0.0.0.0:7700", "--max-fps", "60"],
             &["--serve", "0.0.0.0:7700", "--headless", "--size", "320x180"],
             &["--stopped", "--serve", "0.0.0.0:7700"],
             &["--stopped", "--connect", "127.0.0.1:7700"],

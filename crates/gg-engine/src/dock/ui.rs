@@ -143,6 +143,19 @@ impl<'a> Ui<'a> {
         self.dock.bar.controls(add_contents)
     }
 
+    /// Adds what `add_contents` draws to the settings this frame, which a gear at the right of the
+    /// title bar, left of the buttons that hide and show the panels, opens below it, with
+    /// [`App::custom_title_bar`](crate::App::custom_title_bar): after those added before, a line
+    /// between, the engine's own first, the frame rate limit that
+    /// [`Context::set_max_fps`](crate::Context::set_max_fps) sets, then the layers', bottom layer
+    /// first. `add_contents` runs while they're open; the gear, Escape or a click outside them
+    /// closes them. Without the custom title bar there's no gear, and it doesn't run. What a layer's
+    /// settings set, the layer keeps for the user itself, as with
+    /// [`Context::save_state`](crate::Context::save_state).
+    pub fn settings(&mut self, add_contents: impl FnOnce(&mut egui::Ui)) {
+        self.dock.bar.settings(add_contents);
+    }
+
     /// Shows what `add_contents` draws over the game's view, at `align` within it, 8 points in
     /// from its edges, and moved from there by `offset`, in points, such as by a drag of a
     /// toolbar's grip, but no further than the view's edges: above the view, and below what else
@@ -1693,6 +1706,10 @@ mod tests {
         /// last frame.
         cover: bool,
         covered: Option<Response>,
+        /// Whether frames add a button, Setting, to the title bar's settings; and what egui made
+        /// of it last frame, while they were open.
+        setting: bool,
+        set: Option<Response>,
         /// What the main window's pass drew in the last frame, and the windows of their own egui
         /// showed, with what it asked of them.
         shapes: Vec<ClippedShape>,
@@ -1752,6 +1769,8 @@ mod tests {
                 viewport: None,
                 cover: false,
                 covered: None,
+                setting: false,
+                set: None,
                 shapes: Vec::new(),
                 windows: Vec::new(),
             };
@@ -1860,9 +1879,17 @@ mod tests {
             let (dock, panels, menus) = (&mut self.dock, &self.panels, &self.menus);
             let (toolbar, offset, cover) = (self.toolbar, self.offset, self.cover);
             let (mut shown, mut view, mut viewport, mut covered) = (None, None, None, None);
+            let (setting, mut set) = (self.setting, None);
             let mut output = self.ctx.run_ui(input, |root| {
                 dock.begin(root);
                 let mut ui = Ui::new(root, dock);
+                if setting {
+                    ui.settings(|ui| {
+                        // Low enough to be over the view, below its tab bar.
+                        ui.add_space(40.0);
+                        set = Some(ui.button("Setting"));
+                    });
+                }
                 for &name in menus {
                     ui.menu(name, |ui| {
                         ui.label(format!("{name} item"));
@@ -1885,7 +1912,7 @@ mod tests {
                 dock.end(root);
             });
             (self.shown, self.view, self.viewport) = (shown, view, viewport);
-            self.covered = covered;
+            (self.covered, self.set) = (covered, set);
             output.textures_delta.clear();
             self.shapes = mem::take(&mut output.shapes);
             let windows = output.viewport_output.iter();
@@ -2638,6 +2665,37 @@ mod tests {
         run.cover = false;
         run.frames(2);
         assert_eq!(run.dock.under(&run.ctx, pos2(600.0, 450.0)), Under::View);
+    }
+
+    /// The title bar's settings open below its gear over the view, which the pointer doesn't
+    /// reach there: what's under it is the settings', and a click reaches the setting.
+    #[test]
+    fn the_settings_show_over_the_view_and_take_its_clicks() {
+        use crate::chrome::{BUTTON, TOOL};
+
+        let mut run = Run::dockspace(Chrome::Drawn);
+        run.setting = true;
+        // A and B float at the bottom left, clear of the settings.
+        for (panel, x) in [("A", 48.0), ("B", 200.0)] {
+            let id = run.layout().find(panel).unwrap();
+            run.dock.layout.floating_mut(id).unwrap().place = Place::Main {
+                min: [x, 400.0],
+                size: [100.0, 100.0],
+            };
+        }
+        run.frames(2);
+        let gear = pos2(SCREEN.x - 3.0 * BUTTON - 3.5 * TOOL, BAR / 2.0);
+        run.click_with(PointerButton::Primary, gear);
+        // Their sizing pass, and the next that shows them.
+        run.frames(2);
+        let at = run.set.as_ref().expect("the settings show").rect.center();
+        assert!(run.dock.view().contains(at), "over the view: {at:?}");
+        for panel in ["A", "B"] {
+            assert!(!floating_rect(&run, panel).contains(at), "clear of {panel}");
+        }
+        assert_eq!(run.dock.under(&run.ctx, at), Under::Other);
+        run.click_with(PointerButton::Primary, at);
+        assert!(run.set.as_ref().is_some_and(Response::clicked));
     }
 
     #[test]

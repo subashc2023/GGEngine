@@ -17,6 +17,8 @@ use crate::args::{Args, Net};
 use crate::chrome::Chrome;
 #[cfg(feature = "dev")]
 use crate::dock::{Dock, Ui};
+#[cfg(feature = "dev")]
+use crate::frame_rate;
 use crate::interrupt;
 use crate::layer::{Context, Stack, Tick};
 use crate::memory;
@@ -381,8 +383,8 @@ pub(crate) type Passed = std::convert::Infallible;
 /// entities are as each starts, updates the layers, draws the world after what they drew, as far
 /// on from where the last tick found it to where it left it as the frame is past the tick, a
 /// client's other players as [`Stack::interpolate`] says, and, given egui, the dock and egui's
-/// input in `ui`, has the layers draw
-/// their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
+/// input in `ui`, adds the engine's settings, as [`frame_rate::settings`] does, and has the layers
+/// draw their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
 /// UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands what egui made
 /// of it to the render thread.
 ///
@@ -438,7 +440,10 @@ pub(crate) fn run_frame(
         // egui may run the pass again in a frame, as it asks for one.
         let output = egui.run_ui(input, |root| {
             dock.begin(root);
-            layers_draw |= stack.ui(cx, &mut Ui::new(root, dock));
+            let mut ui = Ui::new(root, dock);
+            // The engine's settings come before the layers'.
+            frame_rate::settings(&mut ui, cx);
+            layers_draw |= stack.ui(cx, &mut ui);
             dock.end(root);
         });
         (output, layers_draw)
@@ -935,6 +940,8 @@ impl Ran {
             ui_ms_p95 = perf.ui.p95,
             handoff_ms_mean = perf.handoff.mean,
             handoff_ms_p95 = perf.handoff.p95,
+            limit_ms_mean = perf.limit.mean,
+            limit_ms_p95 = perf.limit.p95,
             render_ms_mean = perf.render.mean,
             render_ms_p95 = perf.render.p95,
             wait_ms_mean = perf.wait.mean,

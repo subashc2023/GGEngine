@@ -67,6 +67,7 @@ mod edits;
 mod environment;
 mod event;
 mod font;
+mod frame_rate;
 mod game_ui;
 mod gltf;
 mod grant;

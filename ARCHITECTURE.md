@@ -1513,11 +1513,12 @@ Layers add menus through `Ui` too, and controls at the middle of the main window
 place of its title, through `Ui::title_bar`. A button at the bar's left opens the menus in a drawer.
 The OS draws the windows' frames, and the menus and controls get a bar of their own below its title
 bar, unless the app calls `App::custom_title_bar`, as tools do for the room: then the UI draws the
-windows' title bars, the main window's with buttons that hide and show the panels left of, below and
-right of the view; and the dock adds a View menu, which opens and closes panels and saves, loads,
-deletes and resets layouts. On Windows the rest of the frame stays the OS's, through a window
-procedure in front of winit's, and on macOS the OS keeps its own buttons and edges. Games keep the
-OS's frame.
+windows' title bars, the main window's with a gear that opens the settings, which layers add to
+through `Ui::settings` after the engine's frame rate limit, and buttons that hide and show the
+panels left of, below and right of the view; and the dock adds a View menu, which opens and closes
+panels and saves, loads, deletes and resets layouts. On Windows the rest of the frame stays the
+OS's, through a window procedure in front of winit's, and on macOS the OS keeps its own buttons and
+edges. Games keep the OS's frame.
 
 In development builds a layer asks for a file to open or save as through the OS's own dialog,
 `Context::pick_file`, through rfd, modal over the main window: it blocks the frame that asks, at a
@@ -3002,6 +3003,16 @@ out a window's handle only on its own thread, and macOS closes a window there, s
 makes and drops the renderer's surfaces, and the render thread never holds the last reference to a
 window. An error while rendering comes back with the renderer and ends the run, and a panic resumes
 on the main thread.
+
+A windowed run's frames go as fast as presentation lets them: mailbox's, as fast as the GPU
+renders, or with `--vsync` FIFO's, at the display's rate. `Context::set_max_fps` caps them, as
+`--max-fps` does as the run starts and, in development builds, the frame rate limit among the title
+bar's settings, which the app keeps for the user: the main thread sleeps before each frame until
+it's due, a share of a second after the last was due, as Unreal's `t.MaxFPS` and Godot's `max_fps`
+do, rather than waiting in the event loop, which Windows doesn't run while the user moves or resizes
+the window. The Performance panel and `engine.perf` count the sleep apart (`limit`). An embedded run
+renders a frame once its tool has taken the last, or 100 ms after, so the editor capped caps its
+game too.
 
 A run decodes images on threads of its own, `gg-load`, which the main thread hands each texture's
 bytes as its handle goes out and takes the pixels back from as each frame starts, so that neither a

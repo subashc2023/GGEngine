@@ -34,6 +34,9 @@ pub(crate) struct Sample {
     pub(crate) ui: u64,
     /// Waiting for the render thread to finish the frame before.
     pub(crate) handoff: u64,
+    /// Waiting, as it ended, for the next frame to be due under the frame-rate cap, as
+    /// [`Context::set_max_fps`](crate::Context::set_max_fps) says.
+    pub(crate) limit: u64,
     /// Rendering the frame before, with its submission and present, but not its waits.
     pub(crate) render: u64,
     /// Its waits: for the GPU to finish an earlier frame, and for the display to let go of an
@@ -53,11 +56,13 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
-    /// The rest of the frame: what happens between frames, such as making the swapchains of
-    /// torn-off windows and tessellating their UI, polling the gamepads, and the OS's events.
+    /// The rest of the frame but its wait for the cap: what happens between frames, such as making
+    /// the swapchains of torn-off windows and tessellating their UI, polling the gamepads, and the
+    /// OS's events.
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn other(&self) -> u64 {
-        (self.frame).saturating_sub(self.ticks + self.update + self.ui + self.handoff)
+        let parts = self.ticks + self.update + self.ui + self.handoff + self.limit;
+        self.frame.saturating_sub(parts)
     }
 
     /// Sets each field to `f` of it and `other`'s.
@@ -67,6 +72,7 @@ impl Sample {
         self.update = f(self.update, other.update);
         self.ui = f(self.ui, other.ui);
         self.handoff = f(self.handoff, other.handoff);
+        self.limit = f(self.limit, other.limit);
         self.render = f(self.render, other.render);
         self.wait = f(self.wait, other.wait);
         self.publish = f(self.publish, other.publish);
@@ -144,6 +150,13 @@ impl Perf {
         }
     }
 
+    /// The frame under way waited `limit`, as it ended, for the next to be due under the cap.
+    pub(crate) fn limited(&mut self, limit: Duration) {
+        if let Some(sample) = &mut self.pending {
+            sample.limit = nanos(limit);
+        }
+    }
+
     /// The run ends, `last` after the last frame started, which is then measured.
     pub(crate) fn finish(&mut self, last: Duration) {
         self.end(last);
@@ -207,6 +220,7 @@ impl Perf {
             update: stats(|s| s.update),
             ui: stats(|s| s.ui),
             handoff: stats(|s| s.handoff),
+            limit: stats(|s| s.limit),
             render: stats(|s| s.render),
             wait: stats(|s| s.wait),
             publish: stats(|s| s.publish),
@@ -232,6 +246,7 @@ pub(crate) struct Summary {
     pub(crate) update: Stats,
     pub(crate) ui: Stats,
     pub(crate) handoff: Stats,
+    pub(crate) limit: Stats,
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
     pub(crate) publish: Stats,
@@ -401,6 +416,11 @@ const RENDERING: [(&str, &str, Time); 3] = [
 #[cfg(feature = "dev")]
 const FRAME_TIP: &str = "The whole frame on the main thread, from its start to the next's";
 
+/// What the cap's row is, which its name's tooltip says.
+#[cfg(feature = "dev")]
+const LIMIT_TIP: &str = "The main thread waiting for the next frame to be due under the frame rate limit, which the \
+     graph leaves empty";
+
 /// The sum and the maximum of some times.
 #[cfg(feature = "dev")]
 #[derive(Clone, Copy, Default)]
@@ -428,6 +448,7 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
     let mut frames = 0;
     let mut frame = Total::default();
     let mut parts = [Total::default(); PARTS.len()];
+    let mut limit = Total::default();
     let mut rendering = [Total::default(); RENDERING.len()];
     for sample in perf.recent() {
         if frame.sum >= 1_000_000_000 {
@@ -438,6 +459,7 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         for (total, part) in parts.iter_mut().zip(&PARTS) {
             total.add((part.time)(sample));
         }
+        limit.add(sample.limit);
         for (total, (.., time)) in rendering.iter_mut().zip(&RENDERING) {
             total.add(time(sample));
         }
@@ -469,6 +491,10 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
                 let color = part.color(ui.visuals());
                 row(ui, Some(color), (part.name, part.tip), total);
             }
+            // While frames are capped.
+            if limit.max > 0 {
+                row(ui, None, ("Limit", LIMIT_TIP), limit);
+            }
             for (&(name, tip, _), total) in RENDERING.iter().zip(rendering) {
                 row(ui, None, (name, tip), total);
             }
@@ -477,8 +503,9 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
 
 /// The last frames' times as bars, newest at the right, each split into its parts and scaled to
 /// twice their mean, so that one long frame doesn't flatten the rest; longer frames are cut off,
-/// under a line in the text's color. While the pointer is over the graph, the graph holds still,
-/// and shows the parts of the frame under the pointer.
+/// under a line in the text's color. A frame's wait for the cap is left empty above its bar. While
+/// the pointer is over the graph, the graph holds still, and shows the parts of the frame under
+/// the pointer.
 #[cfg(feature = "dev")]
 fn graph(perf: &Perf, ui: &mut egui::Ui) {
     let size = egui::vec2(ui.available_width(), 64.0);
@@ -614,6 +641,9 @@ fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
         for part in &PARTS {
             let color = part.color(ui.visuals());
             row(ui, Some(color), part.name, (part.time)(sample));
+        }
+        if sample.limit > 0 {
+            row(ui, None, "Limit", sample.limit);
         }
         for (name, _, time) in &RENDERING {
             row(ui, None, name, time(sample));
@@ -786,6 +816,7 @@ mod tests {
                     update: ms(2),
                     ui: ms(4),
                     handoff: ms(5),
+                    limit: 0,
                     render: ms(6),
                     wait: ms(4),
                     publish: 0,
@@ -801,6 +832,26 @@ mod tests {
         let summary = perf.summary();
         let maxima = (summary.draws_max, summary.instances_max);
         assert_eq!((maxima, summary.triangles_max), ((7, 900), 1800));
+    }
+
+    #[test]
+    fn a_frames_wait_for_the_cap_is_its_own_and_none_of_the_rest() {
+        let mut perf = Perf::default();
+        let presented = rendered(Duration::ZERO, Duration::ZERO, DrawCounts::default(), true);
+        perf.start_frame(Duration::ZERO);
+        perf.rendered(Duration::ZERO, Duration::ZERO, Some(&presented));
+        perf.start_frame(MS);
+        perf.ran(MS, MS, MS);
+        perf.rendered(Duration::ZERO, MS, Some(&presented));
+        // As the frame ends, before the next starts.
+        perf.limited(12 * MS);
+        perf.start_frame(17 * MS);
+        perf.finish(MS);
+        let newest = perf.recent().nth(1).copied().expect("the capped frame");
+        let ms = |ms: u64| ms * 1_000_000;
+        assert_eq!((newest.frame, newest.limit), (ms(17), ms(12)));
+        assert_eq!(newest.other(), ms(1));
+        assert_eq!(perf.summary().limit.max, Some(12.0));
     }
 
     /// The GPU's times are of the frames whose times came back alone, as the first frames' don't.

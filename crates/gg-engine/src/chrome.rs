@@ -1,9 +1,9 @@
 //! The frame around the app's windows: who draws it, and what the UI draws when it's the UI's:
 //! the main window's title bar, which holds a button that opens the menus in a drawer, which
-//! slides out from the window's left edge, the controls layers put at its middle, the buttons that
-//! hide and show the panels docked left of, below and right of the view, and those that minimize,
-//! maximize and close a window; and the edges that resize one. On Windows the rest of the frame
-//! stays the OS's own, which `windows_frame` gives back.
+//! slides out from the window's left edge, the controls layers put at its middle, a gear that opens
+//! the settings, the buttons that hide and show the panels docked left of, below and right of the
+//! view, and those that minimize, maximize and close a window; and the edges that resize one. On
+//! Windows the rest of the frame stays the OS's own, which `windows_frame` gives back.
 
 use std::mem;
 
@@ -36,6 +36,8 @@ const TRAFFIC_LIGHTS: f32 = 72.0;
 /// How wide the menus' drawer is, in points, and how long it takes to slide out, in seconds.
 const DRAWER: f32 = 200.0;
 const SLIDE: f32 = 0.15;
+/// How wide the settings are, in points.
+const SETTINGS: f32 = 240.0;
 /// How thick a window's edges are, and how far along one from either end it resizes diagonally,
 /// in points.
 const EDGE: f32 = 5.0;
@@ -117,9 +119,9 @@ pub(crate) enum Sidebar {
 
 /// The main window's title bar, or, under the OS's frame, a bar below its title bar: the button
 /// that opens the menus' drawer, and the drawer, the layers' controls at its middle, and where the
-/// UI draws the frame, the buttons that hide and show the panels left of, below and right of the
-/// view, and the window's own. The dock owns it, since it comes off the window before the dock
-/// arranges the rest.
+/// UI draws the frame, the gear that opens the settings, and the settings, the buttons that hide
+/// and show the panels left of, below and right of the view, and the window's own. The dock owns
+/// it, since it comes off the window before the dock arranges the rest.
 pub(crate) struct TitleBar {
     chrome: Chrome,
     /// The bar this pass, and the Ui its buttons go in until the pass ends; where its buttons
@@ -135,6 +137,12 @@ pub(crate) struct TitleBar {
     drawer_height: f32,
     /// Whether a press has come since the drawer opened, whose click may close it.
     pressed: bool,
+    /// The Ui the settings go in, below the gear, while they're open, until the pass ends; how
+    /// tall they were in the last pass they were open, which they take, since they come after they
+    /// show; and how many groups of them were added this pass, which a line parts.
+    settings: Option<egui::Ui>,
+    settings_height: f32,
+    settings_added: usize,
     /// The Ui the layers' controls go in, at the middle of the bar, until the pass ends; how wide
     /// they were in the last pass, which centers them; and whether any were added this pass and in
     /// the last.
@@ -175,6 +183,9 @@ impl TitleBar {
             drawer: None,
             drawer_height: 0.0,
             pressed: false,
+            settings: None,
+            settings_height: 0.0,
+            settings_added: 0,
             middle: None,
             middle_width: 0.0,
             controls: false,
@@ -188,13 +199,15 @@ impl TitleBar {
     }
 
     /// Starts a pass: takes the bar off the top of `root`, with the button that opens the menus'
-    /// drawer once a menu has shown, the drawer while it's open, and the middle, which the
-    /// controls go in. Under [`Chrome::Os`] it's a bar of its own below the OS's title bar, from
-    /// the pass after a menu or a control first shows.
+    /// drawer once a menu has shown, the drawer while it's open, the middle, which the controls go
+    /// in, and where the UI draws the title bar, the gear and the settings while they're open.
+    /// Under [`Chrome::Os`] it's a bar of its own below the OS's title bar, from the pass after a
+    /// menu or a control first shows.
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
         self.had_menus = !self.shown.is_empty();
         self.shown.clear();
         self.had_controls = mem::take(&mut self.controls);
+        self.settings_added = 0;
         let ctx = root.ctx().clone();
         // Every pass, so that the drawer slides out from the edge each time it opens.
         let open = Popup::is_id_open(&ctx, drawer_id());
@@ -245,17 +258,30 @@ impl TitleBar {
                 let middle = Rect::from_center_size(pos2(x, bar.center().y), size);
                 let layout = Layout::left_to_right(Align::Center);
                 self.middle = Some(ui.new_child(UiBuilder::new().max_rect(middle).layout(layout)));
+                // Left of the sidebars' buttons, which `end` draws.
+                if self.chrome != Chrome::Os {
+                    let gear = Rect::from_min_size(pos2(end, bar.min.y), vec2(TOOL, bar.height()));
+                    let open = Popup::is_id_open(&ctx, settings_id());
+                    let button = tool(&mut ui, gear, Tool::Settings, open, true);
+                    // Before the settings show, so that a click on the gear while they're open
+                    // closes them rather than closing them as a click outside and opening them.
+                    if button.on_hover_text("Settings").clicked() {
+                        Popup::toggle_id(&ctx, settings_id());
+                    }
+                    self.settings = self.show_settings(&ui, gear);
+                }
                 self.ui = Some(ui);
             });
     }
 
-    /// How much of the bar's right its buttons take: those that hide and show the panels around the
-    /// view, where the UI draws the title bar, and the window's, where it draws them.
+    /// How much of the bar's right its buttons take: the gear and those that hide and show the
+    /// panels around the view, where the UI draws the title bar, and the window's, where it draws
+    /// them.
     fn right(&self) -> f32 {
         let sidebars = if self.chrome == Chrome::Os {
             0.0
         } else {
-            3.0 * TOOL
+            4.0 * TOOL
         };
         let window = if self.chrome.draws_buttons() {
             3.0 * BUTTON
@@ -325,6 +351,39 @@ impl TitleBar {
         }
     }
 
+    /// Shows the settings while they're open, below the gear at `gear`, their right edge at its
+    /// right, over the dock; and returns the Ui they go in. They close on the gear, Escape and a
+    /// click outside them, as egui's popups do.
+    fn show_settings(&self, ui: &egui::Ui, gear: Rect) -> Option<egui::Ui> {
+        let height = self.settings_height;
+        let mut settings = None;
+        Popup::new(settings_id(), ui.ctx().clone(), gear, ui.layer_id())
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .layout(Layout::top_down(Align::Min))
+            .align(RectAlign::BOTTOM_END)
+            .align_alternatives(&[])
+            .open_memory(None)
+            .show(|ui| {
+                ui.set_width(SETTINGS);
+                ui.set_min_height(height);
+                settings = Some(ui.new_child(UiBuilder::new()));
+            })?;
+        settings
+    }
+
+    /// Adds what `add_contents` draws to the settings this pass, after those added before, parted
+    /// from them by a line, while they're open; nothing under [`Chrome::Os`], which has no gear.
+    pub(crate) fn settings(&mut self, add_contents: impl FnOnce(&mut egui::Ui)) {
+        let Some(settings) = &mut self.settings else {
+            return;
+        };
+        if self.settings_added > 0 {
+            settings.separator();
+        }
+        self.settings_added += 1;
+        add_contents(settings);
+    }
+
     /// Adds what `add_contents` draws to the controls at the middle of the bar this pass, after
     /// those added before, in place of the window's title; and returns what it returned, unless
     /// the bar doesn't show. Under [`Chrome::Os`], the bar shows from the pass after the first
@@ -347,8 +406,17 @@ impl TitleBar {
         self.caption = None;
         // Dropped within the pass, since dropping a Ui records its rect in egui.
         let (drawer, middle) = (self.drawer.take(), self.middle.take());
+        let settings = self.settings.take();
         let mut ui = self.ui.take()?;
         let ctx = ui.ctx().clone();
+        // As the drawer does, a pass the settings outgrew or shrank from goes again.
+        if let Some(settings) = settings {
+            let height = settings.min_rect().height();
+            if height != self.settings_height {
+                self.settings_height = height;
+                ctx.request_discard("the settings changed size");
+            }
+        }
         if let Some(drawer) = drawer {
             // A pass the menus outgrew or shrank from goes again, rather than show the drawer
             // another size than theirs.
@@ -460,11 +528,12 @@ impl TitleBar {
             }
         }
 
-        // As far right as the window's buttons, which stay the rightmost, as the OS's are.
+        // As far right as the window's buttons, which stay the rightmost, as the OS's are, right
+        // of the gear.
         let mut toggled = None;
         let all = [Sidebar::Left, Sidebar::Bottom, Sidebar::Right];
         for (i, sidebar) in all.into_iter().enumerate() {
-            let at = pos2(end + i as f32 * TOOL, bar.min.y);
+            let at = pos2(end + (i + 1) as f32 * TOOL, bar.min.y);
             let rect = Rect::from_min_size(at, vec2(TOOL, bar.height()));
             let shows = sidebars(sidebar);
             let side = match sidebar {
@@ -721,11 +790,18 @@ fn drawer_id() -> Id {
     Id::unique("gg title bar drawer")
 }
 
+/// The id of the settings.
+fn settings_id() -> Id {
+    Id::unique("gg title bar settings")
+}
+
 /// One of the bar's own buttons, rather than the window's.
 #[derive(Clone, Copy)]
 enum Tool {
     /// Three lines across, as menus behind a button have.
     Menu,
+    /// A gear, as settings behind a button have.
+    Settings,
     /// A window with a strip along one side, filled while the panels there show.
     Sidebar(Sidebar, bool),
 }
@@ -741,6 +817,18 @@ impl Tool {
             Self::Menu => {
                 for y in [4.0, 8.0, 12.0] {
                     painter.line_segment([at(2.0, y), at(14.0, y)], line);
+                }
+            }
+            Self::Settings => {
+                // A ring with a hole, and eight teeth round it.
+                let center = at(8.0, 8.0);
+                painter.circle_stroke(center, 4.25 * scale, line);
+                painter.circle_stroke(center, 1.75 * scale, line);
+                let tooth = Stroke::new(2.25 * scale, color);
+                for i in 0..8 {
+                    let way = Vec2::angled(i as f32 * std::f32::consts::FRAC_PI_4);
+                    let from = center + way * 4.5 * scale;
+                    painter.line_segment([from, center + way * 6.75 * scale], tooth);
                 }
             }
             Self::Sidebar(sidebar, shows) => {
@@ -868,6 +956,11 @@ mod tests {
                         ui.label(format!("{name} item"));
                     });
                 }
+                for name in ["A setting", "Another setting"] {
+                    bar.settings(|ui| {
+                        ui.label(name);
+                    });
+                }
                 *shown = control.and_then(|width| {
                     let size = vec2(width, 20.0);
                     bar.controls(|ui| ui.allocate_exact_size(size, Sense::click()).0)
@@ -953,6 +1046,10 @@ mod tests {
 
         fn drawer_open(&self) -> bool {
             Popup::is_id_open(&self.ctx, drawer_id())
+        }
+
+        fn settings_open(&self) -> bool {
+            Popup::is_id_open(&self.ctx, settings_id())
         }
 
         /// Presses Escape, which closes what's open.
@@ -1111,6 +1208,48 @@ mod tests {
         assert_eq!(run.toggled, None);
     }
 
+    /// Where the UI draws the title bar, the gear, left of the sidebars' buttons, opens the
+    /// settings below it, against its right, each group added under the one before; a click in
+    /// them leaves them open, and the gear, a click outside them and Escape close them. Under the
+    /// OS's frame there's no gear.
+    #[test]
+    fn the_gear_opens_the_settings_below_it() {
+        let left_of_buttons = SCREEN.x - 3.0 * BUTTON;
+        for (chrome, end) in [
+            (Chrome::Drawn, left_of_buttons),
+            (Chrome::InWindowsFrame, left_of_buttons),
+            (Chrome::AroundTrafficLights, SCREEN.x),
+        ] {
+            let mut run = Run::new(chrome);
+            let gear = pos2(end - 3.5 * TOOL, run.top / 2.0);
+            assert!(run.texts("A setting").is_empty(), "{chrome:?}");
+            run.click(gear);
+            assert!(run.settings_open(), "{chrome:?}");
+            run.frames(2);
+            let (first, second) = (run.text("A setting"), run.text("Another setting"));
+            assert!(first.y > run.top && second.y > first.y, "{chrome:?}");
+            let right = gear.x + TOOL / 2.0;
+            assert!(first.x < right && first.x > right - SETTINGS, "{chrome:?}");
+            run.click(first);
+            assert!(run.settings_open(), "{chrome:?}");
+            run.click(gear + vec2(1.0, 0.0));
+            assert!(!run.settings_open(), "{chrome:?}");
+            run.click(gear);
+            run.frames(2);
+            run.click(FREE);
+            assert!(!run.settings_open(), "{chrome:?}");
+            run.click(gear + vec2(1.0, 0.0));
+            run.frames(2);
+            run.escape();
+            assert!(!run.settings_open(), "{chrome:?}");
+        }
+        let mut run = Run::new(Chrome::Os);
+        run.click(pos2(SCREEN.x - TOOL / 2.0, run.top / 2.0));
+        run.frames(2);
+        assert!(!run.settings_open());
+        assert!(run.texts("A setting").is_empty());
+    }
+
     #[test]
     fn dragging_the_free_space_moves_the_window_and_dragging_a_button_doesnt() {
         let mut run = Run::new(Chrome::Drawn);
@@ -1166,8 +1305,9 @@ mod tests {
         let [left, free, none] = caption.drag;
         let bar = run.bar.bar;
         assert_eq!(left, bar.with_max_x(INSET));
-        // From the menu button to the sidebars' buttons, without controls between.
-        let end = pos2(SCREEN.x - 3.0 * BUTTON - 3.0 * TOOL, bar.max.y);
+        // From the menu button to the gear, left of the sidebars' buttons, without controls
+        // between.
+        let end = pos2(SCREEN.x - 3.0 * BUTTON - 4.0 * TOOL, bar.max.y);
         assert_eq!(free, Rect::from_min_max(pos2(INSET + TOOL, 0.0), end));
         assert_eq!(none, Rect::NOTHING);
         let maximize = bar

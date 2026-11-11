@@ -43,6 +43,10 @@ impl Ui<'_> {
         match self.never {}
     }
 
+    pub fn settings(&mut self, _: impl FnOnce(&mut egui::Ui)) {
+        match self.never {}
+    }
+
     pub fn over_view<R>(
         &mut self,
         _: impl Hash + Debug,

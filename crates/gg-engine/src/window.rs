@@ -35,6 +35,9 @@ use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock, Under};
 #[cfg(feature = "dev")]
 use crate::egui_context;
+#[cfg(feature = "dev")]
+use crate::frame_rate;
+use crate::frame_rate::Limiter;
 use crate::interrupt;
 use crate::layer::Stack;
 use crate::main_loop::{
@@ -126,6 +129,7 @@ pub(crate) fn run(
         gamepads: Gamepads::default(),
         cx: Context::new(None),
         clock: Clock::default(),
+        limiter: Limiter::default(),
         stepper: Stepper::default(),
         api,
         frames: 0,
@@ -197,6 +201,8 @@ struct Handler<'a> {
     dock: Dock,
     cx: Context,
     clock: Clock,
+    /// Holds the frames to the run's cap, as [`Context::set_max_fps`] says.
+    limiter: Limiter,
     /// Steps the simulation in real time, or as the tool API asks.
     stepper: Stepper,
     /// Serves tools, in development builds.
@@ -264,6 +270,12 @@ impl Handler<'_> {
             ));
         }
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
+        // What the settings kept, which a flag overrides for the run.
+        #[cfg(feature = "dev")]
+        let kept = frame_rate::kept(&self.cx);
+        #[cfg(not(feature = "dev"))]
+        let kept = None;
+        self.cx.set_max_fps(self.args.max_fps.or(kept));
         api::debug(&self.api, &mut self.cx);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
@@ -280,6 +292,11 @@ impl Handler<'_> {
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        // Before the frame starts, so that the frame before counts the wait, and the pads read and
+        // the tools' requests that came meanwhile go into this one; the window's events that came
+        // meanwhile reach the layers after it, as the event loop hands them on.
+        let waited = self.limiter.wait(self.cx.max_fps());
+        self.cx.perf.limited(waited);
         let _zone = gg_core::zone!();
         // Before the frame's ticks, which apply what the pads did.
         let Self {

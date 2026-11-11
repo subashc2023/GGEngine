@@ -5,6 +5,7 @@ use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt;
 use std::mem;
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -323,6 +324,9 @@ pub struct Context {
     /// Whether layers want the cursor grabbed, as [`set_cursor_grabbed`](Self::set_cursor_grabbed)
     /// says.
     cursor_grabbed: bool,
+    /// The most frames a second a windowed run renders, as [`set_max_fps`](Self::set_max_fps)
+    /// says.
+    max_fps: Option<NonZeroU32>,
     clear_color: [f32; 4],
     /// How a layer set the view to be antialiased, in place of the world's environment's, as
     /// [`set_antialiasing`](Self::set_antialiasing) says.
@@ -701,6 +705,7 @@ impl Context {
             window,
             input: Input::default(),
             cursor_grabbed: false,
+            max_fps: None,
             clear_color: [0.02, 0.02, 0.02, 1.0],
             antialiasing: None,
             viewpoint: None,
@@ -867,6 +872,13 @@ impl Context {
         })
     }
 
+    /// Keeps what the app keeps for the user in `dir`, as a windowed run's context does in the OS's
+    /// directory for it, for a test's context.
+    #[cfg(all(test, feature = "dev"))]
+    pub(crate) fn keep_state_in(&mut self, dir: PathBuf) {
+        self.state = Some(dir);
+    }
+
     /// The path of the app's state file `name`, as [`read_state`](Self::read_state) says; `None`
     /// in a run that keeps none.
     fn state_path(&self, name: &str) -> Result<Option<PathBuf>> {
@@ -902,6 +914,25 @@ impl Context {
     /// that the layer that asks last in a frame has its way.
     pub fn set_cursor_grabbed(&mut self, grabbed: bool) {
         self.cursor_grabbed = grabbed;
+    }
+
+    /// The most frames a second a windowed run renders, as
+    /// [`set_max_fps`](Self::set_max_fps) last set it; `None` while uncapped.
+    pub fn max_fps(&self) -> Option<NonZeroU32> {
+        self.max_fps
+    }
+
+    /// Caps a windowed run's frames at `max` a second, or uncaps them with `None`, as a game's own
+    /// settings menu does: before each frame, the main loop waits out the rest of the frame's
+    /// share of a second, counting from when the last was due, so that the rate holds though a
+    /// wait ends late, and from the frame's start once frames have fallen a whole share behind, so
+    /// that no burst follows a slow one. The simulation's ticks go on in real time however fast
+    /// frames come. `--max-fps` sets it as the run starts, and in a development build the title
+    /// bar's settings, as [`Ui::settings`](crate::Ui::settings) says, set it and keep it for the
+    /// user. Headless runs ignore it, as their frames go as fast as they can or `--real-time` paces
+    /// them, and so do embedded ones, which their tool paces by taking frames.
+    pub fn set_max_fps(&mut self, max: Option<NonZeroU32>) {
+        self.max_fps = max;
     }
 
     /// The color each frame clears to, in linear RGBA.
