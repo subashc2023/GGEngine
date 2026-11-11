@@ -2745,7 +2745,19 @@ stays where it was, so that a still view settles rather than following each fram
 newest frame's share, up to a tenth where it moved a pixel or more, and a share equal to each
 frame's that the history holds while those are fewer; the history first scaled by this frame's
 exposure over the frame before's, so that a change of exposure, as an adapting one's, leaves no ghost where the clipping
-lets much of the history through. Its history is one of two images of the view's size, each frame
+lets much of the history through. The clip throws out what's thinner than a pixel, or cut out by a
+mask near its cutoff, at each offset that misses it, so that in a still view such a pixel would
+show each offset's own color in turn; so each pixel keeps, in two more images of the view's size,
+the luminance each of the eight offsets drew of it the last time it came round, and whether that
+matched the time before, which the resolve reads and writes in place. A pixel that stood still while
+every offset drew it as it had a cycle before is changing only as the offsets move what's drawn: its
+history isn't clipped, its luminance is the mean of the eight, and its color blends in a hundredth
+of this frame's. Anything else that changes it, something passing over it, a shadow too, or light
+that changes, breaks the match for two cycles, which the clip resolves as it otherwise does, so
+that it leaves no trail; and a pixel that moves keeps none. FSR 2's luma instability and Unreal's
+TSR keep the history unclipped where a pixel's luminance flickers; this asks the same luminance at
+the same offset, so that no change but the offsets' is kept. Those images are 16 bytes a pixel, as
+much as the two of the history. Its history is one of two images of the view's size, each frame
 resolving into the one the frame before didn't, against the other, which a frame at another size,
 or after one that resolved no view, starts afresh. The canvas draws after the resolve, in a pass of
 its own over the view's resolved colors, which the resolve then writes apart from its history, so

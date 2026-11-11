@@ -2,7 +2,8 @@
 //! offsets, and resolved, before it's tonemapped, against what the frames before it resolved,
 //! taken back to where each pixel's point was by its motion and clipped to its neighborhood, as
 //! `shaders/taa.slang` says; into one of two images of the view's size, which the next frame
-//! resolves against in turn.
+//! resolves against in turn, beside two more of what each pixel's offsets drew, which keep a still
+//! pixel's history unclipped where only the offsets change it.
 
 use std::iter;
 use std::sync::Arc;
@@ -26,7 +27,9 @@ pub enum Antialiasing {
     /// Temporal antialiasing: the view drawn a fraction of a pixel off each frame, by a cycle of
     /// 8 offsets, and each pixel blended with what the frames before resolved where its point was,
     /// as its motion says, clipped to what's round it this frame, so that its edges average what's
-    /// drawn across their pixels; what's drawn on the canvas, after it, isn't. Each frame draws
+    /// drawn across their pixels; and, where it stands still and each offset draws it as it did a
+    /// cycle before, unclipped, so that what's thinner than a pixel averages too, rather than
+    /// flicker. What's drawn on the canvas, after it, isn't antialiased. Each frame draws
     /// what's opaque in the view with how far it moved in the world since the frame before: a
     /// model's by its instance's transform the frame before, of the world's opaque meshes, and a
     /// game's shader's as it returns it, and the rest with the camera alone.
@@ -48,8 +51,12 @@ impl Antialiasing {
     pub const ALL: [Self; 3] = [Self::Taa, Self::None, Self::Smaa];
 }
 
-/// How many offsets the view cycles through, of the Halton sequence's first.
+/// How many offsets the view cycles through, of the Halton sequence's first: `OFFSETS` in
+/// `shaders/taa.slang`, whose store of what each drew holds four in each of two images.
 const OFFSETS: u64 = 8;
+
+/// How many of the frame's targets a [`History`] takes, from [`TaaPass::plan`]'s `first`.
+pub(crate) const TARGETS: usize = 4;
 
 /// The `index`th number of the Halton sequence of base `base`: its digits in that base, mirrored
 /// about the point, from 0 to 1.
@@ -106,6 +113,9 @@ struct Resolve {
     held: u32,
     writes_resolved: u32,
     history_scale: f32,
+    seen_first: u32,
+    seen_second: u32,
+    phase: u32,
 }
 
 /// What the resolve pushes: `Push` in `shaders/taa.slang`.
@@ -136,17 +146,18 @@ pub(crate) struct TaaPass {
 }
 
 /// What the game's view resolves into and against: two images of its size, made again as it
-/// changes, each frame resolving into the one the frame before didn't, against the other, which
-/// frames that resolve take as their targets; apart from [`TaaPass`], as a frame holds them while
-/// it records the resolve.
+/// changes, each frame resolving into the one the frame before didn't, against the other; and two
+/// more, of what each pixel's offsets drew, which each frame reads and writes in place, as
+/// `shaders/taa.slang` says; all four of which frames that resolve take as their targets, apart
+/// from [`TaaPass`], as a frame holds them while it records the resolve.
 #[derive(Default)]
 pub(crate) struct History {
-    images: Option<[StorageImage; 2]>,
+    images: Option<[StorageImage; TARGETS]>,
 }
 
 impl History {
     /// Makes its images again at `size`, if they're another size, or there are none yet; the
-    /// frame resolves against neither then, as the last that resolved did so at another size.
+    /// frame resolves against none then, as the last that resolved did so at another size.
     pub(crate) fn prepare(&mut self, device: &Arc<Device>, size: [u32; 2]) -> Result<()> {
         if (self.images.as_ref()).is_some_and(|images| images[0].size() == size) {
             return Ok(());
@@ -154,7 +165,12 @@ impl History {
         // Those there retire until the GPU is done with them.
         self.images = None;
         let image = |name| StorageImage::new(device, size, 1, false, name);
-        self.images = Some([image("taa history 0")?, image("taa history 1")?]);
+        self.images = Some([
+            image("taa history 0")?,
+            image("taa history 1")?,
+            image("taa seen 0")?,
+            image("taa seen 1")?,
+        ]);
         Ok(())
     }
 
@@ -167,14 +183,15 @@ impl History {
 
 /// A frame's resolve in its graph: its pass; the view's size, and its colors, depth and motion, as
 /// its passes drew them; the image it resolves into, and the one it resolves against, if the frame
-/// before resolved one it can take; and the view's resolved colors, if it writes them apart, for
-/// its canvas to be drawn over.
+/// before resolved one it can take; the two of what each pixel's offsets drew; and the view's
+/// resolved colors, if it writes them apart, for its canvas to be drawn over.
 pub(crate) struct Plan {
     pass: PassId,
     size: [u32; 2],
     drawn: [ImageId; 3],
     target: ImageId,
     history: Option<ImageId>,
+    seen: [ImageId; 2],
     resolved: Option<ImageId>,
 }
 
@@ -213,9 +230,11 @@ impl TaaPass {
     }
 
     /// Declares in `graph` the resolve of frame `frame`'s view, of `size` pixels, from its colors,
-    /// depth and motion, `drawn`, into the image of a [`History`]'s two, at targets `first` and 1
-    /// past it, that the frame before didn't resolve into, against the other, if that one resolved
-    /// the view at its size; and into the view's resolved colors too, made in `graph`, if `apart`.
+    /// depth and motion, `drawn`, into the image of a [`History`]'s two of colors, at targets
+    /// `first` and 1 past it, that the frame before didn't resolve into, against the other, if that
+    /// one resolved the view at its size; reading and writing its two of what the offsets drew, at
+    /// the two targets past those; and into the view's resolved colors too, made in `graph`, if
+    /// `apart`.
     pub(crate) fn plan(
         &self,
         graph: &mut Graph,
@@ -226,6 +245,7 @@ impl TaaPass {
         apart: bool,
     ) -> Plan {
         let images = [graph.target(first), graph.target(first + 1)];
+        let seen = [graph.target(first + 2), graph.target(first + 3)];
         let target = images[(frame % 2) as usize];
         let history = (self.last)
             .filter(|last| last.frame + 1 == frame && last.size == size)
@@ -239,12 +259,14 @@ impl TaaPass {
         let pass = iter::once(target)
             .chain(resolved)
             .fold(pass, |pass, image| pass.overwrite(image));
+        let pass = seen.into_iter().fold(pass, |pass, image| pass.write(image));
         Plan {
             pass: pass.add(),
             size,
             drawn,
             target,
             history,
+            seen,
             resolved,
         }
     }
@@ -281,6 +303,10 @@ impl TaaPass {
             held,
             writes_resolved: u32::from(plan.resolved.is_some()),
             history_scale,
+            seen_first: pass.storage(plan.seen[0], 0),
+            seen_second: pass.storage(plan.seen[1], 0),
+            // The offset `offset` gave this frame, which `self.resolved` counts to.
+            phase: (self.resolved % OFFSETS) as u32,
         };
         let push = ResolvePush {
             resolve: pass.upload(bytemuck::bytes_of(&resolve))?.address(),

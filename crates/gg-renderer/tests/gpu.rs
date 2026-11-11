@@ -28,8 +28,8 @@ use gg_renderer::{
     MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets,
     Mipmaps, ModelMesh, ModelVertex, MotionBlur, Outline, PackedVertex, ParticleShape, Particles,
     Pick, Pixels, Projection, Reflections, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
-    Shaders, Show, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
-    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
+    Shader, Shaders, Show, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures,
+    Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -156,6 +156,9 @@ fn main() -> ExitCode {
         antialiasing_smooths_edges_frame_by_frame,
         antialiasing_follows_what_moves,
         antialiasing_leaves_no_trail,
+        antialiasing_steadies_what_is_thinner_than_a_pixel,
+        antialiasing_keeps_still_dark_colors_as_drawn,
+        antialiasing_leaves_no_trail_behind_dark_specks,
         smaa_smooths_edges_in_a_frame,
         smaa_blends_by_how_much_of_each_pixel_the_edge_covers,
         smaa_blends_along_diagonals_by_how_much_they_cover,
@@ -10835,6 +10838,231 @@ fn antialiasing_leaves_no_trail() {
             "frame {}'s pixel {outside:?} is outside the clear color's and the plate's {bounds:?}",
             i + 1
         );
+    }
+}
+
+/// The bright plate the antialiasing tests' specks and bars are seen against: unlit, 0.8 in linear
+/// light, behind the origin and filling the view, drawn by `flat`, `flat_color.slang`.
+fn bright_plate(draws: &mut Draws, square: Mesh<[f32; 3]>, flat: Shader<[f32; 3], Vec4>) {
+    let behind =
+        Mat4::from_translation(Vec3::new(0.0, 0.0, -0.5)) * Mat4::from_scale(Vec3::splat(4.0));
+    draws.push(square, flat, behind, Vec4::new(0.8, 0.8, 0.8, 1.0));
+}
+
+/// [`bright_plate`], sRGB-encoded, as a frame reads back.
+const PLATE: [u8; 4] = [231, 231, 231, 255];
+
+/// What's thinner than a pixel, in a still view, antialiased: dark bars a third of a pixel wide
+/// across a bright plate, aslant, which each of the 8 offsets draws over pixels the others don't.
+/// Once the view has settled, over 16 frames, no pixel's channel moves more than 2 levels, as
+/// rounding may: it shows the mean of what the offsets drew, where a resolve that clipped its
+/// history to the pixels round it, which hold the bars at some offsets and not at others, showed
+/// each offset's own, and moved 24.
+fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
+    const SIZE: u32 = 64;
+    const SETTLE: usize = 160;
+    const FRAMES: usize = 16;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    bright_plate(&mut draws, square, flat);
+    // About 19 pixels a unit at the origin.
+    for i in 0..5 {
+        let bar = Mat4::from_scale_rotation_translation(
+            Vec3::new(0.016, 2.6, 1.0),
+            Quat::from_rotation_z(0.15 + 0.3 * i as f32),
+            Vec3::new(-1.0 + 0.5 * i as f32, 0.0, 0.0),
+        );
+        draws.push(square, flat, bar, Vec4::new(0.01, 0.01, 0.01, 1.0));
+    }
+    let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut drawn = Vec::new();
+    for frame in 0..SETTLE + FRAMES {
+        let data = RenderData {
+            antialiasing: Antialiasing::Taa,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        if frame >= SETTLE {
+            drawn.push(frame_pixels(&mut renderer));
+        }
+    }
+    shut_down(renderer);
+    // Each channel of each pixel: how far it moves over the frames, and where it moves most.
+    let (mut worst, mut at, mut moving) = (0, 0, 0);
+    for channel in (0..(SIZE * SIZE * 4) as usize).filter(|channel| channel % 4 != 3) {
+        let values = drawn.iter().map(|frame| frame[channel]);
+        let range = values.clone().max().unwrap_or(0) - values.min().unwrap_or(0);
+        if range > 2 {
+            moving += 1;
+        }
+        if range > worst {
+            (worst, at) = (range, channel / 4);
+        }
+    }
+    let at = [at as u32 % SIZE, at as u32 / SIZE];
+    assert!(
+        worst <= 2,
+        "a pixel at {at:?} moves {worst} levels over {FRAMES} still frames, and {moving} channels \
+         more than 2"
+    );
+}
+
+/// Dark squares in a still view, antialiased, from a thousandth to a fiftieth in linear light, where
+/// a level of sRGB spans the least light: once settled, each pixel 2 or more inside one shows it as
+/// a view without antialiasing does, within a level, as one whose resolve kept what the offsets drew
+/// in steps of a thousandth, and showed their mean, didn't, by 2.
+fn antialiasing_keeps_still_dark_colors_as_drawn() {
+    const SIZE: u32 = 64;
+    const SETTLE: usize = 64;
+    let render = |antialiasing: Antialiasing| {
+        let mut renderer = renderer(SIZE, SIZE);
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let square = square(&mut stores.meshes);
+        let mut draws = Draws::default();
+        // A grid of 4 by 4 squares, each 0.7 across, about 13 pixels.
+        for i in 0..16 {
+            let at = Vec3::new(
+                -1.2 + 0.8 * (i % 4) as f32,
+                -1.2 + 0.8 * (i / 4) as f32,
+                0.0,
+            );
+            let placed = Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.7));
+            let linear = 0.001 + 0.019 * i as f32 / 15.0;
+            draws.push(square, flat, placed, Vec4::new(linear, linear, linear, 1.0));
+        }
+        let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        for _ in 0..SETTLE {
+            let data = RenderData {
+                antialiasing,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        pixels
+    };
+    let (antialiased, drawn) = (render(Antialiasing::Taa), render(Antialiasing::None));
+    let (mut inside, mut apart) = (0, Vec::new());
+    for y in 2..SIZE - 2 {
+        for x in 2..SIZE - 2 {
+            let at = |dx: i32, dy: i32| [(x as i32 + dx) as u32, (y as i32 + dy) as u32];
+            let center = pixel_at(&drawn, SIZE, [x, y]);
+            let flat =
+                (-2..=2).all(|dy| (-2..=2).all(|dx| pixel_at(&drawn, SIZE, at(dx, dy)) == center));
+            if !flat || center == CLEARED {
+                continue;
+            }
+            inside += 1;
+            let shown = pixel_at(&antialiased, SIZE, [x, y]);
+            if !close(shown, center) {
+                apart.push(([x, y], shown, center));
+            }
+        }
+    }
+    assert!(
+        inside > 1000,
+        "{inside} pixels are 2 or more inside a square"
+    );
+    assert!(
+        apart.is_empty(),
+        "{} pixels inside a square show otherwise than without antialiasing, as {:?}",
+        apart.len(),
+        apart.first()
+    );
+}
+
+/// A dark speck, about 3 pixels across, crossing a bright plate before a still camera, antialiased,
+/// at a quarter of a pixel, a pixel and 3 pixels a frame, from where it stood still long enough for
+/// the plate to settle: drawn by a shader that returns how far it moved, `moving.slang`, and by one
+/// that doesn't, `flat_color.slang`, as nothing moves where a shadow crosses what stands still. In
+/// every frame, every pixel 3 or more from the speck's middle past its edge shows the plate: where
+/// it was leaves no trail, as the pixels it left are resolved against what's round them.
+fn antialiasing_leaves_no_trail_behind_dark_specks() {
+    const SIZE: u32 = 64;
+    const STILL: usize = 48;
+    // Pixels a unit at the speck's depth, 3.9 from the camera, whose view is a quarter turn tall.
+    const PIXELS_A_UNIT: f32 = SIZE as f32 / (2.0 * 3.9 * 0.414_213_57);
+    const HALF: f32 = 0.08;
+    let dark = Vec4::new(0.01, 0.01, 0.01, 1.0);
+    for speed in [0.25, 1.0, 3.0] {
+        for returns_motion in [true, false] {
+            let mut renderer = renderer(SIZE, SIZE);
+            let mut stores = Stores::default();
+            let flat = (stores.shaders)
+                .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+                .expect("a shader");
+            let moving = (stores.shaders)
+                .add::<[f32; 3], Vec4>("moving", &shader("moving.slang"), Blend::Opaque)
+                .expect("a shader");
+            let square = square(&mut stores.meshes);
+            let speck = MeshDraw::new(square, moving, dark);
+            // Where the speck is in a frame of its crossing, from 0, in the world and in pixels.
+            let moves = (40.0 / speed) as usize;
+            let middle = |frame: usize| {
+                let x = -1.2 + speed * frame as f32 / PIXELS_A_UNIT;
+                Vec3::new(x, 0.1, 0.1)
+            };
+            let placed = |frame| {
+                Mat4::from_translation(middle(frame)) * Mat4::from_scale(Vec3::splat(2.0 * HALF))
+            };
+            let drawing = |stores: &mut Stores, frame| {
+                let mut draws = Draws::default();
+                bright_plate(&mut draws, square, flat);
+                if returns_motion {
+                    stores.scene.set(0, placed(frame), &speck, 1);
+                    draws.draw_scene();
+                } else {
+                    draws.push(square, flat, placed(frame), dark);
+                }
+                draws
+            };
+            let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+            let draws = drawing(&mut stores, 0);
+            settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+            for frame in (0..STILL).map(|_| 0).chain(0..=moves) {
+                let draws = drawing(&mut stores, frame);
+                let data = RenderData {
+                    antialiasing: Antialiasing::Taa,
+                    ..stores.data(viewport, viewpoint, &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                let pixels = frame_pixels(&mut renderer);
+                let seen = middle(frame) * PIXELS_A_UNIT;
+                let center = [SIZE as f32 / 2.0 + seen.x, SIZE as f32 / 2.0 - seen.y];
+                let reach = HALF * PIXELS_A_UNIT + 3.0;
+                let trailing: Vec<[u32; 2]> = (0..SIZE * SIZE)
+                    .map(|i| [i % SIZE, i / SIZE])
+                    .filter(|&[x, y]| {
+                        let away = |at: u32, middle: f32| (at as f32 + 0.5 - middle).abs() > reach;
+                        let far = away(x, center[0]) || away(y, center[1]);
+                        far && !close(pixel_at(&pixels, SIZE, [x, y]), PLATE)
+                    })
+                    .collect();
+                assert!(
+                    trailing.is_empty(),
+                    "at {speed} pixels a frame, {}, frame {frame} of its crossing: the speck at \
+                     {center:?} trails at {trailing:?}, {:?} the first",
+                    if returns_motion {
+                        "returning its motion"
+                    } else {
+                        "without its motion"
+                    },
+                    trailing.first().map(|&at| pixel_at(&pixels, SIZE, at))
+                );
+            }
+            shut_down(renderer);
+        }
     }
 }
 

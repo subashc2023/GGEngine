@@ -23,6 +23,21 @@
 // so that what it holds is of this frame's light. Where the frame before resolved nothing, or the
 // point showed outside it or behind its camera, the pixel takes this frame's alone.
 //
+// The clip throws the history out wherever this frame's pixels round it don't hold it, and so in
+// a still view it throws out what's thinner than a pixel, or cut out by a mask near its cutoff, at
+// each offset that misses it, and the pixel shows each offset's own color in turn: it flickers,
+// as it wouldn't without antialiasing. So each pixel keeps the luminance each offset drew of it the
+// last time the offset came round, and whether that matched the time before. A pixel that stood
+// still while each of the 8 offsets drew it as it had a cycle before is changing only as the
+// offsets move what's drawn: its history isn't clipped, and its luminance is the mean of the 8,
+// which is what blending them converges to, without the ripple that each offset's share of a
+// blend leaves. Anything else that changes it, as something passing over it, a shadow too, or
+// light that changes, breaks the match for two cycles, which the clip resolves as it otherwise
+// does, so that it leaves no trail. FSR 2 keeps the history unclipped where a pixel's luminance
+// returns to what it was (`ffx_fsr2_accumulate.h`, `RectifyHistory`), and Unreal's TSR where it
+// flickers within a bound: this test asks more, the same luminance at the same offset, so that no
+// change but the offsets' is kept.
+//
 // `Resolve` and `Push` match `Resolve` and `ResolvePush` in src/taa.rs, field for field.
 
 [[vk::binding(0, 0)]] Texture2D textures[];
@@ -43,6 +58,10 @@ static const uint GROUP = 8;
 // last 10's.
 static const float CURRENT_STILL = 0.04;
 static const float CURRENT_MOVED = 0.1;
+// Of the color of a pixel whose offsets each drew it as they did a cycle before, whose luminance
+// is the mean of what they drew: a hundredth, whose ripple as the offsets come round is a quarter
+// of the still share's, as it settles over a few hundred frames rather than a hundred.
+static const float CURRENT_REPEATS = 0.01;
 
 // How sharply a pixel's weight in this frame's color falls with the square of how far from the
 // center, in pixels, it was drawn: a Gaussian of a deviation of 0.35 pixels, about a pixel's box's.
@@ -50,6 +69,22 @@ static const float FALLOFF = 4.0;
 
 // How many of the neighborhood's deviations from its mean the history may stray, each way.
 static const float SPREAD = 1.25;
+
+// How many offsets the view cycles through: `OFFSETS` in src/taa.rs.
+static const uint OFFSETS = 8;
+
+// What's added to the luminance an offset drew, as `weighed` has it, as it's kept: the least
+// normal half float, so that what's kept of black isn't 0, which marks none kept.
+static const float KEPT_BLACK = 1.0 / 16384.0;
+
+// How near what an offset draws must come to what it drew a cycle before to count as the same, of
+// what it draws: two steps of the half floats that keep it, as a still view's offsets draw exactly
+// as they did.
+static const float SAME = 2.0 / 1024.0;
+
+// How far, in pixels, a pixel may have moved since the frame before and still stand still: what
+// reprojecting a still view's points rounds to.
+static const float STILL = 0.01;
 
 struct Resolve {
     // From the view's clip space, as this frame draws it, offset, to the world, homogeneous.
@@ -77,6 +112,15 @@ struct Resolve {
     // What the history is multiplied by: this frame's exposure over the frame before's, which an
     // adapting exposure changes, so that it's of the same light as this frame's colors.
     float history_scale;
+    // What each offset drew of each pixel, the last time it came round, storage images of the
+    // bindless set's that the resolve reads and writes in place: the first four offsets' in the
+    // first, the last four's in the second, each the luminance of this frame's color as `weighed`
+    // has it, plus `KEPT_BLACK`, negative where it differed from what the offset drew a cycle
+    // before, and 0 where none was kept.
+    uint seen_first;
+    uint seen_second;
+    // Which of the offsets this frame draws at, from 0.
+    uint phase;
 };
 
 struct Push {
@@ -205,6 +249,12 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     current /= weights;
     // Without a history, the pixel's own, as drawn.
     float3 resolved = weighed(finite(drawn.rgb));
+    // The history, where it's taken, and this frame's share of the pixel then; and whether the
+    // pixel stood still since the frame before.
+    bool taken = false;
+    float3 history = float3(0.0);
+    float share = 1.0;
+    bool still = false;
     if (resolve.held != 0) {
         // Where the nearest pixel's point is, homogeneous, at infinity for depth 0 under
         // perspective, and where it was, before it moved.
@@ -221,19 +271,52 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
         bool inside = all(uv >= 0.0) && all(uv <= 1.0);
         if (before.w > 0.0 && inside) {
             float3 sampled = catmull_rom(textures[resolve.history], uv, size);
-            float3 history = weighed(sampled * resolve.history_scale);
+            history = weighed(sampled * resolve.history_scale);
             if (!any(isnan(history))) {
-                history = clipped(history, least, most);
-                float moved = saturate(length(motion * size * 0.5));
-                float share = max(lerp(CURRENT_STILL, CURRENT_MOVED, moved),
-                                  1.0 / (float(resolve.held) + 1.0));
-                resolved = lerp(history, current, share);
+                float pixels = length(motion * size * 0.5);
+                taken = true;
+                still = pixels <= STILL;
+                share = max(lerp(CURRENT_STILL, CURRENT_MOVED, saturate(pixels)),
+                            1.0 / (float(resolve.held) + 1.0));
             }
+        }
+    }
+    // What each offset drew of the pixel: this frame's offset's, against the cycle before, where
+    // the pixel stood still, and none of any other where it didn't, as they drew another point.
+    uint3 to = uint3(pixel.xy, 0);
+    float4 first = storage[resolve.seen_first][to];
+    float4 second = storage[resolve.seen_second][to];
+    float seen[OFFSETS] = { first.x, first.y, first.z, first.w,
+                            second.x, second.y, second.z, second.w };
+    float drew = max(current.x, 0.0) + KEPT_BLACK;
+    if (still) {
+        bool same = abs(abs(seen[resolve.phase]) - drew) <= SAME * drew;
+        seen[resolve.phase] = same ? drew : -drew;
+    } else {
+        for (uint i = 0; i < OFFSETS; i++) {
+            seen[i] = 0.0;
+        }
+        seen[resolve.phase] = -drew;
+    }
+    storage[resolve.seen_first][to] = float4(seen[0], seen[1], seen[2], seen[3]);
+    storage[resolve.seen_second][to] = float4(seen[4], seen[5], seen[6], seen[7]);
+    // Whether every offset drew the pixel as it did a cycle before, and the mean of what they drew.
+    bool repeats = still;
+    float mean_drawn = 0.0;
+    for (uint i = 0; i < OFFSETS; i++) {
+        repeats = repeats && seen[i] > 0.0;
+        mean_drawn += seen[i] - KEPT_BLACK;
+    }
+    mean_drawn /= float(OFFSETS);
+    if (taken) {
+        if (repeats) {
+            resolved = float3(mean_drawn, lerp(history.yz, current.yz, CURRENT_REPEATS));
+        } else {
+            resolved = lerp(clipped(history, least, most), current, share);
         }
     }
     // Within a half float: unweighing a saturated color near the weighing's limit can pass it.
     float4 color = float4(finite(unweighed(resolved)), drawn.a);
-    uint3 to = uint3(pixel.xy, 0);
     storage[resolve.target][to] = color;
     if (resolve.writes_resolved != 0) {
         storage[resolve.resolved][to] = color;

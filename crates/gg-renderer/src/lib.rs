@@ -1180,7 +1180,7 @@ impl Renderer {
         // The antialiased view's images it resolves into and against are the targets after the
         // windows'.
         let resolved = 1 + windows_drawn;
-        let resolves = if antialiased { 2 } else { 0 };
+        let resolves = if antialiased { taa::TARGETS } else { 0 };
         // The reflections' images are the targets after those.
         let reflections_first = resolved + resolves;
         let reflects = if reflected.is_some() { 2 } else { 0 };
