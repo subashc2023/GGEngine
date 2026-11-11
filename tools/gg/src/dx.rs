@@ -3,7 +3,7 @@
 //! patches, printing where the build has come to, and building patches of it, reading what dx says
 //! as it builds, and mending the thunks of those it builds for Windows on x86-64.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -69,7 +69,8 @@ impl Dx {
     /// environment dx wrote as it built, as [`forget`](Self::forget) says, whether the build
     /// succeeded or not.
     ///
-    /// Fails with `gg.build` if dx can't run, or the build fails, with rustc's errors.
+    /// Fails with `gg.build` if dx can't run, the build fails, with rustc's errors, or it leaves no
+    /// executable, as when dx's own link of it fails, with what dx said of that.
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
         // dx makes it too, but says less if it can't.
         let _ = fs::create_dir_all(&self.cache);
@@ -84,10 +85,32 @@ impl Dx {
         let status = child.wait();
         self.forget();
         let status = status.map_err(cant)?;
-        match said.fat {
-            Some(fat) if status.success() => Ok(fat),
-            _ => Err(self.failed(&args, status, said.errors)),
-        }
+        let fat = match said.fat {
+            Some(fat) if status.success() => fat,
+            _ => return Err(self.failed(&args, status, said.errors)),
+        };
+        // dx's linker writes an empty object file where the executable goes, which dx's own link of
+        // the build replaces; when that link fails, dx logs why and says the build finished all the
+        // same, leaving the object file, which the system refuses to run.
+        let mut head = Vec::new();
+        let read = File::open(&fat.exe).and_then(|file| file.take(18).read_to_end(&mut head));
+        let why = match read {
+            Ok(_) if executable(&head) => return Ok(fat),
+            Ok(_) => "isn't an executable".to_owned(),
+            Err(error) => format!("can't be read: {error}"),
+        };
+        let (package, bin, exe) = (&self.package, &self.bin, fat.exe.display());
+        let what = format!(
+            "`dx {} -p {package} --bin {bin}` said it built {exe}, which {why}, as when dx's own \
+             link of it fails",
+            args.join(" ")
+        );
+        let message = if said.errors.is_empty() {
+            format!("{what}; run by hand, it says why")
+        } else {
+            format!("{what}:\n\n{}", build::listed_errors(&said.errors))
+        };
+        Err(Failure::new("gg.build", message))
     }
 
     /// Removes what dx's rustc wrapper writes into the session cache as a build runs, in a directory
@@ -219,6 +242,18 @@ fn version(said: &str) -> Option<&str> {
     words.next()
 }
 
+/// Whether `head`, a file's first 18 bytes or fewer, begins an executable rather than an object
+/// file, such as the one dx's linker writes where the executable goes: a PE image, whose DOS header
+/// starts `MZ`, where an object file starts with its machine; or an ELF or 64-bit Mach-O file whose
+/// type, little-endian, as on every machine gg runs on, is an executable's, `e_type` 2, or 3 for a
+/// position-independent one, or `filetype` 2, where an object file's is 1.
+fn executable(head: &[u8]) -> bool {
+    let elf = head.starts_with(b"\x7FELF") && matches!(head.get(16..18), Some([2 | 3, 0]));
+    let mach_o = head.starts_with(&0xFEED_FACFu32.to_le_bytes())
+        && head.get(12..16) == Some(&2u32.to_le_bytes()[..]);
+    head.starts_with(b"MZ") || elf || mach_o
+}
+
 /// What dx said on its stdout, until it ended: the build's record, the patch's table, and its
 /// errors, each once.
 #[derive(Default)]
@@ -257,7 +292,8 @@ enum Record {
     /// as each is compiled, how many have been, fresh ones among them, `compiled`, of `crates`, and
     /// the last one's name, `crate`.
     Stage(Value),
-    /// An error, rustc's, as rustc renders it, or dx's own, as plain text.
+    /// An error, rustc's, as rustc renders it, or dx's own, as plain text: one it ends on, or one it
+    /// logs and carries on past, as when its own link of the build fails.
     Error(String),
     /// Anything else, such as a warning.
     Other,
@@ -297,13 +333,17 @@ impl Progress {
 }
 
 /// What `line` says: it's an object whose `json`, if it has one, is one of dx's records, as a
-/// string of JSON, such as `{"BuildUpdate":{"stage":"Linking"}}`.
+/// string of JSON, such as `{"BuildUpdate":{"stage":"Linking"}}`; one without is a line of dx's
+/// log, whose errors, at `level` `ERROR`, say in `message` what failed.
 fn record(line: &str) -> Record {
     let Ok(line) = serde_json::from_str::<Value>(line) else {
         return Record::Other;
     };
     let Some(Ok(record)) = line["json"].as_str().map(serde_json::from_str::<Value>) else {
-        return Record::Other;
+        return match (line["level"].as_str(), line["message"].as_str()) {
+            (Some("ERROR"), Some(message)) => Record::Error(plain(message)),
+            _ => Record::Other,
+        };
     };
     if let Some(client) = record.pointer("/BuildsFinished/client")
         && let Some(exe) = client["exe"].as_str()
@@ -537,6 +577,19 @@ mod tests {
             "ERROR dx tools: Cargo build failed - no output location."
         );
 
+        // And its log's errors, which it carries on past, as when its own link of the build fails.
+        let lld = "rust-lld: error: could not open 'kernel32.lib': no such file or directory";
+        let logged = json!({"timestamp": "  10.212s", "level": "ERROR",
+            "message": format!("Failed to generate fat binary: {lld}\n{lld}\n"),
+            "telemetry": r#"{"event":"hotpatch_fat_binary_generation_failed"}"#});
+        let Record::Error(error) = record(&logged.to_string()) else {
+            panic!("an error");
+        };
+        assert_eq!(
+            error,
+            format!("Failed to generate fat binary: {lld}\n{lld}")
+        );
+
         // The stages the build comes to, with the crates it counts on and has compiled.
         let stages = [
             (
@@ -563,10 +616,45 @@ mod tests {
 
         // Anything else.
         let message = r#"{"timestamp":"   1.000s","level":"INFO","message":"Compiling"}"#;
+        let warned = r#"{"timestamp":"   2.000s","level":"WARN","message":"No assets found"}"#;
         let shapeless = line(r#"{"BuildUpdate":{"stage":{}}}"#);
-        for other in [message, shapeless.as_str(), "not JSON", ""] {
+        for other in [message, warned, shapeless.as_str(), "not JSON", ""] {
             assert!(matches!(record(other), Record::Other), "{other}");
         }
+    }
+
+    #[test]
+    fn an_executable_is_told_from_the_object_file_dx_leaves_where_its_link_failed() {
+        // What dx left on Windows on x86-64 as its link failed: an empty COFF object file.
+        let coff = [
+            0x64, 0x86, 0, 0, 0, 0, 0, 0, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+        ];
+        assert!(!executable(&coff[..18]));
+        let pe = b"MZ\x90\0\x03\0\0\0\x04\0\0\0\xFF\xFF\0\0\xB8\0";
+        assert!(executable(pe));
+        // ELF files of each type: an object file, an executable and a position-independent one.
+        let elf = |e_type: u8| {
+            let mut head = [0; 18];
+            head[..7].copy_from_slice(b"\x7FELF\x02\x01\x01");
+            head[16] = e_type;
+            head
+        };
+        assert!(!executable(&elf(1)));
+        assert!(executable(&elf(2)));
+        assert!(executable(&elf(3)));
+        // Mach-O files for ARM64: an object file and an executable.
+        let mach_o = |filetype: u32| {
+            let mut head = [0; 18];
+            head[..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
+            head[4..8].copy_from_slice(&0x0100_000Cu32.to_le_bytes());
+            head[12..16].copy_from_slice(&filetype.to_le_bytes());
+            head
+        };
+        assert!(!executable(&mach_o(1)));
+        assert!(executable(&mach_o(2)));
+        // Too little to tell by.
+        assert!(!executable(&[]));
+        assert!(!executable(&elf(2)[..16]));
     }
 
     #[test]
