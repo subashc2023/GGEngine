@@ -29,14 +29,16 @@
 // as it wouldn't without antialiasing. So each pixel keeps the luminance each offset drew of it the
 // last time the offset came round, and whether that matched the time before. A pixel that stood
 // still while each of the 8 offsets drew it as it had a cycle before is changing only as the
-// offsets move what's drawn: its history isn't clipped, and its luminance is the mean of the 8,
-// which is what blending them converges to, without the ripple that each offset's share of a
-// blend leaves. Anything else that changes it, as something passing over it, a shadow too, or
-// light that changes, breaks the match for two cycles, which the clip resolves as it otherwise
-// does, so that it leaves no trail. FSR 2 keeps the history unclipped where a pixel's luminance
-// returns to what it was (`ffx_fsr2_accumulate.h`, `RectifyHistory`), and Unreal's TSR where it
-// flickers within a bound: this test asks more, the same luminance at the same offset, so that no
-// change but the offsets' is kept.
+// offsets move what's drawn: its history isn't clipped, and its luminance settles on the mean of
+// the 8, which is what blending them converges to, without the ripple that each offset's share of
+// a blend leaves. It settles by a still pixel's share of the way each frame rather than at once,
+// which jumped from wherever the clip had left it, hundreds of pixels together, as the store came
+// to hold two cycles after the view stopped. Anything else that changes it, as something passing
+// over it, a shadow too, or light that changes, breaks the match for two cycles, which the clip
+// resolves as it otherwise does, so that it leaves no trail. FSR 2 keeps the history unclipped
+// where a pixel's luminance returns to what it was (`ffx_fsr2_accumulate.h`, `RectifyHistory`),
+// and Unreal's TSR where it flickers within a bound: this test asks more, the same luminance at the
+// same offset, so that no change but the offsets' is kept.
 //
 // `Resolve` and `Push` match `Resolve` and `ResolvePush` in src/taa.rs, field for field.
 
@@ -59,8 +61,9 @@ static const uint GROUP = 8;
 static const float CURRENT_STILL = 0.04;
 static const float CURRENT_MOVED = 0.1;
 // Of the color of a pixel whose offsets each drew it as they did a cycle before, whose luminance
-// is the mean of what they drew: a hundredth, whose ripple as the offsets come round is a quarter
-// of the still share's, as it settles over a few hundred frames rather than a hundred.
+// settles on the mean of what they drew by `CURRENT_STILL`: a hundredth, whose ripple as the
+// offsets come round is a quarter of the still share's, as it settles over a few hundred frames
+// rather than a hundred.
 static const float CURRENT_REPEATS = 0.01;
 
 // How sharply a pixel's weight in this frame's color falls with the square of how far from the
@@ -310,7 +313,8 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     mean_drawn /= float(OFFSETS);
     if (taken) {
         if (repeats) {
-            resolved = float3(mean_drawn, lerp(history.yz, current.yz, CURRENT_REPEATS));
+            resolved = float3(lerp(history.x, mean_drawn, CURRENT_STILL),
+                              lerp(history.yz, current.yz, CURRENT_REPEATS));
         } else {
             resolved = lerp(clipped(history, least, most), current, share);
         }

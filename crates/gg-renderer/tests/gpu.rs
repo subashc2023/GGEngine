@@ -157,6 +157,7 @@ fn main() -> ExitCode {
         antialiasing_follows_what_moves,
         antialiasing_leaves_no_trail,
         antialiasing_steadies_what_is_thinner_than_a_pixel,
+        antialiasing_settles_without_a_jump_once_the_view_stops,
         antialiasing_keeps_still_dark_colors_as_drawn,
         antialiasing_leaves_no_trail_behind_dark_specks,
         smaa_smooths_edges_in_a_frame,
@@ -10852,18 +10853,10 @@ fn bright_plate(draws: &mut Draws, square: Mesh<[f32; 3]>, flat: Shader<[f32; 3]
 /// [`bright_plate`], sRGB-encoded, as a frame reads back.
 const PLATE: [u8; 4] = [231, 231, 231, 255];
 
-/// What's thinner than a pixel, in a still view, antialiased: dark bars a third of a pixel wide
-/// across a bright plate, aslant, which each of the 8 offsets draws over pixels the others don't.
-/// Once the view has settled, over 16 frames, no pixel's channel moves more than 2 levels, as
-/// rounding may: it shows the mean of what the offsets drew, where a resolve that clipped its
-/// history to the pixels round it, which hold the bars at some offsets and not at others, showed
-/// each offset's own, and moved 24.
-fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
-    const SIZE: u32 = 64;
-    const SETTLE: usize = 160;
-    const FRAMES: usize = 16;
-    let mut renderer = renderer(SIZE, SIZE);
-    let mut stores = Stores::default();
+/// What's thinner than a pixel, as the antialiasing tests see it from [`seeing_from`], added to
+/// `stores`: dark bars a third of a pixel wide across [`bright_plate`], aslant, which each of the 8
+/// offsets draws over pixels the others don't.
+fn thin_bars(stores: &mut Stores) -> Draws {
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
@@ -10879,6 +10872,20 @@ fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
         );
         draws.push(square, flat, bar, Vec4::new(0.01, 0.01, 0.01, 1.0));
     }
+    draws
+}
+
+/// [`thin_bars`] in a still view, antialiased. Once the view has settled, over 16 frames, no pixel's
+/// channel moves more than 2 levels, as rounding may: it shows the mean of what the offsets drew,
+/// where a resolve that clipped its history to the pixels round it, which hold the bars at some
+/// offsets and not at others, showed each offset's own, and moved 24.
+fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
+    const SIZE: u32 = 64;
+    const SETTLE: usize = 160;
+    const FRAMES: usize = 16;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let draws = thin_bars(&mut stores);
     let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     let mut drawn = Vec::new();
@@ -10910,6 +10917,65 @@ fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
         worst <= 2,
         "a pixel at {at:?} moves {worst} levels over {FRAMES} still frames, and {moving} channels \
          more than 2"
+    );
+}
+
+/// [`thin_bars`] antialiased as the view stops after moving: panning half a pixel a frame at the
+/// bars for 16 frames, then still for 160. As the store of what the offsets drew holds again, two
+/// cycles after the view stops, each pixel settles on the mean of what they drew by a still pixel's
+/// share of the way a frame: in no frame do more than 1% of its pixels land at once within 2 levels
+/// of where they end from 12 or more away, against some 11 that the clip's flicker lands by chance
+/// the frame after the view stops; a resolve that showed that mean as soon as the store held jumped
+/// there, 350 at once.
+fn antialiasing_settles_without_a_jump_once_the_view_stops() {
+    const SIZE: u32 = 64;
+    const MOVES: usize = 16;
+    const STOPPED: usize = 160;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let draws = thin_bars(&mut stores);
+    let viewport = filling([SIZE, SIZE]);
+    // Half a pixel a frame at the bars, 4 from the camera, whose view is a quarter turn tall.
+    let step = 0.5 * 2.0 * 4.0 * math::libm::tanf(PI / 8.0) / SIZE as f32;
+    let at = |frame: usize| {
+        let moved = frame.min(MOVES) as f32 - MOVES as f32 / 2.0;
+        seeing_from(Vec3::new(step * moved, 0.0, 0.0))
+    };
+    settle(&mut renderer, &mut stores, viewport, at(0), &draws);
+    let mut drawn = Vec::new();
+    for frame in 0..=MOVES + STOPPED {
+        let data = RenderData {
+            antialiasing: Antialiasing::Taa,
+            ..stores.data(viewport, at(frame), &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        drawn.push(frame_pixels(&mut renderer));
+    }
+    shut_down(renderer);
+    let end = drawn.last().expect("frames");
+    // How far each pixel of `frame` is from where it ends: its farthest channel's levels.
+    let from_end = |frame: &[u8], at: usize| {
+        (0..3)
+            .map(|c| frame[at * 4 + c].abs_diff(end[at * 4 + c]))
+            .max()
+            .unwrap_or(0)
+    };
+    // How many pixels land in each frame after the view stopped.
+    let landed: Vec<usize> = (drawn[MOVES..].windows(2))
+        .map(|pair| {
+            (0..(SIZE * SIZE) as usize)
+                .filter(|&at| from_end(&pair[1], at) <= 2 && from_end(&pair[0], at) >= 12)
+                .count()
+        })
+        .collect();
+    let (after, most) = (landed.iter().enumerate())
+        .max_by_key(|&(_, count)| *count)
+        .map(|(after, count)| (after + 1, *count))
+        .expect("frames");
+    assert!(
+        most <= (SIZE * SIZE / 100) as usize,
+        "{most} pixels land at once within 2 levels of where they settle from 12 or more away, \
+         {after} frames after the view stops: {landed:?}"
     );
 }
 

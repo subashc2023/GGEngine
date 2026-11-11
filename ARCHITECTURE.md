@@ -2751,7 +2751,8 @@ show each offset's own color in turn; so each pixel keeps, in two more images of
 the luminance each of the eight offsets drew of it the last time it came round, and whether that
 matched the time before, which the resolve reads and writes in place. A pixel that stood still while
 every offset drew it as it had a cycle before is changing only as the offsets move what's drawn: its
-history isn't clipped, its luminance is the mean of the eight, and its color blends in a hundredth
+history isn't clipped, its luminance settles on the mean of the eight, by a still pixel's share of
+the way a frame, not at once, from where the clip left it, and its color blends in a hundredth
 of this frame's. Anything else that changes it, something passing over it, a shadow too, or light
 that changes, breaks the match for two cycles, which the clip resolves as it otherwise does, so
 that it leaves no trail; and a pixel that moves keeps none. FSR 2's luma instability and Unreal's
