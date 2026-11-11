@@ -1,5 +1,7 @@
 //! The showcase: a scene for each of what the engine draws and simulates so far, in its scenes
-//! folder, which the editor's Scenes panel opens, each with a camera of its own: `welcome.ron`,
+//! folder, which the editor's Scenes panel opens, and Page Down and Page Up step through as it
+//! plays, in the order of their names, the game putting each in place of the last through
+//! `World::change_scene`, each with a camera of its own: `welcome.ron`,
 //! where it starts; sprites, tinted, textured, cut from a sheet, tiled, sampled crisp or smooth,
 //! flipped and blended (`sprites.ron`); sprites played through a sheet's cells, a coin spinning and
 //! numbered tiles, looping, back and forth and once, at their own rates and flipped
@@ -114,7 +116,7 @@
 
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -183,6 +185,9 @@ enum Command {
     /// Records a change of the widget named `widget` to what `value` says, or a press of a button
     /// among the widgets, on each [`Widgets`].
     Change { widget: String, value: String },
+    /// Puts the scene at `path`, from the game's directory, in place of the world's entities, as
+    /// Page Up and Page Down step through the scenes.
+    Scene { path: String },
 }
 
 /// A sound of the showcase's, which a [`Chime`] rings.
@@ -383,6 +388,30 @@ const ANCHORED: [([Align; 2], &str); 8] = [
 /// The HUD's button: its middle and its half size, from the canvas's middle.
 const BUTTON: (Vec2, Vec2) = (Vec2::new(0.0, -40.0), Vec2::new(190.0, 56.0));
 
+/// The scene the game starts in, as its project's manifest names it.
+const START: &str = "scenes/welcome.ron";
+
+/// The game's scenes, by their paths from its directory, `root`, `/` between their parts, in order:
+/// those its package holds, in a run from one, as a build without `dev` runs, and else those in its
+/// scenes folder.
+fn scenes(cx: &Context, root: &Path) -> Vec<String> {
+    let mut paths = cx.package_files();
+    if paths.is_empty() {
+        let listed = std::fs::read_dir(root.join("scenes")).into_iter().flatten();
+        paths = listed.flatten().map(|entry| entry.path()).collect();
+    }
+    let scene = |path: &PathBuf| {
+        let within = path.strip_prefix(root).ok()?;
+        let parts: Option<Vec<&str>> = within.iter().map(|part| part.to_str()).collect();
+        let parts = parts?;
+        let ron = within.extension().is_some_and(|ext| ext == "ron");
+        (ron && parts.len() == 2 && parts[0] == "scenes").then(|| parts.join("/"))
+    };
+    let mut scenes: Vec<String> = paths.iter().filter_map(scene).collect();
+    scenes.sort();
+    scenes
+}
+
 /// What the showcase loads beside its scripts, for its scenes' components.
 struct Assets {
     /// The sounds, by [`Tone`].
@@ -460,13 +489,13 @@ fn register(world: &mut World) {
 /// before any entity has one, loads its sounds, music, font and shader, and has the navmesh and
 /// agents' paths show, of the scenes that have them; loads the start scene as it attaches; and at
 /// each tick applies what the keys, the mouse and the HUD's button did to its scenes' walkers,
-/// looks and HUDs, then runs the scripts, rings the chimes, bursts the bursters' emitters, counts
-/// the HUDs' and menus' ticks, fires the launches' bodies, steps animation, navigation and then
-/// physics, places the tethers, gives the plasmas their draws and writes the state labels' text. As
-/// it updates, it
-/// grabs the cursor while it wants it for a look, plays the music while a jukebox is in the world,
-/// and draws the HUD while a HUD is. A script, an asset or the
-/// start scene that doesn't load ends the run with its error, through [`Context::fail`].
+/// looks and HUDs, and the scene Page Up or Page Down asked for, then runs the scripts, rings the
+/// chimes, bursts the bursters' emitters, counts the HUDs' and menus' ticks, fires the launches'
+/// bodies, steps animation, navigation and then physics, places the tethers, gives the plasmas
+/// their draws and writes the state labels' text. As it updates, it grabs the cursor while it
+/// wants it for a look, plays the music while a jukebox is in the world, and draws the HUD while a
+/// HUD is. A script, an asset or the start scene that doesn't load ends the run with its error,
+/// through [`Context::fail`].
 struct Showcase {
     scripts: Scripts,
     actions: Actions<Act>,
@@ -488,6 +517,10 @@ struct Showcase {
     /// Whether it wants the cursor grabbed, for the looks: from a click in the view while the world
     /// has one until Escape, or until it has none.
     grab: bool,
+    /// The scenes, by their paths from the game's directory, in order, which Page Up and Page Down
+    /// step through from the one the world's entities came from, as the last change put it in, or
+    /// else the start scene.
+    scenes: Vec<String>,
 }
 
 impl Showcase {
@@ -522,6 +555,7 @@ impl Showcase {
             labeled: Vec::new(),
             label: String::new(),
             grab: false,
+            scenes: Vec::new(),
         }
     }
 
@@ -696,6 +730,10 @@ fn apply(world: &mut World, command: &Command) {
             }
             return;
         }
+        Command::Scene { ref path } => {
+            world.change_scene(path);
+            return;
+        }
         Command::Look { by } => {
             for (look, transform) in world.query_mut::<(&mut Look, &mut Transform)>() {
                 // Right turns to the right, about the world's up, and down looks down.
@@ -728,6 +766,7 @@ impl Layer for Showcase {
             }
         }
         register(cx.world_mut());
+        self.scenes = scenes(cx, root);
         // Only a scene with a navmesh volume, `navigation.ron`, has any to show.
         cx.set_navmesh_shown(true);
         match Assets::load(cx, root) {
@@ -880,6 +919,20 @@ impl Layer for Showcase {
                 pressed: true,
                 ..
             } => self.grab = false,
+            Event::Key {
+                key: key @ (Key::PageUp | Key::PageDown),
+                pressed: true,
+                ..
+            } if !self.scenes.is_empty() => {
+                // From the scene a change put in, which a change refused leaves in.
+                let count = self.scenes.len();
+                let shown = cx.world().scene().unwrap_or(START);
+                let at = self.scenes.iter().position(|scene| scene == shown);
+                let by = if key == Key::PageDown { 1 } else { count - 1 };
+                let at = at.map_or(0, |at| (at + by) % count);
+                let path = self.scenes[at].clone();
+                commands.push(Command::Scene { path });
+            }
             // Each tick turns the looks once, by the motion since the tick before.
             Event::MouseMotion { x, y } if self.grab => {
                 let by = Vec2::new(x as f32, y as f32);

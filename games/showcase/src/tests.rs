@@ -625,6 +625,35 @@ fn the_menus_presses_reach_the_world_as_commands() {
     showcase.update(&mut cx, frame);
 }
 
+/// Page Down and Page Up step through the scenes in the order of their names, from the scene the
+/// world's entities came from, the start scene before any change has gone in, each step queuing a
+/// command that the next tick asks for the scene with: a step whose change hasn't gone in steps
+/// from where the world still is.
+#[test]
+fn the_page_keys_step_through_the_scenes() {
+    let (mut cx, mut showcase) = loaded();
+    let names: Vec<String> = scenes()
+        .iter()
+        .map(|path| format!("scenes/{}", path.file_name().expect("a name").display()))
+        .collect();
+    assert_eq!(showcase.scenes, names);
+    let key = |key| Event::Key {
+        key,
+        pressed: true,
+        repeat: false,
+    };
+    let mut step = |cx: &mut Context, page| {
+        showcase.commands.clear();
+        let _ = showcase.event(cx, &key(page));
+        showcase.tick(cx.world_mut(), Tick { number: 0 });
+        cx.world().scene_asked().map(str::to_owned)
+    };
+    let start = names.iter().position(|name| name == START).expect("listed");
+    let after = names[(start + 1) % names.len()].clone();
+    assert_eq!(step(&mut cx, Key::PageDown), Some(after));
+    assert_eq!(step(&mut cx, Key::PageUp), Some(names[start - 1].clone()));
+}
+
 /// The widgets' UI takes input while widgets are in the world, and none without them: the right
 /// arrow steps its slider, whose label follows it as it's drawn, and the down arrow and Enter flip
 /// its toggle, each change queuing a command that the next tick records on the widgets.

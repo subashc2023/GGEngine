@@ -6,14 +6,17 @@ use std::collections::HashSet;
 
 use gg_core::math::{Mat4, Quat, Vec2, Vec3, libm};
 use rapier2d::prelude::{
-    BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle, ColliderSet,
-    ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
-    PhysicsPipeline, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, Rotation,
-    SoftBodySet, Vector,
+    ActiveCollisionTypes, BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle,
+    ColliderSet, Group, ImpulseJointSet, IntegrationParameters, InteractionGroups,
+    InteractionTestMode, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
+    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, Rotation, SoftBodySet, Vector,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{BodyType, Finite, Link, Links, Outline, kept, kept_collider, unfinite};
+use super::contacts::{Contacts, SavedContacts};
+use super::{
+    BodyType, Contact, ContactEvent, Finite, Link, Links, Outline, kept, kept_collider, unfinite,
+};
 use crate::draw::Poses;
 use crate::recording::text;
 use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
@@ -69,6 +72,18 @@ pub struct BoxCollider2D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`] has it, but pushes nothing and nothing pushes it. Its density still
+    /// weighs its body.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for BoxCollider2D {
@@ -79,6 +94,9 @@ impl Default for BoxCollider2D {
             density: 1.0,
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -89,12 +107,12 @@ impl BoxCollider2D {
     fn collider(&self, scale: Vec3) -> Collider {
         let scale = scale.truncate();
         let half = (self.size * scale).abs() * 0.5;
-        ColliderBuilder::cuboid(half.x, half.y)
+        let shape = ColliderBuilder::cuboid(half.x, half.y)
             .translation(vector(self.offset * scale))
             .density(self.density)
             .friction(self.friction)
-            .restitution(self.restitution)
-            .build()
+            .restitution(self.restitution);
+        met(shape, self.sensor, self.membership, self.filter).build()
     }
 }
 
@@ -118,6 +136,18 @@ pub struct CircleCollider2D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`] has it, but pushes nothing and nothing pushes it. Its density still
+    /// weighs its body.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for CircleCollider2D {
@@ -128,6 +158,9 @@ impl Default for CircleCollider2D {
             density: 1.0,
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -137,12 +170,30 @@ impl CircleCollider2D {
     /// radius by the larger of the two scales.
     fn collider(&self, scale: Vec3) -> Collider {
         let scale = scale.truncate();
-        ColliderBuilder::ball(self.radius * scale.abs().max_element())
+        let shape = ColliderBuilder::ball(self.radius * scale.abs().max_element())
             .translation(vector(self.offset * scale))
             .density(self.density)
             .friction(self.friction)
-            .restitution(self.restitution)
-            .build()
+            .restitution(self.restitution);
+        met(shape, self.sensor, self.membership, self.filter).build()
+    }
+}
+
+/// `shape` with what a collider's component says of whether it's a sensor and which groups it
+/// meets: a sensor finds kinematic and static bodies too, which rapier's default leaves to dynamic
+/// ones, but for a static body's sensor finding another static body.
+fn met(shape: ColliderBuilder, sensor: bool, membership: u32, filter: u32) -> ColliderBuilder {
+    let groups = InteractionGroups::new(
+        Group::from_bits_retain(membership),
+        Group::from_bits_retain(filter),
+        InteractionTestMode::And,
+    );
+    let shape = shape.sensor(sensor).collision_groups(groups);
+    if sensor {
+        let types = ActiveCollisionTypes::all().difference(ActiveCollisionTypes::FIXED_FIXED);
+        shape.active_collision_types(types)
+    } else {
+        shape
     }
 }
 
@@ -161,6 +212,7 @@ pub struct Physics2D {
     pipeline: PhysicsPipeline,
     links: Links<Linked>,
     joints: Links<Jointed>,
+    pub(super) contacts: Contacts,
 }
 
 /// What rapier keeps from one step to the next.
@@ -225,6 +277,7 @@ impl Default for Physics2D {
             pipeline: PhysicsPipeline::new(),
             links: Links::default(),
             joints: Links::default(),
+            contacts: Contacts::default(),
         }
     }
 }
@@ -237,6 +290,7 @@ impl Clone for Physics2D {
             pipeline: PhysicsPipeline::new(),
             links: self.links.clone(),
             joints: self.joints.clone(),
+            contacts: self.contacts.clone(),
         }
     }
 
@@ -251,14 +305,15 @@ impl Clone for Physics2D {
         self.pipeline = PhysicsPipeline::new();
         self.links.clone_from(&source.links);
         self.joints.clone_from(&source.joints);
+        self.contacts.clone_from(&source.contacts);
     }
 }
 
 /// What a snapshot file holds of [`Physics2D`], `R` its rapier's state, as its own or borrowed: its
 /// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body
-/// and each joint, with its entity by its ID; and the bodies under a parent warned of, by their
-/// entities' IDs. Text that lists no joints reads as having none, so that a world saved without
-/// them loads.
+/// and each joint, with its entity by its ID; the bodies under a parent warned of, by their
+/// entities' IDs; and the contacts and their events. Text that lists no joints or contacts reads as
+/// having none, so that a world saved without them loads.
 #[derive(Serialize, Deserialize)]
 struct SavedPhysics<R> {
     gravity: [f32; 2],
@@ -267,6 +322,8 @@ struct SavedPhysics<R> {
     children: Vec<Option<u64>>,
     #[serde(default)]
     joints: Vec<SavedJoint>,
+    #[serde(default)]
+    contacts: SavedContacts,
 }
 
 /// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
@@ -325,12 +382,13 @@ impl Saved for Physics2D {
             linked: linked.collect(),
             children: self.links.children.iter().map(|&child| id(child)).collect(),
             joints: joints.collect(),
+            contacts: self.contacts.save(),
         };
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
 
     fn load(text: &str, world: &World) -> Result<Self> {
-        let saved: SavedPhysics<Rapier> =
+        let mut saved: SavedPhysics<Rapier> =
             ron::from_str(text).map_err(|error| Error::new("physics.load", error.to_string()))?;
         let entity = |id: Option<u64>| {
             let id = id.and_then(EntityId::new);
@@ -363,12 +421,25 @@ impl Saved for Physics2D {
             let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
             Error::new("physics.load", format!("{who}'s body {what}"))
         };
-        let rapier = &saved.rapier;
+        let rapier = &mut saved.rapier;
         let mut bodies = HashSet::with_capacity(linked.len());
         for linked in &linked {
-            if rapier.bodies.get(linked.body).is_none() || !bodies.insert(linked.body) {
+            let body = rapier.bodies.get(linked.body);
+            let Some(body) = body.filter(|_| bodies.insert(linked.body)) else {
                 let what = "names no rigid body of rapier's, or another body's";
                 return Err(refused(linked.entity, what));
+            };
+            let alive = linked.entity != Entity::DEAD;
+            // Text from a build whose bodies held no entity leaves it unset, 0, which no entity's
+            // bits are: given its entity's here, which its contacts find it by.
+            if alive && body.user_data == 0 {
+                let body = rapier.bodies.get_mut(linked.body).expect("there");
+                body.user_data = user_data(linked.entity);
+            } else if alive && body.user_data != user_data(linked.entity) {
+                return Err(refused(
+                    linked.entity,
+                    "names another entity in rapier's state",
+                ));
             }
             let on = |collider: &ColliderHandle| {
                 rapier.colliders.get(*collider).and_then(Collider::parent) == Some(linked.body)
@@ -414,6 +485,7 @@ impl Saved for Physics2D {
             pipeline: PhysicsPipeline::new(),
             links,
             joints,
+            contacts: Contacts::load(saved.contacts, world),
         })
     }
 }
@@ -477,7 +549,19 @@ impl Physics2D {
             &(),
             &(),
         );
+        self.contacts.take(world, touching(&self.rapier));
         self.write_back(world);
+    }
+
+    /// The contacts the last step left, as [`World::contacts`] says, 2D's alone.
+    pub fn contacts(&self) -> impl Iterator<Item = Contact> + '_ {
+        self.contacts.touching()
+    }
+
+    /// The contacts that started and stopped at the last step, as [`World::contact_events`] says,
+    /// 2D's alone.
+    pub fn contact_events(&self) -> impl Iterator<Item = ContactEvent> + '_ {
+        self.contacts.events()
     }
 
     /// Takes out each body whose entity has gone, lost its `RigidBody2D` or its `Transform`, or
@@ -549,6 +633,31 @@ impl Physics2D {
     }
 }
 
+/// Each pair of colliders in `rapier` that touch, or overlap where either is a sensor, by their
+/// bodies' entities, and whether it's a sensor's, in rapier's order.
+fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '_ {
+    let entity = |collider: ColliderHandle| {
+        let body = rapier
+            .bodies
+            .get(rapier.colliders.get(collider)?.parent()?)?;
+        Entity::from_bits(u64::try_from(body.user_data).ok()?)
+    };
+    let narrow_phase = &rapier.narrow_phase;
+    let contacts = (narrow_phase.contact_pairs())
+        .filter(|pair| pair.has_any_active_contact())
+        .map(|pair| (pair.collider1, pair.collider2, false));
+    let overlaps = (narrow_phase.intersection_pairs())
+        .filter(|&(.., intersecting)| intersecting)
+        .map(|(a, b, _)| (a, b, true));
+    let pairs = contacts.chain(overlaps);
+    pairs.filter_map(move |(a, b, sensor)| Some((entity(a)?, entity(b)?, sensor)))
+}
+
+/// What the body of `entity` holds as its user data, which its contacts find the entity by.
+fn user_data(entity: Entity) -> u128 {
+    u128::from(entity.to_bits())
+}
+
 /// Makes `entity`'s body in `rapier`, as its components say, and gives back its link.
 fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
@@ -560,7 +669,8 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
         .rotation(angle(transform.rotation))
         .linvel(vector(rigid_body.velocity))
         .angvel(rigid_body.angular_velocity)
-        .ccd_enabled(rigid_body.continuous_collision);
+        .ccd_enabled(rigid_body.continuous_collision)
+        .user_data(user_data(entity));
     if rigid_body.fixed_rotation {
         built = built.lock_rotations();
     }
@@ -1014,9 +1124,58 @@ mod tests {
         let changes = loaded.load_whole(lines, true).expect("loaded");
         assert!(changes.is_empty(), "{changes:?}");
         assert_eq!(loaded.hash(), world.hash(), "loaded");
-        step(&mut world, 60);
-        step(&mut loaded, 60);
+        // Its contacts and their events too, by their entities' IDs, the loaded world's own.
+        let ids = |world: &World| {
+            let id = |entity| world.id(entity).map(EntityId::get);
+            let events = world.contact_events().map(|event| {
+                let contact = event.contact;
+                (contact.entities.map(id), contact.sensor, event.started)
+            });
+            events.collect::<Vec<_>>()
+        };
+        assert!(!ids(&world).is_empty());
+        assert_eq!(ids(&loaded), ids(&world), "loaded");
+        for _ in 0..60 {
+            step(&mut world, 1);
+            step(&mut loaded, 1);
+            assert_eq!(ids(&loaded), ids(&world), "stepped on");
+        }
         assert_eq!(loaded.hash(), world.hash(), "stepped on");
+    }
+
+    /// Saved text whose rapier bodies hold no entity, their user data 0, as a build before bodies
+    /// held theirs wrote it, loads, each given its link's entity, and steps on as the world it was
+    /// saved from does, finding the same contacts; one naming another entity is refused.
+    #[test]
+    fn saved_bodies_without_their_entities_are_given_them() {
+        let mut world = World::seeded(7);
+        pile(&mut world);
+        step(&mut world, 40);
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let text = physics.save(&world).expect("saved");
+        let mut saved: SavedPhysics<Rapier> = ron::from_str(&text).expect("read");
+        for (_, body) in saved.rapier.bodies.iter_mut() {
+            body.user_data = 0;
+        }
+        let old = ron::to_string(&saved).expect("written");
+        let loaded = Physics2D::load(&old, &world).expect("loaded");
+        let mut copy = world.clone();
+        copy.insert_resource(loaded);
+        for _ in 0..60 {
+            step(&mut world, 1);
+            step(&mut copy, 1);
+            assert!(copy.contact_events().eq(world.contact_events()));
+        }
+        assert!(copy.contacts().next().is_some());
+        assert!(copy.contacts().eq(world.contacts()));
+        assert_eq!(copy.hash(), world.hash());
+        let (_, body) = saved.rapier.bodies.iter_mut().next().expect("a body");
+        body.user_data = 1;
+        let other = ron::to_string(&saved).expect("written");
+        let refused = Physics2D::load(&other, &world)
+            .err()
+            .map(|error| error.code());
+        assert_eq!(refused, Some("physics.load"));
     }
 
     /// Saved text whose bodies name what its rapier's state doesn't hold as theirs, as text from a
@@ -1345,5 +1504,139 @@ mod tests {
         step(&mut world, 120);
         assert!(angle(transform(&world, tipping).rotation).abs() > 0.3);
         assert_eq!(transform(&world, upright).rotation, Quat::IDENTITY);
+    }
+
+    /// A static box 4 units wide around (0, 4), a sensor.
+    fn zone(world: &mut World) -> Entity {
+        let at = Transform {
+            translation: Vec3::new(0.0, 4.0, 0.0),
+            scale: Vec3::new(4.0, 1.0, 1.0),
+            ..Transform::IDENTITY
+        };
+        let body = RigidBody2D {
+            body_type: BodyType::Static,
+            ..RigidBody2D::default()
+        };
+        let sensor = BoxCollider2D {
+            sensor: true,
+            ..BoxCollider2D::default()
+        };
+        world.spawn((at, body, sensor))
+    }
+
+    /// The contact events of each of `ticks` steps.
+    fn events(world: &mut World, ticks: u32) -> Vec<Vec<ContactEvent>> {
+        (0..ticks)
+            .map(|_| {
+                step(world, 1);
+                world.contact_events().collect()
+            })
+            .collect()
+    }
+
+    /// A box falls through a sensor, which pushes it not at all, and lands on the floor: the sensor's
+    /// overlap with it starts and stops, as an overlap, and its contact with the floor starts and
+    /// stays, each once, and the world's contacts hold it with the floor alone at last.
+    #[test]
+    fn a_sensor_finds_what_overlaps_it_and_pushes_nothing() {
+        let mut world = World::default();
+        let floor = floor(&mut world);
+        let zone = zone(&mut world);
+        let dropped = crate_at(&mut world, 0.0, 7.0, 0.0);
+        let mut free = World::default();
+        let falling = crate_at(&mut free, 0.0, 7.0, 0.0);
+        let mut found = Vec::new();
+        for tick in 0..240 {
+            step(&mut world, 1);
+            step(&mut free, 1);
+            found.extend(world.contact_events());
+            // Falling as it would without the sensor there, through it to just above the floor.
+            let y = transform(&world, dropped).translation.y;
+            if y > 1.6 {
+                assert_eq!(y, transform(&free, falling).translation.y, "tick {tick}");
+            }
+        }
+        let event = |other, sensor, started| {
+            let entities = if world.id(dropped) < world.id(other) {
+                [dropped, other]
+            } else {
+                [other, dropped]
+            };
+            ContactEvent {
+                contact: Contact { entities, sensor },
+                started,
+            }
+        };
+        let want = [
+            event(zone, true, true),
+            event(zone, true, false),
+            event(floor, false, true),
+        ];
+        assert_eq!(found, want);
+        let rested = transform(&world, dropped).translation.y;
+        assert!((rested - 1.0).abs() < 0.02, "on the floor: {rested}");
+        let contacts: Vec<_> = world.contacts().collect();
+        assert_eq!(contacts, [want[2].contact]);
+        assert_eq!(contacts[0].other(dropped), Some(floor));
+    }
+
+    /// Two colliders meet only where each is in a group the other's filter has: a box in group 2
+    /// falls through a floor whose filter leaves group 2 out, and through one that isn't in its own
+    /// filter's groups, as a box in every group lands on both, with no contact of what passed
+    /// through; a sensor whose filter leaves a box's group out doesn't find it.
+    #[test]
+    fn groups_choose_which_colliders_meet() {
+        let mut world = World::default();
+        let floor = floor(&mut world);
+        let zone = zone(&mut world);
+        world.get_mut::<BoxCollider2D>(zone).expect("alive").filter = !2;
+        world.get_mut::<BoxCollider2D>(floor).expect("alive").filter = !2;
+        let through = crate_at(&mut world, -3.0, 7.0, 0.0);
+        world
+            .get_mut::<BoxCollider2D>(through)
+            .expect("alive")
+            .membership = 2;
+        let landing = crate_at(&mut world, 3.0, 2.0, 0.0);
+        step(&mut world, 120);
+        assert!(transform(&world, through).translation.y < -2.0);
+        assert!((transform(&world, landing).translation.y - 1.0).abs() < 0.02);
+        let touched: Vec<_> = world.contacts().filter_map(|it| it.other(floor)).collect();
+        assert_eq!(touched, [landing]);
+        // A floor in group 4 alone, which the box's filter leaves out.
+        let floor = world.get_mut::<BoxCollider2D>(floor).expect("alive");
+        floor.filter = u32::MAX;
+        floor.membership = 4;
+        world
+            .get_mut::<BoxCollider2D>(landing)
+            .expect("alive")
+            .filter = !4;
+        step(&mut world, 60);
+        assert!(transform(&world, landing).translation.y < -2.0);
+        assert_eq!(world.contacts().count(), 0);
+    }
+
+    /// The contact events of the steps after a snapshot, restored, as a rollback restores it, or
+    /// copied, are those the world it was taken from had at each, in the same order: and a pile
+    /// with a sensor through it has events of both kinds.
+    #[test]
+    fn contact_events_are_alike_after_a_restore() {
+        let mut world = World::seeded(7);
+        pile(&mut world);
+        zone(&mut world);
+        step(&mut world, 30);
+        let snapshot = world.clone();
+        let went = events(&mut world, 90);
+        for kind in [false, true] {
+            let any = went
+                .iter()
+                .flatten()
+                .any(|event| event.contact.sensor == kind);
+            assert!(any, "a sensor's: {kind}");
+        }
+        let mut copy = snapshot.clone();
+        assert_eq!(events(&mut copy, 90), went, "a copy");
+        world.clone_from(&snapshot);
+        assert!(world.contact_events().eq(snapshot.contact_events()));
+        assert_eq!(events(&mut world, 90), went, "restored");
     }
 }

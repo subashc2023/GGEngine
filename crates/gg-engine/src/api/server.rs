@@ -384,6 +384,8 @@ struct Taken {
     world: World,
     /// The scene files the layers loaded, which the restored run watches, and its open scene.
     scenes: Vec<SceneFile>,
+    /// The scene files' texts the run keeps for its scene changes.
+    cached: Vec<SceneFile>,
     open: Open,
     /// The scripts the layers loaded, each a path and its text as last applied, and the mods.
     scripts: Vec<(String, String)>,
@@ -857,6 +859,7 @@ impl Api {
                     let taken = Taken {
                         world: world.clone(),
                         scenes: cx.scenes.files.clone(),
+                        cached: cx.scenes.cached.clone(),
                         open: cx.scenes.open.clone(),
                         scripts: cx.hosts.applied(),
                         mods: cx.mods.applied(),
@@ -2425,6 +2428,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     for Taken {
         world,
         scenes,
+        cached,
         open,
         scripts,
         mods,
@@ -2440,6 +2444,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
         let of = snapshot::Of {
             world: &world,
             scenes: &scenes,
+            cached: &cached,
             open: &open,
             scripts: &scripts,
             mods: &mods,

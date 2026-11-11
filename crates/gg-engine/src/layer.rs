@@ -509,6 +509,17 @@ pub struct Context {
     /// Whether the run takes part in a networked session, as the layers attach or pick up from a
     /// restore.
     networked: bool,
+    /// Whether the run is a server's or one of its clients, as the layers attach or pick up from a
+    /// restore: their worlds name only the assets the layers loaded, so that a client reads its
+    /// server's states, and a scene change loads none, as [`change_scene`](Self::change_scene)
+    /// says.
+    pub(crate) served: bool,
+    /// How many scene changes the world had been through as a tick last took them as final, as
+    /// [`confirm_scene`](Self::confirm_scene) says.
+    scene_seen: u64,
+    /// How many scene changes the world's ticks had asked for that were refused, as a tick last
+    /// took them as final.
+    refused_seen: u64,
     /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
     /// from a restore.
     #[cfg(feature = "dev")]
@@ -676,7 +687,8 @@ impl Context {
             world.register::<Owner>()?;
             world.register::<PrefabRoot>()?;
             world.register_saved::<Physics2D>()?;
-            world.register_saved::<Physics3D>()
+            world.register_saved::<Physics3D>()?;
+            world.register_saved::<crate::scene_change::SceneIn>()
         });
         registered.expect("the engine's components describe themselves");
         let mut textures = Textures::default();
@@ -772,6 +784,9 @@ impl Context {
             edited: None,
             player: None,
             networked: false,
+            served: false,
+            scene_seen: 0,
+            refused_seen: 0,
             #[cfg(feature = "dev")]
             sync_tested: false,
         }
@@ -2207,11 +2222,17 @@ impl Context {
     ///
     /// Fails, loading nothing, as [`World::load_scene`] does but for those.
     pub(crate) fn load_scene_assets(&mut self, text: &str) -> Result<Vec<String>> {
+        self.load_scene_assets_as(text, self.follows)
+    }
+
+    /// As [`load_scene_assets`](Self::load_scene_assets), standing in for what can't be loaded if
+    /// `stand_in`, whatever run this is.
+    fn load_scene_assets_as(&mut self, text: &str, stand_in: bool) -> Result<Vec<String>> {
         let mut missing = Vec::new();
         // Again while a prefab loads, whose text may name more: each time one more at least.
         loop {
             let names = self.world.scene_assets(text)?;
-            self.load_named(names.iter().map(Asset::as_deref), self.follows);
+            self.load_named(names.iter().map(Asset::as_deref), stand_in);
             let prefab = |asset: &Asset<String>| matches!(asset, Asset::Prefab(_));
             let more = names
                 .iter()
@@ -3785,8 +3806,10 @@ impl Context {
         if start.is_some_and(|start| scene_files::same_file(start, path)) {
             self.scenes.open.author = Some(author.clone());
         }
-        self.scenes
-            .loaded(SceneFile::new(path.to_owned(), author, text));
+        let file = SceneFile::new(path.to_owned(), author, text);
+        // For the scene changes to come, which may name it.
+        self.scenes.cache(file.clone());
+        self.scenes.loaded(file);
         info!(
             code = "scene.loaded",
             path = %path.display(),
@@ -3819,6 +3842,370 @@ impl Context {
         self.load_scene_file(start)
     }
 
+    /// Drops the scene a layer asked for outside a tick, through [`World::change_scene`], as in its
+    /// `update`, `event` or `attach`, warning `scene.not_in_tick`: as each tick starts, before the
+    /// layers' ticks, so that only what a tick asks for goes in, as a recording and the other
+    /// lockstep peer have it.
+    pub(crate) fn drop_untimely_scene(&mut self) {
+        if let Some(scene) = self.world.take_asked_scene() {
+            warn!(
+                code = "scene.not_in_tick",
+                scene = &*scene,
+                "A layer asked for the scene {scene} outside its tick, where the world doesn't \
+                 change, so it's dropped: a layer asks in its tick, as for a command it queued"
+            );
+        }
+    }
+
+    /// Puts the scene the world's last tick asked for, through [`World::change_scene`], in place
+    /// of the world's entities, as [`change_scene`](Self::change_scene) does, if it asked for one:
+    /// as each layer's tick returns, before the next layer's, wherever a tick runs, again in a
+    /// rollback or a SyncTest too. Logs, at the debug level, `scene.entered`, with how many roots
+    /// the scene made and how long it took, the loads of what it names among it; or the error,
+    /// the world staying as it was, which the world notes, for
+    /// [`confirm_scene`](Self::confirm_scene) to log once the tick is final, as a tick that may run
+    /// again, a client's or a rollback peer's on the other's inputs predicted, would log it again,
+    /// and one that never does would log a refusal that didn't happen.
+    pub(crate) fn change_asked_scene(&mut self) {
+        let Some(scene) = self.world.take_asked_scene() else {
+            return;
+        };
+        let started = Instant::now();
+        match self.change_scene(&scene) {
+            Ok(roots) => debug!(
+                code = "scene.entered",
+                scene = &*scene,
+                roots,
+                ms = perf::millis(started.elapsed()),
+                "Put the scene's entities in place of the world's"
+            ),
+            Err(error) => {
+                debug!(
+                    refused = error.code(),
+                    scene = &*scene,
+                    "{error:#}; the world stays as it was"
+                );
+                self.world.refuse_scene(&scene, &error);
+            }
+        }
+    }
+
+    /// Puts the scene file `scene` names, its path from the asset root, `/` between its parts, in
+    /// place of the world's entities, as [`World::change_scene`] says, and returns how many roots
+    /// it made: its text as [`scene_text`](Self::scene_text) keeps it; each model and prefab it
+    /// names that no layer has added loaded first, none standing in, and then each texture and
+    /// font, a stand-in for one that can't be loaded, as a run that follows another stands in, so
+    /// that whether the scene goes in depends on its text and the models and prefabs alone; in a
+    /// server's session, server and clients alike, none, as a client reads its server's states
+    /// only of the assets loaded.
+    ///
+    /// Fails, changing nothing, with `scene.bad_path` for a name that isn't a path inside the asset
+    /// root, as one that's absolute, holds `.`, `..`, `\`, `:` or a control character, or is
+    /// empty; as `scene_text` does; `asset.no_model` or `asset.no_prefab`, saying why, for a model
+    /// or a prefab it names that doesn't load; `net.no_scene_change` in a server's session for a
+    /// scene that names an asset the layers haven't loaded; and as [`World::load_scene`] does into
+    /// the world without its entities, the name beginning the message.
+    pub(crate) fn change_scene(&mut self, scene: &str) -> Result<usize> {
+        let _zone = gg_core::zone!();
+        if !package::inside(scene) || scene.chars().any(char::is_control) {
+            let message = format!(
+                "`{scene}` isn't a scene file's path from the asset root, `/` between its parts, \
+                 none of them empty, `.` or `..`, nor holding `\\`, `:` or a control character, \
+                 which a game names its scenes by on every OS and in its package alike"
+            );
+            return Err(Error::new("scene.bad_path", message));
+        }
+        let text = self.scene_text(scene)?;
+        // A world put in the world's place, as a SyncTest's copy, may share fewer assets than the
+        // layers have added since it was taken, which the scene may name.
+        self.share_assets();
+        let named = |error: Error| {
+            let message = format!("{scene}:{error}");
+            error.with_message(message)
+        };
+        if self.served {
+            let missing = self.world.scene_assets(&text).map_err(named)?;
+            if let Some(asset) = missing.first() {
+                let message = format!(
+                    "{scene} names {}, which no layer has loaded, and a server's session loads \
+                     none as it plays, so that its clients read its states: load what the game's \
+                     scenes name as its layers load",
+                    asset.name()
+                );
+                return Err(Error::new("net.no_scene_change", message));
+            }
+        } else {
+            self.load_change_assets(&text).map_err(named)?;
+        }
+        let roots = self.world.change_entities(scene, &text).map_err(named)?;
+        Ok(roots.len())
+    }
+
+    /// Loads what scene `text` names that no layer has added, for a scene change, as
+    /// [`change_scene`](Self::change_scene) says: its models and prefabs first, and those the
+    /// prefabs name, in turn, none standing in, so that a refusal leaves no stand-in behind; and
+    /// then its textures and fonts, standing in for those that can't be loaded.
+    ///
+    /// Fails as [`World::load_scene`] does into the world without its entities, but for what it
+    /// names, and with `asset.no_model` or `asset.no_prefab`, saying why, for a model or a prefab
+    /// that doesn't load.
+    fn load_change_assets(&mut self, text: &str) -> Result<()> {
+        loop {
+            let names = self.world.scene_assets(text)?;
+            let heavy =
+                |asset: &&Asset<String>| matches!(asset, Asset::Model(_) | Asset::Prefab(_));
+            let heavy: Vec<&Asset<String>> = names.iter().filter(heavy).collect();
+            if heavy.is_empty() {
+                break;
+            }
+            self.load_named(heavy.iter().map(|asset| asset.as_deref()), false);
+            if let Some(asset) = heavy.into_iter().find(|asset| !self.assets.has(asset)) {
+                let (code, kind) = match asset {
+                    Asset::Model(_) => ("asset.no_model", "model"),
+                    _ => ("asset.no_prefab", "prefab"),
+                };
+                let message = format!(
+                    "{}; a scene change stands in for no model or prefab, which would leave the \
+                     scene without what they hold",
+                    self.assets.not_found(kind, asset.name())
+                );
+                return Err(Error::new(code, message));
+            }
+        }
+        self.load_scene_assets_as(text, true).map(drop)
+    }
+
+    /// The text of the scene file `scene` names, its path from the asset root, for the scene
+    /// changes of the run: as the run read it once, as it started or as a change first named it,
+    /// or as a development build's edit took a save of it since, so that a tick run again, a
+    /// replay and each lockstep peer read the same, as [`World::change_scene`] says; and else read
+    /// now, from the game's package in a run that reads one and from the disk otherwise, and kept.
+    ///
+    /// Fails with `scene.no_root` in a run without an asset root, as [`App::root`] gives one;
+    /// `scene.not_found`, naming it, for a file that isn't there; `scene.case` for one whose name
+    /// is the file's but in its case, which a package or another OS's disk wouldn't find;
+    /// `asset.outside_root` for a link that leads outside the root; and `scene.file` for one that
+    /// can't be read, is more than 16 MiB or isn't UTF-8.
+    ///
+    /// [`App::root`]: crate::App::root
+    pub(crate) fn scene_text(&mut self, scene: &str) -> Result<String> {
+        if let Some(file) = self.scenes.cached.iter().find(|file| file.author == scene) {
+            return Ok(file.text.clone());
+        }
+        let Some(root) = self.root.clone() else {
+            let message = format!(
+                "there's no asset root to find the scene {scene} under: `App::root` or \
+                 `App::project` gives the game one"
+            );
+            return Err(Error::new("scene.no_root", message));
+        };
+        let path = package::under(&root, scene);
+        let text = self.read_scene_text(&root, scene, &path, true)?;
+        self.scenes
+            .cache(SceneFile::new(path, scene.to_owned(), text.clone()));
+        Ok(text)
+    }
+
+    /// Reads the scene file `scene` names, at `path` under `root`, as
+    /// [`scene_text`](Self::scene_text) does: checking its name against the disk's, part by part,
+    /// if `named`, for one the disk didn't give.
+    fn read_scene_text(
+        &self,
+        root: &Path,
+        scene: &str,
+        path: &Path,
+        named: bool,
+    ) -> Result<String> {
+        /// The most a scene file holds, as the most a prefab's does.
+        const MOST: u64 = 16 << 20;
+        let packaged = self.files.packaged().is_some();
+        let not_found = |within: &str| {
+            let message = format!("there's no scene {scene} in {within}");
+            Error::new("scene.not_found", message)
+        };
+        let case = |found: &str| {
+            let message = format!(
+                "the scene {scene} is {found}, in another case, which a package or a disk that \
+                 tells case apart, as Linux's does, wouldn't find: name it as its file is named"
+            );
+            Error::new("scene.case", message)
+        };
+        if !packaged {
+            let exactly = if named {
+                scene_files::named_exactly(root, scene)
+            } else {
+                Ok(())
+            };
+            exactly.map_err(|found| {
+                found.map_or_else(|| not_found("the asset root"), |found| case(&found))
+            })?;
+            let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+            if let (Some(root), Some(file)) = (canonical(root), canonical(path))
+                && !file.starts_with(root)
+            {
+                let message = format!(
+                    "the scene {scene} is a link to {}, outside the asset root, which a package \
+                     wouldn't hold",
+                    file.display()
+                );
+                return Err(Error::new("asset.outside_root", message));
+            }
+        }
+        let bytes = match self.files.read(path, MOST + 1) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && packaged => {
+                let paths = self.files.paths();
+                let other = (paths.iter())
+                    .filter_map(|other| other.strip_prefix(root).ok())
+                    .map(|other| other.to_string_lossy().replace('\\', "/"))
+                    .find(|other| other.to_lowercase() == scene.to_lowercase());
+                return Err(match other {
+                    Some(other) => case(&other),
+                    None => not_found("the game's package").with_source(error),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(not_found("the asset root").with_source(error));
+            }
+            Err(error) => {
+                let message = format!("can't read the scene {scene}");
+                return Err(Error::new("scene.file", message).with_source(error));
+            }
+        };
+        if bytes.len() as u64 > MOST {
+            let message = format!("the scene {scene} is more than 16 MiB, which no change reads");
+            return Err(Error::new("scene.file", message));
+        }
+        String::from_utf8(bytes).map_err(|error| {
+            let message = format!("the scene {scene} isn't UTF-8 text");
+            Error::new("scene.file", message).with_source(error)
+        })
+    }
+
+    /// Reads each scene file in the project's scenes folders, in a development build reading the
+    /// disk, and keeps its text for the scene changes of the run, as
+    /// [`scene_text`](Self::scene_text) keeps one: as the run starts, so that each lockstep peer,
+    /// and a replay, reads them as it starts, as it reads its start scene, rather than at a tick.
+    /// One that can't be read is left for a change to name, which fails as `scene_text` does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn read_scenes(&mut self) {
+        let _zone = gg_core::zone!();
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if self.reads_package() {
+            return;
+        }
+        let mut found = Vec::new();
+        // Each folder as the disk names it, its files' names the disk's, so that each directory
+        // is listed once.
+        let named = |folder: &PathBuf| {
+            let name = assets::name_of(Some(&root), folder);
+            package::inside(&name) && scene_files::named_exactly(&root, &name).is_ok()
+        };
+        let mut folders: Vec<PathBuf> = self.folders.iter().filter(|f| named(f)).cloned().collect();
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let hidden = entry.file_name().to_string_lossy().starts_with('.');
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() && !hidden => folders.push(path),
+                    Ok(kind)
+                        if kind.is_file()
+                            && !hidden
+                            && path.extension().is_some_and(|ext| ext == "ron") =>
+                    {
+                        found.push(path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        found.sort();
+        for path in found {
+            let scene = assets::name_of(Some(&root), &path).to_string();
+            let cached = self.scenes.cached.iter().any(|file| file.author == scene);
+            if cached || !package::inside(&scene) {
+                continue;
+            }
+            if let Ok(text) = self.read_scene_text(&root, &scene, &path, false) {
+                self.scenes.cache(SceneFile::new(path, scene, text));
+            }
+        }
+    }
+
+    /// Once a tick is final, as it is at once in a run alone, a replay, a lockstep session that
+    /// predicts nothing and a server, and in a rollback session once it has run on both peers'
+    /// inputs, and as such a tick starts, the world before it final too: takes what changed the
+    /// world's scene since it last did, as [`World::change_scene`] says, logging `scene.replaced`;
+    /// the scene's file is then the scene file in the world, which a development build applies the
+    /// saves of, in place of those the layers loaded, whose entities went, and in a project's game
+    /// the open scene. And logs the last change refused since, at the error level, with its code
+    /// and how many were. A client's ticks are never final, its server's world the one that is.
+    pub(crate) fn confirm_scene(&mut self) {
+        self.confirm_scene_from(None);
+    }
+
+    /// Takes the world's scene, and the scene changes refused, as what the run keeps of them
+    /// already, as [`confirm_scene`](Self::confirm_scene) would: as a world comes in from a
+    /// snapshot, a lockstep host, or held aside while a copy played, with its scene files.
+    pub(crate) fn seen_scene(&mut self) {
+        self.scene_seen = self.world.scene_changes();
+        self.refused_seen = self.world.scenes_refused();
+    }
+
+    /// As [`confirm_scene`](Self::confirm_scene) does, of `world`, a world that's final, or of the
+    /// context's own, for `None`: allocating nothing while nothing changed.
+    pub(crate) fn confirm_scene_from(&mut self, world: Option<&World>) {
+        let world = match world {
+            Some(world) => world,
+            None => &self.world,
+        };
+        let (changes, refused) = (world.scene_changes(), world.scenes_refused());
+        if (changes, refused) == (self.scene_seen, self.refused_seen) {
+            return;
+        }
+        let changed = changes != self.scene_seen;
+        let scene = world.scene().filter(|_| changed).map(str::to_owned);
+        let last = (refused != self.refused_seen)
+            .then(|| world.resource::<crate::scene_change::Refused>())
+            .flatten()
+            .and_then(|refused| refused.last.clone());
+        let times = refused - self.refused_seen;
+        (self.scene_seen, self.refused_seen) = (changes, refused);
+        if let Some((code, refused, message)) = last {
+            error!(
+                code = &*code,
+                scene = &*refused,
+                times,
+                "{message}; the world stays as it was"
+            );
+        }
+        let Some(scene) = scene else {
+            return;
+        };
+        info!(
+            code = "scene.replaced",
+            scene = &*scene,
+            changes,
+            "The scene's entities took the place of the world's"
+        );
+        let file = (self.scenes.cached.iter())
+            .find(|file| file.author == scene)
+            .cloned();
+        self.scenes.files.clear();
+        self.scenes.open = scene_files::Open {
+            author: (self.start.is_some() && file.is_some()).then(|| scene.clone()),
+            ..scene_files::Open::default()
+        };
+        self.scenes.files.extend(file);
+        #[cfg(feature = "dev")]
+        self.scenes.changed();
+    }
+
     /// The paths of the files the run's game's package holds, as
     /// [`App::from_package`](crate::App::from_package) and a project's game built without `dev`
     /// read one, each joined to the asset root as layers name files, which
@@ -3841,6 +4228,12 @@ impl Context {
         match edit {
             Edit::Script { path, text } => {
                 self.hosts.reload(&mut self.world, &path, text)?;
+                Ok(Done::Applied(Vec::new()))
+            }
+            Edit::Scene { path, text } => {
+                let root = self.root.clone().unwrap_or_default();
+                let file = SceneFile::new(package::under(&root, &path), path, text);
+                self.scenes.cache(file);
                 Ok(Done::Applied(Vec::new()))
             }
             // Every log goes, the authors' and those of layers, such as the Inspector's, which the
@@ -4409,6 +4802,7 @@ impl Stack {
                 let of = crate::snapshot::Of {
                     world: &cx.world,
                     scenes: &cx.scenes.files,
+                    cached: &cx.scenes.cached,
                     open: &cx.scenes.open,
                     scripts: &scripts,
                     mods: &mods,
@@ -4478,6 +4872,12 @@ impl Stack {
             }
             None => {}
         }
+        // A rollback peer's ticks run on the other's inputs predicted that held nothing are final
+        // once theirs have come, though they don't run again: the world as the first not yet so
+        // started is.
+        if let Some(Session::Peer(peer)) = &self.net {
+            cx.confirm_scene_from(peer.final_world());
+        }
         restored
     }
 
@@ -4493,6 +4893,11 @@ impl Stack {
     /// server's world goes.
     fn joins(&self) -> bool {
         self.net.as_ref().is_some_and(Session::follows)
+    }
+
+    /// Whether the run serves a server's session (`--serve`) or connects to one (`--connect`).
+    fn served(&self) -> bool {
+        matches!(self.net, Some(Session::Server(_) | Session::Client(_)))
     }
 
     /// Whether the run is networked, hosting, joining, serving or connecting, whose scene files the
@@ -4622,12 +5027,15 @@ impl Stack {
         }
         cx.player = self.net.as_ref().and_then(Session::player);
         cx.networked = self.net.is_some();
+        cx.served = self.served();
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {
             cx.sync_tested = self.sync_test.is_some();
         }
         self.load(cx);
+        #[cfg(feature = "dev")]
+        cx.read_scenes();
         for layer in &mut self.layers {
             layer.attach(cx);
             cx.share_assets();
@@ -4658,6 +5066,7 @@ impl Stack {
         let _zone = gg_core::zone!();
         cx.player = self.net.as_ref().and_then(Session::player);
         cx.networked = self.net.is_some();
+        cx.served = self.served();
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {
@@ -4764,6 +5173,8 @@ impl Stack {
         cx.authors = edited.authors;
         cx.scenes.files = edited.scenes;
         cx.scenes.open = edited.open;
+        // Of the world as edited, as its scene files and open scene are.
+        cx.seen_scene();
         // Its scripts' components as their scripts declare them now, though they reloaded since.
         cx.hosts.migrate(&mut cx.world);
         for layer in &mut self.layers {
@@ -4821,6 +5232,8 @@ impl Stack {
     fn restore_in_place(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
         let ticks = snapshot.restore(&mut cx.world, &self.names)?;
         cx.scenes.files.clone_from(&snapshot.scenes);
+        cx.scenes.cached.clone_from(&snapshot.cached);
+        cx.seen_scene();
         cx.scenes.open = (snapshot.open.clone())
             .unwrap_or_else(|| scene_files::opened(cx.start.as_deref(), &snapshot.scenes));
         #[cfg(feature = "dev")]
@@ -4951,6 +5364,17 @@ impl Stack {
         cx: &mut Context,
         tick: Tick,
     ) {
+        // A client's ticks may all run again, as may a rollback peer's on the other's inputs
+        // predicted, whose world before them is then final no more than after.
+        let final_tick = match net.as_deref() {
+            None | Some(Session::Server(_)) => true,
+            Some(Session::Peer(peer)) => peer.settled(tick.number),
+            Some(Session::Client(_)) => false,
+        };
+        cx.drop_untimely_scene();
+        if final_tick {
+            cx.confirm_scene();
+        }
         let merged = match net.as_deref_mut() {
             Some(net) => {
                 let merged = net.inputs(tick.number, cx);
@@ -5024,6 +5448,7 @@ impl Stack {
                 sync_test.queued(index, names[index], commands, &cx.world);
             }
             layer.tick(&mut cx.world, tick);
+            cx.change_asked_scene();
             cx.share_assets();
         }
         match net.as_deref_mut().and_then(|net| net.played(tick.number)) {
@@ -5038,6 +5463,9 @@ impl Stack {
             cx.exiting = true;
             cx.failed = true;
             *sync_test = None;
+        }
+        if final_tick {
+            cx.confirm_scene();
         }
         // A rollback session's isn't recorded, as `--rollback` takes no `--record`, nor a
         // client's, as `--connect` takes none.
@@ -5119,6 +5547,8 @@ impl Stack {
             sync_test,
             ..
         } = self;
+        cx.drop_untimely_scene();
+        cx.confirm_scene();
         if let Some(sync_test) = sync_test.as_mut() {
             sync_test.take(&cx.world);
         }
@@ -5130,6 +5560,7 @@ impl Stack {
                 sync_test.queued(index, names[index], commands, &cx.world);
             }
             layer.tick(&mut cx.world, tick);
+            cx.change_asked_scene();
             cx.share_assets();
         }
         cx.play_queued();
@@ -5139,6 +5570,7 @@ impl Stack {
             *sync_test = None;
             return Err(error);
         }
+        cx.confirm_scene();
         Ok(())
     }
 
@@ -5168,6 +5600,7 @@ impl Stack {
                 sync_test.give_back(index, queue);
             }
             layer.tick(&mut cx.world, tick);
+            cx.change_asked_scene();
             cx.share_assets();
         }
         mem::swap(&mut cx.world, sync_test.world_mut());

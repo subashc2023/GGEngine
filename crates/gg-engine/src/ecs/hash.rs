@@ -231,6 +231,63 @@ mod tests {
     #[derive(Clone, Copy, crate::Component)]
     struct Right(u32);
 
+    /// A component as it was before fields were added to it.
+    #[derive(Clone, Copy, crate::Component)]
+    #[reflect(name = "Grown")]
+    struct Before {
+        size: f32,
+    }
+
+    /// The same component, with fields added that the hash reads only while they're set.
+    #[derive(Clone, Copy, crate::Component)]
+    #[reflect(name = "Grown")]
+    struct After {
+        size: f32,
+        #[reflect(default = false, hashed_when_set)]
+        on: bool,
+        #[reflect(default = u32::MAX, hashed_when_set)]
+        mask: u32,
+        #[reflect(default = u32::MAX, hashed_when_set)]
+        other: u32,
+    }
+
+    /// Fields marked `hashed_when_set` leave a component's hash as it was before they were added
+    /// while they hold their defaults, and change it once set, each apart from the others, though
+    /// two set alike write the same words.
+    #[test]
+    fn fields_hashed_when_set_leave_the_hash_as_it_was_until_set() {
+        let hashed = |spawn: &dyn Fn(&mut World)| {
+            let mut world = World::seeded(5);
+            spawn(&mut world);
+            world.hash().content
+        };
+        let before = hashed(&|world| {
+            world.spawn(Before { size: 2.0 });
+        });
+        let after = |on, mask, other| {
+            hashed(&move |world| {
+                world.spawn(After {
+                    size: 2.0,
+                    on,
+                    mask,
+                    other,
+                });
+            })
+        };
+        assert_eq!(after(false, u32::MAX, u32::MAX), before);
+        let set = [
+            after(true, u32::MAX, u32::MAX),
+            after(false, 3, u32::MAX),
+            after(false, u32::MAX, 3),
+        ];
+        for (i, one) in set.iter().enumerate() {
+            assert_ne!(*one, before, "{i}");
+            for other in &set[i + 1..] {
+                assert_ne!(one, other, "{i}");
+            }
+        }
+    }
+
     /// Where the world holds its entities changes its layout, not its content: a scene's entities
     /// loaded into other worlds have the content they had, and the same layout as each other
     /// whatever order their types registered in; in the world they came from, a row moved to the

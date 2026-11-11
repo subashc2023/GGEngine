@@ -24,6 +24,11 @@ use crate::reflect::Value;
 /// entities a scene [replaced](World::replace_scene), refuses them too, having let their slots go
 /// itself. So whoever restores, clears or replaces a world clears its log too.
 ///
+/// An entry applied before the world's scene changed, as [`World::change_scene`] says, which may
+/// have put entities of the same IDs in place of those it changed, refuses to undo or redo
+/// (`ops.scene_changed`), and stays where it is, keeping what it kept, so that it neither changes
+/// an entity of the scene in its place nor frees a slot that another peer's log holds.
+///
 /// The last entry done keeps each component its sets changed, whole, as it was, so that the rest
 /// of its edit, appended and refused, rolls it back exactly, as an edit refused partway rolls back
 /// its own; it lets go of them once another entry is done, or it's undone.
@@ -46,6 +51,9 @@ struct Entry {
     operations: Vec<Operation>,
     inverses: Vec<Inverse>,
     of: Vec<usize>,
+    /// How many scene changes the world had been through as it applied, as
+    /// [`World::scene_changes`] counts them.
+    scenes: u64,
 }
 
 impl Log {
@@ -157,6 +165,7 @@ impl Log {
             operations,
             inverses,
             of,
+            scenes: world.scene_changes(),
         });
         self.open = false;
         Ok(())
@@ -184,6 +193,7 @@ impl Log {
                     operations: Vec::new(),
                     inverses: Vec::new(),
                     of: Vec::new(),
+                    scenes: last.scenes,
                 });
                 let before = last.operations.len();
                 last.operations.extend(entry.operations);
@@ -243,6 +253,8 @@ impl Log {
             ) => (entity, component, path) == (next, of, at) && !relinks(of),
             _ => false,
         };
+        let scenes = world.scene_changes();
+        let joins = |entry: &Entry| entry.scenes == scenes && joins(entry);
         if !(self.open && self.done.last().is_some_and(joins)) {
             let set = matches!(operation, Operation::Set { .. });
             self.apply(world, operation)?;
@@ -271,7 +283,8 @@ impl Log {
     /// children since, which the create didn't make, or a field it set held what a set refuses,
     /// as code may have stored, it changes nothing, and its entry is dropped, with what it kept,
     /// since the world has moved on from it and it would block the entries before it: the error
-    /// says why, and is logged as `ops.dropped`.
+    /// says why, and is logged as `ops.dropped`. An entry applied before the world's scene changed
+    /// is refused too, but stays, as [`Log`] says (`ops.scene_changed`).
     pub fn undo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Undo)
     }
@@ -314,6 +327,7 @@ impl Log {
                 operations: entry.operations.clone(),
                 inverses: entry.inverses.iter().map(Inverse::copied).collect(),
                 of: entry.of.clone(),
+                scenes: entry.scenes,
             };
             entries.iter().map(entry).collect()
         };
@@ -353,12 +367,23 @@ impl Log {
             Step::Undo => &mut self.done,
             Step::Redo => &mut self.undone,
         };
-        let Some(mut entry) = from.pop() else {
-            return Ok(false);
-        };
         let (doing, code, done) = match step {
             Step::Undo => ("undo", "ops.undone", "Undid an operation"),
             Step::Redo => ("redo", "ops.redone", "Redid an operation"),
+        };
+        let scenes = world.scene_changes();
+        if let Some(entry) = from.last()
+            && entry.scenes != scenes
+        {
+            let operation = &entry.operations[0];
+            let message = format!(
+                "can't {doing} {operation}, applied before the world's scene changed, which may \
+                 have put another entity under its ID: the edit stays in the log, refused"
+            );
+            return Err(Error::new("ops.scene_changed", message));
+        }
+        let Some(mut entry) = from.pop() else {
+            return Ok(false);
         };
         // An entry's operations come undone the last first, and redone the first first, so that
         // each finds the world as the one after it, or before it, left it.

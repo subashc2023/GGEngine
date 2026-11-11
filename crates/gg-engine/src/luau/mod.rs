@@ -33,13 +33,17 @@ use crate::{
 };
 
 mod bytecode;
+mod contacts;
 #[cfg(feature = "dev")]
 mod debugger;
+mod entities;
 // Luau's hooks, its interrupt and its debugger's, which mlua reaches through its raw API alone:
 // this module alone may use unsafe code for them.
 #[allow(unsafe_code)]
 mod hooks;
 mod mods;
+#[cfg(test)]
+mod reference;
 
 #[cfg(feature = "dev")]
 pub(crate) use debugger::Debugger;
@@ -127,34 +131,25 @@ const REMOVED: [&str; 7] = [
 /// `gg.declare`'s third argument, `{ on = "Shard" }`, has the component ride on another: each
 /// entity with a `Shard` is given its own, at its defaults, as the scripts run, before its tick.
 ///
-/// `gg.quat` makes and multiplies rotations, and turns a vector by one (`gg.quat.rotate(q, v)`).
-/// `gg.cast_ray(from, toward, distance, exclude)` casts through the world's 3D colliders, as
-/// [`World::cast_ray`] does, and `gg.cast_sphere`, `gg.cast_box` and `gg.cast_capsule` sweep a
-/// shape so, as [`World::cast_shape`] does, their sizes and a box's or a capsule's rotation first,
-/// as `gg.cast_sphere(radius, from, toward, distance, exclude)`: each gives the entity hit, where,
-/// the surface's normal there and how far, or nil, without end for a distance of nil, through the
-/// colliders of `exclude` if it's given. A mod's scripts cast only if it may read the whole world.
-/// `gg.find_path(from, to)` gives the corners of the shortest path over the world's navmesh, as
-/// [`World::find_path`] does, as an array of vectors, or nil where none joins them, and an agent's
-/// destination, a vector or nil, steers it, as `entity[NavAgent.destination] = to` does; a mod's
-/// scripts find paths only if it may read the whole world.
+/// A tick changes the world's entities at once, as Rust code does, by their components' type
+/// names: `gg.spawn`, `gg.despawn`, `gg.add`, `gg.remove` and `gg.alive`, whose arguments are in
+/// docs/LUAU.md. What these give an entity, or the entity they spawn, starts the VM's scripts on it
+/// at the next tick, though another VM's that run later in the tick, a mod's, run them as they
+/// come; a chunk calls none of them, nor `gg.tween`, `gg.play`, `gg.set_param` or writes a field
+/// (`script.loading`), as it runs again as a lockstep joiner loads it; and they fail with the engine's errors and codes, such as `ecs.no_entity` for an
+/// entity despawned, as a field read or written through a handle to one fails too, and
+/// `script.bad_argument` for an argument of another kind. A mod's scripts give and take the
+/// components they may write, and spawn only if they may write some type, an entity of components
+/// they may write; one without components, under a parent or of a prefab, and a despawn, only if
+/// they may write the whole world.
 ///
-/// `gg.tween(entity, field, to, seconds, options)` eases the field whose handle is `field` from
-/// what it holds to `to` over `seconds`, as [`World::tween`] does, in place of a tween of that
-/// field; `options`, if it's given, a table of `curve`, `ease` and `playback`, their variants'
-/// names, as `{ curve = "Back", ease = "Out", playback = "PingPong" }`, and `delay`, the seconds
-/// before it starts. A mod's scripts tween only fields they may write, and only if they may write
-/// `Tweens`.
-///
-/// `gg.play(entity, clip, fade)` has `entity`, a model's root, play its model's clip named `clip`,
-/// cross-fading from what it plays over `fade` seconds, or cutting to it without one, as
-/// [`World::play`] does. A mod's scripts play clips only if they may write `Animator`.
-///
-/// `gg.set_param(entity, name, value)` sets parameter `name` of `entity`'s state machine, its
-/// [`AnimationStates`](crate::AnimationStates), to `value`: a number for a float, and a boolean for
-/// a bool or a trigger, which a transition that fires on it consumes, as [`World::set_param`] does.
-/// A mod's scripts set parameters only if they may write `AnimationStates`. A call allocates nothing
-/// once its VM has been given its name, among the first 64 names it's given.
+/// `gg.quat`, the casts, `gg.find_path`, `gg.tween`, `gg.play` and `gg.set_param` do as
+/// [`World::cast_ray`], [`World::cast_shape`], [`World::find_path`], [`World::tween`],
+/// [`World::play`] and [`World::set_param`] do, for the entity they're given, and what a mod's
+/// scripts need of each is as docs/LUAU.md lists, which is the reference of everything scripts
+/// reach, each `gg` function's arguments, results and errors among it. A call that sets
+/// `gg.set_param`'s parameter allocates nothing once its VM has been given its name, among the
+/// first 64 names it's given.
 ///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
@@ -302,6 +297,11 @@ struct Shared {
     /// address of the string Luau interned, where reading a Luau string's text through mlua
     /// allocates, as a call naming one past them does.
     params: RefCell<Vec<(LuaString, String)>>,
+    /// What the scripts gave entities as they ran this time, which no tick runs for until they run
+    /// again, as [`entities`] says: each entity they spawned, with `None`, and each component they
+    /// gave one, with its type, and those riding on it. A set, never iterated, so its order counts
+    /// for nothing, and cleared in place, so it allocates only as it holds more than ever before.
+    fresh: RefCell<HashSet<(Entity, Option<ComponentId>)>>,
     #[cfg(feature = "dev")]
     hooked: debugger::Hooked,
 }
@@ -684,6 +684,7 @@ impl Host {
                 budget: Cell::new(BUDGET),
                 held,
                 params: RefCell::new(Vec::new()),
+                fresh: RefCell::new(HashSet::new()),
                 #[cfg(feature = "dev")]
                 hooked: debugger::Hooked::new(lua.clone()),
             },
@@ -778,7 +779,7 @@ impl Host {
         quat.raw_set("from_rotation_y", rotation(Quat::from_rotation_y)?)?;
         quat.raw_set("from_rotation_z", rotation(Quat::from_rotation_z)?)?;
         let axis_angle = lua.create_function(|_, (axis, angle): (Vector, f64)| {
-            let axis = Vec3::new(axis.x(), axis.y(), axis.z());
+            let axis = unit_axis(vec3_of(axis), angle)?;
             Ok(vector_of(Quat::from_axis_angle(axis, angle as f32)))
         })?;
         quat.raw_set("from_axis_angle", axis_angle)?;
@@ -800,6 +801,8 @@ impl Host {
         gg.raw_set("tween", lua.create_function(tween)?)?;
         gg.raw_set("play", lua.create_function(play)?)?;
         gg.raw_set("set_param", lua.create_function(set_param)?)?;
+        contacts::install(&lua, &gg)?;
+        entities::register(&lua, &gg)?;
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
@@ -891,6 +894,7 @@ impl Host {
         } = self;
         // A mod's calls this tick share one budget.
         shared.budget.set(BUDGET);
+        shared.fresh.borrow_mut().clear();
         lent(shared, world, || {
             for script in scripts.iter_mut() {
                 let Some(id) = script.id else {
@@ -903,6 +907,7 @@ impl Host {
                         if !world.has(entity, id) {
                             let added = world.add_default(entity, &script.component);
                             added.expect("an entity alive is given a component it hasn't");
+                            entities::rides(shared, entity, on, id);
                         }
                     }
                 }
@@ -911,8 +916,10 @@ impl Host {
                 };
                 shared.world.borrow().list_with(id, &mut list);
                 for &entity in &list {
-                    // Gone, or without the component, since the list was made.
-                    if !shared.world.borrow().has(entity, id) {
+                    // Gone, or without the component, since the list was made; or given it as the
+                    // scripts ran, as `entities` says.
+                    if !shared.world.borrow().has(entity, id) || entities::fresh(shared, entity, id)
+                    {
                         continue;
                     }
                     if shared.held.is_none() {
@@ -926,10 +933,13 @@ impl Host {
                     {
                         let world = shared.world.borrow();
                         let entity = world.id(entity).map(|id| id.to_string());
+                        // The engine's own error's code, as of a despawned entity reached.
+                        let cause = error.downcast_ref::<Error>().map(Error::code);
                         warn!(
                             code = "script.error",
                             script = script.path,
                             entity,
+                            cause,
                             "{error}; it runs on, for this entity and others, as it does"
                         );
                     }
@@ -1557,6 +1567,13 @@ fn ungranted(capability: &str, what: &str) -> String {
     format!("the mod isn't granted `{capability}`, which {what} needs")
 }
 
+/// [`ungranted`] as the error a script's call fails with, `mod.ungranted`, so that a tick's
+/// `script.error` names it as its `cause`.
+fn denied(capability: &str, what: &str) -> mlua::Error {
+    let message = ungranted(capability, what);
+    mlua::Error::external(Error::new("mod.ungranted", message))
+}
+
 /// What the functions Luau calls reach, as they run only as scripts run or load.
 fn shared<R>(f: impl FnOnce(&Shared) -> mlua::Result<R>) -> mlua::Result<R> {
     if !SHARED.is_set() {
@@ -1581,7 +1598,7 @@ fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
                 let error = Error::new("mod.ungranted", format!("{}: {message}", loading.path));
                 loading.refused = Some(error);
             }
-            return Err(mlua::Error::runtime(message));
+            return Err(mlua::Error::external(Error::new("mod.ungranted", message)));
         }
         let Some(id) = world.component_named(&name) else {
             let names = crate::reflect::list(world.component_types());
@@ -1770,10 +1787,7 @@ fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Result<Lua_> {
         if !field.reads {
             let (component, name) = (&field.component, &field.name);
             let what = format!("reading `{component}.{name}`");
-            return Err(mlua::Error::runtime(ungranted(
-                &format!("read:{component}"),
-                &what,
-            )));
+            return Err(denied(&format!("read:{component}"), &what));
         }
         let world = shared.world.borrow();
         let reached = world.field_at(entity, missing(field)?, field.index);
@@ -1785,16 +1799,14 @@ fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Result<Lua_> {
 /// `entity[field] = value`: sets the field whose handle is `key`, of `entity`, to `value`.
 fn write(_: &Lua, (entity, key, value): (LightUserData, Lua_, Lua_)) -> mlua::Result<()> {
     shared(|shared| {
+        entities::ticking(shared, "writes fields")?;
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
         let field = field_of(&fields, &key)?;
         if !field.writes {
             let (component, name) = (&field.component, &field.name);
             let what = format!("writing `{component}.{name}`");
-            return Err(mlua::Error::runtime(ungranted(
-                &format!("write:{component}"),
-                &what,
-            )));
+            return Err(denied(&format!("write:{component}"), &what));
         }
         let mut world = shared.world.borrow_mut();
         let at = (entity, missing(field)?, field.index);
@@ -1907,15 +1919,25 @@ fn missing(field: &FieldRef) -> mlua::Result<ComponentId> {
     })
 }
 
-/// The error that `field` of `entity` can't be reached in `world`, as `error` says.
+/// The error that `field` of `entity` can't be reached in `world`, as `error` says, of its code,
+/// such as `ecs.no_entity` for an entity despawned.
 fn reaching(world: &World, entity: Entity, field: &FieldRef, error: &Error) -> mlua::Error {
-    let entity = world
-        .id(entity)
-        .map_or(entity.to_string(), |id| id.to_string());
-    mlua::Error::runtime(format!(
-        "can't reach `{}.{}` of entity {entity}: {error:#}",
-        field.component, field.name
+    mlua::Error::external(Error::new(
+        error.code(),
+        format!(
+            "can't reach `{}.{}` of entity {}: {error:#}",
+            field.component,
+            field.name,
+            named(world, entity)
+        ),
     ))
+}
+
+/// How diagnostics name `entity` of `world`: by its ID while it's alive, and else by its handle.
+fn named(world: &World, entity: Entity) -> String {
+    world
+        .id(entity)
+        .map_or(entity.to_string(), |id| id.to_string())
 }
 
 /// The value of `field`, which holds `ty`, as a script reads it: without allocating.
@@ -1958,52 +1980,56 @@ fn set(
     ty: Field,
     value: &Lua_,
 ) -> Result<()> {
-    let wrong = |expected: &str| {
-        Error::new(
-            "reflect.wrong_kind",
-            format!("expected {expected}, got a {}", value.type_name()),
-        )
-    };
-    let number = || match *value {
-        Lua_::Number(x) => Ok(x),
-        Lua_::Integer(n) => Ok(n as f64),
-        _ => Err(wrong("a number")),
-    };
-    let vector = || match *value {
-        Lua_::Vector(v) => Ok(v),
-        _ => Err(wrong("a vector")),
-    };
-    let to_entity = || match *value {
-        Lua_::LightUserData(data) => {
-            Entity::from_bits(bits(data)).ok_or_else(|| wrong("an entity"))
-        }
-        _ => Err(wrong("an entity")),
-    };
-    let value = match ty {
+    match ty {
         Field::MaybeEntity => {
             let held = match value {
                 Lua_::Nil => None,
-                _ => Some(to_entity()?),
+                _ => Some(entity_in(value)?),
             };
             let any: &mut dyn Any = world.field_to_set(entity, id, index, None)?;
             *any.downcast_mut::<Option<Entity>>()
                 .expect("an option of an entity") = held;
-            return Ok(());
+            Ok(())
         }
         Field::MaybeVec3 => {
             let held = match value {
                 Lua_::Nil => None,
-                _ => Some(vec3_of(vector()?)),
+                _ => Some(vec3_of(vector_in(value)?)),
             };
             let checked = held.map(Value::Vec3);
             let any: &mut dyn Any = world.field_to_set(entity, id, index, checked.as_ref())?;
             *any.downcast_mut::<Option<Vec3>>()
                 .expect("an option of a vector") = held;
-            return Ok(());
+            Ok(())
         }
+        _ => {
+            let value = value_of(ty, value)?;
+            let field = world.field_to_set(entity, id, index, Some(&value))?;
+            field.set_value(&value)
+        }
+    }
+}
+
+/// `value`, a script's, as a field that holds `ty` takes it, as reflection's value: nil for an
+/// option's none. The bounds of the field aren't checked, which setting it or building its
+/// component does.
+///
+/// Fails with `reflect.wrong_kind` for a value of another kind, and `reflect.out_of_range` for a
+/// number that isn't an integer, or is negative, where the field holds an integer, or none.
+fn value_of(ty: Field, value: &Lua_) -> Result<Value> {
+    let number = || match *value {
+        Lua_::Number(x) => Ok(x),
+        Lua_::Integer(n) => Ok(n as f64),
+        _ => Err(wrong("a number", value)),
+    };
+    let vector = || vector_in(value);
+    Ok(match ty {
+        Field::MaybeEntity | Field::MaybeVec3 if value.is_nil() => Value::Option(None),
+        Field::MaybeEntity => Value::Option(Some(Box::new(Value::Entity(entity_in(value)?)))),
+        Field::MaybeVec3 => Value::Option(Some(Box::new(Value::Vec3(vec3_of(vector()?))))),
         Field::Bool => match *value {
             Lua_::Boolean(b) => Value::Bool(b),
-            _ => return Err(wrong("a bool")),
+            _ => return Err(wrong("a bool", value)),
         },
         Field::F32 => Value::F32(number()? as f32),
         Field::F64 => Value::F64(number()?),
@@ -2030,10 +2056,34 @@ fn set(
         Field::Vec3 => Value::Vec3(vector().map(|v| Vec3::new(v.x(), v.y(), v.z()))?),
         Field::Vec4 => Value::Vec4(vector().map(|v| Vec4::new(v.x(), v.y(), v.z(), v.w()))?),
         Field::Quat => Value::Quat(quat_of(vector()?)),
-        Field::Entity => Value::Entity(to_entity()?),
-    };
-    let field = world.field_to_set(entity, id, index, Some(&value))?;
-    field.set_value(&value)
+        Field::Entity => Value::Entity(entity_in(value)?),
+    })
+}
+
+/// The error that `value`, a script's, is of another kind than `expected`.
+fn wrong(expected: &str, value: &Lua_) -> Error {
+    Error::new(
+        "reflect.wrong_kind",
+        format!("expected {expected}, got a {}", value.type_name()),
+    )
+}
+
+/// The vector `value` is, as [`value_of`] takes one.
+fn vector_in(value: &Lua_) -> Result<Vector> {
+    match *value {
+        Lua_::Vector(v) => Ok(v),
+        _ => Err(wrong("a vector", value)),
+    }
+}
+
+/// The entity `value` is, as [`value_of`] takes one.
+fn entity_in(value: &Lua_) -> Result<Entity> {
+    match *value {
+        Lua_::LightUserData(data) => {
+            Entity::from_bits(bits(data)).ok_or_else(|| wrong("an entity", value))
+        }
+        _ => Err(wrong("an entity", value)),
+    }
 }
 
 /// The end of each cast's arguments, as a script gives them: where it starts, which way it goes,
@@ -2099,7 +2149,7 @@ fn cast(
             && !held.grant.has(&Capability::Read(None))
         {
             let what = "a cast, which reads where every collider is,";
-            return Err(mlua::Error::runtime(ungranted("read", what)));
+            return Err(denied("read", what));
         }
         let mut cast = Cast::new(vec3_of(from), vec3_of(toward));
         if let Some(distance) = distance {
@@ -2136,7 +2186,7 @@ fn find_path(lua: &Lua, (from, to): (Vector, Vector)) -> mlua::Result<Lua_> {
             && !held.grant.has(&Capability::Read(None))
         {
             let what = "a path, which reads where every static collider is,";
-            return Err(mlua::Error::runtime(ungranted("read", what)));
+            return Err(denied("read", what));
         }
         let mut world = shared.world.borrow_mut();
         let Some(corners) = world.find_path(vec3_of(from), vec3_of(to)) else {
@@ -2158,6 +2208,7 @@ type TweenArgs = (LightUserData, Lua_, Lua_, f64, Option<Table>);
 /// is `field` from what it holds to `to`, as the scripts' doc says.
 fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Result<()> {
     shared(|shared| {
+        entities::ticking(shared, "starts tweens")?;
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
         let field = field_of(&fields, &key)?;
@@ -2165,13 +2216,13 @@ fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Resul
         if !field.writes {
             let what = format!("tweening `{component}.{name}`");
             let capability = format!("write:{component}");
-            return Err(mlua::Error::runtime(ungranted(&capability, &what)));
+            return Err(denied(&capability, &what));
         }
         if let Some(held) = &shared.held
             && !held.grant.writes("Tweens")
         {
             let what = format!("tweening `{component}.{name}`, which its entity's `Tweens` holds,");
-            return Err(mlua::Error::runtime(ungranted("write:Tweens", &what)));
+            return Err(denied("write:Tweens", &what));
         }
         let mut world = shared.world.borrow_mut();
         let reached = world.field_at(entity, missing(field)?, field.index);
@@ -2254,16 +2305,23 @@ fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Resul
 /// over `fade` seconds, or at once without them, as the scripts' doc says.
 fn play(_: &Lua, (entity, clip, fade): (LightUserData, String, Option<f64>)) -> mlua::Result<()> {
     shared(|shared| {
+        entities::ticking(shared, "plays clips")?;
         let entity = entity_of(entity)?;
         if let Some(held) = &shared.held
             && !held.grant.writes("Animator")
         {
             let what = format!("playing clip {clip:?}, which its root's `Animator` holds,");
-            return Err(mlua::Error::runtime(ungranted("write:Animator", &what)));
+            return Err(denied("write:Animator", &what));
         }
         let mut world = shared.world.borrow_mut();
         let played = world.play(entity, &clip, fade.unwrap_or(0.0) as f32);
-        played.map_err(|error| mlua::Error::runtime(format!("{error:#}")))
+        played.map_err(|error| {
+            let message = format!(
+                "can't play clip {clip:?} on entity {}: {error:#}",
+                named(&world, entity)
+            );
+            mlua::Error::external(Error::new(error.code(), message))
+        })
     })
 }
 
@@ -2271,6 +2329,7 @@ fn play(_: &Lua, (entity, clip, fade): (LightUserData, String, Option<f64>)) -> 
 /// `value`, a number or a boolean, as the scripts' doc says.
 fn set_param(_: &Lua, (entity, name, value): (LightUserData, LuaString, Lua_)) -> mlua::Result<()> {
     shared(|shared| {
+        entities::ticking(shared, "sets parameters")?;
         let entity = entity_of(entity)?;
         if let Some(held) = &shared.held
             && !held.grant.writes("AnimationStates")
@@ -2279,10 +2338,7 @@ fn set_param(_: &Lua, (entity, name, value): (LightUserData, LuaString, Lua_)) -
                 "setting parameter \"{}\", which its entity's `AnimationStates` holds,",
                 name.display()
             );
-            return Err(mlua::Error::runtime(ungranted(
-                "write:AnimationStates",
-                &what,
-            )));
+            return Err(denied("write:AnimationStates", &what));
         }
         let value = match value {
             Lua_::Number(x) => ParamValue::Float(x as f32),
@@ -2314,8 +2370,46 @@ fn set_param(_: &Lua, (entity, name, value): (LightUserData, LuaString, Lua_)) -
         };
         let mut world = shared.world.borrow_mut();
         let set = world.set_param(entity, name, value);
-        set.map_err(|error| mlua::Error::runtime(format!("{error:#}")))
+        set.map_err(|error| {
+            let message = format!(
+                "can't set parameter \"{name}\" of entity {}: {error:#}",
+                named(&world, entity)
+            );
+            mlua::Error::external(Error::new(error.code(), message))
+        })
     })
+}
+
+/// The smallest of an axis' components, in absolute value, that is one: below it, a rotation's
+/// axis is no direction.
+const AXIS_LEAST: f32 = 1e-6;
+
+/// `axis`, of the rotation of `angle` radians that `gg.quat.from_axis_angle` makes, as a unit
+/// vector: scaled by its largest component first, so that an axis of huge components doesn't
+/// overflow as its length is found.
+///
+/// Fails with `script.bad_argument` for an axis of a component that isn't finite, or of none past
+/// [`AXIS_LEAST`], and for an angle that isn't finite.
+fn unit_axis(axis: Vec3, angle: f64) -> mlua::Result<Vec3> {
+    let refuse =
+        |message: String| mlua::Error::external(Error::new("script.bad_argument", message));
+    if !angle.is_finite() {
+        return Err(refuse(format!(
+            "`gg.quat.from_axis_angle`'s angle is a finite number of radians, not {angle}"
+        )));
+    }
+    if !axis.is_finite() {
+        return Err(refuse(format!(
+            "`gg.quat.from_axis_angle`'s axis is a vector of finite components, not {axis}"
+        )));
+    }
+    let largest = axis.abs().max_element();
+    if largest < AXIS_LEAST {
+        return Err(refuse(format!(
+            "`gg.quat.from_axis_angle`'s axis is a direction, not {axis}, which is as good as zero"
+        )));
+    }
+    Ok((axis / largest).normalize())
 }
 
 /// `v`'s X, Y and Z, as a script's vector holds a point or a direction.

@@ -1,8 +1,9 @@
 //! Physics, through rapier: bodies that it moves at the world's ticks, as their entities'
 //! components describe them, and joints that hold them together, in the XY plane ([`dim2`]) or in
-//! space ([`dim3`]), with characters and casts through the colliders in space; the world's
-//! resources that hold rapier's bodies, joints and contacts, which snapshots copy and snapshot
-//! files hold; and the colliders' outlines and the joints' lines, drawn where their entities draw.
+//! space ([`dim3`]), with characters and casts through the colliders in space; which entities'
+//! colliders touch and overlap ([`contacts`]); the world's resources that hold rapier's bodies,
+//! joints and contacts, which snapshots copy and snapshot files hold; and the colliders' outlines
+//! and the joints' lines, drawn where their entities draw.
 
 use std::f32::consts::TAU;
 
@@ -13,9 +14,11 @@ use tracing::warn;
 use crate::draw::Poses;
 use crate::{Component, Entity, Reflect, Transform, World};
 
+mod contacts;
 mod dim2;
 mod dim3;
 
+pub use contacts::{Contact, ContactEvent};
 pub use dim2::{BoxCollider2D, CircleCollider2D, Joint2D, JointKind2D, Physics2D, RigidBody2D};
 pub use dim3::{
     BoxCollider3D, CapsuleCollider3D, Cast, CharacterController3D, Hit3D, Joint3D, JointKind3D,

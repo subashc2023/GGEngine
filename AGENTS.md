@@ -28,8 +28,8 @@ games/shards/     the first demo, a project: two players, alone, as peers or as 
 games/foxball/    the 3D demo, networked as Shards is: two foxes, a ball and two goals
 games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
-docs/PLAN.md      the roadmap (see Workflow)
-docs/DEFECTS.md   known defects of the code that exists (see Workflow)
+docs/              PLAN.md, the roadmap, and DEFECTS.md, known defects (see Workflow); LUAU.md, what
+                  Luau scripts and mods can use: every `gg` function, the limits, the diagnostics
 ```
 
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any

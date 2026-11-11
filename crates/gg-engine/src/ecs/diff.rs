@@ -387,8 +387,7 @@ impl World {
     /// would load it into the world without its entities.
     ///
     /// Fails as `load_scene` does, but for the IDs the world has.
-    #[cfg(feature = "dev")]
-    pub(crate) fn scene_loads(&self, text: &str) -> Result<()> {
+    pub(crate) fn scene_loads(&self, text: &str) -> gg_core::Result<()> {
         self.emptied().load_scene(text).map(drop)
     }
 

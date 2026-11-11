@@ -1357,6 +1357,14 @@ impl Lockstep {
         None
     }
 
+    /// The world as the first tick run on the other peer's inputs predicted, whose inputs haven't
+    /// come, started: the world after the last tick that's final, which no rollback takes back;
+    /// `None` while no tick runs on them, the world as it stands the one.
+    pub(crate) fn final_world(&self) -> Option<&World> {
+        let (_, first) = self.predicted.first_key_value()?;
+        Some(&first.start)
+    }
+
     /// The world as tick `tick`, run on the other peer's inputs predicted, started.
     ///
     /// # Panics
@@ -2606,6 +2614,280 @@ mod tests {
         assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
     }
 
+    /// A command of [`Stager`]'s: asks for the scene of this path from the asset root.
+    #[derive(Reflect)]
+    struct Stage(String);
+
+    /// Loads `scenes/menu.ron` as it attaches, and asks at each tick for the scenes its commands
+    /// name, as a game goes from its menu to a level.
+    #[derive(Default)]
+    struct Stager(Vec<Stage>);
+
+    impl Layer for Stager {
+        fn attach(&mut self, cx: &mut Context) {
+            let root = cx.root.clone().expect("a root");
+            cx.load_scene_file(root.join("scenes/menu.ron"))
+                .expect("loaded");
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Stage(scene) in self.0.drain(..) {
+                world.change_scene(&scene);
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.0)
+        }
+    }
+
+    /// Lockstep peers, predicting each other's inputs and rolling back if `rollback`, each put
+    /// in a scene the other's command asked for at the same tick, loading the texture it names
+    /// on both, and hash alike, without a desync.
+    fn peers_change_scenes_in_step(rollback: bool) {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new(&format!("net-scene-change-{rollback}"));
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("scenes")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("moss.png"), png).expect("a PNG");
+        let sprite = |id: u64, texture: &str| {
+            format!(
+                "        \"{id:016x}\": (\n            Sprite: (\n                texture: \
+                 {texture},\n            ),\n        ),\n"
+            )
+        };
+        let scene = |entities: &str| format!("(\n    entities: {{\n{entities}    }},\n)\n");
+        let menu = scene(&sprite(1, "None"));
+        let level = scene(&(sprite(2, "Some(\"moss.png\")") + &sprite(3, "None")));
+        fs::write(root.join("scenes/menu.ron"), menu).expect("the menu");
+        fs::write(root.join("scenes/level.ron"), level).expect("the level");
+        let link = rollback.then_some(SLOW);
+        let peer = |net: &Net, seed: u64| {
+            let mut stack = Stack::default();
+            stack.push_layer(Stager::default());
+            Peer::of(
+                stack,
+                net,
+                Context::seeded(seed).root(&root),
+                rollback,
+                link,
+            )
+        };
+        let mut host = peer(&Net::Host("127.0.0.1:0".to_owned()), 1);
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        let mut joiner = peer(&Net::Join(address), 2);
+        join(&mut host, &mut joiner);
+        let stage = |peer: &mut Peer, scene: &str| {
+            let queue = peer
+                .stack
+                .commands_of(0)
+                .expect("the stager queues commands");
+            let command = Stage(scene.to_owned()).to_value();
+            queue.push(&command).expect("queued");
+        };
+        let ids = |peer: &Peer| {
+            let world = peer.cx.world();
+            let mut ids: Vec<u64> = (world.query::<crate::Entity>())
+                .map(|entity| world.id(entity).expect("alive").get())
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        for (by_joiner, scene, entities) in [
+            (true, "scenes/level.ron", vec![2, 3]),
+            (false, "scenes/menu.ron", vec![1]),
+            (false, "scenes/level.ron", vec![2, 3]),
+        ] {
+            stage(if by_joiner { &mut joiner } else { &mut host }, scene);
+            for _ in 0..20 {
+                host.turn();
+                joiner.turn();
+                thread::sleep(Duration::from_millis(1));
+            }
+            let at = host.next.max(joiner.next) + DELAY.max(ROLLBACK_DELAY) + 1;
+            settle(&mut host, &mut joiner, at);
+            assert_eq!((ids(&host), ids(&joiner)), (entities.clone(), entities));
+            assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        }
+        for peer in [&host, &joiner] {
+            assert!(peer.cx.world().assets().texture("moss.png").is_some());
+        }
+        // Each takes the last as final as the ticks after run, as a rollback peer may have taken
+        // it as predicted, its run on both peers' inputs alike.
+        let at = host.next.max(joiner.next) + 2;
+        settle(&mut host, &mut joiner, at);
+        let codes: Vec<String> = logged.try_iter().collect();
+        let replaced = (codes.iter())
+            .filter(|code| *code == "scene.replaced")
+            .count();
+        assert_eq!(replaced, 6, "three on each peer: {codes:?}");
+        let parted = [
+            "net.desync",
+            "net.bad_command",
+            "net.lost",
+            "asset.stand_in",
+        ];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// Whether a [`Vetoer`]'s scene changes are vetoed: a resource, which rollback takes back with
+    /// the world.
+    #[derive(Clone)]
+    struct Vetoed;
+
+    /// A command of [`Vetoer`]'s.
+    #[derive(Reflect)]
+    enum Stagehand {
+        /// Vetoes every scene change from then on.
+        Veto,
+        /// Asks for the scene of this path from the asset root, unless vetoed.
+        Go(String),
+    }
+
+    /// Loads `scenes/menu.ron` as it attaches, and applies its commands at each tick.
+    #[derive(Default)]
+    struct Vetoer(Vec<Stagehand>);
+
+    impl Layer for Vetoer {
+        fn attach(&mut self, cx: &mut Context) {
+            let root = cx.root.clone().expect("a root");
+            cx.load_scene_file(root.join("scenes/menu.ron"))
+                .expect("loaded");
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for command in self.0.drain(..) {
+                match command {
+                    Stagehand::Veto => {
+                        world.insert_resource(Vetoed);
+                    }
+                    Stagehand::Go(scene) if world.resource::<Vetoed>().is_none() => {
+                        world.change_scene(&scene);
+                    }
+                    Stagehand::Go(_) => {}
+                }
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.0)
+        }
+    }
+
+    /// A rollback peer that changed the scene at a tick run on the other's inputs predicted, which
+    /// held a veto of it, takes the change back as it rolls back to that tick: the world, the scene
+    /// file in it and the logs keep nothing of it, both peers hashing alike, and no peer logs
+    /// `scene.replaced` for it.
+    #[test]
+    fn a_scene_change_rollback_takes_back_leaves_nothing_of_it() {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new("net-scene-change-vetoed");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("scenes")).expect("a directory");
+        let scene = |id: u64| {
+            format!(
+                "(\n    entities: {{\n        \"{id:016x}\": (\n            Sprite: (),\n        \
+                 ),\n    }},\n)\n"
+            )
+        };
+        fs::write(root.join("scenes/menu.ron"), scene(1)).expect("the menu");
+        fs::write(root.join("scenes/level.ron"), scene(2)).expect("the level");
+        // Slower than the ticks the peers predict ahead of each other's inputs, so that the
+        // joiner runs the tick of its change before the host's veto of it comes.
+        let link = Conditions {
+            latency: Duration::from_millis(80),
+            jitter: Duration::ZERO,
+            loss: 0.0,
+        };
+        let peer = |net: &Net, seed: u64| {
+            let mut stack = Stack::default();
+            stack.push_layer(Vetoer::default());
+            Peer::of(
+                stack,
+                net,
+                Context::seeded(seed).root(&root),
+                true,
+                Some(link),
+            )
+        };
+        let mut host = peer(&Net::Host("127.0.0.1:0".to_owned()), 1);
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        let mut joiner = peer(&Net::Join(address), 2);
+        join(&mut host, &mut joiner);
+        let at = host.next.max(joiner.next) + 1;
+        meet(&mut host, &mut joiner, at);
+        let queue = |peer: &mut Peer, command: Stagehand| {
+            let queue = peer
+                .stack
+                .commands_of(0)
+                .expect("the vetoer queues commands");
+            queue.push(&command.to_value()).expect("queued");
+        };
+        // For the same tick, the host's first.
+        queue(&mut host, Stagehand::Veto);
+        queue(&mut joiner, Stagehand::Go("scenes/level.ron".to_owned()));
+        for _ in 0..40 {
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let settled = host.next.max(joiner.next) + ROLLBACK_DELAY + 1;
+        settle(&mut host, &mut joiner, settled);
+        for peer in [&host, &joiner] {
+            let world = peer.cx.world();
+            assert_eq!(world.scene(), None);
+            assert!(world.resource::<Vetoed>().is_some());
+            let files: Vec<&str> = (peer.cx.scenes.files.iter())
+                .map(|file| file.author.as_str())
+                .collect();
+            assert_eq!(files, ["scenes/menu.ron"]);
+        }
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let [rollbacks, ..] = joiner.net().rolled;
+        assert!(rollbacks > 0, "the joiner rolled back");
+        let codes: Vec<String> = logged.try_iter().collect();
+        assert!(
+            codes.iter().any(|code| code == "scene.entered"),
+            "the joiner's prediction changed the scene: {codes:?}"
+        );
+        let parted = ["scene.replaced", "net.desync", "net.lost"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// As [`peers_change_scenes_in_step`] says, in lockstep.
+    #[test]
+    fn lockstep_peers_change_scenes_in_step() {
+        peers_change_scenes_in_step(false);
+    }
+
+    /// As [`peers_change_scenes_in_step`] says, rolling back over a slow link.
+    #[test]
+    fn rollback_peers_change_scenes_in_step() {
+        peers_change_scenes_in_step(true);
+    }
+
     /// Queues a command for each player on its peer, and turns both, `turns` times.
     fn play(host: &mut Peer, joiner: &mut Peer, turns: usize) {
         for _ in 0..turns {
@@ -2762,6 +3044,7 @@ mod tests {
         let of = crate::snapshot::Of {
             world: host.cx.world(),
             scenes: &host.cx.scenes.files,
+            cached: &host.cx.scenes.cached,
             open: &host.cx.scenes.open,
             scripts: &[],
             mods: &[],

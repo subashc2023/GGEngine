@@ -384,7 +384,7 @@ impl Files {
 /// Whether `path`, `/` between its parts, is inside the directory it's from, as a manifest's check
 /// keeps its paths on every OS: none of its parts empty, `.` or `..`, nor holding `:`, a drive's
 /// on Windows, or `\`, a separator there.
-fn inside(path: &str) -> bool {
+pub(crate) fn inside(path: &str) -> bool {
     !(path.split('/')).any(|part| matches!(part, "" | "." | "..") || part.contains([':', '\\']))
 }
 

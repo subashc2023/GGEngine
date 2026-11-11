@@ -76,7 +76,7 @@ fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
             unread(data)?;
             opaque(&name, &doc, hint)
         }
-        (Data::Struct(data), None) => structure(&name, &doc, &data.fields, &mut checks)?,
+        (Data::Struct(data), None) => structure(&name, &doc, &data.fields, component, &mut checks)?,
         (Data::Enum(data), None) => enumeration(&name, &doc, &data.variants, &mut checks)?,
         (Data::Union(_), None) => unreachable!("unions are refused above"),
     };
@@ -170,16 +170,31 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
     }
 }
 
-/// A struct's methods: its fields described, read, made and kept, by name, and reached by index.
+/// A struct's methods: its fields described, read, made and kept, by name, and reached by index;
+/// `component` if it's a component, whose own fields alone may be `hashed_when_set`.
 fn structure(
     name: &str,
     doc: &str,
     fields: &Fields,
+    component: bool,
     checks: &mut Vec<TokenStream>,
 ) -> syn::Result<TokenStream> {
     let r = reflect();
     let tuple = matches!(fields, Fields::Unnamed(_));
     let fields = Field::all(fields, checks)?;
+    for field in &fields {
+        if let Some(hint) = field.hints.hashed_when_set
+            && !(component && word(field.ty))
+        {
+            return Err(syn::Error::new(
+                hint,
+                "`hashed_when_set` is for a component's own integer and bool fields: in a type \
+                 nested in another, a field left out can't be told from the next field's words, \
+                 as a list's, and a float's default equals its other zero, -0.0, which the hash \
+                 tells apart",
+            ));
+        }
+    }
     let described = fields.iter().map(Field::describe);
     let values = fields.iter().map(|field| {
         let member = &field.member;
@@ -211,9 +226,23 @@ fn structure(
         let member = &field.member;
         quote_spanned!(at_type(field.ty)=> &mut self.#member as &mut dyn #r::Reflect)
     });
-    let digested = read.iter().map(|(_, field)| {
+    let digested = read.iter().map(|(index, field)| {
         let Field { member, ty, .. } = field;
-        quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, __to))
+        let digest =
+            quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, __to));
+        match (&field.hints.hashed_when_set, &field.hints.default) {
+            // Its index first, so that one such field set tells apart from another set alike.
+            (Some(_), Some(default)) => {
+                let index = Literal::u32_unsuffixed(*index);
+                quote! {
+                    if self.#member != { let __default: #ty = #default; __default } {
+                        <::core::primitive::u32 as #r::Reflect>::digest(&#index, __to);
+                        #digest
+                    }
+                }
+            }
+            _ => digest,
+        }
     });
     let reached = read.iter().map(|(_, field)| {
         let Field { member, ty, .. } = field;
@@ -278,6 +307,20 @@ fn structure(
     })
 }
 
+/// Whether `ty` is an integer or a bool, as written: one word of the hash, whose `==` is its bits'.
+fn word(ty: &syn::Type) -> bool {
+    const WORDS: [&str; 13] = [
+        "bool", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+        "isize",
+    ];
+    match ty {
+        syn::Type::Path(path) if path.qself.is_none() => {
+            (path.path.get_ident()).is_some_and(|ident| WORDS.iter().any(|word| ident == word))
+        }
+        _ => false,
+    }
+}
+
 /// An enum's methods: its variants described, read and made by name, and kept while a value keeps
 /// its variant. An enum is set whole, so it has no parts.
 fn enumeration(
@@ -303,6 +346,13 @@ fn enumeration(
         let name = ident.unraw().to_string();
         let tuple = matches!(variant.fields, Fields::Unnamed(_));
         let fields = Field::all(&variant.fields, checks)?;
+        if let Some(hint) = fields.iter().find_map(|field| field.hints.hashed_when_set) {
+            return Err(syn::Error::new(
+                hint,
+                "`hashed_when_set` is for a struct's fields: a variant's are hashed whole, as its \
+                 index tells which are there",
+            ));
+        }
         let members: Vec<_> = fields.iter().map(|field| &field.member).collect();
         let bindings: Vec<_> = fields.iter().map(|field| &field.binding).collect();
         let field_names: Vec<_> = fields.iter().map(|field| &field.name).collect();
@@ -647,6 +697,8 @@ struct FieldHints {
     degrees: Option<Span>,
     color: Option<Span>,
     opaque: Option<Span>,
+    /// That the world's hash reads it only while it isn't its `default`.
+    hashed_when_set: Option<Span>,
 }
 
 impl FieldHints {
@@ -670,12 +722,15 @@ impl FieldHints {
                     once(&mut hints.color, span, &meta)
                 } else if meta.path.is_ident("opaque") {
                     once(&mut hints.opaque, span, &meta)
+                } else if meta.path.is_ident("hashed_when_set") {
+                    once(&mut hints.hashed_when_set, span, &meta)
                 } else {
                     Err(meta.error(
                         "unknown hint: a field takes `min = ..` and `max = ..`, which bound it, \
                          `default = ..`, its value unless something says otherwise, `degrees` \
-                         for an angle in radians, `color` for a linear color, and `opaque`, \
-                         which reflection keeps but doesn't read",
+                         for an angle in radians, `color` for a linear color, `opaque`, which \
+                         reflection keeps but doesn't read, and `hashed_when_set`, which the \
+                         world's hash reads only while it isn't its default",
                     ))
                 }
             })?;
@@ -686,11 +741,20 @@ impl FieldHints {
                 "a field is shown in degrees or as a color, not both",
             ));
         }
+        if let Some(hint) = hints.hashed_when_set
+            && hints.default.is_none()
+        {
+            return Err(syn::Error::new(
+                hint,
+                "`hashed_when_set` needs `default = ..`, the value the hash leaves out",
+            ));
+        }
         let other = hints.min.is_some()
             || hints.max.is_some()
             || hints.default.is_some()
             || hints.degrees.is_some()
-            || hints.color.is_some();
+            || hints.color.is_some()
+            || hints.hashed_when_set.is_some();
         if let Some(opaque) = hints.opaque
             && other
         {
@@ -881,10 +945,11 @@ mod tests {
     use super::*;
 
     /// The derive refuses, saying why, a generic type, a union, a hint it doesn't know, one given
-    /// twice or beside `opaque`, and one on a variant or inside an opaque type.
+    /// twice or beside `opaque`, one on a variant or inside an opaque type, and `hashed_when_set`
+    /// without a default, on a variant's field, on a float, or on a type that isn't a component.
     #[test]
     fn the_derive_refuses_what_reflection_cant_describe() {
-        let cases: [(DeriveInput, &str); 7] = [
+        let cases: [(DeriveInput, &str); 11] = [
             (
                 parse_quote!(
                     struct Pair<T>(T, T);
@@ -929,10 +994,37 @@ mod tests {
                 ),
                 "an opaque type isn't read, so its fields and variants take no hints",
             ),
+            (
+                parse_quote!(
+                    struct Layers(#[reflect(hashed_when_set)] u32);
+                ),
+                "`hashed_when_set` needs `default = ..`",
+            ),
+            (
+                parse_quote!(
+                    enum Mask {
+                        Bits(#[reflect(default = 1, hashed_when_set)] u32),
+                    }
+                ),
+                "`hashed_when_set` is for a struct's fields",
+            ),
+            (
+                parse_quote!(
+                    struct Scale(#[reflect(default = 1.0, hashed_when_set)] f32);
+                ),
+                "`hashed_when_set` is for a component's own integer and bool fields",
+            ),
+            (
+                parse_quote!(
+                    struct Inner(#[reflect(default = 1, hashed_when_set)] u32);
+                ),
+                "`hashed_when_set` is for a component's own integer and bool fields",
+            ),
         ];
         for (input, says) in cases {
             let name = input.ident.to_string();
-            let error = expand(&input, true).expect_err(&name);
+            // `Inner` as a type nested in a component, which derives `Reflect` alone.
+            let error = expand(&input, name != "Inner").expect_err(&name);
             assert!(error.to_string().starts_with(says), "{name}: {error}");
         }
     }

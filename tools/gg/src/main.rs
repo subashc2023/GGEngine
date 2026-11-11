@@ -82,6 +82,10 @@ Build and run:
       cargo and watches its sources all the same (`watching`, `patches` false), every change
       rebuilding it and starting it again from a snapshot, a build's rustc errors in
       `rebuild_failed`; a first build that fails waits for a change to build again (`build_failed`).
+      What survives a restart is the world, its entities' components, as a snapshot holds it,
+      never a layer's own fields or a static, which start over as the layer is made again. Once
+      the sources are what the running build was built from again, after a rebuild failed, `recovered`
+      says so, and the failure leaves the run's state.
       A patch whose answer never comes (`patch_unanswered`) is sent again with every edit since
       the build. While no game answers, as during a build, the commands that talk to it say
       what `run` is doing, with a code: `gg.rebuilding`, `gg.starting`, `gg.waiting`, or
@@ -207,7 +211,8 @@ Talk to a running game, through its tool API:
   ui                             Each UI its layers added from a `.ui` file, laid out for its view:
                                  each node's name, kind, parent, rectangle, `[x, y, width, height]`
                                  from the view's top left in the canvas's units, 1,080 to its
-                                 height, and in its pixels, as `capture` and `input` have them,
+                                 height, and in its pixels (the `pixels` rectangles, which
+                                 `input` clicks at, as `capture` has them),
                                  whether it shows, what it says, what a widget holds, and a
                                  button's or a widget's whether it's disabled, focused or
                                  pressed; and each UI's focus and whether it takes input. Press a
@@ -277,7 +282,7 @@ Options for every command but `new`:
                         rather than in the one gg is in
 
 Each result is a line of JSON on stdout; `logs` prints a line for each of the game's events, and
-`run` one for each of its own. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
+`run` one for each of its own, the game's own output and cargo's going to stderr. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
 1 on an error, a check that failed or a run that didn't end cleanly, and 2 on bad arguments.
 ";
 

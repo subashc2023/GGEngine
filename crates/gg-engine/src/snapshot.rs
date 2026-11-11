@@ -86,6 +86,9 @@ pub(crate) enum Run {
 pub(crate) struct Of<'r> {
     pub(crate) world: &'r World,
     pub(crate) scenes: &'r [SceneFile],
+    /// The scene files' texts the run keeps for its scene changes, as
+    /// [`Context::scene_text`](crate::Context::scene_text) keeps them.
+    pub(crate) cached: &'r [SceneFile],
     pub(crate) open: &'r Open,
     pub(crate) scripts: &'r [(String, String)],
     pub(crate) mods: &'r [ModText],
@@ -120,6 +123,7 @@ pub(crate) fn write_paused(
     let Of {
         world,
         scenes,
+        cached,
         open,
         scripts,
         mods,
@@ -150,6 +154,15 @@ pub(crate) fn write_paused(
         out.push_str("mod ");
         crate::recording::text::write_mod(&mut out, text);
         out.push('\n');
+    }
+    for scene in cached {
+        if let Some(path) = scene.path.to_str() {
+            let strings = [path, &scene.author, &scene.text];
+            let strings = strings.map(|string| Value::String(string.to_owned()));
+            out.push_str("cached ");
+            crate::recording::text::write(&mut out, &Value::List(strings.into()), world);
+            out.push('\n');
+        }
     }
     write_scenes(&mut out, scenes, open, world);
     world.save_whole(&mut out)?;
@@ -352,6 +365,8 @@ pub(crate) struct Snapshot {
     pub(crate) mods: Vec<ModText>,
     /// The scene files that run's layers had loaded, as last applied.
     pub(crate) scenes: Vec<SceneFile>,
+    /// The scene files' texts that run kept for its scene changes.
+    pub(crate) cached: Vec<SceneFile>,
     /// That run's open scene; `None` for a snapshot written before the open scene was.
     pub(crate) open: Option<Open>,
     /// The indexes of its world's lines.
@@ -495,27 +510,25 @@ impl Snapshot {
             })?);
             world += 1;
         }
-        // The scene lines from line `at` on, then the open scene's line, if there's one, and the
-        // index of the line after them.
-        let read_scenes = |mut at: usize| {
+        // The lines from line `at` on that start with `kind`, each a scene file, and the index of
+        // the line after them.
+        let read_files = |mut at: usize, kind: &str| {
             let mut scenes = Vec::new();
-            while let Some(scene) = lines.get(at).and_then(|line| line.strip_prefix("scene ")) {
-                let read = Text::parse(scene, "scene ".len() + 1)
-                    .ok()
-                    .and_then(|text| {
-                        let Value::List(strings) = text.value(&World::default()) else {
-                            return None;
-                        };
-                        let [
-                            Value::String(path),
-                            Value::String(author),
-                            Value::String(text),
-                        ] = <[Value; 3]>::try_from(strings).ok()?
-                        else {
-                            return None;
-                        };
-                        Some(SceneFile::new(path.into(), author, text))
-                    });
+            while let Some(scene) = lines.get(at).and_then(|line| line.strip_prefix(kind)) {
+                let read = Text::parse(scene, kind.len() + 1).ok().and_then(|text| {
+                    let Value::List(strings) = text.value(&World::default()) else {
+                        return None;
+                    };
+                    let [
+                        Value::String(path),
+                        Value::String(author),
+                        Value::String(text),
+                    ] = <[Value; 3]>::try_from(strings).ok()?
+                    else {
+                        return None;
+                    };
+                    Some(SceneFile::new(path.into(), author, text))
+                });
                 let scene = read.ok_or_else(|| {
                     refused(format!(
                         "line {}: a scene file is a list of its path, its author and its text",
@@ -525,6 +538,13 @@ impl Snapshot {
                 scenes.push(scene);
                 at += 1;
             }
+            Ok((scenes, at))
+        };
+        let (cached, world) = read_files(world, "cached ")?;
+        // The scene lines from line `at` on, then the open scene's line, if there's one, and the
+        // index of the line after them.
+        let read_scenes = |at: usize| {
+            let (scenes, mut at) = read_files(at, "scene ")?;
             let mut open = None;
             if let Some(line) = lines.get(at).and_then(|line| line.strip_prefix("open ")) {
                 open = Some(read_open(line).ok_or_else(|| {
@@ -603,6 +623,7 @@ impl Snapshot {
             scripts,
             mods,
             scenes,
+            cached,
             open,
             world: world..end,
             stopped,
@@ -807,6 +828,7 @@ mod tests {
         let of = Of {
             world,
             scenes,
+            cached: &[],
             open,
             scripts: &[],
             mods: &[],
@@ -904,6 +926,7 @@ mod tests {
         let of = Of {
             world: saved.world(),
             scenes: &scenes,
+            cached: &scenes,
             open: &open,
             scripts: &scripts,
             mods: &mods,
@@ -1097,6 +1120,7 @@ mod tests {
         let of = Of {
             world: &world,
             scenes: &[],
+            cached: &[],
             open: &none,
             scripts: &[],
             mods: &[],

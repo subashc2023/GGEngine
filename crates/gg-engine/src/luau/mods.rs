@@ -491,7 +491,7 @@ mod tests {
         // or what a VM makes as it starts, but a platform never does.
         assert_eq!(
             held(&mods).1,
-            507_752,
+            509_288,
             "the memory the mod's VM holds as it has loaded"
         );
         let counts = |cx: &Context| {

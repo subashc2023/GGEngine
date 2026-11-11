@@ -25,6 +25,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 3"),
             RigidBody2D: (
@@ -77,6 +80,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Link"),
             RigidBody2D: (
@@ -108,6 +114,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 1"),
             RigidBody2D: (
@@ -139,6 +148,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 5"),
             RigidBody2D: (
@@ -175,6 +187,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.3,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ball, bouncing 0.3"),
             RigidBody2D: (
@@ -197,6 +212,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Link"),
             RigidBody2D: (
@@ -228,6 +246,9 @@
                 density: 1.0,
                 friction: 0.2,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Left wall"),
             RigidBody2D: (
@@ -318,6 +339,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 6"),
             RigidBody2D: (
@@ -370,6 +394,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Falling box"),
             RigidBody2D: (
@@ -406,6 +433,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.6,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ball, bouncing 0.6"),
             RigidBody2D: (
@@ -428,6 +458,9 @@
                 density: 1.0,
                 friction: 0.3,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ledge"),
             RigidBody2D: (
@@ -459,6 +492,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Link"),
             RigidBody2D: (
@@ -511,6 +547,9 @@
                 density: 1.0,
                 friction: 0.2,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Right wall"),
             RigidBody2D: (
@@ -542,6 +581,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Falling box"),
             RigidBody2D: (
@@ -578,6 +620,9 @@
                 density: 2.0,
                 friction: 0.4,
                 restitution: 0.2,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Chain ball"),
             RigidBody2D: (
@@ -600,6 +645,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Paddle"),
             RigidBody2D: (
@@ -631,6 +679,9 @@
                 density: 1.0,
                 friction: 0.3,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ramp"),
             RigidBody2D: (
@@ -662,6 +713,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Falling box"),
             RigidBody2D: (
@@ -714,6 +768,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 4"),
             RigidBody2D: (
@@ -745,6 +802,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Link"),
             RigidBody2D: (
@@ -781,6 +841,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.85,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ball, bouncing 0.85"),
             RigidBody2D: (
@@ -803,6 +866,9 @@
                 density: 1.0,
                 friction: 0.4,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Link"),
             RigidBody2D: (
@@ -834,6 +900,9 @@
                 density: 1.0,
                 friction: 0.7,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Box 2"),
             RigidBody2D: (
@@ -902,6 +971,9 @@
                 density: 1.0,
                 friction: 0.6,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Ground"),
             RigidBody2D: (

@@ -327,8 +327,11 @@ impl Patches {
         match act(diff, games, &self.applied, self.stale, patches) {
             Act::Nothing => {
                 // The processes run what the sources hold, once each serves.
-                if !games.is_empty() && games.iter().all(|game| game.session.is_some()) {
-                    self.failed = None;
+                if !games.is_empty()
+                    && games.iter().all(|game| game.session.is_some())
+                    && let Some(failure) = self.failed.take()
+                {
+                    event(&recovered(&failure));
                 }
             }
             Act::Rebuild(file, why) => self.rebuild(&file, why),
@@ -977,7 +980,12 @@ fn hash_of(content: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// `failure`, as events give it.
+/// The event that tells the failure of code `failure` is over.
+fn recovered(failure: &Failure) -> Value {
+    json!({"event": "recovered", "was": failure.code})
+}
+
+/// `failure` as the `error` of an event.
 fn error(failure: &Failure) -> Value {
     json!({"code": failure.code, "message": failure.message})
 }
@@ -1216,6 +1224,10 @@ mod tests {
         patches.fresh = true;
         patches.look(&serving);
         assert_eq!(told(&patches, &serving), ("running", Some(true), false));
+        assert_eq!(
+            recovered(&Failure::new("gg.build", "x")),
+            json!({"event": "recovered", "was": "gg.build"})
+        );
         // An edit a patch would carry rebuilds a game built with cargo, which here fails.
         fs::write(&main, "fn main() {}\n\nfn run() {\n    step(22);\n}\n").expect("written");
         patches.seen = patches.sources.scan();

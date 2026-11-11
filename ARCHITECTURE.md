@@ -271,8 +271,21 @@ makes; anyone else's game depends on the engine from its own repository.
   quests, dialogue and level events reload in milliseconds. A script file declares one component:
   its fields, with their defaults, and a tick run for each entity that has it, as a native
   `Script`'s is; adding the component attaches the script. It reaches Rust components through
-  reflection, without hand-written bindings. A layer's `Scripts` loads its scripts from the
-  project's files in its `load` and runs them where its tick chooses; a development build reloads
+  reflection, without hand-written bindings; [docs/LUAU.md](docs/LUAU.md) lists what scripts and
+  mods can use. Its tick spawns entities, with components by their
+  types' names and fields' values, under a parent or as a prefab's instance's root, despawns them
+  with their descendants, and gives and takes away their components, at once, as Rust code does:
+  each script's pass runs over the entities listed as it starts, not a query that holds the world,
+  passing over one despawned, or without its component, by its turn, so nothing need wait for a
+  point to apply at. IDs and slots come from the world, whose stream of IDs and free slots
+  snapshots copy, so a spawn gives the same entity on every peer, in a replay and as rollback runs
+  a tick again. What a VM's scripts give an entity as they run, the entity spawned or a component
+  given, and what rides on it, ticks first as they next run, at the next tick, whichever pass comes
+  later, though another VM's scripts that run later in the tick, a mod's, tick it as they come to
+  it; a despawned entity's scripts go with it, its handles found to be of none
+  (`ecs.no_entity`) wherever a script uses them. A chunk changes no entity (`script.loading`), as
+  it runs again as a joiner or a restored run loads it. A layer's `Scripts` loads its scripts from
+  the project's files in its `load` and runs them where its tick chooses; a development build reloads
   one as it's saved, between ticks, through an edit that a recording keeps and lockstep peers apply
   at one tick, as a scene file's save is. A reload that changes the component's fields migrates
   every one in place, by field name: a field kept keeps its value, one added takes its default, one
@@ -330,14 +343,17 @@ makes; anyone else's game depends on the engine from its own repository.
   its component types before it loads mods, since a mod may declare any name that's free: once a
   world has loaded mods, whatever's installed, it refuses a Rust type that registers
   (`ecs.registered_late`), so that a game that registers one late fails as it first runs, not
-  where a player's mod has taken its name. A mod's scripts are
-  scripts as a game's are, run in a VM of the mod's own and kept to its capabilities, `read` and
-  `write` of the whole world or of the component types they name, as `read:Shard` or
-  `write:Sprite`, which `gg.component` and an entity's fields check, its own components, which no
-  other script's are, always its own; within a memory limit, past which a call fails as an error does, at the same allocation on
-  every platform and in every build, for runs that went alike; with one budget of interrupts for
-  all of the mod's calls in a tick, past which they fail until the next, so that a mod slows a
-  tick by no more than one call can; and with its prints held to a rate. A script, a game's or a
+  where a player's mod has taken its name. A mod's scripts are scripts as a game's are, run in a
+  VM of the mod's own and kept to its capabilities, `read` and `write` of the whole world or of the
+  component types they name, as `read:Shard` or `write:Sprite`, which `gg.component`, an entity's
+  fields and the components its scripts give and take check; its own components, which no other
+  script's are, always its own. Its scripts spawn only if it may write some type, and then an
+  entity of components they may write; one without components, under a parent or of a prefab,
+  and a despawn, need `write` of the whole world. They run within a memory limit, past which a
+  call fails as an error does, at the same allocation on every platform and in every build, for
+  runs that went alike; with one budget of interrupts for all of the mod's calls in a tick, past
+  which they fail until the next, so that a mod slows a tick by no more than one call can; and
+  with its prints held to a rate. A script, a game's or a
   mod's, reaches the game's entities through a component of the game's that its own rides on, as
   `gg.declare`'s `on` names it, which gives each entity with that component its own, at its
   defaults, as its scripts run. A run's mods, their manifests and scripts, go whole in its
@@ -805,7 +821,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
     file's save names before it offers it, so that their names go out first, and offers none
     naming an asset it can't load; a joiner loads for its tool API only what its host named
     (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
-    only what's loaded. Each is read, and a font baked, on the main thread as it's named, as a
+    only what's loaded, but a scene a tick changes to loads what it names, as Scene changes says
+    below. Each is read, and a font baked, on the main thread as it's named, as a
     layer's add does, a texture's pixels decoding after, as [Rendering](#rendering) says.
   - A layer removes a texture, a mesh or a model it added (`Context::remove_texture`,
     `remove_mesh`, `remove_model`, a model's meshes and images with it), freeing its memory, but
@@ -895,6 +912,58 @@ A project's state is text that people and agents edit, diff and merge with ordin
     snapshot keeps which scene is open and what edits made into it.
   - Recorded runs and lockstep peers refuse New and Open, and lockstep peers refuse Save too
     (`api.no_scene`): neither a replay nor the other peer could follow them.
+- **Scene changes.** A game changes its scene as it plays, from its menu to a level, from a level
+  to the next or to its own start again, from a tick: `World::change_scene` names a scene file by
+  its path from the asset root, `/` between its parts, as `scenes/level2.ron`, and as the tick of
+  the layer that asked returns, before the next layer's, the scene's entities take the place of
+  every entity of the world's, the last it asked for in its tick going in; a layer above may ask
+  again in the same tick. One asked outside a tick, as in an update, is dropped as the next tick
+  starts (`scene.not_in_tick`). The change is the simulation's own, as a command is, rather than an
+  edit from outside the layers: a replay, each lockstep peer, a tick run again by rollback or a
+  SyncTest, and a server and its clients predicting it, make it at the same tick, so it needs no
+  line of a recording's nor an input of a peer's. The world stays the world, its `World::scene`
+  saying which scene its entities came from.
+  - A run reads a scene's file once, from the game's package in a run from one and else from the
+    disk, and keeps its text for the changes after: a development build every file in the project's
+    scenes folders as it starts, after its layers load, and any other as a change first names it.
+    Its saves reach the text kept as edits (`Edit::Scene`), as a scene file's saves do, so that a
+    recording replays them where they were made and lockstep peers take them at one tick, and a
+    snapshot keeps the texts, which a run restored from it and a lockstep joiner, which starts from
+    its host's world, take in place of their own. A replay reads them from its disk as it starts,
+    as the run did, so that a file changed since parts its hashes from the recording's.
+  - What it names that no layer has added loads first, as for `Context::load_scene_file`: its
+    models and prefabs, none standing in, a model or a prefab that doesn't load refusing the change
+    (`asset.no_model`, `asset.no_prefab`) before anything stands in; then its textures and fonts, a
+    stand-in taking the place of one that can't be loaded, warning `asset.stand_in`, as in a run
+    that follows another. A recording's `named` lines carry what it loaded by ID to the replay, a
+    lockstep host's names to its joiner, and a snapshot's `asset` lines to a run restored from it,
+    which comes back in the scene. A server's session, server and clients alike, loads nothing as it
+    plays, as a client reads its server's states only of the assets its layers loaded, and refuses
+    a scene that names another (`net.no_scene_change`): a game served loads what its scenes name as
+    its layers load.
+  - Every entity goes, the game's own too, as despawns take them, so that no handle from before
+    names one, and its resources stay, as what a game carries from scene to scene. A layer that
+    keeps handles finds its entities again at its next tick. The authors' edits, the tool API's
+    clients' and the Inspector's, stay in their logs, but each entry notes how many scene changes
+    the world had been through as it applied, and one applied before a change refuses to undo or
+    redo (`ops.scene_changed`), as the scene may have put another entity under an ID it names, as a
+    level started again does; it stays where it is, keeping its slots, since clearing or dropping
+    it would free slots on one peer and not the other, and those applied after undo as ever.
+  - What the run keeps of the scene beside the world follows once the tick is final, so that a tick
+    rollback takes back leaves none of it: at once in a run alone, a replay, lockstep and a server;
+    in a rollback session once the tick's inputs are both peers', whether it ran again or its
+    prediction held; on a client never, its server's the world that's final. Then the run logs
+    `scene.replaced`, and the scene's file is the one the run applies the saves of to the world, in
+    place of those its layers loaded, whose entities went, and in a project's game the open scene.
+    A world held aside while a copy plays brings its own back at `stop`.
+  - A scene that isn't there (`scene.not_found`, naming it), a name that isn't a path inside the
+    root (`scene.bad_path`), one not named exactly as its file is (`scene.case`), which a package or
+    Linux's disk wouldn't find, a link out of the root (`asset.outside_root`), a file of more than
+    16 MiB, a run without a root (`scene.no_root`), or a scene that doesn't load, with its own code,
+    changes nothing, alike everywhere: the world notes the refusal, which the run logs at the error
+    level once the tick is final, as it logs a change that went in, with how many were refused
+    since.
+    [scene_change.rs](crates/gg-engine/src/scene_change.rs) has the rest.
 
 ## ECS
 
@@ -1223,7 +1292,9 @@ alone, as Foxball's bot, a session's runs leave out.
   the very world (`World::rewind`), and runs the ticks after again, as rollback does, its inputs
   the server hadn't applied applying in them, those whose ticks have gone at the first, as the
   server would, the sounds played before not played again. A queue that edits, as the Inspector's,
-  goes to the server alone. As the run ends a client logs how often it corrected
+  goes to the server alone. A scene a tick changes to, as [Project state](#project-state) says,
+  goes in on the server and on each client predicting it at the same tick, from the assets the
+  layers loaded alone. As the run ends a client logs how often it corrected
   (`net.corrected`), and the server what it sent (`net.served`).
 - **The other players draw between the server's states.** An entity whose `Owner` component names
   another player, and its descendants, draw on a client between the two states about three ticks
@@ -1297,7 +1368,8 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   start, the process's resident memory and its peak, and the GPU's own memory in use and its
   budget. The OS's counts are read then and as the run ends alone. What that time went to logs as
   it's done, each with how long it took, `ms`, what each loads among it: at the info level, each
-  scene file a layer loads (`scene.loaded`) or the tool API opens (`scene.opened`), and each
+  scene file a layer loads (`scene.loaded`), the tool API opens (`scene.opened`) or a tick changes
+  to (`scene.replaced`), and each
   model, prefab, font, UI file and music added (`asset.model_loaded`, `asset.prefab_loaded`,
   `asset.font_loaded`, `asset.ui_loaded`, `asset.music_loaded`); at the debug level, as there may
   be many, each texture and sound added from its file (`asset.texture_loaded`,
@@ -1567,10 +1639,30 @@ replays, snapshots and peers move it alike. An entity with a `RigidBody3D` is a 
 controller doing nothing, as is one without a capsule, each warned of once
 (`physics.not_character`).
 
+Each collider's component says whether it's a `sensor`, which finds what overlaps it but pushes
+nothing and is pushed by nothing, as a trigger zone, and which groups it's in and meets, its
+`membership` and `filter`, a bit for each of 32, as rapier's collision groups: two colliders touch,
+or overlap, only where each is in a group the other's filter has. A sensor finds kinematic bodies
+and characters too, and static bodies but from a static body's sensor. A character moves through
+sensors and through what its capsule's groups don't meet, and one whose capsule is a sensor pushes
+nothing; casts pass through sensors. The world's hash reads these fields only while they aren't
+their defaults (`#[reflect(hashed_when_set)]`), so that a world that sets none hashes as it would
+without them. At each step, physics finds which entities' colliders touch, or overlap where either
+is a sensor, from rapier's contact and intersection pairs rather than its events, which name
+colliders, some gone by then: each pair of entities once for each kind, sorted by their IDs, and
+compared with the last step's for the contacts that started and stopped at it, in that order.
+`World::contacts` and `World::contact_events` read them, 2D's then 3D's, and scripts read an
+entity's as `gg.contacts(entity)` and `gg.contact_events(entity)`, at the tick after, as scripts run
+before physics. Both are the physics resources' state, which snapshots copy and snapshot files hold
+by IDs, so that a world restored, as a rollback restores it, steps on to the events the world it was
+taken from had; and a collider made again, as its component changes, keeps its contacts going.
+Contacts are rapier's, where a dynamic body is one of two, so that a character finds what's static
+or kinematic only as a sensor's overlap.
+
 `World::cast_ray` and `World::cast_shape` cast a ray, or a box, a sphere or a capsule swept along a
-line, through the 3D colliders, from code and from scripts, as `gg.cast_ray` and the like: what's
-hit first, its entity, where, the surface's normal there and how far, passing through an entity's
-own colliders if it's asked to. They see the colliders where the last step left them, as each
+line, through the 3D colliders but sensors, from code and from scripts, as `gg.cast_ray` and the
+like: what's hit first, its entity, where, the surface's normal there and how far, passing through
+an entity's own colliders if it's asked to. They see the colliders where the last step left them, as each
 body's rapier holds its entity, which a snapshot file checks.
 
 `Context::set_colliders_shown` outlines the world's colliders where their entities draw, in lines,

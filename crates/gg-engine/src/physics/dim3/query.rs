@@ -106,7 +106,8 @@ pub struct Hit3D {
 
 impl World {
     /// What a ray from `cast.from` toward `cast.toward` hits first of the world's 3D colliders,
-    /// within `cast.max_distance`, but those of `cast.exclude` and those of entities gone: nothing
+    /// within `cast.max_distance`, but sensors, those of `cast.exclude` and those of entities gone:
+    /// nothing
     /// for a world that has never stepped 3D physics, for a way of no length, or for a distance
     /// that isn't 0 or more. It sees the colliders where the last step of physics left them, and
     /// none made since; a ray that starts inside one hits it there.
@@ -147,8 +148,8 @@ impl World {
 }
 
 impl Physics3D {
-    /// What `cast` gives, run against the colliders, but those of `exclude` and of entities gone
-    /// from `world`, as its hit, with the entity whose collider it hit.
+    /// What `cast` gives, run against the colliders, but sensors and those of `exclude` and of
+    /// entities gone from `world`, as its hit, with the entity whose collider it hit.
     fn cast(
         &self,
         world: &World,
@@ -162,7 +163,7 @@ impl Physics3D {
             Entity::from_bits(bits).filter(|&entity| world.contains(entity))
         };
         let alive = |_: ColliderHandle, collider: &Collider| entity_of(collider).is_some();
-        let mut filter = QueryFilter::new().predicate(&alive);
+        let mut filter = QueryFilter::new().exclude_sensors().predicate(&alive);
         if let Some(body) = exclude.and_then(|entity| self.body_of(entity)) {
             filter = filter.exclude_rigid_body(body);
         }

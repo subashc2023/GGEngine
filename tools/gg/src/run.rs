@@ -588,7 +588,9 @@ impl Supervisor<'_> {
         command
             .args(&self.run.args)
             .args(&them.args)
-            .stdin(Stdio::piped());
+            .stdin(Stdio::piped())
+            // gg's stdout is JSON lines alone: the game's own output goes to stderr.
+            .stdout(io::stderr());
         if let Some(from) = &from {
             command.arg("--restore").arg(&from.path);
         }

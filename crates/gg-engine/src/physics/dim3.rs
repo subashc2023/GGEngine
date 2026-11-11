@@ -9,15 +9,19 @@ use std::sync::Arc;
 use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use rapier3d::control::CharacterCollision;
 use rapier3d::prelude::{
-    BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle, ColliderSet,
-    ImpulseJointSet, IntegrationParameters, IslandManager, MassProperties, MultibodyJointSet,
-    NarrowPhase, PhysicsPipeline, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    RigidBodyType, Rotation, SoftBodySet, TriMeshFlags, Vector,
+    ActiveCollisionTypes, BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle,
+    ColliderSet, Group, ImpulseJointSet, IntegrationParameters, InteractionGroups,
+    InteractionTestMode, IslandManager, MassProperties, MultibodyJointSet, NarrowPhase,
+    PhysicsPipeline, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType,
+    Rotation, SoftBodySet, TriMeshFlags, Vector,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::{BodyType, Finite, Link, Links, Outline, kept, kept_collider, unfinite};
+use super::contacts::{Contacts, SavedContacts};
+use super::{
+    BodyType, Contact, ContactEvent, Finite, Link, Links, Outline, kept, kept_collider, unfinite,
+};
 use crate::draw::Poses;
 use crate::model::{ModelRoot, Surface};
 use crate::recording::text;
@@ -80,6 +84,19 @@ pub struct BoxCollider3D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
+    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has; a character moves
+    /// through what its capsule doesn't meet.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for BoxCollider3D {
@@ -90,6 +107,9 @@ impl Default for BoxCollider3D {
             density: 1.0,
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -105,9 +125,13 @@ impl BoxCollider3D {
             density,
             friction,
             restitution,
+            sensor,
+            membership,
+            filter,
             ..
         } = *self;
-        built(shape, offset * scale, density, friction, restitution)
+        let shape = built(shape, offset * scale, density, friction, restitution);
+        met(shape, sensor, membership, filter).build()
     }
 }
 
@@ -131,6 +155,19 @@ pub struct SphereCollider3D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
+    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has; a character moves
+    /// through what its capsule doesn't meet.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for SphereCollider3D {
@@ -141,6 +178,9 @@ impl Default for SphereCollider3D {
             density: 1.0,
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -155,9 +195,13 @@ impl SphereCollider3D {
             density,
             friction,
             restitution,
+            sensor,
+            membership,
+            filter,
             ..
         } = *self;
-        built(shape, offset * scale, density, friction, restitution)
+        let shape = built(shape, offset * scale, density, friction, restitution);
+        met(shape, sensor, membership, filter).build()
     }
 }
 
@@ -187,6 +231,19 @@ pub struct CapsuleCollider3D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
+    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has; a character moves
+    /// through what its capsule doesn't meet.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for CapsuleCollider3D {
@@ -198,6 +255,9 @@ impl Default for CapsuleCollider3D {
             density: 1.0,
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -222,9 +282,13 @@ impl CapsuleCollider3D {
             density,
             friction,
             restitution,
+            sensor,
+            membership,
+            filter,
             ..
         } = *self;
-        built(shape, offset * scale, density, friction, restitution)
+        let shape = built(shape, offset * scale, density, friction, restitution);
+        met(shape, sensor, membership, filter).build()
     }
 }
 
@@ -247,6 +311,19 @@ pub struct MeshCollider3D {
     /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
+    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
+    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
+    /// it, characters moving through it as casts pass through it.
+    #[reflect(default = false, hashed_when_set)]
+    pub sensor: bool,
+    /// The groups it's in, a bit for each of 32: all by default.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub membership: u32,
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
+    /// or overlap, only where each is in a group the other's filter has; a character moves
+    /// through what its capsule doesn't meet.
+    #[reflect(default = u32::MAX, hashed_when_set)]
+    pub filter: u32,
 }
 
 impl Default for MeshCollider3D {
@@ -254,6 +331,9 @@ impl Default for MeshCollider3D {
         Self {
             friction: 0.5,
             restitution: 0.0,
+            sensor: false,
+            membership: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }
@@ -277,12 +357,8 @@ impl MeshCollider3D {
             let shape =
                 ColliderBuilder::trimesh_with_flags(vertices, indices, TriMeshFlags::empty());
             let shape = shape.ok()?.mass_properties(MassProperties::default());
-            Some(
-                shape
-                    .friction(self.friction)
-                    .restitution(self.restitution)
-                    .build(),
-            )
+            let shape = shape.friction(self.friction).restitution(self.restitution);
+            Some(met(shape, self.sensor, self.membership, self.filter).build())
         });
         if made.is_none() {
             let id = world.id(entity).expect("found alive");
@@ -336,13 +412,36 @@ fn built(
     density: f32,
     friction: f32,
     restitution: f32,
-) -> Collider {
+) -> ColliderBuilder {
     shape
         .translation(vector(offset))
         .density(density)
         .friction(friction)
         .restitution(restitution)
-        .build()
+}
+
+/// `shape` with what a collider's component says of whether it's a sensor and which groups it
+/// meets: a sensor finds kinematic and static bodies too, characters among them, which rapier's
+/// default leaves to dynamic ones, but for a static body's sensor finding another static body.
+fn met(shape: ColliderBuilder, sensor: bool, membership: u32, filter: u32) -> ColliderBuilder {
+    let shape = shape
+        .sensor(sensor)
+        .collision_groups(groups(membership, filter));
+    if sensor {
+        let types = ActiveCollisionTypes::all().difference(ActiveCollisionTypes::FIXED_FIXED);
+        shape.active_collision_types(types)
+    } else {
+        shape
+    }
+}
+
+/// rapier's groups of a collider in the groups `membership` has, meeting those `filter` has.
+fn groups(membership: u32, filter: u32) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from_bits_retain(membership),
+        Group::from_bits_retain(filter),
+        InteractionTestMode::And,
+    )
 }
 
 /// The world's 3D physics, a [`Resource`](crate::Resource) that
@@ -370,6 +469,7 @@ pub struct Physics3D {
     /// The kinematic bodies that go by their velocities, with those velocities, which the
     /// characters' moves hold them from meanwhile: a workspace too.
     moving: Vec<character::Moving>,
+    pub(super) contacts: Contacts,
 }
 
 /// What rapier keeps from one step to the next.
@@ -440,6 +540,7 @@ impl Default for Physics3D {
             unmoved: Vec::new(),
             hits: Vec::new(),
             moving: Vec::new(),
+            contacts: Contacts::default(),
         }
     }
 }
@@ -456,6 +557,7 @@ impl Clone for Physics3D {
             unmoved: self.unmoved.clone(),
             hits: Vec::new(),
             moving: Vec::new(),
+            contacts: self.contacts.clone(),
         }
     }
 
@@ -472,6 +574,7 @@ impl Clone for Physics3D {
         self.characters.clone_from(&source.characters);
         self.joints.clone_from(&source.joints);
         self.unmoved.clone_from(&source.unmoved);
+        self.contacts.clone_from(&source.contacts);
     }
 }
 
@@ -479,7 +582,8 @@ impl Clone for Physics3D {
 /// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body,
 /// each character and each joint, with its entity by its ID; and the bodies under a parent and the
 /// entities with a character's controller that aren't characters warned of, by their entities'
-/// IDs. Text that lists no joints reads as having none, so that a world saved without them loads.
+/// IDs; and the contacts and their events. Text that lists no joints or contacts reads as having
+/// none, so that a world saved without them loads.
 #[derive(Serialize, Deserialize)]
 struct SavedPhysics<R> {
     gravity: [f32; 3],
@@ -491,6 +595,8 @@ struct SavedPhysics<R> {
     unmoved: Vec<Option<u64>>,
     #[serde(default)]
     joints: Vec<SavedJoint>,
+    #[serde(default)]
+    contacts: SavedContacts,
 }
 
 /// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
@@ -578,6 +684,7 @@ impl Saved for Physics3D {
             character_children: ids(&self.characters.children),
             unmoved: ids(&self.unmoved),
             joints: joints.collect(),
+            contacts: self.contacts.save(),
         };
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
@@ -706,6 +813,7 @@ impl Saved for Physics3D {
             unmoved: entities(saved.unmoved),
             hits: Vec::new(),
             moving: Vec::new(),
+            contacts: Contacts::load(saved.contacts, world),
         })
     }
 }
@@ -750,6 +858,7 @@ impl Physics3D {
         self.join(world);
         self.move_characters(world);
         self.step_rapier();
+        self.contacts.take(world, touching(&self.rapier));
         self.write_back(world);
         self.write_back_characters(world);
     }
@@ -835,6 +944,17 @@ impl Physics3D {
         }
     }
 
+    /// The contacts the last step left, as [`World::contacts`] says, 3D's alone.
+    pub fn contacts(&self) -> impl Iterator<Item = Contact> + '_ {
+        self.contacts.touching()
+    }
+
+    /// The contacts that started and stopped at the last step, as [`World::contact_events`] says,
+    /// 3D's alone.
+    pub fn contact_events(&self) -> impl Iterator<Item = ContactEvent> + '_ {
+        self.contacts.events()
+    }
+
     /// The body of `entity`, a body's or a character's, if it has one.
     fn body_of(&self, entity: Entity) -> Option<RigidBodyHandle> {
         let body = self.links.get(entity).map(|linked| linked.body);
@@ -855,7 +975,27 @@ fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
     );
 }
 
-/// What the body of `entity` holds as its user data, which casts find the entity they hit by.
+/// Each pair of colliders in `rapier` that touch, or overlap where either is a sensor, by their
+/// bodies' entities, and whether it's a sensor's, in rapier's order.
+fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '_ {
+    let entity = |collider: ColliderHandle| {
+        let body = rapier
+            .bodies
+            .get(rapier.colliders.get(collider)?.parent()?)?;
+        Entity::from_bits(u64::try_from(body.user_data).ok()?)
+    };
+    let narrow_phase = &rapier.narrow_phase;
+    let contacts = (narrow_phase.contact_pairs())
+        .filter(|pair| pair.has_any_active_contact())
+        .map(|pair| (pair.collider1, pair.collider2, false));
+    let overlaps = (narrow_phase.intersection_pairs())
+        .filter(|&(.., intersecting)| intersecting)
+        .map(|(a, b, _)| (a, b, true));
+    let pairs = contacts.chain(overlaps);
+    pairs.filter_map(move |(a, b, sensor)| Some((entity(a)?, entity(b)?, sensor)))
+}
+
+/// What the body of `entity` holds as its user data, which casts and contacts find the entity by.
 fn user_data(entity: Entity) -> u128 {
     u128::from(entity.to_bits())
 }
@@ -2004,5 +2144,65 @@ mod tests {
         step(world, 60);
         step(&mut copy, 60);
         assert_eq!(copy.hash(), world.hash());
+    }
+
+    /// The contact events of each of `ticks` steps.
+    fn events(world: &mut World, ticks: u32) -> Vec<Vec<ContactEvent>> {
+        (0..ticks)
+            .map(|_| {
+                step(world, 1);
+                world.contact_events().collect()
+            })
+            .collect()
+    }
+
+    /// The contact events of the steps after a snapshot, of a pile falling through a sensor and a
+    /// character walking into it, restored, as a rollback restores it, copied, or saved to text
+    /// and loaded, are those the world it was taken from had at each, in the same order; and a
+    /// dynamic body falls through the sensor as it would without it.
+    #[test]
+    fn contact_events_are_alike_after_a_restore() {
+        let mut world = World::seeded(7);
+        pile(&mut world);
+        let at = Transform {
+            translation: Vec3::new(0.0, 4.0, 0.0),
+            scale: Vec3::new(4.0, 1.0, 4.0),
+            ..Transform::IDENTITY
+        };
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let sensor = BoxCollider3D {
+            sensor: true,
+            ..BoxCollider3D::default()
+        };
+        world.spawn((at, fixed, sensor));
+        let walker = super::character::tests::character(&mut world, Vec3::new(-4.0, 1.6, 0.0));
+        world
+            .get_mut::<CharacterController3D>(walker)
+            .expect("alive")
+            .velocity = Vec3::X;
+        step(&mut world, 30);
+        let snapshot = world.clone();
+        let went = events(&mut world, 90);
+        for kind in [false, true] {
+            let any = went
+                .iter()
+                .flatten()
+                .any(|event| event.contact.sensor == kind);
+            assert!(any, "a sensor's: {kind}");
+        }
+        let mut copy = snapshot.clone();
+        assert_eq!(events(&mut copy, 90), went, "a copy");
+        world.clone_from(&snapshot);
+        assert!(world.contact_events().eq(snapshot.contact_events()));
+        assert_eq!(events(&mut world, 90), went, "restored");
+        let physics = snapshot.resource::<Physics3D>().expect("stepped");
+        let text = physics.save(&snapshot).expect("saved");
+        let mut loaded = snapshot.clone();
+        loaded.insert_resource(Physics3D::load(&text, &snapshot).expect("loaded"));
+        assert!(loaded.contact_events().eq(snapshot.contact_events()));
+        assert_eq!(events(&mut loaded, 90), went, "loaded");
     }
 }

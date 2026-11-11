@@ -162,14 +162,14 @@ The agent loop's, a game's input's, networking's and scripts', assets', the GPU'
 defects are fixed, but for what their rows in DEFECTS.md keep. Left:
 
 - **The toolchain.** visibility.slang's change of 2026-11-10, which keeps its frame whole as
-  model.slang's does, has AMD's ISA checked under both slangc releases, as its header asks, and
-  passes CI's shader tests under the release CI pins.
+  model.slang's does, has AMD's ISA checked under both slangc releases, as its header asks; it passes
+  CI's shader tests under the release CI pins.
 - **The check.** The game `cargo gg new` makes, with a HUD, run under `gg run`, edited, rebuilt and
-  restarted, as the *done when* says, on macOS and Windows.
+  restarted, as the *done when* says, on Windows, and with `dx`: it passed on macOS without `dx`.
 
-Then, from Deferred, what the audit's game needed first: physics' sensors, contact events and
-collision groups for scripts and code; a scene changed from a game's code as it plays; scripts
-that spawn and despawn entities; and a reference of the Luau API.
+What the audit's game needed first of Deferred is done: physics' sensors, contact events and
+collision groups for scripts and code, a scene changed from a game's code as it plays, scripts that
+spawn and despawn entities, and a reference of the Luau API, [LUAU.md](LUAU.md).
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -526,7 +526,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files |
 | IDs for shaders, scenes, sounds, music and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures, models and fonts under the root alone, never through a link | Each kind as something first names it by ID |
 | A recording's scripts as they were as it started, which its replay reads from their files, as it reads scene files', so that a script changed since makes it go another way at its first tick | A recording travels without its game's files, as a bug report does |
-| Scripts that spawn and despawn entities, or give and take their components, which Rust code alone does | A game's behavior in Luau makes or unmakes what it acts on |
 | Whether an entity has a component, from a script: one that reads or writes a field of a component its entity lacks fails there (`script.error`) | A script acts on entities that differ in what they have |
 | Finding an entity by its `Name` from a script, which reaches another only through an entity field that a scene, the Inspector or Rust code sets | A script finds what it acts on as it runs, as a quest's would |
 | Text for scripts: fields of strings, a script's own and Rust components' such as `Text.text`, which scripts reach none of, reaching numbers, bools, vectors, quaternions and entities alone | A script shows text or chooses by it, as dialogue does |
@@ -544,7 +543,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Breakpoints in what a script's chunk runs as it loads, which places them once it has run | Someone debugs a chunk's own code |
 | Stepping on from where a pause broke into a call entered while the debugger wasn't armed, which goes on to the next call: every call entered stepping would slow every development run | Someone pauses into long calls and steps through them |
 | Keys for the Debugger panel's buttons, as F5, F10 and F11 | Someone steps often |
-| Loading the textures, models and fonts that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names assets no layer adds |
+| Loading the textures, models and fonts that scene text names where a layer loads the text into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `World::change_scene`, `Context::load_scene_file`, the tool API and the engine's other reads, which name a file, load them | A game loads scene text of its own making in a tick that names assets no layer adds |
 | A lockstep joiner loading for its tool API an asset its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's assets from its own editor |
 | `gg mv` and an MCP `mv`, moving an asset and its ID file in one step: a file renamed alone keeps its ID by what it holds, but not one edited in the same step, nor one renamed in a fresh clone before its first run, which has no cache of prints | An agent's renames lose IDs that pairing by content can't keep |
 | A lockstep joiner that joins after its host's texture was renamed finding its file where it is now: it loads it by the path its host loaded it from, as the host names it, standing in where that's gone, as it is on one machine | Someone renames assets during a lockstep session |
@@ -625,7 +624,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Instances told apart in the Entities panel's rows, as Unity colors them: the Inspector alone says an entity is an instance's | Picking through scenes of many instances gets confusing |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |
-| Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
+| Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three, or a scene change that keeps the game's own entities, as a player carried from one level to the next; a load refuses IDs the world has, and `World::replace_scene` and `World::change_scene` replace all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own, or carries entities across levels |
+| Loading assets as a server's session changes scenes: a change loads none there (`net.no_scene_change`), as a client reads its server's states only of the assets its layers loaded, until the states name the assets the server loads | A game served changes to scenes whose assets its layers don't load |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
 | Opening a scene from the editor's Assets panel, by a double click or a drag onto the view, as the drag of the editor's own world did; the File menu's Open and the Scenes panel open one | Someone opens scenes from the Assets panel |
@@ -638,9 +638,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
-| Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; sensors; which colliders collide with which, by groups; damping; a body's mass and center of mass set, rather than given by its colliders' densities; and contacts for scripts | Each with its first game use |
+| Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; damping; and a body's mass and center of mass set, rather than given by its colliders' densities | Each with its first game use |
 | Mesh colliders' outlines: `MeshCollider3D` outlines nothing, as its model shows where it is, and Sponza's would draw some 790,000 lines | Someone needs to see a mesh collider apart from its model, as one of another model's |
-| Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; a character's rotation turned by its controller, toward where it goes; and a character's own collision filter, as one that passes through other characters | Each with its first game use; the platforms with the 3D demo's level, if it moves |
+| Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; and a character's rotation turned by its controller, toward where it goes | Each with its first game use; the platforms with the 3D demo's level, if it moves |
 | Casts that give every hit along their way, rather than the first; overlap queries, what's within a shape or at a point; casts that pass through colliders by component or group rather than an entity's; and casts in 2D | Each with its first game use |
 | Flipbooks of sheets whose cells don't fill their texture, or have space between them, by cells in pixels as `SpriteSheet` takes them; clips, named runs of cells a game switches between; and events at a flipbook's cells, as a footstep's sound at a foot's | Each with its first game use; clips and events with the 3D demo's animated characters, if they need them |
 | Tweens of another entity's fields, or of fields deeper than a vector's component, as a list's element; tweens one after another or together as a sequence; a tween's end told to code and scripts, as an event, and scripts asking whether a field is tweening; and tweens of integers, or of colors through a space other than linear's | Each with its first game use |
@@ -730,3 +730,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
   a project's files and works on the running game through the tool API, as Claude Code does now;
   world streaming once a game's world outgrows a scene, since how its cells stay in step across
   peers and a server is a design of its own. Decide before the next phase starts.
+- Where uploads go on a device whose transfer queue copies whole images alone (a granularity of
+  0, 0, 0): it's refused, so they go to the compute queue's family, and async compute, which needs
+  a queue of its own, is off. Recommendation: upload on the graphics queue there instead, keeping
+  async compute. Decide before a game targets such a device.
+- Whether scripts' spawns have a limit of their own, as a number a tick: nothing caps them now but
+  each call's budget of interrupts, so a game's script, or a mod granted `write`, may spawn some
+  hundreds of thousands of entities in a tick, which the world holds and every peer simulates.
+  Recommendation: no cap for a game's own scripts, as Rust code has none; for mods, a count a tick
+  beside their budget of interrupts, a few hundred, failing past it as the budget does, once a mod
+  that spawns is written. Decide before mods that spawn ship.

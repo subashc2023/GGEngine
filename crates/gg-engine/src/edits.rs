@@ -39,6 +39,10 @@ pub(crate) enum Edit {
     /// Reloads the script whose path from the project's root is `path`, its text now `text`,
     /// through the [`Scripts`](crate::Scripts) that loaded it, as the context applies it.
     Script { path: String, text: String },
+    /// Has the scene file whose path from the asset root is `path` hold `text` for the scene
+    /// changes to come, as [`World::change_scene`](crate::World::change_scene) reads it, as its
+    /// file is saved, as the context applies it.
+    Scene { path: String, text: String },
     /// Drops every author's log, and what they kept, and renews the world, as
     /// [`World::renew`](crate::World::renew) says, through the context: as a lockstep host does as
     /// it sends its joiner its world, which no log of the joiner's could undo into, and a replay
@@ -95,6 +99,7 @@ impl Authors {
         }
         match edit {
             Edit::Script { .. } => unreachable!("a context reloads scripts itself"),
+            Edit::Scene { .. } => unreachable!("a context keeps scenes' texts itself"),
             Edit::Renew => unreachable!("a context renews its world itself"),
             Edit::Amend {
                 author,
@@ -212,15 +217,15 @@ impl Edit {
             | Self::Amend { author, .. }
             | Self::Undo { author }
             | Self::Redo { author } => author,
-            Self::Script { path, .. } => path,
+            Self::Script { path, .. } | Self::Scene { path, .. } => path,
             Self::Renew => "",
         }
     }
 
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
     /// and its operations, `Amend`, with its author, its gesture and its operation, `Undo` and
-    /// `Redo`, with their author, `Script`, with its path and its text, and `Renew`; each operation a
-    /// variant named as its [`Operation`]'s, with its entities' IDs as text.
+    /// `Redo`, with their author, `Script` and `Scene`, with its path and its text, and `Renew`;
+    /// each operation a variant named as its [`Operation`]'s, with its entities' IDs as text.
     pub(crate) fn to_value(&self) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
         let author = |author: &str| ("author".into(), text(author));
@@ -258,10 +263,17 @@ impl Edit {
             }
             Self::Undo { author: by } => Value::Variant("Undo".into(), vec![author(by)]),
             Self::Redo { author: by } => Value::Variant("Redo".into(), vec![author(by)]),
-            Self::Script { path, text: script } => Value::Variant(
-                "Script".into(),
-                vec![("path".into(), text(path)), ("text".into(), text(script))],
-            ),
+            Self::Script { path, text: script } | Self::Scene { path, text: script } => {
+                let name = if matches!(self, Self::Script { .. }) {
+                    "Script"
+                } else {
+                    "Scene"
+                };
+                Value::Variant(
+                    name.into(),
+                    vec![("path".into(), text(path)), ("text".into(), text(script))],
+                )
+            }
             Self::Renew => Value::Variant("Renew".into(), Vec::new()),
         }
     }
@@ -315,18 +327,20 @@ impl Edit {
                     Self::Redo { author }
                 })
             }
-            "Script" => {
+            "Script" | "Scene" => {
                 let [path, script] = reflect::pick(fields, ["path", "text"])?;
-                Ok(Self::Script {
-                    path: text(path, "path")?,
-                    text: text(script, "text")?,
+                let (path, script) = (text(path, "path")?, text(script, "text")?);
+                Ok(if name == "Script" {
+                    Self::Script { path, text: script }
+                } else {
+                    Self::Scene { path, text: script }
                 })
             }
             "Renew" => Ok(Self::Renew),
             other => Err(reflect::no_variant(
                 other,
                 &[
-                    "Apply", "Append", "Amend", "Undo", "Redo", "Script", "Renew",
+                    "Apply", "Append", "Amend", "Undo", "Redo", "Script", "Scene", "Renew",
                 ],
             )),
         }

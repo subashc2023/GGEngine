@@ -660,8 +660,14 @@ struct Declared;
 ///   (`reflect.bad_default`), and without it its type's is its default, under its bounds, as
 ///   [`Types::default_value`] makes it; `degrees` shows an `f32` of radians, or of radians a
 ///   second, in degrees; `color` shows a `Vec3` or `Vec4` as a linear color, alpha not multiplied
-///   in; and `opaque` keeps a field of a `Clone` type that isn't reflected, which reads as
-///   [`Value::Opaque`], and takes no other hint.
+///   in; `opaque` keeps a field of a `Clone` type that isn't reflected, which reads as
+///   [`Value::Opaque`], and takes no other hint; and `hashed_when_set`, beside `default = ..`, on
+///   a component's own integer or bool field, has the world's hash read it, after its index, only
+///   while it isn't its default, so that a field added to a component leaves the hash of a world
+///   that doesn't set it as it was, as a reference hash checks. The derive refuses it elsewhere:
+///   in a type nested in another, a field left out can't be told from the words of what follows,
+///   as a list's, and a float's default compares equal to its other zero, 0.0 to -0.0, which the
+///   hash tells apart.
 ///
 /// Each hint is given once, and a variant takes none, nor does a field of an opaque type.
 ///

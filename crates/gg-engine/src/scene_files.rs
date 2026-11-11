@@ -61,6 +61,11 @@ impl SceneFile {
 #[derive(Default)]
 pub(crate) struct SceneFiles {
     pub(crate) files: Vec<SceneFile>,
+    /// The scene files' texts the run keeps for the scene changes to come, each its author's, as
+    /// [`Context::scene_text`] reads them: those it read, as it started or as a change first named
+    /// one, and those the layers loaded, as last saved since, which a development build watches as
+    /// it watches `files`, and which snapshots keep.
+    pub(crate) cached: Vec<SceneFile>,
     /// The open scene of the world in the context's place: of the copy, while one plays.
     pub(crate) open: Open,
     #[cfg(feature = "dev")]
@@ -80,6 +85,25 @@ impl SceneFiles {
     pub(crate) fn loaded(&mut self, file: SceneFile) {
         self.files.retain(|kept| kept.path != file.path);
         self.files.push(file);
+    }
+
+    /// Keeps `file`'s text for the scene changes to come, in place of one of the same author's, as
+    /// last read for the watch's next look, which the file's next save is compared with.
+    pub(crate) fn cache(&mut self, file: SceneFile) {
+        match self
+            .cached
+            .iter_mut()
+            .find(|kept| kept.author == file.author)
+        {
+            #[cfg(feature = "dev")]
+            Some(kept) => {
+                kept.read.clone_from(&file.text);
+                kept.text = file.text;
+            }
+            #[cfg(not(feature = "dev"))]
+            Some(kept) => kept.text = file.text,
+            None => self.cached.push(file),
+        }
     }
 
     /// Forgets whether the open scene of the world as edited differs from its file, as
@@ -118,6 +142,40 @@ pub(crate) fn opened(start: Option<&Path>, files: &[SceneFile]) -> Open {
         author: start.map(|file| file.author.clone()),
         made: Vec::new(),
         edited: false,
+    }
+}
+
+/// Checks that each part of `path`, a path from `root` with `/` between its parts, is named on the
+/// disk exactly as it's given, byte for byte, so that a disk that ignores case or normalizes
+/// Unicode, as macOS's and Windows' do, finds no file that a package, or Linux's disk, wouldn't.
+///
+/// Fails with the path as the disk names it, where each part that isn't named exactly is named
+/// alike in Unicode's lower case, or with `None` for a part that isn't there even so.
+pub(crate) fn named_exactly(root: &Path, path: &str) -> Result<(), Option<String>> {
+    let mut dir = root.to_owned();
+    let mut found = Vec::new();
+    let mut exact = true;
+    for part in path.split('/') {
+        let names = fs::read_dir(&dir).map_err(|_| None)?;
+        let names: Vec<String> = (names.flatten())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let name = match names.iter().find(|name| *name == part) {
+            Some(name) => name,
+            None => {
+                exact = false;
+                let part = part.to_lowercase();
+                let other = names.iter().find(|name| name.to_lowercase() == part);
+                other.ok_or(None)?
+            }
+        };
+        dir.push(name);
+        found.push(name.clone());
+    }
+    if exact {
+        Ok(())
+    } else {
+        Err(Some(found.join("/")))
     }
 }
 
@@ -199,7 +257,7 @@ mod watch {
         let now = Instant::now();
         if !stack.watches_files()
             || cx.reads_package()
-            || cx.scenes.files.is_empty()
+            || (cx.scenes.files.is_empty() && cx.scenes.cached.is_empty())
             || cx
                 .scenes
                 .looked
@@ -208,8 +266,11 @@ mod watch {
             return;
         }
         cx.scenes.looked = Some(now);
-        let mut saves = Vec::new();
-        for file in &mut cx.scenes.files {
+        let mut saves: Vec<(String, String)> = Vec::new();
+        // The files in the world first, and then the texts kept for scene changes, which a save
+        // of one of the former takes too.
+        let scenes = &mut cx.scenes;
+        for file in scenes.files.iter_mut().chain(&mut scenes.cached) {
             let stamp = fs::metadata(&file.path)
                 .and_then(|meta| Ok((meta.modified()?, meta.len())))
                 .ok();
@@ -223,7 +284,9 @@ mod watch {
             file.stamp = stamp;
             if text != file.read {
                 file.read.clone_from(&text);
-                saves.push((file.author.clone(), text));
+                if !saves.iter().any(|(author, _)| *author == file.author) {
+                    saves.push((file.author.clone(), text));
+                }
             }
         }
         // With the files in place, which a save finds its own among as it applies, now or at a
@@ -234,7 +297,10 @@ mod watch {
     }
 
     /// Applies the save of the scene file whose author is `author`, its text now `text`, through
-    /// `edit`, which applies an edit to `cx`'s world and records it, as [`look`] says.
+    /// `edit`, which applies an edit to `cx`'s world and records it, as [`look`] says; and keeps
+    /// the text for the scene changes to come, through an edit too, [`Edit::Scene`], so that a
+    /// replay and each lockstep peer keep it at the same tick: of a file in the world once it has
+    /// applied, and of one kept for them alone, as it's saved.
     ///
     /// Fails with `scene.not_watched` for an author no scene file has, and as [`apply`] does.
     pub(crate) fn apply_save(
@@ -247,12 +313,22 @@ mod watch {
         // scene's file, whose save leaves the scene as saved.
         let edited = cx.scenes.open.edited && cx.scenes.open.author.as_deref() != Some(author);
         let mut files = mem::take(&mut cx.scenes.files);
+        let kept = Edit::Scene {
+            path: author.to_owned(),
+            text: text.clone(),
+        };
+        let cached = cx.scenes.cached.iter().any(|file| file.author == author);
         let applied = match files.iter_mut().find(|file| file.author == author) {
             Some(file) => apply(cx, edit, file, text),
+            None if cached => Ok(()),
             None => Err(Error::new(
                 "scene.not_watched",
                 format!("no scene file the layers loaded is {author}"),
             )),
+        };
+        let applied = match applied {
+            Ok(()) if cached => edit(cx, kept).map(drop),
+            applied => applied,
         };
         files.append(&mut cx.scenes.files);
         cx.scenes.files = files;
@@ -575,6 +651,8 @@ mod open_scene {
                 scenes.open.edited = false;
             }
         }
+        // Its text for the scene changes to come, as read, which the watch applies nothing of.
+        scenes.cache(saved.clone());
         scenes.changed();
         info!(
             code = "scene.saved",
@@ -746,8 +824,9 @@ mod open_scene {
         })?;
         close(cx);
         let entities = World::scene_ids(&text).map_or(0, |ids| ids.len());
-        cx.scenes
-            .loaded(SceneFile::new(path.clone(), author.clone(), text));
+        let file = SceneFile::new(path.clone(), author.clone(), text);
+        cx.scenes.cache(file.clone());
+        cx.scenes.loaded(file);
         cx.scenes.open.author = Some(author);
         info!(
             code = "scene.opened",
@@ -1730,6 +1809,7 @@ pub(crate) mod tests {
         let of = snapshot::Of {
             world: cx.world(),
             scenes: &cx.scenes.files,
+            cached: &cx.scenes.cached,
             open: &played,
             scripts: &[],
             mods: &[],

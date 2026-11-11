@@ -1022,6 +1022,103 @@ impl World {
         }
     }
 
+    /// Spawns an entity with `components`, each a type's name and its whole value, the last of
+    /// `parent`'s children, or a root, as a create does, and returns it: a `PrefabRoot` among them
+    /// spawns its prefab's instance under it, the components given the root in place of the
+    /// prefab's, and a `ModelRoot` its model's nodes. No log keeps it, as a script's `gg.spawn`
+    /// makes one: its ID is drawn from the world's stream, and its slot taken, once nothing can
+    /// refuse it, as [`World::spawn`] draws and takes them.
+    ///
+    /// Fails, changing nothing, as a create is refused: with `ecs.no_entity` for a parent that
+    /// isn't alive, and `ecs.model_node` for one that's a model's node.
+    pub(crate) fn spawn_named(
+        &mut self,
+        parent: Option<Entity>,
+        components: &[(Ident, Value)],
+    ) -> Result<Entity> {
+        let parent = match parent {
+            Some(parent) => {
+                self.locate(parent)?;
+                self.not_a_node(parent)?;
+                self.id(parent)
+            }
+            None => None,
+        };
+        let template = self.created_template(components)?;
+        let id = self.create(None, parent, components, template.as_deref())?;
+        let made = self.entity(id).expect("made");
+        if let Some(template) = template {
+            let ids = template.ids(id).expect("checked as it was made");
+            self.spawn_instance(made, &Instance { template, ids });
+        }
+        self.fit_nodes(made, None);
+        Ok(made)
+    }
+
+    /// Gives `entity` `component`, which it hasn't, made from `value` as a scene's is, as an add
+    /// does, but kept by no log, as a script's `gg.add` gives one.
+    ///
+    /// Fails, changing nothing, with `ecs.no_entity` if `entity` isn't alive; as an add is refused;
+    /// and as [`unlinked_type`](Self::unlinked_type) refuses its type.
+    pub(crate) fn add_named(
+        &mut self,
+        entity: Entity,
+        component: &str,
+        value: &Value,
+    ) -> Result<()> {
+        let at = self.locate(entity)?;
+        let id = self.unlinked_type(component)?;
+        if self.tables[at.table as usize].has(id) {
+            return Err(Error::new(
+                "reflect.has_component",
+                format!("it has a `{component}` already"),
+            ));
+        }
+        let column = self.build(id, component, value)?;
+        self.give(entity, at, id, column);
+        Ok(())
+    }
+
+    /// Takes `entity`'s `component` away, as a remove does, but kept by no log, as a script's
+    /// `gg.remove` takes one.
+    ///
+    /// Fails, changing nothing, with `ecs.no_entity` if `entity` isn't alive; as a remove is
+    /// refused, such as with `reflect.missing_component`; and as
+    /// [`unlinked_type`](Self::unlinked_type) refuses its type.
+    pub(crate) fn remove_named(&mut self, entity: Entity, component: &str) -> Result<()> {
+        let at = self.locate(entity)?;
+        let id = self.unlinked_type(component)?;
+        self.column(at, id, component)?;
+        drop(self.take_out(entity, at, id));
+        Ok(())
+    }
+
+    /// The id of the component type named `name`, which a script gives and takes away: not
+    /// [`Parent`] or [`ModelNode`], as [`writable_type`](Self::writable_type) finds it, nor
+    /// [`PrefabRoot`] or [`ModelRoot`], which the world spawns entities under as it's given them,
+    /// and despawns with them.
+    ///
+    /// Fails with `reflect.unknown_type` if no component type is named `name`, and with
+    /// `reflect.read_only` for those.
+    pub(crate) fn unlinked_type(&self, name: &str) -> Result<ComponentId> {
+        let id = self.writable_type(name)?;
+        if Some(id) == self.component::<PrefabRoot>() {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world keeps `PrefabRoot`, spawning its prefab's entities under the instance's \
+                 root: a spawn of the prefab gives it",
+            ));
+        }
+        if Some(id) == self.component::<ModelRoot>() {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world spawns a `ModelRoot`'s model's nodes under it, and despawns them with \
+                 it: a script gives and takes away none",
+            ));
+        }
+        Ok(id)
+    }
+
     /// Fails with `ecs.prefab_entity` for `operation` if it would take away what an instance's
     /// prefab gives: delete or move one of the entities it gives, or unlink one, or give one a
     /// `PrefabRoot`, change it, or take it away, as those of instances inside another's are the

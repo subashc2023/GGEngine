@@ -16,8 +16,8 @@ use rapier3d::prelude::{
 use tracing::warn;
 
 use super::{
-    CapsuleCollider3D, Physics3D, Rapier, RigidBody3D, remove_body, replace, rotation, user_data,
-    vector,
+    CapsuleCollider3D, Physics3D, Rapier, RigidBody3D, groups, remove_body, replace, rotation,
+    user_data, vector,
 };
 use crate::physics::{Link, kept, unfinite};
 use crate::{Component, Entity, Tick, Transform, World};
@@ -28,7 +28,8 @@ use crate::{Component, Entity, Tick, Transform, World};
 /// `max_slope` and steps up to `step_height`, and kept on the ground going down as far as `snap`.
 /// It moves as its entity's [`CapsuleCollider3D`], its body kinematic, which pushes what's dynamic
 /// in its way as it goes and stops for the rest, characters among them, but passes through what a
-/// [`Joint3D`](super::Joint3D) joins it to without colliding. A kinematic [`RigidBody3D`] it
+/// [`Joint3D`](super::Joint3D) joins it to without colliding, sensors, and what its capsule's groups
+/// don't meet; a capsule that's a sensor pushes nothing, as nothing pushes it. A kinematic [`RigidBody3D`] it
 /// stands on, as a moving platform, a lift or a carousel, carries it as it goes and turns, and one
 /// moving into it pushes it before it. Its entity needs no
 /// [`RigidBody3D`]: one with one is moved as a body, and its controller does nothing, warned of
@@ -279,7 +280,12 @@ impl Physics3D {
                 !joined
                     .is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
             };
-            let mut alone = QueryFilter::new().exclude_rigid_body(own);
+            // What it moves against: not sensors, and only what its capsule's groups meet.
+            let met = groups(character.capsule.membership, character.capsule.filter);
+            let mut alone = QueryFilter::new()
+                .exclude_rigid_body(own)
+                .exclude_sensors()
+                .groups(met);
             if joined {
                 alone = alone.predicate(&apart);
             }
@@ -334,6 +340,8 @@ impl Physics3D {
                     };
                     let filter = QueryFilter::new()
                         .exclude_rigid_body(own)
+                        .exclude_sensors()
+                        .groups(met)
                         .predicate(&beside);
                     let queries =
                         broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
@@ -370,7 +378,10 @@ impl Physics3D {
                 let on_it = |handle: ColliderHandle, other: &Collider| {
                     other.parent() == Some(by) && (!joined || apart(handle, other))
                 };
-                let filter = QueryFilter::new().predicate(&on_it);
+                let filter = QueryFilter::new()
+                    .exclude_sensors()
+                    .groups(met)
+                    .predicate(&on_it);
                 let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
                 let toward = ShapeCastOptions {
                     max_time_of_impact: dt,
@@ -386,6 +397,8 @@ impl Physics3D {
                 };
                 let filter = QueryFilter::new()
                     .exclude_rigid_body(own)
+                    .exclude_sensors()
+                    .groups(met)
                     .predicate(&beside);
                 let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
                 let push = speed * (dt - hit.time_of_impact);
@@ -394,9 +407,13 @@ impl Physics3D {
                 });
                 total += went.translation;
             }
-            let mut pushing =
-                broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
-            moving.solve_character_collision_impulses(dt, &mut pushing, &*shape, mass, &self.hits);
+            // A sensor's pushes nothing.
+            if !character.capsule.sensor {
+                let mut pushing =
+                    broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
+                let hits = &self.hits;
+                moving.solve_character_collision_impulses(dt, &mut pushing, &*shape, mass, hits);
+            }
             let body = &mut bodies[character.body];
             body.set_next_kinematic_translation(body.translation() + total);
             if let Some(yaw) = turned {
@@ -675,6 +692,59 @@ pub(super) mod tests {
         // Against the wall, its radius and the gap from it.
         assert!((at.x - 0.98).abs() < 0.03, "{at}");
         assert!(at.z > 0.0, "slid along: {at}");
+    }
+
+    /// A character walks through a sensor, which finds it, its overlap starting and stopping, and
+    /// through a wall in a group its capsule's filter leaves out, as casts pass through the sensor
+    /// but not the wall; and stops at a wall it meets.
+    #[test]
+    fn a_character_walks_through_sensors_and_what_its_groups_dont_meet() {
+        let mut world = World::default();
+        floor(&mut world);
+        let size = Vec3::new(1.0, 3.0, 4.0);
+        let sensor = wall(&mut world, Vec3::new(-2.0, 2.0, 0.0), size, Quat::IDENTITY);
+        world
+            .get_mut::<BoxCollider3D>(sensor)
+            .expect("alive")
+            .sensor = true;
+        let apart = wall(&mut world, Vec3::new(0.0, 2.0, 0.0), size, Quat::IDENTITY);
+        world
+            .get_mut::<BoxCollider3D>(apart)
+            .expect("alive")
+            .membership = 2;
+        // Its face at x 2.5.
+        wall(&mut world, Vec3::new(3.0, 2.0, 0.0), size, Quat::IDENTITY);
+        let walker = character(&mut world, Vec3::new(-4.0, ON_FLOOR, 0.0));
+        world
+            .get_mut::<CapsuleCollider3D>(walker)
+            .expect("alive")
+            .filter = !2;
+        step(&mut world, 4);
+        let ray = crate::Cast::new(Vec3::new(-4.9, 1.5, 0.0), Vec3::X).excluding(walker);
+        assert_eq!(world.cast_ray(ray).map(|hit| hit.entity), Some(apart));
+        set_velocity(&mut world, walker, Vec3::new(3.0, 0.0, 0.0));
+        let mut found = Vec::new();
+        for _ in 0..192 {
+            step(&mut world, 1);
+            found.extend(world.contact_events());
+        }
+        let at = transform(&world, walker).translation;
+        // Against the last wall, its radius and the gap from it.
+        assert!((at.x - 1.98).abs() < 0.03, "{at}");
+        let overlaps: Vec<_> = found
+            .iter()
+            .map(|event| {
+                (
+                    event.contact.other(walker),
+                    event.contact.sensor,
+                    event.started,
+                )
+            })
+            .collect();
+        assert_eq!(
+            overlaps,
+            [(Some(sensor), true, true), (Some(sensor), true, false)]
+        );
     }
 
     /// A character climbs a slope gentler than its `max_slope`, and not one steeper, which it

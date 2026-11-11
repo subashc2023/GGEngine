@@ -16,6 +16,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Left wall"),
             RigidBody2D: (
@@ -65,6 +68,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Bottom wall"),
             RigidBody2D: (
@@ -96,6 +102,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Pillar"),
             RigidBody2D: (
@@ -127,6 +136,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Right wall"),
             RigidBody2D: (
@@ -158,6 +170,9 @@
                 density: 1.0,
                 friction: 0.5,
                 restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
             ),
             Name: ("Top wall"),
             RigidBody2D: (
