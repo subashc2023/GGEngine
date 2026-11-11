@@ -301,6 +301,9 @@ impl Kept {
             };
             self.merged.extend(next.copied());
         }
+        // One set again as it was into a slot these changes emptied, as a clear empties each, both
+        // stayed and came: an instance is drawn once.
+        self.merged.dedup();
         std::mem::swap(&mut self.members, &mut self.merged);
         self.added.clear();
         self.removed = false;
@@ -458,6 +461,32 @@ mod tests {
         scene.set(1, Mat4::IDENTITY, &b, 3);
         kept.apply(&mut scene.changes, 4);
         assert_eq!(runs(&kept), vec![(1, 1, both, vec![1])]);
+    }
+
+    /// An instance set again into its slot once the slot's emptied, by a clear, as every one is
+    /// when the engine plays or stops a copy of the world, or taken away in the same frame's
+    /// changes, is ordered once, as it was.
+    #[test]
+    fn an_instance_set_again_once_its_slot_is_emptied_is_ordered_once() {
+        let a = draw(0);
+        let mut scene = Scene::default();
+        let mut kept = Kept::default();
+        scene.set(0, Mat4::IDENTITY, &a, 1);
+        scene.set(1, Mat4::IDENTITY, &a, 2);
+        kept.apply(&mut scene.changes, 1);
+        let want = vec![(0, 0, Faces::Both, vec![0, 1])];
+        assert_eq!(runs(&kept), want);
+
+        scene.clear();
+        scene.set(0, Mat4::IDENTITY, &a, 1);
+        scene.set(1, Mat4::IDENTITY, &a, 2);
+        kept.apply(&mut scene.changes, 2);
+        assert_eq!(runs(&kept), want, "after a clear");
+
+        scene.remove(1);
+        scene.set(1, Mat4::IDENTITY, &a, 2);
+        kept.apply(&mut scene.changes, 3);
+        assert_eq!(runs(&kept), want, "after a removal");
     }
 
     /// A record keeps the transform the frame before drew its instance at, from the first of a
