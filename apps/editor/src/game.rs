@@ -48,6 +48,8 @@
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
 //! handles move, turn and scale it through the Inspector's link, each drag one edit of the
 //! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
+//! The title bar's settings switch on the game's frame rate and the editor's at the view's bottom
+//! right, as [`rates`](crate::rates) says.
 //! The editor's camera, the outline round what's picked, the grid and the colliders' switch reach
 //! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
 //! editor taking the parts another client, such as an agent, sets.
@@ -108,6 +110,7 @@ use crate::handles::{Picked, Reading, Sight};
 use crate::hub::{self, Hub};
 use crate::look::{Looking, Part, Parts};
 use crate::overlay::{self, Mode, Toolbar};
+use crate::rates::Rates;
 use crate::scenes::{self, Scenes};
 use crate::view::{self, OUTLINE, OUTLINE_WIDTH, ViewTools};
 
@@ -274,6 +277,8 @@ struct Game {
     /// Why the game, or the editor, refused the File menu's last request, until it's dismissed.
     message: Option<Message>,
     measures: Measures,
+    /// The game's frame rate and the editor's, which the view shows while the settings say.
+    rates: Rates,
 }
 
 /// The project's folders, as its manifest names them: its asset root, which the open scene's file
@@ -486,6 +491,7 @@ impl Game {
             closing: Closing::No,
             message: None,
             measures: Measures::default(),
+            rates: Rates::default(),
         }
     }
 
@@ -1975,6 +1981,7 @@ impl Layer for Game {
     fn attach(&mut self, cx: &mut Context) {
         self.hub.read(cx);
         self.view.toolbar.read(cx);
+        self.rates.read(cx);
         match self.dir.clone() {
             Some(dir) => {
                 self.hub.opened(&dir);
@@ -2011,6 +2018,8 @@ impl Layer for Game {
             self.fit(view.size);
         }
         self.take_frame(cx);
+        let published = self.reader.as_ref().map(Reader::published);
+        self.rates.see(Instant::now(), published);
         // The game's grab, in Play alone; a Stop or Simulate ends what Escape did too.
         let through = self.through();
         self.escaped &= through;
@@ -2103,6 +2112,7 @@ impl Layer for Game {
         if to_hub {
             self.hub.asked = true;
         }
+        self.rates.settings(ui, cx);
         // The hub, over the panels, which go on showing the project open, if one is, behind it.
         if self.hub_shows() {
             let current = self.dir.clone();
@@ -2211,6 +2221,9 @@ impl Layer for Game {
         let picked = picked(&self.view.link);
         let alt = view::alt_down(cx.input());
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
+        if let Some(view) = ui.view() {
+            self.rates.paint(ui.egui(), &view);
+        }
         self.view.overlay(ui, self.screen(cx.view()));
         self.view.toolbar.save(cx);
         // As Play, Simulate, Stop and the toolbar's switch went.

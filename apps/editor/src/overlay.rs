@@ -34,8 +34,8 @@ const CUBE: f32 = 10.0;
 const GIZMO: f32 = 2.0 * (REACH + BALL) + 4.0;
 /// The height of the label under the gizmo, in points.
 const LABEL: f32 = 18.0;
-/// How far in from the view's edges the name of what's under the cursor shows, in points: as far
-/// as [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
+/// How far in from the view's edges a [`label`] shows, in points: as far as
+/// [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
 const INSET: f32 = 8.0;
 
 /// What the toolbar's list of what the view shows in place of its light has for an entry: the
@@ -885,18 +885,30 @@ fn letter(side: Side) -> Option<&'static str> {
     }
 }
 
-/// Names `name`, what the view shows under the cursor, at the bottom left of `view`, in a frame as
-/// the toolbar's: painted on the view's own layer, over the world it shows and the handles, rather
-/// than shown over the view as the toolbar is, so that the cursor over it is still over the view.
+/// Names `name`, what the view shows under the cursor, at the bottom left of `view`, as
+/// [`label`] shows it.
 pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
+    label(egui, view, Align2::LEFT_BOTTOM, name, TextStyle::Body);
+}
+
+/// Shows `text`, in `style`, at `corner` of `view`, in a frame as the toolbar's: painted on the
+/// view's own layer, over the world it shows and the handles, rather than shown over the view as
+/// the toolbar is, so that the cursor over it is still over the view.
+pub fn label(
+    egui: &egui::Context,
+    view: &Response,
+    corner: Align2,
+    text: String,
+    style: TextStyle,
+) {
     let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
-    let style = egui.global_style();
-    let color = style.visuals.text_color();
-    let galley = painter.layout_no_wrap(name, TextStyle::Body.resolve(&style), color);
-    let frame = panel(&style.visuals);
+    let global = egui.global_style();
+    let color = global.visuals.text_color();
+    let galley = painter.layout_no_wrap(text, style.resolve(&global), color);
+    let frame = panel(&global.visuals);
     let margin = frame.total_margin();
-    let corner = view.rect.left_bottom() + vec2(INSET, -INSET);
-    let outer = Align2::LEFT_BOTTOM.anchor_size(corner, galley.size() + margin.sum());
+    let at = corner.pos_in_rect(&view.rect.shrink(INSET));
+    let outer = corner.anchor_size(at, galley.size() + margin.sum());
     let inner = outer - margin;
     painter.add(frame.paint(inner));
     painter.galley(inner.min, galley, color);
