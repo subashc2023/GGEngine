@@ -8,6 +8,7 @@
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 use std::vec::Drain;
 
@@ -702,12 +703,7 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
         let message = format!("font {name:?} at {} {problem}", path.display());
         Error::new("engine.bad_font", message)
     };
-    // fdsm can panic on a malformed font, as reading files is, so that's the file's doing: the font
-    // fails as one that doesn't read does. gg-core's panic hook still logs it.
-    let field = panic::catch_unwind(AssertUnwindSafe(|| field(&bytes)));
-    let field = field
-        .unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
-        .map_err(bad)?;
+    let (field, cached) = field_of(&bytes).map_err(bad)?;
     let (shaping, plan) = shaping(&bytes).map_err(bad)?;
     let [width, height] = field.size;
     debug!(
@@ -717,6 +713,7 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
         glyphs = field.glyphs.len(),
         width,
         height,
+        cached,
         ms = crate::perf::millis(start.elapsed()),
         "Font baked"
     );
@@ -735,10 +732,42 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
     })
 }
 
+/// The field of the font in `bytes`, as [`field`] bakes it, and whether this process had baked it
+/// already, which it then takes. The error says what's wrong with the font.
+///
+/// A process keeps the field of each font it bakes, by the font's bytes, which always bake to the
+/// same field: tests build a game's context again and again, each adding its fonts and the engine's,
+/// and bake on their own thread alone, where a debug build takes about a second a font. A process
+/// bakes few fonts, each kept as long as it runs, some 2 MB of field and file; but each save of a
+/// font's file that a development run reloads keeps another, the old staying: if runs come to save
+/// fonts often, keep only the latest few.
+fn field_of(bytes: &[u8]) -> Result<(Field, bool), String> {
+    static FIELDS: Mutex<Vec<(Box<[u8]>, Field)>> = Mutex::new(Vec::new());
+    let find = |fields: &[(Box<[u8]>, Field)]| {
+        let found = fields.iter().find(|(of, _)| **of == *bytes);
+        found.map(|(_, field)| field.clone())
+    };
+    let lock = || FIELDS.lock().expect("no thread panics holding it");
+    if let Some(field) = find(&lock()) {
+        return Ok((field, true));
+    }
+    // fdsm can panic on a malformed font, as reading files is, so that's the file's doing: the font
+    // fails as one that doesn't read does. gg-core's panic hook still logs it.
+    let field = panic::catch_unwind(AssertUnwindSafe(|| field(bytes)));
+    let field = field.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))?;
+    // Two threads may bake the same font at once: the first to finish keeps its field.
+    let mut fields = lock();
+    if find(&fields).is_none() {
+        fields.push((bytes.into(), field.clone()));
+    }
+    Ok((field, false))
+}
+
 /// What a font bakes into, before its field is a texture: the field's size and its rows of RGBA8,
 /// tightly packed, top row first, each texel the distances to a glyph's nearest edges in its red,
 /// green and blue, multi-channel, and to its outline in its alpha; and where its glyphs are in it,
 /// and its lines' metrics.
+#[derive(Clone)]
 struct Field {
     size: [u32; 2],
     pixels: Vec<u8>,
@@ -1419,6 +1448,27 @@ mod tests {
         let contour = vec![Command::Line(Point::new(0.0, 0.0), nowhere)];
         let error = outline(1, &[contour], 2048.0).err().expect("refused");
         assert!(error.contains("isn't a finite number"), "{error}");
+    }
+
+    /// A process bakes a font's bytes once: baked again, they take the field the first bake made;
+    /// other bytes bake apart. Inter at 8,192 and 16,384 units to the em, a quarter and an eighth of
+    /// its size, quick to bake, which no other test bakes, so that each first bake here is the
+    /// process's first.
+    #[test]
+    fn a_process_bakes_a_fonts_bytes_once() {
+        let bytes = inter_of(8192);
+        let (first, cached) = field_of(&bytes).expect("it bakes");
+        assert!(!cached, "the process's first bake of these bytes");
+        let (again, cached) = field_of(&bytes).expect("it bakes again");
+        assert!(cached, "the field the first bake made");
+        assert_eq!(again.size, first.size);
+        assert_eq!(again.pixels, first.pixels);
+        assert_eq!(again.glyphs, first.glyphs);
+        assert_eq!(again.units_per_em, first.units_per_em);
+        assert_eq!(again.lines, first.lines);
+        let (other, cached) = field_of(&inter_of(16384)).expect("it bakes");
+        assert!(!cached, "other bytes bake apart");
+        assert_ne!(other.units_per_em, first.units_per_em);
     }
 
     /// A file that isn't a font, or is one without outlines, is refused, saying why.

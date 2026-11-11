@@ -1385,7 +1385,8 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   model, prefab, font, UI file and music added (`asset.model_loaded`, `asset.prefab_loaded`,
   `asset.font_loaded`, `asset.ui_loaded`, `asset.music_loaded`); at the debug level, as there may
   be many, each texture and sound added from its file (`asset.texture_loaded`,
-  `asset.sound_loaded`), each font baked (`asset.font_baked`), the sound's output opened
+  `asset.sound_loaded`), each font baked (`asset.font_baked`, `cached` if the process had baked
+  its bytes before, whose field it takes), the sound's output opened
   (`audio.opened`), each image decoded, a model's among them, from the thread that decoded it as
   it's done (`asset.texture_decoded`, with the time its mip levels took, `levels_ms`), and each
   texture and mesh streamed to the GPU, from when the render thread queued it to when it's drawable
@@ -2471,9 +2472,11 @@ reaching 4 texels either side of each glyph's edge, and in its alpha the true di
 outlines and shadows will read. The median of a texel's three distances keeps a glyph's corners
 sharp at any size, where a single distance would round them off. fdsm generates each glyph's field
 from the outline skrifa reads, unhinted, on the job system's threads, a fixed seed coloring its
-edges so that a font bakes the same field every time, and corrects its errors. A font whose glyphs'
-cells, alone or together, wouldn't fit a field of the largest texture's size is refused before any
-is made, as a crafted font's would take gigabytes. `Context::draw_text`
+edges so that a font bakes the same field every time, and corrects its errors. A process bakes a
+font's bytes once, keeping their field as long as it runs, as tests build a game's context again
+and again, baking on their own thread alone, where a debug build takes about a second a font. A
+font whose glyphs' cells, alone or together, wouldn't fit a field of the largest texture's size is
+refused before any is made, as a crafted font's would take gigabytes. `Context::draw_text`
 shapes each line of a text with harfrust, for the font's kerning and its marks' places, but without
 the features that put glyphs in place of others, as ligatures and contextual alternates, whose
 glyphs the field may not hold; and draws each glyph on the engine's quad with the text shader, an

@@ -206,7 +206,9 @@ opt-level = 3
 
 # Debug builds bake a font's field as a layer adds it, Inter's in some 15 s unoptimized, at each of
 # their tests' and runs' starts. nalgebra's and image's code that it runs is generic, and builds in
-# fdsm, at fdsm's level.
+# fdsm, at fdsm's level; but fdsm's functions that fill a field are generic over its image, and build
+# unoptimized in gg-engine, where Inter still takes about a second on one thread, as tests bake it,
+# which a process takes once (gg-engine's font.rs).
 [profile.dev.package.fdsm]
 opt-level = 3
 
