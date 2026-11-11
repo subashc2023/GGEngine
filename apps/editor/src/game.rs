@@ -19,7 +19,8 @@
 //! shows it over the project open, which its Back goes back to. A project picked there opens in
 //! place of the one open as a close of the editor goes, asking whether to save the open scene's
 //! unsaved edits first: the run of the one open ends, going on ending as the new project's starts,
-//! but in the same project, which waits for it, and the panels show the new project's.
+//! but in the same project, which waits for it, and the panels show the new project's, the view
+//! empty until its game's first frame.
 //!
 //! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
 //! seeing through the game's own camera, which gets all the input the view gets, the view's tools
@@ -958,9 +959,10 @@ impl Game {
 
     /// Opens the project in `dir` in place of the one open, if one is: lets go of its game, closing
     /// its run's stdin, which ends it, the run going on ending meanwhile; logs what was measured of
-    /// its view; and makes the layer the new project's, as it starts but for the hub, the Logs, the
-    /// runs ending and where the toolbar is, noting the project opened, and starting its run, as
-    /// [`start`](Self::start) does.
+    /// its view, and empties the view, which would show its game's last frame until the new game's
+    /// first, as a restart's does, through the new project's build; and makes the layer the new
+    /// project's, as it starts but for the hub, the Logs, the runs ending and where the toolbar is,
+    /// noting the project opened, and starting its run, as [`start`](Self::start) does.
     fn switch(&mut self, cx: &mut Context, dir: PathBuf) {
         self.disconnect();
         if let Some((child, stdin)) = self.run.take() {
@@ -969,6 +971,7 @@ impl Game {
             self.ending.push((ran, child));
         }
         self.measures.report();
+        cx.hide_pixels();
         let mut opened = Game::new(Some(dir.clone()), self.view.link.clone());
         opened.hub = mem::take(&mut self.hub);
         opened.ending = mem::take(&mut self.ending);
