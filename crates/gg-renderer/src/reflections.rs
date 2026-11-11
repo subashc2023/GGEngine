@@ -228,6 +228,15 @@ impl Images {
         });
     }
 
+    /// Notes that frame `frame`, submitted, which reflected what the frame before it kept, kept
+    /// nothing, as a frame that shows something in place of the view's light doesn't: so that the
+    /// next frame's reflections take the same, which nothing has written over.
+    pub(crate) fn carry(&mut self, frame: u64) {
+        if let Some(last) = &mut self.last {
+            last.frame = frame;
+        }
+    }
+
     /// Its images, as a frame that reflects takes them as targets, at the indices
     /// [`ReflectionPass::plan`] and [`ReflectionPass::plan_keep`] give them: none before
     /// [`prepare`](Self::prepare) has made them.

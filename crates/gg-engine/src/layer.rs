@@ -4463,6 +4463,7 @@ impl Context {
             self.look.seen = Some(frame.viewpoint);
             frame.look = self.look.revision;
             frame.bare = self.look.bare;
+            frame.show = self.look.shown();
             // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
             frame.looked = matches!(seer, Seer::Look(_));
         }

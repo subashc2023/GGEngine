@@ -28,10 +28,10 @@ const FINAL_VALUE_POWER: f32 = 2.2;
 /// XeGTAO's `DenoiseBlurBeta`, and those before it a fifth of that, which blur more.
 const BLUR: f32 = 1.2;
 
-/// How many times the occlusion is denoised: once, as XeGTAO's sharp preset, where the view is
-/// antialiased, which takes noise that changes each frame and averages it over frames; three times,
-/// its soft preset, where it isn't, and the noise stays still.
-const ANTIALIASED_DENOISES: usize = 1;
+/// How many times the occlusion is denoised: three times, XeGTAO's soft preset, of noise that
+/// stays still from frame to frame, however the view is antialiased. Noise that changes each frame,
+/// denoised once, its sharp preset, which leaves temporal antialiasing to average it, stays in a
+/// still view: the resolve clips its history to each frame's pixels, the frame's noise among them.
 const DENOISES: usize = 3;
 
 /// How the game's view's ambient occlusion darkens the light from all around, as
@@ -152,14 +152,12 @@ pub(crate) struct Plan {
     size: [u32; 2],
     depths: [ImageId; 2],
     levels: BufferId,
-    /// What the occlusion writes, and the denoises read and write by turns, the second only where
-    /// it's denoised more than once.
-    terms: [Option<BufferId>; 2],
+    /// What the occlusion writes, and the denoises read and write by turns.
+    terms: [BufferId; 2],
     image: ImageId,
     prefilter: PassId,
     occlusion: PassId,
-    denoises: [Option<PassId>; DENOISES],
-    antialiased: bool,
+    denoises: [PassId; DENOISES],
 }
 
 impl Plan {
@@ -171,12 +169,10 @@ impl Plan {
 }
 
 /// What a frame's ambient occlusion takes of how it draws the view: from the view's space to its
-/// clip space, with antialiasing's offset, under perspective; the settings; and the frame's number,
-/// whose noise an antialiased view takes.
+/// clip space, with antialiasing's offset, under perspective; and the settings.
 pub(crate) struct Seen {
     pub(crate) clip_from_view: Mat4,
     pub(crate) settings: AmbientOcclusion,
-    pub(crate) frame: u64,
 }
 
 impl AoPass {
@@ -192,25 +188,14 @@ impl AoPass {
 
     /// Declares in `graph` the ambient occlusion of a view of `size` pixels, from `depths`, as the
     /// passes before drew them, whose nearer at each pixel is what's opaque there, into an image
-    /// its shading passes then sample; denoised as [`ANTIALIASED_DENOISES`] says if `antialiased`,
-    /// and as [`DENOISES`] does otherwise.
-    pub(crate) fn plan(
-        graph: &mut Graph,
-        depths: [ImageId; 2],
-        size: [u32; 2],
-        antialiased: bool,
-    ) -> Plan {
-        let count = if antialiased {
-            ANTIALIASED_DENOISES
-        } else {
-            DENOISES
-        };
+    /// its shading passes then sample, denoised [`DENOISES`] times.
+    pub(crate) fn plan(graph: &mut Graph, depths: [ImageId; 2], size: [u32; 2]) -> Plan {
         let (_, bytes) = levels(size);
         let levels = graph.buffer("ambient occlusion view depths", bytes);
         let pixels = u64::from(size[0]) * u64::from(size[1]) * 4;
         let terms = [
-            Some(graph.buffer("ambient occlusion terms", pixels)),
-            (count > 1).then(|| graph.buffer("ambient occlusion terms denoised", pixels)),
+            graph.buffer("ambient occlusion terms", pixels),
+            graph.buffer("ambient occlusion terms denoised", pixels),
         ];
         let image = graph.scalar("ambient occlusion", size);
         let prefilter = graph.compute(label!("ambient occlusion prefilter"));
@@ -220,23 +205,21 @@ impl AoPass {
             prefilter.sample(depths[0]).sample(depths[1])
         };
         let prefilter = prefilter.write_buffer(levels).add();
-        let term = |i: usize| terms[i % 2].expect("declared for as many denoises");
         let occlusion = (graph.compute(label!("ambient occlusion")))
             .read_buffer(levels)
-            .write_buffer(term(0))
+            .write_buffer(terms[0])
             .add();
-        let mut denoises = [None; DENOISES];
-        for (i, denoise) in denoises.iter_mut().take(count).enumerate() {
+        let denoises = std::array::from_fn(|i| {
             let pass = graph
                 .compute(label!("ambient occlusion denoise"))
-                .read_buffer(term(i));
-            let pass = if i + 1 == count {
+                .read_buffer(terms[i % 2]);
+            let pass = if i + 1 == DENOISES {
                 pass.overwrite(image)
             } else {
-                pass.write_buffer(term(i + 1))
+                pass.write_buffer(terms[(i + 1) % 2])
             };
-            *denoise = Some(pass.add());
-        }
+            pass.add()
+        });
         Plan {
             size,
             depths,
@@ -246,7 +229,6 @@ impl AoPass {
             prefilter,
             occlusion,
             denoises,
-            antialiased,
         }
     }
 
@@ -271,12 +253,8 @@ impl AoPass {
             target: 0,
             radius: seen.settings.radius,
             power: FINAL_VALUE_POWER * seen.settings.strength,
-            // Still without antialiasing, which would leave the noise to shimmer.
-            noise: if plan.antialiased {
-                (seen.frame % 64) as u32
-            } else {
-                0
-            },
+            // The same every frame, as `DENOISES` says why.
+            noise: 0,
             blur: BLUR,
             starts: levels(plan.size).0,
             unused: 0,
@@ -294,7 +272,7 @@ impl AoPass {
         let [prefilter_across, prefilter_down] = plan.size.map(|side| side.div_ceil(2 * GROUP));
         pass.dispatch([prefilter_across, prefilter_down, 1]);
         drop(pass);
-        let term = |i: usize| plan.terms[i % 2].expect("declared for as many denoises");
+        let term = |i: usize| plan.terms[i % 2];
         let mut pass = frame.compute(plan.occlusion);
         let push = Push {
             levels: pass.address(plan.levels),
@@ -305,9 +283,8 @@ impl AoPass {
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch([across, down, 1]);
         drop(pass);
-        let count = plan.denoises.iter().flatten().count();
-        for (i, &denoise) in plan.denoises.iter().flatten().enumerate() {
-            let last = i + 1 == count;
+        for (i, &denoise) in plan.denoises.iter().enumerate() {
+            let last = i + 1 == DENOISES;
             let mut pass = frame.compute(denoise);
             let push = Push {
                 terms: pass.address(term(i)),

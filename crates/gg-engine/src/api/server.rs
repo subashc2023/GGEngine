@@ -47,7 +47,7 @@ use serde_json::Value;
 use subsecond::JumpTable;
 use tracing::{Level, debug, info, warn};
 
-use super::{Waiting, json};
+use super::{Shown, Waiting, json};
 use crate::assets::Asset;
 use crate::edits::{Done, Edit};
 use crate::grant::{Capability, Grant};
@@ -178,9 +178,11 @@ pub(crate) struct Api {
     /// after `riding_ticks` ticks, until a frame that rendered brings its view back.
     riding: Vec<Capturing>,
     riding_ticks: u64,
-    /// Whether the frame being made is bare, as the oldest capture waiting decided as the frame
-    /// started.
+    /// Whether the frame being made is bare, and what it shows in place of the view's light, as
+    /// the oldest capture waiting decided as the frame started: a frame of either is apart, not
+    /// published.
     bare: bool,
+    shown: Option<Shown>,
     /// The look as the clients set it, each part `None` where it's the game's own, and the run's
     /// number; its `seen` is filled in as it's answered.
     look: Looked,
@@ -229,12 +231,15 @@ struct Picking {
 }
 
 /// A `capture` waiting for its frame: where its answer goes, where its PNG goes, whether it's of
-/// the game's own view, which a bare frame shows, and when it came, which it waits from, as
-/// [`CAPTURE_WAIT`] says.
+/// the game's own view, which a bare frame shows, what it shows in place of the view's light, if it
+/// asks, and when it came, which it waits from, as [`CAPTURE_WAIT`] says. With `at` and no path it
+/// answers the pixel and writes no PNG.
 struct Capturing {
     reply: Reply,
     path: Option<PathBuf>,
+    at: Option<[f64; 2]>,
     own: bool,
+    show: Option<Shown>,
     since: Instant,
 }
 
@@ -293,7 +298,10 @@ enum Call {
     Scene(Scene),
     Capture {
         path: Option<PathBuf>,
+        /// A pixel of the view to answer the bytes of, checked finite and not negative.
+        at: Option<[f64; 2]>,
         own: bool,
+        show: Option<gg_api::Shown>,
     },
     /// The name of the memory to publish the view to, or `None` to stop.
     View(Option<String>),
@@ -409,7 +417,10 @@ struct Taken {
 /// where the answer goes.
 struct Png {
     shot: Arc<Shot>,
-    path: PathBuf,
+    /// Where it goes; `None` for a capture of a pixel alone, which writes nothing.
+    path: Option<PathBuf>,
+    /// The pixel whose bytes the answer gives.
+    at: Option<[f64; 2]>,
     /// Whether the engine named the path, the request giving none, which prunes the directory.
     named: bool,
     ticks: u64,
@@ -528,11 +539,13 @@ impl Api {
             riding: Vec::new(),
             riding_ticks: 0,
             bare: false,
+            shown: None,
             look: Looked {
                 viewpoint: None,
                 outline: None,
                 grid: None,
                 colliders: None,
+                show: None,
                 by: By::default(),
                 revision: 0,
                 run,
@@ -574,9 +587,10 @@ impl Api {
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
     /// refused before the first tick of a run playing from its start. Then makes the frame bare if
     /// the oldest capture waiting, of those riding, whose frame may not render, then of those
-    /// asked, is of the game's own view; and unless it's bare, which reads no picks, has the frame
-    /// ask the picks waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after.
-    /// Returns whether a request asked the run to end.
+    /// asked, is of the game's own view, and has it show what that capture shows in place of the
+    /// view's light; and unless it's bare, which reads no picks, has the frame ask the picks
+    /// waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after. Returns whether a
+    /// request asked the run to end.
     pub(crate) fn serve(
         &mut self,
         cx: &mut Context,
@@ -587,7 +601,9 @@ impl Api {
         let quit = self.answer(cx, stack, stepper, false);
         let oldest = self.riding.first().or(self.asked.first());
         self.bare = oldest.is_some_and(|capturing| capturing.own);
+        self.shown = oldest.and_then(|capturing| capturing.show.clone());
         cx.look.bare = self.bare;
+        cx.look.captured = self.shown.clone();
         if self.bare {
             return quit;
         }
@@ -735,10 +751,17 @@ impl Api {
                     let until = stepper.ticks + stepper.steps();
                     self.steps.push((reply, until));
                 }
-                Call::Capture { path, own } => self.asked.push(Capturing {
+                Call::Capture {
+                    path,
+                    at,
+                    own,
+                    show,
+                } => self.asked.push(Capturing {
                     reply,
                     path,
+                    at,
                     own,
+                    show: show.as_ref().map(Shown::of),
                     since: Instant::now(),
                 }),
                 // A second writer of the memory would write the slot the first holds.
@@ -1072,6 +1095,7 @@ impl Api {
             outline,
             grid,
             colliders,
+            show,
             by,
             revision,
             ..
@@ -1081,6 +1105,7 @@ impl Api {
             set_part(outline, &mut by.outline, given.outline, client),
             set_part(grid, &mut by.grid, given.grid, client),
             set_part(colliders, &mut by.colliders, given.colliders, client),
+            set_part(show, &mut by.show, given.show, client),
         ];
         if changed.contains(&true) {
             *revision += 1;
@@ -1100,6 +1125,7 @@ impl Api {
             gg_api::Plane::Yz => Plane::YZ,
         });
         look.colliders = *colliders;
+        look.show = show.as_ref().map(Shown::of);
         look.revision = *revision;
     }
 
@@ -1154,7 +1180,7 @@ impl Api {
                 let consequence = "frames go unpublished while that lasts";
                 warn!(code = error.code(), "{error:#}; {consequence}");
             }
-            publish.skip = self.bare;
+            publish.skip = self.apart();
             publish.ticks = ticks;
             publish.started = cx.started;
         }
@@ -1166,16 +1192,24 @@ impl Api {
                 let taken = (self.riding).extract_if(.., |capturing| {
                     !streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT
                 });
-                for Capturing { reply, path, .. } in taken {
-                    let named = path.is_none();
-                    let path = path.unwrap_or_else(|| {
-                        self.numbered += 1;
-                        let name = format!("{}-{}.png", self.stem, self.numbered);
-                        self.captures.join(name)
-                    });
+                for Capturing {
+                    reply, path, at, ..
+                } in taken
+                {
+                    let named = path.is_none() && at.is_none();
+                    let path = match path {
+                        Some(path) => Some(path),
+                        None if at.is_some() => None,
+                        None => {
+                            self.numbered += 1;
+                            let name = format!("{}-{}.png", self.stem, self.numbered);
+                            Some(self.captures.join(name))
+                        }
+                    };
                     let png = Png {
                         shot: shot.clone(),
                         path,
+                        at,
                         named,
                         ticks: self.riding_ticks,
                         streaming,
@@ -1222,8 +1256,10 @@ impl Api {
                 name: name.map(|name| name.0.clone()),
             });
         }
-        let bare = self.bare;
-        let kind = self.asked.extract_if(.., |capturing| capturing.own == bare);
+        let (bare, shown) = (self.bare, &self.shown);
+        let kind = (self.asked).extract_if(.., |capturing| {
+            capturing.own == bare && capturing.show == *shown
+        });
         self.riding.extend(kind);
         frame.capture = !self.riding.is_empty();
         if frame.capture {
@@ -1243,10 +1279,16 @@ impl Api {
     }
 
     /// While the view is published, the number of the frame to be handed off next, as the client
-    /// will take it; `None` while the frame is bare, which isn't published.
+    /// will take it; `None` while the frame is apart, which isn't published.
     pub(crate) fn handing(&self) -> Option<u64> {
-        let pacer = self.pacer.as_ref().filter(|_| !self.bare)?;
+        let pacer = self.pacer.as_ref().filter(|_| !self.apart())?;
         Some(pacer.published().saturating_add(1))
+    }
+
+    /// Whether the frame being made is apart from those the view's client is shown, and isn't
+    /// published: bare, or showing what a capture asks in place of the view's light.
+    fn apart(&self) -> bool {
+        self.bare || self.shown.is_some()
     }
 
     /// While the view is published, waits until the client has taken frame `handed`, as
@@ -2406,18 +2448,34 @@ fn write_answers(mut stream: TcpStream, answers: &Receiver<Answer>) {
 fn write_pngs(pngs: &Receiver<Png>) {
     for png in pngs {
         let [width, height] = png.shot.size;
-        let written = write_png(&png.path, &png.shot, png.named).map(|()| Captured {
-            path: png.path,
-            width,
-            height,
-            ticks: png.ticks,
-            streaming: png.streaming,
-        });
+        let written = (png.path.as_deref())
+            .map_or(Ok(()), |path| write_png(path, &png.shot, png.named))
+            .map(|()| Captured {
+                path: png.path,
+                width,
+                height,
+                pixel: png.at.and_then(|at| pixel_at(&png.shot, at)),
+                ticks: png.ticks,
+                streaming: png.streaming,
+            });
         match written {
             Ok(captured) => png.reply.result(&captured),
             Err(error) => png.reply.send(Err(failure(&error))),
         }
     }
+}
+
+/// The RGBA bytes of the pixel `at` falls in, `[x, y]` from the top left of `shot`'s view, as the
+/// PNG has them; `None` outside the view.
+fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
+    let [width, height] = shot.size;
+    let [x, y] = at.map(f64::floor);
+    // Negative and not finite positions were refused with the request; this keeps an index in range.
+    if !(0.0..f64::from(width)).contains(&x) || !(0.0..f64::from(height)).contains(&y) {
+        return None;
+    }
+    let index = y as usize * width as usize + x as usize;
+    shot.pixels.as_chunks::<4>().0.get(index).copied()
 }
 
 /// Writes the snapshots `taken` brings, each a file of app `app`'s, whose layers are `layers`, as
@@ -2595,7 +2653,26 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
             return Err(bad_params(method, what));
         }
     }
+    if let Some(Some(show)) = &given.show {
+        shown(method, show)?;
+    }
     Ok(given)
+}
+
+/// Checks what a `look` or a `capture` shows in place of the view's light: an image's name that's
+/// neither empty nor longer than [`gg_api::MOST_IMAGE_NAME`] bytes.
+fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
+    match show {
+        gg_api::Shown::Image(name) if name.is_empty() || name.len() > gg_api::MOST_IMAGE_NAME => {
+            let what = format!(
+                "takes an image's name of 1 to {} bytes, not {} bytes",
+                gg_api::MOST_IMAGE_NAME,
+                name.len()
+            );
+            Err(bad_params(method, what))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The call `request` makes of the main loop.
@@ -2703,13 +2780,30 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             Call::Step(ticks)
         }
         "capture" => {
-            let Capture { path, own } = take(method, params)?;
+            let Capture {
+                path,
+                at,
+                own,
+                show,
+            } = take(method, params)?;
             if path.as_deref().is_some_and(|path| !path.is_absolute()) {
                 let what = "takes an absolute path, since the game's working directory may not be \
                             the tool's";
                 return Err(bad_params(method, what));
             }
-            Call::Capture { path, own }
+            if at.is_some_and(|at| at.iter().any(|axis| !axis.is_finite() || *axis < 0.0)) {
+                let what = "takes an `at` of finite numbers that aren't negative";
+                return Err(bad_params(method, what));
+            }
+            if let Some(show) = &show {
+                shown(method, show)?;
+            }
+            Call::Capture {
+                path,
+                at,
+                own,
+                show,
+            }
         }
         "look" => Call::Look(look(method, take(method, params)?)?),
         "pick" => {
@@ -4866,7 +4960,8 @@ mod tests {
             },
         );
         assert_eq!(refused, "api.no_view");
-        assert_eq!(captured.path, path);
+        assert_eq!(captured.path, Some(path.clone()));
+        assert_eq!(captured.pixel, None, "none was asked for");
         assert_eq!((captured.width, captured.height), (2, 1));
         let file = fs::File::open(&path).expect("the PNG");
         let mut reader =
@@ -5127,6 +5222,7 @@ mod tests {
             "outline": {"id": hero.to_string(), "color": [1, 0.5, 0, 1], "width": 3},
             "grid": "xy",
             "colliders": true,
+            "show": {"image": "view depth"},
         });
         let client = move |mut client: Client| {
             client.call_as::<Looked>("look", look).expect("the look");
@@ -5172,6 +5268,18 @@ mod tests {
         assert!(!cx.colliders_shown(), "as the layers set");
         // Seen from the look's viewpoint, whose exposure adapts apart, as the layer's own isn't.
         assert!(frame.looked && !expected.looked);
+        let depth = Shown::Image("view depth".into());
+        assert_eq!(frame.show, Some(depth.clone()), "what the look shows");
+        // What a capture riding with the frame shows, in place of the look's.
+        let rough = Shown::Shading(gg_renderer::Channel::Roughness);
+        cx.look.captured = Some(rough.clone());
+        set(&mut cx);
+        assert_eq!(
+            drawn(&mut cx).show,
+            Some(rough.clone()),
+            "what the capture shows"
+        );
+        cx.look.captured = None;
         // Bare, as the layers set alone.
         cx.look.bare = true;
         set(&mut cx);
@@ -5183,12 +5291,18 @@ mod tests {
         assert_eq!(frame.draws, expected.draws);
         assert_eq!((frame.viewpoint, frame.outline), (theirs, expected.outline));
         assert!(!frame.looked, "a bare frame is the game's own view");
+        assert_eq!(frame.show, None, "without what the look shows");
+        // Bare, but showing what a capture of the game's own view asks.
+        cx.look.captured = Some(rough.clone());
+        set(&mut cx);
+        assert_eq!(drawn(&mut cx).show, Some(rough), "what the capture shows");
     }
 
     /// A capture of the game's own view rides with a bare frame, which isn't published nor paced
-    /// for, nor asks a client's pick; a capture of the view as it's shown with one that isn't; and
-    /// of a pair of each asked together, the older goes first, the other with a frame of its kind
-    /// after.
+    /// for, nor asks a client's pick; a capture of the view as it's shown with one that isn't; one
+    /// that shows a part of shading with a frame that shows it, which isn't published nor paced for
+    /// either; and of those asked together, the oldest goes first, each other with a frame of its
+    /// kind after.
     #[test]
     fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
         let (mut api, session) = started("Api Bare Captures");
@@ -5216,11 +5330,14 @@ mod tests {
         let dir = Scratch::new("api-bare-capture");
         fs::create_dir_all(&dir.0).expect("a directory");
         let (to, answers) = mpsc::channel();
-        for (id, own) in [(1, true), (2, false)] {
+        let rough = Shown::Shading(gg_renderer::Channel::Roughness);
+        for (id, own, show) in [(1, true, None), (2, false, None), (3, false, Some(rough))] {
             api.asked.push(Capturing {
                 reply: reply(id, &to),
                 path: Some(dir.0.join(format!("{id}.png"))),
+                at: None,
                 own,
+                show,
                 since: Instant::now(),
             });
         }
@@ -5228,22 +5345,29 @@ mod tests {
             at: [0.0, 0.0],
             ticket: None,
             named: true,
-            reply: reply(3, &to),
+            reply: reply(4, &to),
         });
-        // Each frame: whether it's bare, rides with captures, is published, is paced for and has
-        // asked the pick.
+        // Each frame: whether it's bare, shows a part of shading, rides with captures, is
+        // published, is paced for and has asked the pick.
         let mut frames = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..7 {
             api.serve(&mut cx, &mut Stack::default(), &mut stepper);
-            let bare = cx.look.bare;
+            let (bare, shows) = (cx.look.bare, cx.look.shown().is_some());
             let asked = api.picks[0].ticket.is_some();
             api.frame_back(&mut frame, &cx, stepper.ticks);
             let skip = frame.publish.as_ref().expect("published").skip;
-            frames.push((bare, frame.capture, !skip, api.handing().is_some(), asked));
+            let paced = api.handing().is_some();
+            frames.push((bare, shows, frame.capture, !skip, paced, asked));
             // As the renderer reads back the view of a frame that rides with captures, a bare one
-            // 1 pixel wide, another 2.
+            // 1 pixel wide, one that shows a part of shading 3, another 2.
             frame.captured = frame.capture.then(|| {
-                let width = if bare { 1 } else { 2 };
+                let width = if bare {
+                    1
+                } else if shows {
+                    3
+                } else {
+                    2
+                };
                 let pixels = vec![0; width * 4];
                 Ok(Shot {
                     size: [width as u32, 1],
@@ -5252,15 +5376,18 @@ mod tests {
             });
         }
         let expected = [
-            (true, true, false, false, false),
+            (true, false, true, false, false, false),
             // Bare too, as the capture riding decides, its frame not known to have rendered.
-            (true, false, false, false, false),
-            (false, true, true, true, true),
-            (false, false, true, true, true),
+            (true, false, false, false, false, false),
+            (false, false, true, true, true, true),
+            (false, false, false, true, true, true),
+            (false, true, true, false, false, true),
+            (false, true, false, false, false, true),
+            (false, false, false, true, true, true),
         ];
         assert_eq!(frames, expected);
-        let mut widths = [0; 2];
-        for _ in 0..2 {
+        let mut widths = [0; 3];
+        for _ in 0..3 {
             let (line, _) = answers.recv_timeout(DEADLINE).expect("an answer");
             let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
             let id = answer["id"].as_u64().expect("its ID") as usize;
@@ -5270,8 +5397,8 @@ mod tests {
         }
         assert_eq!(
             widths,
-            [1, 2],
-            "the game's own view bare, the other as it's shown"
+            [1, 2, 3],
+            "the game's own view bare, the next as it's shown, the last showing its roughness"
         );
         drop(reader);
     }
@@ -5297,7 +5424,9 @@ mod tests {
             api.asked.push(Capturing {
                 reply: reply(id, &to),
                 path: Some(dir.0.join(format!("{id}.png"))),
+                at: None,
                 own: false,
+                show: None,
                 since,
             });
         }
@@ -5334,6 +5463,63 @@ mod tests {
             "once nothing is on its way"
         );
         assert!(!frame.capture, "nothing rides once both are answered");
+    }
+
+    /// A capture with `at` and no path answers the shot's bytes at that pixel, `None` outside the
+    /// view, and writes no PNG, numbering none of the engine's own; one with a path writes it too.
+    #[test]
+    fn a_capture_with_a_pixel_answers_its_bytes_and_writes_nothing() {
+        let (mut api, _) = started("Api Probes");
+        let mut cx = Context::seeded(13);
+        let mut stepper = Stepper::default();
+        let mut frame = Extracted::default();
+        let dir = Scratch::new("api-probe");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let (to, answers) = mpsc::channel();
+        let written = dir.0.join("both.png");
+        let asks = [
+            (None, [1.5, 0.0]),
+            (None, [2.0, 0.0]),
+            (None, [0.0, 1.0]),
+            (Some(written.clone()), [1.0, 1.0]),
+        ];
+        for (id, (path, at)) in asks.into_iter().enumerate() {
+            api.asked.push(Capturing {
+                reply: reply(id as u64, &to),
+                path,
+                at: Some(at),
+                own: false,
+                show: None,
+                since: Instant::now(),
+            });
+        }
+        api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        assert!(frame.capture, "the captures ride with the frame");
+        // A view of 2 by 2 pixels: its top row, then its bottom.
+        frame.captured = Some(Ok(Shot {
+            size: [2, 2],
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        }));
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        let mut answered = [const { None }; 4];
+        for _ in 0..4 {
+            let (line, _) = answers.recv_timeout(DEADLINE).expect("an answer");
+            let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
+            let id = answer["id"].as_u64().expect("its ID") as usize;
+            answered[id] = Some(answer["result"].clone());
+        }
+        let [a, b, c, d] = answered.map(|answer| answer.expect("answered"));
+        assert_eq!(a["pixel"], json!([5, 6, 7, 8]), "the pixel 1.5 falls in");
+        assert_eq!(b["pixel"], Value::Null, "outside the view");
+        assert_eq!(c["pixel"], json!([9, 10, 11, 12]), "the bottom row");
+        for probe in [&a, &b, &c] {
+            assert_eq!(probe["path"], Value::Null, "no PNG without a path");
+        }
+        assert_eq!(api.numbered, 0, "none named for the engine's directory");
+        assert_eq!(d["pixel"], json!([13, 14, 15, 16]));
+        assert_eq!(d["path"], json!(written));
+        assert!(written.is_file(), "a path asked for is written");
     }
 
     /// A client's pick is answered with the entity drawn at its pixel of the view, about as the
@@ -5461,9 +5647,29 @@ mod tests {
         assert_eq!(parse(&request("patch", given)), Ok(Call::Patch(jump)));
         let own = Call::Capture {
             path: None,
+            at: None,
             own: true,
+            show: None,
         };
         assert_eq!(parse(&request("capture", json!({"own": true}))), Ok(own));
+        let shown = Call::Capture {
+            path: None,
+            at: None,
+            own: false,
+            show: Some(gg_api::Shown::Image("view depth".to_owned())),
+        };
+        let given = json!({"show": {"image": "view depth"}});
+        assert_eq!(parse(&request("capture", given)), Ok(shown));
+        let probed = Call::Capture {
+            path: None,
+            at: Some([3.0, 4.5]),
+            own: false,
+            show: None,
+        };
+        assert_eq!(
+            parse(&request("capture", json!({"at": [3, 4.5]}))),
+            Ok(probed)
+        );
         let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
         assert_eq!(pick, Ok(Call::Pick([3.0, 4.5])));
         let saved = |path: Option<&str>| {
@@ -5556,6 +5762,16 @@ mod tests {
             ("step", json!({"tick": 2}), "api.bad_params"),
             ("capture", json!({"path": "relative.png"}), "api.bad_params"),
             ("capture", json!({"bare": true}), "api.bad_params"),
+            ("capture", json!({"at": [-1, 0]}), "api.bad_params"),
+            ("capture", json!({"at": [0, -0.5]}), "api.bad_params"),
+            // An image's name, empty or longer than names are.
+            (
+                "capture",
+                json!({"show": {"image": "x".repeat(gg_api::MOST_IMAGE_NAME + 1)}}),
+                "api.bad_params",
+            ),
+            ("look", json!({"show": {"image": ""}}), "api.bad_params"),
+            ("look", json!({"show": "albedo"}), "api.bad_params"),
             ("scene", Value::Null, "api.bad_params"),
             ("scene", json!({"action": "close"}), "api.bad_params"),
             ("scene", json!({"action": "open"}), "api.bad_params"),

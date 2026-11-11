@@ -7,6 +7,7 @@
 
 use std::f32::consts::{PI, TAU};
 
+use gg_api::Shown;
 use gg_engine::Context;
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
@@ -37,9 +38,55 @@ const LABEL: f32 = 18.0;
 /// as [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
 const INSET: f32 = 8.0;
 
+/// What the toolbar's list of what the view shows in place of its light has for an entry: the
+/// game's own light, a part of how it's shaded, or an image the frame makes, by its debug name.
+enum Channel {
+    Lit,
+    Part(Shown),
+    Image(&'static str),
+}
+
+impl Channel {
+    /// What the look's `show` is for it: `None` for the game's own light.
+    fn shown(&self) -> Option<Shown> {
+        match self {
+            Self::Lit => None,
+            Self::Part(shown) => Some(shown.clone()),
+            Self::Image(name) => Some(Shown::Image((*name).to_owned())),
+        }
+    }
+}
+
+/// The entries of the list of what the view shows, as the toolbar names them, the images after a
+/// separator.
+const CHANNELS: &[(&str, Channel)] = &[
+    ("Lit", Channel::Lit),
+    ("Base color", Channel::Part(Shown::BaseColor)),
+    ("Normal", Channel::Part(Shown::Normal)),
+    ("Surface normal", Channel::Part(Shown::SurfaceNormal)),
+    ("Metallic", Channel::Part(Shown::Metallic)),
+    ("Roughness", Channel::Part(Shown::Roughness)),
+    ("Occlusion", Channel::Part(Shown::Occlusion)),
+    ("Emission", Channel::Part(Shown::Emission)),
+    ("Direct light", Channel::Part(Shown::DirectLight)),
+    ("Sky light", Channel::Part(Shown::SkyLight)),
+    ("Reflection", Channel::Part(Shown::Reflection)),
+    ("Depth", Channel::Image("view depth")),
+    ("Motion", Channel::Image("view motion")),
+    ("IDs", Channel::Image("view ids")),
+    ("Visibility buffer", Channel::Image("view visibility")),
+    ("Ambient occlusion", Channel::Image("ambient occlusion")),
+    ("Shadow cascade 0", Channel::Image("shadow cascade 0")),
+    ("Shadow cascade 1", Channel::Image("shadow cascade 1")),
+    ("Shadow cascade 2", Channel::Image("shadow cascade 2")),
+    ("Shadow cascade 3", Channel::Image("shadow cascade 3")),
+    ("Before tonemapping", Channel::Image("view colors")),
+];
+
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
-/// which plane, whether the view sees through the game's camera, and whether the game's colliders'
-/// outlines show; and where it is over the view, and whether it's folded.
+/// which plane, whether the view sees through the game's camera, whether the game's colliders'
+/// outlines show, and what the view shows in place of its light; and where it is over the view, and
+/// whether it's folded.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -51,6 +98,9 @@ pub struct Toolbar {
     /// Whether the game's colliders' outlines show, over the rest of the view but a nearer
     /// opaque mesh, through either camera.
     pub colliders: bool,
+    /// What the view shows in place of its light, to see how it's made, through either camera;
+    /// `None` for the game's own light.
+    pub show: Option<Shown>,
     pub placement: Placement,
 }
 
@@ -62,6 +112,7 @@ impl Default for Toolbar {
             plane: Plane::XY,
             world_camera: false,
             colliders: false,
+            show: None,
             placement: Placement::default(),
         }
     }
@@ -185,9 +236,10 @@ impl Toolbar {
     /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, whose
     /// tooltips name the keys that pick them, the camera's projection, which a click switches, the
     /// grid's switch and its plane, the switch that sees through the game's camera, and the
-    /// colliders' switch, each with a tooltip. While the view sees through the game's camera, the
-    /// projection's and the grid's buttons are off, since what they change doesn't show. It opens
-    /// nothing, since a popup would take the view's keys.
+    /// colliders' switch, and the list of what the view shows in place of its light, each with a
+    /// tooltip. While the view sees through the game's camera, the projection's and the grid's
+    /// buttons are off, since what they change doesn't show. It opens nothing but that list, which
+    /// shows a popup that takes the view's keys while it's open.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -307,6 +359,34 @@ impl Toolbar {
                 {
                     self.colliders = !self.colliders;
                 }
+                // An image another client names that the list lacks shows by its name.
+                let selected = match CHANNELS
+                    .iter()
+                    .find(|(_, channel)| channel.shown() == self.show)
+                {
+                    Some((label, _)) => (*label).to_owned(),
+                    None => match &self.show {
+                        Some(Shown::Image(name)) => name.clone(),
+                        _ => "Lit".to_owned(),
+                    },
+                };
+                egui::ComboBox::from_id_salt("toolbar show")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        let mut images = false;
+                        for (label, channel) in CHANNELS {
+                            if !images && matches!(channel, Channel::Image(_)) {
+                                images = true;
+                                ui.separator();
+                            }
+                            ui.selectable_value(&mut self.show, channel.shown(), *label);
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "What the view shows in place of its light, to see how it's made; agents \
+                         can set it too",
+                    );
             });
         });
         self.placement.size = shown.response.rect.size();
@@ -927,7 +1007,7 @@ mod tests {
     #[test]
     fn dragging_the_grip_moves_the_toolbar_with_the_pointer_within_the_view() {
         let ctx = egui::Context::default();
-        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0));
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 400.0));
         let mut toolbar = Toolbar::default();
         // The first pass sizes it.
         show_toolbar(&ctx, &mut toolbar, view, Vec::new());

@@ -103,7 +103,7 @@ struct Resolve {
     history: u32,
     target: u32,
     resolved: u32,
-    has_history: u32,
+    held: u32,
     writes_resolved: u32,
     history_scale: f32,
 }
@@ -116,13 +116,15 @@ struct ResolvePush {
 }
 
 /// The last frame that resolved the view: its number, the view's size, the matrix from the world to
-/// the view's clip space it drew by, without its offset, and what lit shading multiplied light by.
+/// the view's clip space it drew by, without its offset, what lit shading multiplied light by, and
+/// how many frames in a row what it resolved holds, its own among them.
 #[derive(Clone, Copy)]
 struct Resolved {
     frame: u64,
     size: [u32; 2],
     clip_from_world: Mat4,
     exposure: f32,
+    held: u32,
 }
 
 /// What resolves the game's view, how many frames have, which the next one's offset follows, and
@@ -261,6 +263,7 @@ impl TaaPass {
         let previous = last.map_or(drawn.unjittered, |last| last.clip_from_world);
         // The history at this frame's exposure, as it changes, as an adapting one does.
         let history_scale = last.map_or(1.0, |last| rescale(drawn.exposure, last.exposure));
+        let held = last.map_or(0, |last| last.held);
         let [colors, depth, motion] = plan.drawn.map(|image| pass.sampled(image));
         let resolve = Resolve {
             world_from_clip: drawn.clip_from_world.inverse(),
@@ -275,7 +278,7 @@ impl TaaPass {
             resolved: plan
                 .resolved
                 .map_or(0, |resolved| pass.storage(resolved, 0)),
-            has_history: u32::from(plan.history.is_some()),
+            held,
             writes_resolved: u32::from(plan.resolved.is_some()),
             history_scale,
         };
@@ -292,6 +295,7 @@ impl TaaPass {
             size: plan.size,
             clip_from_world: drawn.unjittered,
             exposure: drawn.exposure,
+            held: held.saturating_add(1),
         });
         Ok(())
     }

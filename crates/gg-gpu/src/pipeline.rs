@@ -11,7 +11,7 @@ use gg_core::{Error, Result};
 use tracing::debug;
 
 use crate::device::Retired;
-use crate::frame::graph::Kind;
+use crate::frame::graph::ImageKind;
 use crate::{Device, vk_error};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for: its color
@@ -37,14 +37,14 @@ impl Format {
     ///
     /// [`Graph`]: crate::Graph
     /// [`Graph::hdr`]: crate::Graph::hdr
-    pub const HDR: Self = Self::new(Kind::Hdr.format());
+    pub const HDR: Self = Self::new(ImageKind::Hdr.format());
 
     /// The format of a visibility buffer ([`Graph::visibility`]), two 32-bit unsigned integers a
     /// pixel, without IDs or depth: a pipeline into one writes them at location 0, and blends as
     /// [`Blend::Opaque`] alone, as integers don't blend.
     ///
     /// [`Graph::visibility`]: crate::Graph::visibility
-    pub const VISIBILITY: Self = Self::new(Kind::Visibility.format());
+    pub const VISIBILITY: Self = Self::new(ImageKind::Visibility.format());
 
     /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::depth`])
     /// does.
@@ -66,7 +66,7 @@ impl Format {
     /// ([`RenderPass::ids`](crate::RenderPass::ids)) renders into, as a second color target.
     pub const fn with_ids(self) -> Self {
         Self {
-            ids: Kind::Ids.format(),
+            ids: ImageKind::Ids.format(),
             ..self
         }
     }
@@ -76,7 +76,7 @@ impl Format {
     /// target, which a pipeline that writes depth writes at location 2, as 16-bit floats in RGBA.
     pub const fn with_motion(self) -> Self {
         Self {
-            motion: Kind::Motion.format(),
+            motion: ImageKind::Motion.format(),
             ..self
         }
     }
@@ -85,7 +85,7 @@ impl Format {
     /// ([`RenderPass::depth`](crate::RenderPass::depth)) renders into.
     pub const fn with_depth(self) -> Self {
         Self {
-            depth: Kind::Depth.format(),
+            depth: ImageKind::Depth.format(),
             ..self
         }
     }

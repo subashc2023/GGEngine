@@ -23,12 +23,12 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
-    Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog, Glyph, Grade,
-    Grid, GridLines, Lens, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES,
+    Channel, Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog, Glyph,
+    Grade, Grid, GridLines, Lens, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES,
     MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets,
     Mipmaps, ModelMesh, ModelVertex, MotionBlur, Outline, PackedVertex, ParticleShape, Particles,
     Pick, Pixels, Projection, Reflections, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
-    Shaders, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
+    Shaders, Show, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures, Tonemapper, Ui,
     UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
 };
 
@@ -122,6 +122,7 @@ fn main() -> ExitCode {
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
+        views_show_parts_of_shading_and_images_in_place_of_light,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -183,6 +184,7 @@ fn main() -> ExitCode {
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
+        views_show_parts_of_shading_and_images_in_place_of_light,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -442,6 +444,7 @@ impl Stores {
             outline: None,
             read_view: false,
             pixels: None,
+            show: None,
         }
     }
 }
@@ -4081,7 +4084,10 @@ fn tonemappers_match_their_reference() {
 /// to white, the first three show white, and the last as none, black, without antialiasing, with
 /// TAA and with SMAA, frame after frame, rather than as no number, black, or cyan where red alone
 /// is infinite; and no pixel but those of the square of no number and next to it, which blend with
-/// its black, shows darker than the clear color, as one that blends with no number would.
+/// its black, shows darker than the clear color, as one that blends with no number would: darker in
+/// a channel, and brighter in none. A pixel beside the red is redder, as TAA's filter spreads a
+/// little of its light, and darker in green and blue, as PBR Neutral takes more off a color whose
+/// least channel is greater.
 fn colors_past_a_half_float_show_as_its_brightest() {
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 16;
@@ -4135,9 +4141,11 @@ fn colors_past_a_half_float_show_as_its_brightest() {
             let clear = pixel_at(&pixels, WIDTH, [0, 0]);
             let dark = (0..HEIGHT)
                 .flat_map(|y| (0..51).map(move |x| [x, y]))
-                .find(|&at| {
-                    let pixel = pixel_at(&pixels, WIDTH, at);
-                    (pixel.iter().zip(clear)).any(|(&got, clear)| got < clear.saturating_sub(1))
+                .map(|at| (at, pixel_at(&pixels, WIDTH, at)))
+                .find(|(_, pixel)| {
+                    let darker = |(&got, clear): (&u8, u8)| got < clear.saturating_sub(1);
+                    let brighter = |(&got, clear): (&u8, u8)| got > clear.saturating_add(1);
+                    pixel.iter().zip(clear).any(darker) && !pixel.iter().zip(clear).any(brighter)
                 });
             assert!(
                 dark.is_none(),
@@ -7089,9 +7097,8 @@ fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
 /// otherwise; through the panel's hole, the floor under it, as the depth of a masked material is
 /// cut out as it is; out in the open, and where the strip was bound, it's as it is without; and the
 /// back wall, which reads none, shows its color either way. Against its reference image, without
-/// antialiasing, which denoises the still noise; and antialiased, as the frames' noise averages
-/// out, against it too, where two frames drawn at the same offset, each starting afresh, differ
-/// by their noise.
+/// antialiasing and antialiased alike, the noise still from frame to frame either way: two frames
+/// drawn at the same offset, each starting afresh, are the same.
 fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7158,9 +7165,10 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         "the back wall reads no occlusion"
     );
     compare("ambient_occlusion", WIDTH, HEIGHT, &with);
-    // Antialiased, each frame takes another frame's noise. Its first frame, after one that resolved
+    // Antialiased, each frame takes the same noise. Its first frame, after one that resolved
     // nothing, starts afresh, as does the one after the next 7 and a frame that resolves nothing,
-    // at the same offset of the 8: the two differ by their noise alone, where the occlusion shows.
+    // at the same offset of the 8: the two are the same, as noise that changed would differ where
+    // the occlusion shows.
     let taa = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
         let data = RenderData {
             ambient_occlusion: on,
@@ -7182,11 +7190,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         .zip(again.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
-    assert!(
-        moved > 100,
-        "{moved} pixels differ, as the occlusion's noise stays from frame to frame"
-    );
-    // Which the resolve averages over its frames.
+    assert_eq!(moved, 0, "pixels differ, as the occlusion's noise changed");
     for _ in 0..16 {
         taa(&mut renderer, &mut stores, Antialiasing::Taa);
     }
@@ -7887,6 +7891,154 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
             "square {i} shows {got:?}, not 0.5 times {share} encoded, {value}"
         );
     }
+    shut_down(renderer);
+}
+
+/// Squares lit by a sky and a light, each showing in place of its light a part of what shading
+/// takes, as its material holds it, its values as their bytes over 255, through a frame that would
+/// otherwise antialias, bloom and vignette them; or an image the frame makes, black where nothing
+/// drew, and wholly black for an image it doesn't make. The sky doesn't show behind them. A frame
+/// of their light, after, shows as one before.
+fn views_show_parts_of_shading_and_images_in_place_of_light() {
+    const SIDE: u32 = 16;
+    const SQUARES: u32 = 3;
+    const WIDTH: u32 = SIDE * SQUARES;
+    const HEIGHT: u32 = 2 * SIDE;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [1.0; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 0.25,
+    });
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::new(0.0, -1.0, -1.0).normalize(),
+        color: Vec3::splat(1.0),
+        range: None,
+        shadow_distance: None,
+    }];
+    let color = Vec4::new(0.5, 0.25, 1.0, 1.0);
+    let squares = [
+        Material {
+            color,
+            workflow: metallic(0.25, 0.75),
+            emissive: Vec3::new(0.5, 0.0, 0.0),
+            ..Material::default()
+        },
+        Material {
+            color,
+            unlit: true,
+            ..Material::default()
+        },
+        Material {
+            color,
+            workflow: Workflow::SpecularGlossiness {
+                specular: Vec3::splat(0.04),
+                glossiness: 0.5,
+            },
+            ..Material::default()
+        },
+    ];
+    let square = model_square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    for (i, material) in (0_u32..).zip(&squares) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        let at = Vec3::new(i as f32 - (SQUARES - 1) as f32 / 2.0, 0.0, 0.0);
+        draws.push_draw(Mat4::from_translation(at), &draw, u64::from(i) + 1);
+    }
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut frame = |show| {
+        let data = RenderData {
+            show,
+            antialiasing: Antialiasing::Taa,
+            bloom: 1.0,
+            lens: Lens {
+                vignette: 1.0,
+                ..Lens::NONE
+            },
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        frame_pixels(&mut renderer)
+    };
+    let lit = frame(None);
+    let square = |frame: &[u8], i: u32| pixel_at(frame, WIDTH, [i * SIDE + SIDE / 2, SIDE]);
+    let above = |frame: &[u8]| pixel_at(frame, WIDTH, [SIDE / 2, 2]);
+    let near = |got: [u8; 4], [r, g, b]: [u8; 3]| {
+        got.iter()
+            .zip([r, g, b, 255])
+            .all(|(&a, b)| a.abs_diff(b) <= 1)
+    };
+    let value = |value: f32| (value * 255.0).round() as u8;
+    let encoded_color = [encoded(0.5), encoded(0.25), encoded(1.0)];
+    let up = [128, 128, 255];
+    let parts = [
+        (
+            Channel::BaseColor,
+            [encoded_color, encoded_color, encoded_color],
+        ),
+        (Channel::Normal, [up; 3]),
+        (Channel::SurfaceNormal, [up; 3]),
+        (Channel::Metallic, [[value(0.25); 3], [255; 3], [0; 3]]),
+        (
+            Channel::Roughness,
+            [[value(0.75); 3], [255; 3], [value(0.5); 3]],
+        ),
+        (Channel::Occlusion, [[255; 3]; 3]),
+        (Channel::Emission, [[encoded(0.5), 0, 0], [0; 3], [0; 3]]),
+    ];
+    for (channel, expected) in parts {
+        let shown = frame(Some(Show::Shading(channel)));
+        for (i, expected) in (0..).zip(expected) {
+            let got = square(&shown, i);
+            assert!(
+                near(got, expected),
+                "{channel:?} shows square {i} as {got:?}, not {expected:?}"
+            );
+        }
+        assert_eq!(above(&shown), [0, 0, 0, 255], "{channel:?} shows a sky");
+    }
+    // Light, which the lit square takes and the unlit one doesn't.
+    for channel in [Channel::DirectLight, Channel::SkyLight] {
+        let shown = frame(Some(Show::Shading(channel)));
+        let [lit_square, unlit] = [square(&shown, 0), square(&shown, 1)];
+        assert!(
+            lit_square[..3].iter().any(|&channel| channel > 8) && unlit == [0, 0, 0, 255],
+            "{channel:?} shows the lit square as {lit_square:?} and the unlit one as {unlit:?}"
+        );
+    }
+    let depth = frame(Some(Show::Image("view depth")));
+    let [r, g, b, _] = square(&depth, 0);
+    assert!(r > 0 && r == g && g == b, "the depth shows {:?}", [r, g, b]);
+    assert_eq!(above(&depth), [0, 0, 0, 255], "where nothing drew");
+    let ids = frame(Some(Show::Image("view ids")));
+    let colors = [0, 1, 2].map(|i| square(&ids, i));
+    assert!(
+        colors[0] != colors[1] && colors[1] != colors[2] && colors.iter().all(|c| c[..3] != [0; 3]),
+        "the IDs show as {colors:?}"
+    );
+    assert_eq!(above(&ids), [0, 0, 0, 255], "where no ID drew");
+    let missing = frame(Some(Show::Image("no such image")));
+    assert!(
+        missing.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]),
+        "an image the frame doesn't make shows black"
+    );
+    let again = frame(None);
+    assert!(again == lit, "the light shows again as it did");
     shut_down(renderer);
 }
 

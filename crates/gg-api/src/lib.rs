@@ -66,7 +66,10 @@
 //!   - `api.no_scene`, in a lockstep peer, and for `open` and `new` in a recorded run;
 //!   - and as loading or saving a scene fails, such as with `scene.file` or `scene.outside`.
 //! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
-//!   shown, the look among it, or as the game shows it on its own, and answers [`Captured`].
+//!   shown, the look among it, or as the game shows it on its own, showing what [`Shown`] says in
+//!   place of its light if asked, and answers [`Captured`]; fails with `api.bad_params` for an
+//!   image's name as `look` refuses it, and for an `at` that isn't finite or is negative. With `at`
+//!   it answers the bytes of that pixel, and with `at` alone writes no PNG.
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
 //!   client made, as [`view::Reader`] makes it, in place of any it published to before, or stop
 //!   publishing for `null`, and answers `{}`; fails with `api.view` if the memory can't be opened.
@@ -76,13 +79,15 @@
 //!   frame starts, and answers `{}`.
 //! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
 //!   last to set a part winning, and which last until a client changes them or the run ends: the
-//!   viewpoint the view is seen from, the outline round an entity, a grid, and whether colliders'
-//!   outlines show; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
-//!   It's set as a frame starts, which draws with it. It fails with `api.bad_params`, saying why,
-//!   for a viewpoint that isn't finite, whose rotation doesn't normalize, or whose projection can't
-//!   project, as [`Projection`] says; or for an outline whose ID isn't 16 hex digits, whose color
-//!   isn't finite, or whose width isn't finite and positive. An outline of an ID no entity has
-//!   outlines nothing, and isn't refused.
+//!   viewpoint the view is seen from, the outline round an entity, a grid, whether colliders'
+//!   outlines show, and what the view shows in place of its light, [`Shown`]; and answers
+//!   [`Looked`], the look once set, or as it is, for `{}` or no params. It's set as a frame starts,
+//!   which draws with it. It fails with `api.bad_params`, saying why, for a viewpoint that isn't
+//!   finite, whose rotation doesn't normalize, or whose projection can't project, as
+//!   [`Projection`] says; for an outline whose ID isn't 16 hex digits, whose color isn't finite, or
+//!   whose width isn't finite and positive; or for an image's name that's empty or longer than
+//!   [`MOST_IMAGE_NAME`] bytes. An outline of an ID no entity has outlines nothing, and isn't
+//!   refused, nor is an image's name the frame doesn't make.
 //! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
 //!   look among it, in the frame that reads it, about four frames after it's asked.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
@@ -588,29 +593,52 @@ fn one() -> u64 {
 /// one, a file in the `captures` directory beside the game's executable, named for the run, as
 /// `sandbox-4242-7.png`, the newest 32 of which it keeps, removing older ones as each is written:
 /// those a client named stay.
+///
+/// With `at` and without `path`, it writes no file and keeps none of the newest 32 out: it answers
+/// the pixel alone, as [`Captured::pixel`] says.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// A pixel of the view, `[x, y]` from its top left, as [`Pick::at`] is, whose bytes the answer
+    /// gives as [`Captured::pixel`]; a number that isn't finite, or is negative, is refused with
+    /// `api.bad_params`. The pixel is the one the position falls in, as `pick`'s is.
+    #[serde(default)]
+    pub at: Option<[f64; 2]>,
     /// Whether to capture the view as the game shows it on its own, through its own viewpoint,
     /// without the look's outline, grid or colliders, in a frame that isn't published to a view's
     /// memory, and that a windowed game shows in its window; without it, the capture shows the
     /// view as it's shown, the look among it.
     #[serde(default)]
     pub own: bool,
+    /// What to show in place of the view's light, as [`Shown`] says, in place of what the look
+    /// shows, in a frame that isn't published to a view's memory; without it, what the look shows,
+    /// unless `own`. Captures of several, one after another while the game is paused, show one
+    /// world.
+    #[serde(default)]
+    pub show: Option<Shown>,
 }
 
-/// What `capture` answers: where the PNG is, its size, the view's in pixels, and the ticks the
+/// What `capture` answers: where the PNG is, if it wrote one, its size, the view's in pixels, the
+/// bytes of the pixel it was asked for, if it was asked, and the ticks the
 /// simulation had run in the frame it shows, as that frame drew them: while paused, as the last
 /// tick left the world. A capture waits up to 10 s for a frame in which every texture and mesh
 /// added before it has come to the GPU, rather than showing their stand-ins; past that, it takes
 /// the next frame all the same, and `streaming` says so.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
-    pub path: PathBuf,
+    /// The PNG's path; `None` exactly when [`Capture::at`] was given without a `path`, which writes
+    /// none.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
+    /// The red, green, blue and alpha bytes of the pixel at [`Capture::at`], as the PNG has them
+    /// (its alpha, which the PNG leaves out, as the view drew it), each read as [`Shown`] says of
+    /// what the capture shows; `None` where it's outside the view, and without `at`.
+    #[serde(default)]
+    pub pixel: Option<[u8; 4]>,
     pub ticks: u64,
     /// Whether textures or meshes were still decoding or streaming to the GPU in the frame it
     /// shows, which shows a stand-in in a texture's place, or nothing in a mesh's.
@@ -786,7 +814,67 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub colliders: Option<Option<bool>>,
+    /// What the view shows in place of its light, as [`Shown`] says.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub show: Option<Option<Shown>>,
 }
+
+/// What the game's view shows in place of its light, to see how it's made: a part of what lit
+/// shading takes or makes, at each point of what models draw, by its name, as `"roughness"`; or an
+/// image the frame makes, by its debug name, as RenderDoc and ARCHITECTURE.md's Rendering name
+/// them: `{"image":"view depth"}`. The view shows it as drawn, without the offset of antialiasing,
+/// and nothing after it: no antialiasing, fog, depth of field, motion blur, bloom, grade or lens,
+/// nor the exposure metered; and without the sky, black behind what's drawn. Beside a part of
+/// shading, what draws without lit shading, as sprites, text and particles, draws as it does; an
+/// image takes the whole view, alone.
+///
+/// A pixel's bytes, as a capture's PNG has them, read as each says: a value of 0 to 1 as its byte
+/// over 255, in red, green and blue alike.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Shown {
+    /// The base color, its texture's, its vertices' and its factor's, as a texture's sRGB colors
+    /// store it; a specular-glossiness material's diffuse color.
+    BaseColor,
+    /// Which way the point faces in the world, as shading turns it, its normal map's bumps among
+    /// it: each axis from -1 to 1 as its byte over 255, times 2, less 1, X in red, Y in green and
+    /// Z in blue.
+    Normal,
+    /// Which way the point faces before its normal map, as [`Shown::Normal`] reads.
+    SurfaceNormal,
+    /// How metallic it is; 0 for a specular-glossiness material.
+    Metallic,
+    /// How rough it is, as shading takes it: from 0.045, the least it takes, to 1.
+    Roughness,
+    /// The share of the light from all around that reaches it: its material's occlusion map's and
+    /// the view's ambient occlusion's, as shading takes it.
+    Occlusion,
+    /// The light it gives off, as [`Shown::BaseColor`] reads, past 1 shown as 1.
+    Emission,
+    /// The light the frame's lights shade it with, the sun's among them, shadows and all, exposed
+    /// and tonemapped as the view's light is; none on an unlit material.
+    DirectLight,
+    /// The light from all around, the sky's diffuse and specular light, darkened by occlusion, as
+    /// [`Shown::DirectLight`] reads.
+    SkyLight,
+    /// The view's reflection, which takes the place of as much of the sky's specular light, as
+    /// [`Shown::DirectLight`] reads.
+    Reflection,
+    /// An image the frame makes, by its debug name, as its kind reads: colors as they are, of high
+    /// dynamic range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at
+    /// its near plane, and a 24th darker each time the distance doubles, black where nothing drew;
+    /// IDs and a visibility buffer as a color for each value, black for 0; motion as normals are,
+    /// in units of the world, -1 to 1; a float a pixel as its value. An image the frame doesn't
+    /// make shows black, warning `renderer.no_image`.
+    Image(String),
+}
+
+/// The most bytes a [`Shown::Image`]'s name has.
+pub const MOST_IMAGE_NAME: usize = 64;
 
 /// What `look` answers: the look once set, each part `None` where it's the game's own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -795,6 +883,9 @@ pub struct Looked {
     pub outline: Option<Outline>,
     pub grid: Option<Plane>,
     pub colliders: Option<bool>,
+    /// `None` from an engine older than what the view shows.
+    #[serde(default)]
+    pub show: Option<Shown>,
     pub by: By,
     /// How many times the look has changed in the run, which a frame shared gives as the revision
     /// it drew with ([`view::Frame::look`]): a `look` that changes no part's value or setter
@@ -818,6 +909,8 @@ pub struct By {
     pub outline: Option<String>,
     pub grid: Option<String>,
     pub colliders: Option<String>,
+    #[serde(default)]
+    pub show: Option<String>,
 }
 
 /// What `pick` takes: the pixel of the view to pick at, `[x, y]` from its top left, as `input`'s
@@ -1971,6 +2064,7 @@ mod tests {
             outline: Some(None),
             grid: Some(Some(Plane::Xz)),
             colliders: None,
+            show: None,
         };
         assert_eq!(look, expected);
         let written = serde_json::to_value(&look).unwrap();
@@ -1997,7 +2091,28 @@ mod tests {
         };
         assert_eq!(look.outline, Some(Some(outline)));
         assert_eq!(look.colliders, Some(Some(false)));
+        // What the view shows: a part of shading by its name, or an image by its own.
+        let shows = [
+            (r#""base_color""#, Shown::BaseColor),
+            (r#""surface_normal""#, Shown::SurfaceNormal),
+            (r#""direct_light""#, Shown::DirectLight),
+            (
+                r#"{"image": "view depth"}"#,
+                Shown::Image("view depth".to_owned()),
+            ),
+        ];
+        for (json, show) in shows {
+            let look: Look = serde_json::from_str(&format!(r#"{{"show": {json}}}"#)).unwrap();
+            assert_eq!(look.show, Some(Some(show.clone())), "{json}");
+            let written = serde_json::to_value(&show).unwrap();
+            assert_eq!(written, serde_json::from_str::<Value>(json).unwrap());
+        }
+        let look: Look = serde_json::from_str(r#"{"show": null}"#).unwrap();
+        assert_eq!(look.show, Some(None), "given back");
         for refused in [
+            r#"{"show": "BaseColor"}"#,
+            r#"{"show": "albedo"}"#,
+            r#"{"show": {"image": "view depth", "level": 0}}"#,
             r#"{"grid": "XZ"}"#,
             r#"{"colliders": true, "camera": null}"#,
             r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0, 0, 1]}}"#,
@@ -2037,19 +2152,30 @@ mod tests {
             }),
             grid: Some(Plane::Xy),
             colliders: None,
+            // From an engine older than what the view shows, which names none.
+            show: None,
             by: By {
                 viewpoint: None,
                 outline: Some("editor".to_owned()),
                 grid: Some("gg".to_owned()),
                 colliders: None,
+                show: None,
             },
             revision: 3,
             run: 7,
             seen: Some(seen),
         };
         assert_eq!(looked, expected);
-        let back: Looked = serde_json::from_str(&serde_json::to_string(&looked).unwrap()).unwrap();
-        assert_eq!(back, looked);
+        let shown = Looked {
+            show: Some(Shown::Roughness),
+            by: By {
+                show: Some("gg".to_owned()),
+                ..expected.by
+            },
+            ..expected
+        };
+        let back: Looked = serde_json::from_str(&serde_json::to_string(&shown).unwrap()).unwrap();
+        assert_eq!(back, shown);
     }
 
     /// A pick names a pixel of the view, and its answer an entity, or none; a capture is of the
@@ -2068,10 +2194,37 @@ mod tests {
         };
         assert_eq!(serde_json::from_str::<Picked>(picked).unwrap(), expected);
         let capture: Capture = serde_json::from_str("{}").unwrap();
-        assert_eq!((capture.path, capture.own), (None, false));
+        assert_eq!(
+            (capture.path, capture.own, capture.show),
+            (None, false, None)
+        );
         let capture: Capture = serde_json::from_str(r#"{"own": true}"#).unwrap();
         assert!(capture.own);
+        let capture: Capture = serde_json::from_str(r#"{"show": "normal"}"#).unwrap();
+        assert_eq!(capture.show, Some(Shown::Normal));
         assert!(serde_json::from_str::<Capture>(r#"{"bare": true}"#).is_err());
+        let capture: Capture = serde_json::from_str(r#"{"at": [3, 4.5]}"#).unwrap();
+        assert_eq!((capture.at, capture.path), (Some([3.0, 4.5]), None));
+        assert!(serde_json::from_str::<Capture>(r#"{"at": [3]}"#).is_err());
+    }
+
+    /// A capture's answer has a path unless it was asked for a pixel alone, and the pixel's bytes
+    /// when asked; one from an engine older than `at` has a path and no pixel.
+    #[test]
+    fn captured_reads_with_or_without_its_path_and_pixel() {
+        let old = r#"{"path": "/c/a.png", "width": 4, "height": 2, "ticks": 7}"#;
+        let captured: Captured = serde_json::from_str(old).unwrap();
+        assert_eq!(captured.path, Some(PathBuf::from("/c/a.png")));
+        assert_eq!(captured.pixel, None);
+        let probe =
+            r#"{"path": null, "width": 4, "height": 2, "pixel": [1, 2, 3, 255], "ticks": 7}"#;
+        let captured: Captured = serde_json::from_str(probe).unwrap();
+        assert_eq!(
+            (captured.path, captured.pixel),
+            (None, Some([1, 2, 3, 255]))
+        );
+        let bare = r#"{"width": 4, "height": 2, "ticks": 7}"#;
+        assert_eq!(serde_json::from_str::<Captured>(bare).unwrap().path, None);
     }
 
     /// A scene request says what to do, with a path and whether to discard, when given; a status

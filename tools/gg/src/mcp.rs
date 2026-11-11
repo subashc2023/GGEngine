@@ -11,10 +11,11 @@ use std::io::{self, BufRead, Write as _};
 use std::time::Duration;
 
 use gg_api::{Failure, LogEvents};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 use crate::game::{self, Pick};
-use crate::runs;
+use crate::{probe, runs};
 
 /// The versions of MCP served, the latest first: a client's own, if it's one of them, or else the
 /// latest. Those that `initialize`, `tools/list` and `tools/call` are the same in, which is all
@@ -23,6 +24,24 @@ const VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2024-11-05"];
 
 /// How many of the log's events `logs` gives without `from`, the last.
 const MOST_LOG_LINES: usize = 200;
+
+/// What the tools' `show` is, for their schemas: the names, and how a PNG's bytes read, as gg-api's
+/// `Shown` says.
+const SHOWN: &str = "\
+A part of lit shading, by its name: `base_color` (as a texture's sRGB colors store it), `normal` \
+(which way the point faces in the world, its normal map's bumps among it: each axis -1 to 1 as \
+its byte over 255, times 2, less 1, X in red, Y in green, Z in blue), `surface_normal` (the same \
+before its normal map), `metallic`, `roughness` (0.045 to 1) and `occlusion` (each a value 0 to 1 \
+as its byte over 255, in red, green and blue alike), `emission` (as `base_color`, past 1 shown as \
+1), `direct_light` (the frame's lights', shadows and all), `sky_light` and `reflection` (each \
+light exposed and tonemapped as the view's is); or an image the frame makes, by its debug name, \
+any other string, as `view depth`, or `{\"image\": name}` (at most 64 bytes), as its kind reads: \
+colors as they are, high dynamic range tonemapped, depth as 1 + log2(depth) / 24 (white at the \
+near plane, a 24th darker each time the distance doubles, black where nothing drew), IDs and a \
+visibility buffer a color for each value (black for 0), motion as normals are, a float a pixel as \
+its value; an image the frame doesn't make shows black, warning `renderer.no_image`. Drawn without \
+antialiasing, fog, depth of field, motion blur, bloom, grade, lens, exposure or sky, which is \
+black.";
 
 /// What `initialize` tells the client of the tools, for its model.
 const INSTRUCTIONS: &str = "\
@@ -38,9 +57,13 @@ names, whose `unsaved` says whether it differs from the file, and `edited` wheth
 author edited it since, as play changes it too, writing its entities, never those \
 the game's code made; or opens another scene file in its place, or empties it, neither of which \
 can be undone. `look` sets parts of the view's look, its viewpoint, an outline round an entity, a \
-grid, and whether colliders' outlines show, which the editor and any other client set too, the \
-last to set a part winning; give back, as null, what you set when you're done. `capture` shows \
-the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it. \
+grid, whether colliders' outlines show, and `show`, which part of the lit shading or which image \
+the frame makes the view shows in place of its light, which the editor and any other client set \
+too, the last to set a part winning; give back, as null, what you set when you're done. `capture` \
+shows the view with the look, or with its own `show`, for that capture alone, which an agent \
+reads for what shading made of a pixel; several, taken together from one world, are an array; and \
+`pick` names the entity at a pixel of it, as a capture's PNG has it; `probe` reads the numbers of \
+what shading took and made at one pixel, which is the way to find what's wrong there. \
 Textures, models, fonts, prefabs and UIs have IDs, 16 hex digits, which `assets` lists with their \
 paths: the game, but a lockstep session's joiner, whose host does, writes each one's in an ID file \
 beside it, `<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it \
@@ -185,6 +208,10 @@ fn tools() -> Value {
             "additionalProperties": false,
         })
     };
+    let shown = json!({"anyOf": [
+        {"type": "string", "minLength": 1, "maxLength": 64},
+        variant("image", json!({"type": "string", "minLength": 1, "maxLength": 64})),
+    ]});
     let input = json!({
         "type": "array",
         "description": "The events, each an object of one key, its kind, or a string for one that \
@@ -348,9 +375,18 @@ fn tools() -> Value {
              `path`, which a tool that reads images opens: as it's shown, the look included, but \
              without the game's UI; or with `own`, as the game shows it on its own, through its \
              own viewpoint, without the look. With `inline`, the answer holds the image too, \
-             which a large view makes large. The game keeps its newest 32 captures.",
+             which a large view makes large. With `show`, that capture alone shows what it names \
+             in place of the view's light, without changing the look, in a frame that isn't \
+             published; give several, as an array, and they're taken one after another from one \
+             world, the game paused for them if it plays, and answer an array, each with its \
+             `path`, and with `inline` each PNG, in order. The game keeps its newest 32 captures.",
             json!({
                 "own": {"type": "boolean", "default": false},
+                "show": {
+                    "anyOf": [shown.clone(), {"type": "array", "minItems": 1, "items": shown.clone()}],
+                    "description": format!("What to show in place of the view's light: a name, \
+                                            or an array of them. {SHOWN}"),
+                },
                 "inline": {"type": "boolean", "default": false,
                            "description": "Whether the answer holds the PNG itself"},
             }),
@@ -410,6 +446,12 @@ fn tools() -> Value {
                     "description": "Whether colliders' outlines show, in place of whether the \
                                     game shows them",
                 },
+                "show": {
+                    "anyOf": [shown.clone(), {"type": "null"}],
+                    "description": format!("What the view shows in place of its light, to see \
+                                            how it's made, and which any capture without its own \
+                                            `show` shows: {SHOWN}"),
+                },
             }),
             &[],
         ),
@@ -421,6 +463,35 @@ fn tools() -> Value {
              while its window is minimized.",
             json!({"at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's \
                                      PNG has it")}),
+            &["at"],
+        ),
+        tool(
+            "probe",
+            "What shading took and made at one pixel of the game's view, as numbers: use it to \
+             find what's wrong at a pixel, such as its material's values, its normal, and which \
+             light reaches it, rather than reading a PNG's colors by eye. It captures the pixel \
+             showing each part of shading, writing no PNG, with a `pick` and a `look`, all from \
+             one world, the game paused for them if it plays, and answers one object: `at`, \
+             `size` ([width, height] of the view) and `ticks`; `base_color` and `emission`, \
+             linear RGB from 0; `normal` (its normal map's bumps among it) and `surface_normal` \
+             (without them), [x, y, z] in the world, each from -1 to 1; `metallic`, `roughness` \
+             (from 0.045) and `occlusion` (the share of the light from all around that reaches \
+             it), each 0 to 1; `direct_light` (the frame's lights', shadows and all), `sky_light` \
+             (from all around, darkened by occlusion), `reflection` and `shown` (the view's own \
+             pixel), each as the sRGB bytes [r, g, b], 0 to 255, exposed and tonemapped as the \
+             view shows them, not linear; `depth`, the reversed depth, 1 at the near plane and \
+             smaller the farther, 0 where nothing drew; `distance`, `near / depth` in world \
+             units, how far in front of the viewpoint, not from it, null where nothing drew and \
+             for a view that isn't a perspective; `entity`, `{id, name}` as `pick` answers it; \
+             and `quantized`, a note that every value is read from an 8-bit pixel, good to about \
+             1/255, `distance` to about 3%. Every value is null for a pixel outside the view.",
+            json!({
+                "at": numbers(2, "The pixel, [x, y] from the view's top left, not negative, as a \
+                                  capture's PNG has it"),
+                "own": {"type": "boolean", "default": false,
+                        "description": "Whether to probe the view as the game shows it on its \
+                                        own, through its own viewpoint, without the look"},
+            }),
             &["at"],
         ),
         tool(
@@ -677,9 +748,13 @@ fn call_tool(pick: &Pick, params: &Value) -> Result<Value, String> {
     let text = |text: String| json!({"type": "text", "text": text});
     let done = match run(pick, name, arguments) {
         Ok(Ran::Json(result)) => json!({"content": [text(result)], "isError": false}),
-        Ok(Ran::Image(result, png)) => {
-            let image = json!({"type": "image", "data": base64(&png), "mimeType": "image/png"});
-            json!({"content": [text(result), image], "isError": false})
+        Ok(Ran::Image(result, pngs)) => {
+            let mut content = vec![text(result)];
+            for png in pngs {
+                let data = base64(&png);
+                content.push(json!({"type": "image", "data": data, "mimeType": "image/png"}));
+            }
+            json!({"content": content, "isError": false})
         }
         Err(failure) => {
             let error = json!({"error": {"code": failure.code, "message": failure.message}});
@@ -689,10 +764,10 @@ fn call_tool(pick: &Pick, params: &Value) -> Result<Value, String> {
     Ok(done)
 }
 
-/// What a tool gave: JSON, or JSON and a PNG.
+/// What a tool gave: JSON, or JSON and PNGs.
 enum Ran {
     Json(String),
-    Image(String, Vec<u8>),
+    Image(String, Vec<Vec<u8>>),
 }
 
 /// Runs tool `name` with `arguments`.
@@ -711,8 +786,17 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
         // names scene files.
-        "step" | "scene" | "look" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
+        "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
         | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
+            call(name, Value::Object(arguments))
+        }
+        "look" => {
+            // A name that isn't a variant's is an image's, as `capture`'s `show` has it.
+            if let Some(show) = arguments.get_mut("show")
+                && !show.is_null()
+            {
+                *show = game::shown(show)?;
+            }
             call(name, Value::Object(arguments))
         }
         "set" => {
@@ -732,8 +816,35 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
                 None | Some(Value::Null) => json!({}),
                 Some(own) => json!({"own": own}),
             };
-            let captured = game::call(pick, "capture", params)?;
-            captured_as(captured.get(), inline)
+            // An array of shows answers an array, even of one.
+            let (shows, listed) = match arguments.remove("show") {
+                None | Some(Value::Null) => (Vec::new(), false),
+                Some(Value::Array(given)) if given.is_empty() => {
+                    let message = "`show` is a name, or an array of at least one";
+                    return Err(Failure::new("gg.args", message));
+                }
+                Some(Value::Array(given)) => (shows_of(&given)?, true),
+                Some(given) => (shows_of(&[given])?, false),
+            };
+            let taken = game::captures(pick, params, &shows)?;
+            captured_as(&taken, listed, inline)
+        }
+        "probe" => {
+            let bad = |message: String| Failure::new("gg.args", message);
+            let at = arguments.get("at").and_then(Value::as_array);
+            let at = match at.map(|at| at.iter().map(Value::as_f64).collect::<Vec<_>>()) {
+                Some(at) => match at[..] {
+                    [Some(x), Some(y)] => probe::pixel([x, y])?,
+                    _ => return Err(bad("`at` is [x, y], two numbers".to_owned())),
+                },
+                None => return Err(bad("`at` is [x, y], two numbers".to_owned())),
+            };
+            let own = match arguments.get("own") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(own)) => *own,
+                Some(given) => return Err(bad(format!("`own` is true or false, not {given}"))),
+            };
+            probe::run(pick, at, own).map(|probe| Ran::Json(probe.to_string()))
         }
         "wait" => {
             let timeout = match arguments.get("timeout_s") {
@@ -792,24 +903,38 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
     }
 }
 
-/// What a capture that the game answered `captured` gives: its answer, which names the PNG's path,
-/// for a tool that reads images to open, so that an agent's context doesn't hold every capture it
-/// takes; and with `inline`, the PNG too.
+/// `given`, each a `show` of `capture` or `look`, as the API's `Shown`.
 ///
-/// Fails with `gg.io` if the PNG it inlines can't be read.
-fn captured_as(captured: &str, inline: bool) -> Result<Ran, Failure> {
+/// Fails with `gg.args` for one that isn't a name or an image's.
+fn shows_of(given: &[Value]) -> Result<Vec<Value>, Failure> {
+    given.iter().map(game::shown).collect()
+}
+
+/// What captures that the game answered, `taken`, give: their answers, which name each PNG's path,
+/// for a tool that reads images to open, so that an agent's context doesn't hold every capture it
+/// takes, as an array if `listed`, else the one's; and with `inline`, each PNG too, in order.
+///
+/// Fails with `gg.io` if a PNG it inlines can't be read.
+fn captured_as(taken: &[Box<RawValue>], listed: bool, inline: bool) -> Result<Ran, Failure> {
+    let answer = match taken {
+        [one] if !listed => one.get().to_owned(),
+        _ => game::joined(taken),
+    };
     if !inline {
-        return Ok(Ran::Json(captured.to_owned()));
+        return Ok(Ran::Json(answer));
     }
-    let result: Value = serde_json::from_str(captured).unwrap_or(Value::Null);
-    let path = result
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let png = fs::read(path).map_err(|error| {
-        Failure::new("gg.io", format!("can't read the capture {path}: {error}"))
-    })?;
-    Ok(Ran::Image(captured.to_owned(), png))
+    let mut pngs = Vec::with_capacity(taken.len());
+    for captured in taken {
+        let result: Value = serde_json::from_str(captured.get()).unwrap_or(Value::Null);
+        let path = result
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        pngs.push(fs::read(path).map_err(|error| {
+            Failure::new("gg.io", format!("can't read the capture {path}: {error}"))
+        })?);
+    }
+    Ok(Ran::Image(answer, pngs))
 }
 
 /// `bytes` in base64, as MCP's images are.
@@ -853,15 +978,100 @@ mod tests {
         let path = std::env::temp_dir().join(format!("gg-mcp-capture-{}.png", std::process::id()));
         fs::write(&path, b"a png").expect("written");
         let captured = json!({"path": path, "ticks": 3}).to_string();
-        let named = captured_as(&captured, false);
-        let inlined = captured_as(&captured, true);
+        let taken = [RawValue::from_string(captured.clone()).expect("JSON")];
+        let named = captured_as(&taken, false, false);
+        let inlined = captured_as(&taken, false, true);
+        let listed = captured_as(&taken, true, true);
         let _ = fs::remove_file(&path);
         assert!(matches!(named, Ok(Ran::Json(answer)) if answer == captured));
-        assert!(matches!(inlined, Ok(Ran::Image(_, png)) if png == b"a png"));
-        let gone = captured_as(&captured, true)
+        assert!(matches!(inlined, Ok(Ran::Image(answer, pngs))
+            if answer == captured && pngs == [b"a png"]));
+        // An array of shows answers an array, even of one, and a PNG for each.
+        assert!(matches!(listed, Ok(Ran::Image(answer, pngs))
+            if answer == format!("[{captured}]") && pngs.len() == 1));
+        let gone = captured_as(&taken, true, true)
             .err()
             .map(|failure| failure.code);
         assert_eq!(gone.as_deref(), Some("gg.io"));
+    }
+
+    /// Several captures are an array of their answers, each with a PNG of its own if inlined.
+    #[test]
+    fn several_captures_answer_an_array_with_each_png() {
+        let dir = std::env::temp_dir();
+        let paths = ["a", "b"]
+            .map(|name| dir.join(format!("gg-mcp-capture-{name}-{}.png", std::process::id())));
+        let taken = paths.clone().map(|path| {
+            fs::write(&path, path.to_string_lossy().as_bytes()).expect("written");
+            RawValue::from_string(json!({"path": path}).to_string()).expect("JSON")
+        });
+        let named = captured_as(&taken, true, false);
+        let inlined = captured_as(&taken, true, true);
+        for path in &paths {
+            let _ = fs::remove_file(path);
+        }
+        let Ok(Ran::Json(named)) = named else {
+            panic!("JSON");
+        };
+        let named: Value = serde_json::from_str(&named).expect("JSON");
+        assert_eq!(named, json!([{"path": paths[0]}, {"path": paths[1]}]));
+        let Ok(Ran::Image(_, pngs)) = inlined else {
+            panic!("images");
+        };
+        let want = paths.map(|path| path.to_string_lossy().into_owned().into_bytes());
+        assert_eq!(pngs, want);
+    }
+
+    /// A `show` is a name, an image's name, which may hold spaces, or an object of one, in a
+    /// capture's and a look's schema alike; and the capture's takes an array.
+    #[test]
+    fn show_is_listed_for_capture_and_look_and_read_as_the_apis_shown() {
+        use gg_api::Shown;
+
+        let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let listed = answer(&mut pick(), listed).expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let show = |name: &str| {
+            let tool = tools.iter().find(|tool| tool["name"] == name);
+            tool.unwrap_or_else(|| panic!("a `{name}` tool"))["inputSchema"]["properties"]["show"]
+                .clone()
+        };
+        let (capture, look) = (show("capture"), show("look"));
+        assert!(capture["anyOf"][1]["type"] == "array", "{capture}");
+        assert!(look["anyOf"][1]["type"] == "null", "{look}");
+        // Each of the API's variants is named in both descriptions.
+        let variants = [
+            Shown::BaseColor,
+            Shown::Normal,
+            Shown::SurfaceNormal,
+            Shown::Metallic,
+            Shown::Roughness,
+            Shown::Occlusion,
+            Shown::Emission,
+            Shown::DirectLight,
+            Shown::SkyLight,
+            Shown::Reflection,
+        ];
+        for description in [&capture["description"], &look["description"]] {
+            let description = description.as_str().expect("described");
+            for variant in &variants {
+                let name = serde_json::to_value(variant).expect("a name");
+                let name = name.as_str().expect("a string");
+                assert!(description.contains(&format!("`{name}`")), "{name}");
+            }
+        }
+        let shows = shows_of(&[
+            json!("roughness"),
+            json!("view depth"),
+            json!({"image": "id"}),
+        ]);
+        let want = [
+            json!("roughness"),
+            json!({"image": "view depth"}),
+            json!({"image": "id"}),
+        ];
+        assert_eq!(shows.expect("shows"), want);
+        assert!(shows_of(&[json!(3)]).is_err());
     }
 
     #[test]
@@ -917,6 +1127,62 @@ mod tests {
         assert_eq!(unknown.expect("answered")["error"]["code"], -32601);
         let broken = super::answer(&mut pick, "{").expect("answered");
         assert_eq!(broken["error"]["code"], -32700);
+    }
+
+    /// `probe` is listed, taking a pixel and whether to probe the game's own view, and describing
+    /// each field it answers; one given a pixel that isn't two numbers, not negative, or an `own`
+    /// that isn't a boolean, fails with `gg.args` before it looks for a game.
+    #[test]
+    fn probe_is_listed_with_its_fields_and_refuses_odd_arguments() {
+        let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let listed = answer(&mut pick(), listed).expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let probe = tools.iter().find(|tool| tool["name"] == "probe");
+        let probe = probe.expect("a `probe` tool");
+        assert_eq!(probe["inputSchema"]["required"], json!(["at"]));
+        assert_eq!(probe["inputSchema"]["properties"]["at"]["minItems"], 2);
+        assert_eq!(probe["inputSchema"]["properties"]["own"]["type"], "boolean");
+        let description = probe["description"].as_str().expect("described");
+        for field in [
+            "at",
+            "size",
+            "ticks",
+            "base_color",
+            "emission",
+            "normal",
+            "surface_normal",
+            "metallic",
+            "roughness",
+            "occlusion",
+            "direct_light",
+            "sky_light",
+            "reflection",
+            "shown",
+            "depth",
+            "distance",
+            "entity",
+            "quantized",
+        ] {
+            assert!(description.contains(&format!("`{field}`")), "{field}");
+        }
+        for arguments in [
+            r#"{}"#,
+            r#"{"at":[1]}"#,
+            r#"{"at":[1,"2"]}"#,
+            r#"{"at":[-1,2]}"#,
+            r#"{"at":[1,2],"own":"yes"}"#,
+        ] {
+            let call = format!(
+                r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"probe","arguments":{arguments}}}}}"#
+            );
+            let answer = answer(&mut pick(), &call).expect("answered");
+            assert_eq!(answer["result"]["isError"], true, "{arguments}");
+            let text = answer["result"]["content"][0]["text"].as_str();
+            assert!(
+                text.is_some_and(|text| text.contains("gg.args")),
+                "{arguments}"
+            );
+        }
     }
 
     /// `debug` is listed, its actions those gg-api's `debug` takes.
@@ -1018,8 +1284,12 @@ mod tests {
             r#"{"from":"later"}"#,
             r#"{"from":3}"#,
             r#"{"inline":"yes"}"#,
+            r#"{"show":""}"#,
+            r#"{"show":[]}"#,
+            r#"{"show":["normal",3]}"#,
+            r#"{"show":{"other":"x"}}"#,
         ] {
-            let name = if arguments.contains("inline") {
+            let name = if arguments.contains("inline") || arguments.contains("show") {
                 "capture"
             } else {
                 "logs"

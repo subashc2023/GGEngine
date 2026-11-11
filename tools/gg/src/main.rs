@@ -14,6 +14,7 @@ mod game;
 mod mcp;
 mod new;
 mod patch;
+mod probe;
 mod run;
 mod runs;
 mod ship;
@@ -161,16 +162,48 @@ Talk to a running game, through its tool API:
                                  to its file, or to PATH, its file from then on
   scene new [--discard]          Delete the open scene's entities, leaving it untitled; refused as
                                  `scene open` is
-  capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it, which
+  capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]
+                                 Write its view as a PNG at PATH, or in `captures` beside it, which
                                  keeps the newest 32: as it's shown, the look included, or with
-                                 `--own`, as the game shows it on its own
+                                 `--own`, as the game shows it on its own. With `--show`, as the
+                                 look's `show` has it, that capture alone shows NAME: one of
+                                 `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`,
+                                 `occlusion`, `emission`, `direct_light`, `sky_light` and
+                                 `reflection`, or else an image's debug name, as `view depth`. With
+                                 several, which PATH refuses, it captures each in order from one
+                                 world, pausing the game for them if it plays, and prints an array
+                                 of the answers
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
-                                 takes them, `viewpoint`, `outline`, `grid` or `colliders`, those set
-                                 first, each `null` giving it back to the game
+                                 takes them, `viewpoint`, `outline`, `grid`, `colliders` or `show`,
+                                 what the view shows in place of its light, a name as `capture`'s
+                                 `--show` has it, `{\"show\":\"roughness\"}` or
+                                 `{\"show\":{\"image\":\"view depth\"}}`, those set first, each
+                                 `null` giving it back to the game
   pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
                                  top left, as a capture has it, the look included; `null` for none
-  input <EVENTS>                 Hand its layers EVENTS, a JSON array of the API's input events, in
+  probe <X> <Y> [--own]          What shading took and made at pixel X, Y of its view, from its top
+                                 left, X and Y not negative, as numbers, in one JSON object, from
+                                 one world: captures of that pixel, writing no PNG, pausing the game
+                                 for them if it plays, with a pick and a look. The view as the look
+                                 shows it, or with `--own`, as the game shows it on its own. Every
+                                 value is `null` for a pixel outside the view, and read from 8-bit
+                                 bytes, good to about 1/255 (`quantized`). `base_color` and
+                                 `emission` are linear RGB, from 0; `normal` (with its normal map)
+                                 and `surface_normal` (without) are [x, y, z] in the world, each
+                                 from -1 to 1; `metallic`, `roughness` (from 0.045) and `occlusion`
+                                 are 0 to 1, `occlusion` the share of the light from all around
+                                 that reaches the point; `direct_light`, `sky_light`, `reflection`
+                                 and `shown` (the view's pixel) are sRGB bytes [r, g, b], 0 to 255,
+                                 exposed and tonemapped as the view shows them, not linear;
+                                 `depth` is the view's reversed depth, 1 at the near plane and
+                                 smaller farther, 0 where nothing drew; `distance` is `near /
+                                 depth` in world units, in front of the viewpoint, not from it,
+                                 good to about 3%, `null` where nothing drew and without a
+                                 perspective; `entity` is what `pick` answers; and `size`, `at` and
+                                 `ticks`. To find what's wrong at a pixel: its material's values,
+                                 its normal, and which light reaches it
+  input <EVENTS>                Hand its layers EVENTS, a JSON array of the API's input events, in
                                  order, as its window would, as a frame starts: a key down or up by
                                  its W3C `code`, `{\"key\":{\"key\":\"KeyW\",\"pressed\":true}}`,
                                  `{\"text\":\"w\"}`, the cursor at a pixel of the view from its top
@@ -321,6 +354,19 @@ enum Command {
         method: String,
         params: Value,
     },
+    /// Captures of several shows, from one world: `params` are what `capture` takes but `show`.
+    Capture {
+        pick: Pick,
+        params: Value,
+        shows: Vec<Value>,
+    },
+    /// The numbers of what shading took and made at a pixel of the view, as the view is shown or,
+    /// with `own`, as the game shows it on its own.
+    Probe {
+        pick: Pick,
+        at: [f64; 2],
+        own: bool,
+    },
     Mcp(Pick),
     /// Waiting, for at most the time given, until the game of the `gg run` the pick reaches runs
     /// the code of the edits saved before.
@@ -368,6 +414,18 @@ fn main() -> ExitCode {
             print(result.get());
             true
         }),
+        Command::Capture {
+            pick,
+            params,
+            shows,
+        } => game::captures(&pick, params, &shows).map(|taken| {
+            print(&game::joined(&taken));
+            true
+        }),
+        Command::Probe { pick, at, own } => probe::run(&pick, at, own).map(|probe| {
+            print(&probe.to_string());
+            true
+        }),
         Command::Mcp(pick) => mcp::serve(pick).map(|()| true),
         Command::Wait(pick, timeout) => runs::wait(&pick, timeout).map(|told| {
             print(&told.to_string());
@@ -412,7 +470,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 16] = [
+const VALUED: [&str; 17] = [
     "--project",
     "--grant",
     "--peers",
@@ -429,6 +487,7 @@ const VALUED: [&str; 16] = [
     "--take",
     "--level",
     "--wait",
+    "--show",
 ];
 
 /// The arguments after a command's name: what isn't a flag, the flags, each with its value if it
@@ -481,6 +540,11 @@ impl Parsed {
     /// Takes flag `name`'s value, if it was given.
     fn value(&mut self, name: &str) -> Option<String> {
         self.take(name).flatten()
+    }
+
+    /// Takes the value of each time flag `name` was given, in order.
+    fn values(&mut self, name: &str) -> Vec<String> {
+        std::iter::from_fn(|| self.take(name)).flatten().collect()
     }
 
     /// Takes flag `name`'s value as a `T`, or `default` if it wasn't given.
@@ -801,7 +865,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             call(&mut parsed, "scene", params)?
         }
         "capture" => {
-            let path = parsed.positional(0, 1, "capture [--own] [PATH]")?;
+            let usage = "capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]";
+            let path = parsed.positional(0, 1, usage)?;
             let mut params = json!({});
             if let Some(path) = path.first() {
                 params["path"] = json!(absolute(path)?);
@@ -809,7 +874,30 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             if parsed.switch("--own") {
                 params["own"] = json!(true);
             }
-            call(&mut parsed, "capture", params)?
+            let given = parsed.values("--show");
+            let shows = (given.iter().flat_map(|names| names.split(',')))
+                .map(|name| {
+                    game::shown(&json!(name.trim())).map_err(|failure| bad(failure.message))
+                })
+                .collect::<Result<Vec<Value>, Failure>>()?;
+            match shows.as_slice() {
+                [] => call(&mut parsed, "capture", params)?,
+                [show] => {
+                    params["show"] = show.clone();
+                    call(&mut parsed, "capture", params)?
+                }
+                _ if !path.is_empty() => {
+                    return Err(bad(
+                        "a PATH holds one PNG, so `gg capture` takes it with one `--show` at most"
+                            .to_owned(),
+                    ));
+                }
+                _ => Command::Capture {
+                    pick: parsed.pick()?,
+                    params,
+                    shows,
+                },
+            }
         }
         "snapshot" => {
             let path = parsed.positional(0, 1, "snapshot [PATH]")?;
@@ -843,6 +931,25 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             });
             let at = at.collect::<Result<Vec<f64>, Failure>>()?;
             call(&mut parsed, "pick", json!({"at": at}))?
+        }
+        "probe" => {
+            let given = parsed.positional(2, 2, "probe <X> <Y> [--own]")?;
+            let at = given.iter().map(|given| {
+                given.parse::<f64>().map_err(|_| {
+                    bad(format!(
+                        "`gg probe` takes a pixel's X and Y, numbers, not `{given}`"
+                    ))
+                })
+            });
+            let at: [f64; 2] = at
+                .collect::<Result<Vec<f64>, Failure>>()?
+                .try_into()
+                .expect("two numbers, as many as `positional` took");
+            Command::Probe {
+                at: probe::pixel(at).map_err(|failure| bad(failure.message))?,
+                own: parsed.switch("--own"),
+                pick: parsed.pick()?,
+            }
         }
         "entities" => {
             parsed.positional(
@@ -1177,10 +1284,22 @@ mod tests {
                 &["capture", "view.png", "--own"],
                 json!({"path": png, "own": true}),
             ),
+            (
+                &["capture", "--show", "roughness"],
+                json!({"show": "roughness"}),
+            ),
+            (
+                &["capture", "--show", "view depth", "--own", "view.png"],
+                json!({"path": png, "own": true, "show": {"image": "view depth"}}),
+            ),
             (&["look"], json!({})),
             (
                 &["look", r#"{"grid":"xz","outline":null}"#],
                 json!({"grid": "xz", "outline": null}),
+            ),
+            (
+                &["look", r#"{"show":{"image":"view depth"}}"#],
+                json!({"show": {"image": "view depth"}}),
             ),
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
@@ -1223,6 +1342,46 @@ mod tests {
                 panic!("a call");
             };
             assert_eq!((method.as_str(), params), (args[0], want), "{args:?}");
+        }
+        // Several shows, repeated or comma-separated, are captures of one world.
+        for args in [
+            &[
+                "capture",
+                "--show",
+                "base_color,normal",
+                "--show",
+                "view depth",
+            ][..],
+            &[
+                "capture",
+                "--show=base_color",
+                "--show",
+                "normal,view depth",
+            ],
+        ] {
+            let Ok(Command::Capture { params, shows, .. }) = parsed(args) else {
+                panic!("captures");
+            };
+            let want = [json!("base_color"), json!("normal")];
+            assert_eq!(shows[..2], want, "{args:?}");
+            assert_eq!(shows[2], json!({"image": "view depth"}), "{args:?}");
+            assert_eq!(params, json!({}));
+        }
+        let Ok(Command::Capture { params, shows, .. }) =
+            parsed(&["capture", "--own", "--show", "normal,roughness"])
+        else {
+            panic!("captures");
+        };
+        assert_eq!((params, shows.len()), (json!({"own": true}), 2));
+        // A probe takes a pixel, in the view as it's shown, or the game's own.
+        for (args, want_own) in [
+            (&["probe", "3", "4.5"][..], false),
+            (&["probe", "--own", "3", "4.5"], true),
+        ] {
+            let Ok(Command::Probe { at, own, .. }) = parsed(args) else {
+                panic!("a probe");
+            };
+            assert_eq!((at, own), ([3.0, 4.5], want_own), "{args:?}");
         }
         let Ok(Command::Logs { level, follow, .. }) = parsed(&["logs", "--level", "INFO"]) else {
             panic!("logs");
@@ -1267,6 +1426,19 @@ mod tests {
             &["scene", "save", "a.ron", "b.ron"],
             &["capture", "a", "b"],
             &["capture", "--own=yes"],
+            &["capture", "--show"],
+            &["capture", "--show", ""],
+            &["capture", "--show", "normal,"],
+            // One PATH can't hold several PNGs.
+            &["capture", "--show", "normal,roughness", "view.png"],
+            &[
+                "capture",
+                "--show",
+                "normal",
+                "--show",
+                "roughness",
+                "view.png",
+            ],
             &["look", "{not json"],
             &["look", "[]"],
             &["look", "{}", "{}"],
@@ -1274,6 +1446,15 @@ mod tests {
             &["pick", "1", "2", "3"],
             &["pick", "left", "2"],
             &["pick", "1", "NaN"],
+            &["probe"],
+            &["probe", "1"],
+            &["probe", "1", "2", "3"],
+            &["probe", "left", "2"],
+            &["probe", "1", "NaN"],
+            // A pixel from the view's top left isn't negative.
+            &["probe", "-1", "2"],
+            &["probe", "1", "2", "--show", "normal"],
+            &["probe", "1", "2", "--own=yes"],
             &["types", "Sprite"],
             &["input"],
             &["input", "{not json"],

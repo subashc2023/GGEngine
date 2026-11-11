@@ -223,7 +223,9 @@ struct Frame {
     // fraction of the light from all around that reaches each pixel, in red, which a fragment loads
     // at its pixel; 0 for none, which reads as 1.
     uint ambient_occlusion;
-    uint unused;
+    // What the view shows in place of its light, as shading.slang's `SHOW_` constants number it:
+    // 0, `SHOW_LIGHT`, for its light, as games' shaders take it.
+    uint show;
     // The height fog its view is in.
     Fog fog;
     // The haze its atmosphere puts between the viewer and what's lit.

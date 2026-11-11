@@ -70,14 +70,14 @@ pub(crate) enum ImageDecl {
     /// One of the graph's own, `name` its debug name.
     Transient {
         name: &'static str,
-        kind: Kind,
+        kind: ImageKind,
         size: [u32; 2],
     },
 }
 
-/// What a graph's own image holds.
+/// What a graph's own image holds, as [`Graph::image_named`] tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum ImageKind {
     /// Colors, in [`ColorImage::FORMAT`], which passes render into and blend over, later ones
     /// sample and frames read back.
     Color,
@@ -114,7 +114,7 @@ pub(crate) enum Kind {
     Scalar,
 }
 
-impl Kind {
+impl ImageKind {
     pub(crate) const fn format(self) -> vk::Format {
         match self {
             Self::Color => ColorImage::FORMAT.color,
@@ -412,7 +412,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn color(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Color, size)
+        self.transient(name, ImageKind::Color, size)
     }
 
     /// An image of the graph's own of colors of high dynamic range, `size` pixels, named `name`:
@@ -424,7 +424,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn hdr(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Hdr, size)
+        self.transient(name, ImageKind::Hdr, size)
     }
 
     /// An image of the graph's own of IDs, `size` pixels, named `name`, which a pass renders
@@ -435,7 +435,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn ids(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Ids, size)
+        self.transient(name, ImageKind::Ids, size)
     }
 
     /// An image of the graph's own of motion, `size` pixels, named `name`, 16-bit floats in RGBA,
@@ -447,7 +447,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn motion(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Motion, size)
+        self.transient(name, ImageKind::Motion, size)
     }
 
     /// A visibility buffer of the graph's own, `size` pixels, named `name`: two 32-bit unsigned
@@ -460,7 +460,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn visibility(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Visibility, size)
+        self.transient(name, ImageKind::Visibility, size)
     }
 
     /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws
@@ -473,7 +473,7 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn depth(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Depth, size)
+        self.transient(name, ImageKind::Depth, size)
     }
 
     /// An image of the graph's own of a 32-bit float a pixel, `size` pixels, named `name`, which
@@ -484,10 +484,20 @@ impl Graph {
     ///
     /// If a side is 0.
     pub fn scalar(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
-        self.transient(name, Kind::Scalar, size)
+        self.transient(name, ImageKind::Scalar, size)
     }
 
-    fn transient(&mut self, name: &'static str, kind: Kind, size: [u32; 2]) -> ImageId {
+    /// The last image of the graph's own added so far that's named `name`, and what it holds, if
+    /// one is: so that a pass added after it may sample it, as one that shows it does.
+    pub fn image_named(&self, name: &str) -> Option<(ImageId, ImageKind)> {
+        let found = self.images.iter().rposition(
+            |image| matches!(image, ImageDecl::Transient { name: named, .. } if *named == name),
+        )?;
+        let id = ImageId(found as u32);
+        self.kind(id).map(|kind| (id, kind))
+    }
+
+    fn transient(&mut self, name: &'static str, kind: ImageKind, size: [u32; 2]) -> ImageId {
         let [width, height] = size;
         assert!(
             width > 0 && height > 0,
@@ -590,7 +600,7 @@ impl Graph {
     /// If `ids` isn't an image of IDs of the graph's own, or no earlier pass wrote it.
     pub fn read_ids(&mut self, label: Label, ids: ImageId) -> PassId {
         assert!(
-            matches!(self.kind(ids), Some(Kind::Ids)),
+            matches!(self.kind(ids), Some(ImageKind::Ids)),
             "pass {label:?} reads IDs back from an image of IDs of the graph's own, which image {} \
              isn't",
             ids.0
@@ -607,7 +617,7 @@ impl Graph {
     /// If `image` is neither, or is one of the graph's own that no earlier pass wrote.
     pub fn read_image(&mut self, label: Label, image: ImageId) -> PassId {
         assert!(
-            matches!(self.kind(image), None | Some(Kind::Color)),
+            matches!(self.kind(image), None | Some(ImageKind::Color)),
             "pass {label:?} reads back a target or a color image, which image {} isn't",
             image.0
         );
@@ -678,7 +688,7 @@ impl Graph {
     }
 
     /// The kind of `image` if it's one of the graph's own; `None` for a target.
-    pub(crate) fn kind(&self, image: ImageId) -> Option<Kind> {
+    pub(crate) fn kind(&self, image: ImageId) -> Option<ImageKind> {
         match self.images.get(image.0 as usize)? {
             ImageDecl::Target(_) => None,
             &ImageDecl::Transient { kind, .. } => Some(kind),
@@ -738,10 +748,11 @@ impl RenderPass<'_> {
     /// holds nothing to draw over.
     pub fn keep(self, image: ImageId) -> Self {
         let use_ = match self.graph.kind(image) {
-            Some(Kind::Ids) => Use::Ids { kept: true },
-            Some(Kind::Motion) => Use::Motion { kept: true },
-            Some(Kind::Depth) => Use::Depth { kept: true },
-            None | Some(Kind::Color | Kind::Hdr | Kind::Visibility | Kind::Scalar) => {
+            Some(ImageKind::Ids) => Use::Ids { kept: true },
+            Some(ImageKind::Motion) => Use::Motion { kept: true },
+            Some(ImageKind::Depth) => Use::Depth { kept: true },
+            None
+            | Some(ImageKind::Color | ImageKind::Hdr | ImageKind::Visibility | ImageKind::Scalar) => {
                 Use::Color(None)
             }
         };
@@ -842,14 +853,14 @@ impl RenderPass<'_> {
             let kind = graph.kind(image);
             let fits = match use_ {
                 // A visibility buffer clears to 0 alone, as its integers take no color.
-                Use::Color(clear) if kind == Some(Kind::Visibility) => {
+                Use::Color(clear) if kind == Some(ImageKind::Visibility) => {
                     clear.is_none_or(|clear| clear == [0.0; 4])
                 }
-                Use::Color(_) => matches!(kind, None | Some(Kind::Color | Kind::Hdr)),
-                Use::Ids { .. } => kind == Some(Kind::Ids),
-                Use::Motion { .. } => kind == Some(Kind::Motion),
-                Use::Depth { .. } => kind == Some(Kind::Depth),
-                Use::Sampled => kind.is_none_or(Kind::sampled),
+                Use::Color(_) => matches!(kind, None | Some(ImageKind::Color | ImageKind::Hdr)),
+                Use::Ids { .. } => kind == Some(ImageKind::Ids),
+                Use::Motion { .. } => kind == Some(ImageKind::Motion),
+                Use::Depth { .. } => kind == Some(ImageKind::Depth),
+                Use::Sampled => kind.is_none_or(ImageKind::sampled),
                 Use::ComputeSampled | Use::Storage { .. } | Use::CopySource => {
                     unreachable!("a render pass neither computes nor copies")
                 }
@@ -978,9 +989,9 @@ impl ComputePass<'_> {
             );
             let kind = graph.kind(image);
             let fits = match use_ {
-                Use::ComputeSampled => kind.is_none_or(Kind::sampled),
+                Use::ComputeSampled => kind.is_none_or(ImageKind::sampled),
                 // A target is written only if it's a storage image, as the frame checks.
-                Use::Storage { .. } => kind.is_none_or(Kind::storage),
+                Use::Storage { .. } => kind.is_none_or(ImageKind::storage),
                 _ => unreachable!("a compute pass samples and writes alone"),
             };
             assert!(
@@ -1536,8 +1547,8 @@ mod tests {
     /// attachment, or read back.
     #[test]
     fn scalars_are_computed_then_sampled_but_never_drawn_into() {
-        assert_eq!(Kind::Scalar.format(), vk::Format::R32_SFLOAT);
-        assert!(Kind::Scalar.storage() && Kind::Scalar.sampled());
+        assert_eq!(ImageKind::Scalar.format(), vk::Format::R32_SFLOAT);
+        assert!(ImageKind::Scalar.storage() && ImageKind::Scalar.sampled());
         let mut graph = Graph::default();
         let (scalar, hdr) = (graph.scalar("scalar", [4, 4]), graph.hdr("hdr", [4, 4]));
         let written = graph.compute(label()).overwrite(scalar).add();
@@ -1596,5 +1607,22 @@ mod tests {
             graph.read_image(label(), hdr)
         }));
         assert!(read.is_err(), "read back");
+    }
+
+    /// An image of the graph's own is found by its name, the last of that name added, with what it
+    /// holds; a target, which has no name in the graph, and a name none has, aren't.
+    #[test]
+    fn images_are_found_by_their_names() {
+        let mut graph = Graph::default();
+        graph.target(0);
+        let first = graph.depth("depth", [4, 4]);
+        let ids = graph.ids("ids", [4, 4]);
+        let last = graph.depth("depth", [2, 2]);
+        assert_ne!(first, last);
+        assert_eq!(graph.image_named("depth"), Some((last, ImageKind::Depth)));
+        assert_eq!(graph.image_named("ids"), Some((ids, ImageKind::Ids)));
+        assert_eq!(graph.image_named("view"), None);
+        graph.clear();
+        assert_eq!(graph.image_named("ids"), None, "cleared");
     }
 }

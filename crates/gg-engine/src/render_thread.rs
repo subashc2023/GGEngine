@@ -123,6 +123,10 @@ pub(crate) struct Extracted {
     /// which then reads no picks, leaving them for the next frame that isn't.
     #[cfg(feature = "dev")]
     pub(crate) bare: bool,
+    /// What the view shows in place of its light, as the look or a capture riding with the frame
+    /// asks, if anything.
+    #[cfg(feature = "dev")]
+    pub(crate) show: Option<crate::api::Shown>,
 }
 
 /// The client a game's view is published to, as the tool API's `view` asked: the memory it made,
@@ -200,6 +204,8 @@ impl Default for Extracted {
             look: 0,
             #[cfg(feature = "dev")]
             bare: false,
+            #[cfg(feature = "dev")]
+            show: None,
         }
     }
 }
@@ -258,6 +264,10 @@ impl Render for Renderer {
         let read_picks = !frame.bare;
         #[cfg(not(feature = "dev"))]
         let read_picks = true;
+        #[cfg(feature = "dev")]
+        let show = frame.show.as_ref().map(crate::api::Shown::show);
+        #[cfg(not(feature = "dev"))]
+        let show = None;
         let pixels = frame.pixels.map(|size| Pixels {
             size,
             bytes: frame.pixels_new.then_some(&frame.pixel_bytes[..]),
@@ -292,6 +302,7 @@ impl Render for Renderer {
             outline: frame.outline,
             read_view,
             pixels,
+            show,
         };
         let ui = gg_renderer::Ui {
             primitives: &frame.primitives,

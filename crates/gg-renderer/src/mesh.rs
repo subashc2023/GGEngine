@@ -2375,7 +2375,9 @@ pub(crate) struct FrameData {
     /// [`AmbientOcclusion`](crate::AmbientOcclusion) says; 0 for none, which shaders take as 1,
     /// as for every pass but the view's shading.
     pub(crate) ambient_occlusion: u32,
-    pub(crate) unused: u32,
+    /// What the view shows in place of its light, as [`Channel::index`](crate::Channel::index)
+    /// numbers it, which lit shading returns in place of its light: 0 for its light.
+    pub(crate) show: u32,
     /// The height fog the view is in, as [`FogData`](crate::fog::FogData) has it.
     pub(crate) fog: crate::fog::FogData,
     /// The atmosphere's haze, as [`AerialData`](crate::atmosphere::AerialData) has it.

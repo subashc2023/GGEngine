@@ -14,7 +14,9 @@ use gg_core::Result;
 use tracing::trace;
 
 use super::batches::Crossing;
-use super::graph::{Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId, Kind, Queue};
+use super::graph::{
+    Access, Barrier, BufferId, Graph, Hazard, ImageDecl, ImageId, ImageKind, Queue,
+};
 use crate::Device;
 use crate::buffer::Buffer;
 use crate::device::Retired;
@@ -55,7 +57,7 @@ struct MadeBuffer {
 /// An image made for one of a graph's own.
 pub(crate) struct Made {
     name: &'static str,
-    pub(crate) kind: Kind,
+    pub(crate) kind: ImageKind,
     pub(crate) size: [u32; 2],
     pub(crate) raw: vk::Image,
     pub(crate) view: vk::ImageView,

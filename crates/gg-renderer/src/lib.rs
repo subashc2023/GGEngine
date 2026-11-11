@@ -46,6 +46,7 @@ mod pick;
 mod reflections;
 mod shader;
 mod shadow;
+mod show;
 mod skin;
 mod sky;
 mod smaa;
@@ -69,7 +70,7 @@ use gg_gpu::{
     ColorImage, ComputePass, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId,
     RenderPass, Surface, Swapchain, Target, Texture as GpuTexture, TextureFormat,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 pub use ao::AmbientOcclusion;
 pub use atmosphere::Atmosphere;
@@ -100,6 +101,7 @@ pub use particles::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Part
 pub use pick::{MAX_PICKS, Pick};
 pub use reflections::Reflections;
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
+pub use show::{Channel, Show};
 pub use sky::Sky;
 pub use sprite::{Sprite, SpriteSheet};
 pub use taa::Antialiasing;
@@ -126,6 +128,7 @@ use particles::{ParticlePass, ParticlePlan};
 use pick::Picks;
 use reflections::{ReflectionData, ReflectionPass};
 use shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
+use show::ShowPass;
 use skin::{SkinPlan, Skinning};
 use sky::{SkyData, SkyLight, SkyPass, Source};
 use smaa::SmaaPass;
@@ -161,6 +164,21 @@ impl Viewport {
     pub fn aspect(&self) -> f32 {
         let [width, height] = self.size;
         width as f32 / height as f32
+    }
+}
+
+/// Warns that the view shows image `name`, which the frame doesn't make, unless it's `found`: once
+/// while frames go on asking for it, `missing` naming the last image warned of.
+fn show_missing(missing: &mut Option<String>, name: &str, found: bool) {
+    if found {
+        *missing = None;
+    } else if missing.as_deref() != Some(name) {
+        warn!(
+            code = "renderer.no_image",
+            image = name,
+            "the view shows image {name:?}, which the frame doesn't make, as black"
+        );
+        *missing = Some(name.to_owned());
     }
 }
 
@@ -405,6 +423,13 @@ pub struct RenderData<'a> {
     /// Whether the frame reads the view back as it renders it, outline and all, which
     /// [`Renderer::view_read`] then gives.
     pub read_view: bool,
+    /// What the view shows in place of its light, if anything, to see how it's made, as [`Show`]
+    /// says: drawn without antialiasing's offset, and nothing after it, no antialiasing, fog, depth
+    /// of field, motion blur, bloom, grade or lens, nor the exposure metered, as it adapts on as
+    /// it did; without the sky, cleared to black; tonemapped only where it's light. The frames
+    /// after it antialias afresh, and reflect what the last frame that showed the view's light
+    /// kept. What the canvas draws shows over a part of shading, but not over an image.
+    pub show: Option<Show<'a>>,
     /// Pixels the view shows in place of what `draws` would draw, from its top left, each onto one
     /// of the frame's, as far as they reach of it, the rest of it the clear color: the view of
     /// another process's game, say. The frame draws nothing in the view then, and answers its
@@ -486,6 +511,10 @@ pub struct Renderer {
     history: taa::History,
     /// Made by the first frame that antialiases the view by SMAA.
     smaa: Option<SmaaPass>,
+    /// What shows an image the frame makes in the view, made by the first frame that shows one;
+    /// and the name of the last it couldn't find, which it warned of.
+    show: Option<ShowPass>,
+    missing: Option<String>,
     /// Made by the first frame with a sky to show.
     sky: Option<SkyPass>,
     /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
@@ -610,11 +639,15 @@ struct ViewPasses {
     /// kept for reflections, metered, blurred, bloomed, graded or seen through a lens; otherwise
     /// the view's last pass draws the canvas.
     canvas: Option<PassId>,
+    /// What shows an image the frame makes in its place, if it shows one.
+    show: Option<show::Plan>,
     /// What it shows, drawn, antialiased, blurred, bloomed, graded and seen through a lens, with
-    /// its canvas over that, which the tonemap pass samples.
+    /// its canvas over that, or an image the frame makes in its place, which the tonemap pass
+    /// samples.
     shown: ImageId,
-    /// What tonemaps it.
+    /// What tonemaps it, and how.
     tonemap: PassId,
+    tonemapper: Tonemapper,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
     read_ids: Option<PassId>,
     /// What outlines what the view shows of an ID, if anything.
@@ -818,6 +851,8 @@ impl Renderer {
             taa: TaaPass::new(device)?,
             history: taa::History::default(),
             smaa: None,
+            show: None,
+            missing: None,
             sky: None,
             sky_light: SkyLight::default(),
             atmosphere: None,
@@ -998,6 +1033,7 @@ impl Renderer {
         windows: &mut [(u64, Ui<'_>)],
     ) -> Result<bool> {
         let _zone = gg_core::zone!();
+        let data = show::showing(data);
         // egui sends each texture change once, so changes wait for a frame that renders.
         for (_, window) in windows.iter_mut() {
             self.ui.queue(window.textures);
@@ -1042,6 +1078,16 @@ impl Renderer {
         let smaa = renders_view && data.antialiasing == Antialiasing::Smaa;
         if smaa && self.smaa.is_none() {
             self.smaa = Some(SmaaPass::new(&self.device)?);
+        }
+        let image_shown = match data.show {
+            Some(Show::Image(name)) if renders_view => Some(name),
+            _ => None,
+        };
+        if image_shown.is_some() && self.show.is_none() {
+            self.show = Some(ShowPass::new(&self.device)?);
+        }
+        if image_shown.is_none() {
+            self.missing = None;
         }
         let (jitter, view_projection) = if antialiased {
             self.history.prepare(&self.device, data.viewport.size)?;
@@ -1127,6 +1173,7 @@ impl Renderer {
         let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
         let windows_drawn = self.window_keys.iter().filter(|key| has_ui(key)).count();
         let graph = &mut self.graph;
+        let missing = &mut self.missing;
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
@@ -1328,7 +1375,7 @@ impl Renderer {
                     });
                 let alone = opaque_depth.unwrap_or(depth);
                 let depths = [if visibility.is_some() { depth } else { alone }, alone];
-                let ao = occluded.map(|_| AoPass::plan(graph, depths, size, antialiased));
+                let ao = occluded.map(|_| AoPass::plan(graph, depths, size));
                 // Each depth's, as they pair.
                 let found = [normals, drawn_normals].map(|pair| pair.map(|(_, normals)| normals));
                 let reflections = (traced)
@@ -1413,14 +1460,17 @@ impl Renderer {
             let smaa = smaa.then(|| SmaaPass::plan(graph, hdr, size));
             let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
             let shown = smaa.as_ref().map_or(shown, smaa::Plan::shown);
+            // A frame that shows something in place of the view's light keeps nothing for the next,
+            // whose reflections take what the last frame that showed the view's light kept.
             let keep = (reflected)
+                .filter(|_| data.show.is_none())
                 .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
             // Where its exposure adapts, the view's light is metered as resolved, before the
             // camera's passes, bloom and the canvas, whose UI isn't lit: blurring keeps about the
             // mean of what it blurs, and a lens's vignette and grain shouldn't move the exposure.
             let looked = data.looked;
-            let exposure =
-                (data.adaptation.is_some()).then(|| ExposurePass::plan(graph, shown, size, looked));
+            let metered = data.adaptation.is_some() && data.show.is_none();
+            let exposure = metered.then(|| ExposurePass::plan(graph, shown, size, looked));
             let focus =
                 circle.map(|circle| DepthOfFieldPass::plan(graph, circle, shown, depth, size));
             let blur =
@@ -1443,6 +1493,16 @@ impl Renderer {
                 let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
                 (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
             });
+            // An image the frame makes in place of all that, the last of its name added so far.
+            let show = image_shown.map(|name| {
+                let found = graph.image_named(name);
+                show_missing(missing, name, found.is_some());
+                ShowPass::plan(graph, found, size)
+            });
+            let (shown, tonemapper) = match &show {
+                Some(plan) => (plan.shown(), plan.tonemapper(data.tonemapper)),
+                None => (shown, data.tonemapper),
+            };
             let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
             // Cleared as a graph's own image is first written, though the pass writes every pixel.
             let color = graph.color("view", size);
@@ -1485,8 +1545,10 @@ impl Renderer {
                 bloom,
                 lens,
                 canvas,
+                show,
                 shown,
                 tonemap,
+                tonemapper,
                 read_ids,
                 outline,
                 read_view,
@@ -1651,7 +1713,10 @@ impl Renderer {
                     shadows: ShadowData::default(),
                     clusters: ClusterData::default(),
                     ambient_occlusion: 0,
-                    unused: 0,
+                    show: match data.show {
+                        Some(Show::Shading(channel)) => channel.index(),
+                        _ => 0,
+                    },
                     fog: FogData::default(),
                     aerial: AerialData::default(),
                     reflections: ReflectionData::default(),
@@ -1724,7 +1789,6 @@ impl Renderer {
                 let occlusion_seen = occluded.map(|settings| ao::Seen {
                     clip_from_view,
                     settings,
-                    frame: number,
                 });
                 let reflections_seen =
                     traced.map(
@@ -1889,9 +1953,12 @@ impl Renderer {
                     (pass, shared, frame_data, lit)
                 };
                 // Behind everything, in place of the clear color: the atmosphere's sky, or the
-                // image sky.
+                // image sky; unless the view shows something in place of its light.
                 let aspect = data.viewport.aspect();
-                if let (Some(seen), Some(tables), Some(air)) = (&atmosphere, &tables, air) {
+                let draws_sky = data.show.is_none();
+                if draws_sky
+                    && let (Some(seen), Some(tables), Some(air)) = (&atmosphere, &tables, air)
+                {
                     let made = self
                         .atmosphere
                         .as_ref()
@@ -1904,7 +1971,7 @@ impl Renderer {
                         disk: seen.disk(),
                     };
                     made.draw(&mut pass, &data.viewpoint, aspect, jitter, &drawn);
-                } else if let Some(SkyData { sky, luminance, .. }) = lit {
+                } else if draws_sky && let Some(SkyData { sky, luminance, .. }) = lit {
                     let drawn = self.sky.as_ref().expect("made for a sky to show");
                     let scale = luminance * exposure;
                     drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, sky, scale);
@@ -2065,6 +2132,13 @@ impl Renderer {
                         (frame.render(canvas)).expect("the graph's own images are always there");
                     counts += draw_canvas(&mut pass)?;
                 }
+                if let Some(plan) = &view.show {
+                    let pass = self
+                        .show
+                        .as_ref()
+                        .expect("made by the frame that planned it");
+                    pass.record(&mut frame, plan);
+                }
                 if let Some(read) = view.read_ids {
                     let picked = self.picks.take(frame.number(), Some(size));
                     frame.read_ids(read, picked)?;
@@ -2072,7 +2146,7 @@ impl Renderer {
                 let mut pass =
                     (frame.render(view.tonemap)).expect("the graph's own images are always there");
                 let shown = pass.sampled(view.shown);
-                self.tonemap.draw(&mut pass, shown, data.tonemapper);
+                self.tonemap.draw(&mut pass, shown, view.tonemapper);
                 drop(pass);
                 if let Some((outlined, outline)) = view.outline {
                     let mut pass =
@@ -2160,6 +2234,8 @@ impl Renderer {
         }
         if keeps {
             self.reflected.kept(number, size, unjittered, self.exposed);
+        } else if data.show.is_some() && traced.is_some() {
+            self.reflected.carry(number);
         }
         self.waited = self.frames.waited();
         Ok(true)

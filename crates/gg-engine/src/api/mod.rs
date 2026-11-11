@@ -28,8 +28,9 @@ pub(crate) enum Api {}
 /// The look the API's clients set, as a frame draws with it, which [`Api`] sets as it answers:
 /// each part in place of the game's own, where one's set; the revision it's at, which a frame
 /// published gives; whether the frame is bare, as a capture of the game's own view asks, which
-/// leaves the look out; and the viewpoint the last frame handed off drew from, the look's or the
-/// game's own.
+/// leaves the look out; what the frame shows in place of the view's light for a capture that asks,
+/// in place of what the look shows; and the viewpoint the last frame handed off drew from, the
+/// look's or the game's own.
 #[cfg(feature = "dev")]
 #[derive(Default)]
 pub(crate) struct Look {
@@ -37,9 +38,61 @@ pub(crate) struct Look {
     pub(crate) outline: Option<gg_renderer::Outline>,
     pub(crate) grid: Option<crate::grid::Plane>,
     pub(crate) colliders: Option<bool>,
+    pub(crate) show: Option<Shown>,
     pub(crate) revision: u64,
     pub(crate) bare: bool,
+    pub(crate) captured: Option<Shown>,
     pub(crate) seen: Option<gg_renderer::Viewpoint>,
+}
+
+#[cfg(feature = "dev")]
+impl Look {
+    /// What the frame being made shows in place of the view's light: what a capture riding with it
+    /// asks, or else what the look shows, unless the frame is bare.
+    pub(crate) fn shown(&self) -> Option<Shown> {
+        let look = self.show.as_ref().filter(|_| !self.bare);
+        self.captured.as_ref().or(look).cloned()
+    }
+}
+
+/// What the view shows in place of its light, as [`gg_renderer::Show`] has it, an image's name held
+/// so that frames take it from the look without allocating.
+#[cfg(feature = "dev")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Shown {
+    Shading(gg_renderer::Channel),
+    Image(std::sync::Arc<str>),
+}
+
+#[cfg(feature = "dev")]
+impl Shown {
+    /// What the tool API names `shown`.
+    pub(crate) fn of(shown: &gg_api::Shown) -> Self {
+        use gg_api::Shown as Api;
+        use gg_renderer::Channel;
+        let channel = match shown {
+            Api::Image(name) => return Self::Image(name.as_str().into()),
+            Api::BaseColor => Channel::BaseColor,
+            Api::Normal => Channel::Normal,
+            Api::SurfaceNormal => Channel::SurfaceNormal,
+            Api::Metallic => Channel::Metallic,
+            Api::Roughness => Channel::Roughness,
+            Api::Occlusion => Channel::Occlusion,
+            Api::Emission => Channel::Emission,
+            Api::DirectLight => Channel::DirectLight,
+            Api::SkyLight => Channel::SkyLight,
+            Api::Reflection => Channel::Reflection,
+        };
+        Self::Shading(channel)
+    }
+
+    /// As the renderer takes it.
+    pub(crate) fn show(&self) -> gg_renderer::Show<'_> {
+        match self {
+            Self::Shading(channel) => gg_renderer::Show::Shading(*channel),
+            Self::Image(name) => gg_renderer::Show::Image(name),
+        }
+    }
 }
 
 /// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, whose

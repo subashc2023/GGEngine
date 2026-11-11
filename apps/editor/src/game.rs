@@ -357,8 +357,9 @@ impl Found {
 
 /// What the parts of the look the editor wants go by, which between updates only the user changes:
 /// whether the game's camera drives the view, what the editor's camera sees from, what the
-/// Inspector has picked, and the toolbar's grid, its plane and the colliders' switch.
-#[derive(Clone, Copy, PartialEq)]
+/// Inspector has picked, and the toolbar's grid, its plane, the colliders' switch and what the view
+/// shows.
+#[derive(Clone, PartialEq)]
 struct Wants {
     through: bool,
     viewpoint: Viewpoint,
@@ -366,6 +367,7 @@ struct Wants {
     grid: bool,
     plane: Plane,
     colliders: bool,
+    show: Option<gg_api::Shown>,
 }
 
 /// A line `gg run` printed: on stdout, its events; on stderr, its errors, and what the game and the
@@ -1350,7 +1352,8 @@ impl Game {
     /// editor's camera adopts, driving the view, and `null` turns the view back to the game's
     /// camera, either turn taking the grid with it, as the user's does, unless another client set
     /// the grid; an outline's entity the Inspector picks, and `null` unpicks; and the grid and the
-    /// colliders set the toolbar's switches, and the grid its plane.
+    /// colliders set the toolbar's switches, and the grid its plane; and what the view shows sets
+    /// the toolbar's choice.
     fn take_look(&mut self, taken: gg_api::Look) {
         let toolbar = &mut self.view.toolbar;
         let through = toolbar.world_camera;
@@ -1378,6 +1381,9 @@ impl Game {
         }
         if let Some(colliders) = taken.colliders {
             toolbar.colliders = colliders == Some(true);
+        }
+        if let Some(show) = taken.show {
+            toolbar.show = show;
         }
     }
 
@@ -1591,9 +1597,10 @@ impl Game {
     /// editor's camera or back to the game's; the outline, as the pick changed, but to what the
     /// Inspector made of the pick the look's outline asked for, its entity, or none for an ID a
     /// read of the game has found gone; the grid, as the view turned, or the toolbar's grid or its
-    /// plane changed; and the colliders, as their switch did.
+    /// plane changed; the colliders, as their switch did; and what the view shows, as the toolbar's
+    /// choice did.
     fn changes(&mut self, now: Wants) {
-        let was = self.wants;
+        let was = self.wants.clone();
         let turned = now.through != was.through;
         if turned || (!now.through && now.viewpoint != was.viewpoint) {
             self.looking.change(Part::Viewpoint);
@@ -1610,6 +1617,9 @@ impl Game {
         }
         if now.colliders != was.colliders {
             self.looking.change(Part::Colliders);
+        }
+        if now.show != was.show {
+            self.looking.change(Part::Show);
         }
     }
 
@@ -1633,8 +1643,9 @@ impl Game {
 
     /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
     /// editor's camera's viewpoint while it drives the view; the Inspector's pick outlined; the
-    /// toolbar's grid, while it's on and the editor's camera drives; and the colliders' outlines
-    /// while their switch is on, or else whether the game shows them.
+    /// toolbar's grid, while it's on and the editor's camera drives; the colliders' outlines while
+    /// their switch is on, or else whether the game shows them; and what the toolbar has the view
+    /// show, or else its light.
     fn wanted(&self, scale: f32) -> Parts {
         let ViewTools {
             camera,
@@ -1653,6 +1664,7 @@ impl Game {
             outline: link.picked().map(outline),
             grid: (driving && toolbar.grid).then(|| api_plane(toolbar.plane)),
             colliders: toolbar.colliders.then_some(true),
+            show: toolbar.show.clone(),
         }
     }
 
@@ -1830,6 +1842,7 @@ fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
         grid: view.toolbar.grid,
         plane: view.toolbar.plane,
         colliders: view.toolbar.colliders,
+        show: view.toolbar.show.clone(),
     }
 }
 
@@ -3374,11 +3387,13 @@ mod tests {
             outline: None,
             grid: Some(grid),
             colliders: None,
+            show: None,
             by: By {
                 viewpoint: Some(CLIENT.to_owned()),
                 outline: None,
                 grid: Some(CLIENT.to_owned()),
                 colliders: None,
+                show: None,
             },
             revision: 1,
             run: 1,
@@ -3577,11 +3592,13 @@ mod tests {
                 outline: parts.outline,
                 grid: parts.grid,
                 colliders: None,
+                show: None,
                 by: By {
                     viewpoint,
                     outline,
                     grid,
                     colliders: None,
+                    show: None,
                 },
                 revision,
                 run: 1,
@@ -3663,15 +3680,18 @@ mod tests {
             ["fedcba9876543210", "00000000000000ff"].map(|id| id.parse().expect("an ID"));
         let was = Wants {
             picked: Some(before),
-            ..game.wants
+            ..game.wants.clone()
         };
-        game.wants = was;
+        game.wants = was.clone();
         for (picked, sends) in [(Some(x), false), (None, false), (Some(users), true)] {
             game.take_look(Look {
                 outline: Some(Some(outline.clone())),
                 ..Look::default()
             });
-            game.changes(Wants { picked, ..was });
+            game.changes(Wants {
+                picked,
+                ..was.clone()
+            });
             let wanted = Parts {
                 outline: picked.map(|id| Outline {
                     id: id.to_string(),
@@ -3751,11 +3771,13 @@ mod tests {
                 outline: None,
                 grid,
                 colliders: None,
+                show: None,
                 by: By {
                     viewpoint: viewpoint_by,
                     outline: None,
                     grid: grid_by,
                     colliders: None,
+                    show: None,
                 },
                 revision,
                 run: 1,

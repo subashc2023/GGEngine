@@ -42,7 +42,8 @@ use upload::Arena;
 
 pub use compute::Compute;
 pub use graph::{
-    BufferId, ComputePass, Graph, ImageId, MAX_BUFFER_READ, MAX_BUFFER_READS, PassId, RenderPass,
+    BufferId, ComputePass, Graph, ImageId, ImageKind, MAX_BUFFER_READ, MAX_BUFFER_READS, PassId,
+    RenderPass,
 };
 pub use pass::{Indices, Pass};
 pub use upload::Upload;

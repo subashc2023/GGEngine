@@ -432,7 +432,9 @@ in the editor is out of an agent's reach.
   frame once the client has taken the last, rather than rendering frames it never takes. The view
   has one look, as the engine renders one view, which every client sets part by part, the last to
   set a part winning: the viewpoint it sees from, in place of the game's own; the entity it
-  outlines; a grid on one of the world's axis planes; and whether the colliders' outlines show. A
+  outlines; a grid on one of the world's axis planes; whether the colliders' outlines show; and
+  what the view shows in place of its light, to see how it's made, as [Rendering](#rendering)
+  says. A
   part given back is the game's own again. A look lasts until a client changes it or the run ends,
   so a restarted run starts without one; it says which client set each part, so that a client takes
   up what another set, as the editor's camera carries on from a viewpoint an agent set; and each
@@ -440,7 +442,11 @@ in the editor is out of an agent's reach.
   that what a client draws over a frame matches it. A capture shows the view as it's shown, the look
   among it, or, asked to, as the game shows it on its own, from a bare frame, which draws without
   the look, isn't shared and leaves the picks asked to the next frame, so that none reads a view a
-  client isn't shown. A pick answers which entity the view shows at a pixel, and its name to a
+  client isn't shown; and, asked to, shows something in place of the view's light, from a frame of
+  its own that isn't shared either, so that an agent captures a set of them without the user's view
+  changing, from one world while the game is paused, as `gg capture --show` does, and reads the
+  numbers at a pixel from them, as `gg probe` does. A pick answers which entity the view shows at a
+  pixel, and its name to a
   connection granted to read names, once the frame that read it comes back. A connection is kept
   to the capabilities it's granted: `read` and `write` of the world, whole or of the component
   types they name, as a mod's scripts are kept;
@@ -2119,6 +2125,23 @@ after, where the driver can; and every run's `engine.perf` logs the frames' time
 frame's first pass on either queue to its last (`gpu_ms_mean`, `gpu_ms_p95`), and the memory of the
 graph's own images and buffers (`transient_bytes`).
 
+The view may show something in place of its light, to see how it's made, as the tool API's look or
+a capture asks and the editor's toolbar sets: a part of what lit shading takes or makes at each
+point of what models draw, which shading.slang's `lit` returns in place of its light, by a number
+in the frame's data, both where the visibility buffer shades and where models shade as they draw:
+the base color, the normal before and after its normal map, how metallic and how rough it is, its
+occlusion, its emission, or the light the frame's lights, the sky and the view's reflections each
+give it; or an image of the graph's own, by its debug name, which a compute pass reads by its kind
+into colors of the view's own, shown in place of the view's. The frame shows it as drawn: without
+antialiasing's offset or anything after the view's passes, no antialiasing, fog, depth of field,
+motion blur, bloom, grade or lens, nor the exposure metered, which adapts on as it did; without the
+sky; and through the tonemapper only where it's light, so that the view's 8-bit sRGB image stores a
+color as a texture holds it and a value as its byte over 255, as gg-api's `Shown` says, and a
+capture's bytes read as numbers. It keeps nothing for the next frame's reflections, which trace
+against what the last frame that showed the view's light kept, and the frames after it antialias
+afresh. The frame's targets, as TAA's history and the reflections, have no names in its graph, and
+show by none.
+
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
 render data carries what's been added to them, replaced in them or removed from them since, in
@@ -2597,11 +2620,11 @@ own, each texel the mean of the 2 by 2 under it weighted toward the farthest, so
 level keeps to what's behind a thin occluder; the second searches each pixel's horizons along
 three slices of the hemisphere round its normal, which the depth round it gives, three steps each
 way, out as far as the environment's radius, half a unit by default, reaching farther steps through
-coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and,
-where the view is antialiased temporally, on from frame to frame, for the resolve to average over
-its frames; and the denoise blurs each pixel with the eight round it, but across where the depth
-breaks, once where the view is antialiased temporally, and three times where it isn't, by SMAA or
-not at all, and the noise stays still, into an
+coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and
+stays still from frame to frame, however the view is antialiased, as the temporal resolve clips its
+history to each frame's pixels, and so keeps noise that changes with the frame rather than averaging
+it; and the denoise blurs each pixel with the eight round it, but across where the depth breaks,
+three times, into an
 image of the graph's own of a float a pixel, the fraction of the light from all around that
 reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
 light, never the lights', by the less of that and the material's occlusion map: both estimate how
@@ -2713,8 +2736,12 @@ nearest of the 3 by 3 pixels round it, so that an edge that moves over what's be
 own motion; samples the history there by a Catmull-Rom filter; clips it to a box of this frame's
 pixels round it, their mean give or take their deviation within their least and most, in YCoCg,
 weighing colors by 1 over 1 plus their luminance, so that a lone bright pixel doesn't flicker; and
-blends a tenth of this frame's in, the history first scaled by this frame's exposure over the frame
-before's, so that a change of exposure, as an adapting one's, leaves no ghost where the clipping
+blends this frame's in, the 3 by 3 pixels round it each weighed by how far from the pixel's center
+the frame's offset drew it, a Gaussian of a deviation of 0.35 pixels: a 25th of it where the pixel
+stays where it was, so that a still view settles rather than following each frame's offset by the
+newest frame's share, up to a tenth where it moved a pixel or more, and a share equal to each
+frame's that the history holds while those are fewer; the history first scaled by this frame's
+exposure over the frame before's, so that a change of exposure, as an adapting one's, leaves no ghost where the clipping
 lets much of the history through. Its history is one of two images of the view's size, each frame
 resolving into the one the frame before didn't, against the other, which a frame at another size,
 or after one that resolved no view, starts afresh. The canvas draws after the resolve, in a pass of

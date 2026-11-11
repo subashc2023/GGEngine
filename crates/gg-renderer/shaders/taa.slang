@@ -13,9 +13,15 @@
 // uncovered or lit otherwise, doesn't linger as a ghost, nor the filter's undershoot at an edge as
 // a dark fringe. Colors are weighed by 1 over 1 plus their luminance as they're clipped and
 // blended, so that a lone bright pixel doesn't flicker as the offsets move it in and out of a
-// pixel. The history is scaled by how the exposure changed since the frame before, as an adapting
-// one does, so that what it holds is of this frame's light. Where the frame before resolved
-// nothing, or the point showed outside it or behind its camera, the pixel takes this frame's alone.
+// pixel. This frame's color is the 3 by 3 pixels' too, each weighed by how far from the pixel's
+// center the frame's offset drew it, rather than the pixel's own alone, which is drawn up to half a
+// pixel off; and less of it is blended in where the pixel stays where it was (Karis, as above): a
+// still view's pixels otherwise follow each frame's offset, by the newest's share of them, and
+// never settle. While the history holds fewer frames than that share stands for, this frame's takes
+// a share equal to each of theirs, so that a view's first frames average as fast as they come. The
+// history is scaled by how the exposure changed since the frame before, as an adapting one does,
+// so that what it holds is of this frame's light. Where the frame before resolved nothing, or the
+// point showed outside it or behind its camera, the pixel takes this frame's alone.
 //
 // `Resolve` and `Push` match `Resolve` and `ResolvePush` in src/taa.rs, field for field.
 
@@ -30,9 +36,17 @@ static const uint LINEAR_CLAMP = 0;
 // How many pixels across and down a workgroup takes: `GROUP` in src/taa.rs.
 static const uint GROUP = 8;
 
-// How much of each pixel this frame's color makes, the rest the history's: as much as the last 10
-// frames' or so together.
-static const float CURRENT = 0.1;
+// How much of each pixel this frame's color makes, the rest the history's, once the history holds
+// as many frames: of a pixel that stays where it was, as much as the last 25 frames' or so
+// together, three cycles of the offsets, of which the newest is then a small share; and of one
+// that moved a pixel or more, whose history blurs as it's sampled between pixels, as much as the
+// last 10's.
+static const float CURRENT_STILL = 0.04;
+static const float CURRENT_MOVED = 0.1;
+
+// How sharply a pixel's weight in this frame's color falls with the square of how far from the
+// center, in pixels, it was drawn: a Gaussian of a deviation of 0.35 pixels, about a pixel's box's.
+static const float FALLOFF = 4.0;
 
 // How many of the neighborhood's deviations from its mean the history may stray, each way.
 static const float SPREAD = 1.25;
@@ -56,8 +70,9 @@ struct Resolve {
     // them apart, storage images of the bindless set's.
     uint target;
     uint resolved;
-    // Whether there's a history to take, and whether the resolved colors are written apart.
-    uint has_history;
+    // How many frames in a row the history holds, 0 where there's none to take, and whether the
+    // resolved colors are written apart.
+    uint held;
     uint writes_resolved;
     // What the history is multiplied by: this frame's exposure over the frame before's, which an
     // adapting exposure changes, so that it's of the same light as this frame's colors.
@@ -151,9 +166,13 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     Texture2D colors = textures[resolve.colors];
     Texture2D depths = textures[resolve.depth];
     float4 drawn = colors.Load(int3(at, 0));
-    drawn.rgb = finite(drawn.rgb);
-    // The 3 by 3 pixels round it: their mean and deviation, and their least and most, weighed; and
-    // the nearest of them, whose depth is the most, as depth runs from 1 at the near plane.
+    // The 3 by 3 pixels round it: their mean and deviation, and their least and most, weighed;
+    // this frame's color, each weighed again by how far from the pixel's center it was drawn, the
+    // frame's offset back from its own center; and the nearest of them, whose depth is the most, as
+    // depth runs from 1 at the near plane.
+    float2 drawn_off = -resolve.jitter * float2(resolve.size) * 0.5;
+    float3 current = float3(0.0);
+    float weights = 0.0;
     float3 sum = float3(0.0);
     float3 squares = float3(0.0);
     float3 least = float3(1.0e9);
@@ -168,6 +187,10 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
             squares += c * c;
             least = min(least, c);
             most = max(most, c);
+            float2 off = float2(x, y) + drawn_off;
+            float weight = exp(-FALLOFF * dot(off, off));
+            current += c * weight;
+            weights += weight;
             float depth = depths.Load(int3(p, 0)).r;
             if (depth > nearest) {
                 nearest = depth;
@@ -179,9 +202,10 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     float3 deviation = sqrt(max(squares / 9.0 - mean * mean, 0.0));
     least = max(least, mean - SPREAD * deviation);
     most = min(most, mean + SPREAD * deviation);
-    float3 current = weighed(drawn.rgb);
-    float3 resolved = current;
-    if (resolve.has_history != 0) {
+    current /= weights;
+    // Without a history, the pixel's own, as drawn.
+    float3 resolved = weighed(finite(drawn.rgb));
+    if (resolve.held != 0) {
         // Where the nearest pixel's point is, homogeneous, at infinity for depth 0 under
         // perspective, and where it was, before it moved.
         float2 size = float2(resolve.size);
@@ -200,7 +224,10 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
             float3 history = weighed(sampled * resolve.history_scale);
             if (!any(isnan(history))) {
                 history = clipped(history, least, most);
-                resolved = lerp(history, current, CURRENT);
+                float moved = saturate(length(motion * size * 0.5));
+                float share = max(lerp(CURRENT_STILL, CURRENT_MOVED, moved),
+                                  1.0 / (float(resolve.held) + 1.0));
+                resolved = lerp(history, current, share);
             }
         }
     }

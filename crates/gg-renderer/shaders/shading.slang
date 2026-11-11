@@ -470,17 +470,74 @@ float3 shading_normal(Material material, float3 interpolated, float4 tangent, bo
     return normal;
 }
 
+// What the view shows in place of its light, `Frame::show`, as `Channel` in src/show.rs numbers it:
+// at 0, its light; below `SHOW_DIRECT_LIGHT`, a part of what shading takes, as `surface_shown`
+// gives it; from there, a part of the light it makes.
+static const uint SHOW_LIGHT = 0;
+static const uint SHOW_BASE_COLOR = 1;
+static const uint SHOW_NORMAL = 2;
+static const uint SHOW_SURFACE_NORMAL = 3;
+static const uint SHOW_METALLIC = 4;
+static const uint SHOW_ROUGHNESS = 5;
+static const uint SHOW_OCCLUSION = 6;
+static const uint SHOW_EMISSION = 7;
+static const uint SHOW_DIRECT_LIGHT = 8;
+static const uint SHOW_SKY_LIGHT = 9;
+static const uint SHOW_REFLECTION = 10;
+
+// `value`, each channel from 0 to 1, as the view's colors hold it so that the view's sRGB image,
+// which the tonemap pass writes them into clamped, stores it as its byte over 255: decoded from
+// sRGB, which the image encodes it in again.
+float3 stored_as(float3 value) {
+    float3 v = saturate(value);
+    return select(v <= 0.04045, v / 12.92, pow((v + 0.055) / 1.055, 2.4));
+}
+
+// What the view shows of a point in place of its light, the part of what shading takes that
+// `show`, below `SHOW_DIRECT_LIGHT`, names, as `lit` takes its arguments: colors as they are, and
+// values, of normals each axis from -1 to 1 as 0 to 1, as `stored_as` stores them.
+float4 surface_shown(uint show, Material material, float3 interpolated, float4 tangent, bool front,
+                     float4 color, float4 surface, float2 mapped, float occlusion,
+                     float3 emission) {
+    if (show == SHOW_BASE_COLOR) {
+        return color;
+    }
+    if (show == SHOW_EMISSION) {
+        return float4(emission, color.a);
+    }
+    float3 value;
+    if (show == SHOW_NORMAL || show == SHOW_SURFACE_NORMAL) {
+        float3 surface_normal;
+        float3 normal = shading_normal(material, interpolated, tangent, front, mapped, surface_normal);
+        value = (show == SHOW_NORMAL ? normal : surface_normal) * 0.5 + 0.5;
+    } else if (show == SHOW_METALLIC) {
+        bool metal_rough = (material.flags & SPECULAR_GLOSSINESS) == 0;
+        value = float3(metal_rough ? saturate(material.metallic * surface.b) : 0.0);
+    } else if (show == SHOW_ROUGHNESS) {
+        value = float3(roughness_of(material, surface));
+    } else {
+        value = float3(occlusion);
+    }
+    return float4(stored_as(value), color.a);
+}
+
 // The color of a point of `material`, as the frame lights it, or unlit: where it is in the world,
 // `world`, its `normal` and `tangent` as interpolated, whether its triangle shows its front, the
 // side its corners wind counterclockwise from in its mesh, which a transform that mirrors shows
 // winding the other way, and what its maps hold there: its base `color`, its vertices' and its
 // factor's in, its `surface`'s map, its normal map's X and Y, from -1 to 1, its occlusion and its
-// emission; and the view's `reflection` there, as `reflection` gives it, or 0 for none.
+// emission; and the view's `reflection` there, as `reflection` gives it, or 0 for none. Or what the
+// frame's `show` shows in its place: a part of what it takes, as `surface_shown` gives it; or a
+// part of its light, exposed, without the haze, none for what's unlit.
 float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
            bool front, float4 color, float4 surface, float2 mapped, float occlusion,
            float3 emission, float4 reflection) {
+    if (frame.show != SHOW_LIGHT && frame.show < SHOW_DIRECT_LIGHT) {
+        return surface_shown(frame.show, material, interpolated, tangent, front, color, surface,
+                             mapped, occlusion, emission);
+    }
     if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
-        return color;
+        return frame.show == SHOW_LIGHT ? color : float4(0.0, 0.0, 0.0, color.a);
     }
     // Which way the surface faces where its shadows are sampled: the normal map's bumps cast none.
     float3 surface_normal;
@@ -545,6 +602,7 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         }
     }
     float n_dot_v = lit.n_dot_v;
+    float3 direct = light_sum;
     // The view's reflection, exposed already, as the colors it was found in are, the trace taking
     // them to this frame's exposure, so that neither the sky's luminance nor the exposure scales
     // it here: in place of the share of the sky's specular
@@ -555,6 +613,12 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         light_sum += sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
                                view, n_dot_v, occlusion, reflection.a, reflectance);
         mirrored = reflection.rgb * reflection.a * reflectance;
+    }
+    if (frame.show != SHOW_LIGHT) {
+        float3 part = frame.show == SHOW_DIRECT_LIGHT ? direct * frame.exposure
+            : frame.show == SHOW_SKY_LIGHT ? (light_sum - direct) * frame.exposure
+            : mirrored;
+        return float4(min(part, BRIGHTEST), color.a);
     }
     float3 shaded = hazed(frame, world, light_sum * frame.exposure + mirrored + emission);
     return float4(min(shaded, BRIGHTEST), color.a);

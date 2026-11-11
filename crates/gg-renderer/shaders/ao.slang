@@ -9,7 +9,7 @@
 // distance ahead of the view, in levels of half the size each, each texel a mean of the 2 by 2 under
 // it weighted toward the farthest; `occlusion_main` searches each pixel's horizons along slices of
 // the hemisphere round its normal, found from the depth around it, turned by noise that changes from
-// pixel to pixel along a Hilbert curve, and from frame to frame where the view is antialiased, and
+// pixel to pixel along a Hilbert curve, and with `Push::noise`, which every frame gives alike, and
 // writes how much of it they leave open and where the depth breaks round it; and the denoise, once
 // or more, blurs each pixel with the 8 round it but across those breaks, `denoise_main` from one
 // buffer into the other and `denoise_last_main` into the view's ambient occlusion. The view's space

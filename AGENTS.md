@@ -99,10 +99,14 @@ background: it patches in an edit inside function bodies as it's saved, with Dio
 root Cargo.toml's `subsecond` release (`gg` names its install), and restarts it from a snapshot
 after any other change, a crash or a hang (without `dx`, at every change); `cargo gg wait` waits for
 an edit's code. `cargo gg status`, `capture`, `set`, `undo`, `logs --follow` and the rest answer in
-JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its `attach`, which a
-restart skips, builds the world, so an edit to it shows only in a run started afresh; a patch or a
-rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`, `gg.rebuild_failed`,
-`gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
+JSON; `cargo gg mcp` serves them over MCP. To see how a frame is made, `cargo gg capture --show
+base_color,normal,roughness` captures parts of shading, or an image the frame makes by its debug
+name (`--show "view depth"`), in place of the view's light, each pixel's bytes numbers as gg-api's
+`Shown` says; the editor's toolbar shows the same. `cargo gg probe X Y` decodes such captures of one
+pixel into numbers: its base color, normal, roughness, light, depth, distance and entity. A layer's
+`load` makes its assets; its `attach`, which a restart skips, builds the world, so an edit to it
+shows only in a run started afresh; a patch or a rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`,
+`gg.rebuild_failed`, `gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
 
 A change is done when all seven pass:
 
@@ -192,8 +196,8 @@ what another OS could break, and run [ship.yml](.github/workflows/ship.yml) only
   milestone's details go in its commit message.
 - Docs record decisions, not the research behind them: no feature matrices, version surveys or
   source lists. A source that justifies some code goes in a comment beside that code.
-- This file loads into every agent session, so keep it under 200 lines. `CLAUDE.md` only imports
-  it, for Claude Code. A rule for one crate goes in an `AGENTS.md` inside that crate, beside a
-  `CLAUDE.md` that imports it, so it loads only when an agent works there.
+- This file loads into every agent session; `CLAUDE.md` only imports it, for Claude Code. A rule
+  for one crate goes in an `AGENTS.md` inside that crate, beside a `CLAUDE.md` that imports it, so
+  it loads only when an agent works there.
 - No session logs, ADR files or agent notes in the repo. A lesson that holds only on one
   machine goes in the agent's own memory.

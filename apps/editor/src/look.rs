@@ -1,5 +1,6 @@
 //! The editor's side of a game's look: the view settings the game keeps, its viewpoint, an outline,
-//! a grid and whether colliders' outlines show, which any client sets, part by part, the last to
+//! a grid, whether colliders' outlines show and what the view shows in place of its light, which
+//! any client sets, part by part, the last to
 //! set a part winning, as the tool API's `look` says. A part goes to the game only as the user
 //! changes it, or as it follows one the editor took, as the grid follows the camera that drives the
 //! view; and every answer is a read of the look: the parts another client set since, the editor
@@ -8,7 +9,7 @@
 
 use std::mem;
 
-use gg_api::{By, Look, Looked, Outline, Plane, Viewpoint};
+use gg_api::{By, Look, Looked, Outline, Plane, Shown, Viewpoint};
 
 /// One of the look's parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum Part {
     Outline,
     Grid,
     Colliders,
+    Show,
 }
 
 /// The look's parts, each `None` where it's the game's own: what the editor wants of them, or knows
@@ -27,6 +29,7 @@ pub struct Parts {
     pub outline: Option<Outline>,
     pub grid: Option<Plane>,
     pub colliders: Option<bool>,
+    pub show: Option<Shown>,
 }
 
 /// What the editor knows of a game's look, and what it asks of it: the look as the game last
@@ -41,7 +44,7 @@ pub struct Looking {
     drawn: u64,
     /// Whether each part changed since the last look was asked for, by the user or as it follows
     /// one taken, by [`Part`].
-    changed: [bool; 4],
+    changed: [bool; 5],
     /// The parts the look asked for sets, all left out for a read.
     asked: Option<Look>,
 }
@@ -55,7 +58,7 @@ impl Looking {
             by: By::default(),
             revision: 0,
             drawn: 0,
-            changed: [true; 4],
+            changed: [true; 5],
             asked: None,
         }
     }
@@ -82,6 +85,7 @@ impl Looking {
             Part::Outline => &self.by.outline,
             Part::Grid => &self.by.grid,
             Part::Colliders => &self.by.colliders,
+            Part::Show => &self.by.show,
         };
         if by.as_deref().is_none_or(|by| by == self.client) {
             self.change(part);
@@ -101,13 +105,14 @@ impl Looking {
         if self.asked.is_some() {
             return None;
         }
-        let [viewpoint, outline, grid, colliders] = mem::take(&mut self.changed);
+        let [viewpoint, outline, grid, colliders, show] = mem::take(&mut self.changed);
         let known = &self.known;
         let look = Look {
             viewpoint: sent(viewpoint, &wanted.viewpoint, &known.viewpoint),
             outline: sent(outline, &wanted.outline, &known.outline),
             grid: sent(grid, &wanted.grid, &known.grid),
             colliders: sent(colliders, &wanted.colliders, &known.colliders),
+            show: sent(show, &wanted.show, &known.show),
         };
         if look == Look::default() && self.drawn <= self.revision {
             return None;
@@ -127,6 +132,7 @@ impl Looking {
             outline,
             grid,
             colliders,
+            show,
             by,
             revision,
             ..
@@ -157,6 +163,12 @@ impl Looking {
                 (&mut known.colliders, &mut setters.colliders),
                 (colliders, by.colliders),
                 kept(Part::Colliders, asked.colliders.is_some()),
+                client,
+            ),
+            show: take(
+                (&mut known.show, &mut setters.show),
+                (show, by.show),
+                kept(Part::Show, asked.show.is_some()),
                 client,
             ),
         };
@@ -210,6 +222,7 @@ mod tests {
             outline: parts.outline.clone(),
             grid: parts.grid,
             colliders: parts.colliders,
+            show: parts.show.clone(),
             by,
             revision,
             run: 1,
@@ -217,7 +230,8 @@ mod tests {
         }
     }
 
-    /// Who set each part: `viewpoint`'s, the outline's, the grid's and the colliders' setters.
+    /// Who set each part but what the view shows, which none did: `viewpoint`'s, the outline's, the
+    /// grid's and the colliders' setters.
     fn by(setters: [Option<&str>; 4]) -> By {
         let [viewpoint, outline, grid, colliders] = setters.map(|by| by.map(str::to_owned));
         By {
@@ -225,6 +239,7 @@ mod tests {
             outline,
             grid,
             colliders,
+            show: None,
         }
     }
 
@@ -347,6 +362,7 @@ mod tests {
             outline: Some(outline("0123456789abcdef")),
             grid: Some(Plane::Xy),
             colliders: Some(false),
+            show: None,
         };
         let agent = by([Some("agent"); 4]);
         looking.drew(2);
@@ -357,6 +373,7 @@ mod tests {
             outline: Some(theirs.outline.clone()),
             grid: Some(theirs.grid),
             colliders: Some(theirs.colliders),
+            show: None,
         };
         assert_eq!(taken, expected);
         // As the editor's wanted parts follow what it took, the agent's colliders are kept: the
@@ -366,6 +383,7 @@ mod tests {
             outline: Some(outline("0123456789abcdef")),
             grid: Some(Plane::Xy),
             colliders: None,
+            show: None,
         };
         assert_eq!(looking.ask(&wanted), None, "nothing the user changed");
         looking.drew(3);
@@ -404,5 +422,80 @@ mod tests {
         assert!(looking.ask(&wanted).is_some());
         let read = looking.read(looked(&mine, setters, 6));
         assert_eq!(read, Look::default(), "its own grid");
+    }
+
+    /// What the view shows goes as the others' parts do: once as the user picks it, null as they
+    /// give it back; one an agent set is taken, but not over a pick of the user's since, which goes
+    /// next; and an agent's null is taken too.
+    #[test]
+    fn what_the_view_shows_goes_and_is_taken_as_the_others_parts() {
+        let mut wanted = Parts {
+            colliders: Some(true),
+            ..Parts::default()
+        };
+        let mut looking = served(&wanted);
+        let setters = |show: Option<&str>| By {
+            show: show.map(str::to_owned),
+            ..by([None, None, None, Some(CLIENT)])
+        };
+        let others = wanted.clone();
+        let shows = |show: Option<Shown>| Parts {
+            show,
+            ..others.clone()
+        };
+        // The user picks one: it goes once, and the answer, its own, takes nothing.
+        wanted.show = Some(Shown::Normal);
+        looking.change(Part::Show);
+        let sent = looking.ask(&wanted).expect("picked");
+        let expected = Look {
+            show: Some(Some(Shown::Normal)),
+            ..Look::default()
+        };
+        assert_eq!(sent, expected);
+        assert_eq!(looking.ask(&wanted), None, "one at a time");
+        let answer = looked(&wanted, setters(Some(CLIENT)), 2);
+        assert_eq!(looking.read(answer), Look::default(), "its own");
+        assert_eq!(looking.ask(&wanted), None, "sent once");
+        // An agent sets another, which the editor takes.
+        looking.drew(3);
+        assert_eq!(looking.ask(&wanted), Some(Look::default()), "a read");
+        let theirs = shows(Some(Shown::Roughness));
+        let taken = looking.read(looked(&theirs, setters(Some("agent")), 3));
+        let expected = Look {
+            show: Some(Some(Shown::Roughness)),
+            ..Look::default()
+        };
+        assert_eq!(taken, expected);
+        wanted.show = Some(Shown::Roughness);
+        assert_eq!(looking.ask(&wanted), None, "taken, not the user's change");
+        // The user picks one as an agent sets an image: the user's goes next.
+        looking.drew(4);
+        assert!(looking.ask(&wanted).is_some());
+        wanted.show = Some(Shown::Metallic);
+        looking.change(Part::Show);
+        let image = shows(Some(Shown::Image("view depth".to_owned())));
+        let taken = looking.read(looked(&image, setters(Some("agent")), 4));
+        assert_eq!(taken, Look::default(), "but the user's");
+        let sent = looking.ask(&wanted).expect("the user's");
+        assert_eq!(sent.show, Some(Some(Shown::Metallic)));
+        let answer = looked(&wanted, setters(Some(CLIENT)), 5);
+        assert_eq!(looking.read(answer), Look::default());
+        // Given back: null goes.
+        wanted.show = None;
+        looking.change(Part::Show);
+        let back = looking.ask(&wanted).expect("given back");
+        assert_eq!(back.show, Some(None));
+        let answer = looked(&wanted, setters(Some(CLIENT)), 6);
+        assert_eq!(looking.read(answer), Look::default(), "the editor's null");
+        // An agent sets an image, then gives it back: both are taken.
+        looking.drew(7);
+        assert!(looking.ask(&wanted).is_some());
+        let theirs = shows(Some(Shown::Image("view ids".to_owned())));
+        let taken = looking.read(looked(&theirs, setters(Some("agent")), 7));
+        assert_eq!(taken.show, Some(theirs.show));
+        looking.drew(8);
+        assert!(looking.ask(&wanted).is_some());
+        let taken = looking.read(looked(&wanted, setters(None), 8));
+        assert_eq!(taken.show, Some(None), "the agent's null");
     }
 }

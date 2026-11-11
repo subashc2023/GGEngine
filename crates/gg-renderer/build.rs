@@ -26,7 +26,7 @@ const SHADERS: [&str; 14] = [
 ];
 
 /// Those that compute, with their entry points.
-const COMPUTE: [(&str, &[&str]); 20] = [
+const COMPUTE: [(&str, &[&str]); 21] = [
     (
         "ao",
         &[
@@ -91,6 +91,7 @@ const COMPUTE: [(&str, &[&str]); 20] = [
             "keep_main",
         ],
     ),
+    ("show", &["show_main"]),
     ("skin", &["skin_main"]),
     ("smaa", &["edges_main", "weights_main", "blend_main"]),
     ("taa", &["resolve_main"]),

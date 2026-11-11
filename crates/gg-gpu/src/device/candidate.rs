@@ -7,7 +7,7 @@ use gg_core::{Error, Result};
 
 use super::{UploadPath, has_bindless};
 use crate::capture;
-use crate::frame::graph::Kind;
+use crate::frame::graph::ImageKind;
 use crate::pipeline_cache::Identity;
 use crate::{
     Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, TextureFormat, Version,
@@ -329,7 +329,7 @@ fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
     unsafe {
         instance.raw().get_physical_device_format_properties2(
             physical,
-            Kind::Depth.format(),
+            ImageKind::Depth.format(),
             &mut properties,
         );
     }

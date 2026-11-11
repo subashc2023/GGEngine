@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gg_api::{Client, Failure, LogEvents, Pulse, Session};
+use gg_api::{Client, Failure, LogEvents, Pulse, Session, Shown, Status};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
@@ -203,11 +203,122 @@ pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawVa
     answered.map_err(|failure| waits(pick, method, failure))
 }
 
+/// What the API's `Shown` is for `given`, a name or an object: the name of one of its unit variants,
+/// as `roughness`, stays a string; any other string is an image's debug name, which may hold
+/// spaces, as `view depth`, and becomes `{"image": NAME}`; an object of an `image` alone is kept.
+///
+/// Fails with `gg.args` for an empty name, one of more than [`gg_api::MOST_IMAGE_NAME`] bytes, and
+/// anything that is neither a string nor such an object.
+pub(crate) fn shown(given: &Value) -> Result<Value, Failure> {
+    let args = |message: String| Failure::new("gg.args", message);
+    let name = match (given, serde_json::from_value::<Shown>(given.clone())) {
+        (Value::String(_), Ok(_)) => return Ok(given.clone()),
+        (Value::String(name), Err(_)) => name.clone(),
+        (Value::Object(_), Ok(Shown::Image(name))) => name,
+        _ => {
+            return Err(args(format!(
+                "`show` is a name, as `roughness` or `view depth`, or `{{\"image\": NAME}}`, not \
+                 {given}"
+            )));
+        }
+    };
+    if name.is_empty() || name.len() > gg_api::MOST_IMAGE_NAME {
+        return Err(args(format!(
+            "an image's name is 1 to {} bytes, not `{name}`",
+            gg_api::MOST_IMAGE_NAME
+        )));
+    }
+    Ok(json!({"image": name}))
+}
+
+/// Captures with `params`, those of `capture`, as each of `shows`, as [`shown`] gives them, shows,
+/// in order: one capture if there are none or one, as the game answers it; with several, all of
+/// one world, as they're taken on one connection, the game paused for them if it plays, and
+/// running again once they're taken, or have failed. Each answer is a `Captured`.
+///
+/// Fails as the call does; the first capture that fails, after which none is taken, or else
+/// `resume`.
+pub(crate) fn captures(
+    pick: &Pick,
+    params: Value,
+    shows: &[Value],
+) -> Result<Vec<Box<RawValue>>, Failure> {
+    match shows {
+        [] => call(pick, "capture", params).map(|taken| vec![taken]),
+        [show] => {
+            let params = with_show(&params, show);
+            call(pick, "capture", params).map(|taken| vec![taken])
+        }
+        _ => {
+            let mut client = connect(pick)?;
+            let call = |method: &str, params: Value| {
+                (client.call(method, params)).map_err(|failure| waits(pick, method, failure))
+            };
+            captured_together(call, &params, shows)
+        }
+    }
+}
+
+/// `params` with `show` in it.
+pub(crate) fn with_show(params: &Value, show: &Value) -> Value {
+    let mut params = params.clone();
+    params["show"] = show.clone();
+    params
+}
+
+/// [`captures`] of several shows, sending each request through `call`, as [`while_paused`] does.
+fn captured_together(
+    call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
+    params: &Value,
+    shows: &[Value],
+) -> Result<Vec<Box<RawValue>>, Failure> {
+    while_paused(call, |call| {
+        (shows.iter())
+            .map(|show| call("capture", with_show(params, show)))
+            .collect()
+    })
+}
+
+/// What `body` does with `call`, sending each request through `call`: `status` first, then `pause`
+/// if the game plays, neither paused nor stopped, then `body`, which sees one world, and `resume` if
+/// and only if it paused it.
+///
+/// Fails as `body` does, over a failed `resume`.
+pub(crate) fn while_paused<T>(
+    mut call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
+    body: impl FnOnce(
+        &mut dyn FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
+    ) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let status: Status = serde_json::from_str(call("status", Value::Null)?.get())
+        .map_err(|error| Failure::new("api.protocol", format!("`status` answered {error}")))?;
+    let plays = !status.paused && !status.stopped;
+    if plays {
+        call("pause", Value::Null)?;
+    }
+    let done = body(&mut call);
+    let resumed = if plays {
+        call("resume", Value::Null).map(drop)
+    } else {
+        Ok(())
+    };
+    // A failed body is the failure to report, over a failed resume.
+    let done = done?;
+    resumed?;
+    Ok(done)
+}
+
+/// `answers` as one JSON array, as the game wrote each.
+pub(crate) fn joined(answers: &[Box<RawValue>]) -> String {
+    let answers: Vec<&str> = answers.iter().map(|answer| answer.get()).collect();
+    format!("[{}]", answers.join(","))
+}
+
 /// `failure`, `method`'s, saying what the game `pick` picks waits for, as its `ping` answers on a
 /// connection of its own, if it's `api.timeout` and the game waits for a script that has stopped, a
 /// file dialog or its window menu, which hold its main thread, rather than that it may be hung;
 /// else as it is.
-fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
+pub(crate) fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
     if failure.code != "api.timeout" {
         return failure;
     }
@@ -531,5 +642,99 @@ mod tests {
         let refused = refused.map(|failure| failure.code);
         assert_eq!(refused.as_deref(), Some("api.unauthorized"));
         assert!(none.is_empty());
+    }
+
+    /// A unit variant's name stays a string, any other name is an image's, spaces and all, and an
+    /// object of an image is kept; an empty or long name, or what isn't one, is refused.
+    #[test]
+    fn a_show_is_a_variant_or_an_images_name() {
+        for (given, want) in [
+            (json!("roughness"), json!("roughness")),
+            (json!("surface_normal"), json!("surface_normal")),
+            (json!("view depth"), json!({"image": "view depth"})),
+            // The newtype variant's own name is a name like any other, not a variant.
+            (json!("image"), json!({"image": "image"})),
+            (
+                json!({"image": "view depth"}),
+                json!({"image": "view depth"}),
+            ),
+        ] {
+            assert_eq!(shown(&given).expect("a show"), want, "{given}");
+        }
+        let long = "x".repeat(gg_api::MOST_IMAGE_NAME + 1);
+        for given in [
+            json!(""),
+            json!(long),
+            json!({"image": ""}),
+            json!({"image": 3}),
+            json!({"other": "x"}),
+            json!(3),
+            json!(null),
+            json!(["roughness"]),
+        ] {
+            let refused = shown(&given).err().map(|failure| failure.code);
+            assert_eq!(refused.as_deref(), Some("gg.args"), "{given}");
+        }
+    }
+
+    /// Runs [`captured_together`] against a game that is `paused` or not, and that fails its
+    /// capture of `fail`, if any: the requests it got, and what the call gave.
+    fn together(
+        paused: bool,
+        fail: Option<&str>,
+    ) -> (Vec<String>, Result<Vec<Box<RawValue>>, Failure>) {
+        let mut got = Vec::new();
+        let result = captured_together(
+            |method, params| {
+                got.push(match params.get("show") {
+                    Some(show) => format!("{method} {show}"),
+                    None => method.to_owned(),
+                });
+                if method == "capture" && fail.is_some_and(|show| params["show"] == show) {
+                    return Err(Failure::new("renderer.no_image", "no such image"));
+                }
+                let answer = match method {
+                    "status" => json!({
+                        "ticks": 0, "paused": paused, "stopped": false, "frames": 0,
+                        "entities": 0, "view": null, "scene": null, "unsaved": false,
+                    }),
+                    _ => json!({"path": "a.png"}),
+                };
+                Ok(RawValue::from_string(answer.to_string()).expect("JSON"))
+            },
+            &json!({"own": true}),
+            &[json!("normal"), json!("roughness")],
+        );
+        (got, result)
+    }
+
+    /// Several captures of a playing game pause it, and run it again once they're taken, or one
+    /// has failed, putting the failure first; of a paused game, they leave it paused.
+    #[test]
+    fn several_captures_are_taken_paused_and_the_game_resumes_if_it_played() {
+        let (got, result) = together(false, None);
+        let want = [
+            "status",
+            "pause",
+            r#"capture "normal""#,
+            r#"capture "roughness""#,
+            "resume",
+        ];
+        assert_eq!(got, want);
+        assert_eq!(result.expect("taken").len(), 2);
+        let (got, result) = together(true, None);
+        assert_eq!(
+            got,
+            ["status", r#"capture "normal""#, r#"capture "roughness""#]
+        );
+        assert_eq!(result.expect("taken").len(), 2);
+        let (got, result) = together(false, Some("normal"));
+        assert_eq!(got, ["status", "pause", r#"capture "normal""#, "resume"]);
+        assert_eq!(
+            result.err().map(|f| f.code).as_deref(),
+            Some("renderer.no_image")
+        );
+        let (got, _) = together(true, Some("normal"));
+        assert_eq!(got, ["status", r#"capture "normal""#]);
     }
 }
