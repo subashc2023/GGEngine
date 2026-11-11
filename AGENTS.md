@@ -38,6 +38,54 @@ ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catch
 edges and a crate using a library another crate owns, such as `ash`, `winit` or `rapier2d`:
 check a change against the rest yourself.
 
+## Where to look
+
+Each topic's one home. A crate's own docs are its root's `//!` comment and its items' doc comments
+(`cargo doc --no-deps --open`, or the source).
+
+- What games use, `App`, `Layer`, `Context`, `Ui`, the world, assets and input: [gg-engine's
+  root](crates/gg-engine/src/lib.rs); working in it, [its AGENTS.md](crates/gg-engine/AGENTS.md).
+- Rendering, each pass and the debug names of the images it makes: [ARCHITECTURE.md's
+  Rendering](ARCHITECTURE.md#rendering), [gg-renderer's root](crates/gg-renderer/src/lib.rs), each
+  shader's header in [its shaders](crates/gg-renderer/shaders); Vulkan, [gg-gpu's
+  root](crates/gg-gpu/src/lib.rs).
+- The tool API: `cargo gg help`, each command and what it answers; the protocol, [gg-api's
+  root](crates/gg-api/src/lib.rs); how a game serves it, [Agents and
+  tools](ARCHITECTURE.md#agents-and-tools) and [the server](crates/gg-engine/src/api/server.rs).
+- The flags every app shares: `--help`, from [args.rs](crates/gg-engine/src/args.rs).
+- Scripts and mods: [docs/LUAU.md](docs/LUAU.md). Game UI files, `.ui`: [game_ui's
+  root](crates/gg-engine/src/game_ui/mod.rs).
+- Scene files, prefabs, assets' IDs and projects' manifests: [Project
+  state](ARCHITECTURE.md#project-state); a scene for each feature in [the showcase's
+  scenes](games/showcase/scenes).
+- The simulation: [ECS](ARCHITECTURE.md#ecs), [Networking](ARCHITECTURE.md#networking),
+  [Physics](ARCHITECTURE.md#physics), [Animation](ARCHITECTURE.md#animation),
+  [Navigation](ARCHITECTURE.md#navigation), [Audio](ARCHITECTURE.md#audio); the demos' rules,
+  [Shards'](games/shards/AGENTS.md) and [Foxball's](games/foxball/AGENTS.md) AGENTS.md.
+- Diagnostics and their codes: [Diagnostics](ARCHITECTURE.md#diagnostics).
+- The editor, each panel, menu and control: [its game layer's root](apps/editor/src/game.rs).
+- Tests to imitate: images against references, [gg-renderer's GPU
+  tests](crates/gg-renderer/tests/gpu.rs); frames that don't allocate,
+  [frames.rs](crates/gg-engine/tests/frames.rs); a run embedded in a tool,
+  [embedded.rs](crates/gg-engine/tests/embedded.rs); UI driven by egui's input, [the
+  dock's](crates/gg-engine/src/dock/ui.rs).
+- The roadmap and the defects kept: [docs/PLAN.md](docs/PLAN.md), [docs/DEFECTS.md](docs/DEFECTS.md).
+
+### Debugging and measuring
+
+- What a run did: its JSON log by `code`, and `engine.perf` as it ends (Commands, below); while it
+  runs, `cargo gg logs --follow` and `cargo gg status`, whose `frames` count the game's frames.
+- Frame times: the Performance panel, an overlay apps add, the main thread's parts beside the render
+  thread's and the GPU's; Tracy's zones (below). In the editor the panel times the editor's frames:
+  the title bar's gear has "Show frame rates", the game's beside the editor's, at the view's bottom
+  right.
+- Frame rate: `--max-fps N`, or the gear's frame rate limit, which the app keeps for its next runs,
+  caps a window's frames, and so an editor's game; at 60 something that settles over frames is
+  watched as a player sees it, at 2 to 10 frame by frame. `--vsync` caps at the display's rate.
+- How a frame is made: `cargo gg capture --show` and `cargo gg probe` (below); RenderDoc (below).
+- The simulation: `--record`, `--replay` and `--dump`, and `--sync-test` (below); a session over a
+  slow link, `--link`.
+
 ## Commands
 
 ```sh

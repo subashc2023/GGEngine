@@ -6,6 +6,8 @@
 //! and reaches the project's games alone. It prints what it finds as JSON, a line at a time, for
 //! agents and scripts as much as for people.
 
+#[cfg(test)]
+mod agents_md;
 mod build;
 mod classify;
 mod dx;
