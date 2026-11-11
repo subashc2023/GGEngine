@@ -7898,7 +7898,9 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
 /// takes, as its material holds it, its values as their bytes over 255, through a frame that would
 /// otherwise antialias, bloom and vignette them; or an image the frame makes, black where nothing
 /// drew, and wholly black for an image it doesn't make. The sky doesn't show behind them. A frame
-/// of their light, after, shows as one before.
+/// of their light, after, shows as one before, each channel within 1: it's drawn at antialiasing's
+/// next offset, as the frames that showed parts resolved none, and where meshlets draw, lavapipe
+/// rounds some pixels otherwise at another offset.
 fn views_show_parts_of_shading_and_images_in_place_of_light() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 3;
@@ -8037,8 +8039,15 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
         missing.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]),
         "an image the frame doesn't make shows black"
     );
+    // Antialiased afresh, at the offset after the one `lit` was drawn at.
     let again = frame(None);
-    assert!(again == lit, "the light shows again as it did");
+    for at in (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| [x, y])) {
+        let (got, was) = (pixel_at(&again, WIDTH, at), pixel_at(&lit, WIDTH, at));
+        assert!(
+            close(got, was),
+            "the light shows again at {at:?} as {got:?}, not {was:?}"
+        );
+    }
     shut_down(renderer);
 }
 
