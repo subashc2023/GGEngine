@@ -128,14 +128,14 @@ rewrites them and the demos' live recordings' alone. gg-engine's `physics/` hold
 `animation/` three and its `navigation/` one, edited by hand. A difference on some platforms alone
 is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
 
-CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate, and the
-demo and the player run as they ship on Linux x86-64 alone; and the layering check. Only Linux jobs
-run the GPU tests, on lavapipe, and the apps and the demo's peers headless, grepping their logs;
-Windows' and macOS's runners have no GPU, so `GG_SKIP_GPU_TESTS` skips them there. lavapipe has no
-transfer queue, so CI never uploads through one: after changing uploads, run the GPU tests on a GPU
-with one, as NVIDIA's. Minutes are billed, a macOS one at ten Linux ones: push a branch to probe CI
-only for what another OS could break, and run [ship.yml](.github/workflows/ship.yml) only as asked.
+CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push of more than docs, on Windows
+and Linux, x86-64 and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the
+doc gate, the GPU tests, on lavapipe, the apps and the demo's peers headless, grepping their logs,
+and the demo and the player run as they ship on Linux x86-64 alone; and the layering check. Hosted
+runners have no GPU, so the other jobs set `GG_SKIP_GPU_TESTS`. lavapipe has no transfer queue,
+so CI never uploads through one: after changing uploads, run the GPU tests on a GPU with one, as
+NVIDIA's. Minutes are billed, a macOS one at ten Linux ones: push a branch to probe CI only for
+what another OS could break, and run [ship.yml](.github/workflows/ship.yml) only as asked.
 
 ## Rust
 

@@ -96,6 +96,9 @@ const ASKED: usize = 8;
 /// The ticks the atmosphere's sun takes to rise a degree, past which its light is prefiltered
 /// again: a few times in the frames counted, as prefiltering is slow on lavapipe.
 const SUN_TICKS: u64 = 16;
+/// A headless run's view, in pixels: small, as what's allocated is alike at any size, and lavapipe
+/// draws a frame of 1280 by 720 on CI's two CPUs in about 820 ms, which made the test the longest.
+const SIZE: [u32; 2] = [320, 180];
 
 /// The answers that came back: to the picks at the view's middle, those that found an entity and
 /// those that found none; to those outside it, which find none; and those that came back in
@@ -581,11 +584,13 @@ impl Layer for Scene {
         }
         // The view's middle, where the last frame had it, or a headless run's at first; and left of
         // the window.
-        let middle = cx.view().map_or([640.0, 360.0], |view| {
-            let [x, y] = view.origin.map(f64::from);
-            let [width, height] = view.size.map(f64::from);
-            [x + width / 2.0, y + height / 2.0]
-        });
+        let middle = cx
+            .view()
+            .map_or(SIZE.map(|side| f64::from(side) / 2.0), |view| {
+                let [x, y] = view.origin.map(f64::from);
+                let [width, height] = view.size.map(f64::from);
+                [x + width / 2.0, y + height / 2.0]
+            });
         let picks = [middle, [-1.0, middle[1]]].map(|at| cx.pick(at).expect("two a frame"));
         self.asked[frame as usize % ASKED] = Some(picks);
         if self.frames == WARM_UP {
@@ -794,11 +799,12 @@ fn main() {
         .layer(scene);
     // Four threads, so that the job system has threads of its own on a machine of two CPUs too.
     let frames = FRAMES.to_string();
+    let size = format!("{}x{}", SIZE[0], SIZE[1]);
     let mut args = vec!["--frames", &frames, "--threads", "4"];
     if !windowed {
         // Without the tool API, whose runs in a development build have threads watch the assets'
         // files, which allocate as they look at them, as docs/PLAN.md's Deferred says.
-        args.extend(["--headless", "--no-api"]);
+        args.extend(["--headless", "--no-api", "--size", &size]);
     }
     assert_eq!(
         gg_engine::run_with(app, args),

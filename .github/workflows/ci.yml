@@ -1,8 +1,11 @@
 name: CI
 
+# Not for a change to the docs alone, but docs/LUAU.md, which a test checks against the code.
 on:
   push:
+    paths: ["**", "!**.md", "!docs/**", "docs/LUAU.md"]
   pull_request:
+    paths: ["**", "!**.md", "!docs/**", "docs/LUAU.md"]
 
 permissions:
   contents: read
@@ -28,11 +31,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Hosted runners have no GPU. On Linux the GPU tests run on lavapipe, Mesa's CPU
-          # Vulkan driver, from Debian trixie: Mesa 25.0, the first with Vulkan 1.4, and the
-          # validation layer 1.4.309. Elsewhere they're skipped.
+          # Hosted runners have no GPU. On Linux x86-64 the GPU tests and the headless runs below
+          # run on lavapipe, Mesa's CPU Vulkan driver, from Debian trixie: Mesa 25.0, the first
+          # with Vulkan 1.4, and the validation layer 1.4.309. Elsewhere they're skipped: on ARM64
+          # too, as lavapipe takes most of a job's minutes, and the ARM64 jobs' tests check the
+          # simulations' hashes without it.
           - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie", once: true }
-          - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie" }
+          - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie", skip-gpu-tests: "1" }
           - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
           - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
           - { name: macOS ARM64, runner: macos-15, skip-gpu-tests: "1" }
@@ -98,25 +103,25 @@ jobs:
       - run: cargo test --workspace --locked
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
       - name: Run the sandbox headless
-        if: matrix.container
+        if: matrix.once
         run: cargo run -p sandbox --locked -- --headless --frames 60
       # Its frame times, which agents read from the log, before the run below adds a log of its own.
       - name: Check that the run logged its frame times
-        if: matrix.container
+        if: matrix.once
         run: grep -q '"code":"engine.perf"' target/debug/logs/sandbox-*.jsonl
       # A tick of the simulation each frame, so that a headless run runs as many ticks anywhere.
       - name: Check that the run ticked once a frame
-        if: matrix.container
+        if: matrix.once
         run: grep -q '"ticks":60,' target/debug/logs/sandbox-*.jsonl
       # Each frame handed to the render thread renders, the last as the run ends.
       - name: Check that the run rendered once a frame
-        if: matrix.container
+        if: matrix.once
         run: grep -q '"code":"engine.perf","frames":60,' target/debug/logs/sandbox-*.jsonl
       # A run recorded as it goes replays without a GPU to the hashes it recorded, exiting 0: the
       # flags' path, end to end, which the tests take from inside. Recorded on four threads, it
       # replays on the default and on one too, since a tick goes the same way on any number.
       - name: Record a headless run, and replay it
-        if: matrix.container
+        if: matrix.once
         run: |
           cargo run -p sandbox --locked -- --headless --frames 60 --threads 4 --record target/run.recording
           cargo run -p sandbox --locked -- --replay target/run.recording
@@ -125,7 +130,7 @@ jobs:
       # host's world, and their worlds hash alike at every tick, as no `net.desync` in either log
       # says; the host plays on alone once the joiner has gone.
       - name: Run the demo as two lockstep peers
-        if: matrix.container
+        if: matrix.once
         run: |
           cargo build -p shards --locked
           target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7700 &
@@ -138,7 +143,7 @@ jobs:
       # more, and loses 5% of them: each exits 0, the joiner joins, the host rolls back as its first
       # commands come, and their worlds hash alike at every tick run on both peers' inputs.
       - name: Run the demo as two rollback peers over a slow link
-        if: matrix.container
+        if: matrix.once
         run: |
           target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7701 --rollback --link 100,20,5 &
           host=$!
@@ -152,7 +157,7 @@ jobs:
       # own and corrected its world toward the server's states, whose text reads as the server's
       # hash says; and the server, sent Ctrl+C once they've gone, ends cleanly, exiting 0.
       - name: Run the demo as a server and two clients over a slow link
-        if: matrix.container
+        if: matrix.once
         run: |
           target/debug/gg-shards --serve 127.0.0.1:7702 --link 100,20,5 &
           server=$!
@@ -171,7 +176,7 @@ jobs:
       # demo's headless, and the demo's live recording replayed, which steers, dashes, collects and
       # edits, each exiting 0 and saying so as it ends.
       - name: Run each tick again, as a SyncTest
-        if: matrix.container
+        if: matrix.once
         run: |
           cargo run -p sandbox --locked -- --headless --frames 120 --sync-test
           target/debug/gg-shards --headless --frames 300 --sync-test
@@ -185,7 +190,7 @@ jobs:
       # Its runs render 320 by 180: lavapipe draws its arena's frames on the runner's two CPUs, at
       # 1280 by 720 in about 265 ms each, which made the step the job's longest.
       - name: Run the 3D demo networked, and as a SyncTest
-        if: matrix.container
+        if: matrix.once
         run: |
           cargo build -p foxball --locked
           fox=target/debug/gg-foxball
@@ -217,12 +222,12 @@ jobs:
           ! grep -q '"code":"net.desync"' $logs
       # Whether the editor runs, its view a panel that the UI draws among its own, exiting 0.
       - name: Run the editor headless
-        if: matrix.container
+        if: matrix.once
         run: cargo run -p editor --locked -- --headless --frames 60
       # With Tracy's client, which records into memory with no viewer and exits as usual. Hosted
       # runners are VMs, whose clocks Tracy otherwise refuses on x86.
       - name: Run the sandbox headless with Tracy
-        if: matrix.container
+        if: matrix.once
         run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
         env:
           TRACY_NO_INVARIANT_CHECK: "1"
