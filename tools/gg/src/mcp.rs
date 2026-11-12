@@ -212,6 +212,10 @@ fn tools() -> Value {
         {"type": "string", "minLength": 1, "maxLength": 64},
         variant("image", json!({"type": "string", "minLength": 1, "maxLength": 64})),
     ]});
+    // By the API's own names, so that the list can't fall behind it.
+    let passes: Vec<Value> = (gg_api::Pass::ALL.iter())
+        .map(|pass| serde_json::to_value(pass).expect("a pass's name"))
+        .collect();
     let input = json!({
         "type": "array",
         "description": "The events, each an object of one key, its kind, or a string for one that \
@@ -451,6 +455,16 @@ fn tools() -> Value {
                     "description": format!("What the view shows in place of its light, to see \
                                             how it's made, and which any capture without its own \
                                             `show` shows: {SHOWN}"),
+                },
+                "skip": {
+                    "type": ["array", "null"],
+                    "items": {"enum": passes},
+                    "description": "The passes the view leaves out, to narrow down which one makes \
+                                    what it shows, each by the name of the environment's field \
+                                    that turns it on, or `shadows`: each left out as the game \
+                                    would draw without it, the game itself unchanged, and a \
+                                    capture with `own` showing it as it is. `[]` or null gives \
+                                    them back",
                 },
             }),
             &[],
@@ -1072,6 +1086,19 @@ mod tests {
         ];
         assert_eq!(shows.expect("shows"), want);
         assert!(shows_of(&[json!(3)]).is_err());
+    }
+
+    /// A look's `skip` takes a list of the passes, by the API's names, or null.
+    #[test]
+    fn skip_is_listed_for_look_by_the_apis_names() {
+        let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let listed = answer(&mut pick(), listed).expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let look = tools.iter().find(|tool| tool["name"] == "look");
+        let skip = &look.expect("a `look` tool")["inputSchema"]["properties"]["skip"];
+        assert_eq!(skip["type"], json!(["array", "null"]));
+        let names = gg_api::Pass::ALL.map(|pass| serde_json::to_value(pass).expect("a name"));
+        assert_eq!(skip["items"]["enum"], json!(names));
     }
 
     #[test]

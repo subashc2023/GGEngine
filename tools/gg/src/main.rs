@@ -177,11 +177,15 @@ Talk to a running game, through its tool API:
                                  of the answers
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
-                                 takes them, `viewpoint`, `outline`, `grid`, `colliders` or `show`,
+                                 takes them, `viewpoint`, `outline`, `grid`, `colliders`, `show`,
                                  what the view shows in place of its light, a name as `capture`'s
                                  `--show` has it, `{\"show\":\"roughness\"}` or
-                                 `{\"show\":{\"image\":\"view depth\"}}`, those set first, each
-                                 `null` giving it back to the game
+                                 `{\"show\":{\"image\":\"view depth\"}}`, or `skip`, the passes the
+                                 view leaves out, to narrow down which one makes what it shows,
+                                 `{\"skip\":[\"reflections\",\"shadows\"]}`, of `ambient_occlusion`,
+                                 `reflections`, `shadows`, `fog`, `bloom`, `depth_of_field`,
+                                 `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`;
+                                 those set first, each `null` giving it back to the game
   pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
                                  top left, as a capture has it, the look included; `null` for none
   probe <X> <Y> [--own]          What shading took and made at pixel X, Y of its view, from its top
@@ -1117,6 +1121,16 @@ mod tests {
         assert_eq!(granted(&["status"]), None);
     }
 
+    /// `look`'s help names each pass a look can leave out, as the API names it.
+    #[test]
+    fn looks_help_names_every_pass() {
+        for pass in gg_api::Pass::ALL {
+            let name = serde_json::to_value(pass).expect("a name");
+            let name = name.as_str().expect("a string");
+            assert!(USAGE.contains(&format!("`{name}`")), "{name}");
+        }
+    }
+
     #[test]
     fn commands_parse_into_their_calls_with_their_options() {
         let Ok(Command::Call {
@@ -1302,6 +1316,10 @@ mod tests {
             (
                 &["look", r#"{"show":{"image":"view depth"}}"#],
                 json!({"show": {"image": "view depth"}}),
+            ),
+            (
+                &["look", r#"{"skip":["fog","shadows"]}"#],
+                json!({"skip": ["fog", "shadows"]}),
             ),
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
