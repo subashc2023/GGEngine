@@ -7,11 +7,12 @@
 
 use std::f32::consts::{PI, TAU};
 
-use gg_api::Shown;
+use gg_api::{Pass, Shown};
 use gg_engine::Context;
 use gg_engine::egui::{
-    self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
-    Rect, Response, Rgba, Sense, Shape, Stroke, StrokeKind, TextStyle, Visuals, vec2,
+    self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Popup,
+    PopupCloseBehavior, Pos2, Rect, Response, Rgba, Sense, Shape, Stroke, StrokeKind, TextStyle,
+    Visuals, vec2,
 };
 use gg_engine::grid::{self, Plane};
 use gg_engine::math::{self, Quat, libm};
@@ -83,10 +84,27 @@ const CHANNELS: &[(&str, Channel)] = &[
     ("Before tonemapping", Channel::Image("view colors")),
 ];
 
+/// What the toolbar's list of the passes the view can leave out calls `pass`.
+fn pass_label(pass: Pass) -> &'static str {
+    match pass {
+        Pass::AmbientOcclusion => "Ambient occlusion",
+        Pass::Reflections => "Reflections",
+        Pass::Shadows => "Shadows",
+        Pass::Fog => "Fog",
+        Pass::Bloom => "Bloom",
+        Pass::DepthOfField => "Depth of field",
+        Pass::MotionBlur => "Motion blur",
+        Pass::Antialiasing => "Antialiasing",
+        Pass::Grade => "Grade",
+        Pass::Lens => "Lens",
+        Pass::Adaptation => "Exposure adaptation",
+    }
+}
+
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
 /// which plane, whether the view sees through the game's camera, whether the game's colliders'
-/// outlines show, and what the view shows in place of its light; and where it is over the view, and
-/// whether it's folded.
+/// outlines show, what the view shows in place of its light and the passes it leaves out; and
+/// where it is over the view, and whether it's folded.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -101,6 +119,10 @@ pub struct Toolbar {
     /// What the view shows in place of its light, to see how it's made, through either camera;
     /// `None` for the game's own light.
     pub show: Option<Shown>,
+    /// The passes the view leaves out, to narrow down which one makes what it shows, through
+    /// either camera, in [`Pass::ALL`]'s order, as the game answers them; empty for none. Not kept
+    /// from run to run, so that none is left out unawares.
+    pub skip: Vec<Pass>,
     pub placement: Placement,
 }
 
@@ -113,6 +135,7 @@ impl Default for Toolbar {
             world_camera: false,
             colliders: false,
             show: None,
+            skip: Vec::new(),
             placement: Placement::default(),
         }
     }
@@ -236,10 +259,12 @@ impl Toolbar {
     /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, whose
     /// tooltips name the keys that pick them, the camera's projection, which a click switches, the
     /// grid's switch and its plane, the switch that sees through the game's camera, and the
-    /// colliders' switch, and the list of what the view shows in place of its light, each with a
-    /// tooltip. While the view sees through the game's camera, the projection's and the grid's
-    /// buttons are off, since what they change doesn't show. It opens nothing but that list, which
-    /// shows a popup that takes the view's keys while it's open.
+    /// colliders' switch, the list of what the view shows in place of its light, and the Passes
+    /// button, lit while the view leaves any out, each with a tooltip. While the view sees through
+    /// the game's camera, the projection's and the grid's buttons are off, since what they change
+    /// doesn't show. It opens nothing but that list, and the Passes button's list of the passes,
+    /// ticked while drawn, which stays open as they're ticked, until a click outside it: each a
+    /// popup that takes the view's keys while it's open.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -387,9 +412,44 @@ impl Toolbar {
                         "What the view shows in place of its light, to see how it's made; agents \
                          can set it too",
                     );
+                let label = match self.skip.len() {
+                    0 => "Passes".to_owned(),
+                    off => format!("Passes: {off} off"),
+                };
+                let passes = ui
+                    .add(Button::selectable(!self.skip.is_empty(), label))
+                    .on_hover_text(
+                        "The passes the view draws, to narrow down which one makes what it shows: \
+                         untick one to leave it out, as the game would draw without it, the game \
+                         itself unchanged; agents can set them too",
+                    );
+                Popup::menu(&passes)
+                    .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.show_passes(ui));
             });
         });
         self.placement.size = shown.response.rect.size();
+    }
+
+    /// Draws the passes the view can leave out into `ui`, each ticked while it's drawn, which a
+    /// click leaves out or draws again, then Draw all, which draws them all again.
+    fn show_passes(&mut self, ui: &mut egui::Ui) {
+        for pass in Pass::ALL {
+            let mut drawn = !self.skip.contains(&pass);
+            if ui.checkbox(&mut drawn, pass_label(pass)).changed() {
+                if drawn {
+                    self.skip.retain(|left_out| *left_out != pass);
+                } else {
+                    self.skip.push(pass);
+                    self.skip.sort_unstable();
+                }
+            }
+        }
+        ui.separator();
+        let all = ui.add_enabled(!self.skip.is_empty(), Button::new("Draw all"));
+        if all.clicked() {
+            self.skip.clear();
+        }
     }
 }
 
@@ -1214,6 +1274,80 @@ mod tests {
             let clicked = [0, 1, 2, 3].map(|i| click_control(current, paused, i));
             assert_eq!(clicked, expected, "{current:?}, paused {paused}");
         }
+    }
+
+    /// Runs a pass of `toolbar` at the top left of a view of 1400 by 400 points, with `events`;
+    /// returns what it drew.
+    fn toolbar_pass(
+        ctx: &egui::Context,
+        toolbar: &mut Toolbar,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 400.0));
+        let input = RawInput {
+            screen_rect: Some(view),
+            events,
+            ..RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::Area::new(Id::unique("gg editor test toolbar"))
+                .fixed_pos(view.min + egui::Vec2::splat(INSET))
+                .show(ui.ctx(), |ui| toolbar.show(ui, &mut OrbitCamera::new()));
+        });
+        output.textures_delta.clear();
+        output
+    }
+
+    /// Clicks `toolbar` at `at`: a pass each of the pointer moving there, pressing and letting go.
+    /// Returns what the last drew.
+    fn click_toolbar(ctx: &egui::Context, toolbar: &mut Toolbar, at: Pos2) -> egui::FullOutput {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        toolbar_pass(ctx, toolbar, vec![egui::Event::PointerMoved(at)]);
+        toolbar_pass(ctx, toolbar, vec![button(true)]);
+        toolbar_pass(ctx, toolbar, vec![button(false)])
+    }
+
+    /// The middle of where `output` drew `text`, a text of its own, if it did.
+    fn text_at(output: &egui::FullOutput, text: &str) -> Option<Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(shape.pos + shape.galley.rect.center().to_vec2())
+                }
+                _ => None,
+            })
+    }
+
+    /// The Passes button opens the passes, each ticked while drawn: a click on one leaves it out,
+    /// the list staying open for the next, kept in the order the game answers them, and a click
+    /// again draws it again; Draw all draws them all again; and the button counts those left out.
+    #[test]
+    fn the_passes_list_leaves_passes_out_and_draws_them_all_again() {
+        let ctx = egui::Context::default();
+        let mut toolbar = Toolbar::default();
+        // Each pass after the first that shows the toolbar, then the list, which only sizes them.
+        let drawn = [(); 2].map(|()| toolbar_pass(&ctx, &mut toolbar, Vec::new()));
+        let button = text_at(&drawn[1], "Passes").expect("the button");
+        click_toolbar(&ctx, &mut toolbar, button);
+        let opened = toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        let [shadows, reflections, all] =
+            ["Shadows", "Reflections", "Draw all"].map(|text| text_at(&opened, text).expect(text));
+        click_toolbar(&ctx, &mut toolbar, shadows);
+        click_toolbar(&ctx, &mut toolbar, reflections);
+        assert_eq!(toolbar.skip, [Pass::Reflections, Pass::Shadows]);
+        let listed = toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        assert!(text_at(&listed, "Passes: 2 off").is_some(), "counted");
+        click_toolbar(&ctx, &mut toolbar, reflections);
+        assert_eq!(toolbar.skip, [Pass::Shadows], "drawn again");
+        click_toolbar(&ctx, &mut toolbar, all);
+        assert_eq!(toolbar.skip, [], "all drawn again");
     }
 
     /// Where the toolbar is and whether it's folded read back as they were, and what of a file

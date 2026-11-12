@@ -1,6 +1,6 @@
 //! The editor's side of a game's look: the view settings the game keeps, its viewpoint, an outline,
-//! a grid, whether colliders' outlines show and what the view shows in place of its light, which
-//! any client sets, part by part, the last to
+//! a grid, whether colliders' outlines show, what the view shows in place of its light and the
+//! passes it leaves out, which any client sets, part by part, the last to
 //! set a part winning, as the tool API's `look` says. A part goes to the game only as the user
 //! changes it, or as it follows one the editor took, as the grid follows the camera that drives the
 //! view; and every answer is a read of the look: the parts another client set since, the editor
@@ -9,7 +9,7 @@
 
 use std::mem;
 
-use gg_api::{By, Look, Looked, Outline, Plane, Shown, Viewpoint};
+use gg_api::{By, Look, Looked, Outline, Pass, Plane, Shown, Viewpoint};
 
 /// One of the look's parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +19,7 @@ pub enum Part {
     Grid,
     Colliders,
     Show,
+    Skip,
 }
 
 /// The look's parts, each `None` where it's the game's own: what the editor wants of them, or knows
@@ -30,6 +31,8 @@ pub struct Parts {
     pub grid: Option<Plane>,
     pub colliders: Option<bool>,
     pub show: Option<Shown>,
+    /// In [`Pass::ALL`]'s order, each once, never empty, as the game answers it.
+    pub skip: Option<Vec<Pass>>,
 }
 
 /// What the editor knows of a game's look, and what it asks of it: the look as the game last
@@ -44,7 +47,7 @@ pub struct Looking {
     drawn: u64,
     /// Whether each part changed since the last look was asked for, by the user or as it follows
     /// one taken, by [`Part`].
-    changed: [bool; 5],
+    changed: [bool; 6],
     /// The parts the look asked for sets, all left out for a read.
     asked: Option<Look>,
 }
@@ -58,7 +61,7 @@ impl Looking {
             by: By::default(),
             revision: 0,
             drawn: 0,
-            changed: [true; 5],
+            changed: [true; 6],
             asked: None,
         }
     }
@@ -86,6 +89,7 @@ impl Looking {
             Part::Grid => &self.by.grid,
             Part::Colliders => &self.by.colliders,
             Part::Show => &self.by.show,
+            Part::Skip => &self.by.skip,
         };
         if by.as_deref().is_none_or(|by| by == self.client) {
             self.change(part);
@@ -105,7 +109,7 @@ impl Looking {
         if self.asked.is_some() {
             return None;
         }
-        let [viewpoint, outline, grid, colliders, show] = mem::take(&mut self.changed);
+        let [viewpoint, outline, grid, colliders, show, skip] = mem::take(&mut self.changed);
         let known = &self.known;
         let look = Look {
             viewpoint: sent(viewpoint, &wanted.viewpoint, &known.viewpoint),
@@ -113,7 +117,7 @@ impl Looking {
             grid: sent(grid, &wanted.grid, &known.grid),
             colliders: sent(colliders, &wanted.colliders, &known.colliders),
             show: sent(show, &wanted.show, &known.show),
-            skip: None,
+            skip: sent(skip, &wanted.skip, &known.skip),
         };
         if look == Look::default() && self.drawn <= self.revision {
             return None;
@@ -134,6 +138,7 @@ impl Looking {
             grid,
             colliders,
             show,
+            skip,
             by,
             revision,
             ..
@@ -172,7 +177,12 @@ impl Looking {
                 kept(Part::Show, asked.show.is_some()),
                 client,
             ),
-            skip: None,
+            skip: take(
+                (&mut known.skip, &mut setters.skip),
+                (skip, by.skip),
+                kept(Part::Skip, asked.skip.is_some()),
+                client,
+            ),
         };
         self.revision = revision;
         taken
@@ -225,7 +235,7 @@ mod tests {
             grid: parts.grid,
             colliders: parts.colliders,
             show: parts.show.clone(),
-            skip: None,
+            skip: parts.skip.clone(),
             by,
             revision,
             run: 1,
@@ -233,8 +243,8 @@ mod tests {
         }
     }
 
-    /// Who set each part but what the view shows, which none did: `viewpoint`'s, the outline's, the
-    /// grid's and the colliders' setters.
+    /// Who set each part but what the view shows and the passes it leaves out, which none did:
+    /// `viewpoint`'s, the outline's, the grid's and the colliders' setters.
     fn by(setters: [Option<&str>; 4]) -> By {
         let [viewpoint, outline, grid, colliders] = setters.map(|by| by.map(str::to_owned));
         By {
@@ -367,6 +377,7 @@ mod tests {
             grid: Some(Plane::Xy),
             colliders: Some(false),
             show: None,
+            skip: None,
         };
         let agent = by([Some("agent"); 4]);
         looking.drew(2);
@@ -389,6 +400,7 @@ mod tests {
             grid: Some(Plane::Xy),
             colliders: None,
             show: None,
+            skip: None,
         };
         assert_eq!(looking.ask(&wanted), None, "nothing the user changed");
         looking.drew(3);
@@ -502,5 +514,55 @@ mod tests {
         assert!(looking.ask(&wanted).is_some());
         let taken = looking.read(looked(&wanted, setters(None), 8));
         assert_eq!(taken.show, Some(None), "the agent's null");
+    }
+
+    /// The passes the view leaves out go as the others' parts do: once as the user changes them,
+    /// null as they draw every pass again; and an agent's are taken, and its null too.
+    #[test]
+    fn the_passes_left_out_go_and_are_taken_as_the_others_parts() {
+        let mut wanted = Parts {
+            colliders: Some(true),
+            ..Parts::default()
+        };
+        let mut looking = served(&wanted);
+        let setters = |skip: Option<&str>| By {
+            skip: skip.map(str::to_owned),
+            ..by([None, None, None, Some(CLIENT)])
+        };
+        let skips = |skip: Option<Vec<Pass>>| Look {
+            skip: Some(skip),
+            ..Look::default()
+        };
+        // The user leaves reflections out: it goes once, and the answer, its own, takes nothing.
+        wanted.skip = Some(vec![Pass::Reflections]);
+        looking.change(Part::Skip);
+        let sent = looking.ask(&wanted).expect("changed");
+        assert_eq!(sent, skips(wanted.skip.clone()));
+        let answer = looked(&wanted, setters(Some(CLIENT)), 2);
+        assert_eq!(looking.read(answer), Look::default(), "its own");
+        assert_eq!(looking.ask(&wanted), None, "sent once");
+        // Drawn whole again: null goes.
+        wanted.skip = None;
+        looking.change(Part::Skip);
+        assert_eq!(looking.ask(&wanted), Some(skips(None)));
+        assert_eq!(
+            looking.read(looked(&wanted, setters(None), 3)),
+            Look::default()
+        );
+        // An agent leaves out others, which are taken, then gives them back, which is taken too.
+        looking.drew(4);
+        assert_eq!(looking.ask(&wanted), Some(Look::default()), "a read");
+        let theirs = Parts {
+            skip: Some(vec![Pass::Shadows, Pass::Fog]),
+            ..wanted.clone()
+        };
+        let taken = looking.read(looked(&theirs, setters(Some("agent")), 4));
+        assert_eq!(taken, skips(theirs.skip.clone()));
+        wanted.skip = theirs.skip;
+        looking.drew(5);
+        assert!(looking.ask(&wanted).is_some());
+        wanted.skip = None;
+        let taken = looking.read(looked(&wanted, setters(None), 5));
+        assert_eq!(taken, skips(None), "the agent's null");
     }
 }

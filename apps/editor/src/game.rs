@@ -56,9 +56,11 @@
 //! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
 //! The title bar's settings switch on the game's frame rate and the editor's at the view's bottom
 //! right, as [`rates`](crate::rates) says.
-//! The editor's camera, the outline round what's picked, the grid and the colliders' switch reach
-//! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
-//! editor taking the parts another client, such as an agent, sets.
+//! The editor's camera, the outline round what's picked, the grid, the colliders' switch, what the
+//! toolbar has the view show in place of its light, and the passes its Passes list leaves out, to
+//! narrow down which one makes what the view shows, reach the game as parts of its look, as
+//! [`look`](crate::look) says: each as the user changes it, the editor taking the parts another
+//! client, such as an agent, sets.
 //!
 //! A texture, a model, a font or a prefab dragged from the Assets panel outlines the view while it's
 //! held over it, and is let go there as an edit of the editor's, through the Inspector's link,
@@ -384,8 +386,8 @@ impl Found {
 
 /// What the parts of the look the editor wants go by, which between updates only the user changes:
 /// whether the game's camera drives the view, what the editor's camera sees from, what the
-/// Inspector has picked, and the toolbar's grid, its plane, the colliders' switch and what the view
-/// shows.
+/// Inspector has picked, and the toolbar's grid, its plane, the colliders' switch, what the view
+/// shows and the passes it leaves out.
 #[derive(Clone, PartialEq)]
 struct Wants {
     through: bool,
@@ -395,6 +397,7 @@ struct Wants {
     plane: Plane,
     colliders: bool,
     show: Option<gg_api::Shown>,
+    skip: Vec<gg_api::Pass>,
 }
 
 /// A line `gg run` printed: on stdout, its events; on stderr, its errors, and what the game and the
@@ -1437,8 +1440,8 @@ impl Game {
     /// editor's camera adopts, driving the view, and `null` turns the view back to the game's
     /// camera, either turn taking the grid with it, as the user's does, unless another client set
     /// the grid; an outline's entity the Inspector picks, and `null` unpicks; and the grid and the
-    /// colliders set the toolbar's switches, and the grid its plane; and what the view shows sets
-    /// the toolbar's choice.
+    /// colliders set the toolbar's switches, and the grid its plane; and what the view shows and
+    /// the passes it leaves out set the toolbar's choices.
     fn take_look(&mut self, taken: gg_api::Look) {
         let toolbar = &mut self.view.toolbar;
         let through = toolbar.world_camera;
@@ -1469,6 +1472,9 @@ impl Game {
         }
         if let Some(show) = taken.show {
             toolbar.show = show;
+        }
+        if let Some(skip) = taken.skip {
+            toolbar.skip = skip.unwrap_or_default();
         }
     }
 
@@ -1682,8 +1688,8 @@ impl Game {
     /// editor's camera or back to the game's; the outline, as the pick changed, but to what the
     /// Inspector made of the pick the look's outline asked for, its entity, or none for an ID a
     /// read of the game has found gone; the grid, as the view turned, or the toolbar's grid or its
-    /// plane changed; the colliders, as their switch did; and what the view shows, as the toolbar's
-    /// choice did.
+    /// plane changed; the colliders, as their switch did; and what the view shows and the passes it
+    /// leaves out, as the toolbar's choices did.
     fn changes(&mut self, now: Wants) {
         let was = self.wants.clone();
         let turned = now.through != was.through;
@@ -1705,6 +1711,9 @@ impl Game {
         }
         if now.show != was.show {
             self.looking.change(Part::Show);
+        }
+        if now.skip != was.skip {
+            self.looking.change(Part::Skip);
         }
     }
 
@@ -1729,8 +1738,8 @@ impl Game {
     /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
     /// editor's camera's viewpoint while it drives the view; the Inspector's pick outlined; the
     /// toolbar's grid, while it's on and the editor's camera drives; the colliders' outlines while
-    /// their switch is on, or else whether the game shows them; and what the toolbar has the view
-    /// show, or else its light.
+    /// their switch is on, or else whether the game shows them; what the toolbar has the view show,
+    /// or else its light; and the passes the toolbar has it leave out, if any.
     fn wanted(&self, scale: f32) -> Parts {
         let ViewTools {
             camera,
@@ -1750,6 +1759,7 @@ impl Game {
             grid: (driving && toolbar.grid).then(|| api_plane(toolbar.plane)),
             colliders: toolbar.colliders.then_some(true),
             show: toolbar.show.clone(),
+            skip: (!toolbar.skip.is_empty()).then(|| toolbar.skip.clone()),
         }
     }
 
@@ -1929,6 +1939,7 @@ fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
         plane: view.toolbar.plane,
         colliders: view.toolbar.colliders,
         show: view.toolbar.show.clone(),
+        skip: view.toolbar.skip.clone(),
     }
 }
 
@@ -3942,6 +3953,69 @@ mod tests {
         assert_eq!(sent, [], "the agent's grid");
         let sent = answer(None, Some(xz), [None, agent], 6);
         assert_eq!(sent, [], "the agent's grid stays");
+    }
+
+    /// The passes the toolbar's list leaves out go to the game as the user ticks them, null once
+    /// all are drawn again; and those another client leaves out, or gives back, set the list.
+    #[test]
+    fn the_passes_left_out_go_to_the_game_and_are_taken_from_other_clients() {
+        use gg_api::Pass;
+
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [], "all the game's own");
+        // The game answers a look whose passes left out are `skip`, set by `by`, at `revision`;
+        // returns the looks the editor asks for in the update that takes it.
+        let answer = |game: &mut Game, cx: &mut Context, skip, by: Option<&str>, revision| {
+            let looked = Looked {
+                viewpoint: None,
+                outline: None,
+                grid: None,
+                colliders: None,
+                show: None,
+                skip,
+                by: By {
+                    skip: by.map(str::to_owned),
+                    ..By::default()
+                },
+                revision,
+                run: 1,
+                seen: None,
+            };
+            let answer = ("look".to_owned(), Ok(json!(looked)));
+            ends.answer.send(answer).expect("sent");
+            game.update(cx, Duration::ZERO);
+            looks(&ends)
+        };
+        let skips = |skip| Look {
+            skip: Some(skip),
+            ..Look::default()
+        };
+        // The list's ticks, for which a test sets the field, since it can't run `ui`.
+        game.view.toolbar.skip = vec![Pass::Reflections];
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [skips(Some(vec![Pass::Reflections]))]);
+        let mine = Some(vec![Pass::Reflections]);
+        assert_eq!(answer(&mut game, &mut cx, mine, Some(CLIENT), 1), []);
+        let theirs = vec![Pass::Shadows, Pass::Fog];
+        let sent = answer(&mut game, &mut cx, Some(theirs.clone()), Some("agent"), 2);
+        assert_eq!(
+            (sent, &game.view.toolbar.skip),
+            (vec![], &theirs),
+            "the agent's"
+        );
+        let sent = answer(&mut game, &mut cx, None, None, 3);
+        assert_eq!(sent, [], "given back");
+        assert_eq!(game.view.toolbar.skip, [], "all drawn again");
+        game.view.toolbar.skip = vec![Pass::Lens];
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [skips(Some(vec![Pass::Lens]))]);
+        let mine = Some(vec![Pass::Lens]);
+        assert_eq!(answer(&mut game, &mut cx, mine, Some(CLIENT), 4), []);
+        game.view.toolbar.skip.clear();
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [skips(None)], "the user's null");
     }
 
     /// While the game hasn't answered the last `input`, as while a script has stopped it, the
