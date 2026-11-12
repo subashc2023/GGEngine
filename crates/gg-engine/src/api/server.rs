@@ -343,7 +343,7 @@ enum Call {
         quit: bool,
     },
     Patch(JumpTable),
-    /// An edit's operations, and the gesture it's part of, if it's a set of one.
+    /// An edit's operations, and the gesture it's part of, if it's sets of one field.
     Apply(Vec<gg_api::Operation>, Option<u64>),
     /// The entity to save as a prefab and link to it, and the path of the prefab's file, as given,
     /// checked to be a `.prefab` file's.
@@ -940,13 +940,13 @@ impl Api {
                     let named = assets_named(world, &given);
                     cx.load_named(named, false);
                     match operations(cx.world(), cx.world(), given) {
-                        Ok(mut operations) => {
+                        Ok(operations) => {
                             let author = client.to_string();
                             let edit = match gesture {
                                 Some(gesture) => Edit::Amend {
                                     author,
                                     gesture,
-                                    operation: operations.pop().expect("checked as it was read"),
+                                    operations,
                                 },
                                 None => Edit::Apply { author, operations },
                             };
@@ -2788,8 +2788,26 @@ fn parse(request: &Request) -> Result<Call, Failure> {
                 operations,
                 gesture,
             } = take(method, params)?;
-            if gesture.is_some() && !matches!(operations[..], [gg_api::Operation::Set { .. }]) {
-                return Err(bad_params(method, "takes one set as a gesture's"));
+            let mut seen = Vec::new();
+            let mut field = None;
+            let one_field = operations.iter().all(|operation| match operation {
+                gg_api::Operation::Set {
+                    id,
+                    component,
+                    path,
+                    ..
+                } => {
+                    let of = *field.get_or_insert((component, path));
+                    let new = !seen.contains(&id);
+                    seen.push(id);
+                    of == (component, path) && new
+                }
+                _ => false,
+            });
+            if gesture.is_some() && !(one_field && !operations.is_empty()) {
+                let what = "takes sets of one component's one field, no two of one entity, as a \
+                            gesture's";
+                return Err(bad_params(method, what));
             }
             Call::Apply(operations, gesture)
         }
@@ -3939,32 +3957,65 @@ mod tests {
         assert_eq!(field(&lines[1], "fields"), Value::Null, "none given");
     }
 
-    /// A client's sets of one field in one gesture undo as one edit, and a gesture's apply is of
-    /// one set.
+    /// A client's sets of one field in one gesture undo as one edit, of one entity or several, and
+    /// a gesture's apply is of sets of one field, no two of one entity.
     #[test]
     fn a_gestures_sets_undo_as_one_edit() {
         let (mut api, session) = started("Api Gestures");
         let mut cx = Context::seeded(3);
         let hero = cx.world_mut().spawn(Transform::IDENTITY);
-        let hero_id = cx.world().id(hero).expect("alive").to_string();
+        let foe = cx.world_mut().spawn(Transform::IDENTITY);
+        let [hero_id, foe_id] = [hero, foe].map(|e| cx.world().id(e).expect("alive").to_string());
         let mut stepper = Stepper::default();
         stepper.pause();
         let client = move |mut client: Client| {
-            let set = |x: i32| {
-                let path = "translation.x";
-                json!({"set": {"id": hero_id, "component": "Transform", "path": path, "value": x}})
-            };
+            let set = |id: &str, path: &str, x: i32| json!({"set": {"id": id, "component": "Transform", "path": path, "value": x}});
             for x in [1, 2, 3] {
-                let apply = json!({"operations": [set(x)], "gesture": 9});
+                let apply =
+                    json!({"operations": [set(&hero_id, "translation.x", x)], "gesture": 9});
                 client.call_as::<Applied>("apply", apply).expect("set");
             }
-            let two = json!({"operations": [set(4), set(5)], "gesture": 9});
-            let refused = client.call("apply", two).expect_err("two sets").code;
             let history: History = client.call_as("edits", ()).expect("the edits");
             let undone: Option<gg_api::Edit> = client.call_as("undo", ()).expect("undone");
-            (refused, history, undone)
+            // Two entities' sets, twice, in a gesture of their own.
+            for x in [4, 5] {
+                let sets = [
+                    set(&hero_id, "translation.x", x),
+                    set(&foe_id, "translation.x", x),
+                ];
+                let apply = json!({"operations": sets, "gesture": 10});
+                client.call_as::<Applied>("apply", apply).expect("sets");
+            }
+            let both: History = client.call_as("edits", ()).expect("the edits");
+            let undone_both: Option<gg_api::Edit> = client.call_as("undo", ()).expect("undone");
+            let refuse = |client: &mut Client, operations: Value| {
+                let apply = json!({"operations": operations, "gesture": 11});
+                client.call("apply", apply).expect_err("refused").code
+            };
+            let same = refuse(
+                &mut client,
+                json!([
+                    set(&hero_id, "translation.x", 6),
+                    set(&hero_id, "translation.x", 7)
+                ]),
+            );
+            let fields = refuse(
+                &mut client,
+                json!([
+                    set(&hero_id, "translation.x", 6),
+                    set(&foe_id, "translation.y", 7)
+                ]),
+            );
+            let none = refuse(&mut client, json!([]));
+            let after: History = client.call_as("edits", ()).expect("the edits");
+            (
+                (history, undone),
+                (both, undone_both),
+                [same, fields, none],
+                after,
+            )
         };
-        let (refused, history, undone) = serving(
+        let (one, two, refused, after) = serving(
             &mut api,
             &mut cx,
             &mut Stack::default(),
@@ -3973,16 +4024,24 @@ mod tests {
             client,
             |_, _, _| {},
         );
-        assert_eq!(refused, "api.bad_params");
-        assert_eq!(history.authors[0].done.len(), 1, "one edit: {history:?}");
-        assert!(undone.is_some());
-        let x = cx
-            .world()
-            .get::<Transform>(hero)
-            .expect("a transform")
-            .translation
-            .x;
-        assert_eq!(x, 0.0, "the gesture undone whole");
+        assert_eq!(one.0.authors[0].done.len(), 1, "one edit: {:?}", one.0);
+        assert!(one.1.is_some());
+        assert_eq!(two.0.authors[0].done.len(), 1, "one edit: {:?}", two.0);
+        assert!(two.1.is_some());
+        assert_eq!(refused, ["api.bad_params"; 3]);
+        assert_eq!(
+            after.authors[0].done.len(),
+            0,
+            "the refused changed nothing"
+        );
+        let x = |e| {
+            cx.world()
+                .get::<Transform>(e)
+                .expect("a transform")
+                .translation
+                .x
+        };
+        assert_eq!([x(hero), x(foe)], [0.0, 0.0], "both gestures undone whole");
     }
 
     /// A client's edit that names a texture none loaded, by its ID, has it loaded from its file

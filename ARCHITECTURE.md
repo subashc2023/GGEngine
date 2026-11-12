@@ -890,9 +890,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   field of its own exclusive, as a camera's `primary` is, so that one edit, a person's or an
   agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
   applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
-  applies one of several operations all or nothing, merges a gesture's sets of one field, such as
-  a drag's, but an instance's link, into one edit, a tool API client's too, by the number it gives
-  each of its gestures,
+  applies one of several operations all or nothing, merges a gesture's sets of one field, of one
+  entity or several, such as a drag's, but an instance's link, into one edit, a tool API client's
+  too, by the number it gives each of its gestures,
   and drops an entry whose undo the world refuses, as where a set's old value is one that code
   stored and a set refuses: an undo sets each field back, checked, keeping what has changed the
   component's other fields since. A running game applies the tool API's edits

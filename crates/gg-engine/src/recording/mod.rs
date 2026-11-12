@@ -6,7 +6,7 @@
 //! A recording is text, a line at a time:
 //!
 //! ```text
-//! gg-recording 5
+//! gg-recording 6
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
@@ -56,7 +56,11 @@ use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 5";
+const FORMAT: &str = "gg-recording 6";
+
+/// The format of the recordings before an `Amend` held several operations, whose `Amend` has one
+/// `operation`, which this engine reads too.
+const BEFORE_GESTURES: &str = "gg-recording 5";
 
 /// The format of the recordings before patches, `patch` lines, which this engine reads too.
 const BEFORE_PATCHES: &str = "gg-recording 4";
@@ -364,7 +368,11 @@ impl Recording {
     fn parse(text: &str) -> Result<Self> {
         let mut lines = whole_lines(text).peekable();
         match lines.next() {
-            Some((_, FORMAT | BEFORE_PATCHES | BEFORE_MODS | BEFORE_NAMES | BEFORE_EDITS)) => {}
+            Some((
+                _,
+                FORMAT | BEFORE_GESTURES | BEFORE_PATCHES | BEFORE_MODS | BEFORE_NAMES
+                | BEFORE_EDITS,
+            )) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
                     "it's a recording of format `{line}`, but this engine reads `{FORMAT}`"
@@ -1362,12 +1370,12 @@ mod tests {
                 (5 | 6, Some(made)) => Edit::Amend {
                     author: author(),
                     gesture: 7,
-                    operation: crate::Operation::Set {
+                    operations: vec![crate::Operation::Set {
                         entity: made,
                         component: "Transform".into(),
                         path: "translation.y".to_owned(),
                         value: crate::reflect::Value::F32(frame as f32),
-                    },
+                    }],
                 },
                 (7, _) => Edit::Apply {
                     author: author(),
@@ -1634,7 +1642,7 @@ mod tests {
         let after_end = format!("{text}0 {hash}\n");
         let named = |line: &str| changed(&text, 4, &format!("{}\n{line}", lines[4]));
         let cases = [
-            (changed(&text, 0, "gg-recording 6"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 7"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),

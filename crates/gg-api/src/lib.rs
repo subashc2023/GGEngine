@@ -167,9 +167,9 @@
 //!   the game's build, as one that exports no `main` isn't.
 //! - `apply`, [`Apply`]: applies an edit, [`Operation`]s that undo and redo together, as the
 //!   frame starts, between ticks, and answers [`Applied`]; it applies all or none, failing with
-//!   the code of the first refused, such as `ecs.no_entity`, which names it. A set of a gesture,
-//!   such as a drag, joins the client's last edit if that's a set of the same field in the same
-//!   gesture, so that the gesture undoes whole.
+//!   the code of the first refused, such as `ecs.no_entity`, which names it. The sets of a
+//!   gesture, such as a drag, of one field of one entity or several, join the client's last edit
+//!   if that's sets of the same field in the same gesture, so that the gesture undoes whole.
 //! - `save_prefab`, [`SavePrefab`]: saves an entity and its descendants as a new prefab, and links
 //!   the entity to it, as an edit of the client's, and answers [`SavedPrefab`]. The prefab's file
 //!   is `path`, absolute or from the asset root, in a folder there that [`asset::scan`] reaches,
@@ -1588,11 +1588,13 @@ pub enum Operation {
 /// gesture, such as a drag or a number typed, the gesture, a number the client gives each of its
 /// own, the same for each of its sets: a set of the field that the client's last edit set, with the
 /// same gesture, joins that edit, taking its value and keeping what undoes it, so that the gesture
-/// undoes whole, and any other edit of the client's that reaches the world ends it, refused there
+/// undoes whole, whether it sets that field of one entity or of several (a set of another entity
+/// is added to the edit), and any other edit of the client's that reaches the world ends it, refused there
 /// or not; one refused as it's read, as for an ID that isn't one, a type there's none of or a value
 /// of another kind, doesn't. Since a client's edits are those of every connection with its name, a
 /// gesture's number is its own across them, as one drawn at random to start from is. With a
-/// gesture, an apply is of one set, or refused with `api.bad_params`.
+/// gesture, an apply is of sets, each of one component's one field, no two of one entity, or
+/// refused with `api.bad_params`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Apply {

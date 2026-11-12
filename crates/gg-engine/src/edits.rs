@@ -24,13 +24,13 @@ pub(crate) enum Edit {
         author: String,
         operations: Vec<Operation>,
     },
-    /// Applies `operation`, a set, as part of `author`'s gesture `gesture`, such as a drag: as
-    /// [`Log::amend`] does, joining `author`'s last edit if that's a set of the same field in the
-    /// same gesture, so that the gesture undoes whole.
+    /// Applies `operations`, sets of one field, as part of `author`'s gesture `gesture`, such as a
+    /// drag: as [`Log::amend_all`] does, joining `author`'s last edit if that's sets of the same
+    /// field in the same gesture, of one entity or several, so that the gesture undoes whole.
     Amend {
         author: String,
         gesture: u64,
-        operation: Operation,
+        operations: Vec<Operation>,
     },
     /// Undoes `author`'s last edit.
     Undo { author: String },
@@ -77,7 +77,7 @@ struct Author {
 impl Authors {
     /// Applies `edit`, an author's, to `world`, and says what it did.
     ///
-    /// Fails as [`Log::apply_all`], [`Log::amend`], [`Log::undo`] and [`Log::redo`] do.
+    /// Fails as [`Log::apply_all`], [`Log::amend_all`], [`Log::undo`] and [`Log::redo`] do.
     ///
     /// # Panics
     ///
@@ -104,14 +104,14 @@ impl Authors {
             Edit::Amend {
                 author,
                 gesture,
-                operation,
+                operations,
             } => {
                 let author = self.author(author);
                 if author.gesture != Some(gesture) {
                     author.log.seal();
                     author.gesture = Some(gesture);
                 }
-                author.log.amend(world, operation)?;
+                author.log.amend_all(world, operations)?;
                 Ok(Done::Applied(Vec::new()))
             }
             // Nothing to log, nor any author to list.
@@ -223,7 +223,7 @@ impl Edit {
     }
 
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
-    /// and its operations, `Amend`, with its author, its gesture and its operation, `Undo` and
+    /// and its operations, `Amend`, with its author, its gesture and its operations, `Undo` and
     /// `Redo`, with their author, `Script` and `Scene`, with its path and its text, and `Renew`;
     /// each operation a variant named as its [`Operation`]'s, with its entities' IDs as text.
     pub(crate) fn to_value(&self) -> Value {
@@ -233,13 +233,16 @@ impl Edit {
             Self::Amend {
                 author: by,
                 gesture,
-                operation,
+                operations,
             } => Value::Variant(
                 "Amend".into(),
                 vec![
                     author(by),
                     ("gesture".into(), Value::UInt(*gesture)),
-                    ("operation".into(), operation_value(operation)),
+                    (
+                        "operations".into(),
+                        Value::List(operations.iter().map(operation_value).collect()),
+                    ),
                 ],
             ),
             Self::Apply {
@@ -287,17 +290,8 @@ impl Edit {
         match name {
             "Apply" | "Append" => {
                 let [author, operations] = reflect::pick(fields, ["author", "operations"])?;
-                let Value::List(operations) = operations else {
-                    let error = reflect::wrong_kind("List", operations);
-                    return Err(reflect::within(error, "operations"));
-                };
-                let operations = operations.iter().enumerate().map(|(i, value)| {
-                    operation(value).map_err(|error| reflect::within(error, &format!("[{i}]")))
-                });
                 let author = text(author, "author")?;
-                let operations = operations
-                    .collect::<Result<_>>()
-                    .map_err(|error| reflect::within(error, "operations"))?;
+                let operations = operation_list(operations)?;
                 Ok(if name == "Apply" {
                     Self::Apply { author, operations }
                 } else {
@@ -305,8 +299,19 @@ impl Edit {
                 })
             }
             "Amend" => {
-                let [author, gesture, operation] =
-                    reflect::pick(fields, ["author", "gesture", "operation"])?;
+                // Recordings of format 5 hold one `operation`.
+                let one = fields.iter().any(|(field, _)| field == "operation");
+                let (author, gesture, operations) = if one {
+                    let [author, gesture, operation] =
+                        reflect::pick(fields, ["author", "gesture", "operation"])?;
+                    let operation = self::operation(operation)
+                        .map_err(|error| reflect::within(error, "operation"))?;
+                    (author, gesture, vec![operation])
+                } else {
+                    let [author, gesture, operations] =
+                        reflect::pick(fields, ["author", "gesture", "operations"])?;
+                    (author, gesture, operation_list(operations)?)
+                };
                 let &Value::UInt(gesture) = gesture else {
                     let error = reflect::wrong_kind("UInt", gesture);
                     return Err(reflect::within(error, "gesture"));
@@ -314,8 +319,7 @@ impl Edit {
                 Ok(Self::Amend {
                     author: text(author, "author")?,
                     gesture,
-                    operation: self::operation(operation)
-                        .map_err(|error| reflect::within(error, "operation"))?,
+                    operations,
                 })
             }
             "Undo" | "Redo" => {
@@ -345,6 +349,21 @@ impl Edit {
             )),
         }
     }
+}
+
+/// The operations the list `value` holds, as [`Edit::to_value`] writes them; its error is within
+/// `operations`.
+fn operation_list(value: &Value) -> Result<Vec<Operation>> {
+    let Value::List(operations) = value else {
+        let error = reflect::wrong_kind("List", value);
+        return Err(reflect::within(error, "operations"));
+    };
+    let operations = operations.iter().enumerate().map(|(i, value)| {
+        operation(value).map_err(|error| reflect::within(error, &format!("[{i}]")))
+    });
+    operations
+        .collect::<Result<_>>()
+        .map_err(|error| reflect::within(error, "operations"))
 }
 
 /// `operation` as a value, as [`Edit::to_value`] writes it.
@@ -600,7 +619,7 @@ mod tests {
         Edit::Amend {
             author: "editor".to_owned(),
             gesture,
-            operation,
+            operations: vec![operation],
         }
     }
 
@@ -667,6 +686,32 @@ mod tests {
         fields[1].1 = Value::Int(3);
         let error = Edit::from_value(&Value::Variant(name, fields)).expect_err("refused");
         assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
+    }
+
+    /// An amend of several operations reads back as itself, and a recording of format 5's, whose
+    /// amend has one `operation`, reads as an amend of that one.
+    #[test]
+    fn an_amend_of_several_sets_reads_back_and_an_older_one_reads_as_one() {
+        let (_, id) = world();
+        let other: EntityId = "0000000000000002".parse().expect("an ID");
+        let several = Edit::Amend {
+            author: "editor".to_owned(),
+            gesture: 3,
+            operations: vec![set(id, 1.0), set(other, 2.0)],
+        };
+        assert_eq!(
+            Edit::from_value(&several.to_value()).expect("an edit"),
+            several
+        );
+        let Value::Variant(name, mut fields) = amend(3, set(id, 1.0)).to_value() else {
+            panic!("a variant");
+        };
+        let Value::List(mut one) = std::mem::replace(&mut fields[2].1, Value::Bool(false)) else {
+            panic!("a list");
+        };
+        fields[2] = ("operation".into(), one.remove(0));
+        let older = Edit::from_value(&Value::Variant(name, fields)).expect("an edit");
+        assert_eq!(older, amend(3, set(id, 1.0)));
     }
 
     /// A link reads back with its prefab, as a recording keeps it, and one whose prefab isn't one,

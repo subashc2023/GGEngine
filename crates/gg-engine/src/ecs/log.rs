@@ -231,42 +231,78 @@ impl Log {
     /// starts a gesture, which [`seal`](Self::seal) ends. A set of a
     /// [`PrefabRoot`](crate::PrefabRoot) joins none: each relinks its instance, and the first set's
     /// inverse would take out only the entities its own set spawned.
-    pub fn amend(&mut self, world: &mut World, mut operation: Operation) -> Result<()> {
+    ///
+    /// It is [`amend_all`](Self::amend_all) of one operation, as `apply` is of `apply_all`.
+    pub fn amend(&mut self, world: &mut World, operation: Operation) -> Result<()> {
+        self.amend_all(world, vec![operation])
+    }
+
+    /// As [`amend`](Self::amend) for each of `operations`, but all of them or none. While a
+    /// gesture goes on, its entry is of sets alone, all of one field of one component, of one
+    /// entity or of several, as a drag of several entities' handles makes. If `operations` are all
+    /// sets of that field, they join the entry: a set of an entity the entry already sets takes the
+    /// new value and keeps the entry's inverse, as `amend` does, and a set of another entity is
+    /// added to the entry with its own inverse, so that undoing the entry undoes every entity's
+    /// sets. One refused rolls back those this call applied, and the entry is left as it was.
+    ///
+    /// Otherwise they apply as [`apply_all`](Self::apply_all) does, an entry of their own, and
+    /// refused, they change nothing. That entry starts a gesture if they're sets of one field, no
+    /// two of one entity, which [`seal`](Self::seal) ends. An empty `operations` does nothing.
+    pub fn amend_all(&mut self, world: &mut World, mut operations: Vec<Operation>) -> Result<()> {
+        let field = set_field(&operations);
         let link = world.component::<crate::PrefabRoot>();
-        let relinks = |name: &str| link.is_some() && world.component_named(name) == link;
-        let joins = |entry: &Entry| match (entry.operations.as_slice(), &operation) {
-            (
-                [
-                    Operation::Set {
-                        entity,
-                        component,
-                        path,
-                        ..
-                    },
-                ],
-                Operation::Set {
-                    entity: next,
-                    component: of,
-                    path: at,
-                    ..
-                },
-            ) => (entity, component, path) == (next, of, at) && !relinks(of),
-            _ => false,
-        };
+        let relinks = field.is_some_and(|(component, _)| {
+            link.is_some() && world.component_named(component) == link
+        });
         let scenes = world.scene_changes();
-        let joins = |entry: &Entry| entry.scenes == scenes && joins(entry);
-        if !(self.open && self.done.last().is_some_and(joins)) {
-            let set = matches!(operation, Operation::Set { .. });
-            self.apply(world, operation)?;
-            self.open = set;
+        let joins = self.open
+            && field.is_some()
+            && !relinks
+            && self.done.last().is_some_and(|entry| {
+                entry.scenes == scenes
+                    && set_field(&entry.operations) == field
+                    && entry.inverses.len() == entry.operations.len()
+            });
+        if !joins {
+            // A gesture goes on from an entry of sets of one field, of an entity each.
+            let mut entities: Vec<_> = operations.iter().filter_map(Operation::entity).collect();
+            entities.sort_unstable();
+            let distinct = entities.windows(2).all(|pair| pair[0] != pair[1]);
+            let gesture = field.is_some() && distinct;
+            self.apply_all(world, operations)?;
+            self.open = gesture;
             return Ok(());
         }
-        let later = world.apply(&mut operation)?;
-        // What undoes the gesture's first set undoes this one too, but for the exclusive fields
-        // this one made false, which the entry takes on.
+        let mut laters = Vec::with_capacity(operations.len());
+        for i in 0..operations.len() {
+            match world.apply(&mut operations[i]) {
+                Ok(later) => laters.push(later),
+                Err(error) => {
+                    roll_back(world, laters);
+                    return Err(refused(error, operations.len(), i, &operations[i], false));
+                }
+            }
+        }
+        // What undoes an entity's first set in the gesture undoes its later ones too, but for the
+        // exclusive fields these made false, which the entry takes on.
         let entry = self.done.last_mut().expect("an entry joined");
-        world.join(&mut entry.inverses[0], later);
-        entry.operations[0] = operation;
+        for (operation, later) in operations.into_iter().zip(laters) {
+            let at = entry
+                .operations
+                .iter()
+                .position(|set| set.entity() == operation.entity());
+            match at {
+                Some(at) => {
+                    world.join(&mut entry.inverses[at], later);
+                    entry.operations[at] = operation;
+                }
+                None => {
+                    entry.of.push(entry.operations.len());
+                    entry.operations.push(operation);
+                    entry.inverses.push(later);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -450,6 +486,25 @@ fn turn(
         }
     }
     Ok(())
+}
+
+/// The component and field that `operations` all set, if there are any and they're sets of one
+/// field alone.
+fn set_field(operations: &[Operation]) -> Option<(&str, &str)> {
+    let mut field = None;
+    for operation in operations {
+        let Operation::Set {
+            component, path, ..
+        } = operation
+        else {
+            return None;
+        };
+        let this = (&component[..], &path[..]);
+        if *field.get_or_insert(this) != this {
+            return None;
+        }
+    }
+    field
 }
 
 /// Rolls back `inverses`, those of an edit refused partway, in reverse: each puts the world back as
@@ -782,8 +837,8 @@ pub(super) mod tests {
         log.amend(&mut x.world, count(f, 6)).expect("set");
         assert_eq!(
             log.edits().len(),
-            8,
-            "another component's, another entity's, and one applied"
+            7,
+            "another entity's sets of a field join, another field's, and one applied, don't"
         );
         while log.undo(&mut x.world).expect("undone") {}
         assert!(same_snapshots(&sorted(&x.world), &before));
@@ -791,6 +846,85 @@ pub(super) mod tests {
         assert!(log.redo(&mut x.world).expect("redone"));
         let all = x.world.get::<Everything>(x.f).expect("everything");
         assert_eq!(all.count, 3);
+    }
+
+    /// A set of `entity`'s `scale.x`.
+    fn scale_x(entity: EntityId, x: f32) -> Operation {
+        Operation::Set {
+            entity,
+            component: "Transform".into(),
+            path: "scale.x".to_owned(),
+            value: Value::F32(x),
+        }
+    }
+
+    #[test]
+    fn a_gestures_sets_of_one_field_of_several_entities_are_one_entry() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let [r, s] = [x.r, x.s].map(|entity| x.id(entity));
+        let before = sorted(&x.world);
+        // Interleaved, as a drag of two entities' handles makes them.
+        for n in [2.0, 3.0] {
+            log.amend(&mut x.world, scale_x(r, n)).expect("set");
+            log.amend(&mut x.world, scale_x(s, n + 10.0)).expect("set");
+        }
+        assert_eq!(log.edits().len(), 1, "one field of two entities");
+        let last = [scale_x(r, 3.0), scale_x(s, 13.0)];
+        assert_eq!(log.undoable(), Some(&last[..]));
+        // Another field of one of them is another edit.
+        let y = Operation::Set {
+            entity: r,
+            component: "Transform".into(),
+            path: "scale.y".to_owned(),
+            value: Value::F32(5.0),
+        };
+        log.amend(&mut x.world, y).expect("set");
+        assert_eq!(log.edits().len(), 2);
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert!(same_snapshots(&sorted(&x.world), &before), "both back");
+        assert!(log.redo(&mut x.world).expect("redone"));
+        let scale = |entity| {
+            x.world
+                .get::<Transform>(entity)
+                .expect("a transform")
+                .scale
+                .x
+        };
+        assert_eq!([scale(x.r), scale(x.s)], [3.0, 13.0]);
+    }
+
+    #[test]
+    fn amend_all_with_one_set_refused_changes_nothing() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let [r, s] = [x.r, x.s].map(|entity| x.id(entity));
+        let gone: EntityId = "0000000000000001".parse().expect("an ID");
+        // A new entry: nothing is applied, nothing logged, and no gesture is open.
+        let before = sorted(&x.world);
+        let refused = log.amend_all(&mut x.world, vec![scale_x(r, 2.0), scale_x(gone, 2.0)]);
+        refused.expect_err("an entity that's gone");
+        assert!(same_snapshots(&sorted(&x.world), &before));
+        assert_eq!(log.edits().len(), 0);
+        // Joining: the entry stays as it was, and the sets before the refused one are put back.
+        log.amend_all(&mut x.world, vec![scale_x(r, 2.0), scale_x(s, 2.0)])
+            .expect("set");
+        let joined = sorted(&x.world);
+        let refused = log.amend_all(&mut x.world, vec![scale_x(s, 3.0), scale_x(gone, 3.0)]);
+        refused.expect_err("an entity that's gone");
+        assert!(same_snapshots(&sorted(&x.world), &joined));
+        assert_eq!(log.edits().len(), 1);
+        assert_eq!(
+            log.undoable(),
+            Some(&[scale_x(r, 2.0), scale_x(s, 2.0)][..])
+        );
+        // It still joins, and undoes whole.
+        log.amend_all(&mut x.world, vec![scale_x(s, 4.0), scale_x(r, 4.0)])
+            .expect("set");
+        assert_eq!(log.edits().len(), 1);
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert!(same_snapshots(&sorted(&x.world), &before));
     }
 
     /// Undoing a gesture lights again every lamp its sets put out, though its first put none out.
