@@ -886,11 +886,12 @@ impl Pass {
 /// What the game's view shows in place of its light, to see how it's made: a part of what lit
 /// shading takes or makes, at each point of what models draw, by its name, as `"roughness"`; or an
 /// image the frame makes, by its debug name, as RenderDoc and ARCHITECTURE.md's Rendering name
-/// them: `{"image":"view depth"}`. The view shows it as drawn, without the offset of antialiasing,
-/// and nothing after it: no antialiasing, fog, depth of field, motion blur, bloom, grade or lens,
-/// nor the exposure metered; and without the sky, black behind what's drawn. Beside a part of
-/// shading, what draws without lit shading, as sprites, text and particles, draws as it does; an
-/// image takes the whole view, alone.
+/// them: `{"image":"view depth"}`. The view shows it as drawn, without the offset of antialiasing
+/// nor the exposure metered. A part of shading shows nothing after it: no antialiasing, fog, depth
+/// of field, motion blur, bloom, grade or lens; and no sky, black behind what's drawn; and what
+/// draws without lit shading, as sprites, text and particles, draws as it does. An image takes the
+/// whole view, alone, from a frame drawn as the game's is but for its antialiasing, so that the
+/// images of every pass but antialiasing's are there to show.
 ///
 /// A pixel's bytes, as a capture's PNG has them, read as each says: a value of 0 to 1 as its byte
 /// over 255, in red, green and blue alike.

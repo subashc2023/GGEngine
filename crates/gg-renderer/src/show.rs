@@ -1,8 +1,10 @@
 //! What the game's view shows in place of its light, to see how it's made, as the tool API's look
 //! and captures ask for it: a part of what lit shading takes or makes, which shading.slang's `lit`
-//! returns in place of its light; or an image the frame makes, by its debug name, which a pass of
-//! its own, as `shaders/show.slang` says, writes into colors of the view's own in place of the
-//! view's. Either way, the view shows it as drawn, and nothing after it, as [`showing`] says.
+//! returns in place of its light, shown as drawn and nothing after it; or an image the frame makes,
+//! by its debug name, which a pass of its own, as `shaders/show.slang` says, writes into colors of
+//! the view's own in place of the view's, from a frame drawn as the game's is but for its
+//! antialiasing, so that every pass's images are there to show. [`showing`] says how each frame
+//! draws.
 
 use std::sync::Arc;
 
@@ -28,17 +30,6 @@ pub enum Show<'a> {
     /// normal is; a float a pixel as its value; each value as [`Channel`] says the view stores
     /// one. An image the frame doesn't make shows black, warning `renderer.no_image` once.
     Image(&'a str),
-}
-
-impl Show<'_> {
-    /// Whether it shows light, which the frame's tonemapper maps as it maps the view's: a part of
-    /// the light shading makes, or, until the frame finds it, an image.
-    fn light(self) -> bool {
-        match self {
-            Self::Shading(channel) => channel.light(),
-            Self::Image(_) => true,
-        }
-    }
 }
 
 /// A part of what lit shading takes or makes, which shading returns in place of its light: colors
@@ -102,30 +93,36 @@ impl Channel {
     }
 }
 
-/// `data` as a frame renders it while it shows something in place of the view's light: with no
-/// antialiasing, fog, depth of field, motion blur, bloom, grade or lens, so that the view shows it
-/// as drawn, a pixel at each pixel's center; cleared to black; and through no tonemapper unless it
-/// shows light, so that the view's sRGB image stores colors and values as they are. The frame
-/// keeps its exposure as it adapts, metering none of it, and draws no sky.
+/// `data` as a frame renders it while it shows something in place of the view's light, with no
+/// antialiasing, so that the view shows it as drawn, a pixel at each pixel's center. A part of
+/// shading shows with no fog, depth of field, motion blur, bloom, grade or lens either, cleared to
+/// black, without the sky, and through no tonemapper unless it shows light, so that the view's sRGB
+/// image stores colors and values as they are. An image shows from a frame drawn as the game's is
+/// but for that, so that the passes after the view's make theirs. Either way the frame keeps its
+/// exposure as it adapts, metering none of it.
 pub(crate) fn showing(data: RenderData<'_>) -> RenderData<'_> {
-    let Some(show) = data.show else {
-        return data;
-    };
-    RenderData {
-        clear_color: [0.0, 0.0, 0.0, 1.0],
-        tonemapper: if show.light() {
-            data.tonemapper
-        } else {
-            Tonemapper::None
+    match data.show {
+        None => data,
+        Some(Show::Image(_)) => RenderData {
+            antialiasing: Antialiasing::None,
+            ..data
         },
-        antialiasing: Antialiasing::None,
-        bloom: 0.0,
-        grade: Grade::IDENTITY,
-        fog: None,
-        depth_of_field: None,
-        motion_blur: None,
-        lens: Lens::NONE,
-        ..data
+        Some(Show::Shading(channel)) => RenderData {
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+            tonemapper: if channel.light() {
+                data.tonemapper
+            } else {
+                Tonemapper::None
+            },
+            antialiasing: Antialiasing::None,
+            bloom: 0.0,
+            grade: Grade::IDENTITY,
+            fog: None,
+            depth_of_field: None,
+            motion_blur: None,
+            lens: Lens::NONE,
+            ..data
+        },
     }
 }
 

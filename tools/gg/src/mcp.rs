@@ -41,9 +41,10 @@ any other string, as `view depth`, or `{\"image\": name}` (at most 64 bytes), as
 colors as they are, high dynamic range tonemapped, depth as 1 + log2(depth) / 24 (white at the \
 near plane, a 24th darker each time the distance doubles, black where nothing drew), IDs and a \
 visibility buffer a color for each value (black for 0), motion as normals are, a float a pixel as \
-its value; an image the frame doesn't make shows black, warning `renderer.no_image`. Drawn without \
-antialiasing, fog, depth of field, motion blur, bloom, grade, lens, exposure or sky, which is \
-black.";
+its value; an image the frame doesn't make shows black, warning `renderer.no_image`. A part of \
+shading is drawn without antialiasing, fog, depth of field, motion blur, bloom, grade, lens, \
+exposure or sky, which is black; an image from a frame drawn as the game's is but without \
+antialiasing, so that every other pass's images are there, as `bloom 1` or `depth of field near`.";
 
 /// What `initialize` tells the client of the tools, for its model.
 const INSTRUCTIONS: &str = "\

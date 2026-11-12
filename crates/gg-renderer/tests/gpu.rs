@@ -8181,6 +8181,26 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
         "the IDs show as {colors:?}"
     );
     assert_eq!(above(&ids), [0, 0, 0, 255], "where no ID drew");
+    // Images the passes after the view's make, from a frame drawn as the game's is but for its
+    // antialiasing: bloom's first level, and the colors through the lens, at the middle square,
+    // which the vignette leaves bright.
+    for name in ["bloom 1", "view lensed"] {
+        let shown = frame(Some(Show::Image(name)));
+        let got = square(&shown, 1);
+        assert!(
+            got[..3].iter().any(|&channel| channel > 8),
+            "{name} shows the middle square as {got:?}"
+        );
+    }
+    // And the sky behind what's drawn, in the colors as drawn: its gray, of a luminance of 0.25,
+    // rather than the clear color.
+    let colors = frame(Some(Show::Image("view colors")));
+    let [r, g, b, _] = above(&colors);
+    assert!(
+        r == g && g == b && r > 100,
+        "the sky shows behind the colors as {:?}",
+        [r, g, b]
+    );
     let missing = frame(Some(Show::Image("no such image")));
     assert!(
         missing.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]),

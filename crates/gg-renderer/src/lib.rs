@@ -424,11 +424,13 @@ pub struct RenderData<'a> {
     /// [`Renderer::view_read`] then gives.
     pub read_view: bool,
     /// What the view shows in place of its light, if anything, to see how it's made, as [`Show`]
-    /// says: drawn without antialiasing's offset, and nothing after it, no antialiasing, fog, depth
-    /// of field, motion blur, bloom, grade or lens, nor the exposure metered, as it adapts on as
-    /// it did; without the sky, cleared to black; tonemapped only where it's light. The frames
-    /// after it antialias afresh, and reflect what the last frame that showed the view's light
-    /// kept. What the canvas draws shows over a part of shading, but not over an image.
+    /// says: drawn without antialiasing's offset, nor the exposure metered, as it adapts on as it
+    /// did. A part of shading shows nothing after the view's passes, no fog, depth of field, motion
+    /// blur, bloom, grade or lens; without the sky, cleared to black; tonemapped only where it's
+    /// light. An image shows from a frame drawn as the game's is but for its antialiasing, so that
+    /// those passes make theirs. The frames after it antialias afresh, and reflect what the last
+    /// frame that showed the view's light kept. What the canvas draws shows over a part of shading,
+    /// but not over an image.
     pub show: Option<Show<'a>>,
     /// Pixels the view shows in place of what `draws` would draw, from its top left, each onto one
     /// of the frame's, as far as they reach of it, the rest of it the clear color: the view of
@@ -1955,9 +1957,9 @@ impl Renderer {
                     (pass, shared, frame_data, lit)
                 };
                 // Behind everything, in place of the clear color: the atmosphere's sky, or the
-                // image sky; unless the view shows something in place of its light.
+                // image sky; unless the view shows a part of shading in place of its light.
                 let aspect = data.viewport.aspect();
-                let draws_sky = data.show.is_none();
+                let draws_sky = !matches!(data.show, Some(Show::Shading(_)));
                 if draws_sky
                     && let (Some(seen), Some(tables), Some(air)) = (&atmosphere, &tables, air)
                 {
