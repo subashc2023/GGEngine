@@ -70,6 +70,15 @@
 //!   place of its light if asked, and answers [`Captured`]; fails with `api.bad_params` for an
 //!   image's name as `look` refuses it, and for an `at` that isn't finite or is negative. With `at`
 //!   it answers the bytes of that pixel, and with `at` alone writes no PNG.
+//! - `frames`, [`Frames`]: captures frames of the view in a row, none skipped, each as a PNG, as
+//!   `capture` does one, each drawn from the next of the viewpoints it's given, if any, and answers
+//!   [`Framed`] once all are written. It fails with `api.bad_params` as `capture` and `look` would
+//!   for its `show` and its viewpoints, for a `dir` that isn't an absolute path to a directory, a
+//!   `count` of 0 or past [`MOST_FRAMES`], a `rect` of no area, and frames that would hold more
+//!   than [`MOST_FRAMES_BYTES`] of pixels; with `api.no_view` for a frame that has no view, none of
+//!   the `rect`, or that doesn't render, as while a window resizes, which would break the row; and
+//!   with `api.capture_file` for a PNG it can't write. One asked while another captures frames
+//!   waits for it, and while one does, a `capture` that shows otherwise waits too.
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
 //!   client made, as [`view::Reader`] makes it, in place of any it published to before, or stop
 //!   publishing for `null`, and answers `{}`; fails with `api.view` if the memory can't be opened.
@@ -229,14 +238,14 @@
 //!
 //! The methods but `hello`, `ping`, `logs`, `note` and `debug` are answered by the game's main
 //! thread, as a frame starts, those that came before it did, the rest as the next starts. While the
-//! window is minimized, and no frames run, it answers them between frames, but `step`, `capture` and
-//! `pick`, which need frames, fail with `api.paused`; while a file dialog or the window menu Windows
-//! runs is open, holding the main thread, or a script has stopped, they wait. The connection's own
-//! thread answers `hello`, `ping`, `logs`, `note` and `debug` as it reads them, so that a `logs` or
-//! a `debug` that waits holds up the connection's later requests: follow the logs, or wait for a
-//! script to stop, on a connection of their own. A connection has at most [`MOST_IN_FLIGHT`]
-//! requests in flight, the game reading no more of it until it has written an answer, so that a
-//! `ping` sent behind as many that wait for the main thread waits too.
+//! window is minimized, and no frames run, it answers them between frames, but `step`, `capture`,
+//! `frames` and `pick`, which need frames, fail with `api.paused`; while a file dialog or the window
+//! menu Windows runs is open, holding the main thread, or a script has stopped, they wait. The
+//! connection's own thread answers `hello`, `ping`, `logs`, `note` and `debug` as it reads them, so
+//! that a `logs` or a `debug` that waits holds up the connection's later requests: follow the logs,
+//! or wait for a script to stop, on a connection of their own. A connection has at most
+//! [`MOST_IN_FLIGHT`] requests in flight, the game reading no more of it until it has written an
+//! answer, so that a `ping` sent behind as many that wait for the main thread waits too.
 //!
 //! A connection is kept to what its `hello` grants, [`Hello::grant`], every capability without it:
 //! a request its grant doesn't cover fails with `api.ungranted`, naming the capability it needs.
@@ -247,7 +256,8 @@
 //! does; `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and
 //! `pick` need `view`, a `pick` answering its entity's name only with `read` of `Name` too;
 //! `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; a `capture` or a
-//! `snapshot` given a path needs `files` too, and a `snapshot` with `quit` needs `quit`.
+//! `snapshot` given a path needs `files` too, and a `snapshot` with `quit` needs `quit`; `frames`
+//! needs `view` and `files`.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -657,6 +667,61 @@ pub struct Captured {
     /// shows, which shows a stand-in in a texture's place, or nothing in a mesh's.
     #[serde(default)]
     pub streaming: bool,
+}
+
+/// The most frames a `frames` captures.
+pub const MOST_FRAMES: u32 = 1_000;
+
+/// The most bytes of pixels a `frames` holds until its PNGs are written: its `count` frames of its
+/// `rect`, or of the view as it is when it's asked, four bytes a pixel.
+pub const MOST_FRAMES_BYTES: u64 = 1 << 30;
+
+/// What `frames` takes: how many frames of the view to capture in a row, none skipped, each as a
+/// PNG in `dir`, an absolute path to a directory that exists, as `frame-0001.png`, `frame-0002.png`
+/// and on, over any there of those names. The first is the next frame made after one comes back
+/// with nothing on its way to the GPU, as a `capture` waits for, or after 10 s all the same, each
+/// frame saying whether it showed what was on its way.
+///
+/// The frames show the view as it's shown, the look among it, or what `show` says in place of its
+/// light, from frames that aren't published to a view's memory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frames {
+    pub dir: PathBuf,
+    /// 1 to [`MOST_FRAMES`].
+    pub count: u32,
+    /// The viewpoint of each frame in turn, as the look's viewpoint is drawn, the last held for the
+    /// frames after it, as a scripted move and then a hold; the frames before the first, while it
+    /// waits for what's on its way, are drawn from the first. Empty, the view's own, the look's or
+    /// the game's. Each is checked, its rotation normalized, as `look` does.
+    #[serde(default)]
+    pub viewpoints: Vec<Viewpoint>,
+    /// The part of each frame to keep, `[x, y, width, height]` in pixels from the view's top left,
+    /// cropped to the view as each frame comes back; the whole view without.
+    #[serde(default)]
+    pub rect: Option<[u32; 4]>,
+    /// What to show in place of the view's light, as [`Capture::show`] says.
+    #[serde(default)]
+    pub show: Option<Shown>,
+}
+
+/// What `frames` answers: each frame captured, in order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Framed {
+    pub frames: Vec<FrameShot>,
+}
+
+/// A frame `frames` captured: its PNG and its size, the ticks the simulation had run in it, whether
+/// textures or meshes were still on their way to the GPU in it, as [`Captured::streaming`] says, and
+/// the viewpoint it was drawn from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameShot {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub ticks: u64,
+    pub streaming: bool,
+    pub viewpoint: Viewpoint,
 }
 
 /// What `view` takes: the name of the memory to publish the view into, as [`view::Reader::name`]
@@ -2502,6 +2567,49 @@ mod tests {
         );
         let bare = r#"{"width": 4, "height": 2, "ticks": 7}"#;
         assert_eq!(serde_json::from_str::<Captured>(bare).unwrap().path, None);
+    }
+
+    /// Frames in a row need a directory and a count, and take viewpoints, a rect and a show
+    /// besides; each frame they answer names its PNG and the viewpoint it was drawn from.
+    #[test]
+    fn frames_read_as_their_docs_say() {
+        let frames: Frames = serde_json::from_str(r#"{"dir": "/c/f", "count": 3}"#).unwrap();
+        assert_eq!(
+            (frames.viewpoints.len(), frames.rect, frames.show),
+            (0, None, None)
+        );
+        let given = r#"{"dir": "/c/f", "count": 2, "rect": [1, 2, 3, 4], "show": "normal",
+            "viewpoints": [{"position": [0, 1, 2], "rotation": [0, 0, 0, 1],
+            "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}}]}"#;
+        let frames: Frames = serde_json::from_str(given).unwrap();
+        assert_eq!(frames.viewpoints[0].position, [0.0, 1.0, 2.0]);
+        assert_eq!(
+            (frames.rect, frames.show),
+            (Some([1, 2, 3, 4]), Some(Shown::Normal))
+        );
+        for refused in [
+            r#"{"count": 3}"#,
+            r#"{"dir": "/c/f"}"#,
+            r#"{"dir": "/c/f", "count": 3, "own": true}"#,
+            r#"{"dir": "/c/f", "count": 3, "rect": [1, 2, 3]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Frames>(refused).is_err(),
+                "{refused}"
+            );
+        }
+        let framed = Framed {
+            frames: vec![FrameShot {
+                path: PathBuf::from("/c/f/frame-0001.png"),
+                width: 4,
+                height: 2,
+                ticks: 7,
+                streaming: false,
+                viewpoint: frames.viewpoints[0],
+            }],
+        };
+        let text = serde_json::to_string(&framed).unwrap();
+        assert_eq!(serde_json::from_str::<Framed>(&text).unwrap(), framed);
     }
 
     /// A scene request says what to do, with a path and whether to discard, when given; a status

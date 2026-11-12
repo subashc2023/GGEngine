@@ -215,6 +215,17 @@ fn tools() -> Value {
         {"type": "string", "minLength": 1, "maxLength": 64},
         variant("image", json!({"type": "string", "minLength": 1, "maxLength": 64})),
     ]});
+    // A viewpoint's parts, as `look` and `frames` take them.
+    let viewpoint = json!({
+        "position": numbers(3, "[x, y, z]"),
+        "rotation": numbers(4, "A unit quaternion, [x, y, z, w]"),
+        "projection": {
+            "type": "object",
+            "description": "{\"Orthographic\": {\"height\", \"near\", \"far\"}} or \
+                            {\"Perspective\": {\"fov\", \"near\"}}, fov vertical, in radians, as \
+                            `entity` shows a camera's",
+        },
+    });
     // By the API's own names, so that the list can't fall behind it.
     let passes: Vec<Value> = (gg_api::Pass::ALL.iter())
         .map(|pass| serde_json::to_value(pass).expect("a pass's name"))
@@ -400,6 +411,47 @@ fn tools() -> Value {
             &[],
         ),
         tool(
+            "frames",
+            "Captures the game's next frames in a row, none skipped, each as a PNG in `dir`, \
+             `frame-0001.png` on, to see how the view changes frame by frame: how it settles, \
+             shimmers, flickers or leaves trails as antialiasing and the passes that keep a \
+             history go on, through a scripted move and a hold. The first is the first frame \
+             with nothing on its way to the GPU. Each is drawn from the next of `viewpoints`, \
+             the last held after it, or else as the view's shown, the look included. Answers \
+             `frames`, each its `path`, size, `ticks`, `streaming` and `viewpoint`, once all are \
+             written. Pause the game first to see the view alone change.",
+            json!({
+                "dir": {"type": "string",
+                        "description": "An absolute path to a directory that exists"},
+                "count": {"type": "integer", "minimum": 1, "maximum": gg_api::MOST_FRAMES,
+                          "description": "How many frames"},
+                "viewpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": viewpoint,
+                        "required": ["position", "rotation", "projection"],
+                    },
+                    "description": "Each frame's viewpoint in turn, as `look`'s, the last held \
+                                    for the frames after it",
+                },
+                "rect": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0},
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "description": "The part of each frame to keep, [x, y, width, height] in \
+                                    pixels from the view's top left: the frames hold at most \
+                                    1 GiB of pixels",
+                },
+                "show": {
+                    "anyOf": [shown.clone(), {"type": "null"}],
+                    "description": format!("What to show in place of the view's light: {SHOWN}"),
+                },
+            }),
+            &["dir", "count"],
+        ),
+        tool(
             "look",
             "Sets parts of the game's look, the view's settings, which any client sets, such as \
              the editor, the last to set a part winning, and which last until a client changes \
@@ -415,16 +467,7 @@ fn tools() -> Value {
                     "description": "Where the view is seen from, in place of the game's camera. \
                                     World space is right-handed with +Y up, and a viewpoint \
                                     without rotation looks down -Z",
-                    "properties": {
-                        "position": numbers(3, "[x, y, z]"),
-                        "rotation": numbers(4, "A unit quaternion, [x, y, z, w]"),
-                        "projection": {
-                            "type": "object",
-                            "description": "{\"Orthographic\": {\"height\", \"near\", \"far\"}} \
-                                            or {\"Perspective\": {\"fov\", \"near\"}}, fov \
-                                            vertical, in radians, as `entity` shows a camera's",
-                        },
-                    },
+                    "properties": viewpoint.clone(),
                     "required": ["position", "rotation", "projection"],
                 },
                 "outline": {
@@ -835,7 +878,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
             call(name, Value::Object(arguments))
         }
-        "look" => {
+        "look" | "frames" => {
             // A name that isn't a variant's is an image's, as `capture`'s `show` has it.
             if let Some(show) = arguments.get_mut("show")
                 && !show.is_null()

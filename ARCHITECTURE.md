@@ -460,7 +460,11 @@ in the editor is out of an agent's reach.
   client isn't shown; and, asked to, shows something in place of the view's light, from a frame of
   its own that isn't shared either, so that an agent captures a set of them without the user's view
   changing, from one world while the game is paused, as `gg capture --show` does, and reads the
-  numbers at a pixel from them, as `gg probe` does. A pick answers which entity the view shows at a
+  numbers at a pixel from them, as `gg probe` does. Frames in a row are captured too, none skipped,
+  each read back and kept, cropped to a rectangle if asked, until the last comes back and the PNGs
+  are written, each drawn from the next of the viewpoints the request gives, as the look's viewpoint
+  is, so that an agent sees frame by frame how the view settles, shimmers or leaves trails through a
+  scripted move and a hold, as `gg frames` does. A pick answers which entity the view shows at a
   pixel, and its name to a
   connection granted to read names, once the frame that read it comes back. A connection is kept
   to the capabilities it's granted: `read` and `write` of the world, whole or of the component

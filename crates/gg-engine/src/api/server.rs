@@ -33,9 +33,9 @@ use gg_api::asset::AssetKind;
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
     Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, EntityList, Failure, Field,
-    Hash, Hello, History, ImageList, Input, InputEvent, Listed, ListedAsset, ListedOrphan, Looked,
-    Patched, Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene, SceneAction, Session,
-    Snapshotted, Status, Step, View, Welcome,
+    FrameShot, Framed, Hash, Hello, History, ImageList, Input, InputEvent, Listed, ListedAsset,
+    ListedOrphan, Looked, Patched, Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene,
+    SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -67,7 +67,7 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 33] = [
+const METHODS: [&str; 34] = [
     "hello",
     "ping",
     "status",
@@ -78,6 +78,7 @@ const METHODS: [&str; 33] = [
     "step",
     "scene",
     "capture",
+    "frames",
     "view",
     "input",
     "look",
@@ -180,9 +181,16 @@ pub(crate) struct Api {
     /// after `riding_ticks` ticks, until a frame that rendered brings its view back.
     riding: Vec<Capturing>,
     riding_ticks: u64,
+    /// `frames` in the order they came, the first capturing its frames, the rest waiting for it;
+    /// whether the frame being made is the first's, of its kind and drawn from its viewpoint, if it
+    /// gives them; and whether the frame made last drew from a film's viewpoint in place of the
+    /// look's.
+    films: Vec<Filming>,
+    film_frame: bool,
+    film_viewpoint: bool,
     /// Whether the frame being made is bare, and what it shows in place of the view's light, as
-    /// the oldest capture waiting decided as the frame started: a frame of either is apart, not
-    /// published.
+    /// the film capturing frames, or else the oldest capture waiting, decided as the frame started:
+    /// a frame of either is apart, not published.
     bare: bool,
     shown: Option<Shown>,
     /// The look as the clients set it, each part `None` where it's the game's own, and the run's
@@ -206,7 +214,7 @@ pub(crate) struct Api {
     /// Whether a frame that wasn't published has been warned of, since the view was asked for.
     view_warned: bool,
     /// To the thread that writes captures' PNGs.
-    pngs: Sender<Png>,
+    pngs: Sender<Writing>,
     /// Where snapshots without a path go, and how many have, which number their files.
     snapshots: PathBuf,
     snapshotted: u64,
@@ -249,6 +257,47 @@ struct Capturing {
     own: bool,
     show: Option<Shown>,
     since: Instant,
+}
+
+/// A `frames` capturing frames in a row, or waiting to: where its answer and its PNGs go, how many
+/// frames it captures, the viewpoints they're drawn from, the part of each it keeps, what they show
+/// in place of the view's light, and when it came, as [`CAPTURE_WAIT`] counts from. Its frames are
+/// those handed off from the first made after a frame comes back with nothing on its way, `started`
+/// from then: each frame handed off as its own, the ticks it shows; and those back, in order.
+struct Filming {
+    reply: Reply,
+    dir: PathBuf,
+    count: u32,
+    viewpoints: Vec<Viewpoint>,
+    rect: Option<[u32; 4]>,
+    show: Option<Shown>,
+    since: Instant,
+    started: bool,
+    handed: Vec<u64>,
+    back: Vec<FilmShot>,
+}
+
+impl Filming {
+    /// The viewpoint the frame made next draws from, if it's one of the film's: its first until the
+    /// film starts, then each in turn, the last held; `None` without viewpoints, or once every frame
+    /// of the film is handed off.
+    fn viewpoint(&self) -> Option<Viewpoint> {
+        let next = self.handed.len();
+        if next >= self.count as usize {
+            return None;
+        }
+        let last = self.viewpoints.len().checked_sub(1)?;
+        self.viewpoints.get(next.min(last)).copied()
+    }
+}
+
+/// A frame of a `frames` back from the renderer, its view cropped to the film's rect, with the
+/// ticks it shows, whether anything was on its way to the GPU in it, and its viewpoint.
+struct FilmShot {
+    shot: Arc<Shot>,
+    ticks: u64,
+    streaming: bool,
+    viewpoint: Viewpoint,
 }
 
 /// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
@@ -309,6 +358,15 @@ enum Call {
         /// A pixel of the view to answer the bytes of, checked finite and not negative.
         at: Option<[f64; 2]>,
         own: bool,
+        show: Option<gg_api::Shown>,
+    },
+    /// Frames in a row: the directory their PNGs go in, how many, their viewpoints, each checked,
+    /// its rotation normalized, the part of each kept, of some area, and what they show.
+    Frames {
+        dir: PathBuf,
+        count: u32,
+        viewpoints: Vec<gg_api::Viewpoint>,
+        rect: Option<[u32; 4]>,
         show: Option<gg_api::Shown>,
     },
     /// The name of the memory to publish the view to, or `None` to stop.
@@ -437,6 +495,17 @@ struct Png {
     reply: Reply,
 }
 
+/// What the thread that writes PNGs writes: a capture's, or a `frames`' every frame, into its
+/// directory, numbered from 1, answered once all are written.
+enum Writing {
+    Capture(Png),
+    Frames {
+        dir: PathBuf,
+        shots: Vec<FilmShot>,
+        reply: Reply,
+    },
+}
+
 impl Api {
     /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, whose JSON
     /// log is at `log`, if it has one, and keeps its last events in `events`, which plays `player`
@@ -547,6 +616,9 @@ impl Api {
             asked: Vec::new(),
             riding: Vec::new(),
             riding_ticks: 0,
+            films: Vec::new(),
+            film_frame: false,
+            film_viewpoint: false,
             bare: false,
             shown: None,
             look: Looked {
@@ -597,12 +669,14 @@ impl Api {
     /// run, then the rest in the order they came, `look`s setting the look the frame draws with,
     /// `capture`s and `pick`s once a frame has rendered the view, as
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
-    /// refused before the first tick of a run playing from its start. Then makes the frame bare if
-    /// the oldest capture waiting, of those riding, whose frame may not render, then of those
-    /// asked, is of the game's own view, and has it show what that capture shows in place of the
-    /// view's light; and unless it's bare, which reads no picks, has the frame ask the picks
-    /// waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after. Returns whether a
-    /// request asked the run to end.
+    /// refused before the first tick of a run playing from its start. Then makes the frame of the
+    /// kind of the oldest capture riding, whose frame may not render, or else of the film that has
+    /// frames to capture, or else of the oldest capture asked: bare if it's of the game's own view,
+    /// and showing what it shows in place of the view's light; a film's frame drawn from its
+    /// viewpoint, if it gives them, as [`Filming::viewpoint`] says, in place of the look's, which
+    /// the next frame not of a film's gets back. Unless the frame's bare, which reads no picks, has
+    /// it ask the picks waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after.
+    /// Returns whether a request asked the run to end.
     pub(crate) fn serve(
         &mut self,
         cx: &mut Context,
@@ -611,11 +685,26 @@ impl Api {
     ) -> bool {
         self.shared.frames.fetch_add(1, Ordering::Relaxed);
         let quit = self.answer(cx, stack, stepper, false);
-        let oldest = self.riding.first().or(self.asked.first());
-        self.bare = oldest.is_some_and(|capturing| capturing.own);
-        self.shown = oldest.and_then(|capturing| capturing.show.clone());
+        let film = (self.films.first()).filter(|film| film.handed.len() < film.count as usize);
+        let kind = match (self.riding.first(), film, self.asked.first()) {
+            (Some(capturing), ..) | (None, None, Some(capturing)) => {
+                Some((capturing.own, capturing.show.clone()))
+            }
+            (None, Some(film), _) => Some((false, film.show.clone())),
+            (None, None, None) => None,
+        };
+        (self.bare, self.shown) = kind.unwrap_or_default();
         cx.look.bare = self.bare;
         cx.look.captured = self.shown.clone();
+        let filming = film.filter(|film| !self.bare && self.shown == film.show);
+        let filmed = filming.and_then(Filming::viewpoint);
+        if let Some(viewpoint) = filmed {
+            cx.look.viewpoint = Some(viewpoint);
+        } else if self.film_viewpoint {
+            cx.look.viewpoint = self.look.viewpoint.as_ref().map(engine_viewpoint);
+        }
+        self.film_frame = filming.is_some();
+        self.film_viewpoint = filmed.is_some();
         if self.bare {
             return quit;
         }
@@ -713,7 +802,13 @@ impl Api {
                                    once it serves";
                     reply.send(Err(Failure::new("api.quitting", message)));
                 }
-                Call::Step(_) | Call::Capture { .. } | Call::Pick(..) | Call::Images if paused => {
+                Call::Step(_)
+                | Call::Capture { .. }
+                | Call::Frames { .. }
+                | Call::Pick(..)
+                | Call::Images
+                    if paused =>
+                {
                     let message = "frames have paused while the window is minimized, and steps, \
                                    captures, picks and images run in frames; restore the window \
                                    first";
@@ -777,6 +872,43 @@ impl Api {
                     show: show.as_ref().map(Shown::of),
                     since: Instant::now(),
                 }),
+                Call::Frames {
+                    dir,
+                    count,
+                    viewpoints,
+                    rect,
+                    show,
+                } => {
+                    // A view of no area, or none, fails as the frames come back without one.
+                    let size = (rect.map(|[_, _, width, height]| [width, height]))
+                        .or(cx.view().map(|view| view.size));
+                    let held = size.map_or(0, |[width, height]| {
+                        u64::from(count) * u64::from(width) * u64::from(height) * 4
+                    });
+                    if held > gg_api::MOST_FRAMES_BYTES {
+                        let [width, height] = size.unwrap_or_default();
+                        let what = format!(
+                            "holds at most {} bytes of pixels, and {count} frames of \
+                             {width}x{height} would hold {held}: ask for fewer frames, or a \
+                             smaller `rect`",
+                            gg_api::MOST_FRAMES_BYTES
+                        );
+                        reply.send(Err(bad_params("frames", what)));
+                    } else {
+                        self.films.push(Filming {
+                            reply,
+                            dir,
+                            count,
+                            viewpoints: viewpoints.iter().map(engine_viewpoint).collect(),
+                            rect,
+                            show: show.as_ref().map(Shown::of),
+                            since: Instant::now(),
+                            started: false,
+                            handed: Vec::new(),
+                            back: Vec::new(),
+                        });
+                    }
+                }
                 // A second writer of the memory would write the slot the first holds.
                 Call::View(memory) if memory.is_some() && memory == self.memory => {
                     reply.send(Ok("{}".to_owned()));
@@ -1204,10 +1336,11 @@ impl Api {
             publish.ticks = ticks;
             publish.started = cx.started;
         }
-        match frame.captured.take() {
+        let back = (frame.captured.take()).map(|shot| shot.map(Arc::new));
+        let streaming = frame.loading > 0 || !frame.streaming.is_empty();
+        self.film_back(back.as_ref(), streaming, frame.viewpoint);
+        match back {
             Some(Ok(shot)) => {
-                let shot = Arc::new(shot);
-                let streaming = frame.loading > 0 || !frame.streaming.is_empty();
                 let now = Instant::now();
                 let taken = (self.riding).extract_if(.., |capturing| {
                     !streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT
@@ -1236,7 +1369,7 @@ impl Api {
                         reply,
                     };
                     // The thread runs until the API drops.
-                    let _ = self.pngs.send(png);
+                    let _ = self.pngs.send(Writing::Capture(png));
                 }
             }
             Some(Err(error)) => {
@@ -1290,10 +1423,11 @@ impl Api {
             capturing.own == bare && capturing.show == *shown
         });
         self.riding.extend(kind);
-        frame.capture = !self.riding.is_empty();
-        if frame.capture {
+        if !self.riding.is_empty() {
             self.riding_ticks = ticks;
         }
+        let filming = self.film_hands(streaming, ticks);
+        frame.capture = !self.riding.is_empty() || filming;
         if let Some(images) = frame.images.take() {
             let listed = ImageList {
                 images: images.iter().map(frame_image).collect(),
@@ -1306,13 +1440,88 @@ impl Api {
         frame.list_images = !self.images_riding.is_empty();
     }
 
+    /// With a frame back, whose view `back` is, if it read it, which showed what was on its way to
+    /// the GPU if `streaming`, from `viewpoint`: keeps it as the first film's next frame, cropped
+    /// to its rect, if that film has a frame in flight, which is this one; and once it has all its
+    /// frames, has the thread that writes PNGs write them and answer it. A frame of it back without
+    /// its view, or with none of its rect, fails it.
+    fn film_back(
+        &mut self,
+        back: Option<&Result<Arc<Shot>>>,
+        streaming: bool,
+        viewpoint: Viewpoint,
+    ) {
+        let Some(film) = self.films.first_mut() else {
+            return;
+        };
+        if film.back.len() == film.handed.len() {
+            return;
+        }
+        let shot = match back {
+            Some(Ok(shot)) => crop(shot, film.rect).ok_or_else(|| {
+                let message = format!(
+                    "a frame's view, of {}x{} pixels, has none of the rect {:?}",
+                    shot.size[0], shot.size[1], film.rect
+                );
+                Failure::new("api.no_view", message)
+            }),
+            Some(Err(error)) => Err(failure(error)),
+            None => {
+                let message = "a frame of them didn't render, as while a window resizes, so they \
+                               wouldn't be in a row: ask again";
+                Err(Failure::new("api.no_view", message))
+            }
+        };
+        match shot {
+            Ok(shot) => film.back.push(FilmShot {
+                shot,
+                ticks: film.handed[film.back.len()],
+                streaming,
+                viewpoint,
+            }),
+            Err(failure) => {
+                self.film_frame = false;
+                self.films.remove(0).reply.send(Err(failure));
+                return;
+            }
+        }
+        if film.back.len() == film.count as usize {
+            let Filming {
+                reply, dir, back, ..
+            } = self.films.remove(0);
+            // The thread runs until the API drops.
+            let _ = self.pngs.send(Writing::Frames {
+                dir,
+                shots: back,
+                reply,
+            });
+        }
+    }
+
+    /// Whether the frame handed off next, made after `ticks` ticks, is to read its view back for
+    /// the first film: if it was made as the film's, as [`serve`](Self::serve) decided, and the
+    /// film has started, as it does at the first frame back that showed nothing on its way, unless
+    /// `streaming`, or once it has waited [`CAPTURE_WAIT`] since it came.
+    fn film_hands(&mut self, streaming: bool, ticks: u64) -> bool {
+        let film = (self.films.first_mut()).filter(|_| self.film_frame);
+        let Some(film) = film else {
+            return false;
+        };
+        film.started |= !streaming || film.since.elapsed() >= CAPTURE_WAIT;
+        if film.started {
+            film.handed.push(ticks);
+        }
+        film.started
+    }
+
     /// Whether the simulation is paused or stopped with nothing asked of the frames: no ticks to
-    /// step, no capture, pick or `images` waiting and no request held.
+    /// step, no capture, `frames`, pick or `images` waiting and no request held.
     pub(crate) fn is_idle(&self, stepper: &Stepper) -> bool {
         (stepper.paused() || stepper.stopped())
             && stepper.steps() == 0
             && self.asked.is_empty()
             && self.riding.is_empty()
+            && self.films.is_empty()
             && self.picks.is_empty()
             && self.images_asked.is_empty()
             && self.images_riding.is_empty()
@@ -2168,6 +2377,7 @@ fn needs(call: &Call) -> Vec<Capability> {
             .into_iter()
             .flatten()
             .collect(),
+        Call::Frames { .. } => vec![View, Files],
         Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Images => vec![View],
         Call::Input(_) => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
@@ -2513,9 +2723,36 @@ fn write_answers(mut stream: TcpStream, answers: &Receiver<Answer>) {
     }
 }
 
-/// Writes the captures `pngs` brings, each as a PNG, answering each, until the API drops.
-fn write_pngs(pngs: &Receiver<Png>) {
-    for png in pngs {
+/// Writes the captures `pngs` brings, each as a PNG, and each `frames`' frames, as PNGs numbered
+/// from 1, `frame-0001.png` and on, answering each once its PNGs are written, or as the first
+/// fails, until the API drops.
+fn write_pngs(pngs: &Receiver<Writing>) {
+    for writing in pngs {
+        let png = match writing {
+            Writing::Capture(png) => png,
+            Writing::Frames { dir, shots, reply } => {
+                let framed = (shots.into_iter().enumerate())
+                    .map(|(at, back)| {
+                        let path = dir.join(format!("frame-{:04}.png", at + 1));
+                        write_png(&path, &back.shot, false)?;
+                        let [width, height] = back.shot.size;
+                        Ok(FrameShot {
+                            path,
+                            width,
+                            height,
+                            ticks: back.ticks,
+                            streaming: back.streaming,
+                            viewpoint: api_viewpoint(&back.viewpoint),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>();
+                match framed {
+                    Ok(frames) => reply.result(&Framed { frames }),
+                    Err(error) => reply.send(Err(failure(&error))),
+                }
+                continue;
+            }
+        };
         let [width, height] = png.shot.size;
         let written = (png.path.as_deref())
             .map_or(Ok(()), |path| write_png(path, &png.shot, png.named))
@@ -2532,6 +2769,30 @@ fn write_pngs(pngs: &Receiver<Png>) {
             Err(error) => png.reply.send(Err(failure(&error))),
         }
     }
+}
+
+/// `shot` cropped to `rect`, `[x, y, width, height]` from its top left, where they overlap, or whole
+/// without one; `None` where they don't.
+fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
+    let Some([x, y, width, height]) = rect else {
+        return Some(shot.clone());
+    };
+    let [shot_width, shot_height] = shot.size;
+    let right = x.saturating_add(width).min(shot_width);
+    let bottom = y.saturating_add(height).min(shot_height);
+    if x >= right || y >= bottom {
+        return None;
+    }
+    let row = (right - x) as usize * 4;
+    let mut pixels = Vec::with_capacity(row * (bottom - y) as usize);
+    for line in y..bottom {
+        let start = (line as usize * shot_width as usize + x as usize) * 4;
+        pixels.extend_from_slice(&shot.pixels[start..start + row]);
+    }
+    Some(Arc::new(Shot {
+        size: [right - x, bottom - y],
+        pixels,
+    }))
 }
 
 /// The RGBA bytes of the pixel `at` falls in, `[x, y]` from the top left of `shot`'s view, as the
@@ -2687,25 +2948,7 @@ fn engine_named(name: &str, extension: &str) -> bool {
 /// an ID that isn't an entity's, or whose color isn't finite, or whose width isn't finite and positive.
 fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> {
     if let Some(Some(viewpoint)) = &mut given.viewpoint {
-        if !viewpoint.is_finite() {
-            let what = "takes a viewpoint whose numbers are finite";
-            return Err(bad_params(method, what));
-        }
-        let Some(rotation) = Vec4::from_array(viewpoint.rotation).try_normalize() else {
-            let what = "takes a viewpoint whose rotation is a quaternion with a length, which is \
-                        normalized";
-            return Err(bad_params(method, what));
-        };
-        viewpoint.rotation = rotation.to_array();
-        let projection = engine_projection(viewpoint.projection);
-        if !projection.projects() {
-            let what = format!(
-                "takes a projection that projects: orthographic, of a positive height, between a \
-                 near and a far that differ; or perspective, of a field of view more than 0 and \
-                 less than π, from a positive near; not {projection:?}"
-            );
-            return Err(bad_params(method, what));
-        }
+        checked_viewpoint(method, viewpoint)?;
     }
     if let Some(Some(outline)) = &given.outline {
         for id in &outline.ids {
@@ -2742,6 +2985,33 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
     Ok(given)
 }
 
+/// Checks a viewpoint method `method` takes, normalizing its rotation.
+///
+/// Fails with `api.bad_params`, saying why, for one that isn't finite, whose rotation has no
+/// length, or whose projection can't project, as [`Projection`] says.
+fn checked_viewpoint(method: &str, viewpoint: &mut gg_api::Viewpoint) -> Result<(), Failure> {
+    if !viewpoint.is_finite() {
+        let what = "takes a viewpoint whose numbers are finite";
+        return Err(bad_params(method, what));
+    }
+    let Some(rotation) = Vec4::from_array(viewpoint.rotation).try_normalize() else {
+        let what = "takes a viewpoint whose rotation is a quaternion with a length, which is \
+                    normalized";
+        return Err(bad_params(method, what));
+    };
+    viewpoint.rotation = rotation.to_array();
+    let projection = engine_projection(viewpoint.projection);
+    if !projection.projects() {
+        let what = format!(
+            "takes a projection that projects: orthographic, of a positive height, between a near \
+             and a far that differ; or perspective, of a field of view more than 0 and less than \
+             π, from a positive near; not {projection:?}"
+        );
+        return Err(bad_params(method, what));
+    }
+    Ok(())
+}
+
 /// Checks what a `look` or a `capture` shows in place of the view's light: an image's name that's
 /// neither empty nor longer than [`gg_api::MOST_IMAGE_NAME`] bytes.
 fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
@@ -2762,9 +3032,11 @@ fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
 ///
 /// Fails with `api.unknown_method` for a method there's none of, `api.bad_params` for parameters
 /// it doesn't take, a `look` that can't be, as [`look`] says, a `scene` whose path is missing,
-/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`, or a
-/// `save_prefab` whose path isn't a `.prefab` file's,
-/// `api.bad_request` for a `hello` after the first, and `ecs.bad_id` for an ID that isn't one.
+/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`, a
+/// `save_prefab` whose path isn't a `.prefab` file's, or a `frames` whose `dir` isn't an absolute
+/// path to a directory, whose `count` is 0 or past [`gg_api::MOST_FRAMES`], or whose viewpoints, or
+/// `rect` of no area, can't be; `api.bad_request` for a `hello` after the first, and `ecs.bad_id`
+/// for an ID that isn't one.
 fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
     let params = &request.params;
@@ -2903,6 +3175,53 @@ fn parse(request: &Request) -> Result<Call, Failure> {
                 path,
                 at,
                 own,
+                show,
+            }
+        }
+        "frames" => {
+            let gg_api::Frames {
+                dir,
+                count,
+                mut viewpoints,
+                rect,
+                show,
+            } = take(method, params)?;
+            if !dir.is_absolute() {
+                let what = "takes an absolute `dir`, since the game's working directory may not be \
+                            the tool's";
+                return Err(bad_params(method, what));
+            }
+            // Before the frames are captured, rather than as their PNGs fail to be written.
+            if !dir.is_dir() {
+                let what = format!(
+                    "takes a `dir` that's a directory, as {} isn't",
+                    dir.display()
+                );
+                return Err(bad_params(method, what));
+            }
+            if !(1..=gg_api::MOST_FRAMES).contains(&count) {
+                let what = format!(
+                    "captures from 1 to {} frames, not {count}",
+                    gg_api::MOST_FRAMES
+                );
+                return Err(bad_params(method, what));
+            }
+            for viewpoint in &mut viewpoints {
+                checked_viewpoint(method, viewpoint)?;
+            }
+            if let Some([.., width, height]) = rect
+                && (width == 0 || height == 0)
+            {
+                return Err(bad_params(method, "takes a `rect` with an area"));
+            }
+            if let Some(show) = &show {
+                shown(method, show)?;
+            }
+            Call::Frames {
+                dir,
+                count,
+                viewpoints,
+                rect,
                 show,
             }
         }
@@ -5129,6 +5448,173 @@ mod tests {
         let rgb = &pixels[..info.buffer_size()];
         assert_eq!(rgb, [255, 0, 0, 0, 128, 255], "alpha goes");
         assert!(!frame.capture, "nothing rides once both are answered");
+    }
+
+    /// The RGB bytes of the PNG at `path`, and its size.
+    fn png_rgb(path: &Path) -> (Vec<u8>, [u32; 2]) {
+        let file = fs::File::open(path).expect("the PNG");
+        let mut reader =
+            (png::Decoder::new(std::io::BufReader::new(file)).read_info()).expect("a PNG");
+        let mut pixels = vec![0; reader.output_buffer_size().expect("a size")];
+        let info = reader.next_frame(&mut pixels).expect("its pixels");
+        pixels.truncate(info.buffer_size());
+        (pixels, [info.width, info.height])
+    }
+
+    /// A viewpoint at `z` on the Z axis, looking down -Z, as the tool API gives one.
+    fn at_z(z: f32) -> gg_api::Viewpoint {
+        gg_api::Viewpoint {
+            position: [0.0, 0.0, z],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Perspective {
+                fov: 1.0,
+                near: 0.1,
+            },
+        }
+    }
+
+    /// Frames in a row: refused as their docs say; drawn from the first viewpoint while what's on
+    /// its way keeps them from starting, then each read back in turn, none skipped, from the next
+    /// viewpoint, the last held, each cropped to the rect and written as a PNG numbered in order,
+    /// answered once all are; and the look's viewpoint drawn again after them.
+    #[test]
+    fn frames_are_captured_in_a_row_from_their_viewpoints() {
+        let (mut api, session) = started("Api Frames");
+        let mut cx = Context::seeded(4);
+        let mut stepper = Stepper::default();
+        let dir = Scratch::new("api-frames");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let asked = dir.0.clone();
+        let client = move |mut client: Client| {
+            let look = json!({"viewpoint": at_z(9.0)});
+            client.call("look", look).expect("a look");
+            let refused: Vec<String> = [
+                json!({"dir": "frames", "count": 3}),
+                json!({"dir": asked.join("none"), "count": 3}),
+                json!({"dir": asked, "count": 0}),
+                json!({"dir": asked, "count": gg_api::MOST_FRAMES + 1}),
+                json!({"dir": asked, "count": 3, "rect": [0, 0, 0, 2]}),
+                json!({"dir": asked, "count": 1, "rect": [0, 0, 40_000, 40_000]}),
+                json!({"dir": asked, "count": 3, "viewpoints": [
+                    {"position": [0, 0, 1], "rotation": [0, 0, 0, 0],
+                    "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}}]}),
+            ]
+            .into_iter()
+            .map(|params| client.call("frames", params).expect_err("refused").code)
+            .collect();
+            let params = json!({"dir": asked, "count": 3, "rect": [1, 0, 2, 2],
+                "viewpoints": [at_z(1.0), at_z(2.0)]});
+            let framed: Framed = client.call_as("frames", params).expect("the frames");
+            (refused, framed)
+        };
+        let mut frame = Extracted::default();
+        // The frames handed off as the film's while it waited, and how many have rendered.
+        let (mut waiting, mut rendered) = (Vec::new(), 0u8);
+        let mut drawn_from = Viewpoint::default();
+        let (refused, framed) = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            |api, cx, stepper| {
+                // The frame handed off last comes back, drawn from the look's viewpoint as it was
+                // made, each pixel its place and the frame's number.
+                frame.viewpoint = drawn_from;
+                if frame.capture {
+                    rendered += 1;
+                    let pixels = (0..2u8).flat_map(|y| (0..4u8).map(move |x| (x, y)));
+                    let pixels = pixels.flat_map(|(x, y)| [x, y, rendered, 255]).collect();
+                    frame.captured = Some(Ok(Shot {
+                        size: [4, 2],
+                        pixels,
+                    }));
+                }
+                // What a film's first two frames back showed was on its way.
+                let film = api.films.first().filter(|film| !film.started);
+                if film.is_some() {
+                    waiting.push(cx.look.viewpoint);
+                }
+                frame.loading = u32::from(film.is_some() && waiting.len() <= 2);
+                api.frame_back(&mut frame, cx, stepper.ticks);
+                drawn_from = cx.look.viewpoint.unwrap_or_default();
+            },
+        );
+        assert_eq!(refused, ["api.bad_params"; 7]);
+        let first = Some(engine_viewpoint(&at_z(1.0)));
+        assert!(waiting.len() >= 3, "it waits out what's on its way");
+        assert!(waiting.iter().all(|viewpoint| *viewpoint == first));
+        let viewpoints: Vec<[f32; 3]> = (framed.frames.iter())
+            .map(|shot| shot.viewpoint.position)
+            .collect();
+        assert_eq!(
+            viewpoints,
+            [[0.0, 0.0, 1.0], [0.0, 0.0, 2.0], [0.0, 0.0, 2.0]]
+        );
+        let mut numbers = Vec::new();
+        for (at, shot) in framed.frames.iter().enumerate() {
+            let path = dir.0.join(format!("frame-{:04}.png", at + 1));
+            assert_eq!(shot.path, path);
+            assert_eq!((shot.width, shot.height, shot.streaming), (2, 2, false));
+            let (rgb, size) = png_rgb(&path);
+            assert_eq!(size, [2, 2]);
+            let number = rgb[2];
+            assert_eq!(
+                rgb,
+                [1, 0, number, 2, 0, number, 1, 1, number, 2, 1, number]
+            );
+            numbers.push(number);
+        }
+        assert!(
+            numbers.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "{numbers:?}"
+        );
+        assert_eq!(cx.look.viewpoint, Some(engine_viewpoint(&at_z(9.0))));
+        assert!(!frame.capture, "nothing reads its view back after them");
+    }
+
+    /// A frame of a film that comes back without its view fails the film.
+    #[test]
+    fn frames_fail_at_a_frame_back_without_its_view() {
+        let (mut api, session) = started("Api Frames Failing");
+        let mut cx = Context::seeded(4);
+        let mut stepper = Stepper::default();
+        let dir = Scratch::new("api-frames-failing");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let asked = dir.0.clone();
+        let client = move |mut client: Client| {
+            let params = json!({"dir": asked, "count": 3});
+            client
+                .call("frames", params)
+                .expect_err("a frame lost")
+                .code
+        };
+        let mut frame = Extracted::default();
+        let mut rendered = 0;
+        let refused = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            |api, cx, stepper| {
+                if frame.capture {
+                    rendered += 1;
+                    frame.captured = (rendered != 2).then(|| {
+                        Ok(Shot {
+                            size: [1, 1],
+                            pixels: vec![0; 4],
+                        })
+                    });
+                }
+                api.frame_back(&mut frame, cx, stepper.ticks);
+            },
+        );
+        assert_eq!(refused, "api.no_view");
+        assert!(api.films.is_empty());
+        assert!(!fs::exists(dir.0.join("frame-0001.png")).expect("a look"));
     }
 
     /// A client's input reaches the layers as the window's would, the cursor over the view taken

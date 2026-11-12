@@ -21,6 +21,7 @@ mod run;
 mod runs;
 mod ship;
 
+use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -177,6 +178,17 @@ Talk to a running game, through its tool API:
                                  depth`. With several, which PATH refuses, it captures each in
                                  order from one world, pausing the game for them if it plays, and
                                  prints an array of the answers
+  frames <N> [--viewpoints <FILE>] [--rect X,Y,W,H] [--show <NAME>] <DIR>
+                                 Write its next N frames in a row, none skipped, as PNGs in DIR,
+                                 `frame-0001.png` on, from the first frame with nothing on its way
+                                 to the GPU: each drawn from the next of the viewpoints in FILE, a
+                                 JSON array of them as `look` takes its `viewpoint`, the last held
+                                 for the frames after it, or else as the view's shown; with
+                                 `--rect`, each cropped to the rectangle of pixels from the view's
+                                 top left; with `--show`, showing NAME, as `capture`'s. N is 1 to
+                                 1000, holding at most 1 GiB of pixels. Prints each frame's PNG,
+                                 size, ticks and viewpoint. Pause the game to see the view alone
+                                 change
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
                                  takes them, `viewpoint`, `outline`, round entities and every entity
@@ -487,7 +499,9 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 18] = [
+const VALUED: [&str; 20] = [
+    "--viewpoints",
+    "--rect",
     "--project",
     "--grant",
     "--peers",
@@ -917,6 +931,48 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 },
             }
         }
+        "frames" => {
+            let usage = "frames <N> [--viewpoints <FILE>] [--rect X,Y,W,H] [--show <NAME>] <DIR>";
+            let given = parsed.positional(2, 2, usage)?;
+            let count = given[0].parse::<u32>().map_err(|_| {
+                let what = &given[0];
+                bad(format!(
+                    "`gg frames` takes how many frames, a whole number, not `{what}`"
+                ))
+            })?;
+            let mut params = json!({"dir": absolute(&given[1])?, "count": count});
+            if let Some(file) = parsed.value("--viewpoints") {
+                let text = fs::read_to_string(&file)
+                    .map_err(|error| bad(format!("can't read the viewpoints `{file}`: {error}")))?;
+                // Checked here, to say which file is wrong, and passed on as written.
+                let viewpoints = serde_json::from_str::<Value>(&text).and_then(|viewpoints| {
+                    serde_json::from_value::<Vec<gg_api::Viewpoint>>(viewpoints.clone())
+                        .map(|_| viewpoints)
+                });
+                params["viewpoints"] = viewpoints.map_err(|error| {
+                    bad(format!(
+                        "`{file}` holds a JSON array of viewpoints, as `look` takes its \
+                         `viewpoint`: {error}"
+                    ))
+                })?;
+            }
+            if let Some(rect) = parsed.value("--rect") {
+                let numbers = (rect.split(','))
+                    .map(|number| number.trim().parse::<u32>())
+                    .collect::<Result<Vec<u32>, _>>();
+                let numbers = numbers.ok().filter(|numbers| numbers.len() == 4);
+                params["rect"] = json!(numbers.ok_or_else(|| {
+                    bad(format!(
+                        "`--rect` takes X,Y,WIDTH,HEIGHT, four whole numbers, not `{rect}`"
+                    ))
+                })?);
+            }
+            if let Some(name) = parsed.value("--show") {
+                params["show"] =
+                    game::shown(&json!(name.trim())).map_err(|failure| bad(failure.message))?;
+            }
+            call(&mut parsed, "frames", params)?
+        }
         "snapshot" => {
             let path = parsed.positional(0, 1, "snapshot [PATH]")?;
             let params = match path.first() {
@@ -1297,6 +1353,7 @@ mod tests {
         let snapshot = std::path::absolute("world.snapshot").unwrap();
         let png = std::path::absolute("view.png").unwrap();
         let level = std::path::absolute("scenes/level2.ron").unwrap();
+        let frames = std::path::absolute("frames").unwrap();
         for (args, want) in [
             (
                 &["scene", "open", "scenes/level2.ron"][..],
@@ -1334,6 +1391,22 @@ mod tests {
             (
                 &["capture", "--show", "view depth", "--own", "view.png"],
                 json!({"path": png, "own": true, "show": {"image": "view depth"}}),
+            ),
+            (
+                &["frames", "8", "frames"],
+                json!({"dir": frames, "count": 8}),
+            ),
+            (
+                &[
+                    "frames",
+                    "3",
+                    "--rect",
+                    "1, 2,3,4",
+                    "--show=view depth",
+                    "frames",
+                ],
+                json!({"dir": frames, "count": 3, "rect": [1, 2, 3, 4],
+                    "show": {"image": "view depth"}}),
             ),
             (&["look"], json!({})),
             (
@@ -1425,6 +1498,24 @@ mod tests {
             panic!("captures");
         };
         assert_eq!((params, shows.len()), (json!({"own": true}), 2));
+        // Frames take their viewpoints from a file, each read as a viewpoint.
+        let file = std::env::temp_dir().join(format!("gg-viewpoints-{}.json", std::process::id()));
+        let viewpoint = json!({"position": [0.0, 1.0, 2.0], "rotation": [0.0, 0.0, 0.0, 1.0],
+            "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}});
+        fs::write(&file, json!([viewpoint, viewpoint]).to_string()).unwrap();
+        let path = file.to_str().unwrap();
+        let read = parsed(&["frames", "2", "--viewpoints", path, "frames"]);
+        fs::write(&file, r#"[{"position": [0, 1, 2]}]"#).unwrap();
+        let refused = parsed(&["frames", "2", "--viewpoints", path, "frames"]);
+        fs::remove_file(&file).unwrap();
+        let Ok(Command::Call { params, .. }) = read else {
+            panic!("frames");
+        };
+        assert_eq!(params["viewpoints"], json!([viewpoint, viewpoint]));
+        assert_eq!(
+            refused.err().map(|error| error.code).as_deref(),
+            Some("gg.args")
+        );
         // A probe takes a pixel, in the view as it's shown, or the game's own.
         for (args, want_own) in [
             (&["probe", "3", "4.5"][..], false),
@@ -1491,6 +1582,14 @@ mod tests {
                 "roughness",
                 "view.png",
             ],
+            &["frames", "3"],
+            &["frames", "three", "frames"],
+            &["frames", "-1", "frames"],
+            &["frames", "3", "frames", "more"],
+            &["frames", "3", "frames", "--rect", "1,2,3"],
+            &["frames", "3", "frames", "--rect", "1,2,3,a"],
+            &["frames", "3", "frames", "--show", ""],
+            &["frames", "3", "frames", "--viewpoints", "no such file.json"],
             &["look", "{not json"],
             &["look", "[]"],
             &["look", "{}", "{}"],
