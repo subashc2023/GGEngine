@@ -20,8 +20,9 @@ use crate::overlay::{self, Toolbar};
 /// outline what's selected in.
 pub const OUTLINE: Vec4 = Vec4::new(1.0, 0.35, 0.02, 1.0);
 
-/// How wide the outline round what's picked is, in points, as the colliders' outlines are.
-pub const OUTLINE_WIDTH: f32 = 2.0;
+/// How wide the outline's solid band round what's picked is, in points, its glow reaching as far
+/// again: wide enough to read as a selection over a busy scene.
+pub const OUTLINE_WIDTH: f32 = 3.0;
 
 /// The view's tools: the editor's camera, the toolbar and the handles, which pick and edit through
 /// the Inspector's link; what the view sees from, which the handles are hit against; the pick a
