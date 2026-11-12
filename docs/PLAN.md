@@ -162,11 +162,13 @@ its edits, rebuilds and restarts without losing any.
 The agent loop's, a game's input's, networking's and scripts', assets', the GPU's and state's
 defects are fixed, but for what their rows in DEFECTS.md keep. Left:
 
-- **The toolchain.** visibility.slang's change of 2026-11-10, which keeps its frame whole as
-  model.slang's does, has AMD's ISA checked under both slangc releases, as its header asks; it passes
-  CI's shader tests under the release CI pins.
-- **The check.** The game `cargo gg new` makes, with a HUD, run under `gg run`, edited, rebuilt and
-  restarted, as the *done when* says, on Windows, and with `dx`: it passed on macOS without `dx`.
+- **The toolchain.** visibility.slang, as its change of 2026-11-10, which keeps its frame whole as
+  model.slang's does, and the changes since left it, has AMD's ISA checked under both slangc
+  releases, as its header asks: CI's shader tests pass it under the release CI pins.
+
+The check passed on macOS without `dx`, and on Windows with `dx` (2026-11-12): a game `cargo gg
+new` made, with a HUD's button counting its clicks in a component, under `gg run`, kept its count
+through a patch, a rebuild, a broken edit of each kind, which ran the old game on, a kill and a hang.
 
 What the audit's game needed first of Deferred is done: physics' sensors, contact events and
 collision groups for scripts and code, a scene changed from a game's code as it plays, scripts that
