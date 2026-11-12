@@ -157,6 +157,7 @@ fn main() -> ExitCode {
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
+        picks_see_through_the_grid,
         removed_assets_draw_nothing_or_their_stand_in,
         antialiasing_smooths_edges_frame_by_frame,
         antialiasing_follows_what_moves,
@@ -3799,6 +3800,81 @@ fn picks_wait_through_frames_that_read_none() {
         render_without_ui(&mut renderer, data);
         assert_eq!(renderer.picked(), expected, "frame {frame}'s answers");
     }
+    shut_down(renderer);
+}
+
+/// Draws a square that fills the view and the engine's grid over it, facing it orthographically, a
+/// pixel a unit, its X axis across the view's middle at the square's depth, where the grid draws
+/// over what's at its depth: picks along the axis, on the two rows it may take, answer the square,
+/// as the grid, which is for seeing by, leaves the IDs of what's under it.
+fn picks_see_through_the_grid() {
+    const SIZE: u32 = 32;
+    const SQUARE: u64 = 7;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
+    let square = MeshDraw::new(square(&mut stores.meshes), flat, blue);
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: SIZE as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let over_view = Mat4::from_cols(
+        Vec4::new(2.0 * SIZE as f32, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 2.0 * SIZE as f32, 0.0, 0.0),
+        Vec4::Z,
+        Vec4::W,
+    );
+    let grid = Grid {
+        first: Vec3::new(0.8, 0.1, 0.1),
+        first_center: 0.0,
+        second: Vec3::new(0.1, 0.7, 0.1),
+        second_center: 0.0,
+        eye: Vec3::NEG_Z,
+        coarsest: 3.0,
+        normal: Vec3::Z,
+        lines: GridLines::Crisp,
+    };
+    let mut draws = Draws::default();
+    draws.push_draw(Mat4::from_scale(Vec3::splat(SIZE as f32)), &square, SQUARE);
+    draws.push_grid(&mut stores.meshes, &mut stores.shaders, over_view, grid);
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let rows = [SIZE / 2 - 1, SIZE / 2];
+    let picks: Vec<Pick> = (rows.iter())
+        .flat_map(|&y| (0..SIZE).map(move |x| [x, y]))
+        .enumerate()
+        .map(|(tag, pixel)| Pick {
+            tag: tag as u64,
+            pixel,
+        })
+        .collect();
+    let data = RenderData {
+        picks: &picks,
+        ..stores.data(viewport, viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let frame = frame_pixels(&mut renderer);
+    // The axis shows over the square on one of its rows, away from the lines ten units apart.
+    let plain = pixel_at(&frame, SIZE, [8, 8]);
+    assert!(
+        (rows.iter()).any(|&y| !close(pixel_at(&frame, SIZE, [8, y]), plain)),
+        "the grid's X axis draws over the square"
+    );
+    // Answered once the frame that drew them is done, frames in flight later.
+    let mut answered = renderer.picked().to_vec();
+    for _ in 0..3 {
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        answered.extend_from_slice(renderer.picked());
+    }
+    let expected: Vec<_> = (0..picks.len() as u64).map(|tag| (tag, SQUARE)).collect();
+    assert_eq!(answered, expected, "the picks along the grid's X axis");
     shut_down(renderer);
 }
 

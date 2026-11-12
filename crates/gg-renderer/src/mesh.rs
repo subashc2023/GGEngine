@@ -1143,13 +1143,15 @@ struct Geometry<'a> {
 }
 
 impl Geometry<'_> {
-    /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says; and, if
+    /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says and
+    /// writing the IDs of what it draws if `ids` says so, as [`shader::Added::ids`] says; and, if
     /// that writes depth, what draws its depth alone, by its geometry and, if its shadows are cut
     /// out, `shadow_main`, and its normals, if it has a module of them, by `normal_main`.
     fn pipelines(
         &self,
         device: &Arc<Device>,
         blend: Blend,
+        ids: bool,
     ) -> Result<(Pipeline, Option<DepthOnly>)> {
         let writes_depth = shader::writes_depth(blend);
         let pipeline = Pipeline::graphics(
@@ -1163,6 +1165,7 @@ impl Geometry<'_> {
                 format: Format::HDR.with_ids().with_motion().with_depth(),
                 blend,
                 depth_write: writes_depth,
+                ids_write: ids,
                 depth_bias: 0.0,
                 depth_clamp: false,
             },
@@ -1181,6 +1184,7 @@ impl Geometry<'_> {
                     format: Format::DEPTH,
                     blend: Blend::Opaque,
                     depth_write: true,
+                    ids_write: false,
                     depth_bias: if shadow { shadow::DEPTH_BIAS } else { 0.0 },
                     depth_clamp: shadow,
                 },
@@ -1200,6 +1204,7 @@ impl Geometry<'_> {
                     format: Format::HDR.with_depth(),
                     blend: Blend::Opaque,
                     depth_write: false,
+                    ids_write: false,
                     depth_bias: 0.0,
                     depth_clamp: false,
                 },
@@ -1249,6 +1254,7 @@ fn visibility_pipeline(
             format: Format::VISIBILITY.with_ids().with_depth(),
             blend: Blend::Opaque,
             depth_write: true,
+            ids_write: true,
             depth_bias: 0.0,
             depth_clamp: false,
         },
@@ -1412,7 +1418,7 @@ impl MeshPass {
                 entry: c"vertex_main",
                 mesh: None,
             };
-            let made = geometry.pipelines(device, added.blend);
+            let made = geometry.pipelines(device, added.blend, added.ids);
             // A model shader's meshlets, through the device's mesh shaders if it has them, with the
             // shader's own fragment shaders.
             let meshlets = (added.meshlets.as_deref()).map(|meshlets| {
@@ -1436,7 +1442,7 @@ impl MeshPass {
                         mesh: None,
                     }
                 };
-                geometry.pipelines(device, added.blend)
+                geometry.pipelines(device, added.blend, added.ids)
             });
             // And into the visibility buffer.
             let visibility = (added.meshlets.as_deref())

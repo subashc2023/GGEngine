@@ -118,6 +118,9 @@ pub(crate) struct Added {
     /// The size of the parameters it takes.
     pub(crate) params_size: usize,
     pub(crate) blend: Blend,
+    /// Whether it writes the IDs of what it draws, as all do but the engine's grid, which is for
+    /// seeing by and leaves those of what's under it.
+    pub(crate) ids: bool,
     /// What draws the shadows of what it draws, if it writes depth and they're cut out as it is:
     /// a module of its vertex shader and `shadow_main`, a fragment shader that discards where it
     /// does, as the engine's masked model shader has. Those of the others that write depth are of
@@ -326,7 +329,7 @@ impl Shaders {
         let compiled_at = SystemTime::now();
         let (spirv, files) = compile(Path::new(SLANGC), name, path)?;
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, None, None, blend, types);
+        let index = self.push(name, spirv, None, None, blend, true, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -355,7 +358,7 @@ impl Shaders {
     ) -> Result<Shader<V, P>> {
         let types = Types::of::<V, P>();
         check(name, path, &spirv, &types)?;
-        let index = self.push(name, spirv, None, None, blend, types);
+        let index = self.push(name, spirv, None, None, blend, true, types);
         self.sources.push(ShaderSource {
             index,
             name: name.to_owned(),
@@ -425,6 +428,7 @@ impl Shaders {
             vertex_size: source.types.vertex_size,
             params_size: source.types.params_size,
             blend: source.blend,
+            ids: true,
             shadow: None,
             meshlets: None,
         }));
@@ -453,8 +457,13 @@ impl Shaders {
 
     /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, as [`prepared`] has
     /// it, and `shadow`, what draws its shadows if they're cut out, as [`Added::shadow`] says,
-    /// with its sampled images decorated as [`spirv::decorate_non_uniform`] says, and gives the
-    /// index of its handle.
+    /// with its sampled images decorated as [`spirv::decorate_non_uniform`] says, blending as
+    /// `blend` says and writing IDs if `ids` says so, as [`Added::ids`] says, and gives the index of
+    /// its handle.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each says what one of the shaders is"
+    )]
     fn push(
         &mut self,
         name: &str,
@@ -462,6 +471,7 @@ impl Shaders {
         shadow: Option<Vec<u8>>,
         meshlets: Option<&model::MeshletSpirv>,
         blend: Blend,
+        ids: bool,
         types: Types,
     ) -> u32 {
         let index = self.count;
@@ -474,6 +484,7 @@ impl Shaders {
             vertex_size: types.vertex_size,
             params_size: types.params_size,
             blend,
+            ids,
             shadow: shadow.map(spirv::decorate_non_uniform),
             meshlets: meshlets.map(|meshlets| {
                 let module = |spirv: &[u8]| spirv::decorate_non_uniform(spirv.to_vec());
@@ -529,7 +540,7 @@ impl Shaders {
             }),
             AlphaMode::Blend => None,
         };
-        self.lazy(slot, name, spirv, shadow, meshlets.as_ref(), blend)
+        self.lazy(slot, name, spirv, shadow, meshlets.as_ref(), blend, true)
     }
 
     /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
@@ -550,31 +561,36 @@ impl Shaders {
     /// The engine's circle shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
-        self.lazy(3, "circle", circle::SPIRV, None, None, Blend::Alpha)
+        self.lazy(3, "circle", circle::SPIRV, None, None, Blend::Alpha, true)
     }
 
     /// The engine's line shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
-        self.lazy(4, "line", line::SPIRV, None, None, Blend::Alpha)
+        self.lazy(4, "line", line::SPIRV, None, None, Blend::Alpha, true)
     }
 
     /// The engine's grid shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn grid(&mut self) -> Shader<Vec2, grid::Params> {
-        self.lazy(5, "grid", grid::SPIRV, None, None, Blend::Alpha)
+        self.lazy(5, "grid", grid::SPIRV, None, None, Blend::Alpha, false)
     }
 
     /// The engine's text shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
-        self.lazy(6, "text", text::SPIRV, None, None, Blend::Alpha)
+        self.lazy(6, "text", text::SPIRV, None, None, Blend::Alpha, true)
     }
 
     /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, with `shadow`
     /// to draw its shadows cut out, if they are, and `meshlets` to draw meshes' meshlets, if it
-    /// does, which draws meshes of `V` with parameters `P` and blends as `blend` says: added the
-    /// first time it's asked for, and then the same.
+    /// does, which draws meshes of `V` with parameters `P`, blends as `blend` says and writes the
+    /// IDs of what it draws if `ids` says so, as [`Added::ids`] says: added the first time it's
+    /// asked for, and then the same.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each says what one of the shaders is"
+    )]
     fn lazy<V, P>(
         &mut self,
         slot: usize,
@@ -583,13 +599,14 @@ impl Shaders {
         shadow: Option<&[u8]>,
         meshlets: Option<&model::MeshletSpirv>,
         blend: Blend,
+        ids: bool,
     ) -> Shader<V, P> {
         let index = match self.lazy[slot] {
             Some(index) => index,
             None => {
                 let (spirv, shadow) = (spirv.to_vec(), shadow.map(<[u8]>::to_vec));
                 let types = Types::of::<V, P>();
-                let index = self.push(name, spirv, shadow, meshlets, blend, types);
+                let index = self.push(name, spirv, shadow, meshlets, blend, ids, types);
                 *self.lazy[slot].insert(index)
             }
         };
@@ -613,6 +630,7 @@ impl Default for Shaders {
             None,
             None,
             Blend::Alpha,
+            true,
             types,
         );
         assert_eq!(index, sprite::SHADER.index, "the sprite shader comes first");

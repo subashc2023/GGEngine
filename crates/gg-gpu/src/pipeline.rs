@@ -199,7 +199,8 @@ pub struct GraphicsDesc<'a> {
     pub fragment: Option<&'a CStr>,
     /// The formats of the targets it draws into. Where they have IDs, its fragment shader writes
     /// them at location 1, as two 32-bit unsigned integers, which replace what's there wherever it
-    /// draws, however its color blends. Where they have motion, a pipeline that writes depth
+    /// draws, however its color blends, if [`ids_write`](Self::ids_write) says it writes them.
+    /// Where they have motion, a pipeline that writes depth
     /// writes it at location 2, a float4 that replaces what's there, as the motion belongs to what
     /// owns the depth; one that doesn't leaves it as it was.
     pub format: Format,
@@ -207,6 +208,10 @@ pub struct GraphicsDesc<'a> {
     /// Whether it writes its depth where it draws, for later draws to test against. Only a
     /// pipeline whose targets have depth can.
     pub depth_write: bool,
+    /// Whether it writes its IDs where it draws. Only a pipeline whose targets have IDs can. One
+    /// that doesn't leaves the IDs of what's under what it draws, as a draw that's for seeing by
+    /// does, such as the engine's grid, so that a pick there finds what's under it.
+    pub ids_write: bool,
     /// How far each fragment's depth goes back, away from the near plane, in multiples of the most
     /// its triangle's depth changes across a pixel: slope-scaled depth bias, which keeps the depths
     /// of a shadow map behind the surfaces they're of where those slope away from the light, so
@@ -235,7 +240,8 @@ impl Pipeline {
     ///
     /// # Panics
     ///
-    /// If it writes, biases or clamps depth for targets without it, it has no fragment shader but
+    /// If it writes, biases or clamps depth for targets without it, writes IDs for targets without
+    /// them, it has no fragment shader but
     /// its targets have colors, it blends into a visibility buffer, its targets have IDs but no
     /// color or motion but no IDs, or its geometry is a mesh shader and the device draws through
     /// none.
@@ -263,6 +269,10 @@ impl Pipeline {
         assert!(
             depth || !(desc.depth_write || desc.depth_bias != 0.0 || desc.depth_clamp),
             "a pipeline writes, biases and clamps depth only for targets that have it"
+        );
+        assert!(
+            desc.format.has_ids() || !desc.ids_write,
+            "a pipeline writes IDs only for targets that have them"
         );
         assert!(
             desc.fragment.is_some() || !desc.format.has_color(),
@@ -316,8 +326,12 @@ impl Pipeline {
         let attachment = desc.blend.attachment();
         // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062), so the IDs'
         // state differs from a blended color's, which takes independent blending.
-        let ids = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
+        let ids =
+            vk::PipelineColorBlendAttachmentState::default().color_write_mask(if desc.ids_write {
+                vk::ColorComponentFlags::R | vk::ColorComponentFlags::G
+            } else {
+                vk::ColorComponentFlags::empty()
+            });
         // Written where depth is, unblended, and left alone by a pipeline that writes none.
         let motion = vk::PipelineColorBlendAttachmentState::default().color_write_mask(
             if desc.depth_write {

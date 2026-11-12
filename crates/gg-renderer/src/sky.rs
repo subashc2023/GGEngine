@@ -226,6 +226,7 @@ impl SkyPass {
                     // any motion.
                     blend: Blend::Opaque,
                     depth_write: false,
+                    ids_write: true,
                     depth_bias: 0.0,
                     depth_clamp: false,
                 },

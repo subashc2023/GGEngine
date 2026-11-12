@@ -9,8 +9,9 @@
 // plane squarely they're crisp, a pixel each; in any other they're anti-aliased, each family of
 // lines by its own footprint, and fade toward grazing angles.
 //
-// The grid is a draw of no entity, so the ID it writes is 0; and it discards what's fully
-// transparent, which blending would leave as it was, as a shader that blends does for picks.
+// The grid is a draw of no entity, for seeing by: its pipeline leaves the IDs of what's under it
+// as they were, the 0 it returns unwritten, so that a pick on one of its lines finds what's under
+// the line. It discards what's fully transparent, which blending would leave as it was.
 
 // How the lines draw, which `Grid.lines` says: anti-aliased, seen through perspective from a point
 // or orthographically along a direction; or crisp, orthographically, facing the plane squarely.

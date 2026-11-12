@@ -192,8 +192,8 @@ impl Draws {
     /// nearer, as [`Grid`] describes, with the engine's grid mesh and shader, which `meshes` and `shaders` add the
     /// first time they're asked for. `transform` takes the grid's own space, where it's a unit
     /// square around the origin in its XY plane, to the world's: its first two columns are the
-    /// square's sides in the grid's plane, and its translation the square's center. Its ID is 0, of
-    /// no entity.
+    /// square's sides in the grid's plane, and its translation the square's center. It has no ID,
+    /// leaving the IDs of what's under it, so that picks see through it.
     pub fn push_grid(
         &mut self,
         meshes: &mut Meshes,

@@ -535,6 +535,7 @@ impl AtmospherePass {
                     // any motion, as an image sky is.
                     blend: Blend::Opaque,
                     depth_write: false,
+                    ids_write: true,
                     depth_bias: 0.0,
                     depth_clamp: false,
                 },

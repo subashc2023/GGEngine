@@ -87,6 +87,7 @@ impl UiPass {
                     format,
                     blend: Blend::PremultipliedAlpha,
                     depth_write: false,
+                    ids_write: false,
                     depth_bias: 0.0,
                     depth_clamp: false,
                 },

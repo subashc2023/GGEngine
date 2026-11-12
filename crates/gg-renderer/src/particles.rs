@@ -772,6 +772,7 @@ impl ParticlePass {
                 // makes adding their light; testing depth without writing it or motion.
                 blend: Blend::PremultipliedAlpha,
                 depth_write: false,
+                ids_write: true,
                 depth_bias: 0.0,
                 depth_clamp: false,
             },

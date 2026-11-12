@@ -64,6 +64,7 @@ impl TonemapPass {
                 format: ColorImage::FORMAT,
                 blend: Blend::Opaque,
                 depth_write: false,
+                ids_write: false,
                 depth_bias: 0.0,
                 depth_clamp: false,
             },
