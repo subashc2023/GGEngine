@@ -4461,6 +4461,7 @@ mod remote {
             local: Transform::IDENTITY,
             space: crate::Pose::IDENTITY,
             bounds: None,
+            node: false,
             generation: 1,
         };
         assert_eq!(placed, expected);

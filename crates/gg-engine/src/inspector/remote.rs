@@ -738,6 +738,7 @@ mod imp {
                 space: entity.space?,
                 bounds: (entity.bounds)
                     .map(|sphere| (Vec3::from_array(sphere.center), sphere.radius)),
+                node: entity.components.iter().any(|name| name == "ModelNode"),
                 generation: self.generation,
             })
         }
@@ -1605,6 +1606,7 @@ mod imp {
                 local,
                 space: parent,
                 bounds: None,
+                node: false,
                 generation: 0,
             };
             assert_eq!(placed, expected);
@@ -1613,6 +1615,15 @@ mod imp {
             remote.entity(a, answer(&format!("{}{bounds}", space("4"))), Some(a));
             let bounded = remote.placed(Some(a)).expect("placed");
             assert_eq!(bounded.bounds, Some((Vec3::new(1.0, 2.0, 3.0), 2.5)));
+            // A model's node, as its `ModelNode` says, is placed as one.
+            let transform = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+            let components = format!(r#""components":{{"Transform":{transform},"ModelNode":0}}"#);
+            let node = format!(
+                r#"{{"name":null,"parent":null,"children":[],{components}{}}}"#,
+                space("4")
+            );
+            remote.entity(a, Ok(node), Some(a));
+            assert!(remote.placed(Some(a)).expect("placed").node, "a node");
             assert_eq!(remote.placed(Some(b)), None, "while another is picked");
             for unplaced in ["", &space(r#""inf""#), r#","space":{"rotation":[0,0,0,1]}"#] {
                 remote.entity(a, answer(unplaced), Some(a));

@@ -52,11 +52,14 @@
 //!
 //! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
 //! game's view shows there alone, as the API's `pick` finds it, which the panels show picked, and
-//! with Ctrl (Cmd on macOS) or Shift held adds it to what's picked, or takes it out; the handles,
-//! at the entity picked last, move, turn and scale it, and the others picked with it by the same
-//! change, each about its own origin, but those under another picked, whose drag carries them,
-//! through the Inspector's link, each drag one edit of the editor's, which its Edit menu undoes;
-//! F frames them all; and the view's bottom left names what's under the cursor.
+//! with Ctrl (Cmd on macOS) or Shift held adds it to what's picked, or takes it out: of a model,
+//! its root, but while the root or one of its nodes is the entity picked last, the node there, so
+//! that a second click goes into a model. The handles, at the entity picked last, move, turn and
+//! scale it, and the others picked with it by the same change, each about its own origin, but
+//! those under another picked, whose drag carries them, through the Inspector's link, each drag
+//! one edit of the editor's, which its Edit menu undoes; none show while one they'd move is a
+//! model's node, which the game refuses to change. F frames them all; and the view's bottom left
+//! names what's under the cursor, as a click there would pick.
 //! Move's and Rotate's go along the entity's own axes or the world's, as the toolbar's space switch
 //! says, which X flips; Scale's are always the entity's own.
 //! The toolbar's Probe tool reads what shading took and made at the pixel clicked, through gg-api's
@@ -1621,7 +1624,8 @@ impl Game {
         match dropped.kind {
             kind @ (AssetKind::Texture | AssetKind::Font) => {
                 let origin = view.map_or([0, 0], |view| view.origin);
-                if let Some(ticket) = self.ask_pick(at, origin) {
+                // A model's root, never a node, which refuses the set.
+                if let Some(ticket) = self.ask_pick(at, origin, None) {
                     self.dropping = Some(Dropping {
                         ticket,
                         kind,
@@ -1881,7 +1885,8 @@ impl Game {
             self.queue(input);
         }
         if let Some((at, toggles)) = self.view.picking.take() {
-            self.view.asked = self.ask_pick(at, origin);
+            // Within the active pick's model, so that a click on a model picked goes into it.
+            self.view.asked = self.ask_pick(at, origin, self.view.link.picked());
             self.view.toggles = toggles;
         }
         // Escape closes the Probe tool's numbers, and a probe asked shows its own in their place.
@@ -1929,12 +1934,18 @@ impl Game {
     }
 
     /// Asks the game for the entity its view shows at `at`, in the main window's pixels, with the
-    /// view's top left at `origin`; returns its ticket, while a game serves.
-    fn ask_pick(&mut self, at: [f64; 2], origin: [u32; 2]) -> Option<u64> {
+    /// view's top left at `origin`, within the model of `within`, if it's given, as
+    /// [`gg_api::Pick::within`] says; returns its ticket, while a game serves.
+    fn ask_pick(
+        &mut self,
+        at: [f64; 2],
+        origin: [u32; 2],
+        within: Option<EntityId>,
+    ) -> Option<u64> {
         let talker = self.talker.as_ref()?;
         let ticket = self.tickets;
         self.tickets += 1;
-        talker.pick(ticket, in_view(at, origin));
+        talker.pick(ticket, in_view(at, origin), within);
         Some(ticket)
     }
 
@@ -2057,10 +2068,14 @@ fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
 
 /// What the Inspector has picked last, the active pick, as the handles see it, as `link`, its link,
 /// places it in the game's world: once the others picked are placed too, as [`along`] gives them,
-/// so that no drag leaves one of them behind.
+/// so that no drag leaves one of them behind; and none while it or another a drag would move is a
+/// model's node, which the game refuses to change.
 fn picked(link: &InspectorLink) -> Option<Picked> {
     let placed = link.placed()?;
     let along = link.along()?;
+    if placed.node || along.iter().any(|other| other.node) {
+        return None;
+    }
     Some(Picked {
         entity: placed.id,
         serial: placed.generation,
@@ -2390,7 +2405,8 @@ impl Layer for Game {
         if let Some(at) = at
             && self.hovering.is_none()
         {
-            self.hovering = self.ask_pick(at, origin);
+            // As a click there would pick.
+            self.hovering = self.ask_pick(at, origin, self.view.link.picked());
             self.view.hover.ask(self.hovering);
         }
         let name = self.view.hover.under().map(|found| found.name);
@@ -2667,18 +2683,20 @@ fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
 }
 
 /// Asks the game `session` names, on a connection of its own, as the editor, for the entity its
-/// view shows at each pixel `asks` gives, with its ticket, in turn, sending `send` each answer with
-/// the ticket, or why there's none, until the editor lets go of the game, `asks`' sender dropping.
+/// view shows at each pixel `asks` gives, within the model of the entity it gives, if any, as
+/// [`gg_api::Pick::within`] says, with its ticket, in turn, sending `send` each answer with the
+/// ticket, or why there's none, until the editor lets go of the game, `asks`' sender dropping.
 fn pick(
     session: &Session,
-    asks: Receiver<(u64, [f64; 2])>,
+    asks: Receiver<(u64, [f64; 2], Option<EntityId>)>,
     send: &Sender<(u64, Result<gg_api::Picked, Failure>)>,
 ) {
     let mut connected = Client::connect(session, CLIENT, CONNECT)
         .and_then(|mut client| client.set_timeout(None).map(|()| client));
-    for (ticket, at) in asks {
+    for (ticket, at, within) in asks {
+        let within = within.map(|id| id.to_string());
         let answer = match &mut connected {
-            Ok(client) => client.call_as("pick", gg_api::Pick { at, within: None }),
+            Ok(client) => client.call_as("pick", gg_api::Pick { at, within }),
             Err(failure) => Err(failure.clone()),
         };
         if send.send((ticket, answer)).is_err() {
@@ -2721,7 +2739,7 @@ struct Talker {
     asks: Sender<(String, Value)>,
     answers: Receiver<(String, Result<Value, Failure>)>,
     logged: Receiver<Vec<Value>>,
-    picks: Sender<(u64, [f64; 2])>,
+    picks: Sender<(u64, [f64; 2], Option<EntityId>)>,
     picked: Receiver<(u64, Result<gg_api::Picked, Failure>)>,
     probes: Sender<(u64, [f64; 2])>,
     probed: Receiver<(u64, Result<Probe, Failure>)>,
@@ -2778,10 +2796,10 @@ impl Talker {
         let _ = self.asks.send((method.to_owned(), params));
     }
 
-    /// Asks for the entity the game's view shows at `at`, in its pixels from its top left, whose
-    /// answer comes back in `picked` with `ticket`.
-    fn pick(&self, ticket: u64, at: [f64; 2]) {
-        let _ = self.picks.send((ticket, at));
+    /// Asks for the entity the game's view shows at `at`, in its pixels from its top left, within
+    /// the model of `within`, if it's given, whose answer comes back in `picked` with `ticket`.
+    fn pick(&self, ticket: u64, at: [f64; 2], within: Option<EntityId>) {
+        let _ = self.picks.send((ticket, at, within));
     }
 
     /// Asks what shading took and made at `at`, in the view's pixels from its top left, whose
@@ -2887,7 +2905,7 @@ mod tests {
     struct Ends {
         asked: Receiver<(String, Value)>,
         answer: Sender<(String, Result<Value, Failure>)>,
-        picks: Receiver<(u64, [f64; 2])>,
+        picks: Receiver<(u64, [f64; 2], Option<EntityId>)>,
         found: Sender<(u64, Result<gg_api::Picked, Failure>)>,
         probes: Receiver<(u64, [f64; 2])>,
         read: Sender<(u64, Result<Probe, Failure>)>,
@@ -3070,7 +3088,10 @@ mod tests {
             let routed = game.route(&event, &reading(at), Some(VIEW));
             assert_eq!(routed, ControlFlow::Continue(()), "{event:?}");
         }
-        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
+        assert_eq!(
+            ends.picks.try_iter().collect::<Vec<_>>(),
+            [(0, in_game, None)]
+        );
         assert!(game.view.toolbar.world_camera);
         let routed = game.route(&wheel, &reading(at), Some(VIEW));
         assert_eq!(routed, ControlFlow::Break(()));
@@ -3087,7 +3108,10 @@ mod tests {
         }
         assert_eq!(game.input, []);
         assert_eq!(game.view.toolbar.tool, Tool::Move, "the editor's W");
-        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
+        assert_eq!(
+            ends.picks.try_iter().collect::<Vec<_>>(),
+            [(0, in_game, None)]
+        );
         // Back to the game's camera, with the toolbar's switch, for which a test sets the field
         // and tells the game, since it can't run `ui`: the cursor over the view, and off it.
         for (cursor, told) in [
@@ -4868,7 +4892,7 @@ mod tests {
         // Outlined once it's over the view, until it's let go.
         let outlined = drop(&mut game, stone, view.center());
         assert_eq!(outlined, [false, false, false, true, true, true]);
-        let (ticket, at) = ends.picks.try_recv().expect("a pick");
+        let (ticket, at, _) = ends.picks.try_recv().expect("a pick");
         // Let go a pixel right of and below the view's middle, (600, 200).
         assert_eq!(at, [201.0, 201.0]);
         assert_eq!(game.dropping.map(|dropping| dropping.ticket), Some(ticket));
@@ -4909,7 +4933,7 @@ mod tests {
             Some((entity, "Sprite".to_owned(), "texture".to_owned(), texture))
         };
         game.let_go(&texture("stone.png"), [300.0, 200.0], Some(VIEW), SCALE);
-        let (ticket, at) = ends.picks.try_recv().expect("a pick");
+        let (ticket, at, _) = ends.picks.try_recv().expect("a pick");
         // [`VIEW`]'s top left is at (100, 50).
         assert_eq!(at, [200.0, 150.0]);
         ends.found
@@ -4920,7 +4944,7 @@ mod tests {
         assert_eq!(game.dropping, None);
         // Where no entity draws.
         game.let_go(&texture("new.png"), [300.0, 200.0], Some(VIEW), SCALE);
-        let (ticket, _) = ends.picks.try_recv().expect("a pick");
+        let (ticket, _, _) = ends.picks.try_recv().expect("a pick");
         ends.found.send((ticket, Ok(found(None)))).expect("sent");
         game.take_picks();
         assert_eq!(game.view.link.pending().len(), 2, "nothing more set");
@@ -4929,7 +4953,7 @@ mod tests {
         // Two before an answer: the latest's alone.
         game.let_go(&texture("stone.png"), [300.0, 200.0], Some(VIEW), SCALE);
         game.let_go(&texture("new.png"), [300.0, 200.0], Some(VIEW), SCALE);
-        let tickets: Vec<u64> = ends.picks.try_iter().map(|(ticket, _)| ticket).collect();
+        let tickets: Vec<u64> = ends.picks.try_iter().map(|(ticket, ..)| ticket).collect();
         for ticket in tickets {
             ends.found
                 .send((ticket, Ok(found(Some(entity)))))
@@ -4954,7 +4978,7 @@ mod tests {
         };
         let entity: EntityId = "0123456789abcdef".parse().expect("an ID");
         game.let_go(&title, [300.0, 200.0], Some(VIEW), SCALE);
-        let (ticket, _) = ends.picks.try_recv().expect("a pick");
+        let (ticket, _, _) = ends.picks.try_recv().expect("a pick");
         let found = gg_api::Picked {
             id: Some(entity.to_string()),
             name: Some("Target".to_owned()),

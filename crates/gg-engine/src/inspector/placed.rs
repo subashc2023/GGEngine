@@ -23,6 +23,10 @@ pub struct Placed {
     /// read of it gave it: for a tool to frame it by. `None` if nothing there draws, or the game
     /// doesn't say. Its center and its radius.
     pub bounds: Option<(Vec3, f32)>,
+    /// Whether it's a model's node, which the world spawns from the model under its root, and
+    /// tools' operations refuse to change, as [`ModelRoot`](crate::ModelRoot) says: no tool's
+    /// handles move it.
+    pub node: bool,
     /// How many times the Inspector has been reached, to a game or to none, which goes up at each
     /// reach, its reads of the game before gone, as a world's
     /// [`World::serial`](crate::World::serial) changes as it's another.
