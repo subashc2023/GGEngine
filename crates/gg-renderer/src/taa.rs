@@ -243,6 +243,12 @@ impl TaaPass {
         offset(self.resolved)
     }
 
+    /// Which of the [`OFFSETS`] offsets the next frame to resolve the view draws it at, from 0:
+    /// the one [`offset`](Self::offset) gives.
+    pub(crate) fn phase(&self) -> u32 {
+        (self.resolved % OFFSETS) as u32
+    }
+
     /// Declares in `graph` the resolve of frame `frame`'s view, of `size` pixels, from its colors,
     /// depth and motion, `drawn`, into the image of a [`History`]'s two of colors, at targets
     /// `first` and 1 past it, that the frame before didn't resolve into, against the other, if that
@@ -327,7 +333,7 @@ impl TaaPass {
             seen_first: pass.storage(plan.seen[0], 0),
             seen_second: pass.storage(plan.seen[1], 0),
             // The offset `offset` gave this frame, which `self.resolved` counts to.
-            phase: (self.resolved % OFFSETS) as u32,
+            phase: self.phase(),
             flicker: plan.flicker.map_or(0, |flicker| pass.sampled(flicker)),
             flickers: pass.storage(plan.flickers, 0),
             unused: [0; 2],

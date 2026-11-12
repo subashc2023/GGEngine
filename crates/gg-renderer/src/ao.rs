@@ -28,10 +28,11 @@ const FINAL_VALUE_POWER: f32 = 2.2;
 /// XeGTAO's `DenoiseBlurBeta`, and those before it a fifth of that, which blur more.
 const BLUR: f32 = 1.2;
 
-/// How many times the occlusion is denoised: three times, XeGTAO's soft preset, of noise that
-/// stays still from frame to frame, however the view is antialiased. Noise that changes each frame,
-/// denoised once, its sharp preset, which leaves temporal antialiasing to average it, stays in a
-/// still view: the resolve clips its history to each frame's pixels, the frame's noise among them.
+/// How many times the occlusion is denoised: three times, XeGTAO's soft preset, however the view is
+/// antialiased. XeGTAO denoises once, its sharp preset, where temporal antialiasing averages its
+/// noise over the frames; but here that's the 8 offsets' noise, as [`Seen::phase`] says, and 8
+/// frames' denoised once average to a grainier occlusion than denoised three times, by about a
+/// sixth in the measure of the GPU test `antialiased_ambient_occlusion_averages_its_noise_away`.
 const DENOISES: usize = 3;
 
 /// How the game's view's ambient occlusion darkens the light from all around, as
@@ -169,10 +170,12 @@ impl Plan {
 }
 
 /// What a frame's ambient occlusion takes of how it draws the view: from the view's space to its
-/// clip space, with antialiasing's offset, under perspective; and the settings.
+/// clip space, with antialiasing's offset, under perspective; the settings; and which of temporal
+/// antialiasing's offsets the frame draws the view at, if it's antialiased so.
 pub(crate) struct Seen {
     pub(crate) clip_from_view: Mat4,
     pub(crate) settings: AmbientOcclusion,
+    pub(crate) phase: Option<u32>,
 }
 
 impl AoPass {
@@ -253,8 +256,12 @@ impl AoPass {
             target: 0,
             radius: seen.settings.radius,
             power: FINAL_VALUE_POWER * seen.settings.strength,
-            // The same every frame, as `DENOISES` says why.
-            noise: 0,
+            // Under temporal antialiasing, the frame's offset's own, which it takes again each time
+            // the offset comes round, so that a still view's resolve, which averages what the
+            // offsets draw once each draws each pixel as it did a cycle before, averages the noise
+            // away too. Noise the same every frame would stay where it is on the screen, a grain
+            // over what's occluded as the view moves under it. Without, the same every frame.
+            noise: seen.phase.unwrap_or(0),
             blur: BLUR,
             starts: levels(plan.size).0,
             unused: 0,

@@ -1786,9 +1786,11 @@ impl Renderer {
                 // space, offset as the frame draws it; and the reflections', from its space to the
                 // world.
                 let clip_from_view = taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect);
+                let phase = antialiased.then(|| self.taa.phase());
                 let occlusion_seen = occluded.map(|settings| ao::Seen {
                     clip_from_view,
                     settings,
+                    phase,
                 });
                 let reflections_seen =
                     traced.map(

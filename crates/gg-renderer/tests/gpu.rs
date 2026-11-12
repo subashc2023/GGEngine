@@ -116,6 +116,7 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
+        antialiased_ambient_occlusion_averages_its_noise_away,
         specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
         reflections_mirror_what_the_view_shows,
         reflections_follow_an_exposures_jump,
@@ -7104,8 +7105,9 @@ fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
 /// otherwise; through the panel's hole, the floor under it, as the depth of a masked material is
 /// cut out as it is; out in the open, and where the strip was bound, it's as it is without; and the
 /// back wall, which reads none, shows its color either way. Against its reference image, without
-/// antialiasing and antialiased alike, the noise still from frame to frame either way: two frames
-/// drawn at the same offset, each starting afresh, are the same.
+/// antialiasing and antialiased alike; antialiased, each offset takes noise of its own, the same
+/// each time it comes round: two frames drawn at the same offset, each starting afresh, are the
+/// same.
 fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7172,10 +7174,10 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         "the back wall reads no occlusion"
     );
     compare("ambient_occlusion", WIDTH, HEIGHT, &with);
-    // Antialiased, each frame takes the same noise. Its first frame, after one that resolved
-    // nothing, starts afresh, as does the one after the next 7 and a frame that resolves nothing,
-    // at the same offset of the 8: the two are the same, as noise that changed would differ where
-    // the occlusion shows.
+    // Antialiased, each offset takes its own noise each time it comes round. Its first frame, after
+    // one that resolved nothing, starts afresh, as does the one after the next 7 and a frame that
+    // resolves nothing, at the same offset of the 8: the two are the same, as noise that changed
+    // other than with the offset would differ where the occlusion shows.
     let taa = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
         let data = RenderData {
             ambient_occlusion: on,
@@ -7252,6 +7254,133 @@ fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
         darkened <= lit - 12,
         "where the floor meets the sphere, {darkened} as it comes into view, not 12 darker than \
          {lit} without ambient occlusion"
+    );
+    shut_down(renderer);
+}
+
+/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, in a still view:
+/// antialiased temporally, each of the offsets takes noise of its own, which the resolve averages
+/// away, rather than one noise every frame, which would stay where it is on the screen, a grain over
+/// what's occluded. Grain is measured where the floor is darkened, away from its edges, as what's
+/// left of the mean of the 3 by 3 pixels round each once the 9 by 9's is taken from it. The
+/// antialiased frame keeps at most 0.8 of the grain of a frame without antialiasing, whose noise
+/// stays, and at least 0.4 of that grain is the frame's alone, left once the antialiased frame is
+/// taken from it; one noise every frame kept 0.94 and left 0.18 on an RTX 4090, and the offsets'
+/// own 0.69 and 0.63. The floor is darkened as much either way, within a tenth.
+fn antialiased_ambient_occlusion_averages_its_noise_away() {
+    const WIDTH: u32 = 768;
+    const HEIGHT: u32 = 512;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let scene = occlusion_scene(&mut stores);
+    let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+    let on = Some(AmbientOcclusion::default());
+    // The last of `frames` frames, the first of which resolves nothing as antialiasing changes.
+    let mut render = |ambient_occlusion, antialiasing, frames| {
+        for _ in 0..frames {
+            let data = RenderData {
+                ambient_occlusion,
+                antialiasing,
+                ..stores.data(viewport, viewpoint, draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        frame_pixels(&mut renderer)
+    };
+    let lit = render(None, Antialiasing::None, 2);
+    let still = render(on, Antialiasing::None, 2);
+    // Three cycles of the offsets for each to draw each pixel alike, and more for the resolve to
+    // settle on their mean, as 400 frames do no further.
+    let antialiased = render(on, Antialiasing::Taa, 128);
+    let [width, height] = [WIDTH as usize, HEIGHT as usize];
+    let greens = |frame: &[u8]| -> Vec<f64> {
+        (frame.as_chunks::<4>().0.iter())
+            .map(|pixel| f64::from(pixel[1]))
+            .collect()
+    };
+    // Each pixel's sum of `values` up and left of it, past a row and a column of 0s, so that a
+    // box's sum is of its four corners.
+    let summed = |values: &[f64]| {
+        let row = width + 1;
+        let mut sums = vec![0.0; row * (height + 1)];
+        for y in 0..height {
+            for x in 0..width {
+                sums[(y + 1) * row + x + 1] =
+                    values[y * width + x] + sums[(y + 1) * row + x] + sums[y * row + x + 1]
+                        - sums[y * row + x];
+            }
+        }
+        sums
+    };
+    // The mean of what `sums` sums over the pixels `reach` or less from `[x, y]` each way.
+    let mean = |sums: &[f64], [x, y]: [usize; 2], reach: usize| {
+        let row = width + 1;
+        let [left, top, right, bottom] = [x - reach, y - reach, x + reach + 1, y + reach + 1];
+        let side = (2 * reach + 1) as f64;
+        (sums[bottom * row + right] - sums[bottom * row + left] - sums[top * row + right]
+            + sums[top * row + left])
+            / (side * side)
+    };
+    // The grain is what's left of the 3 by 3 pixels' mean round each once the 9 by 9's is taken
+    // from it: of the noise's blotches a few pixels across, without the pixels' own rounding to a
+    // byte, which the smaller box averages, or how the occlusion falls off, which both follow.
+    const NEAR: usize = 1;
+    const FAR: usize = 4;
+    let lit = greens(&lit);
+    let open = pixel_of(viewpoint, [WIDTH, HEIGHT], scene.open).map(|side| side as usize);
+    let floor = lit[open[1] * width + open[0]];
+    let off_floor: Vec<f64> = (lit.iter())
+        .map(|&green| f64::from(u8::from((green - floor).abs() > 1.0)))
+        .collect();
+    let off_floor = summed(&off_floor);
+    let (still, antialiased) = (greens(&still), greens(&antialiased));
+    // The floor's pixels whose 9 by 9 is the floor's, and 2 more round it, as the resolve's 3 by 3
+    // and its offsets blend what's beside an edge in; of those, where the occlusion darkens it.
+    let margin = FAR + 2;
+    let darkened: Vec<[usize; 2]> = (margin..height - margin)
+        .flat_map(|y| (margin..width - margin).map(move |x| [x, y]))
+        .filter(|&[x, y]| {
+            mean(&off_floor, [x, y], margin) == 0.0 && still[y * width + x] <= floor - 6.0
+        })
+        .collect();
+    assert!(
+        darkened.len() >= 200,
+        "{} of the floor's pixels darkened, too few to measure",
+        darkened.len()
+    );
+    let grain = |frame: &[f64]| {
+        let sums = summed(frame);
+        let off = |&at: &[usize; 2]| (mean(&sums, at, NEAR) - mean(&sums, at, FAR)).abs();
+        darkened.iter().map(off).sum::<f64>() / darkened.len() as f64
+    };
+    let darkness = |frame: &[f64]| {
+        let by = |&[x, y]: &[usize; 2]| lit[y * width + x] - frame[y * width + x];
+        darkened.iter().map(by).sum::<f64>() / darkened.len() as f64
+    };
+    let (still_grain, antialiased_grain) = (grain(&still), grain(&antialiased));
+    assert!(
+        antialiased_grain <= 0.8 * still_grain,
+        "antialiased, the floor's grain is {antialiased_grain:.3}, not 0.8 of {still_grain:.3} \
+         without antialiasing: the noise stays from frame to frame"
+    );
+    let apart: Vec<f64> = still.iter().zip(&antialiased).map(|(a, b)| a - b).collect();
+    let apart_grain = grain(&apart);
+    assert!(
+        apart_grain >= 0.4 * still_grain,
+        "{apart_grain:.3} of the grain of {still_grain:.3} without antialiasing is its alone, not \
+         0.4 of it: the antialiased frame shares its noise"
+    );
+    let (still, antialiased) = (darkness(&still), darkness(&antialiased));
+    assert!(
+        (antialiased - still).abs() <= 0.1 * still,
+        "the floor darkened by {antialiased:.2} antialiased, not near {still:.2} without"
     );
     shut_down(renderer);
 }

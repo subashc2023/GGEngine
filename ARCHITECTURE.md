@@ -2635,11 +2635,13 @@ own, each texel the mean of the 2 by 2 under it weighted toward the farthest, so
 level keeps to what's behind a thin occluder; the second searches each pixel's horizons along
 three slices of the hemisphere round its normal, which the depth round it gives, three steps each
 way, out as far as the environment's radius, half a unit by default, reaching farther steps through
-coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and
-stays still from frame to frame, however the view is antialiased, as the temporal resolve clips its
-history to each frame's pixels, and so keeps noise that changes with the frame rather than averaging
-it; and the denoise blurs each pixel with the eight round it, but across where the depth breaks,
-three times, into an
+coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and,
+where the view is antialiased temporally, is each of its 8 offsets' own, the same each time the
+offset comes round, so that the resolve, which averages what a still pixel's offsets draw once
+each draws it as it did a cycle before, averages the noise away too, where noise the same every
+frame would stay on the screen as a grain while the view moves under it; and stays still where the
+view isn't; and the denoise blurs each pixel with the eight round it, but across where the depth
+breaks, three times, into an
 image of the graph's own of a float a pixel, the fraction of the light from all around that
 reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
 light, never the lights', by the less of that and the material's occlusion map: both estimate how
