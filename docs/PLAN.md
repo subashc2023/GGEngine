@@ -150,29 +150,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Foxball and Sponza on the frame's finish** (2026-11-09)
 - **Phase 18, the frame's finish and a game's widgets** (2026-11-09)
 - **Debug views** (2026-11-10)
+- **Ready for games** (2026-11-12)
 
 ## Now
 
-**Ready for games**: the defects an audit of the engine found (2026-11-10) that a first game would
-hit, fixed before Phase 19, whose choice stays open, as Open questions has it. Each fix removes its
-row from [DEFECTS.md](DEFECTS.md) and has a test. *Done when* what's below is done, CI is green on
-every platform, and a game made with `cargo gg new` and built through `gg run` takes a HUD's clicks,
-its edits, rebuilds and restarts without losing any.
-
-The agent loop's, a game's input's, networking's and scripts', assets', the GPU's and state's
-defects are fixed, but for what their rows in DEFECTS.md keep. Left:
-
-- **The toolchain.** visibility.slang, as its change of 2026-11-10, which keeps its frame whole as
-  model.slang's does, and the changes since left it, has AMD's ISA checked under both slangc
-  releases, as its header asks: CI's shader tests pass it under the release CI pins.
-
-The check passed on macOS without `dx`, and on Windows with `dx` (2026-11-12): a game `cargo gg
-new` made, with a HUD's button counting its clicks in a component, under `gg run`, kept its count
-through a patch, a rebuild, a broken edit of each kind, which ran the old game on, a kill and a hang.
-
-What the audit's game needed first of Deferred is done: physics' sensors, contact events and
-collision groups for scripts and code, a scene changed from a game's code as it plays, scripts that
-spawn and despawn entities, and a reference of the Luau API, [LUAU.md](LUAU.md).
+No milestone, until Open questions' first, which phase comes after Phase 18, is decided.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
