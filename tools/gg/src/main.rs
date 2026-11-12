@@ -170,11 +170,13 @@ Talk to a running game, through its tool API:
                                  `--own`, as the game shows it on its own. With `--show`, as the
                                  look's `show` has it, that capture alone shows NAME: one of
                                  `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`,
-                                 `occlusion`, `emission`, `direct_light`, `sky_light` and
-                                 `reflection`, or else an image's debug name, as `view depth`. With
-                                 several, which PATH refuses, it captures each in order from one
-                                 world, pausing the game for them if it plays, and prints an array
-                                 of the answers
+                                 `occlusion`, `emission`, `specular_color` (what it reflects
+                                 head-on), `direct_light`, `sky_light`, `reflection`,
+                                 `diffuse_light` and `specular_light` (the light it diffuses and
+                                 reflects, of all three), or else an image's debug name, as `view
+                                 depth`. With several, which PATH refuses, it captures each in
+                                 order from one world, pausing the game for them if it plays, and
+                                 prints an array of the answers
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
                                  takes them, `viewpoint`, `outline`, `grid`, `colliders`, `show`,
@@ -194,21 +196,22 @@ Talk to a running game, through its tool API:
                                  for them if it plays, with a pick and a look. The view as the look
                                  shows it, or with `--own`, as the game shows it on its own. Every
                                  value is `null` for a pixel outside the view, and read from 8-bit
-                                 bytes, good to about 1/255 (`quantized`). `base_color` and
-                                 `emission` are linear RGB, from 0; `normal` (with its normal map)
-                                 and `surface_normal` (without) are [x, y, z] in the world, each
-                                 from -1 to 1; `metallic`, `roughness` (from 0.045) and `occlusion`
-                                 are 0 to 1, `occlusion` the share of the light from all around
-                                 that reaches the point; `direct_light`, `sky_light`, `reflection`
-                                 and `shown` (the view's pixel) are sRGB bytes [r, g, b], 0 to 255,
-                                 exposed and tonemapped as the view shows them, not linear;
-                                 `depth` is the view's reversed depth, 1 at the near plane and
-                                 smaller farther, 0 where nothing drew; `distance` is `near /
-                                 depth` in world units, in front of the viewpoint, not from it,
-                                 good to about 3%, `null` where nothing drew and without a
-                                 perspective; `entity` is what `pick` answers; and `size`, `at` and
-                                 `ticks`. To find what's wrong at a pixel: its material's values,
-                                 its normal, and which light reaches it
+                                 bytes, good to about 1/255 (`quantized`). `base_color`, `emission`
+                                 and `specular_color` (what it reflects head-on) are linear RGB,
+                                 from 0; `normal` (with its normal map) and `surface_normal`
+                                 (without) are [x, y, z] in the world, each from -1 to 1;
+                                 `metallic`, `roughness` (from 0.045) and `occlusion` are 0 to 1,
+                                 `occlusion` the share of the light from all around that reaches
+                                 the point; `direct_light`, `sky_light`, `reflection`,
+                                 `diffuse_light`, `specular_light` and `shown` (the view's pixel)
+                                 are sRGB bytes [r, g, b], 0 to 255, exposed and tonemapped as the
+                                 view shows them, not linear; `depth` is the view's reversed depth,
+                                 1 at the near plane and smaller farther, 0 where nothing drew;
+                                 `distance` is `near / depth` in world units, in front of the
+                                 viewpoint, not from it, good to about 3%, `null` where nothing
+                                 drew and without a perspective; `entity` is what `pick` answers;
+                                 and `size`, `at` and `ticks`. To find what's wrong at a pixel: its
+                                 material's values, its normal, and which light reaches it
   input <EVENTS>                Hand its layers EVENTS, a JSON array of the API's input events, in
                                  order, as its window would, as a frame starts: a key down or up by
                                  its W3C `code`, `{\"key\":{\"key\":\"KeyW\",\"pressed\":true}}`,
@@ -1127,6 +1130,14 @@ mod tests {
         for pass in gg_api::Pass::ALL {
             let name = serde_json::to_value(pass).expect("a name");
             let name = name.as_str().expect("a string");
+            assert!(USAGE.contains(&format!("`{name}`")), "{name}");
+        }
+    }
+
+    /// The help names each part of shading, which `capture --show` takes and `probe` answers.
+    #[test]
+    fn the_help_names_every_part_of_shading() {
+        for name in probe::SHADING {
             assert!(USAGE.contains(&format!("`{name}`")), "{name}");
         }
     }

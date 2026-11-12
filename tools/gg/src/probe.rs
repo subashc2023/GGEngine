@@ -10,7 +10,7 @@ use crate::game::{self, Pick};
 
 /// The parts of shading a probe captures, by the names a capture's `show` takes, which are the names
 /// of the fields they answer.
-const SHADING: [&str; 10] = [
+pub(crate) const SHADING: [&str; 13] = [
     "base_color",
     "normal",
     "surface_normal",
@@ -21,6 +21,9 @@ const SHADING: [&str; 10] = [
     "direct_light",
     "sky_light",
     "reflection",
+    "specular_color",
+    "diffuse_light",
+    "specular_light",
 ];
 
 /// The image whose pixel gives the depth.
@@ -103,8 +106,8 @@ fn probed(
 ///
 /// - `at`, the pixel, `[x, y]` from the view's top left, and `size`, the view's `[width, height]`
 ///   in pixels; `ticks`, those the simulation had run in the frame the captures show.
-/// - `base_color` and `emission`: linear RGB, each channel from 0, its sRGB byte decoded; past 1 is
-///   shown as 1.
+/// - `base_color`, `emission` and `specular_color`, what the point reflects head-on: linear RGB,
+///   each channel from 0, its sRGB byte decoded; past 1 is shown as 1.
 /// - `normal`, with its normal map, and `surface_normal`, without: unit vectors in the world, `[x,
 ///   y, z]`, each axis from -1 to 1, as its byte over 255, times 2, less 1; they are read from
 ///   bytes, so aren't of unit length exactly.
@@ -112,9 +115,10 @@ fn probed(
 ///   `roughness` is from 0.045, the least shading takes; `occlusion` is the share of the light from
 ///   all around that reaches the point.
 /// - `direct_light`, `sky_light` and `reflection`: the light from the frame's lights, from all
-///   around, and from the view's reflection, as the view shows it, exposed and tonemapped, as sRGB
-///   bytes, `[r, g, b]`, 0 to 255; not linear, nor in physical units. `shown`: the view's pixel as
-///   it's drawn, with all the view adds to the light, in the same bytes.
+///   around, and from the view's reflection; `diffuse_light` and `specular_light`, the light the
+///   point diffuses and the light it reflects, of all three; each as the view shows it, exposed and
+///   tonemapped, as sRGB bytes, `[r, g, b]`, 0 to 255; not linear, nor in physical units. `shown`:
+///   the view's pixel as it's drawn, with all the view adds to the light, in the same bytes.
 /// - `depth`: the reversed depth the view drew, 1 at the viewpoint's near plane and smaller the
 ///   farther it is, `2^(24 * (byte / 255 - 1))`; 0 where the byte is 0, where nothing drew, or past
 ///   about 2^-24. `distance`: `near / depth`, in world units, how far the point is in front of the
@@ -138,7 +142,7 @@ fn decode(
     });
     for (name, captured) in SHADING.iter().zip(shading) {
         probe[*name] = match *name {
-            "base_color" | "emission" => json!(read(captured, linear)),
+            "base_color" | "emission" | "specular_color" => json!(read(captured, linear)),
             "normal" | "surface_normal" => json!(read(captured, signed)),
             "metallic" | "roughness" | "occlusion" => {
                 json!(captured.pixel.map(|[red, ..]| unit(red)))
@@ -260,9 +264,12 @@ mod tests {
         bytes[8] = Some([0, 0, 0, 255]);
         bytes[9] = Some([1, 2, 3, 255]);
         bytes[10] = Some([4, 5, 6, 255]);
+        bytes[11] = Some([56, 0, 255, 255]);
+        bytes[12] = Some([7, 8, 9, 255]);
+        bytes[13] = Some([10, 11, 12, 255]);
         // Half the way from the near plane's white to black: 2^-12 of its depth.
         let half: f64 = 255.0 * (1.0 - 12.0 / 24.0);
-        bytes[11] = Some([half.round() as u8, 0, 0, 255]);
+        bytes[CAPTURES - 1] = Some([half.round() as u8, 0, 0, 255]);
         let perspective = Projection::Perspective {
             fov: 1.0,
             near: 0.1,
@@ -289,6 +296,11 @@ mod tests {
         assert_eq!(probe["direct_light"], json!([0, 0, 0]));
         assert_eq!(probe["sky_light"], json!([1, 2, 3]));
         assert_eq!(probe["reflection"], json!([4, 5, 6]));
+        // A dielectric's 0.04, sRGB's byte 56, in red.
+        close(&probe["specular_color"][0], 0.04, 0.001);
+        close(&probe["specular_color"][2], 1.0, 1e-9);
+        assert_eq!(probe["diffuse_light"], json!([7, 8, 9]));
+        assert_eq!(probe["specular_light"], json!([10, 11, 12]));
         // Byte 128 of 255 is half of the way, 2^-12 of the depth, a little off from the 12 it
         // rounds from.
         let depth = probe["depth"].as_f64().expect("a depth");

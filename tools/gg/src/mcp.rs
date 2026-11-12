@@ -33,8 +33,10 @@ A part of lit shading, by its name: `base_color` (as a texture's sRGB colors sto
 its byte over 255, times 2, less 1, X in red, Y in green, Z in blue), `surface_normal` (the same \
 before its normal map), `metallic`, `roughness` (0.045 to 1) and `occlusion` (each a value 0 to 1 \
 as its byte over 255, in red, green and blue alike), `emission` (as `base_color`, past 1 shown as \
-1), `direct_light` (the frame's lights', shadows and all), `sky_light` and `reflection` (each \
-light exposed and tonemapped as the view's is); or an image the frame makes, by its debug name, \
+1), `specular_color` (what it reflects head-on, as `base_color`), `direct_light` (the frame's \
+lights', shadows and all), `sky_light`, `reflection`, `diffuse_light` and `specular_light` (the \
+light it diffuses and the light it reflects, of all three; each light exposed and tonemapped as the \
+view's is); or an image the frame makes, by its debug name, \
 any other string, as `view depth`, or `{\"image\": name}` (at most 64 bytes), as its kind reads: \
 colors as they are, high dynamic range tonemapped, depth as 1 + log2(depth) / 24 (white at the \
 near plane, a 24th darker each time the distance doubles, black where nothing drew), IDs and a \
@@ -486,12 +488,14 @@ fn tools() -> Value {
              light reaches it, rather than reading a PNG's colors by eye. It captures the pixel \
              showing each part of shading, writing no PNG, with a `pick` and a `look`, all from \
              one world, the game paused for them if it plays, and answers one object: `at`, \
-             `size` ([width, height] of the view) and `ticks`; `base_color` and `emission`, \
-             linear RGB from 0; `normal` (its normal map's bumps among it) and `surface_normal` \
-             (without them), [x, y, z] in the world, each from -1 to 1; `metallic`, `roughness` \
-             (from 0.045) and `occlusion` (the share of the light from all around that reaches \
-             it), each 0 to 1; `direct_light` (the frame's lights', shadows and all), `sky_light` \
-             (from all around, darkened by occlusion), `reflection` and `shown` (the view's own \
+             `size` ([width, height] of the view) and `ticks`; `base_color`, `emission` and \
+             `specular_color` (what it reflects head-on), linear RGB from 0; `normal` (its normal \
+             map's bumps among it) and `surface_normal` (without them), [x, y, z] in the world, \
+             each from -1 to 1; `metallic`, `roughness` (from 0.045) and `occlusion` (the share \
+             of the light from all around that reaches it), each 0 to 1; `direct_light` (the \
+             frame's lights', shadows and all), `sky_light` (from all around, darkened by \
+             occlusion), `reflection`, `diffuse_light` and `specular_light` (the light it \
+             diffuses and the light it reflects, of all three) and `shown` (the view's own \
              pixel), each as the sRGB bytes [r, g, b], 0 to 255, exposed and tonemapped as the \
              view shows them, not linear; `depth`, the reversed depth, 1 at the near plane and \
              smaller the farther, 0 where nothing drew; `distance`, `near / depth` in world \
@@ -1062,9 +1066,12 @@ mod tests {
             Shown::Roughness,
             Shown::Occlusion,
             Shown::Emission,
+            Shown::SpecularColor,
             Shown::DirectLight,
             Shown::SkyLight,
             Shown::Reflection,
+            Shown::DiffuseLight,
+            Shown::SpecularLight,
         ];
         for description in [&capture["description"], &look["description"]] {
             let description = description.as_str().expect("described");
