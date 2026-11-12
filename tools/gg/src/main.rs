@@ -190,8 +190,10 @@ Talk to a running game, through its tool API:
                                  `reflections`, `shadows`, `fog`, `bloom`, `depth_of_field`,
                                  `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`;
                                  those set first, each `null` giving it back to the game
-  pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
-                                 top left, as a capture has it, the look included; `null` for none
+  pick <X> <Y> [--within <ID>]   The ID and name of the entity its view shows at pixel X, Y from its
+                                 top left, as a capture has it, the look included; `null` for none.
+                                 A model's node gives the model's root, but `--within` the root or
+                                 one of its nodes gives the node itself, as the editor picks parts
   images                         The images its next frame makes that `--show` and the look's `show`
                                  name, as `bloom 1` or `view depth`: each one's debug name, what it
                                  holds and its size, in the order the frame makes them; a frame
@@ -485,7 +487,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 17] = [
+const VALUED: [&str; 18] = [
     "--project",
     "--grant",
     "--peers",
@@ -503,6 +505,7 @@ const VALUED: [&str; 17] = [
     "--level",
     "--wait",
     "--show",
+    "--within",
 ];
 
 /// The arguments after a command's name: what isn't a flag, the flags, each with its value if it
@@ -935,7 +938,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             call(&mut parsed, "look", look)?
         }
         "pick" => {
-            let given = parsed.positional(2, 2, "pick <X> <Y>")?;
+            let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ID>]")?;
             let at = given.iter().map(|given| {
                 let at = given.parse::<f64>().ok().filter(|at| at.is_finite());
                 at.ok_or_else(|| {
@@ -944,8 +947,15 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                     ))
                 })
             });
-            let at = at.collect::<Result<Vec<f64>, Failure>>()?;
-            call(&mut parsed, "pick", json!({"at": at}))?
+            let at: [f64; 2] = at
+                .collect::<Result<Vec<f64>, Failure>>()?
+                .try_into()
+                .expect("two numbers, as many as `positional` took");
+            // `within` left out unless it's given, so that a game of an older engine, which
+            // refuses a field it doesn't know, still takes the pick.
+            let within = parsed.value("--within");
+            let pick = serde_json::to_value(gg_api::Pick { at, within }).expect("JSON");
+            call(&mut parsed, "pick", pick)?
         }
         "probe" => {
             let given = parsed.positional(2, 2, "probe <X> <Y> [--own]")?;
@@ -1340,6 +1350,10 @@ mod tests {
             ),
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
+            (
+                &["pick", "3", "4", "--within", "00000000000000ff"],
+                json!({"at": [3.0, 4.0], "within": "00000000000000ff"}),
+            ),
             (&["types"], Value::Null),
             (&["images"], Value::Null),
             (

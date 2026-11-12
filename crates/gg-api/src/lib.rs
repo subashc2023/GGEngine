@@ -91,7 +91,9 @@
 //!   longer than [`MOST_IMAGE_NAME`] bytes. An outline of no IDs, or of an ID no entity has,
 //!   outlines nothing, and isn't refused, nor is an image's name the frame doesn't make.
 //! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
-//!   look among it, in the frame that reads it, about four frames after it's asked.
+//!   look among it, in the frame that reads it, about four frames after it's asked: for a model's
+//!   node, the model's root, or `within` the root or one of its nodes, the node itself. It fails
+//!   with `api.bad_params` for a `within` that isn't 16 hex digits.
 //! - `images`: answers [`ImageList`], the images the next frame that renders makes that
 //!   [`Shown::Image`] names, each by its debug name, with what it holds and its size, in the order
 //!   the frame makes them: as the look has the view drawn, its light or an image every pass's but
@@ -1005,17 +1007,23 @@ pub struct By {
 }
 
 /// What `pick` takes: the pixel of the view to pick at, `[x, y]` from its top left, as `input`'s
-/// cursor is, and as a capture's PNG, the view, has it.
+/// cursor is, and as a capture's PNG, the view, has it; and `within`, an entity's ID, as an
+/// editor's pick: where it's the root of the model drawn at the pixel, or one of that model's
+/// nodes, the answer is the node drawn there itself rather than the root. A `within` of no living
+/// entity is as none.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pick {
     pub at: [f64; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<String>,
 }
 
 /// What `pick` answers: the entity the view shows at the pixel, by its ID, and its name, as it's
-/// answered, or for a model's node the model's root, which tools change in its place; both `None`
-/// outside the view or where no entity draws, and the name for an entity gone by the answer, whose
-/// ID is kept, or for a connection not granted `read` of `Name`, which `view` alone isn't.
+/// answered, or for a model's node the model's root, which tools change in its place, unless
+/// [`Pick::within`] names that model's root or one of its nodes; both `None` outside the view or
+/// where no entity draws, and the name for an entity gone by the answer, whose ID is kept, or for a
+/// connection not granted `read` of `Name`, which `view` alone isn't.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picked {
     pub id: Option<String>,

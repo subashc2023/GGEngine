@@ -482,11 +482,19 @@ fn tools() -> Value {
         tool(
             "pick",
             "The entity the game's view shows at a pixel, as it's shown, the look included: its \
-             ID and name, both null outside the view or where no entity draws. It answers once a \
-             frame reads it, about four frames on, and fails while the game runs no frames, as \
-             while its window is minimized.",
-            json!({"at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's \
-                                     PNG has it")}),
+             ID and name, both null outside the view or where no entity draws. A model's node \
+             gives the model's root, which tools change in its place, but `within` the root or one \
+             of its nodes gives the node itself. It answers once a frame reads it, about four \
+             frames on, and fails while the game runs no frames, as while its window is \
+             minimized.",
+            json!({
+                "at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's PNG \
+                                  has it"),
+                "within": {"type": "string",
+                           "description": "An entity's ID, 16 hex digits: where it's the root of \
+                                           the model drawn at the pixel, or one of its nodes, the \
+                                           node drawn there rather than the root"},
+            }),
             &["at"],
         ),
         tool(

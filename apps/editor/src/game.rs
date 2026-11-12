@@ -2678,7 +2678,7 @@ fn pick(
         .and_then(|mut client| client.set_timeout(None).map(|()| client));
     for (ticket, at) in asks {
         let answer = match &mut connected {
-            Ok(client) => client.call_as("pick", gg_api::Pick { at }),
+            Ok(client) => client.call_as("pick", gg_api::Pick { at, within: None }),
             Err(failure) => Err(failure.clone()),
         };
         if send.send((ticket, answer)).is_err() {

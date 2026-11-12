@@ -744,12 +744,13 @@ A project's state is text that people and agents edit, diff and merge with ordin
   and change a root's model, take it away or copy the root, its nodes following, as one edit, an
   operation naming the root alone, never its nodes, which go with it however many its model has
   by its undo; a scene file's save edits roots alone; and the tool API's `pick` gives a node's
-  root. Code may change nodes as the game runs, as snapshots keep them, and a world restored from
-  one has them as it was, but for draws that a run of other assets left out, which come back from
-  the model; as the model's nodes change, as its file's read again, nodes that keep their places
-  in its hierarchy stay, as code left them but for their draws and the transforms the model
-  changed, and the others are spawned again, under the same IDs. Unlike a prefab's instance's, a
-  node's fields keep no overrides: what code changes of them lasts the run.
+  root, but the node itself to a pick `within` the root or one of its nodes. Code may change nodes
+  as the game runs, as snapshots keep them, and a world restored from one has them as it was, but
+  for draws that a run of other assets left out, which come back from the model; as the model's
+  nodes change, as its file's read again, nodes that keep their places in its hierarchy stay, as
+  code left them but for their draws and the transforms the model changed, and the others are
+  spawned again, under the same IDs. Unlike a prefab's instance's, a node's fields keep no
+  overrides: what code changes of them lasts the run.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same

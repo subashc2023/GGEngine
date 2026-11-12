@@ -226,11 +226,13 @@ struct Listing {
     take: usize,
 }
 
-/// A `pick` waiting for its answer: at a pixel of the view, with the ticket the frame that asked it
-/// gave, once one has; and whether it answers its entity's name, as it does to a connection granted
-/// `read` of `Name`.
+/// A `pick` waiting for its answer: at a pixel of the view, within the model of an entity, if it
+/// names one, as [`gg_api::Pick::within`] says, with the ticket the frame that asked it gave, once
+/// one has; and whether it answers its entity's name, as it does to a connection granted `read` of
+/// `Name`.
 struct Picking {
     at: [f64; 2],
+    within: Option<EntityId>,
     ticket: Option<crate::Pick>,
     named: bool,
     reply: Reply,
@@ -315,8 +317,8 @@ enum Call {
     Input(Vec<InputEvent>),
     /// The parts of the look to set, each checked, its viewpoint's rotation normalized.
     Look(gg_api::Look),
-    /// The pixel of the view to pick at.
-    Pick([f64; 2]),
+    /// The pixel of the view to pick at, and the entity whose model it picks within, if any.
+    Pick([f64; 2], Option<EntityId>),
     Images,
     Entities {
         with: Option<String>,
@@ -711,7 +713,7 @@ impl Api {
                                    once it serves";
                     reply.send(Err(Failure::new("api.quitting", message)));
                 }
-                Call::Step(_) | Call::Capture { .. } | Call::Pick(_) | Call::Images if paused => {
+                Call::Step(_) | Call::Capture { .. } | Call::Pick(..) | Call::Images if paused => {
                     let message = "frames have paused while the window is minimized, and steps, \
                                    captures, picks and images run in frames; restore the window \
                                    first";
@@ -813,8 +815,9 @@ impl Api {
                     self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
                     reply.result(&self.look);
                 }
-                Call::Pick(at) => self.picks.push(Picking {
+                Call::Pick(at, within) => self.picks.push(Picking {
                     at,
+                    within,
                     ticket: None,
                     named: names,
                     reply,
@@ -1255,6 +1258,7 @@ impl Api {
         let world = cx.world();
         let back = (self.picks).extract_if(.., |picking| answered(picking.ticket).is_some());
         for Picking {
+            within,
             ticket,
             named,
             reply,
@@ -1262,9 +1266,17 @@ impl Api {
         } in back
         {
             let shown = answered(ticket).flatten();
-            // A model's node is its root's, which tools pick and change in its place.
-            let entity = shown.and_then(|id| world.entity(id));
-            let entity = entity.map(|entity| world.node_root(entity));
+            // A model's node is its root's, which tools pick and change in its place, but within
+            // the model, as an editor that has picked its root or a node goes into it.
+            let drawn = shown.and_then(|id| world.entity(id));
+            let root = drawn.map(|entity| world.node_root(entity));
+            let within = within.and_then(|id| world.entity(id));
+            let within = within.map(|entity| world.node_root(entity));
+            let entity = if within.is_some() && within == root {
+                drawn
+            } else {
+                root
+            };
             let id = entity.map_or(shown, |entity| world.id(entity));
             let name = entity.filter(|_| named);
             let name = name.and_then(|entity| world.get::<Name>(entity));
@@ -2156,7 +2168,7 @@ fn needs(call: &Call) -> Vec<Capability> {
             .into_iter()
             .flatten()
             .collect(),
-        Call::View(_) | Call::Look(_) | Call::Pick(_) | Call::Images => vec![View],
+        Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Images => vec![View],
         Call::Input(_) => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }
@@ -2896,8 +2908,12 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         }
         "look" => Call::Look(look(method, take(method, params)?)?),
         "pick" => {
-            let gg_api::Pick { at } = take(method, params)?;
-            Call::Pick(at)
+            let gg_api::Pick { at, within } = take(method, params)?;
+            let within = within.map(|id| id.parse::<EntityId>()).transpose();
+            let within = within.map_err(|error| {
+                bad_params(method, format!("takes `within`, an entity's ID: {error}"))
+            })?;
+            Call::Pick(at, within)
         }
         "images" => none(method, params).map(|()| Call::Images)?,
         "view" => {
@@ -5581,6 +5597,7 @@ mod tests {
         }
         api.picks.push(Picking {
             at: [0.0, 0.0],
+            within: None,
             ticket: None,
             named: true,
             reply: reply(4, &to),
@@ -5875,6 +5892,108 @@ mod tests {
         assert!(api.picks.is_empty());
     }
 
+    /// A pick of a model's node is answered with the model's root, but within the model, as a pick
+    /// within its root or one of its nodes is, with the node drawn there, however deep; within
+    /// another entity, or one gone, with the root still, and an entity no model's within any as
+    /// itself.
+    #[test]
+    fn a_pick_within_a_model_is_answered_with_its_node_drawn_there() {
+        let (mut api, session) = started("Api Picks Within");
+        let mut cx = Context::seeded(12);
+        // Its nodes: part 0, holding parts 1 and 2, each drawing; and part 3, drawing.
+        let (model, _) = crate::model::tests::added(&mut cx, "m", crate::model::tests::imported());
+        let world = cx.world_mut();
+        let root = model.spawn(world, Transform::IDENTITY);
+        world.insert(root, Name("Model".to_owned())).expect("alive");
+        let part = |world: &crate::World, n: u32| {
+            let mut next = vec![root];
+            while let Some(at) = next.pop() {
+                let children: Vec<crate::Entity> = world.children(at).expect("alive").collect();
+                let of = |child: &&crate::Entity| {
+                    world.get::<crate::ModelNode>(**child) == Some(&crate::ModelNode(n))
+                };
+                if let Some(&node) = children.iter().find(of) {
+                    return node;
+                }
+                next.extend(children);
+            }
+            panic!("no part {n}");
+        };
+        let (seat, back) = (part(world, 1), part(world, 3));
+        let other = world.spawn((Transform::IDENTITY, Name("Other".to_owned())));
+        let gone = world.spawn(Transform::IDENTITY);
+        let id = |entity| world.id(entity).expect("alive");
+        let [root, seat, back, other, gone] = [root, seat, back, other, gone].map(id);
+        world
+            .despawn(world.entity(gone).expect("alive"))
+            .expect("despawned");
+        let view = Viewport {
+            origin: [0, 0],
+            size: [100, 50],
+        };
+        let mut frame = Extracted::default();
+        cx.extract(&mut frame, view);
+        let client = move |mut client: Client| {
+            let asks = [
+                (5.0, None),
+                (5.0, Some(root)),
+                (5.0, Some(back)),
+                (35.0, Some(seat)),
+                (5.0, Some(other)),
+                (5.0, Some(gone)),
+                (65.0, Some(root)),
+                (65.0, Some(other)),
+            ];
+            asks.map(|(x, within)| {
+                let within = within.map(|id: EntityId| id.to_string());
+                let params = json!({ "at": [x, 4.0], "within": within });
+                let picked = client.call_as::<Picked>("pick", params);
+                let picked = picked.expect("an answer");
+                (picked.id, picked.name)
+            })
+        };
+        // As the renderer answers: the seat is drawn at the view's columns up to 30, the back's
+        // up to 60, and the other entity's from there.
+        let mut answers = Vec::new();
+        let back_frame = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
+            cx.take_answers(&answers);
+            api.frame_back(&mut frame, cx, stepper.ticks);
+            cx.extract(&mut frame, view);
+            answers.clear();
+            answers.extend(frame.picks.iter().map(|pick| {
+                let id = match pick.pixel[0] {
+                    0..30 => seat,
+                    30..60 => back,
+                    _ => other,
+                };
+                (pick.tag, id.get())
+            }));
+        };
+        let picked = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut Stepper::default(),
+            session,
+            client,
+            back_frame,
+        );
+        let answer =
+            |id: EntityId, name: Option<&str>| (Some(id.to_string()), name.map(str::to_owned));
+        // A model's nodes have no names.
+        let expected = [
+            answer(root, Some("Model")),
+            answer(seat, None),
+            answer(seat, None),
+            answer(back, None),
+            answer(root, Some("Model")),
+            answer(root, Some("Model")),
+            answer(other, Some("Other")),
+            answer(other, Some("Other")),
+        ];
+        assert_eq!(picked, expected);
+    }
+
     #[test]
     fn requests_parse_into_calls_or_are_refused_with_a_code() {
         let request = |method: &str, params: Value| Request {
@@ -5945,7 +6064,13 @@ mod tests {
             Ok(probed)
         );
         let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
-        assert_eq!(pick, Ok(Call::Pick([3.0, 4.5])));
+        assert_eq!(pick, Ok(Call::Pick([3.0, 4.5], None)));
+        let within = json!({"at": [3, 4.5], "within": "00000000000000ff"});
+        let id = "00000000000000ff".parse().expect("an ID");
+        assert_eq!(
+            parse(&request("pick", within)),
+            Ok(Call::Pick([3.0, 4.5], Some(id)))
+        );
         let saved = |path: Option<&str>| {
             Ok(Call::SavePrefab {
                 id: "00000000000000ff".parse().expect("an ID"),
@@ -6103,6 +6228,11 @@ mod tests {
             ("look", json!({"grid": "xw"}), "api.bad_params"),
             ("pick", Value::Null, "api.bad_params"),
             ("pick", json!({"at": [1]}), "api.bad_params"),
+            (
+                "pick",
+                json!({"at": [1, 2], "within": "x"}),
+                "api.bad_params",
+            ),
             ("images", json!({"all": true}), "api.bad_params"),
             ("input", Value::Null, "api.bad_params"),
             (
