@@ -28,9 +28,9 @@ pub(crate) enum Api {}
 /// The look the API's clients set, as a frame draws with it, which [`Api`] sets as it answers:
 /// each part in place of the game's own, where one's set; the revision it's at, which a frame
 /// published gives; whether the frame is bare, as a capture of the game's own view asks, which
-/// leaves the look out; what the frame shows in place of the view's light for a capture that asks,
-/// in place of what the look shows; and the viewpoint the last frame handed off drew from, the
-/// look's or the game's own.
+/// leaves the look out, the passes it leaves out among it; what the frame shows in place of the
+/// view's light for a capture that asks, in place of what the look shows; and the viewpoint the
+/// last frame handed off drew from, the look's or the game's own.
 #[cfg(feature = "dev")]
 #[derive(Default)]
 pub(crate) struct Look {
@@ -39,6 +39,8 @@ pub(crate) struct Look {
     pub(crate) grid: Option<crate::grid::Plane>,
     pub(crate) colliders: Option<bool>,
     pub(crate) show: Option<Shown>,
+    /// The passes the frames leave out, empty for none.
+    pub(crate) skip: Vec<gg_api::Pass>,
     pub(crate) revision: u64,
     pub(crate) bare: bool,
     pub(crate) captured: Option<Shown>,
@@ -52,6 +54,35 @@ impl Look {
     pub(crate) fn shown(&self) -> Option<Shown> {
         let look = self.show.as_ref().filter(|_| !self.bare);
         self.captured.as_ref().or(look).cloned()
+    }
+
+    /// Leaves the passes the look leaves out out of `frame`, extracted from the game's environment
+    /// and lights, unless the frame is bare: each as the game would draw it without that pass, as
+    /// [`gg_api::Pass`] says.
+    pub(crate) fn leave_out(&self, frame: &mut crate::render_thread::Extracted) {
+        use gg_api::Pass;
+        if self.bare {
+            return;
+        }
+        for pass in &self.skip {
+            match pass {
+                Pass::AmbientOcclusion => frame.ambient_occlusion = None,
+                Pass::Reflections => frame.reflections = None,
+                Pass::Shadows => {
+                    for light in &mut frame.lights {
+                        light.shadow_distance = None;
+                    }
+                }
+                Pass::Fog => frame.fog = None,
+                Pass::Bloom => frame.bloom = 0.0,
+                Pass::DepthOfField => frame.depth_of_field = None,
+                Pass::MotionBlur => frame.motion_blur = None,
+                Pass::Antialiasing => frame.antialiasing = gg_renderer::Antialiasing::None,
+                Pass::Grade => frame.grade = gg_renderer::Grade::IDENTITY,
+                Pass::Lens => frame.lens = gg_renderer::Lens::NONE,
+                Pass::Adaptation => frame.adaptation = None,
+            }
+        }
     }
 }
 

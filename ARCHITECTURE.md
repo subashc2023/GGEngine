@@ -438,9 +438,12 @@ in the editor is out of an agent's reach.
   or that frame draws without them. The view
   has one look, as the engine renders one view, which every client sets part by part, the last to
   set a part winning: the viewpoint it sees from, in place of the game's own; the entity it
-  outlines; a grid on one of the world's axis planes; whether the colliders' outlines show; and
+  outlines; a grid on one of the world's axis planes; whether the colliders' outlines show;
   what the view shows in place of its light, to see how it's made, as [Rendering](#rendering)
-  says. A
+  says; and the passes it leaves out, by the names of the environment's fields that turn them on,
+  or `shadows`, to narrow down which one makes what it shows: the engine leaves each out of the
+  frame's render data as it extracts it, as the game would draw without it, the world unchanged,
+  so that the renderer has nothing to skip. A
   part given back is the game's own again. A look lasts until a client changes it or the run ends,
   so a restarted run starts without one; it says which client set each part, so that a client takes
   up what another set, as the editor's camera carries on from a viewpoint an agent set; and each

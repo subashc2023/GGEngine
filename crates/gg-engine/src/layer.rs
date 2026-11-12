@@ -4437,9 +4437,10 @@ impl Context {
     /// it, and how many it's still decoding; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
     /// those outside the view, which the next answers to come back answer `None`. In a development
-    /// build, the look's viewpoint and outline go in place of the layers', the frame carries the
-    /// look's revision, and whether it's seen from the look's viewpoint, whose exposure adapts
-    /// apart from the game's own; but a bare frame leaves the look out, and the picks to the next
+    /// build, the look's viewpoint and outline go in place of the layers', the passes it leaves
+    /// out are left out, the frame carries the look's revision, and whether it's seen from the
+    /// look's viewpoint, whose exposure adapts apart from the game's own; but a bare frame leaves
+    /// the look out, and the picks to the next
     /// frame that isn't bare, both those asked this frame and those the renderer holds, so that
     /// none reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
@@ -4517,6 +4518,7 @@ impl Context {
             frame.look = self.look.revision;
             frame.bare = self.look.bare;
             frame.show = self.look.shown();
+            self.look.leave_out(frame);
             // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
             frame.looked = matches!(seer, Seer::Look(_));
         }
@@ -6153,6 +6155,117 @@ mod tests {
         assert_eq!(seen(&mut cx), (false, false), "a bare frame without a look");
         cx.look.bare = false;
         assert_eq!(seen(&mut cx), (false, false), "the frame after it");
+    }
+
+    /// The passes the tool API's look leaves out are left out of the frame, each as it would be
+    /// drawn were the game's environment without it, and its lights without shadows; a bare frame,
+    /// a capture of the game's own view's, leaves none out; and the world, its environment and
+    /// lights among it, stays as it was.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
+        use gg_renderer::{
+            Adaptation, AmbientOcclusion, DepthOfField, Lens, MotionBlur, Reflections,
+        };
+
+        /// Each pass of `frame`, by [`gg_api::Pass::ALL`]'s order, the shadows by the light's.
+        #[allow(clippy::type_complexity)]
+        fn passes(
+            frame: &Extracted,
+        ) -> (
+            Option<AmbientOcclusion>,
+            Option<Reflections>,
+            Option<f32>,
+            Option<Fog>,
+            f32,
+            Option<DepthOfField>,
+            Option<MotionBlur>,
+            Antialiasing,
+            Grade,
+            Lens,
+            Option<Adaptation>,
+        ) {
+            (
+                frame.ambient_occlusion,
+                frame.reflections,
+                frame.lights[0].shadow_distance,
+                frame.fog,
+                frame.bloom,
+                frame.depth_of_field,
+                frame.motion_blur,
+                frame.antialiasing,
+                frame.grade,
+                frame.lens,
+                frame.adaptation,
+            )
+        }
+        let mut cx = Context::seeded(1);
+        // Every pass on, none as a pass left out leaves it.
+        let everything = Environment {
+            adaptation: Some(crate::Adaptation::default()),
+            bloom: 0.5,
+            grade: Grade {
+                contrast: 1.5,
+                ..Grade::IDENTITY
+            },
+            fog: Some(Fog::default()),
+            reflections: Some(Reflections::default()),
+            depth_of_field: Some(crate::DepthOfField::default()),
+            motion_blur: Some(crate::MotionBlur::default()),
+            lens: crate::Lens {
+                vignette: 0.4,
+                ..crate::Lens::NONE
+            },
+            ..Environment::default()
+        };
+        let environment = cx.world_mut().spawn(everything);
+        let light = (cx.world_mut()).spawn((Transform::IDENTITY, crate::Light::default()));
+        let hash = cx.world().hash();
+        let drawn = passes(&handed_off(&mut cx));
+        let shadows = crate::Light::default().shadow_distance;
+        let game = (
+            everything.ambient_occlusion,
+            everything.reflections,
+            Some(shadows),
+            everything.fog,
+            everything.bloom,
+            everything.depth_of_field.map(|focus| focus.rendered()),
+            everything.motion_blur.map(|blur| blur.rendered()),
+            Antialiasing::Taa,
+            everything.grade,
+            everything.lens.rendered(),
+            everything
+                .adaptation
+                .map(|adaptation| adaptation.rendered()),
+        );
+        assert_eq!(drawn, game, "the game's own");
+        cx.look.skip = gg_api::Pass::ALL.to_vec();
+        let none = (
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            Antialiasing::None,
+            Grade::IDENTITY,
+            Lens::NONE,
+            None,
+        );
+        assert_eq!(passes(&handed_off(&mut cx)), none, "every pass left out");
+        cx.look.skip = vec![gg_api::Pass::Reflections];
+        let mut reflectionless = game;
+        reflectionless.1 = None;
+        assert_eq!(passes(&handed_off(&mut cx)), reflectionless, "one left out");
+        cx.look.skip = gg_api::Pass::ALL.to_vec();
+        cx.look.bare = true;
+        assert_eq!(passes(&handed_off(&mut cx)), game, "a bare frame");
+        let world = cx.world();
+        assert_eq!(world.get::<Environment>(environment), Some(&everything));
+        let lit = world.get::<crate::Light>(light).copied();
+        assert_eq!(lit, Some(crate::Light::default()));
+        assert_eq!(world.hash(), hash);
     }
 
     /// Each skinned part of a model's root draws a mesh of its own, a copy of its model's, which

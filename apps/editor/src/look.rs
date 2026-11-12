@@ -113,6 +113,7 @@ impl Looking {
             grid: sent(grid, &wanted.grid, &known.grid),
             colliders: sent(colliders, &wanted.colliders, &known.colliders),
             show: sent(show, &wanted.show, &known.show),
+            skip: None,
         };
         if look == Look::default() && self.drawn <= self.revision {
             return None;
@@ -171,6 +172,7 @@ impl Looking {
                 kept(Part::Show, asked.show.is_some()),
                 client,
             ),
+            skip: None,
         };
         self.revision = revision;
         taken
@@ -223,6 +225,7 @@ mod tests {
             grid: parts.grid,
             colliders: parts.colliders,
             show: parts.show.clone(),
+            skip: None,
             by,
             revision,
             run: 1,
@@ -240,6 +243,7 @@ mod tests {
             grid,
             colliders,
             show: None,
+            skip: None,
         }
     }
 
@@ -374,6 +378,7 @@ mod tests {
             grid: Some(theirs.grid),
             colliders: Some(theirs.colliders),
             show: None,
+            skip: None,
         };
         assert_eq!(taken, expected);
         // As the editor's wanted parts follow what it took, the agent's colliders are kept: the

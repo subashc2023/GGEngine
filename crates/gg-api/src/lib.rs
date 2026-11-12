@@ -80,8 +80,9 @@
 //! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
 //!   last to set a part winning, and which last until a client changes them or the run ends: the
 //!   viewpoint the view is seen from, the outline round an entity, a grid, whether colliders'
-//!   outlines show, and what the view shows in place of its light, [`Shown`]; and answers
-//!   [`Looked`], the look once set, or as it is, for `{}` or no params. It's set as a frame starts,
+//!   outlines show, what the view shows in place of its light, [`Shown`], and the passes it leaves
+//!   out, [`Pass`]; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
+//!   It's set as a frame starts,
 //!   which draws with it. It fails with `api.bad_params`, saying why, for a viewpoint that isn't
 //!   finite, whose rotation doesn't normalize, or whose projection can't project, as
 //!   [`Projection`] says; for an outline whose ID isn't 16 hex digits, whose color isn't finite, or
@@ -821,6 +822,65 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub show: Option<Option<Shown>>,
+    /// The passes the view leaves out, as [`Pass`] says, in any order, a pass named twice left out
+    /// once; an empty list gives the part back to the game, as `null` does.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skip: Option<Option<Vec<Pass>>>,
+}
+
+/// A pass of the game's view that the look can leave out, to narrow down which one makes what the
+/// view shows, by the name of the field of the world's `Environment` that turns it on, or
+/// `shadows`, the lights' shadows: the view draws as it would were the game's environment without
+/// it, every frame as valid, while the game itself, its environment and lights among it, is
+/// unchanged, and a capture of the game's own view shows it as it is. A pass the view doesn't run
+/// leaves nothing out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pass {
+    /// Ambient occlusion: the light from all around reaches every point whole.
+    AmbientOcclusion,
+    /// Reflections: what's opaque shows the sky's specular light in their place.
+    Reflections,
+    /// The lights' shadows: none casts any.
+    Shadows,
+    /// Height fog.
+    Fog,
+    /// Bloom.
+    Bloom,
+    /// Depth of field.
+    DepthOfField,
+    /// Motion blur.
+    MotionBlur,
+    /// Antialiasing, temporal or SMAA: each pixel shows what's at its center, drawn without an
+    /// offset. Given back, temporal antialiasing starts afresh from the frame that draws with it.
+    Antialiasing,
+    /// The grade: the view's light as it's drawn.
+    Grade,
+    /// The lens's vignette, chromatic aberration and grain.
+    Lens,
+    /// The exposure's adaptation: the view is exposed at the environment's exposure.
+    Adaptation,
+}
+
+impl Pass {
+    /// Every pass, in the order of its variants.
+    pub const ALL: [Self; 11] = [
+        Self::AmbientOcclusion,
+        Self::Reflections,
+        Self::Shadows,
+        Self::Fog,
+        Self::Bloom,
+        Self::DepthOfField,
+        Self::MotionBlur,
+        Self::Antialiasing,
+        Self::Grade,
+        Self::Lens,
+        Self::Adaptation,
+    ];
 }
 
 /// What the game's view shows in place of its light, to see how it's made: a part of what lit
@@ -886,6 +946,10 @@ pub struct Looked {
     /// `None` from an engine older than what the view shows.
     #[serde(default)]
     pub show: Option<Shown>,
+    /// The passes the view leaves out, in the order of [`Pass::ALL`], each once, never empty;
+    /// `None` from an engine older than passes left out.
+    #[serde(default)]
+    pub skip: Option<Vec<Pass>>,
     pub by: By,
     /// How many times the look has changed in the run, which a frame shared gives as the revision
     /// it drew with ([`view::Frame::look`]): a `look` that changes no part's value or setter
@@ -911,6 +975,8 @@ pub struct By {
     pub colliders: Option<String>,
     #[serde(default)]
     pub show: Option<String>,
+    #[serde(default)]
+    pub skip: Option<String>,
 }
 
 /// What `pick` takes: the pixel of the view to pick at, `[x, y]` from its top left, as `input`'s
@@ -2065,6 +2131,7 @@ mod tests {
             grid: Some(Some(Plane::Xz)),
             colliders: None,
             show: None,
+            skip: None,
         };
         assert_eq!(look, expected);
         let written = serde_json::to_value(&look).unwrap();
@@ -2109,7 +2176,35 @@ mod tests {
         }
         let look: Look = serde_json::from_str(r#"{"show": null}"#).unwrap();
         assert_eq!(look.show, Some(None), "given back");
+        // The passes left out, by their names, written as they're read.
+        let look: Look = serde_json::from_str(r#"{"skip": ["reflections", "depth_of_field"]}"#)
+            .expect("passes by their names");
+        let skip = vec![Pass::Reflections, Pass::DepthOfField];
+        assert_eq!(look.skip, Some(Some(skip)));
+        let written = serde_json::to_value(&look).unwrap();
+        let names = serde_json::json!({"skip": ["reflections", "depth_of_field"]});
+        assert_eq!(written, names);
+        let look: Look = serde_json::from_str(r#"{"skip": null}"#).unwrap();
+        assert_eq!(look.skip, Some(None), "given back");
+        let names = Pass::ALL.map(|pass| serde_json::to_value(pass).unwrap());
+        let expected = [
+            "ambient_occlusion",
+            "reflections",
+            "shadows",
+            "fog",
+            "bloom",
+            "depth_of_field",
+            "motion_blur",
+            "antialiasing",
+            "grade",
+            "lens",
+            "adaptation",
+        ];
+        assert_eq!(names, expected.map(|name| serde_json::json!(name)));
         for refused in [
+            r#"{"skip": ["Reflections"]}"#,
+            r#"{"skip": ["tonemapper"]}"#,
+            r#"{"skip": "fog"}"#,
             r#"{"show": "BaseColor"}"#,
             r#"{"show": "albedo"}"#,
             r#"{"show": {"image": "view depth", "level": 0}}"#,
@@ -2152,14 +2247,17 @@ mod tests {
             }),
             grid: Some(Plane::Xy),
             colliders: None,
-            // From an engine older than what the view shows, which names none.
+            // From an engine older than what the view shows and the passes it leaves out, which
+            // names neither.
             show: None,
+            skip: None,
             by: By {
                 viewpoint: None,
                 outline: Some("editor".to_owned()),
                 grid: Some("gg".to_owned()),
                 colliders: None,
                 show: None,
+                skip: None,
             },
             revision: 3,
             run: 7,
@@ -2168,8 +2266,10 @@ mod tests {
         assert_eq!(looked, expected);
         let shown = Looked {
             show: Some(Shown::Roughness),
+            skip: Some(vec![Pass::Shadows, Pass::Adaptation]),
             by: By {
                 show: Some("gg".to_owned()),
+                skip: Some("agent".to_owned()),
                 ..expected.by
             },
             ..expected

@@ -546,6 +546,7 @@ impl Api {
                 grid: None,
                 colliders: None,
                 show: None,
+                skip: None,
                 by: By::default(),
                 revision: 0,
                 run,
@@ -1096,6 +1097,7 @@ impl Api {
             grid,
             colliders,
             show,
+            skip,
             by,
             revision,
             ..
@@ -1106,6 +1108,7 @@ impl Api {
             set_part(grid, &mut by.grid, given.grid, client),
             set_part(colliders, &mut by.colliders, given.colliders, client),
             set_part(show, &mut by.show, given.show, client),
+            set_part(skip, &mut by.skip, given.skip, client),
         ];
         if changed.contains(&true) {
             *revision += 1;
@@ -1126,6 +1129,7 @@ impl Api {
         });
         look.colliders = *colliders;
         look.show = show.as_ref().map(Shown::of);
+        look.skip = skip.clone().unwrap_or_default();
         look.revision = *revision;
     }
 
@@ -2610,7 +2614,8 @@ fn engine_named(name: &str, extension: &str) -> bool {
         && parts.next().is_some_and(|app| !app.is_empty())
 }
 
-/// The look `given`, method `method`'s, checked, its viewpoint's rotation normalized.
+/// The look `given`, method `method`'s, checked, its viewpoint's rotation normalized, and the
+/// passes it leaves out in [`gg_api::Pass::ALL`]'s order, each once, an empty list given back.
 ///
 /// Fails with `api.bad_params`, saying why, for a viewpoint that isn't finite, whose rotation has
 /// no length, or whose projection can't project, as [`Projection`] says; and for an outline whose
@@ -2655,6 +2660,17 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
     }
     if let Some(Some(show)) = &given.show {
         shown(method, show)?;
+    }
+    // A set, whatever the order, so that the same passes again aren't a change; and none left out
+    // is the game's own.
+    if let Some(skip) = &mut given.skip {
+        if let Some(passes) = skip.as_mut() {
+            passes.sort_unstable();
+            passes.dedup();
+        }
+        if skip.as_ref().is_some_and(Vec::is_empty) {
+            *skip = None;
+        }
     }
     Ok(given)
 }
@@ -5182,6 +5198,49 @@ mod tests {
             (None, Some(Plane::XY), None)
         );
         assert_eq!(look.revision, 3);
+    }
+
+    /// The passes a look leaves out are a set: named in any order, or twice, they're answered in
+    /// [`gg_api::Pass::ALL`]'s order, each once, and the same set again is no revision; an empty
+    /// list gives the part back, as `null` does; and the frames get the set as it's answered.
+    #[test]
+    fn the_passes_a_look_leaves_out_are_a_set() {
+        use gg_api::Pass;
+
+        let (mut api, session) = started("Api Look Skips");
+        let mut cx = Context::seeded(8);
+        let mut stepper = Stepper::default();
+        let client = |mut client: Client| {
+            let mut look =
+                |params: Value| (client.call_as::<Looked>("look", params)).expect("the look");
+            [
+                look(json!({"skip": ["shadows", "reflections", "shadows"]})),
+                look(json!({"skip": ["reflections", "shadows"]})),
+                look(json!({"skip": []})),
+                look(json!({"skip": ["fog"]})),
+            ]
+        };
+        let [set, again, emptied, fog] = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        let test = Some("test".to_owned());
+        assert_eq!(set.skip, Some(vec![Pass::Reflections, Pass::Shadows]));
+        assert_eq!((&set.by.skip, set.revision), (&test, 1));
+        assert_eq!(again, set, "the same set, nor counted");
+        assert_eq!(
+            (&emptied.skip, &emptied.by.skip),
+            (&None, &None),
+            "given back"
+        );
+        assert_eq!(emptied.revision, 2);
+        assert_eq!((fog.skip, fog.revision), (Some(vec![Pass::Fog]), 3));
+        assert_eq!((&cx.look.skip, cx.look.revision), (&vec![Pass::Fog], 3));
     }
 
     /// The look draws as a layer that set it would: its viewpoint and outline in place of a
