@@ -8219,10 +8219,12 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     }
     // The images a frame asked to list them makes that a show finds, each name once: as the game's
     // frame makes them while the view shows an image, bloom's and the lens's among them, but not
-    // the show's own; and while it shows a part of shading, nothing after the view's passes.
-    let mut listed = |show| {
+    // the show's own; and while it shows a part of shading, nothing after the view's passes; and
+    // while it shows its light, antialiased, not the antialiasing's, which a show doesn't make.
+    let mut listed = |show, antialiasing| {
         let data = RenderData {
-            show: Some(show),
+            show,
+            antialiasing,
             bloom: 1.0,
             lens: Lens {
                 vignette: 1.0,
@@ -8236,7 +8238,7 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     };
     let named =
         |listed: &[FrameImage], name| listed.iter().find(|image| image.name == name).copied();
-    let images = listed(Show::Image("view depth"));
+    let images = listed(Some(Show::Image("view depth")), Antialiasing::Taa);
     let depth = FrameImage {
         name: "view depth",
         kind: ImageKind::Depth,
@@ -8255,9 +8257,25 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     names.sort_unstable();
     names.dedup();
     assert_eq!(names.len(), count, "each once: {images:?}");
-    let shading = listed(Show::Shading(Channel::Roughness));
+    let shading = listed(Some(Show::Shading(Channel::Roughness)), Antialiasing::Taa);
     assert!(named(&shading, "view depth").is_some(), "{shading:?}");
     assert!(named(&shading, "bloom 1").is_none(), "{shading:?}");
+    for antialiasing in [Antialiasing::Taa, Antialiasing::Smaa] {
+        let lit = listed(None, antialiasing);
+        assert!(
+            named(&lit, "bloom 1").is_some(),
+            "{antialiasing:?}: {lit:?}"
+        );
+        let names = [
+            "view resolved",
+            "smaa edges",
+            "smaa weights",
+            "view antialiased",
+        ];
+        for name in names {
+            assert!(named(&lit, name).is_none(), "{antialiasing:?}: {lit:?}");
+        }
+    }
     shut_down(renderer);
 }
 

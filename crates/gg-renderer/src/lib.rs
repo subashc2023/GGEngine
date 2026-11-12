@@ -1461,6 +1461,10 @@ impl Renderer {
                 .and_then(|focus| depth_of_field::Circle::new(focus, &data.viewpoint, size));
             let blur = data.motion_blur.filter(MotionBlur::blurs);
             let lensed = data.lens.shows();
+            // Where the antialiasing's images are among the graph's own, which a frame that shows
+            // an image, drawn without antialiasing, doesn't make, and a list of the images leaves
+            // out, so that it offers only what a show finds.
+            let unlisted_from = data.list_images.then(|| graph.images().count());
             let taa = antialiased.then(|| {
                 // Apart where what follows writes the resolved colors in place: depth of field;
                 // bloom, the grade or the canvas, unless motion blur or the lens has written colors
@@ -1471,6 +1475,7 @@ impl Renderer {
                 taa.plan(graph, resolved, number, size, drawn, apart)
             });
             let smaa = smaa.then(|| SmaaPass::plan(graph, hdr, size));
+            let unlisted = unlisted_from.map_or(0..0, |from| from..graph.images().count());
             let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
             let shown = smaa.as_ref().map_or(shown, smaa::Plan::shown);
             // A frame that shows something in place of the view's light keeps nothing for the next,
@@ -1507,7 +1512,7 @@ impl Renderer {
                 (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
             });
             if data.list_images {
-                show::list(images, graph);
+                show::list(images, graph, unlisted);
             }
             // An image the frame makes in place of all that, the last of its name added so far.
             let show = image_shown.map(|name| {
@@ -2315,9 +2320,10 @@ impl Renderer {
     }
 
     /// The images the last frame that [`RenderData::list_images`] asked to list them made that
-    /// [`Show::Image`] finds: of the graph's own, before the show's pass, in the order the frame
-    /// made them, each name once, as the last of that name, which a show finds; none for a frame
-    /// that had no view to draw. Empty before such a frame.
+    /// [`Show::Image`] finds: of the graph's own, before the show's pass, but the antialiasing's,
+    /// which a frame showing an image, drawn without it, doesn't make; in the order the frame made
+    /// them, each name once, as the last of that name, which a show finds; none for a frame that
+    /// had no view to draw. Empty before such a frame.
     pub fn images(&self) -> &[FrameImage] {
         &self.images
     }

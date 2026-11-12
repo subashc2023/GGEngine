@@ -93,9 +93,9 @@
 //!   look among it, in the frame that reads it, about four frames after it's asked.
 //! - `images`: answers [`ImageList`], the images the next frame that renders makes that
 //!   [`Shown::Image`] names, each by its debug name, with what it holds and its size, in the order
-//!   the frame makes them: as the look has the view drawn, the view's light making every pass's
-//!   images, an image every one's but antialiasing's, and a part of shading none after the view's
-//!   passes. It fails with `api.paused` while frames pause.
+//!   the frame makes them: as the look has the view drawn, its light or an image every pass's but
+//!   antialiasing's, which a frame showing an image doesn't make, and a part of shading none after
+//!   the view's passes. It fails with `api.paused` while frames pause.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
 //!   revision of its types, as `types` answers it.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],

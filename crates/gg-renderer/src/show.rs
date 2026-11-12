@@ -6,6 +6,7 @@
 //! antialiasing, so that every pass's images are there to show. [`showing`] says how each frame
 //! draws.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
@@ -44,11 +45,14 @@ pub struct FrameImage {
     pub size: [u32; 2],
 }
 
-/// Lists into `images` the images of `graph`'s own added so far, in the order they were, each name
-/// once, at the place of its first, as the last of that name, which a show finds: a scan of those
-/// listed for each, of the tens a frame makes, in a frame asked to list them alone.
-pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph) {
-    for (name, kind, size) in graph.images() {
+/// Lists into `images` the images of `graph`'s own added so far, in the order they were, but those
+/// whose places among them are `unlisted`, each name once, at the place of its first, as the last of
+/// that name, which a show finds: a scan of those listed for each, of the tens a frame makes, in a
+/// frame asked to list them alone.
+pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph, unlisted: Range<usize>) {
+    let listed = graph.images().enumerate();
+    let listed = listed.filter(|(i, _)| !unlisted.contains(i));
+    for (_, (name, kind, size)) in listed {
         let image = FrameImage { name, kind, size };
         match images.iter_mut().find(|listed| listed.name == name) {
             Some(listed) => *listed = image,
@@ -259,7 +263,7 @@ mod tests {
     use super::*;
 
     /// A name the graph has twice is listed once, where it first was, as the last of it, which a
-    /// show finds; and a target, which has no name, isn't.
+    /// show finds; a target, which has no name, isn't; nor are those at the places left out.
     #[test]
     fn a_name_twice_is_listed_once_as_the_last_of_it() {
         let mut graph = Graph::default();
@@ -267,8 +271,9 @@ mod tests {
         graph.depth("depth", [4, 4]);
         graph.ids("ids", [4, 4]);
         graph.depth("depth", [2, 2]);
+        graph.hdr("resolved", [4, 4]);
         let mut images = Vec::new();
-        list(&mut images, &graph);
+        list(&mut images, &graph, 3..4);
         let want = [
             FrameImage {
                 name: "depth",
