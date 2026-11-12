@@ -6168,11 +6168,8 @@ mod tests {
             Adaptation, AmbientOcclusion, DepthOfField, Lens, MotionBlur, Reflections,
         };
 
-        /// Each pass of `frame`, by [`gg_api::Pass::ALL`]'s order, the shadows by the light's.
-        #[allow(clippy::type_complexity)]
-        fn passes(
-            frame: &Extracted,
-        ) -> (
+        /// Each pass of a frame, by [`gg_api::Pass::ALL`]'s order, the shadows by the light's.
+        type Passes = (
             Option<AmbientOcclusion>,
             Option<Reflections>,
             Option<f32>,
@@ -6184,7 +6181,10 @@ mod tests {
             Grade,
             Lens,
             Option<Adaptation>,
-        ) {
+        );
+
+        /// The passes of `frame`.
+        fn passes(frame: &Extracted) -> Passes {
             (
                 frame.ambient_occlusion,
                 frame.reflections,

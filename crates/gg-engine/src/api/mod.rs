@@ -56,9 +56,9 @@ impl Look {
         self.captured.as_ref().or(look).cloned()
     }
 
-    /// Leaves the passes the look leaves out out of `frame`, extracted from the game's environment
-    /// and lights, unless the frame is bare: each as the game would draw it without that pass, as
-    /// [`gg_api::Pass`] says.
+    /// Sets each pass the look leaves out to none in `frame`, as it was extracted from the game's
+    /// environment and lights, unless the frame is bare: each as the game would draw without that
+    /// pass, as [`gg_api::Pass`] says.
     pub(crate) fn leave_out(&self, frame: &mut crate::render_thread::Extracted) {
         use gg_api::Pass;
         if self.bare {
