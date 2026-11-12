@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gg_api::{Client, Failure, LogEvents, Pulse, Session, Shown, Status};
+use gg_api::{Client, Failure, LogEvents, Pulse, Session, Shown, while_paused};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
@@ -260,7 +260,7 @@ pub(crate) fn captures(
 }
 
 /// `params` with `show` in it.
-pub(crate) fn with_show(params: &Value, show: &Value) -> Value {
+fn with_show(params: &Value, show: &Value) -> Value {
     let mut params = params.clone();
     params["show"] = show.clone();
     params
@@ -277,35 +277,6 @@ fn captured_together(
             .map(|show| call("capture", with_show(params, show)))
             .collect()
     })
-}
-
-/// What `body` does with `call`, sending each request through `call`: `status` first, then `pause`
-/// if the game plays, neither paused nor stopped, then `body`, which sees one world, and `resume` if
-/// and only if it paused it.
-///
-/// Fails as `body` does, over a failed `resume`.
-pub(crate) fn while_paused<T>(
-    mut call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
-    body: impl FnOnce(
-        &mut dyn FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
-    ) -> Result<T, Failure>,
-) -> Result<T, Failure> {
-    let status: Status = serde_json::from_str(call("status", Value::Null)?.get())
-        .map_err(|error| Failure::new("api.protocol", format!("`status` answered {error}")))?;
-    let plays = !status.paused && !status.stopped;
-    if plays {
-        call("pause", Value::Null)?;
-    }
-    let done = body(&mut call);
-    let resumed = if plays {
-        call("resume", Value::Null).map(drop)
-    } else {
-        Ok(())
-    };
-    // A failed body is the failure to report, over a failed resume.
-    let done = done?;
-    resumed?;
-    Ok(done)
 }
 
 /// `answers` as one JSON array, as the game wrote each.

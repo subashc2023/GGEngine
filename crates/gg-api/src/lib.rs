@@ -263,6 +263,7 @@
 
 pub mod asset;
 pub mod fetch;
+pub mod probe;
 mod project;
 // It maps memory another process shares, which only unsafe code reaches.
 #[allow(unsafe_code)]
@@ -1987,6 +1988,35 @@ impl Client {
             Failure::new("api.protocol", message)
         })
     }
+}
+
+/// What `body` does with `call`, sending each request through `call`: `status` first, then `pause`
+/// if the game plays, neither paused nor stopped, then `body`, which sees one world, and `resume` if
+/// and only if it paused it.
+///
+/// Fails as `body` does, over a failed `resume`.
+pub fn while_paused<T>(
+    mut call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
+    body: impl FnOnce(
+        &mut dyn FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
+    ) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let status: Status = serde_json::from_str(call("status", Value::Null)?.get())
+        .map_err(|error| Failure::new("api.protocol", format!("`status` answered {error}")))?;
+    let plays = !status.paused && !status.stopped;
+    if plays {
+        call("pause", Value::Null)?;
+    }
+    let done = body(&mut call);
+    let resumed = if plays {
+        call("resume", Value::Null).map(drop)
+    } else {
+        Ok(())
+    };
+    // A failed body is the failure to report, over a failed resume.
+    let done = done?;
+    resumed?;
+    Ok(done)
 }
 
 #[cfg(test)]
