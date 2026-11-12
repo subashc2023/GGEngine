@@ -1499,9 +1499,10 @@ without a central area, and the game's view is a panel of its own, which docks, 
 the main window as the others do, but never goes into a window of its own, since only the main
 window's input reaches the layers. What reaches the layers is then the view's to say, as
 `App::view_panel` details: presses and the wheel over it, and the drags they start; and keys while
-it has focus, which a press on it gives, or the cursor is over it, so that keys follow the cursor
-onto the view. Layers know where the view is from `Context::view`, in the window's pixels, as the
-cursor's position is.
+it has focus, which a press on it gives, or a layer's own control through `Ui::focus_view`, as the
+editor's Play does, and `Ui::view_focused` reads, or the cursor is over it, so that keys follow the
+cursor onto the view. Layers know where the view is from `Context::view`, in the window's pixels,
+as the cursor's position is.
 
 A panel the layout doesn't hold yet floats, unless the app docks it with `App::dock`, beside a
 panel, taking the share of its place the app gives, or among its tabs, which is how an app makes

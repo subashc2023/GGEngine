@@ -212,6 +212,23 @@ impl<'a> Ui<'a> {
     pub fn egui(&self) -> &egui::Context {
         self.root.ctx()
     }
+
+    /// Gives the game's view the keys, as a press on it does, taking them from any widget of
+    /// egui's that has them: for a layer's own control that hands the view its input, such as an
+    /// editor's Play, whose press, off the view, took them. Done as the frame's UI ends. Does
+    /// nothing in apps without [`App::view_panel`](crate::App::view_panel).
+    pub fn focus_view(&mut self) {
+        self.dock.focus_asked = true;
+    }
+
+    /// Whether the game's view has the keys, as the input before this frame left them, as
+    /// [`App::view_panel`](crate::App::view_panel) says: from the start, from a press on it or on
+    /// what [`over_view`](Self::over_view) shows over it, and from
+    /// [`focus_view`](Self::focus_view), until a press elsewhere. `false` in apps without a view
+    /// panel.
+    pub fn view_focused(&self) -> bool {
+        self.dock.view_focused
+    }
 }
 
 /// The dock's layout, and what it needs from one frame to the next.
@@ -259,6 +276,11 @@ pub(crate) struct Dock {
     docked: Vec<(&'static str, Docked)>,
     /// The View menu, in apps that have it, where tabs close their panels too.
     menu: Option<ViewMenu>,
+    /// Whether a dockspace's view had the keys as the frame started, as the windowed loop tells
+    /// it, as it has them from the start; and whether a layer asked this frame that it have them,
+    /// which the loop takes once the frame's UI is done.
+    view_focused: bool,
+    focus_asked: bool,
 }
 
 /// The View menu's items that save and load layouts, and what the menus chose this frame.
@@ -405,6 +427,8 @@ impl Dock {
             knowing: Vec::new(),
             docked: docked.to_vec(),
             menu,
+            view_focused: view.is_some(),
+            focus_asked: false,
         }
     }
 
@@ -451,6 +475,18 @@ impl Dock {
         } else {
             Under::Other
         }
+    }
+
+    /// Tells the dock whether a dockspace's view has the keys, as the frame starts, for
+    /// [`Ui::view_focused`].
+    pub(crate) fn set_view_focused(&mut self, focused: bool) {
+        self.view_focused = focused && self.is_dockspace();
+    }
+
+    /// Whether a layer asked for the view to have the keys, as [`Ui::focus_view`] does, since this
+    /// was last asked.
+    pub(crate) fn take_focus_asked(&mut self) -> bool {
+        mem::take(&mut self.focus_asked)
     }
 
     /// Where the cursor goes as a grab of it starts, in the main window's points, from `cursor`,
@@ -2611,6 +2647,33 @@ mod tests {
         let run = Run::new();
         assert_eq!(run.dock.grab_at(&run.ctx, Some(pos2(100.0, 100.0))), None);
         assert_eq!(run.dock.grab_at(&run.ctx, None), None);
+    }
+
+    /// A layer asks through its UI for the view to have the keys, which the windowed loop takes
+    /// once, after the pass; and reads whether it has them, as the loop told the dock as the frame
+    /// started, in a dockspace alone.
+    #[test]
+    fn layers_ask_for_the_view_s_focus_and_read_it_through_the_ui() {
+        let ctx = crate::egui_context();
+        for view in [Some(VIEW), None] {
+            let mut dock = Dock::new(None, Chrome::Os, view, false, &[]);
+            for told in [true, false] {
+                dock.set_view_focused(told);
+                let mut read = None;
+                let mut output = ctx.run_ui(RawInput::default(), |root| {
+                    dock.begin(root);
+                    let mut ui = Ui::new(root, &mut dock);
+                    read = Some(ui.view_focused());
+                    ui.focus_view();
+                    dock.end(root);
+                });
+                output.textures_delta.clear();
+                let focused = told && view.is_some();
+                assert_eq!(read, Some(focused), "{view:?}, told {told}");
+                assert!(dock.take_focus_asked(), "{view:?}");
+                assert!(!dock.take_focus_asked(), "{view:?}, taken once");
+            }
+        }
     }
 
     /// Where `panel`'s group floats over the main window.

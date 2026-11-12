@@ -502,8 +502,9 @@ impl App {
     /// window of its own. The layers get the mouse's presses and its wheel over the view, and the
     /// drags those start; and keys while none of egui's widgets has focus, no modal of egui's is
     /// open and the view shows, if the view has focus, which a press on it, or on what
-    /// [`Ui::over_view`] shows over it, gives and a press anywhere else takes, or the cursor is
-    /// over either while egui drags none of its own widgets; it has focus as the app starts.
+    /// [`Ui::over_view`] shows over it, gives, as [`Ui::focus_view`] does, and a press anywhere else
+    /// takes, or the cursor is over either while egui drags none of its own widgets; it has focus as
+    /// the app starts, and [`Ui::view_focused`] says whether it has it.
     /// Modifier keys reach them wherever they're pressed while no widget of egui's has focus, and
     /// releases wherever they come. A build without `dev`, which has no UI, changes nothing: the
     /// view fills the window, and its input goes to the layers.

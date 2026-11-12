@@ -347,6 +347,10 @@ impl Handler<'_> {
         if let Some(frame) = &self.frame {
             self.dock.set_maximize(frame.maximize());
         }
+        #[cfg(feature = "dev")]
+        if let Some(view_input) = &self.view_input {
+            self.dock.set_view_focused(view_input.focused());
+        }
         // egui opens the windows of their own during the main window's pass.
         #[cfg(feature = "dev")]
         let pass = viewports::with_event_loop(event_loop, || {
@@ -363,6 +367,13 @@ impl Handler<'_> {
             self.egui_runs = keeps_egui(&self.app.stack, layers_draw, self.chrome, &self.dock);
             output
         });
+        // After the pass, and so after the press on a layer's control that asked, which took them.
+        #[cfg(feature = "dev")]
+        if self.dock.take_focus_asked()
+            && let Some(view_input) = &mut self.view_input
+        {
+            view_input.give_focus(&self.egui);
+        }
         #[cfg(feature = "dev")]
         let (ui, tessellated) = match &mut output {
             Some(output) => tessellate(&self.egui, output),

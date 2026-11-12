@@ -72,4 +72,12 @@ impl Ui<'_> {
     pub fn egui(&self) -> &egui::Context {
         match self.never {}
     }
+
+    pub fn focus_view(&mut self) {
+        match self.never {}
+    }
+
+    pub fn view_focused(&self) -> bool {
+        match self.never {}
+    }
 }

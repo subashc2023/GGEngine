@@ -89,9 +89,7 @@ impl ViewInput {
                 // otherwise for one of its own, such as a splitter dragged over the view.
                 Under::View if self.held != 0 || !egui.egui_is_using_pointer() => {
                     self.held |= bit(button);
-                    // egui keeps a text field's focus until a click elsewhere, which a drag isn't.
-                    egui.memory_mut(|memory| memory.stop_text_input());
-                    self.focus(true);
+                    self.give_focus(egui);
                     match self.withheld.take() {
                         Some((x, y)) => Reach::MoveThen { x, y },
                         None => Reach::Event,
@@ -99,8 +97,7 @@ impl ViewInput {
                 }
                 // The UI over the view is egui's, but leaves the view the keys.
                 Under::Overlay => {
-                    egui.memory_mut(|memory| memory.stop_text_input());
-                    self.focus(true);
+                    self.give_focus(egui);
                     Reach::Nothing
                 }
                 _ => {
@@ -150,6 +147,14 @@ impl ViewInput {
     /// UI over it, until a press elsewhere.
     pub(crate) fn focused(&self) -> bool {
         self.focused
+    }
+
+    /// Gives the view the keys, as a press on it does, and takes egui's focus, which would keep
+    /// them: from a text field, which keeps it until a click elsewhere, which a drag isn't, or any
+    /// widget. For a layer's control too, as [`Ui::focus_view`](crate::Ui::focus_view) says.
+    pub(crate) fn give_focus(&mut self, egui: &egui::Context) {
+        egui.memory_mut(|memory| memory.stop_text_input());
+        self.focus(true);
     }
 
     /// Whether the cursor is in the window: from a move in it until it leaves.
@@ -298,6 +303,22 @@ mod tests {
             Reach::Event
         );
         assert!(!egui.egui_wants_keyboard_input());
+    }
+
+    /// A layer's control, such as an editor's Play, gives the view back the keys its press took,
+    /// taking egui's focus, which would keep them.
+    #[test]
+    fn a_layers_control_gives_the_view_the_keys_its_press_took() {
+        let egui = context(false);
+        let mut input = unfocused(&egui);
+        egui.memory_mut(|memory| memory.request_focus(Id::unique("text")));
+        input.give_focus(&egui);
+        assert!(input.focused());
+        assert!(!egui.egui_wants_keyboard_input());
+        assert_eq!(
+            input.route(&egui, &key(true), false, Under::Other, true),
+            Reach::Event
+        );
     }
 
     #[test]
