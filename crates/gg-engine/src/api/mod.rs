@@ -110,9 +110,12 @@ impl Shown {
             Api::Roughness => Channel::Roughness,
             Api::Occlusion => Channel::Occlusion,
             Api::Emission => Channel::Emission,
+            Api::SpecularColor => Channel::SpecularColor,
             Api::DirectLight => Channel::DirectLight,
             Api::SkyLight => Channel::SkyLight,
             Api::Reflection => Channel::Reflection,
+            Api::DiffuseLight => Channel::DiffuseLight,
+            Api::SpecularLight => Channel::SpecularLight,
         };
         Self::Shading(channel)
     }

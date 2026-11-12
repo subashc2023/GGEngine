@@ -64,6 +64,10 @@ pub enum Channel {
     Occlusion,
     /// The light it gives off.
     Emission,
+    /// What it reflects head-on, as the frame's lights take it: a metallic-roughness material's
+    /// 0.04 mixed with its base color by how metallic it is; a specular-glossiness material's
+    /// specular color.
+    SpecularColor,
     /// The light the frame's lights shade it with, shadows and all; none for what's unlit.
     DirectLight,
     /// The sky's light from all around, diffuse and specular, as occlusion darkens it and the
@@ -71,6 +75,11 @@ pub enum Channel {
     SkyLight,
     /// The view's reflections, as much as takes the place of the sky's specular light.
     Reflection,
+    /// The light it diffuses, the frame's lights' and the sky's.
+    DiffuseLight,
+    /// The light it reflects: the frame's lights' highlights, the sky's specular light and the
+    /// view's reflections.
+    SpecularLight,
 }
 
 impl Channel {
@@ -82,7 +91,14 @@ impl Channel {
 
     /// Whether it's light, which the tonemapper maps, rather than a color or a value.
     fn light(self) -> bool {
-        matches!(self, Self::DirectLight | Self::SkyLight | Self::Reflection)
+        matches!(
+            self,
+            Self::DirectLight
+                | Self::SkyLight
+                | Self::Reflection
+                | Self::DiffuseLight
+                | Self::SpecularLight
+        )
     }
 }
 

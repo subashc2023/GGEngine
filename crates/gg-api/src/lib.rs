@@ -915,6 +915,10 @@ pub enum Shown {
     Occlusion,
     /// The light it gives off, as [`Shown::BaseColor`] reads, past 1 shown as 1.
     Emission,
+    /// What it reflects head-on, as the frame's lights take it: a metallic-roughness material's 0.04
+    /// mixed with its base color by how metallic it is; a specular-glossiness material's specular
+    /// color. Read as [`Shown::BaseColor`] reads.
+    SpecularColor,
     /// The light the frame's lights shade it with, the sun's among them, shadows and all, exposed
     /// and tonemapped as the view's light is; none on an unlit material.
     DirectLight,
@@ -924,6 +928,12 @@ pub enum Shown {
     /// The view's reflection, which takes the place of as much of the sky's specular light, as
     /// [`Shown::DirectLight`] reads.
     Reflection,
+    /// The light it diffuses, the frame's lights' and the sky's, as [`Shown::DirectLight`] reads:
+    /// beside [`Shown::SpecularLight`], all the light the view shows of it but its emission.
+    DiffuseLight,
+    /// The light it reflects, the frame's lights' highlights, the sky's specular light and the
+    /// view's reflection, as [`Shown::DirectLight`] reads.
+    SpecularLight,
     /// An image the frame makes, by its debug name, as its kind reads: colors as they are, of high
     /// dynamic range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at
     /// its near plane, and a 24th darker each time the distance doubles, black where nothing drew;
@@ -2163,6 +2173,9 @@ mod tests {
             (r#""base_color""#, Shown::BaseColor),
             (r#""surface_normal""#, Shown::SurfaceNormal),
             (r#""direct_light""#, Shown::DirectLight),
+            (r#""specular_color""#, Shown::SpecularColor),
+            (r#""diffuse_light""#, Shown::DiffuseLight),
+            (r#""specular_light""#, Shown::SpecularLight),
             (
                 r#"{"image": "view depth"}"#,
                 Shown::Image("view depth".to_owned()),

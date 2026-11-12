@@ -2146,17 +2146,18 @@ a capture asks and the editor's toolbar sets: a part of what lit shading takes o
 point of what models draw, which shading.slang's `lit` returns in place of its light, by a number
 in the frame's data, both where the visibility buffer shades and where models shade as they draw:
 the base color, the normal before and after its normal map, how metallic and how rough it is, its
-occlusion, its emission, or the light the frame's lights, the sky and the view's reflections each
-give it; or an image of the graph's own, by its debug name, which a compute pass reads by its kind
-into colors of the view's own, shown in place of the view's. The frame shows it as drawn: without
-antialiasing's offset or anything after the view's passes, no antialiasing, fog, depth of field,
-motion blur, bloom, grade or lens, nor the exposure metered, which adapts on as it did; without the
-sky; and through the tonemapper only where it's light, so that the view's 8-bit sRGB image stores a
-color as a texture holds it and a value as its byte over 255, as gg-api's `Shown` says, and a
-capture's bytes read as numbers. It keeps nothing for the next frame's reflections, which trace
-against what the last frame that showed the view's light kept, and the frames after it antialias
-afresh. The frame's targets, as TAA's history and the reflections, have no names in its graph, and
-show by none.
+occlusion, its emission, what it reflects head-on, the light the frame's lights, the sky and the
+view's reflections each give it, or the light it diffuses and the light it reflects, of all three,
+the lights shading without the other's term; or an image of the graph's own, by its debug name,
+which a compute pass reads by its kind into colors of the view's own, shown in place of the view's.
+The frame shows it as drawn: without antialiasing's offset or anything after the view's passes, no
+antialiasing, fog, depth of field, motion blur, bloom, grade or lens, nor the exposure metered,
+which adapts on as it did; without the sky; and through the tonemapper only where it's light, so
+that the view's 8-bit sRGB image stores a color as a texture holds it and a value as its byte over
+255, as gg-api's `Shown` says, and a capture's bytes read as numbers. It keeps nothing for the next
+frame's reflections, which trace against what the last frame that showed the view's light kept, and
+the frames after it antialias afresh. The frame's targets, as TAA's history and the reflections,
+have no names in its graph, and show by none.
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's

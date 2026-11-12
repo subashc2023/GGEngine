@@ -124,6 +124,7 @@ fn main() -> ExitCode {
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
         views_show_parts_of_shading_and_images_in_place_of_light,
+        the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -193,6 +194,7 @@ fn main() -> ExitCode {
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
         views_show_parts_of_shading_and_images_in_place_of_light,
+        the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -8138,6 +8140,15 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
         ),
         (Channel::Occlusion, [[255; 3]; 3]),
         (Channel::Emission, [[encoded(0.5), 0, 0], [0; 3], [0; 3]]),
+        // 0.04 mixed with the color by how metallic it is, and the specular color.
+        (
+            Channel::SpecularColor,
+            [
+                [encoded(0.155), encoded(0.0925), encoded(0.28)],
+                encoded_color,
+                [encoded(0.04); 3],
+            ],
+        ),
     ];
     for (channel, expected) in parts {
         let shown = frame(Some(Show::Shading(channel)));
@@ -8184,6 +8195,124 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
             "the light shows again at {at:?} as {got:?}, not {was:?}"
         );
     }
+    shut_down(renderer);
+}
+
+fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
+    const SIDE: u32 = 16;
+    const SQUARES: u32 = 3;
+    const WIDTH: u32 = SIDE * SQUARES;
+    const HEIGHT: u32 = 2 * SIDE;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [1.0; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 0.25,
+    });
+    // From the viewpoint, so that each square's highlight faces it, and its specular light is as
+    // much as a smooth surface's can be.
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::NEG_Z,
+        color: Vec3::splat(1.0),
+        range: None,
+        shadow_distance: None,
+    }];
+    // A dielectric, a metal, which diffuses nothing, and what's unlit, which takes no light.
+    let squares = [
+        Material {
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            workflow: metallic(0.0, 0.5),
+            ..Material::default()
+        },
+        Material {
+            color: Vec4::new(0.4, 0.4, 0.4, 1.0),
+            workflow: metallic(1.0, 0.5),
+            ..Material::default()
+        },
+        Material {
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            unlit: true,
+            ..Material::default()
+        },
+    ];
+    let square = model_square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    for (i, material) in (0_u32..).zip(&squares) {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        let at = Vec3::new(i as f32 - (SQUARES - 1) as f32 / 2.0, 0.0, 0.0);
+        draws.push_draw(Mat4::from_translation(at), &draw, u64::from(i) + 1);
+    }
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // Each square's linear light, as the view shows `channel`, through no tonemapper.
+    let mut light = |channel| {
+        let data = RenderData {
+            show: Some(Show::Shading(channel)),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        [0, 1, 2].map(|i| {
+            let [r, g, b, _] = pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE]);
+            [r, g, b].map(decoded)
+        })
+    };
+    let [direct, sky, reflection, diffuse, specular] = [
+        Channel::DirectLight,
+        Channel::SkyLight,
+        Channel::Reflection,
+        Channel::DiffuseLight,
+        Channel::SpecularLight,
+    ]
+    .map(&mut light);
+    // Within the 8-bit rounding of the five values.
+    for i in 0..2 {
+        for c in 0..3 {
+            let parts = direct[i][c] + sky[i][c] + reflection[i][c];
+            let split = diffuse[i][c] + specular[i][c];
+            assert!(
+                (parts - split).abs() <= 0.01,
+                "square {i} diffuses {:?} and reflects {:?}, which add up to {split}, not {parts}, \
+                 its lights' {:?}, its sky's {:?} and its reflection's {:?}",
+                diffuse[i],
+                specular[i],
+                direct[i],
+                sky[i],
+                reflection[i]
+            );
+        }
+    }
+    // The dielectric's highlight, about 0.05 of the light, besides the sky's, about 0.01.
+    assert!(
+        specular[0].iter().all(|&c| c > 0.04),
+        "the dielectric reflects {:?}",
+        specular[0]
+    );
+    assert_eq!(diffuse[1], [0.0; 3], "the metal diffuses nothing");
+    assert!(
+        specular[1].iter().all(|&c| c > 0.3),
+        "the metal reflects {:?}",
+        specular[1]
+    );
+    assert_eq!(
+        [diffuse[2], specular[2]],
+        [[0.0; 3]; 2],
+        "what's unlit takes no light"
+    );
     shut_down(renderer);
 }
 
