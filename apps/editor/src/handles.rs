@@ -135,6 +135,10 @@ pub enum Reply {
     /// left button over the view off the handles, with a tool that picks, which the camera still
     /// sees.
     Pick([f64; 2]),
+    /// Asks what shading took and made at the cursor, in the main window's pixels: a press of the
+    /// left button over the view with the Probe tool, which shows no handles; the camera doesn't
+    /// see it.
+    Probe([f64; 2]),
 }
 
 /// A field of a transform, which a drag sets whole.
@@ -153,7 +157,7 @@ impl Field {
             Tool::Move => Some(Self::Translation(transform.translation)),
             Tool::Rotate => Some(Self::Rotation(transform.rotation)),
             Tool::Scale => Some(Self::Scale(transform.scale)),
-            Tool::Select | Tool::Pan | Tool::Orbit => None,
+            Tool::Select | Tool::Pan | Tool::Orbit | Tool::Probe => None,
         }
     }
 
@@ -228,8 +232,9 @@ impl Handles {
     /// it started, when that changes and a transform takes it, and pressing or letting go of the
     /// command key, which snaps, sets it again. While it lasts, it takes every other press, the
     /// wheel and Home from the camera. Off the handles, with a tool that picks, the press asks for
-    /// a pick of what's under the cursor; but neither starts with Alt held, which orbits, nor
-    /// while the camera drags; and while the camera eases, a press on a handle grabs nothing.
+    /// a pick of what's under the cursor, and with Probe, which shows none, for a probe of the
+    /// pixel; but none starts with Alt held, which orbits, nor while the camera drags; and while
+    /// the camera eases, a press on a handle grabs nothing.
     pub fn event(&mut self, event: &Event<'_>, reading: &Reading, aim: &Aim) -> Reply {
         if let Some(drag) = &mut self.drag {
             return match *event {
@@ -274,7 +279,13 @@ impl Handles {
         let Some(cursor) = reading.cursor else {
             return Reply::Pass;
         };
-        if !picks || aim.camera || reading.screen.alt {
+        if aim.camera || reading.screen.alt {
+            return Reply::Pass;
+        }
+        if aim.tool == Tool::Probe {
+            return Reply::Probe(cursor);
+        }
+        if !picks {
             return Reply::Pass;
         }
         let at = Vec2::new(cursor[0] as f32, cursor[1] as f32);
@@ -412,7 +423,7 @@ impl Handles {
                 }
                 pen.square(center, CENTER, hue(Handle::Center, PLAIN, 1.0));
             }
-            Tool::Select | Tool::Pan | Tool::Orbit => {}
+            Tool::Select | Tool::Pan | Tool::Orbit | Tool::Probe => {}
         }
     }
 
@@ -458,7 +469,7 @@ impl Handles {
             Tool::Move | Tool::Rotate | Tool::Scale => {
                 place(sight, &picked.parent, &self.shown(picked))
             }
-            Tool::Select | Tool::Pan | Tool::Orbit => None,
+            Tool::Select | Tool::Pan | Tool::Orbit | Tool::Probe => None,
         }
     }
 
@@ -1040,7 +1051,7 @@ impl Placed {
                     );
                 }
             }
-            Tool::Select | Tool::Pan | Tool::Orbit => {}
+            Tool::Select | Tool::Pan | Tool::Orbit | Tool::Probe => {}
         }
         best.map(|(_, handle)| handle)
     }
@@ -2213,5 +2224,35 @@ mod tests {
             assert!(!handles.dragging());
             handles.event(&left(false), &reading(at), &aim);
         }
+    }
+
+    /// With Probe, a press over the view asks for a probe of its pixel, where a handle of what's
+    /// picked would have been too, since Probe shows none; not with Alt held, which orbits.
+    #[test]
+    fn a_press_with_probe_asks_for_a_probe_of_its_pixel() {
+        let viewpoint = aside(Vec3::ZERO, false);
+        let sight = sight(viewpoint);
+        let local = turned();
+        let aim = aim(Tool::Probe, viewpoint, picked(local, Pose::IDENTITY));
+        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let on = sight.project(placed.origin + placed.axes[0] * placed.length * 0.7);
+        let on = on.expect("in view");
+        let mut handles = Handles::default();
+        for at in [on, Vec2::new(110.0, 60.0)] {
+            handles.event(&moved(at), &reading(at), &aim);
+            let reply = handles.event(&left(true), &reading(at), &aim);
+            assert_eq!(reply, Reply::Probe([f64::from(at.x), f64::from(at.y)]));
+            assert!(!handles.dragging());
+            handles.event(&left(false), &reading(at), &aim);
+        }
+        let at = Vec2::new(110.0, 60.0);
+        let alt = Reading {
+            screen: Screen {
+                alt: true,
+                ..reading(at).screen
+            },
+            ..reading(at)
+        };
+        assert_eq!(handles.event(&left(true), &alt, &aim), Reply::Pass);
     }
 }

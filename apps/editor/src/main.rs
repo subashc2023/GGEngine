@@ -107,4 +107,35 @@ mod tests {
             cursor: Some(at.into().to_array()),
         }
     }
+
+    /// A probe's answer at pixel `at` of a view 800 by 600: a material's, its light as the view
+    /// shows it, of entity Crate, with depth but, as an orthographic view's, no distance.
+    pub(crate) fn probe(at: [f64; 2]) -> gg_api::probe::Probe {
+        gg_api::probe::Probe {
+            at,
+            size: [800, 600],
+            ticks: 9,
+            base_color: Some([0.5, 0.25, 1.0]),
+            normal: Some([0.0, 0.0, 1.0]),
+            surface_normal: Some([0.0, 0.0, 1.0]),
+            metallic: Some(0.25),
+            roughness: Some(0.75),
+            occlusion: Some(1.0),
+            emission: Some([0.0; 3]),
+            specular_color: Some([0.155, 0.0925, 0.28]),
+            direct_light: Some([12, 30, 40]),
+            sky_light: Some([1, 2, 3]),
+            reflection: Some([0, 0, 0]),
+            diffuse_light: Some([10, 25, 35]),
+            specular_light: Some([4, 6, 8]),
+            shown: Some([20, 40, 60]),
+            depth: Some(1.0 / 4096.0),
+            distance: None,
+            entity: gg_api::Picked {
+                id: Some("2b7e151628aed2a6".to_owned()),
+                name: Some("Crate".to_owned()),
+            },
+            quantized: String::new(),
+        }
+    }
 }

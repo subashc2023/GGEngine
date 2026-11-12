@@ -66,6 +66,8 @@ pub enum Tool {
     Pan,
     /// Orbits the pivot, as Alt and the left button do.
     Orbit,
+    /// Reads what shading took and made at the pixel pressed, as `gg probe` does.
+    Probe,
 }
 
 /// What a drag does to the camera.
@@ -389,7 +391,7 @@ impl OrbitCamera {
                     (MouseButton::Right, false) => Move::Pan,
                     (MouseButton::Left, true) => Move::Orbit,
                     (MouseButton::Left, false) => match tool {
-                        Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale => {
+                        Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale | Tool::Probe => {
                             return ControlFlow::Continue(());
                         }
                         Tool::Pan => Move::Pan,

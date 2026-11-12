@@ -7,7 +7,8 @@
 
 use std::f32::consts::{PI, TAU};
 
-use gg_api::{FrameImage, ImageKind, Pass, Shown};
+use gg_api::probe::Probe;
+use gg_api::{Failure, FrameImage, ImageKind, Pass, Shown};
 use gg_engine::Context;
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Popup,
@@ -278,8 +279,9 @@ impl Toolbar {
     }
 
     /// Draws the toolbar into `ui`: its grip, which a drag of moves it, as [`place`](Self::place)
-    /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, whose
-    /// tooltips name the keys that pick them, the camera's projection, which a click switches, the
+    /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, Probe
+    /// last, whose tooltips name the keys that pick them, the camera's projection, which a click
+    /// switches, the
     /// grid's switch and its plane, the switch that sees through the game's camera, and the
     /// colliders' switch, the list of what the view shows in place of its light, and the Passes
     /// button, lit while the view leaves any out, each with a tooltip. While the view sees through
@@ -353,6 +355,14 @@ impl Toolbar {
                         Icon::Orbit,
                         "Orbit: the left button turns the view about its pivot, as Alt and the \
                          left button do"
+                            .to_owned(),
+                    ),
+                    (
+                        Tool::Probe,
+                        Icon::Probe,
+                        "Probe: the left button reads what shading took and made at the pixel \
+                         clicked, as `gg probe` does: its material's values, its normal, its light \
+                         and its depth, beside it; Escape closes them"
                             .to_owned(),
                     ),
                 ] {
@@ -633,6 +643,8 @@ enum Icon {
     Pan,
     /// A circular arrow.
     Orbit,
+    /// A crosshair: a ring with a line in from each side, and a dot at its middle.
+    Probe,
     /// Lines across and down.
     Grid,
     /// A film camera: its body, and its lens.
@@ -719,6 +731,18 @@ impl Icon {
                     end + out - along * 0.3,
                     end - out - along * 0.3,
                 ]);
+            }
+            Self::Probe => {
+                painter.circle_stroke(at(8.0, 8.0), 4.5 * scale, line);
+                for [from, to] in [
+                    [at(8.0, 0.5), at(8.0, 5.0)],
+                    [at(8.0, 11.0), at(8.0, 15.5)],
+                    [at(0.5, 8.0), at(5.0, 8.0)],
+                    [at(11.0, 8.0), at(15.5, 8.0)],
+                ] {
+                    painter.line_segment([from, to], line);
+                }
+                painter.circle_filled(at(8.0, 8.0), 1.0 * scale, color);
             }
             Self::Grid => {
                 let thin = Stroke::new(1.0, color);
@@ -1009,6 +1033,82 @@ pub fn label(
     let at = corner.pos_in_rect(&view.rect.shrink(INSET));
     let outer = corner.anchor_size(at, galley.size() + margin.sum());
     let inner = outer - margin;
+    painter.add(frame.paint(inner));
+    painter.galley(inner.min, galley, color);
+}
+
+/// What the Probe tool's panel says of a probe of the view, `probed`, its answer, or, while it's
+/// `None`, that it waits for it: a line for each part, as the list of what the view shows names
+/// them, its numbers as [`Probe`] says, values and colors linear, light as the view's sRGB bytes,
+/// `-` outside the view.
+pub fn probe_text(probed: Option<&Result<Probe, Failure>>) -> String {
+    let probe = match probed {
+        None => return "Probing…".to_owned(),
+        Some(Err(Failure { code, message })) => return format!("Probe failed: [{code}] {message}"),
+        Some(Ok(probe)) => probe,
+    };
+    let none = || "-".to_owned();
+    let color = |color: Option<[f64; 3]>| {
+        color.map_or_else(none, |[r, g, b]| format!("{r:.3} {g:.3} {b:.3}"))
+    };
+    let value = |value: Option<f64>| value.map_or_else(none, |value| format!("{value:.3}"));
+    let light =
+        |light: Option<[u8; 3]>| light.map_or_else(none, |[r, g, b]| format!("{r} {g} {b}"));
+    let entity = match (&probe.entity.name, &probe.entity.id) {
+        (Some(name), Some(id)) => format!("{name} ({id})"),
+        (None, Some(id)) => id.clone(),
+        _ => none(),
+    };
+    let [x, y] = probe.at;
+    let lines = [
+        ("Pixel", format!("{x:.0} {y:.0}")),
+        ("Base color", color(probe.base_color)),
+        ("Normal", color(probe.normal)),
+        ("Surface normal", color(probe.surface_normal)),
+        ("Metallic", value(probe.metallic)),
+        ("Roughness", value(probe.roughness)),
+        ("Occlusion", value(probe.occlusion)),
+        ("Emission", color(probe.emission)),
+        ("Specular color", color(probe.specular_color)),
+        ("Direct light", light(probe.direct_light)),
+        ("Sky light", light(probe.sky_light)),
+        ("Reflection", light(probe.reflection)),
+        ("Diffuse light", light(probe.diffuse_light)),
+        ("Specular light", light(probe.specular_light)),
+        (
+            "Depth",
+            (probe.depth).map_or_else(none, |depth| format!("{depth:.3e}")),
+        ),
+        ("Distance", value(probe.distance)),
+        ("Entity", entity),
+    ];
+    let mut text: String = (lines.iter())
+        .map(|(label, value)| format!("{label:<16}{value}\n"))
+        .collect();
+    text.push_str("Light as the view's sRGB bytes; all read from 8-bit pixels");
+    text
+}
+
+/// Shows `text`, a probe's as [`probe_text`] says, beside `at`, the pixel probed, in points, kept
+/// inside `view`, with a ring round the pixel: on the view's own layer, as [`label`] shows its
+/// text.
+pub fn probe_readout(egui: &egui::Context, view: &Response, at: Pos2, text: String) {
+    let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
+    let global = egui.global_style();
+    let color = global.visuals.text_color();
+    painter.circle_stroke(
+        at,
+        5.0,
+        Stroke::new(1.5, global.visuals.selection.stroke.color),
+    );
+    let galley = painter.layout_no_wrap(text, TextStyle::Monospace.resolve(&global), color);
+    let frame = panel(&global.visuals);
+    let margin = frame.total_margin();
+    let size = galley.size() + margin.sum();
+    // Below and to the right of the pixel, moved back inside the view where it would leave it.
+    let room = view.rect.shrink(INSET);
+    let min = (at + vec2(12.0, 12.0)).min(room.max - size).max(room.min);
+    let inner = Rect::from_min_size(min, size) - margin;
     painter.add(frame.paint(inner));
     painter.galley(inner.min, galley, color);
 }
@@ -1434,6 +1534,33 @@ mod tests {
         let opened = toolbar_pass(&ctx, &mut toolbar, Vec::new());
         let why = "No images listed: [api.unknown_method] no `images`";
         assert!(text_at(&opened, why).is_some(), "says why");
+    }
+
+    /// The Probe tool's numbers: that it waits, why it failed, or a line for each part, values and
+    /// colors to three places, light as its bytes, depth as an exponent, `-` for what there's none
+    /// of, and the entity by its name and ID.
+    #[test]
+    fn a_probes_numbers_read_as_the_list_names_them() {
+        assert_eq!(probe_text(None), "Probing…");
+        let failed = Err(Failure::new("api.no_view", "no view"));
+        assert_eq!(
+            probe_text(Some(&failed)),
+            "Probe failed: [api.no_view] no view"
+        );
+        let text = probe_text(Some(&Ok(crate::tests::probe([300.0, 200.0]))));
+        for line in [
+            "Pixel           300 200",
+            "Base color      0.500 0.250 1.000",
+            "Metallic        0.250",
+            "Specular color  0.155 0.092 0.280",
+            "Direct light    12 30 40",
+            "Specular light  4 6 8",
+            "Depth           2.441e-4",
+            "Distance        -",
+            "Entity          Crate (2b7e151628aed2a6)",
+        ] {
+            assert!(text.lines().any(|got| got == line), "{line:?} in:\n{text}");
+        }
     }
 
     /// The list of what the view shows names each part by its label, as it shows on the closed

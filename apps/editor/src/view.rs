@@ -39,6 +39,9 @@ pub struct ViewTools<T, F> {
     /// Where the last press over the view off the handles asked to pick, in the main window's
     /// pixels, until the layer asks for it, keeping the ticket in `asked`.
     pub picking: Option<[f64; 2]>,
+    /// Where the last press over the view with the Probe tool asked to probe, in the main window's
+    /// pixels, until the layer asks for it.
+    pub probing: Option<[f64; 2]>,
     /// The ticket of the latest pick asked for, until its answer comes back, which the layer has
     /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
     /// handle drops it, so that it picks nothing else under the drag.
@@ -59,6 +62,7 @@ impl<T, F> ViewTools<T, F> {
             link,
             shown: None,
             picking: None,
+            probing: None,
             asked: None,
             hover: Hover::default(),
         }
@@ -109,6 +113,11 @@ impl<T, F> ViewTools<T, F> {
             Reply::Seal => self.link.seal(),
             // For the layer, which asks for picks, to ask.
             Reply::Pick(at) => self.picking = Some(at),
+            // As a pick's, and the camera doesn't take it.
+            Reply::Probe(at) => {
+                self.probing = Some(at);
+                return ControlFlow::Break(());
+            }
             Reply::Pass => {}
         }
         self.choose_tool(event, reading.command);
@@ -239,6 +248,7 @@ impl<T, F> ViewTools<T, F> {
             Some(Move::Dolly) => Some(CursorIcon::ZoomIn),
             None if hovered => match toolbar.tool {
                 Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale => None,
+                Tool::Probe => Some(CursorIcon::Crosshair),
                 Tool::Pan => Some(CursorIcon::Move),
                 Tool::Orbit => Some(CursorIcon::Grab),
             },
@@ -579,6 +589,19 @@ mod tests {
         let _ = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, false);
         let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
         assert_eq!(tools.toolbar.tool, Tool::Scale, "let go");
+    }
+
+    /// A press of the left button over the view with Probe asks for a probe at the cursor, and
+    /// takes it from the camera, picking nothing.
+    #[test]
+    fn a_press_with_probe_asks_for_a_probe() {
+        let off = [200.0, 500.0];
+        let mut tools = fresh();
+        tools.toolbar.tool = Tool::Probe;
+        tools.shown = Some(tools.camera.viewpoint());
+        let pressed = press_at(&mut tools, at_the_origin(), off, MouseButton::Left, true);
+        assert_eq!(pressed, ControlFlow::Break(()));
+        assert_eq!((tools.probing, tools.picking), (Some(off), None));
     }
 
     /// A press of the left button over the view off the handles asks for a pick at the cursor,

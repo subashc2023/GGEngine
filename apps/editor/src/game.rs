@@ -54,6 +54,9 @@
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
 //! handles move, turn and scale it through the Inspector's link, each drag one edit of the
 //! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
+//! The toolbar's Probe tool reads what shading took and made at the pixel clicked, through gg-api's
+//! [`probe`](gg_api::probe), as `gg probe` does, pausing a playing game for its captures, and shows
+//! the numbers beside the pixel until Escape, another probe or another tool.
 //! The title bar's settings switch on the game's frame rate and the editor's at the view's bottom
 //! right, as [`rates`](crate::rates) says.
 //! The editor's camera, the outline round what's picked, the grid, the colliders' switch, what the
@@ -96,6 +99,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::asset::{AssetKind, Meta};
+use gg_api::probe::Probe;
 use gg_api::view::Reader;
 use gg_api::{
     Client, Failure, ImageList, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status,
@@ -115,6 +119,7 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::assets::{Assets, Dragged};
+use crate::camera::Tool;
 use crate::debugger::Debugger;
 use crate::file::{self, Choice, Item, Message};
 use crate::handles::{Picked, Reading, Sight};
@@ -217,6 +222,10 @@ struct Game {
     /// The texture or font let go over the view whose pick waits for its answer, if one does: the
     /// latest.
     dropping: Option<Dropping>,
+    /// The Probe tool's last probe, whose numbers show beside its pixel until Escape, another
+    /// probe, or another tool: its ticket, the next of `tickets`; its pixel, in the main window's
+    /// pixels; and its answer, once it's come.
+    probing: Option<Probing>,
     /// The answers to picks that came back since the last update, each with its ticket.
     answered: Vec<(u64, Option<Found>)>,
     /// The game's look, as the editor keeps it.
@@ -359,6 +368,14 @@ enum Closing {
     Granted,
 }
 
+/// The Probe tool's probe: its ticket, the pixel, in the main window's pixels, and the answer, once
+/// it's come.
+struct Probing {
+    ticket: u64,
+    at: [f64; 2],
+    answer: Option<Result<Probe, Failure>>,
+}
+
 /// A texture or a font let go over the view: the ticket of the pick at where it was let go, which
 /// it is, its name, as the game takes it, and its file's name, as the Logs say it.
 #[derive(Debug, PartialEq)]
@@ -476,6 +493,7 @@ impl Game {
             tickets: 0,
             hovering: None,
             dropping: None,
+            probing: None,
             answered: Vec::new(),
             looking: Looking::new(CLIENT),
             wants,
@@ -1830,8 +1848,48 @@ impl Game {
         if let Some(at) = self.view.picking.take() {
             self.view.asked = self.ask_pick(at, origin);
         }
+        // Escape closes the Probe tool's numbers, and a probe asked shows its own in their place.
+        if escape {
+            self.probing = None;
+        }
+        if let Some(at) = self.view.probing.take()
+            && let Some(talker) = &self.talker
+        {
+            let ticket = self.tickets;
+            self.tickets += 1;
+            talker.probe(ticket, in_view(at, origin));
+            self.probing = Some(Probing {
+                ticket,
+                at,
+                answer: None,
+            });
+        }
         self.tell(reading.cursor, view);
         handled
+    }
+
+    /// Takes the answer to the Probe tool's probe, if it's come, dropping those of probes another
+    /// has taken the place of; and closes its numbers once another tool is picked.
+    fn take_probes(&mut self) {
+        if self.view.toolbar.tool != Tool::Probe {
+            self.probing = None;
+        }
+        let Some(talker) = &self.talker else {
+            return;
+        };
+        let answers: Vec<_> = talker.probed.try_iter().collect();
+        for (ticket, answer) in answers {
+            if let Err(Failure { code, message }) = &answer {
+                self.log(Level::Error, format!("`probe`: [{code}] {message}"));
+            }
+            if let Some(probing) = self
+                .probing
+                .as_mut()
+                .filter(|probing| probing.ticket == ticket)
+            {
+                probing.answer = Some(answer);
+            }
+        }
     }
 
     /// Asks the game for the entity its view shows at `at`, in the main window's pixels, with the
@@ -2068,6 +2126,7 @@ impl Layer for Game {
         self.take_answers();
         self.debugger.update();
         self.take_picks();
+        self.take_probes();
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
@@ -2295,6 +2354,13 @@ impl Layer for Game {
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
         if let Some(view) = ui.view() {
             self.rates.paint(ui.egui(), &view);
+            if let Some(probing) = &self.probing {
+                let points = ui.egui().pixels_per_point();
+                let [x, y] = probing.at.map(|axis| axis as f32 / points);
+                let at = egui::Pos2::new(x, y);
+                let text = overlay::probe_text(probing.answer.as_ref());
+                overlay::probe_readout(ui.egui(), &view, at, text);
+            }
             // Where the keys go in Play, which are the game's.
             if self.through() && ui.view_focused() {
                 overlay::outline_view(ui.egui(), &view);
@@ -2568,17 +2634,44 @@ fn pick(
     }
 }
 
+/// Asks the game `session` names, on a connection of its own, as the editor, what shading took and
+/// made at each pixel of its view `asks` gives, with its ticket, in turn, as `gg probe` does, the
+/// view as the look shows it, sending `send` each answer with the ticket, or why there's none,
+/// until the editor lets go of the game, `asks`' sender dropping.
+fn probe(
+    session: &Session,
+    asks: Receiver<(u64, [f64; 2])>,
+    send: &Sender<(u64, Result<Probe, Failure>)>,
+) {
+    let mut connected = Client::connect(session, CLIENT, CONNECT)
+        .and_then(|mut client| client.set_timeout(None).map(|()| client));
+    for (ticket, at) in asks {
+        let answer = match &mut connected {
+            Ok(client) => {
+                gg_api::probe::probe(|method, params| client.call(method, params), at, false)
+            }
+            Err(failure) => Err(failure.clone()),
+        };
+        if send.send((ticket, answer)).is_err() {
+            return;
+        }
+    }
+}
+
 /// Connections to the game, each on a thread of its own, so that no frame waits for the game's
 /// answer: one that requests go to in order, their answers coming back in order; one that follows
 /// the game's log, as [`follow`] does, whose events come back as they're read, each read's
-/// together; and one that picks go to, as [`pick`] does, each of which waits for a frame to read
-/// it, their answers coming back in order, with their tickets.
+/// together; one that picks go to, as [`pick`] does, each of which waits for a frame to read it,
+/// their answers coming back in order, with their tickets; and one that probes go to, as [`probe`]
+/// does, likewise, each of which waits for a frame for each of its captures.
 struct Talker {
     asks: Sender<(String, Value)>,
     answers: Receiver<(String, Result<Value, Failure>)>,
     logged: Receiver<Vec<Value>>,
     picks: Sender<(u64, [f64; 2])>,
     picked: Receiver<(u64, Result<gg_api::Picked, Failure>)>,
+    probes: Sender<(u64, [f64; 2])>,
+    probed: Receiver<(u64, Result<Probe, Failure>)>,
 }
 
 impl Talker {
@@ -2589,10 +2682,14 @@ impl Talker {
         let (log, logged) = mpsc::channel();
         let (picks, picking) = mpsc::channel();
         let (found, picked) = mpsc::channel();
+        let (probes, probing) = mpsc::channel();
+        let (read, probed) = mpsc::channel();
         let followed = session.clone();
         thread::spawn(move || follow(&followed, &log));
         let picker = session.clone();
         thread::spawn(move || pick(&picker, picking, &found));
+        let prober = session.clone();
+        thread::spawn(move || probe(&prober, probing, &read));
         thread::spawn(move || {
             let connected = Client::connect(&session, CLIENT, CONNECT)
                 .and_then(|mut client| client.set_timeout(None).map(|()| client));
@@ -2618,6 +2715,8 @@ impl Talker {
             logged,
             picks,
             picked,
+            probes,
+            probed,
         }
     }
 
@@ -2630,6 +2729,12 @@ impl Talker {
     /// answer comes back in `picked` with `ticket`.
     fn pick(&self, ticket: u64, at: [f64; 2]) {
         let _ = self.picks.send((ticket, at));
+    }
+
+    /// Asks what shading took and made at `at`, in the view's pixels from its top left, whose
+    /// answer comes back in `probed` with `ticket`.
+    fn probe(&self, ticket: u64, at: [f64; 2]) {
+        let _ = self.probes.send((ticket, at));
     }
 }
 
@@ -2731,6 +2836,8 @@ mod tests {
         answer: Sender<(String, Result<Value, Failure>)>,
         picks: Receiver<(u64, [f64; 2])>,
         found: Sender<(u64, Result<gg_api::Picked, Failure>)>,
+        probes: Receiver<(u64, [f64; 2])>,
+        read: Sender<(u64, Result<Probe, Failure>)>,
     }
 
     /// The layer with a game serving, as `serve` leaves it, that plays, through its camera, as the
@@ -2742,12 +2849,16 @@ mod tests {
         let (_, logged) = mpsc::channel();
         let (picks, picking) = mpsc::channel();
         let (found, picked) = mpsc::channel();
+        let (probes, probing) = mpsc::channel();
+        let (read, probed) = mpsc::channel();
         game.talker = Some(Talker {
             asks,
             answers,
             logged,
             picks,
             picked,
+            probes,
+            probed,
         });
         game.run_state = RunState::Running;
         (game.stopped, game.told, game.served) = (false, true, true);
@@ -2756,6 +2867,8 @@ mod tests {
             answer,
             picks: picking,
             found,
+            probes: probing,
+            read,
         };
         (game, ends)
     }
@@ -4042,6 +4155,63 @@ mod tests {
         assert_eq!(looks(&ends), [skips(None)], "the user's null");
     }
 
+    /// A press with the Probe tool asks the game for a probe of its pixel, in the view's pixels,
+    /// taking the press from the camera; its answer fills the numbers shown beside it, an answer to
+    /// a probe another took the place of dropped; and Escape, or another tool, closes them.
+    #[test]
+    fn a_probe_is_asked_and_its_numbers_shown_until_escape_or_another_tool() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        // Through the editor's camera, as in Simulate, the tools take the view's input.
+        game.view.toolbar.world_camera = false;
+        game.view.toolbar.tool = Tool::Probe;
+        // [`VIEW`]'s top left is at (100, 50).
+        let (at, in_game) = ([300.0, 200.0], [200.0, 150.0]);
+        let press = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        let probed = |game: &mut Game| {
+            let routed = game.route(&press, &reading(at), Some(VIEW));
+            assert_eq!(routed, ControlFlow::Break(()), "the camera's not");
+            let asked: Vec<_> = ends.probes.try_iter().collect();
+            let [(ticket, pixel)] = asked[..] else {
+                panic!("one probe asked: {asked:?}");
+            };
+            assert_eq!(pixel, in_game);
+            ticket
+        };
+        let first = probed(&mut game);
+        let waiting = game.probing.as_ref().expect("probing");
+        assert_eq!((waiting.at, waiting.answer.is_none()), (at, true));
+        let second = probed(&mut game);
+        let answer = |ticket| (ticket, Ok(crate::tests::probe(in_game)));
+        ends.read.send(answer(first)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let probing = game.probing.as_ref().expect("probing");
+        assert!(probing.answer.is_none(), "the first's dropped");
+        ends.read.send(answer(second)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let probing = game.probing.as_ref().expect("probing");
+        let shown = probing
+            .answer
+            .as_ref()
+            .and_then(|answer| answer.as_ref().ok());
+        assert_eq!(shown, Some(&crate::tests::probe(in_game)));
+        let escape = Event::Key {
+            key: Key::Escape,
+            pressed: true,
+            repeat: false,
+        };
+        let _ = game.route(&escape, &reading(at), Some(VIEW));
+        assert!(game.probing.is_none(), "closed by Escape");
+        probed(&mut game);
+        game.view.toolbar.tool = Tool::Select;
+        game.update(&mut cx, Duration::ZERO);
+        assert!(game.probing.is_none(), "closed by another tool");
+    }
+
     /// The images the game's frame makes are asked for as the list of what the view shows opens,
     /// and listed as the game answers; a refusal, as an older game's, says why in their place.
     #[test]
@@ -4414,12 +4584,16 @@ mod tests {
         let (log, logged) = mpsc::channel();
         let (picks, _) = mpsc::channel();
         let (_, picked) = mpsc::channel();
+        let (probes, _) = mpsc::channel();
+        let (_, probed) = mpsc::channel();
         game.talker = Some(Talker {
             asks,
             answers,
             logged,
             picks,
             picked,
+            probes,
+            probed,
         });
         let warned = r#"{"timestamp":"2026-10-30T12:00:00.000000Z","level":"WARN",
             "code":"asset.missing","path":"assets/hero sprite.png","tries":2,"empty":"",
