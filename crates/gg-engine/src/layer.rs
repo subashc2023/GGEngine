@@ -904,14 +904,16 @@ impl Context {
     }
 
     /// Asks for the cursor grabbed, for looking about with the mouse, as first-person games do, or
-    /// lets it go. Grabbed, it's hidden and held in the window, locked where it is on macOS and
-    /// Wayland and kept inside the window elsewhere, so that the mouse's raw motion,
+    /// lets it go. Grabbed, it's hidden and held in the window, locked where it is on Windows,
+    /// macOS and Wayland and kept inside the window on X11, so that the mouse's raw motion,
     /// [`Event::MouseMotion`], looks about however far it goes. It's held while the window has
     /// focus, and in a dockspace while the view has the keys, let go as either goes and held again
-    /// as it comes back. Headless runs have no cursor to grab; a game the editor plays has the
-    /// editor grab its own window's, while Play gives the game its input, letting go at Escape or
-    /// Stop, and grabbing again at a click in the view. It's applied as the next frame starts, so
-    /// that the layer that asks last in a frame has its way.
+    /// as it comes back; in a dockspace, a grab that starts with the cursor off the view moves it
+    /// to the view's center first, where the platform can move it. Headless runs have no cursor to
+    /// grab; a game the editor plays has the editor grab its own window's, while Play gives the
+    /// game its input, letting go at Escape or Stop, and grabbing again at a click in the view.
+    /// It's applied as the next frame starts, so that the layer that asks last in a frame has its
+    /// way.
     pub fn set_cursor_grabbed(&mut self, grabbed: bool) {
         self.cursor_grabbed = grabbed;
     }

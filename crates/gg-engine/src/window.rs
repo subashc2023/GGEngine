@@ -507,9 +507,10 @@ impl Handler<'_> {
 
     /// Grabs the cursor, or lets it go, as the layers want it, while the window has focus, and in a
     /// dockspace while the view shows and has the keys, as [`Context::set_cursor_grabbed`] says.
-    /// Locked where the platform locks it, as macOS and Wayland do, and otherwise kept inside the
-    /// window, as on Windows and X11, which still report the mouse's raw motion past its edges;
-    /// warns `engine.cursor_grab` if it can't be either.
+    /// Locked where the platform locks it, as Windows, macOS and Wayland do, and otherwise kept
+    /// inside the window, as on X11, which still reports the mouse's raw motion past its edges;
+    /// warns `engine.cursor_grab` if it can't be either. In a dockspace, a grab that starts with the
+    /// cursor off the view moves it to the view's center first, as [`Dock::grab_at`] says.
     fn hold_cursor(&mut self) {
         let Some(window) = &self.window else {
             return;
@@ -524,6 +525,25 @@ impl Handler<'_> {
             return;
         }
         self.grabbed = grab;
+        #[cfg(feature = "dev")]
+        if grab
+            && let Some(input) = &self.view_input
+            && let Some(at) = self.dock.grab_at(
+                &self.egui,
+                (self.egui_winit.as_ref())
+                    .filter(|_| input.inside())
+                    .map(WindowInput::cursor),
+            )
+        {
+            let ppp = egui_winit::pixels_per_point(&self.egui, window);
+            let at = PhysicalPosition::new(at.x * ppp, at.y * ppp);
+            match window.set_cursor_position(at) {
+                Ok(()) => debug!(x = at.x, y = at.y, "Cursor moved onto the view"),
+                // As on Wayland, which moves no cursor it hasn't locked: the grab goes on where
+                // the cursor is.
+                Err(error) => debug!("The cursor can't move onto the view: {error}"),
+            }
+        }
         if grab {
             use winit::window::CursorGrabMode;
             let held = (window.set_cursor_grab(CursorGrabMode::Locked))

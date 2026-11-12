@@ -152,6 +152,11 @@ impl ViewInput {
         self.focused
     }
 
+    /// Whether the cursor is in the window: from a move in it until it leaves.
+    pub(crate) fn inside(&self) -> bool {
+        self.inside
+    }
+
     fn focus(&mut self, focused: bool) {
         if self.focused != focused {
             self.focused = focused;

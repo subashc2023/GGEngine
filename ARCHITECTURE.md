@@ -1552,12 +1552,15 @@ motion is an event, which a layer adds up into a command of its own, as it does 
 so that each tick turns by all the motion since the tick before. Motion isn't an action, as an
 action holds a value, as a key or a stick does, and motion is a distance moved. A layer asks for the
 cursor grabbed through its `Context`, and the windowed loop applies it as the next frame starts:
-hidden, egui told so too, and locked where the platform locks it, macOS and Wayland, or else kept
-inside the window, Windows and X11, which report the raw motion all the same; held while the window
+hidden, egui told so too, and locked where the platform locks it, Windows, macOS and Wayland, or
+else kept inside the window, X11, which reports the raw motion all the same; held while the window
 has focus, and in a dockspace while the view has the keys, let go as either goes and grabbed again
-as it comes back. What to do with Escape is the game's, as a game may pause on it. The editor's
-game, which renders offscreen, says in its view's memory whether it wants the cursor grabbed, and
-the editor grabs its own window's in Play, as [Agents and tools](#agents-and-tools) says.
+as it comes back. In a dockspace, a grab that starts with the cursor off the view, over a panel or
+the title bar, moves it to the view's center first, where it's locked, so that its clicks go to the
+view rather than to egui; Wayland moves no cursor it hasn't locked. What to do with Escape is the
+game's, as a game may pause on it. The editor's game, which renders offscreen, says in its view's
+memory whether it wants the cursor grabbed, and the editor grabs its own window's in Play, as
+[Agents and tools](#agents-and-tools) says.
 
 ## World space
 

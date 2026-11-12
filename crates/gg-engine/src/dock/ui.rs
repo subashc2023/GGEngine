@@ -453,6 +453,17 @@ impl Dock {
         }
     }
 
+    /// Where the cursor goes as a grab of it starts, in the main window's points, from `cursor`,
+    /// where it is in the window, if it is: to the center of a dockspace's view, unless it's on the
+    /// view, clear of what's over it, already; so that the grab holds it there, rather than over
+    /// egui's UI, such as the title bar's control whose click started it, which would take its
+    /// clicks. `None` where it stays: on the view, and while no dockspace's view shows.
+    pub(crate) fn grab_at(&self, egui: &Context, cursor: Option<Pos2>) -> Option<Pos2> {
+        let spot = self.spot.as_ref()?;
+        let on_view = cursor.is_some_and(|pos| self.under(egui, pos) == Under::View);
+        (!on_view).then(|| spot.rect.center())
+    }
+
     /// Shows UI over a dockspace's view, as [`Ui::over_view`] says, in an area of the view's
     /// layer's order just above it: egui's sublayer, which it forgets as each frame ends.
     fn show_over_view<R>(
@@ -2576,6 +2587,30 @@ mod tests {
             let under = run.dock.under(&run.ctx, at);
             assert_eq!(under == Under::View, over, "floating, at {at:?}");
         }
+    }
+
+    /// A grab that starts with the cursor off a dockspace's view, over egui's UI or out of the
+    /// window, moves it to the view's center; one that starts on the view leaves it there, as does
+    /// any in a game's dock, whose central area is the game's.
+    #[test]
+    fn a_grab_moves_the_cursor_onto_the_view_from_off_it() {
+        let mut run = Run::dockspace(Chrome::Drawn);
+        // egui's first pass of a new area sizes it, and doesn't take input.
+        run.frames(1);
+        let center = Some(run.dock.view().center());
+        // On the view, clear of A and B; on A, floating over it at (48, 48); on the title bar; and
+        // out of the window.
+        for (cursor, at) in [
+            (Some(pos2(600.0, 450.0)), None),
+            (Some(pos2(100.0, 100.0)), center),
+            (Some(pos2(400.0, BAR / 2.0)), center),
+            (None, center),
+        ] {
+            assert_eq!(run.dock.grab_at(&run.ctx, cursor), at, "at {cursor:?}");
+        }
+        let run = Run::new();
+        assert_eq!(run.dock.grab_at(&run.ctx, Some(pos2(100.0, 100.0))), None);
+        assert_eq!(run.dock.grab_at(&run.ctx, None), None);
     }
 
     /// Where `panel`'s group floats over the main window.
