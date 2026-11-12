@@ -33,9 +33,9 @@ use gg_api::asset::AssetKind;
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
     Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, EntityList, Failure, Field,
-    Hash, Hello, History, Input, InputEvent, Listed, ListedAsset, ListedOrphan, Looked, Patched,
-    Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene, SceneAction, Session, Snapshotted,
-    Status, Step, View, Welcome,
+    Hash, Hello, History, ImageList, Input, InputEvent, Listed, ListedAsset, ListedOrphan, Looked,
+    Patched, Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene, SceneAction, Session,
+    Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -66,7 +66,7 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 32] = [
+const METHODS: [&str; 33] = [
     "hello",
     "ping",
     "status",
@@ -81,6 +81,7 @@ const METHODS: [&str; 32] = [
     "input",
     "look",
     "pick",
+    "images",
     "entities",
     "entity",
     "get",
@@ -188,6 +189,10 @@ pub(crate) struct Api {
     look: Looked,
     /// `pick`s waiting for their answers.
     picks: Vec<Picking>,
+    /// `images` waiting for a frame handed off, and those riding with the frames handed off since
+    /// they came, until one that rendered brings its images back.
+    images_asked: Vec<Reply>,
+    images_riding: Vec<Reply>,
     /// The captures written without a path, which number their files.
     numbered: u64,
     /// The memory a `view` asked for the view to be published to, or `None` to stop, until the
@@ -311,6 +316,7 @@ enum Call {
     Look(gg_api::Look),
     /// The pixel of the view to pick at.
     Pick([f64; 2]),
+    Images,
     Entities {
         with: Option<String>,
         skip: usize,
@@ -553,6 +559,8 @@ impl Api {
                 seen: None,
             },
             picks: Vec::new(),
+            images_asked: Vec::new(),
+            images_riding: Vec::new(),
             numbered: 0,
             viewing: None,
             memory: None,
@@ -620,8 +628,8 @@ impl Api {
     }
 
     /// As [`serve`](Self::serve), between frames while they pause for a minimized window, without
-    /// counting a frame: a `capture`, a `pick` or a `step`, which need frames, fail with
-    /// `api.paused`.
+    /// counting a frame: a `capture`, a `pick`, an `images` or a `step`, which need frames, fail
+    /// with `api.paused`.
     pub(crate) fn serve_paused(
         &mut self,
         cx: &mut Context,
@@ -702,9 +710,10 @@ impl Api {
                                    once it serves";
                     reply.send(Err(Failure::new("api.quitting", message)));
                 }
-                Call::Step(_) | Call::Capture { .. } | Call::Pick(_) if paused => {
+                Call::Step(_) | Call::Capture { .. } | Call::Pick(_) | Call::Images if paused => {
                     let message = "frames have paused while the window is minimized, and steps, \
-                                   captures and picks run in frames; restore the window first";
+                                   captures, picks and images run in frames; restore the window \
+                                   first";
                     reply.send(Err(Failure::new("api.paused", message)));
                 }
                 Call::Step(_) if stepper.stopped() => {
@@ -809,6 +818,7 @@ impl Api {
                     named: names,
                     reply,
                 }),
+                Call::Images => self.images_asked.push(reply),
                 Call::Entities { with, skip, take } => {
                     reply.send(list(world, with.as_deref(), skip, take));
                 }
@@ -1165,6 +1175,8 @@ impl Api {
     /// of its kind, bare or not, asked since, and for those whose frame had nothing to render
     /// into, or showed what was still on its way, and publish it to the memory a `view` asked
     /// for, unless it's bare, warning once of a frame that wasn't, since the view was asked for.
+    /// Likewise answers the `images` riding with frames handed off with the images `frame` listed,
+    /// if it rendered, and has the next list them for those asked since and those still riding.
     pub(crate) fn frame_back(&mut self, frame: &mut Extracted, cx: &Context, ticks: u64) {
         if let Some(viewing) = self.viewing.take() {
             frame.publish = viewing.map(|writer| Publish {
@@ -1269,16 +1281,28 @@ impl Api {
         if frame.capture {
             self.riding_ticks = ticks;
         }
+        if let Some(images) = frame.images.take() {
+            let listed = ImageList {
+                images: images.iter().map(frame_image).collect(),
+            };
+            for reply in self.images_riding.drain(..) {
+                reply.result(&listed);
+            }
+        }
+        self.images_riding.append(&mut self.images_asked);
+        frame.list_images = !self.images_riding.is_empty();
     }
 
     /// Whether the simulation is paused or stopped with nothing asked of the frames: no ticks to
-    /// step, no capture or pick waiting and no request held.
+    /// step, no capture, pick or `images` waiting and no request held.
     pub(crate) fn is_idle(&self, stepper: &Stepper) -> bool {
         (stepper.paused() || stepper.stopped())
             && stepper.steps() == 0
             && self.asked.is_empty()
             && self.riding.is_empty()
             && self.picks.is_empty()
+            && self.images_asked.is_empty()
+            && self.images_riding.is_empty()
             && self.held.is_none()
     }
 
@@ -1840,6 +1864,26 @@ fn set_part<T: PartialEq>(
     changed
 }
 
+/// `image`, which a frame listed, as `images` answers it.
+fn frame_image(image: &gg_renderer::FrameImage) -> gg_api::FrameImage {
+    use gg_api::ImageKind as Api;
+    use gg_renderer::ImageKind;
+
+    gg_api::FrameImage {
+        name: image.name.to_owned(),
+        kind: match image.kind {
+            ImageKind::Color => Api::Color,
+            ImageKind::Hdr => Api::Hdr,
+            ImageKind::Ids => Api::Ids,
+            ImageKind::Motion => Api::Motion,
+            ImageKind::Visibility => Api::Visibility,
+            ImageKind::Depth => Api::Depth,
+            ImageKind::Scalar => Api::Scalar,
+        },
+        size: image.size,
+    }
+}
+
 /// `viewpoint` as the tool API gives one.
 pub(crate) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
     let projection = match viewpoint.projection {
@@ -2103,7 +2147,7 @@ fn needs(call: &Call) -> Vec<Capability> {
             .into_iter()
             .flatten()
             .collect(),
-        Call::View(_) | Call::Look(_) | Call::Pick(_) => vec![View],
+        Call::View(_) | Call::Look(_) | Call::Pick(_) | Call::Images => vec![View],
         Call::Input(_) => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }
@@ -2826,6 +2870,7 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             let gg_api::Pick { at } = take(method, params)?;
             Call::Pick(at)
         }
+        "images" => none(method, params).map(|()| Call::Images)?,
         "view" => {
             let View { memory } = take(method, params)?;
             Call::View(memory)
@@ -5524,6 +5569,42 @@ mod tests {
         assert!(!frame.capture, "nothing rides once both are answered");
     }
 
+    /// An `images` has frame after frame list their images, riding with a frame that didn't render
+    /// on to the next, until one brings its images back, which answer it as the API names them;
+    /// then no frame lists.
+    #[test]
+    fn images_ride_with_frames_until_one_brings_them_back() {
+        let (mut api, _) = started("Api Images");
+        let mut cx = Context::seeded(14);
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let mut frame = Extracted::default();
+        let (to, answers) = mpsc::channel();
+        api.images_asked.push(reply(1, &to));
+        api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+        assert!(!api.is_idle(&stepper), "waiting for a frame");
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        assert!(frame.list_images, "the frame lists");
+        // That frame didn't render, and brings none back.
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        assert!(frame.list_images, "the next lists too");
+        let waiting = answers.recv_timeout(Duration::from_millis(200));
+        assert!(waiting.is_err(), "unanswered");
+        frame.images = Some(vec![gg_renderer::FrameImage {
+            name: "bloom 1",
+            kind: gg_renderer::ImageKind::Hdr,
+            size: [32, 16],
+        }]);
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        let (line, _) = answers.recv_timeout(DEADLINE).expect("an answer");
+        let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
+        assert_eq!(answer["id"], 1);
+        let listed = json!({"images": [{"name": "bloom 1", "kind": "hdr", "size": [32, 16]}]});
+        assert_eq!(answer["result"], listed);
+        assert!(!frame.list_images, "nothing rides once it's answered");
+        assert!(api.is_idle(&stepper), "nothing waits");
+    }
+
     /// A capture with `at` and no path answers the shot's bytes at that pixel, `None` outside the
     /// view, and writes no PNG, numbering none of the engine's own; one with a path writes it too.
     #[test]
@@ -5888,6 +5969,7 @@ mod tests {
             ("look", json!({"grid": "xw"}), "api.bad_params"),
             ("pick", Value::Null, "api.bad_params"),
             ("pick", json!({"at": [1]}), "api.bad_params"),
+            ("images", json!({"all": true}), "api.bad_params"),
             ("input", Value::Null, "api.bad_params"),
             (
                 "input",

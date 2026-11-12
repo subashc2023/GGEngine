@@ -32,6 +32,31 @@ pub enum Show<'a> {
     Image(&'a str),
 }
 
+/// An image a frame made that [`Show::Image`] finds, as [`Renderer::images`] lists them: its debug
+/// name, what it holds, which says how a show reads it, and its size in pixels, which a show
+/// stretches over the view.
+///
+/// [`Renderer::images`]: crate::Renderer::images
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameImage {
+    pub name: &'static str,
+    pub kind: ImageKind,
+    pub size: [u32; 2],
+}
+
+/// Lists into `images` the images of `graph`'s own added so far, in the order they were, each name
+/// once, at the place of its first, as the last of that name, which a show finds: a scan of those
+/// listed for each, of the tens a frame makes, in a frame asked to list them alone.
+pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph) {
+    for (name, kind, size) in graph.images() {
+        let image = FrameImage { name, kind, size };
+        match images.iter_mut().find(|listed| listed.name == name) {
+            Some(listed) => *listed = image,
+            None => images.push(image),
+        }
+    }
+}
+
 /// A part of what lit shading takes or makes, which shading returns in place of its light: colors
 /// as they are; values, from 0 to 1, a normal's axes from -1 to 1 taken as 0 to 1, as the view's
 /// 8-bit sRGB image stores them as their bytes over 255; and light, exposed, without the haze, which
@@ -226,5 +251,36 @@ impl ShowPass {
         pass.push_constants(bytemuck::bytes_of(&push));
         let [across, down] = plan.size.map(|side| side.div_ceil(GROUP));
         pass.dispatch([across, down, 1]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name the graph has twice is listed once, where it first was, as the last of it, which a
+    /// show finds; and a target, which has no name, isn't.
+    #[test]
+    fn a_name_twice_is_listed_once_as_the_last_of_it() {
+        let mut graph = Graph::default();
+        graph.target(0);
+        graph.depth("depth", [4, 4]);
+        graph.ids("ids", [4, 4]);
+        graph.depth("depth", [2, 2]);
+        let mut images = Vec::new();
+        list(&mut images, &graph);
+        let want = [
+            FrameImage {
+                name: "depth",
+                kind: ImageKind::Depth,
+                size: [2, 2],
+            },
+            FrameImage {
+                name: "ids",
+                kind: ImageKind::Ids,
+                size: [4, 4],
+            },
+        ];
+        assert_eq!(images, want);
     }
 }

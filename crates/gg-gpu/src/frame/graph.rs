@@ -487,6 +487,15 @@ impl Graph {
         self.transient(name, ImageKind::Scalar, size)
     }
 
+    /// The images of the graph's own added so far, in the order they were, each with its debug
+    /// name, what it holds and its size: what [`Graph::image_named`] finds, the last of a name.
+    pub fn images(&self) -> impl Iterator<Item = (&'static str, ImageKind, [u32; 2])> + '_ {
+        self.images.iter().filter_map(|image| match *image {
+            ImageDecl::Target(_) => None,
+            ImageDecl::Transient { name, kind, size } => Some((name, kind, size)),
+        })
+    }
+
     /// The last image of the graph's own added so far that's named `name`, and what it holds, if
     /// one is: so that a pass added after it may sample it, as one that shows it does.
     pub fn image_named(&self, name: &str) -> Option<(ImageId, ImageKind)> {
@@ -1622,7 +1631,16 @@ mod tests {
         assert_eq!(graph.image_named("depth"), Some((last, ImageKind::Depth)));
         assert_eq!(graph.image_named("ids"), Some((ids, ImageKind::Ids)));
         assert_eq!(graph.image_named("view"), None);
+        // Each listed in order, a name twice, without the target.
+        let listed: Vec<_> = graph.images().collect();
+        let want = [
+            ("depth", ImageKind::Depth, [4, 4]),
+            ("ids", ImageKind::Ids, [4, 4]),
+            ("depth", ImageKind::Depth, [2, 2]),
+        ];
+        assert_eq!(listed, want);
         graph.clear();
         assert_eq!(graph.image_named("ids"), None, "cleared");
+        assert_eq!(graph.images().count(), 0, "cleared");
     }
 }

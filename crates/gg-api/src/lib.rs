@@ -91,6 +91,11 @@
 //!   refused, nor is an image's name the frame doesn't make.
 //! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
 //!   look among it, in the frame that reads it, about four frames after it's asked.
+//! - `images`: answers [`ImageList`], the images the next frame that renders makes that
+//!   [`Shown::Image`] names, each by its debug name, with what it holds and its size, in the order
+//!   the frame makes them: as the look has the view drawn, the view's light making every pass's
+//!   images, an image every one's but antialiasing's, and a part of shading none after the view's
+//!   passes. It fails with `api.paused` while frames pause.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
 //!   revision of its types, as `types` answers it.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
@@ -891,7 +896,7 @@ impl Pass {
 /// of field, motion blur, bloom, grade or lens; and no sky, black behind what's drawn; and what
 /// draws without lit shading, as sprites, text and particles, draws as it does. An image takes the
 /// whole view, alone, from a frame drawn as the game's is but for its antialiasing, so that the
-/// images of every pass but antialiasing's are there to show.
+/// images of every pass but antialiasing's are there to show, as `images` lists them.
 ///
 /// A pixel's bytes, as a capture's PNG has them, read as each says: a value of 0 to 1 as its byte
 /// over 255, in red, green and blue alike.
@@ -1006,6 +1011,45 @@ pub struct Pick {
 pub struct Picked {
     pub id: Option<String>,
     pub name: Option<String>,
+}
+
+/// What `images` answers: the images the frame that read it made that [`Shown::Image`] names, in
+/// the order the frame made them, each name once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageList {
+    pub images: Vec<FrameImage>,
+}
+
+/// An image a frame makes, as `images` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameImage {
+    /// Its debug name, which [`Shown::Image`] takes, as RenderDoc and ARCHITECTURE.md's Rendering
+    /// name it: `"view depth"`, `"bloom 1"`.
+    pub name: String,
+    /// What it holds, which says how a show reads it, as [`Shown::Image`] says.
+    pub kind: ImageKind,
+    /// Its `[width, height]` in pixels, which a show stretches over the view.
+    pub size: [u32; 2],
+}
+
+/// What an image a frame makes holds, as [`Shown::Image`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageKind {
+    /// Colors.
+    Color,
+    /// Colors of high dynamic range, which a show tonemaps as the view's light is.
+    Hdr,
+    /// IDs, a color for each.
+    Ids,
+    /// Motion, in units of the world, as normals are shown.
+    Motion,
+    /// A visibility buffer, a color for each value.
+    Visibility,
+    /// Depth, as `1 + log2(depth) / 24`.
+    Depth,
+    /// A float a pixel, as its value.
+    Scalar,
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
@@ -2232,6 +2276,45 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<Look>(refused).is_err(), "{refused}");
         }
+    }
+
+    /// An image list reads and writes each image's name, its kind by the name of what it holds, and
+    /// its size.
+    #[test]
+    fn images_read_and_write_by_their_names() {
+        let json = serde_json::json!({"images": [
+            {"name": "view depth", "kind": "depth", "size": [64, 32]},
+            {"name": "bloom 1", "kind": "hdr", "size": [32, 16]},
+        ]});
+        let listed: ImageList = serde_json::from_value(json.clone()).expect("a list");
+        let bloom = FrameImage {
+            name: "bloom 1".to_owned(),
+            kind: ImageKind::Hdr,
+            size: [32, 16],
+        };
+        assert_eq!(listed.images[1], bloom);
+        assert_eq!(listed.images[0].kind, ImageKind::Depth);
+        assert_eq!(serde_json::to_value(&listed).expect("written"), json);
+        let kinds = [
+            ImageKind::Color,
+            ImageKind::Hdr,
+            ImageKind::Ids,
+            ImageKind::Motion,
+            ImageKind::Visibility,
+            ImageKind::Depth,
+            ImageKind::Scalar,
+        ];
+        let names = kinds.map(|kind| serde_json::to_value(kind).expect("a name"));
+        let want = [
+            "color",
+            "hdr",
+            "ids",
+            "motion",
+            "visibility",
+            "depth",
+            "scalar",
+        ];
+        assert_eq!(names, want.map(|name| serde_json::json!(name)));
     }
 
     /// Each part of the look `null` where it's the game's own, beside who set the others.

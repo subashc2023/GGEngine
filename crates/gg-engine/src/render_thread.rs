@@ -127,6 +127,13 @@ pub(crate) struct Extracted {
     /// asks, if anything.
     #[cfg(feature = "dev")]
     pub(crate) show: Option<crate::api::Shown>,
+    /// Whether the frame lists the images it makes that a show finds, for the tool API's
+    /// `images`.
+    #[cfg(feature = "dev")]
+    pub(crate) list_images: bool,
+    /// Those it listed, if it was to and it rendered, as [`Renderer::images`] gives them.
+    #[cfg(feature = "dev")]
+    pub(crate) images: Option<Vec<gg_renderer::FrameImage>>,
 }
 
 /// The client a game's view is published to, as the tool API's `view` asked: the memory it made,
@@ -206,6 +213,10 @@ impl Default for Extracted {
             bare: false,
             #[cfg(feature = "dev")]
             show: None,
+            #[cfg(feature = "dev")]
+            list_images: false,
+            #[cfg(feature = "dev")]
+            images: None,
         }
     }
 }
@@ -268,6 +279,10 @@ impl Render for Renderer {
         let show = frame.show.as_ref().map(crate::api::Shown::show);
         #[cfg(not(feature = "dev"))]
         let show = None;
+        #[cfg(feature = "dev")]
+        let list_images = frame.list_images;
+        #[cfg(not(feature = "dev"))]
+        let list_images = false;
         let pixels = frame.pixels.map(|size| Pixels {
             size,
             bytes: frame.pixels_new.then_some(&frame.pixel_bytes[..]),
@@ -301,6 +316,7 @@ impl Render for Renderer {
             read_picks,
             outline: frame.outline,
             read_view,
+            list_images,
             pixels,
             show,
         };
@@ -318,6 +334,10 @@ impl Render for Renderer {
         frame.picked.clear();
         frame.picked.extend_from_slice(self.picked());
         frame.streaming = self.streaming();
+        #[cfg(feature = "dev")]
+        if list_images && rendered {
+            frame.images = Some(self.images().to_vec());
+        }
         #[cfg(feature = "dev")]
         let (waited, publish) = if read_view && rendered {
             frame.take_view(self)

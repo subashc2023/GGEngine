@@ -190,6 +190,10 @@ Talk to a running game, through its tool API:
                                  those set first, each `null` giving it back to the game
   pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
                                  top left, as a capture has it, the look included; `null` for none
+  images                         The images its next frame makes that `--show` and the look's `show`
+                                 name, as `bloom 1` or `view depth`: each one's debug name, what it
+                                 holds and its size, in the order the frame makes them; a frame
+                                 showing a part of shading makes none after the view's passes
   probe <X> <Y> [--own]          What shading took and made at pixel X, Y of its view, from its top
                                  left, X and Y not negative, as numbers, in one JSON object, from
                                  one world: captures of that pixel, writing no PNG, pausing the game
@@ -835,7 +839,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             Command::Wait(parsed.pick()?, timeout)
         }
         method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui"
-        | "quit") => {
+        | "images" | "quit") => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
         }
@@ -1335,6 +1339,7 @@ mod tests {
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
             (&["types"], Value::Null),
+            (&["images"], Value::Null),
             (
                 &[
                     "input",
@@ -1497,6 +1502,7 @@ mod tests {
             &["entities", "--take"],
             &["assets", "x"],
             &["ui", "menu"],
+            &["images", "bloom"],
             &["logs", "--level", "loud"],
             &["debug", "break"],
             &["debug", "break", "scripts/spin.luau", "0"],

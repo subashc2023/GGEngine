@@ -483,6 +483,18 @@ fn tools() -> Value {
             &["at"],
         ),
         tool(
+            "images",
+            "The images the game's next frame makes that a `show`, of `capture` or `look`, names: \
+             each one's debug name, as `view depth`, `ambient occlusion` or `bloom 1`, what it \
+             holds (`color`, `hdr`, `ids`, `motion`, `visibility`, `depth` or `scalar`), which \
+             says how a show reads it, and its [width, height]; in the order the frame makes them, \
+             each name once. A frame whose look shows a part of shading makes none after the \
+             view's passes, such as bloom's. It answers once a frame renders, and fails while the \
+             game runs no frames, as while its window is minimized.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "probe",
             "What shading took and made at one pixel of the game's view, as numbers: use it to \
              find what's wrong at a pixel, such as its material's values, its normal, and which \
@@ -800,9 +812,8 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui" | "snapshot" => {
-            call(name, Value::Null)
-        }
+        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui" | "images"
+        | "snapshot" => call(name, Value::Null),
         // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
         // names scene files.
         "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"

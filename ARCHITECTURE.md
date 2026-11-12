@@ -2156,7 +2156,8 @@ motion blur, bloom, grade or lens, nor the sky, and through the tonemapper only 
 that the view's 8-bit sRGB image stores a color as a texture holds it and a value as its byte over
 255, as gg-api's `Shown` says, and a capture's bytes read as numbers. An image shows from a frame
 drawn as the game's is but for its antialiasing, so that every other pass makes its images: bloom's
-levels and depth of field's layers show as the depth does. It keeps nothing for the next frame's
+levels and depth of field's layers show as the depth does. A frame asked to lists those it made, by
+name, kind and size, as the tool API's `images` answers them. It keeps nothing for the next frame's
 reflections, which trace against what the last frame that showed the view's light kept, and the
 frames after it antialias afresh. The frame's targets, as TAA's history and the reflections, have
 no names in its graph, and show by none.

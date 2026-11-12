@@ -80,8 +80,8 @@ pub use draws::Draws;
 pub use exposure::{Adaptation, light_scale};
 pub use fog::Fog;
 pub use gg_gpu::{
-    Arenas, Blend, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath, Validation,
-    Window, Wrap, mip_sizes,
+    Arenas, Blend, ImageKind, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath,
+    Validation, Window, Wrap, mip_sizes,
 };
 pub use grade::Grade;
 pub use grid::{Grid, GridLines};
@@ -101,7 +101,7 @@ pub use particles::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Part
 pub use pick::{MAX_PICKS, Pick};
 pub use reflections::Reflections;
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
-pub use show::{Channel, Show};
+pub use show::{Channel, FrameImage, Show};
 pub use sky::Sky;
 pub use sprite::{Sprite, SpriteSheet};
 pub use taa::Antialiasing;
@@ -423,6 +423,9 @@ pub struct RenderData<'a> {
     /// Whether the frame reads the view back as it renders it, outline and all, which
     /// [`Renderer::view_read`] then gives.
     pub read_view: bool,
+    /// Whether the frame lists the images it makes that [`Show::Image`] finds, which
+    /// [`Renderer::images`] then gives.
+    pub list_images: bool,
     /// What the view shows in place of its light, if anything, to see how it's made, as [`Show`]
     /// says: drawn without antialiasing's offset, nor the exposure metered, as it adapts on as it
     /// did. A part of shading shows nothing after the view's passes, no fog, depth of field, motion
@@ -517,6 +520,9 @@ pub struct Renderer {
     /// and the name of the last it couldn't find, which it warned of.
     show: Option<ShowPass>,
     missing: Option<String>,
+    /// The images the last frame asked to list them made that a show finds, as
+    /// [`Renderer::images`] gives them.
+    images: Vec<FrameImage>,
     /// Made by the first frame with a sky to show.
     sky: Option<SkyPass>,
     /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
@@ -855,6 +861,7 @@ impl Renderer {
             smaa: None,
             show: None,
             missing: None,
+            images: Vec::new(),
             sky: None,
             sky_light: SkyLight::default(),
             atmosphere: None,
@@ -1176,6 +1183,10 @@ impl Renderer {
         let windows_drawn = self.window_keys.iter().filter(|key| has_ui(key)).count();
         let graph = &mut self.graph;
         let missing = &mut self.missing;
+        let images = &mut self.images;
+        if data.list_images {
+            images.clear();
+        }
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
@@ -1495,6 +1506,9 @@ impl Renderer {
                 let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
                 (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
             });
+            if data.list_images {
+                show::list(images, graph);
+            }
             // An image the frame makes in place of all that, the last of its name added so far.
             let show = image_shown.map(|name| {
                 let found = graph.image_named(name);
@@ -2298,6 +2312,14 @@ impl Renderer {
     /// once the GPU has rendered that one.
     pub fn picked(&self) -> &[(u64, u64)] {
         self.picks.answered()
+    }
+
+    /// The images the last frame that [`RenderData::list_images`] asked to list them made that
+    /// [`Show::Image`] finds: of the graph's own, before the show's pass, in the order the frame
+    /// made them, each name once, as the last of that name, which a show finds; none for a frame
+    /// that had no view to draw. Empty before such a frame.
+    pub fn images(&self) -> &[FrameImage] {
+        &self.images
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.

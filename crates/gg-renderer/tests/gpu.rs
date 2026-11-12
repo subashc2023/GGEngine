@@ -23,13 +23,14 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
-    Channel, Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog, Glyph,
-    Grade, Grid, GridLines, Lens, Light, LightKind, Line, Lod, Lods, MAX_MESHLET_TRIANGLES,
-    MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes, Meshlet, Meshlets,
-    Mipmaps, ModelMesh, ModelVertex, MotionBlur, Outline, PackedVertex, ParticleShape, Particles,
-    Pick, Pixels, Projection, Reflections, RenderData, Renderer, Sampled, Sampler, Scene, Settings,
-    Shader, Shaders, Show, SkinVertex, Sky, Sprite, SpriteSheet, Texels, Texture, Textures,
-    Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Workflow, Wrap,
+    Channel, Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog,
+    FrameImage, Glyph, Grade, Grid, GridLines, ImageKind, Lens, Light, LightKind, Line, Lod, Lods,
+    MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Map, Material, Materials, Mesh, MeshDraw, Meshes,
+    Meshlet, Meshlets, Mipmaps, ModelMesh, ModelVertex, MotionBlur, Outline, PackedVertex,
+    ParticleShape, Particles, Pick, Pixels, Projection, Reflections, RenderData, Renderer, Sampled,
+    Sampler, Scene, Settings, Shader, Shaders, Show, SkinVertex, Sky, Sprite, SpriteSheet, Texels,
+    Texture, Textures, Tonemapper, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
+    Workflow, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -453,6 +454,7 @@ impl Stores {
             read_picks: true,
             outline: None,
             read_view: false,
+            list_images: false,
             pixels: None,
             show: None,
         }
@@ -8215,6 +8217,47 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
             "the light shows again at {at:?} as {got:?}, not {was:?}"
         );
     }
+    // The images a frame asked to list them makes that a show finds, each name once: as the game's
+    // frame makes them while the view shows an image, bloom's and the lens's among them, but not
+    // the show's own; and while it shows a part of shading, nothing after the view's passes.
+    let mut listed = |show| {
+        let data = RenderData {
+            show: Some(show),
+            bloom: 1.0,
+            lens: Lens {
+                vignette: 1.0,
+                ..Lens::NONE
+            },
+            list_images: true,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        renderer.images().to_vec()
+    };
+    let named =
+        |listed: &[FrameImage], name| listed.iter().find(|image| image.name == name).copied();
+    let images = listed(Show::Image("view depth"));
+    let depth = FrameImage {
+        name: "view depth",
+        kind: ImageKind::Depth,
+        size: [WIDTH, HEIGHT],
+    };
+    assert_eq!(named(&images, "view depth"), Some(depth), "{images:?}");
+    let kind = |name| named(&images, name).map(|image| image.kind);
+    assert_eq!(kind("view ids"), Some(ImageKind::Ids), "{images:?}");
+    assert_eq!(kind("view colors"), Some(ImageKind::Hdr), "{images:?}");
+    let bloom = named(&images, "bloom 1").map(|image| image.size);
+    assert_eq!(bloom, Some([WIDTH / 2, HEIGHT / 2]), "{images:?}");
+    assert!(named(&images, "view lensed").is_some(), "{images:?}");
+    assert!(named(&images, "view shown").is_none(), "the show's own");
+    let mut names: Vec<_> = images.iter().map(|image| image.name).collect();
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count, "each once: {images:?}");
+    let shading = listed(Show::Shading(Channel::Roughness));
+    assert!(named(&shading, "view depth").is_some(), "{shading:?}");
+    assert!(named(&shading, "bloom 1").is_none(), "{shading:?}");
     shut_down(renderer);
 }
 
