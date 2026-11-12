@@ -69,9 +69,12 @@ const CHANNELS: &[(&str, Channel)] = &[
     ("Roughness", Channel::Part(Shown::Roughness)),
     ("Occlusion", Channel::Part(Shown::Occlusion)),
     ("Emission", Channel::Part(Shown::Emission)),
+    ("Specular color", Channel::Part(Shown::SpecularColor)),
     ("Direct light", Channel::Part(Shown::DirectLight)),
     ("Sky light", Channel::Part(Shown::SkyLight)),
     ("Reflection", Channel::Part(Shown::Reflection)),
+    ("Diffuse light", Channel::Part(Shown::DiffuseLight)),
+    ("Specular light", Channel::Part(Shown::SpecularLight)),
     ("Depth", Channel::Image("view depth")),
     ("Motion", Channel::Image("view motion")),
     ("IDs", Channel::Image("view ids")),
@@ -1348,6 +1351,25 @@ mod tests {
         assert_eq!(toolbar.skip, [Pass::Shadows], "drawn again");
         click_toolbar(&ctx, &mut toolbar, all);
         assert_eq!(toolbar.skip, [], "all drawn again");
+    }
+
+    /// The list of what the view shows names each part by its label, as it shows on the closed
+    /// list while the view shows it.
+    #[test]
+    fn the_list_names_what_the_view_shows() {
+        let ctx = egui::Context::default();
+        for (show, label) in [
+            (Shown::SpecularColor, "Specular color"),
+            (Shown::DiffuseLight, "Diffuse light"),
+            (Shown::SpecularLight, "Specular light"),
+        ] {
+            let mut toolbar = Toolbar {
+                show: Some(show),
+                ..Toolbar::default()
+            };
+            let drawn = [(); 2].map(|()| toolbar_pass(&ctx, &mut toolbar, Vec::new()));
+            assert!(text_at(&drawn[1], label).is_some(), "{label}");
+        }
     }
 
     /// Where the toolbar is and whether it's folded read back as they were, and what of a file
