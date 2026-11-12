@@ -309,6 +309,7 @@ pub(crate) mod tests {
     /// cubic spline, whose tangents are 0, so that it eases in and out.
     pub(crate) fn clips() -> Imported {
         let part = |parent| Part {
+            name: None,
             transform: Transform::IDENTITY,
             parent,
             primitive: None,

@@ -734,6 +734,7 @@ pub(crate) mod tests {
         };
         let opaque = colored(1);
         let part = |transform, parent, primitive| gltf::Part {
+            name: None,
             transform,
             parent,
             primitive,
@@ -808,6 +809,7 @@ pub(crate) mod tests {
             reach: None,
         };
         let part = gltf::Part {
+            name: None,
             transform: at,
             parent: None,
             primitive: Some(0),

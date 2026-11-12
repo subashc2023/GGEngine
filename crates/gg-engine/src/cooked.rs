@@ -12,7 +12,8 @@
 //!
 //! ```text
 //! ignored     a count, then each thing the model has that the engine ignores, as a string
-//! parts       a count, then each part's translation (3 f32s), rotation (4) and scale (3); its
+//! parts       a count, then each part's name, as a string, empty for none; its translation
+//!             (3 f32s), rotation (4) and scale (3); its
 //!             parent's index, its primitive's and its skin's, each u32::MAX for none; and its
 //!             light's kind,
 //!             a byte (0 for none, then directional, point, spot), and, if it has one, its color
@@ -49,6 +50,7 @@
 //! are the same from a package as from the model's files.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use gg_core::math::{Mat4, Quat, Vec2, Vec3};
 use gg_core::{Error, Result};
@@ -107,6 +109,7 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     }
     count(&mut bytes, imported.parts.len());
     for part in &imported.parts {
+        string(&mut bytes, part.name.as_deref().unwrap_or(""));
         let Transform {
             translation,
             rotation,
@@ -353,10 +356,12 @@ impl<'a> Reader<'a> {
             .map(|_| self.string())
             .collect::<Result<_, _>>()?;
         let mut parts: Vec<Part> = Vec::new();
-        // A transform, three indices and a light's kind.
-        let part_count = self.count(53)?;
+        // A name's length, a transform, three indices and a light's kind.
+        let part_count = self.count(57)?;
         let mut drawn = Vec::with_capacity(part_count);
         for i in 0..part_count {
+            let name = self.string()?;
+            let name = (!name.is_empty()).then(|| Arc::from(name));
             let [x, y, z, rx, ry, rz, rw, sx, sy, sz] = self.floats()?;
             let transform = Transform {
                 translation: Vec3::new(x, y, z),
@@ -383,6 +388,7 @@ impl<'a> Reader<'a> {
                 .light()
                 .map_err(|problem| format!("its part {i} {problem}"))?;
             parts.push(Part {
+                name,
                 transform,
                 parent,
                 primitive,
@@ -958,6 +964,7 @@ mod tests {
         };
         let parts = vec![
             Part {
+                name: Some(Arc::from("lamp")),
                 transform: turned,
                 parent: None,
                 primitive: None,
@@ -965,6 +972,7 @@ mod tests {
                 skin: None,
             },
             Part {
+                name: None,
                 transform: Transform::IDENTITY,
                 parent: Some(0),
                 primitive: Some(0),
@@ -1206,9 +1214,9 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, byte)| {
-                // The light's kind is the byte after the first part's transform and its three
-                // indices, past the ignored's count and string and the parts' count.
-                let at = 4 + 4 + "1 camera".len() + 4 + 40 + 12;
+                // The light's kind is the byte after the first part's name, its transform and its
+                // three indices, past the ignored's count and string and the parts' count.
+                let at = 4 + 4 + "1 camera".len() + 4 + 4 + "lamp".len() + 40 + 12;
                 if i == at { 9 } else { byte }
             })
             .collect(),

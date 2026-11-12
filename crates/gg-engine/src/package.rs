@@ -8,7 +8,7 @@
 //! The format, every number little-endian:
 //!
 //! ```text
-//! header   32 bytes: "GGPK", the version (4), the number of entries, the string table's length,
+//! header   32 bytes: "GGPK", the version (5), the number of entries, the string table's length,
 //!          then the asset root's path and the start scene's, each from the project's directory,
 //!          as its manifest gives them, and each its start and length in the string table, the
 //!          start's 0 long for none
@@ -34,9 +34,8 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-/// 4 since cooked models' materials hold their workflow, metallic-roughness or
-/// specular-glossiness.
-const VERSION: u32 = 4;
+/// 5 since cooked models' parts hold their nodes' names.
+const VERSION: u32 = 5;
 const HEADER: usize = 32;
 const ENTRY: usize = 32;
 /// What each entry's data starts at a multiple of, so that data mapped into memory is aligned for

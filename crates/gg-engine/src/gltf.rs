@@ -10,6 +10,7 @@ use std::io;
 use std::mem;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy_mikktspace::{Geometry, Ops, TangentSpace};
 use gg_core::math::{Mat4, Quat, Vec3, Vec4, libm};
@@ -64,8 +65,10 @@ impl Imported {
 }
 
 /// A node of the scene, or a primitive of a node's mesh: what an entity holds.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Part {
+    /// Its node's name, as the glTF gives it, if it isn't empty; none for a primitive's part.
+    pub(crate) name: Option<Arc<str>>,
     /// Where it is in its parent's space, or in the model's if it has none.
     pub(crate) transform: Transform,
     /// Its parent's index in `parts`, which comes before its own.
@@ -836,11 +839,14 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 Some(light) => Some(self.light(light.light)?),
                 None => None,
             };
-            self.memory.hold(size_of::<Part>())?;
+            let name = node.name.as_deref().filter(|name| !name.is_empty());
+            self.memory
+                .hold(size_of::<Part>() + name.map_or(0, str::len))?;
             let part = self.imported.parts.len();
             self.parts_of[index as usize] = Some(part);
             let one = (primitives.len() == 1).then_some(primitives.start);
             self.imported.parts.push(Part {
+                name: name.map(Arc::from),
                 transform,
                 parent,
                 primitive: one,
@@ -858,6 +864,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                         skinned.push((self.imported.parts.len(), skin));
                     }
                     self.imported.parts.push(Part {
+                        name: None,
                         transform: Transform::IDENTITY,
                         parent: Some(part),
                         primitive: Some(primitive),
@@ -2304,6 +2311,7 @@ mod json {
     #[derive(Deserialize, Default)]
     #[serde(rename_all = "camelCase", default)]
     pub(super) struct Node {
+        pub(super) name: Option<String>,
         pub(super) children: Vec<u32>,
         pub(super) mesh: Option<u32>,
         pub(super) skin: Option<u32>,
@@ -2695,13 +2703,20 @@ pub(crate) mod tests {
             "nodes": [
                 // Mirrored and moved, by a matrix.
                 {
+                    "name": "frame",
                     "matrix": [-2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1],
                     "mesh": 0,
                     "children": [1, 2],
                 },
                 // A rotation of length 2, which is the identity once it's unit, and morph weights
-                // of 0, which replace its mesh's.
-                {"translation": [0, 5, 0], "rotation": [0, 0, 0, 2], "mesh": 1, "weights": [0]},
+                // of 0, which replace its mesh's; named nothing.
+                {
+                    "name": "",
+                    "translation": [0, 5, 0],
+                    "rotation": [0, 0, 0, 2],
+                    "mesh": 1,
+                    "weights": [0],
+                },
                 // The first mesh again, and a light.
                 {
                     "translation": [7, 0, 0],
@@ -2798,14 +2813,15 @@ pub(crate) mod tests {
         glb(&gltf.to_string(), &bin.bytes)
     }
 
-    /// A model reads into its parts, each node's light among them; its primitives, with their
-    /// normals, or made flat without them, and their tangents, made by MikkTSpace for a normal
-    /// map's, and their materials, with each texture and factor and the extensions the engine
-    /// reads; and its images; leaving out what it says it leaves out.
+    /// A model reads into its parts, each node's name and light among them; its primitives, with
+    /// their normals, or made flat without them, and their tangents, made by MikkTSpace for a
+    /// normal map's, and their materials, with each texture and factor and the extensions the
+    /// engine reads; and its images; leaving out what it says it leaves out.
     #[test]
     fn a_model_reads_into_parts_primitives_and_images() {
         let imported = read_glb(&model()).expect("a model");
         let part = |transform, parent, primitive| Part {
+            name: None,
             transform,
             parent,
             primitive,
@@ -2835,8 +2851,11 @@ pub(crate) mod tests {
         assert_eq!(
             imported.parts,
             [
-                // The first node, with each of its mesh's two primitives as a child.
-                part(mirrored, None, None),
+                // The first node, with each of its mesh's two primitives as a child, unnamed.
+                Part {
+                    name: Some(Arc::from("frame")),
+                    ..part(mirrored, None, None)
+                },
                 part(identity, Some(0), Some(0)),
                 part(identity, Some(0), Some(1)),
                 part(moved(0.0, 5.0, 0.0), Some(0), Some(2)),
@@ -3054,6 +3073,7 @@ pub(crate) mod tests {
         let decoded = imported.decode_images("m", Path::new("m.gltf"));
         decoded.expect("its image decodes");
         let part = Part {
+            name: None,
             transform: Transform::IDENTITY,
             parent: None,
             primitive: Some(0),
