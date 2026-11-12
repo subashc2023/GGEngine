@@ -9,7 +9,7 @@ use gg_core::{Error, Result};
 use super::id::{self, EntityId};
 use super::{Entity, World};
 use crate::model::Nodes;
-use crate::{Light, MeshDraw, Model, ModelNode, ModelRoot, Transform};
+use crate::{Light, MeshDraw, Model, ModelNode, ModelRoot, Name, Transform};
 
 impl World {
     /// Spawns an entity at `at` with a [`ModelRoot`] of `model`, and its nodes, and returns it, as
@@ -167,6 +167,19 @@ impl World {
                 name(root)
             ),
         ))
+    }
+
+    /// What `entity` is called, for people, as the Entities panel and the tool API show it: its
+    /// [`Name`], or, for a model's node without one, its node's name in the model's file, which
+    /// follows the file as it's read again. `None` for an entity called nothing, or dead.
+    pub fn name(&self, entity: Entity) -> Option<&str> {
+        if let Some(Name(name)) = self.get::<Name>(entity) {
+            return Some(name);
+        }
+        let &ModelNode(part) = self.get::<ModelNode>(entity)?;
+        let &ModelRoot(model) = self.get::<ModelRoot>(self.node_root(entity))?;
+        let nodes = self.assets.nodes(model)?;
+        nodes.parts.get(part as usize)?.name.as_deref()
     }
 
     /// The root of the model whose node `entity` is, which tools change in its place; `entity`
@@ -592,5 +605,31 @@ mod tests {
         };
         let ids: Vec<_> = operations.iter().map(Operation::entity).collect();
         assert_eq!(ids, [Some(root_id)], "{operations:?}");
+    }
+
+    /// A model's node is called by its name in the model, or by a `Name` code gives it, which
+    /// any entity is called by; one the model leaves unnamed, an entity of neither and a dead one,
+    /// by nothing.
+    #[test]
+    fn a_models_node_is_called_by_its_name_in_the_model() {
+        let mut cx = Context::seeded(1);
+        let mut named = imported();
+        named.parts[0].name = Some(Arc::from("frame"));
+        let (model, _) = added(&mut cx, "m", named);
+        let world = cx.world_mut();
+        let root = model.spawn(world, Transform::IDENTITY);
+        let nodes = world.nodes_of(root);
+        let (framed, unnamed) = (nodes[0].1, nodes[1].1);
+        assert_eq!(world.name(framed), Some("frame"));
+        assert_eq!(world.name(unnamed), None);
+        assert_eq!(world.name(root), None, "a root is no node");
+        world
+            .insert(framed, Name("held".to_owned()))
+            .expect("code may");
+        assert_eq!(world.name(framed), Some("held"));
+        let plain = world.spawn((Transform::IDENTITY, Name("plain".to_owned())));
+        assert_eq!(world.name(plain), Some("plain"));
+        world.despawn(plain).expect("alive");
+        assert_eq!(world.name(plain), None, "dead");
     }
 }

@@ -67,7 +67,8 @@ impl Imported {
 /// A node of the scene, or a primitive of a node's mesh: what an entity holds.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Part {
-    /// Its node's name, as the glTF gives it, if it isn't empty; none for a primitive's part.
+    /// Its node's name, as the glTF gives it, if it isn't empty: what the world calls the node,
+    /// as [`World::name`](crate::World::name) says. None for a primitive's part.
     pub(crate) name: Option<Arc<str>>,
     /// Where it is in its parent's space, or in the model's if it has none.
     pub(crate) transform: Transform,

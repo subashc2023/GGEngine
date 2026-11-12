@@ -735,9 +735,11 @@ A project's state is text that people and agents edit, diff and merge with ordin
   through `Model::spawn`, and spawns another's in their place as it's given another model, as a set
   of it does. The nodes are the model's: each node of its default scene an entity, with a
   `ModelNode` saying which part of the model it is, and a child for each primitive of a mesh with
-  several. Their IDs are mixed from the root's and their parts', as a prefab's copy's are, so that
-  the root's ID alone gives them wherever it's loaded, made or restored, and a scene saves the root
-  alone, refusing an entity code put under a node (`scene.model_node`). The world keeps
+  several; each called by its glTF node's name, which `World::name`, the panels and the tool API
+  give a node without a `Name`, as the model's rather than the world's. Their IDs are mixed from
+  the root's and their parts', as a prefab's copy's are, so that the root's ID alone gives them
+  wherever it's loaded, made or restored, and a scene saves the root alone, refusing an entity code
+  put under a node (`scene.model_node`). The world keeps
   `ModelRoot` and `ModelNode`, as it keeps `Parent`: code reads them but changes neither; tools'
   operations refuse to change a node, delete it, copy it, put anything under it or give an entity
   a `ModelNode` (`ecs.model_node`, `reflect.read_only`), as a scene's text can't give one either,

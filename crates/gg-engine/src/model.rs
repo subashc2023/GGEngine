@@ -51,16 +51,16 @@ impl Model {
 
 /// The entity a model's nodes are spawned under: the world spawns them as the entity comes with it,
 /// as [`Model::spawn`], a scene loaded or a tool's create makes it, and again as it's given another
-/// model; and takes them away with it. Each node of the model's default scene is an entity under it,
-/// with its transform in its parent's space, and a [`ModelNode`] saying which part of the model it
-/// is; one with a mesh draws it, as a child for each primitive of a mesh with several, since an
-/// entity draws one. The nodes are the model's, which a scene names the root's alone of, so that
-/// scenes don't save them, tools don't change them, and a pick in the view gives the root, or the
-/// node within the root or one of its nodes, as `pick`'s `within` says. Code may change them as the
-/// game runs, as snapshots keep them, until the model's nodes change: in a development run that
-/// serves the tool API, neither recorded nor in a lockstep session, as the model's file changes,
-/// each node still the model's keeps what code gave it, taking what changed of the model's, and the
-/// rest come and go.
+/// model; and takes them away with it. Each node of the model's default scene is an entity under
+/// it, with its transform in its parent's space, and a [`ModelNode`] saying which part of the model
+/// it is, called by its glTF node's name, as [`World::name`] says; one with a mesh draws it, as a
+/// child for each primitive of a mesh with several, since an entity draws one. The nodes are the
+/// model's, which a scene names the root's alone of, so that scenes don't save them, tools don't
+/// change them, and a pick in the view gives the root, or the node within the root or one of its
+/// nodes, as `pick`'s `within` says. Code may change them as the game runs, as snapshots keep them,
+/// until the model's nodes change: in a development run that serves the tool API, neither recorded
+/// nor in a lockstep session, as the model's file changes, each node still the model's keeps what
+/// code gave it, taking what changed of the model's, and the rest come and go.
 ///
 /// The world keeps it, as it keeps [`Parent`](crate::Parent): a scene, the tool API's operations
 /// and [`Model::spawn`] give it, and code reads it but can't change it, since the nodes would then

@@ -21,7 +21,8 @@ pub(super) trait Inspected {
     /// another process has just made.
     fn alive(&self, id: EntityId) -> Option<bool>;
 
-    /// The entity's name, if it has a [`Name`](crate::Name).
+    /// What the entity is called, as [`World::name`] says: its [`Name`](crate::Name), or a model's
+    /// node's name in the model's file.
     fn name(&self, id: EntityId) -> Option<String>;
 
     /// The entity's parent, if it has one.
@@ -94,19 +95,8 @@ impl Inspected for World {
         Some(self.entity(id).is_some())
     }
 
-    /// Read by name, as the panels read the world, listing the entity's components first, so that
-    /// one without a name builds no error, as getting the field it hasn't would, each frame it's
-    /// drawn.
     fn name(&self, id: EntityId) -> Option<String> {
-        let entity = self.entity(id)?;
-        let mut components = self.components_of(entity).ok()?;
-        if !components.any(|component| component == "Name") {
-            return None;
-        }
-        match self.get_field(entity, "Name", "0") {
-            Ok(Value::String(name)) => Some(name),
-            _ => None,
-        }
+        World::name(self, self.entity(id)?).map(str::to_owned)
     }
 
     fn parent(&self, id: EntityId) -> Option<EntityId> {

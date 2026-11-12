@@ -102,17 +102,17 @@
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
 //!   revision of its types, as `types` answers it.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
-//!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`, its
-//!   components in the order their types registered; and `space`, where the space its `Transform`
-//!   is in sits in the world, as the last tick left it: its parent's pose, as a matrix of 16 floats,
-//!   column by column, and a rotation, `[x, y, z, w]`, without the parent's scales; the identity
-//!   for a root. Its floats are written as a value's are. `bounds` is a [`Sphere`] in the world,
-//!   `{"center":[x,y,z],"radius":r}`, round what the entity and every entity under it draw, as the
-//!   last tick left them: meshes, sprites and circles, but not text, particles or lines, nor a mesh
-//!   whose extent the engine doesn't know; absent when nothing there draws. An instance's entity, its root or one its
-//!   prefab gives, has `instance` too, [`Instanced`]: what of it differs from its prefab, which
-//!   `revert` sets back, as a scene saves it; reading it parses the prefab's text, and changes
-//!   nothing.
+//!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`, its name as
+//!   [`Listed`] has it, its components in the order their types registered; and `space`, where the
+//!   space its `Transform` is in sits in the world, as the last tick left it: its parent's pose, as
+//!   a matrix of 16 floats, column by column, and a rotation, `[x, y, z, w]`, without the parent's
+//!   scales; the identity for a root. Its floats are written as a value's are. `bounds` is a
+//!   [`Sphere`] in the world, `{"center":[x,y,z],"radius":r}`, round what the entity and every
+//!   entity under it draw, as the last tick left them: meshes, sprites and circles, but not text,
+//!   particles or lines, nor a mesh whose extent the engine doesn't know; absent when nothing there
+//!   draws. An instance's entity, its root or one its prefab gives, has `instance` too,
+//!   [`Instanced`]: what of it differs from its prefab, which `revert` sets back, as a scene saves
+//!   it; reading it parses the prefab's text, and changes nothing.
 //! - `get`, [`Field`]: answers a component's field, as a value.
 //! - `types`: answers [`Types`], the world's component types and the descriptions of the types
 //!   they hold, which values are read and written by: a client draws and checks values by them, as
@@ -1020,10 +1020,10 @@ pub struct Pick {
 }
 
 /// What `pick` answers: the entity the view shows at the pixel, by its ID, and its name, as it's
-/// answered, or for a model's node the model's root, which tools change in its place, unless
-/// [`Pick::within`] names that model's root or one of its nodes; both `None` outside the view or
-/// where no entity draws, and the name for an entity gone by the answer, whose ID is kept, or for a
-/// connection not granted `read` of `Name`, which `view` alone isn't.
+/// answered and as [`Listed`] has it, or for a model's node the model's root, which tools change in
+/// its place, unless [`Pick::within`] names that model's root or one of its nodes; both `None`
+/// outside the view or where no entity draws, and the name for an entity gone by the answer, whose
+/// ID is kept, or for a connection not granted `read` of `Name`, which `view` alone isn't.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picked {
     pub id: Option<String>,
@@ -1097,8 +1097,9 @@ pub struct EntityList {
     pub types: u64,
 }
 
-/// An entity as `entities` lists it: its ID, its name, its parent's ID, its children's, in their
-/// order, and its components' types, in the order they registered.
+/// An entity as `entities` lists it: its ID, its name, its `Name`'s, or else for a model's node its
+/// node's name in the model's file, its parent's ID, its children's, in their order, and its
+/// components' types, in the order they registered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listed {
     pub id: String,

@@ -62,7 +62,7 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
-    Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Name, Operation, Pose, Prefab,
+    Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Operation, Pose, Prefab,
     PrefabRoot, Scroll, Texture, World, patch, snapshot,
 };
 
@@ -1279,10 +1279,10 @@ impl Api {
             };
             let id = entity.map_or(shown, |entity| world.id(entity));
             let name = entity.filter(|_| named);
-            let name = name.and_then(|entity| world.get::<Name>(entity));
+            let name = name.and_then(|entity| world.name(entity));
             reply.result(&Picked {
                 id: id.map(|id| id.to_string()),
-                name: name.map(|name| name.0.clone()),
+                name: name.map(str::to_owned),
             });
         }
         let (bare, shown) = (self.bare, &self.shown);
@@ -1481,7 +1481,7 @@ fn listed(world: &World, entity: Entity) -> Listed {
     let children = world.children(entity).expect("a listed entity is alive");
     Listed {
         id: id(entity).expect("a listed entity is alive"),
-        name: world.get::<Name>(entity).map(|name| name.0.clone()),
+        name: world.name(entity).map(str::to_owned),
         parent: parent.and_then(id),
         children: children
             .map(|child| id(child).expect("a child is alive"))
@@ -1498,8 +1498,8 @@ fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<String, Failur
     let mut out = String::from("{\"id\":");
     json::string(&mut out, &id.to_string());
     out.push_str(",\"name\":");
-    match world.get::<Name>(entity) {
-        Some(name) => json::string(&mut out, &name.0),
+    match world.name(entity) {
+        Some(name) => json::string(&mut out, name),
         None => out.push_str("null"),
     }
     out.push_str(",\"parent\":");
@@ -3071,7 +3071,7 @@ mod tests {
     use crate::net::Lockstep;
     use crate::recording::Recorder;
     use crate::scene_files::tests as scenes;
-    use crate::{BoxCollider2D, Sprite, Tick, Transform, Viewport};
+    use crate::{BoxCollider2D, Name, Sprite, Tick, Transform, Viewport};
 
     /// A directory of captures or snapshots keeps the newest of those the engine named alone,
     /// and whatever else is in it: files a client named, others' kinds and directories.
@@ -5893,15 +5893,17 @@ mod tests {
     }
 
     /// A pick of a model's node is answered with the model's root, but within the model, as a pick
-    /// within its root or one of its nodes is, with the node drawn there, however deep; within
-    /// another entity, or one gone, with the root still, and an entity no model's within any as
-    /// itself.
+    /// within its root or one of its nodes is, with the node drawn there, however deep, called by
+    /// its name in the model, as `entities` and `entity` call it; within another entity, or one
+    /// gone, with the root still, and an entity no model's within any as itself.
     #[test]
     fn a_pick_within_a_model_is_answered_with_its_node_drawn_there() {
         let (mut api, session) = started("Api Picks Within");
         let mut cx = Context::seeded(12);
-        // Its nodes: part 0, holding parts 1 and 2, each drawing; and part 3, drawing.
-        let (model, _) = crate::model::tests::added(&mut cx, "m", crate::model::tests::imported());
+        // Its nodes: part 0, holding parts 1, named, and 2, each drawing; and part 3, drawing.
+        let mut imported = crate::model::tests::imported();
+        imported.parts[1].name = Some(std::sync::Arc::from("seat"));
+        let (model, _) = crate::model::tests::added(&mut cx, "m", imported);
         let world = cx.world_mut();
         let root = model.spawn(world, Transform::IDENTITY);
         world.insert(root, Name("Model".to_owned())).expect("alive");
@@ -5920,6 +5922,12 @@ mod tests {
             panic!("no part {n}");
         };
         let (seat, back) = (part(world, 1), part(world, 3));
+        assert_eq!(listed(cx.world(), seat).name.as_deref(), Some("seat"));
+        let seat_id = cx.world().id(seat).expect("alive");
+        let answered = entity(cx.world(), cx.meshes(), seat_id).expect("an entity");
+        let answered: Value = serde_json::from_str(&answered).expect("JSON");
+        assert_eq!(answered["name"], "seat");
+        let world = cx.world_mut();
         let other = world.spawn((Transform::IDENTITY, Name("Other".to_owned())));
         let gone = world.spawn(Transform::IDENTITY);
         let id = |entity| world.id(entity).expect("alive");
@@ -5980,11 +5988,11 @@ mod tests {
         );
         let answer =
             |id: EntityId, name: Option<&str>| (Some(id.to_string()), name.map(str::to_owned));
-        // A model's nodes have no names.
+        // The seat by its name in the model, and the back, which it leaves unnamed, by none.
         let expected = [
             answer(root, Some("Model")),
-            answer(seat, None),
-            answer(seat, None),
+            answer(seat, Some("seat")),
+            answer(seat, Some("seat")),
             answer(back, None),
             answer(root, Some("Model")),
             answer(root, Some("Model")),
