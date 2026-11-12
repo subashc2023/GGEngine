@@ -22,10 +22,12 @@ pub(super) enum Command {
         parent: Option<EntityId>,
         components: Vec<(Ident, Value)>,
     },
-    /// Deletes the entity with this ID, and its descendants.
-    Delete(EntityId),
-    /// Copies the entity with this ID, and its descendants.
-    Duplicate(EntityId),
+    /// Deletes the entities with these IDs, and their descendants, as one edit: none of them under
+    /// another, whose delete would take it.
+    Delete(Vec<EntityId>),
+    /// Copies the entities with these IDs, and their descendants, as one edit: none of them under
+    /// another, whose copy would copy it.
+    Duplicate(Vec<EntityId>),
     /// Gives the entity with this ID a component of the type named, made from the value.
     Add(EntityId, String, Value),
     /// Takes the component of the type named away from the entity with this ID.
@@ -46,7 +48,9 @@ pub(super) enum Command {
 /// The Inspector's commands, which a recording reads as values: variants `Set`, with the
 /// entity's ID as text, the component and the path, and the value; `Seal`; `Undo`; `Redo`;
 /// `Create`, with its parent's ID as text, if it has one, and its components as a struct, a field
-/// each named as its type; `Delete`, `Duplicate` and `Unlink`, with the entity's ID as text; `Add`,
+/// each named as its type; `Delete` and `Duplicate`, with the entities' IDs as a list of texts,
+/// `entities`, or, as recordings before multiselect have them, one entity's, `entity`; `Unlink`,
+/// with the entity's ID as text; `Add`,
 /// with the entity's ID as text, the component and its value; `Remove`, with the entity's ID as
 /// text and the component; `Revert`, with the entity's ID as text, the component and the path;
 /// `Reparent`, with the entity's ID as text and its parent's, if it's to have one; and `Rename`,
@@ -90,8 +94,14 @@ impl Commands for Queue {
                     ],
                 )
             }
-            Command::Delete(id) => ("Delete", vec![entity(id)]),
-            Command::Duplicate(id) => ("Duplicate", vec![entity(id)]),
+            Command::Delete(ids) | Command::Duplicate(ids) => {
+                let name = match &self.0[i] {
+                    Command::Delete(_) => "Delete",
+                    _ => "Duplicate",
+                };
+                let ids = ids.iter().map(|id| text(&id.to_string())).collect();
+                (name, vec![("entities".into(), Value::List(ids))])
+            }
             Command::Unlink(id) => ("Unlink", vec![entity(id)]),
             Command::Revert(id, component, path) => (
                 "Revert",
@@ -180,13 +190,28 @@ impl Commands for Queue {
                     components: components.clone(),
                 }
             }
-            "Delete" | "Duplicate" | "Unlink" => {
+            "Unlink" => {
                 let [entity] = reflect::pick(fields, ["entity"])?;
-                let entity = id(entity, "entity")?;
+                Command::Unlink(id(entity, "entity")?)
+            }
+            // A list of entities, or one, as a recording before multiselect has it.
+            "Delete" | "Duplicate" => {
+                let ids = match fields {
+                    [(field, entity)] if field == "entity" => vec![id(entity, "entity")?],
+                    _ => {
+                        let [entities] = reflect::pick(fields, ["entities"])?;
+                        let Value::List(entities) = entities else {
+                            let error = reflect::wrong_kind("List", entities);
+                            return Err(reflect::within(error, "entities"));
+                        };
+                        let ids = (entities.iter().enumerate())
+                            .map(|(i, entity)| id(entity, &format!("entities[{i}]")));
+                        ids.collect::<Result<_>>()?
+                    }
+                };
                 match name {
-                    "Delete" => Command::Delete(entity),
-                    "Duplicate" => Command::Duplicate(entity),
-                    _ => Command::Unlink(entity),
+                    "Delete" => Command::Delete(ids),
+                    _ => Command::Duplicate(ids),
                 }
             }
             "Revert" => {

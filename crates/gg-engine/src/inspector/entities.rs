@@ -120,19 +120,31 @@ impl Inspector {
         };
         let height = ui.spacing().interact_size.y;
         let scroll = egui::ScrollArea::vertical();
+        // The row a click with Shift held picks the rows up to, from the active pick's.
+        let mut ranged = None;
         if self.with.is_some() {
             scroll.show_rows(ui, height, count, |ui, shown| {
                 for id in world.page(self.with.as_deref(), shown) {
-                    self.row(world, ui, id, None, operations, saves);
+                    ranged = ranged.or(self.row(world, ui, id, None, operations, saves));
                 }
             });
+            if let Some(to) = ranged {
+                let rows = world.page(self.with.as_deref(), 0..count);
+                self.pick_rows(&rows, to);
+            }
         } else {
             let tree = Tree::new(world, &self.expanded);
             scroll.show_rows(ui, height, tree.len, |ui, shown| {
                 for (id, depth) in tree.page(world, shown) {
-                    self.row(world, ui, id, Some(depth), operations, saves);
+                    let shifted = self.row(world, ui, id, Some(depth), operations, saves);
+                    ranged = ranged.or(shifted);
                 }
             });
+            if let Some(to) = ranged {
+                let rows = tree.page(world, 0..tree.len);
+                let rows: Vec<EntityId> = rows.into_iter().map(|(id, _)| id).collect();
+                self.pick_rows(&rows, to);
+            }
         }
         // Nothing is behind the rows, so that a click between two of them doesn't unpick.
         let below = ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::click());
@@ -226,13 +238,16 @@ impl Inspector {
     }
 
     /// Draws the row of the entity of ID `id`: its label, across the rest of the row, which picks
-    /// it, a double click framing it in the view too, and which drags, a row let go on it making
+    /// it alone, with Ctrl (Cmd on macOS) held adds it to what's picked or takes it out, and with
+    /// Shift held returns its ID, for the rows from the active pick's to it to be picked; a double
+    /// click frames it in the view too; and which drags, a row let go on it making
     /// the entity dragged its child; and whose context menu frames it in the view, while a layer
     /// takes frames, renames it, copies its ID, makes an empty child of it, duplicates it, makes
     /// it a root, if it isn't one, or deletes it, the operation chosen going in `operations`, or,
     /// where `world` saves prefabs, saves it and its descendants as a prefab, linked in their
-    /// place, the entity going in `saves`; while it's renamed, the field its name is typed into in
-    /// place of its label; in the tree, at `depth`, after an arrow that shows and hides its
+    /// place, the entity going in `saves`: Frame in View, Duplicate Entity and Delete Entity act
+    /// on every entity picked if it's one of them. While it's renamed, the field its name is typed
+    /// into in place of its label; in the tree, at `depth`, after an arrow that shows and hides its
     /// children's rows, if it has any.
     fn row(
         &mut self,
@@ -242,11 +257,12 @@ impl Inspector {
         depth: Option<usize>,
         operations: &mut Vec<Command>,
         saves: &mut Vec<EntityId>,
-    ) {
+    ) -> Option<EntityId> {
         // The entity's own, not its row's, so that its widgets' IDs go with it as rows change, as
         // tables swap theirs: a context menu open on it acts on it, not on the entity that comes
         // to its row.
         let scope = egui::UiBuilder::new().scope_id(ui.make_persistent_id(id));
+        let mut ranged = None;
         ui.scope_builder(scope, |ui| {
             ui.horizontal(|ui| {
                 if let Some(depth) = depth {
@@ -257,7 +273,7 @@ impl Inspector {
                     ui.with_layout(across, |ui| self.rename_field(world, ui, operations));
                     return;
                 }
-                let picked = self.picked == Some(id);
+                let picked = self.is_picked(id);
                 // On one line, as a horizontal row has it, since the rows' paging takes each to be
                 // one tall: a vertical layout would wrap it.
                 let label = egui::Button::selectable(picked, row_label(world, id))
@@ -271,7 +287,14 @@ impl Inspector {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 }
                 if label.clicked() {
-                    self.pick(id);
+                    let modifiers = ui.input(|input| input.modifiers);
+                    if modifiers.command {
+                        self.toggle(id);
+                    } else if modifiers.shift {
+                        ranged = Some(id);
+                    } else {
+                        self.pick(id);
+                    }
                 }
                 if label.double_clicked() {
                     self.frame(id);
@@ -298,13 +321,13 @@ impl Inspector {
                         operations.push(empty(Some(id)));
                     }
                     if item(ui, "Duplicate Entity", &DUPLICATE).clicked() {
-                        operations.push(Command::Duplicate(id));
+                        operations.push(Command::Duplicate(self.acted(world, id)));
                     }
                     if world.parent(id).is_some() && ui.button("Move to Root").clicked() {
                         operations.push(Command::Reparent(id, None));
                     }
                     if item(ui, "Delete Entity", &DELETE).clicked() {
-                        operations.push(Command::Delete(id));
+                        operations.push(Command::Delete(self.acted(world, id)));
                     }
                     if world.saves_prefabs() {
                         let save = ui.button("Save as Prefab").on_hover_text(
@@ -319,6 +342,34 @@ impl Inspector {
                 });
             });
         });
+        ranged
+    }
+
+    /// What a row's Duplicate Entity and Delete Entity act on, the row of the entity of ID `id`:
+    /// every entity picked, if it's one of them, but those under another picked, as the Entity
+    /// menu's do; or else it alone.
+    fn acted(&self, world: &dyn Inspected, id: EntityId) -> Vec<EntityId> {
+        match self.is_picked(id) {
+            true => self.uppermost(world),
+            false => vec![id],
+        }
+    }
+
+    /// Picks the rows `rows` list, the panel's in their order, from the active pick's to `to`'s,
+    /// as a click with Shift held on `to`'s does, `to`'s the active one; or `to` alone if the
+    /// active pick has no row there, as under a row that's closed. A click's, not a frame's, so
+    /// that a list of every row is no frame's cost.
+    fn pick_rows(&mut self, rows: &[EntityId], to: EntityId) {
+        let at = |id: EntityId| rows.iter().position(|&row| row == id);
+        let (Some(from), Some(end)) = (self.picked.and_then(at), at(to)) else {
+            self.pick(to);
+            return;
+        };
+        let range: Vec<EntityId> = match from <= end {
+            true => rows[from..=end].to_vec(),
+            false => rows[end..=from].iter().rev().copied().collect(),
+        };
+        self.pick_all(range);
     }
 
     /// The field the name of the entity being renamed is typed into, across its row: it takes the
@@ -353,9 +404,9 @@ impl Inspector {
     }
 
     /// Takes the panel's keys at a press in it, `ui`'s whole, and lets them go at a press
-    /// elsewhere; and while it has them, and no text field has the keys, has F frame the entity
-    /// picked in the view, F2 rename it in its row, and Delete delete it, while it's alive, the
-    /// delete going in `operations`.
+    /// elsewhere; and while it has them, and no text field has the keys, has F frame the entities
+    /// picked in the view, F2 rename the active one in its row, and Delete delete them, while the
+    /// active one is alive, the delete going in `operations`.
     fn take_keys(&mut self, world: &dyn Inspected, ui: &egui::Ui, operations: &mut Vec<Command>) {
         // Where the pointer is, as a tap's release in the same frame forgets where it pressed.
         let pressed = ui.input(|input| {
@@ -379,21 +430,28 @@ impl Inspector {
             self.rename(world, id);
         }
         if delete {
-            operations.push(Command::Delete(id));
+            operations.push(Command::Delete(self.uppermost(world)));
         }
     }
 
-    /// Picks the entity of ID `id` and asks the link to frame it in the view, as
-    /// [`InspectorLink::framed`](super::InspectorLink::framed) says.
+    /// Asks the link to frame what's picked in the view, as
+    /// [`InspectorLink::framed`](super::InspectorLink::framed) says: every entity picked, if the
+    /// entity of ID `id` is one of them, or else it, picked alone.
     fn frame(&mut self, id: EntityId) {
-        self.pick(id);
-        self.link.borrow_mut().frame = Some(id);
+        if !self.is_picked(id) {
+            self.pick(id);
+        }
+        self.link.borrow_mut().frame = self.picked;
     }
 
-    /// Picks the entity of ID `id` and has its row show the field its name is typed into, holding
-    /// its name, as `world` has it.
+    /// Makes the entity of ID `id` the active pick, keeping the rest picked if it's one of them, or
+    /// else picks it alone, and has its row show the field its name is typed into, holding its
+    /// name, as `world` has it.
     fn rename(&mut self, world: &dyn Inspected, id: EntityId) {
-        self.pick(id);
+        match self.is_picked(id) {
+            true => self.add(id),
+            false => self.pick(id),
+        }
         let name = world.name(id).unwrap_or_default();
         self.renaming = Some(Renaming {
             id,

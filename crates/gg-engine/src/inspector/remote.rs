@@ -4,9 +4,10 @@
 //! One connection, on a thread of its own, carries a request at a time, each answered in turn, so
 //! that what's read after an edit's answer shows the edit. The types go first, once, and again if
 //! a type not described comes, since values are read and written by them; then edits, but for a
-//! read of the picked entity between two of them, as during a drag; then the picked entity, every
-//! 50 ms; the list of entities, 10,000 a page, every quarter of a second; and the client's edits in
-//! words, for the Edit menu, after each edit and each list. A set waits, drawn as it will be, until
+//! read of the picked entity between two of them, as during a drag, the sets of one field of
+//! several entities in a gesture going in one apply; then the active pick, every 50 ms; the others
+//! picked, every quarter of a second; the list of entities, 10,000 a page, as often; and the
+//! client's edits in words, for the Edit menu, after each edit and each list. A set waits, drawn as it will be, until
 //! an `entity` answer after its own; an add or a remove likewise. The game answers a request as its
 //! frame starts, so a request takes a frame of the game's, and of the editor's, which a game run
 //! `--embedded` paces its frames by.
@@ -36,7 +37,7 @@ mod imp {
 
     use super::super::commands::Command;
     use super::super::inspected::{Inspected, Pending};
-    use super::super::link::Linking;
+    use super::super::link::{Linking, Picking};
     use super::super::{Edit, Gesture, Inspector, Pass, Placed, Step};
     use crate::api::json::{self, Remote as Names};
     use crate::reflect::{Reflect, Type, Types, Value};
@@ -74,11 +75,18 @@ mod imp {
         reading: Option<Vec<gg_api::Listed>>,
         /// The picked entity, as the last `entity` answer of it gave it while it stayed picked; the
         /// entity the panels have picked, as of the last pass, whose answer may not have come; and
-        /// the one the link asks them to pick, as of this pass's update, which the list may not
-        /// have yet either.
+        /// those the link asks them to pick, as of this pass's update, which the list may not have
+        /// yet either.
         picked: Option<(EntityId, Option<Known>)>,
         wanted: Option<EntityId>,
-        linking: Option<EntityId>,
+        linking: Vec<EntityId>,
+        /// The other entities the panels have picked, beside the active one, as of the last pass,
+        /// each with where it is.
+        others: Vec<Other>,
+        /// What a duplicate of several made, its entities' copies and their descendants', and the
+        /// active pick as it was answered: the copies of the entities are picked once the list has
+        /// them all, as those among them with no parent among them, unless the pick changes first.
+        copied: Option<(Vec<EntityId>, Option<EntityId>)>,
         /// The edits to send, in order, and the request waiting for its answer.
         queued: VecDeque<Ask>,
         sent: Option<Ask>,
@@ -137,6 +145,22 @@ mod imp {
         Entity,
     }
 
+    /// An entity picked beside the active one: where it is, as the last `entity` answer of it gave
+    /// it while it stayed picked, `None` until one has come, and `Some(None)` for one with no
+    /// place, without a transform, or gone; and when it was last asked for, `None` to ask at once.
+    struct Other {
+        id: EntityId,
+        read: Option<Option<Placed>>,
+        asked: Option<Instant>,
+    }
+
+    /// A set made, by its number, of the field `edit` changes of the entity of ID `id`.
+    struct Made {
+        number: u64,
+        id: EntityId,
+        edit: Edit,
+    }
+
     /// A request, as what's to be done with its answer.
     enum Ask {
         Types,
@@ -148,11 +172,11 @@ mod imp {
         Edits,
         /// A save of the entity with this ID as a prefab, which the Entities panel chose.
         SavePrefab(EntityId),
-        /// A set, its waiting one numbered `number`, of a gesture.
+        /// Sets of a gesture, each waiting by its number: queued one at a time, and sent, as the
+        /// API takes them in one apply, with those queued just after it of the same field of other
+        /// entities in the same gesture, as a drag of several entities' handles makes them.
         Set {
-            number: u64,
-            id: EntityId,
-            edit: Edit,
+            sets: Vec<Made>,
             gesture: u64,
         },
         /// An operation the menus chose, the entity picked as they chose it, and the parent of
@@ -250,7 +274,9 @@ mod imp {
                 reading: None,
                 picked: None,
                 wanted: None,
-                linking: None,
+                linking: Vec::new(),
+                others: Vec::new(),
+                copied: None,
                 queued: VecDeque::new(),
                 sent: None,
                 edited: false,
@@ -289,9 +315,11 @@ mod imp {
         }
 
         /// Takes in what the game answered since the last pass, changing `inspector`'s pick, open
-        /// rows and refusals as it says; and first reaches the game its link names, if it names
-        /// one since, and lets go of the read of the entity picked if the pick changed in the last
-        /// pass, so that a read taken before the pick went elsewhere never shows once it's back.
+        /// rows and refusals as it says, and picking the copies of a duplicate of several once the
+        /// list has them; and first reaches the game its link names, if it names one since, and
+        /// lets go of the read of the entity picked if the pick changed in the last pass, so that a
+        /// read taken before the pick went elsewhere never shows once it's back, and of those of
+        /// the others no longer picked.
         pub(in super::super) fn update(&mut self, inspector: &mut Inspector) {
             let reach = inspector.link.borrow_mut().reach.take();
             if let Some(session) = reach {
@@ -299,6 +327,20 @@ mod imp {
             }
             if inspector.picked != self.wanted {
                 self.picked = None;
+            }
+            // The others picked as of the last pass, those still picked keeping their reads.
+            let ids = self.others.iter().map(|other| other.id);
+            if !ids.eq(inspector.others.iter().copied()) {
+                let mut kept = mem::take(&mut self.others);
+                for &id in &inspector.others {
+                    let at = kept.iter().position(|other| other.id == id);
+                    let other = at.map(|at| kept.swap_remove(at));
+                    self.others.push(other.unwrap_or(Other {
+                        id,
+                        read: None,
+                        asked: None,
+                    }));
+                }
             }
             while let Some(connection) = &self.connection {
                 match connection.heard.try_recv() {
@@ -318,8 +360,29 @@ mod imp {
                     }
                 }
             }
+            if let Some((copied, picked)) = &self.copied {
+                let listed = copied.iter().all(|id| self.list.by_id.contains_key(id));
+                if inspector.picked != *picked {
+                    self.copied = None;
+                } else if listed {
+                    let (copied, _) = self.copied.take().expect("copied");
+                    let under = |id: &EntityId| {
+                        (self.parent(*id)).is_some_and(|parent| copied.contains(&parent))
+                    };
+                    let copies: Vec<EntityId> =
+                        copied.iter().copied().filter(|id| !under(id)).collect();
+                    for &id in &copies {
+                        inspector.open_ancestors(&*self, id);
+                    }
+                    inspector.pick_all(copies);
+                }
+            }
             self.wanted = inspector.picked;
-            self.linking = inspector.link.borrow().pick.flatten();
+            self.linking = match &inspector.link.borrow().pick {
+                Some(Picking::Only(ids)) => ids.clone(),
+                Some(Picking::Toggle(id)) => vec![*id],
+                None => Vec::new(),
+            };
         }
 
         /// Takes in `answer`, to `ask`.
@@ -336,6 +399,9 @@ mod imp {
                 self.entity_at = None;
                 self.list_at = None;
                 self.edits_due = true;
+                for other in &mut self.others {
+                    other.asked = None;
+                }
             }
             match ask {
                 Ask::Types => match answer.and_then(|json| read::<gg_api::Types>(&json)) {
@@ -384,37 +450,39 @@ mod imp {
                     self.undo = authored.as_ref().and_then(|a| first(a.done.last()));
                     self.redo = authored.as_ref().and_then(|a| first(a.undone.last()));
                 }
-                Ask::Set {
-                    number, id, edit, ..
-                } => {
+                // All of them or none, as an apply is.
+                Ask::Set { sets, .. } => {
                     inspector.not_done = None;
-                    let shown = inspector.picked == Some(id);
-                    if shown {
-                        inspector.refusals.retain(|refusal| {
-                            refusal.component != edit.component || refusal.path != edit.path
-                        });
-                    }
-                    match answer {
-                        Ok(_) => {
-                            let set = self.waiting.iter_mut().find(|set| set.number == number);
-                            if let Some(set) = set {
-                                set.applied = true;
-                            }
+                    for Made { number, id, edit } in sets {
+                        let shown = inspector.picked == Some(id);
+                        if shown {
+                            inspector.refusals.retain(|refusal| {
+                                refusal.component != edit.component || refusal.path != edit.path
+                            });
                         }
-                        Err(failure) => {
-                            self.waiting.retain(|set| set.number != number);
-                            warn!(
-                                code = failure.code.as_str(),
-                                entity = %id,
-                                component = edit.component.as_str(),
-                                path = edit.path.as_str(),
-                                "{failure}"
-                            );
-                            if shown {
-                                let Edit {
-                                    component, path, ..
-                                } = edit;
-                                inspector.refuse(&*self, id, component, path, failure.message);
+                        match &answer {
+                            Ok(_) => {
+                                let set = self.waiting.iter_mut().find(|set| set.number == number);
+                                if let Some(set) = set {
+                                    set.applied = true;
+                                }
+                            }
+                            Err(failure) => {
+                                self.waiting.retain(|set| set.number != number);
+                                warn!(
+                                    code = failure.code.as_str(),
+                                    entity = %id,
+                                    component = edit.component.as_str(),
+                                    path = edit.path.as_str(),
+                                    "{failure}"
+                                );
+                                if shown {
+                                    let Edit {
+                                        component, path, ..
+                                    } = edit;
+                                    let message = failure.message.clone();
+                                    inspector.refuse(&*self, id, component, path, message);
+                                }
                             }
                         }
                     }
@@ -436,9 +504,17 @@ mod imp {
                         if let Some(change) = change {
                             change.applied = true;
                         }
-                        // The entity made, picked unless the pick changed since.
-                        let made = applied.entities.first().and_then(|id| id.parse().ok());
-                        if let Some(made) = made.filter(|_| inspector.picked == picked) {
+                        let made: Vec<EntityId> = (applied.entities.iter())
+                            .filter_map(|id| id.parse().ok())
+                            .collect();
+                        let kept = inspector.picked == picked;
+                        let several = matches!(&command, Command::Duplicate(ids) if ids.len() > 1);
+                        if kept && several {
+                            // Copies of several, among those of their descendants, which the
+                            // list tells apart.
+                            self.copied = Some((made, picked));
+                        } else if let Some(&made) = made.first().filter(|_| kept) {
+                            // The entity made, picked unless the pick changed since.
                             inspector.pick(made);
                             // From the parent it was made under, which the list may not have yet.
                             if let Some(parent) = parent {
@@ -452,8 +528,8 @@ mod imp {
                         // What it was of, as the local Inspector logs an operation refused.
                         let (operation, entity, component) = match &command {
                             Command::Create { .. } => ("create", None, None),
-                            &Command::Duplicate(id) => ("duplicate", Some(id), None),
-                            &Command::Delete(id) => ("delete", Some(id), None),
+                            Command::Duplicate(ids) => ("duplicate", ids.first().copied(), None),
+                            Command::Delete(ids) => ("delete", ids.first().copied(), None),
                             Command::Add(id, component, _) => ("add", Some(*id), Some(component)),
                             Command::Remove(id, component) => {
                                 ("remove", Some(*id), Some(component))
@@ -561,20 +637,23 @@ mod imp {
         }
 
         /// Takes in the entity of ID `id`, if it's still the one `picked`, its components' values
-        /// read by the game's types; and lets go of the sets and changes the game has applied, of
-        /// it and of any other no longer picked, which now show.
+        /// read by the game's types, or else where it is, if it's still another picked; and lets
+        /// go of the sets and changes the game has applied, of it and of any other not picked,
+        /// which now show: those of another picked wait for a read of their own.
         fn entity(
             &mut self,
             id: EntityId,
             answer: Result<String, Failure>,
             picked: Option<EntityId>,
         ) {
-            let applied =
-                |of: EntityId, applied: bool| !applied || (of != id && Some(of) == picked);
+            let other = self.others.iter().position(|other| other.id == id);
+            let picks = |of: EntityId| Some(of) == picked || self.others.iter().any(|o| o.id == of);
+            let applied = |of: EntityId, applied: bool| !applied || (of != id && picks(of));
             self.waiting.retain(|set| applied(set.id, set.applied));
             self.changes
                 .retain(|change| applied(change.id, change.applied));
-            if picked != Some(id) {
+            let other = other.filter(|_| picked != Some(id));
+            if picked != Some(id) && other.is_none() {
                 return;
             }
             let answered = match answer.and_then(|json| read::<Answered>(&json)) {
@@ -582,7 +661,10 @@ mod imp {
                 // Despawned.
                 Err(failure) if failure.code == "ecs.no_entity" => {
                     self.troubles[Of::Entity as usize] = None;
-                    self.picked = Some((id, None));
+                    match other {
+                        Some(at) => self.others[at].read = Some(None),
+                        None => self.picked = Some((id, None)),
+                    }
                     return;
                 }
                 Err(failure) => {
@@ -624,7 +706,10 @@ mod imp {
                 .components
                 .iter()
                 .any(|name| self.types.find(name).is_none());
-            self.picked = Some((id, Some(entity)));
+            match other {
+                Some(at) => self.others[at].read = Some(self.place(&entity)),
+                None => self.picked = Some((id, Some(entity))),
+            }
         }
 
         /// Where the entity of ID `picked` is, as the last read of it gave it: if that read was of
@@ -636,19 +721,106 @@ mod imp {
             if picked != Some(*id) {
                 return None;
             }
+            self.place(entity)
+        }
+
+        /// Where `entity` is, as a read of it gave it: if it gave its transform and where the space
+        /// it's in sits.
+        fn place(&self, entity: &Known) -> Option<Placed> {
             let at = entity
                 .components
                 .iter()
                 .position(|name| name == "Transform")?;
             let local = entity.values.get(at)?.as_ref().ok()?;
             Some(Placed {
-                id: *id,
+                id: entity.id,
                 local: Transform::from_value(local).ok()?,
                 space: entity.space?,
                 bounds: (entity.bounds)
                     .map(|sphere| (Vec3::from_array(sphere.center), sphere.radius)),
                 generation: self.generation,
             })
+        }
+
+        /// Where the entities of `picks`, those the panels have picked, the active one last, are
+        /// that a drag of a tool's handles moves, as [`InspectorLink::along`] says: those with a
+        /// place, as their last reads gave it, and the sets waiting for the game will leave it,
+        /// but those under another of them; `None` until a read of each has come since it was
+        /// picked, the active one's too.
+        ///
+        /// [`InspectorLink::along`]: crate::InspectorLink::along
+        pub(in super::super) fn along(&self, picks: &[EntityId]) -> Option<Vec<Placed>> {
+            let &active = picks.last()?;
+            let mut along = Vec::new();
+            for &id in picks {
+                let placed = match self.others.iter().find(|other| other.id == id) {
+                    Some(other) => other.read?,
+                    None if id == active => Some(self.placed(Some(id))?),
+                    // Picked since the last update, which hasn't read it.
+                    None => return None,
+                };
+                if self.under_one_of(id, picks) {
+                    continue;
+                }
+                along.extend(placed.map(|placed| self.waited(placed)));
+            }
+            Some(along)
+        }
+
+        /// Whether an ancestor of the entity of ID `id` is one of `picks`, up to one met again, as
+        /// a hierarchy put together from reads at two moments may have it.
+        fn under_one_of(&self, id: EntityId, picks: &[EntityId]) -> bool {
+            let mut met = HashSet::from([id]);
+            let mut up = self.parent(id);
+            while let Some(parent) = up.filter(|&parent| met.insert(parent)) {
+                if picks.contains(&parent) {
+                    return true;
+                }
+                up = self.parent(parent);
+            }
+            false
+        }
+
+        /// `placed`, with the sets of its transform's fields that wait for the game made, in the
+        /// order they were: whole, or a vector's component, as a link sets them.
+        fn waited(&self, mut placed: Placed) -> Placed {
+            let sets = self.waiting.iter().filter(|set| set.id == placed.id);
+            let local = &mut placed.local;
+            for Edit {
+                component,
+                path,
+                value,
+            } in sets.map(|set| &set.edit)
+            {
+                if component != "Transform" {
+                    continue;
+                }
+                let (field, axis) = match path.split_once('.') {
+                    Some((field, axis)) => (field, Some(axis)),
+                    None => (path.as_str(), None),
+                };
+                let vector = match field {
+                    "translation" => &mut local.translation,
+                    "scale" => &mut local.scale,
+                    "rotation" => {
+                        if let (None, &Value::Quat(rotation)) = (axis, value) {
+                            local.rotation = rotation;
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                match (axis, value) {
+                    (None, &Value::Vec3(whole)) => *vector = whole,
+                    (Some(axis), &Value::F32(x)) => {
+                        if let Some(i) = ["x", "y", "z"].iter().position(|&name| name == axis) {
+                            vector[i] = x;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            placed
         }
 
         /// What waits for the game: the sets of the fields of the entity of ID `picked`, the adds
@@ -738,13 +910,15 @@ mod imp {
                     self.gestures
                 }
             };
+            // Queued one at a time, as `ask_next` sends them.
             let same = self.queued.iter().position(|ask| {
-                matches!(ask, Ask::Set { id: of, edit: set, gesture, .. }
-                    if *of == id && *gesture == number && set.component == edit.component
-                        && set.path == edit.path)
+                matches!(ask, Ask::Set { sets, gesture }
+                    if *gesture == number && sets.iter().any(|set| set.id == id
+                        && set.edit.component == edit.component && set.edit.path == edit.path))
             });
-            if let Some(Ask::Set { number, .. }) = same.and_then(|at| self.queued.remove(at)) {
-                self.waiting.retain(|set| set.number != number);
+            if let Some(Ask::Set { sets, .. }) = same.and_then(|at| self.queued.remove(at)) {
+                self.waiting
+                    .retain(|set| sets.iter().all(|made| made.number != set.number));
             }
             self.made += 1;
             self.waiting.push(Waiting {
@@ -753,12 +927,43 @@ mod imp {
                 edit: edit.clone(),
                 applied: false,
             });
-            self.queued.push_back(Ask::Set {
+            let made = Made {
                 number: self.made,
                 id,
                 edit,
+            };
+            self.queued.push_back(Ask::Set {
+                sets: vec![made],
                 gesture: number,
             });
+        }
+
+        /// The next queued request, `ask`, with, if it's a set, the sets queued just after it of
+        /// the same field of other entities in the same gesture, which go with it in one apply.
+        fn with_its_gesture(&mut self, mut ask: Ask) -> Ask {
+            let Ask::Set { sets, gesture } = &mut ask else {
+                return ask;
+            };
+            while let Some(Ask::Set {
+                sets: next,
+                gesture: of,
+            }) = self.queued.front()
+            {
+                let first = &sets[0].edit;
+                let joins = |made: &Made| {
+                    made.edit.component == first.component
+                        && made.edit.path == first.path
+                        && sets.iter().all(|set| set.id != made.id)
+                };
+                if *of != *gesture || !next.iter().all(joins) {
+                    break;
+                }
+                let Some(Ask::Set { sets: next, .. }) = self.queued.pop_front() else {
+                    unreachable!("a set at the front");
+                };
+                sets.extend(next);
+            }
+            ask
         }
 
         /// Ends `gesture`'s edit, if it goes on.
@@ -775,7 +980,7 @@ mod imp {
             self.made += 1;
             let parent = match &command {
                 Command::Create { parent, .. } => *parent,
-                &Command::Duplicate(id) => self.parent(id),
+                Command::Duplicate(ids) => ids.first().and_then(|&id| self.parent(id)),
                 _ => None,
             };
             if let Command::Add(id, component, _) | Command::Remove(id, component) = &command {
@@ -797,10 +1002,7 @@ mod imp {
 
         /// Sends the next request, if none waits for its answer: as the module says.
         fn ask_next(&mut self, picked: Option<EntityId>) {
-            let Some(connection) = &self.connection else {
-                return;
-            };
-            if self.sent.is_some() {
+            if self.connection.is_none() || self.sent.is_some() {
                 return;
             }
             let due = |at: Option<Instant>, every| at.is_none_or(|at| at.elapsed() >= every);
@@ -816,10 +1018,16 @@ mod imp {
                 // Nothing is read or written but by them.
                 return;
             } else if !self.queued.is_empty() && !(self.edited && entity_due) {
-                self.queued.pop_front().expect("one queued")
+                let ask = self.queued.pop_front().expect("one queued");
+                self.with_its_gesture(ask)
             } else if let (Some(id), true) = (picked, entity_due) {
                 self.entity_at = Some(Instant::now());
                 Ask::Entity(id)
+            } else if let Some(other) = (self.others.iter_mut()).find(|o| due(o.asked, LIST_EVERY))
+            {
+                // The others picked, as often as the list.
+                other.asked = Some(Instant::now());
+                Ask::Entity(other.id)
             } else if let Some(read) = &self.reading {
                 Ask::List { skip: read.len() }
             } else if due(self.list_at, LIST_EVERY) {
@@ -837,6 +1045,7 @@ mod imp {
                 None => return,
             };
             self.edited = ask.edits();
+            let connection = self.connection.as_ref().expect("connected");
             if connection.asks.send(request).is_ok() {
                 self.sent = Some(ask);
             }
@@ -850,9 +1059,9 @@ mod imp {
                 json::write(&mut out, value, &names);
                 serde_json::from_str::<JsonValue>(&out).ok()
             };
-            let apply = |operation: gg_api::Operation, gesture: Option<u64>| {
+            let apply = |operations: Vec<gg_api::Operation>, gesture: Option<u64>| {
                 let apply = gg_api::Apply {
-                    operations: vec![operation],
+                    operations,
                     gesture,
                 };
                 let params = serde_json::to_value(apply).expect("an apply serializes");
@@ -867,19 +1076,36 @@ mod imp {
                 }
                 Ask::Entity(of) => Some(("entity".to_owned(), json!({"id": id(of)}))),
                 Ask::Edits => Some(("edits".to_owned(), json!({"author": self.client}))),
-                Ask::Set {
-                    id: of,
-                    edit,
-                    gesture,
+                Ask::Set { sets, gesture } => {
+                    let sets = sets.iter().map(|Made { id: of, edit, .. }| {
+                        Some(gg_api::Operation::Set {
+                            id: id(of),
+                            component: edit.component.clone(),
+                            path: edit.path.clone(),
+                            value: value(&edit.value)?,
+                        })
+                    });
+                    apply(sets.collect::<Option<_>>()?, Some(*gesture))
+                }
+                // Of several entities, as one edit.
+                Ask::Operation {
+                    command: Command::Delete(ids),
                     ..
                 } => {
-                    let set = gg_api::Operation::Set {
+                    let deletes = ids
+                        .iter()
+                        .map(|of| gg_api::Operation::Delete { id: id(of) });
+                    apply(deletes.collect(), None)
+                }
+                Ask::Operation {
+                    command: Command::Duplicate(ids),
+                    ..
+                } => {
+                    let duplicates = ids.iter().map(|of| gg_api::Operation::Duplicate {
                         id: id(of),
-                        component: edit.component.clone(),
-                        path: edit.path.clone(),
-                        value: value(&edit.value)?,
-                    };
-                    apply(set, Some(*gesture))
+                        copies: Vec::new(),
+                    });
+                    apply(duplicates.collect(), None)
                 }
                 Ask::Operation { command, .. } => {
                     let operation = match command {
@@ -891,11 +1117,6 @@ mod imp {
                                 .map(|(name, given)| Some((name.to_string(), value(given)?)))
                                 .collect::<Option<_>>()?,
                         },
-                        Command::Duplicate(of) => gg_api::Operation::Duplicate {
-                            id: id(of),
-                            copies: Vec::new(),
-                        },
-                        Command::Delete(of) => gg_api::Operation::Delete { id: id(of) },
                         // The game's own default.
                         Command::Add(of, component, _) => gg_api::Operation::Add {
                             id: id(of),
@@ -934,8 +1155,11 @@ mod imp {
                         Command::Set(..) | Command::Seal | Command::Step(_) => {
                             unreachable!("the menus choose no sets, seals or steps")
                         }
+                        Command::Delete(_) | Command::Duplicate(_) => {
+                            unreachable!("matched above")
+                        }
                     };
-                    apply(operation, None)
+                    apply(vec![operation], None)
                 }
                 Ask::Step(Step::Undo) => Some(("undo".to_owned(), JsonValue::Null)),
                 Ask::Step(Step::Redo) => Some(("redo".to_owned(), JsonValue::Null)),
@@ -992,7 +1216,9 @@ mod imp {
             match &self.picked {
                 Some((of, entity)) if *of == id => Some(entity.is_some()),
                 _ if self.list.by_id.contains_key(&id) => Some(true),
-                _ if self.wanted == Some(id) || self.linking == Some(id) || !self.list.read => None,
+                _ if self.wanted == Some(id) || self.linking.contains(&id) || !self.list.read => {
+                    None
+                }
                 _ => Some(false),
             }
         }
@@ -1411,6 +1637,135 @@ mod imp {
             assert_eq!(remote.placed(Some(a)), None, "back, until a read of it");
         }
 
+        /// The others picked are placed by reads of their own, as the sets that wait for the game
+        /// will leave them, but those under another picked, whose drag carries them; nothing is
+        /// until a read of each has come, the active one's too; and one found gone isn't.
+        #[test]
+        fn the_others_picked_are_placed_by_reads_of_their_own() {
+            let mut remote = Remote::new("editor");
+            remote.types = crate::Context::seeded(0).world().types().clone();
+            let (a, b, c) = (id(1), id(2), id(3));
+            let answer = |parent: Option<EntityId>| {
+                let parent = parent.map_or("null".to_owned(), |parent| format!(r#""{parent}""#));
+                let transform = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+                let space =
+                    r#""space":{"matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"rotation":[0,0,0,1]}"#;
+                Ok(format!(
+                    r#"{{"name":null,"parent":{parent},"children":[],"components":{{"Transform":{transform}}},{space}}}"#
+                ))
+            };
+            // c under b, as the list has it.
+            remote.listed(
+                0,
+                page(3, &[(1, None, &[]), (2, None, &[3]), (3, Some(2), &[])]),
+            );
+            let mut inspector = Inspector {
+                picked: Some(a),
+                others: vec![b, c],
+                ..Inspector::default()
+            };
+            remote.update(&mut inspector);
+            let picks = [b, c, a];
+            assert_eq!(remote.along(&picks), None, "none read");
+            remote.entity(a, answer(None), Some(a));
+            remote.entity(b, answer(None), Some(a));
+            assert_eq!(remote.along(&picks), None, "c not read");
+            remote.entity(c, answer(Some(b)), Some(a));
+            let ids = |along: Option<Vec<Placed>>| {
+                along.map(|along| along.iter().map(|placed| placed.id).collect::<Vec<_>>())
+            };
+            assert_eq!(ids(remote.along(&picks)), Some(vec![b, a]), "c goes with b");
+            remote.waiting.push(Waiting {
+                number: 1,
+                id: b,
+                edit: Edit {
+                    component: "Transform".to_owned(),
+                    path: "translation".to_owned(),
+                    value: Value::Vec3(Vec3::new(7.0, 8.0, 9.0)),
+                },
+                applied: true,
+            });
+            // A read of another, after it's applied, leaves it waiting for a read of b.
+            remote.entity(a, answer(None), Some(a));
+            let along = remote.along(&picks).expect("placed");
+            assert_eq!(
+                along[0].local.translation,
+                Vec3::new(7.0, 8.0, 9.0),
+                "as it will be"
+            );
+            remote.entity(b, answer(None), Some(a));
+            assert!(remote.waiting.is_empty(), "shown by b's read");
+            let gone = Err(Failure::new("ecs.no_entity", "gone"));
+            remote.entity(b, gone, Some(a));
+            assert_eq!(
+                ids(remote.along(&picks)),
+                Some(vec![a]),
+                "b gone, placed no more"
+            );
+        }
+
+        /// The sets of one field of several entities in a gesture, as a drag of several entities'
+        /// handles makes them, go to the game in one apply; one of another field in another; and a
+        /// delete or a duplicate of several entities in one apply too.
+        #[test]
+        fn a_gestures_sets_of_one_field_of_several_entities_go_as_one_apply() {
+            let mut remote = Remote::new("editor");
+            let (a, b) = (id(1), id(2));
+            let edit = |path: &str, x| Edit {
+                component: "Transform".to_owned(),
+                path: path.to_owned(),
+                value: Value::F32(x),
+            };
+            remote.set(a, edit("translation.x", 1.0), Gesture::Link);
+            remote.set(b, edit("translation.x", 2.0), Gesture::Link);
+            remote.set(a, edit("translation.y", 3.0), Gesture::Link);
+            let mut sent = Vec::new();
+            while let Some(ask) = remote.queued.pop_front() {
+                let ask = remote.with_its_gesture(ask);
+                sent.push(remote.request(&ask).expect("a request"));
+            }
+            let set = |of: EntityId, path: &str, x: f32| {
+                json!({"set": {"id": of.to_string(), "component": "Transform", "path": path,
+                    "value": x}})
+            };
+            let gesture = remote.open.expect("a gesture").1;
+            let apply = |operations| {
+                (
+                    "apply".to_owned(),
+                    json!({"operations": operations, "gesture": gesture}),
+                )
+            };
+            assert_eq!(
+                sent,
+                [
+                    apply(vec![
+                        set(a, "translation.x", 1.0),
+                        set(b, "translation.x", 2.0)
+                    ]),
+                    apply(vec![set(a, "translation.y", 3.0)]),
+                ]
+            );
+            for (command, name) in [
+                (Command::Delete(vec![a, b]), "delete"),
+                (Command::Duplicate(vec![a, b]), "duplicate"),
+            ] {
+                let operation = Ask::Operation {
+                    command,
+                    picked: Some(b),
+                    parent: None,
+                    number: 1,
+                };
+                let (method, params) = remote.request(&operation).expect("a request");
+                let operations = params["operations"].as_array().expect("operations");
+                let named = operations.iter().map(|operation| &operation[name]["id"]);
+                let ids: Vec<_> = named.map(|id| id.as_str().expect("an ID")).collect();
+                assert_eq!(
+                    (method.as_str(), ids),
+                    ("apply", vec![&*a.to_string(), &*b.to_string()])
+                );
+            }
+        }
+
         /// A read of the picked entity gives what of it differs from its prefab, while it's picked;
         /// and a save as a prefab, an unlink and a revert go to the game as the API's `save_prefab`
         /// and `apply` take them, each an edit, after which the entity is read again.
@@ -1565,7 +1920,7 @@ mod imp {
             assert!(link.idle(), "answered");
             assert!(link.waiting(), "though no read shows it yet");
             let delete = Pass {
-                operations: vec![Command::Delete(a)],
+                operations: vec![Command::Delete(vec![a])],
                 ..Pass::default()
             };
             remote.send(delete, &mut inspector);

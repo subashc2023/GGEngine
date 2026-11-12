@@ -13,8 +13,8 @@ use crate::reflect::{Ident, Shape, Type, Types, Value};
 /// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
 /// sets and creates join the Inspector's commands, which its next tick makes and a recording keeps,
 /// and its Edit menu undoes and redoes them as its own: a gesture of the link's sets of one field,
-/// from its first set to its seal, one edit, as the log merges a gesture's sets of one field. A
-/// layer keeps it, cloned, on the main thread, as layers are.
+/// of one entity or several, from its first set to its seal, one edit, as the log merges a
+/// gesture's sets of one field. A layer keeps it, cloned, on the main thread, as layers are.
 ///
 /// The values it's given are those of the world the Inspector shows: a remote Inspector's, as it
 /// reads a game's, hold an entity by its ID and a texture, a model or a font by its name or a path
@@ -28,9 +28,8 @@ pub struct InspectorLink(pub(super) Rc<RefCell<Linked>>);
 /// What an Inspector shares with its links.
 #[derive(Default)]
 pub(super) struct Linked {
-    /// The pick asked for since the Inspector's last pass, which its next makes: `Some(None)`
-    /// unpicks.
-    pub(super) pick: Option<Option<EntityId>>,
+    /// The pick asked for since the Inspector's last pass, which its next makes.
+    pub(super) pick: Option<Picking>,
     /// The sets, creates and seals made since the Inspector's last pass, in order, each set the
     /// latest of its field since the seal before it, where that latest came.
     pub(super) pending: Vec<Linking>,
@@ -39,18 +38,30 @@ pub(super) struct Linked {
     /// Whether a remote Inspector, as of its last pass, has edits it hasn't sent its game, or one
     /// whose answer hasn't come: sets, operations, undos and redos alike.
     pub(super) unanswered: bool,
-    /// The entity picked, as of the Inspector's last pass or tick.
+    /// The entity picked last, the active one, and every entity picked, in the order they were,
+    /// the active one last, as of the Inspector's last pass or tick.
     pub(super) picked: Option<EntityId>,
+    pub(super) picks: Vec<EntityId>,
     /// How many undos and redos the Inspector's passes have asked for.
     pub(super) stepped: u64,
-    /// Where the entity picked is, as of a remote Inspector's last pass.
+    /// Where the active pick is, and those a drag of a tool's handles moves, as of a remote
+    /// Inspector's last pass, as [`InspectorLink::along`] says.
     pub(super) placed: Option<Placed>,
+    pub(super) along: Option<Vec<Placed>>,
     /// The game a remote Inspector is to show from its next pass, which `Some(None)` leaves.
     pub(super) reach: Option<Option<gg_api::Session>>,
     /// The entity the panels asked to frame in the view since a layer last took it.
     pub(super) frame: Option<EntityId>,
     /// Whether a layer has taken the panels' frames, so that they offer to frame.
     pub(super) frames: bool,
+}
+
+/// A pick asked for through a link.
+pub(super) enum Picking {
+    /// Picks these entities alone, in this order, the last the active one; none unpicks.
+    Only(Vec<EntityId>),
+    /// Adds this entity to what's picked, as the active one, or takes it out if it's picked.
+    Toggle(EntityId),
 }
 
 /// A set, a create or a seal made through a link.
@@ -64,27 +75,50 @@ pub(super) enum Linking {
 }
 
 impl InspectorLink {
-    /// The entity the Inspector has picked, as of its last pass or tick, by its ID, which outlives
-    /// it: one despawned since stays picked, for an undo to bring it back.
+    /// The entity the Inspector has picked last, the active one, which its Inspector panel shows,
+    /// as of its last pass or tick, by its ID, which outlives it: one despawned since stays
+    /// picked, for an undo to bring it back.
     pub fn picked(&self) -> Option<EntityId> {
         self.0.borrow().picked
     }
 
-    /// Has the Inspector pick the entity whose ID is `id` as its next pass starts, before its
-    /// panels, whether or not they show, opening the rows above its own, as its Find field does;
-    /// or unpick, for `None`, or for an ID no living entity has then. A remote Inspector, which
-    /// can't know that of an entity its game has just made, picks any ID but one a read of the game
-    /// has found gone, and shows it despawned if the read it makes then finds none. A pick asked
-    /// for later in the frame takes its place. A world cleared, replaced or restored before then,
-    /// as [`World::serial`](crate::World::serial) says, drops it.
+    /// Every entity the Inspector has picked, as of its last pass or tick, by their IDs, in the
+    /// order they were picked, the active one, [`picked`](Self::picked)'s, last.
+    pub fn picks(&self) -> Vec<EntityId> {
+        self.0.borrow().picks.clone()
+    }
+
+    /// Has the Inspector pick the entity whose ID is `id` alone as its next pass starts, before
+    /// its panels, whether or not they show, opening the rows above its own, as its Find field
+    /// does; or unpick, for `None`, or for an ID no living entity has then. A remote Inspector,
+    /// which can't know that of an entity its game has just made, picks any ID but one a read of
+    /// the game has found gone, and shows it despawned if the read it makes then finds none. A pick
+    /// asked for later in the frame takes its place. A world cleared, replaced or restored before
+    /// then, as [`World::serial`](crate::World::serial) says, drops it.
     pub fn pick(&self, id: Option<EntityId>) {
-        self.0.borrow_mut().pick = Some(id);
+        self.0.borrow_mut().pick = Some(Picking::Only(id.into_iter().collect()));
+    }
+
+    /// Has the Inspector pick the entities whose IDs are `ids` alone, in this order, the last the
+    /// active one, as [`pick`](Self::pick) picks one: those of them no living entity has left out,
+    /// and none, or none alive, unpicking.
+    pub fn pick_all(&self, ids: &[EntityId]) {
+        self.0.borrow_mut().pick = Some(Picking::Only(ids.to_vec()));
+    }
+
+    /// Has the Inspector add the entity whose ID is `id` to what it has picked, as the active one,
+    /// as its next pass starts; or take it out, if it's picked, the one picked before it becoming
+    /// the active one if it was; as a Ctrl+click of a row of the Entities panel does. An ID no
+    /// living entity has changes nothing. It takes the place of a pick asked for before it in the
+    /// frame, as [`pick`](Self::pick) does.
+    pub fn toggle(&self, id: EntityId) {
+        self.0.borrow_mut().pick = Some(Picking::Toggle(id));
     }
 
     /// Sets field `path` of `entity`'s `component` to `value` at the Inspector's next tick, as the
     /// panels' sets are made, `entity`'s whatever's picked by then: as part of the link's gesture,
-    /// which [`seal`](Self::seal) ends, so that the Edit menu undoes a drag of the field in one
-    /// step. The gesture's first set ends an edit of the panels' going on, and their presses and
+    /// which [`seal`](Self::seal) ends, so that the Edit menu undoes a drag of the field, of one
+    /// entity or of several, in one step. The gesture's first set ends an edit of the panels' going on, and their presses and
     /// releases don't end the link's, though a set, an operation, an undo or a redo of theirs does.
     /// Between two of the Inspector's passes the link keeps the latest value of each field alone,
     /// after the sets made since the field's last, so that a mouse that reports a thousand moves a
@@ -200,10 +234,24 @@ impl InspectorLink {
             .filter(|placed| linked.picked == Some(placed.id))
     }
 
+    /// Where the picked entities are that a drag of a tool's handles moves, turns or scales, for a
+    /// remote Inspector, as of its last pass: each picked entity with a transform and no picked
+    /// ancestor, whose drag would move it already, the active one among them if it has none; each
+    /// as the game's last read of it gave it, and as the sets made through the link since, which
+    /// that read doesn't show yet, will leave it, as [`placed`](Self::placed) has the active one.
+    /// `None` until a read of each of them has come since it was picked, or while the active one
+    /// isn't placed; and for the local Inspector, as `placed` gives none.
+    pub fn along(&self) -> Option<Vec<Placed>> {
+        self.placed()?;
+        self.0.borrow().along.clone()
+    }
+
     /// The entity the Entities panel asked to frame in the view since the last call, which this
-    /// takes: by a double click on its row, its row's Frame in View, or F while the panel has the
-    /// keys, each of which picks it too. The panel offers Frame in View once a layer has called
-    /// this, so that an app with no view of its own to frame in doesn't.
+    /// takes: by a double click on its row, or its row's Frame in View, each of which picks it
+    /// alone, unless its row is among several picked; or by F while the panel has the keys, the
+    /// active one, with the rest picked. A layer frames every entity picked, as of when the active
+    /// one is placed. The panel offers Frame in View once a layer has called this, so that an app
+    /// with no view of its own to frame in doesn't.
     pub fn framed(&self) -> Option<EntityId> {
         let linked = &mut *self.0.borrow_mut();
         linked.frames = true;

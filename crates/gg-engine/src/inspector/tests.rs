@@ -1061,8 +1061,8 @@ fn its_commands_are_values_that_queue_them_again() {
     let operations = vec![
         empty(None),
         empty(Some(picked)),
-        Command::Duplicate(picked),
-        Command::Delete(picked),
+        Command::Duplicate(vec![picked]),
+        Command::Delete(vec![picked]),
         Command::Add(picked, "Sprite".to_owned(), Sprite::default().to_value()),
         Command::Remove(picked, "Everything".to_owned()),
         Command::Revert(picked, "Everything".to_owned(), "count".to_owned()),
@@ -1769,7 +1769,7 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
         inspector.not_found = Some("no entity has ID 0123456789abcdef".to_owned());
         // For the next tick: a delete, then a set of a gesture that goes on.
         inspector.queue(Pass {
-            operations: vec![Command::Delete(picked)],
+            operations: vec![Command::Delete(vec![picked])],
             ..Pass::default()
         });
         inspector.queue(Pass {
@@ -2779,6 +2779,124 @@ fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
     let commands = output.platform_output.commands;
     assert!(commands.contains(&copy), "{commands:?}");
     assert_ne!(a_id, c_id);
+}
+
+/// A click on a row with Ctrl (Cmd on macOS) held adds its entity to what's picked, as the active
+/// one, or takes it out, the one picked before becoming the active one; with Shift held, it picks
+/// the rows from the active one's to it; and the Inspector panel says how many are picked. Delete
+/// deletes them all, and a picked row's Duplicate Entity copies them all, each as one edit, which
+/// one undo takes back, one under another picked going with it, the copies picked.
+#[test]
+fn clicks_with_ctrl_and_shift_pick_several_which_delete_and_copy_as_one_edit() {
+    let mut world = World::default();
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|name| world.spawn(called(name)));
+    world.set_parent(d, Some(c)).expect("no cycle");
+    let ids = [a, b, c, d].map(|entity| id(&world, entity));
+    let [a_id, b_id, c_id, d_id] = ids;
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.expanded.insert(c_id);
+    let mut time = 0.0;
+    // A frame given `events` with `modifiers` held, then two that settle what it did, the second
+    // with them let go; the last one's texts.
+    let mut run = |inspector: &mut Inspector, world: &mut World, events: Vec<_>, modifiers| {
+        let mut texts = Vec::new();
+        let held = [egui::Event::ModifiersChanged(modifiers)]
+            .into_iter()
+            .chain(events);
+        let frames = [held.collect(), Vec::new()];
+        let let_go = [vec![egui::Event::ModifiersChanged(Modifiers::NONE)]];
+        for events in frames.into_iter().chain(let_go) {
+            time += 1.0;
+            texts = frame(inspector, world, &ctx, time, events).0;
+        }
+        texts
+    };
+    let held = |modifiers, at| {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: Primary,
+            pressed,
+            modifiers,
+        };
+        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    };
+    let picks = |inspector: &Inspector| inspector.picks().collect::<Vec<_>>();
+    let texts = run(&mut inspector, &mut world, Vec::new(), Modifiers::NONE);
+    let row = |name| in_entities(&texts, name).center();
+    let none = Modifiers::NONE;
+    run(&mut inspector, &mut world, held(none, row("a")), none);
+    let ctrl = Modifiers::COMMAND;
+    run(&mut inspector, &mut world, held(ctrl, row("c")), ctrl);
+    assert_eq!(
+        (picks(&inspector), inspector.picked),
+        (vec![a_id, c_id], Some(c_id))
+    );
+    run(&mut inspector, &mut world, held(ctrl, row("c")), ctrl);
+    assert_eq!(
+        (picks(&inspector), inspector.picked),
+        (vec![a_id], Some(a_id)),
+        "the active one taken out, the one before it active"
+    );
+    let shift = Modifiers::SHIFT;
+    let texts = run(&mut inspector, &mut world, held(shift, row("d")), shift);
+    assert_eq!(picks(&inspector), ids, "the rows from a's to d's");
+    let said = "4 entities picked: the last one picked is below";
+    assert!(texts.iter().any(|(text, _)| text == said), "{texts:?}");
+    // The panel has the keys, from the clicks in it; d goes with c.
+    run(&mut inspector, &mut world, press(egui::Key::Delete), none);
+    assert!([a, b, c, d].iter().all(|&entity| !world.contains(entity)));
+    run(
+        &mut inspector,
+        &mut world,
+        shortcut(egui::Key::Z, false),
+        none,
+    );
+    assert!(
+        [a, b, c, d].iter().all(|&entity| world.contains(entity)),
+        "one edit"
+    );
+    let menu = run(&mut inspector, &mut world, click(Secondary, row("a")), none);
+    let duplicate = in_menu(&ctx, &menu, "Duplicate Entity");
+    run(&mut inspector, &mut world, click(Primary, duplicate), none);
+    let roots: Vec<Entity> = world.roots().collect();
+    assert_eq!(roots.len(), 6, "a copy of each root picked, d's under c's");
+    let copies: Vec<EntityId> = roots[3..].iter().map(|&copy| id(&world, copy)).collect();
+    assert_eq!(picks(&inspector), copies, "the copies picked, c's active");
+    assert_eq!(
+        world.children(roots[5]).expect("alive").count(),
+        1,
+        "d's copy"
+    );
+    run(
+        &mut inspector,
+        &mut world,
+        shortcut(egui::Key::Z, false),
+        none,
+    );
+    assert_eq!(world.roots().count(), 3, "one edit");
+    assert_ne!(b_id, d_id);
+}
+
+/// The Inspector's commands of several entities are values as one's, and a recording's of one,
+/// as before multiselect, reads as one of them.
+#[test]
+fn deletes_and_duplicates_of_one_entity_as_recordings_had_them_read() {
+    let id: EntityId = "0123456789abcdef".parse().expect("an ID");
+    let mut queue = Queue::default();
+    for name in ["Delete", "Duplicate"] {
+        let entity = ("entity".into(), Value::String(id.to_string()));
+        queue
+            .push(&Value::Variant(name.into(), vec![entity]))
+            .expect("one entity's");
+    }
+    let [Command::Delete(deleted), Command::Duplicate(copied)] = &queue.0[..] else {
+        panic!("a delete and a duplicate");
+    };
+    assert_eq!((deleted, copied), (&vec![id], &vec![id]));
+    let entities = Value::List(vec![Value::String(id.to_string())]);
+    let written = Value::Variant("Delete".into(), vec![("entities".into(), entities)]);
+    assert_eq!(queue.value(0), written);
 }
 
 /// A row dragged onto another makes its entity that one's last child, opening its row, and onto

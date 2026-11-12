@@ -95,7 +95,7 @@ mod tests {
     pub(crate) const SCALE: f32 = 1.5;
 
     /// What the editor reads of the window, [`VIEW`] at [`SCALE`] pixels a point, with the cursor
-    /// at `at`, in its pixels, and neither Alt nor the command key held.
+    /// at `at`, in its pixels, and neither Alt, the command key nor Shift held.
     pub(crate) fn reading(at: impl Into<DVec2>) -> Reading {
         Reading {
             screen: Screen {
@@ -104,6 +104,7 @@ mod tests {
                 alt: false,
             },
             command: false,
+            shift: false,
             cursor: Some(at.into().to_array()),
         }
     }

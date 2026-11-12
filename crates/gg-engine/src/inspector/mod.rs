@@ -32,7 +32,7 @@ use commands::{Command, Queue};
 use fields::{Fields, Slot};
 use inspected::{Inspected, Pending};
 pub use link::InspectorLink;
-use link::{Linked, Linking, links_field};
+use link::{Linked, Linking, Picking, links_field};
 pub use placed::Placed;
 use remote::Remote;
 
@@ -47,18 +47,23 @@ use crate::{
 /// hides them all, or those with one component as a list, to pick one from, and finds one by an ID
 /// pasted into its Find field, which its magnifier opens over the rest of its header, from a scene
 /// or a log, or by a part of its name, the next such at each Enter, opening the rows above its
-/// own; a click below the rows, or the Entity menu, unpicks.
+/// own; a click below the rows, or the Entity menu, unpicks. A click on a row picks its entity
+/// alone; with Ctrl (Cmd on macOS) held, it adds it to what's picked, or takes it out; with Shift
+/// held, it picks the rows from the active pick's to it. The entity picked last is the active one,
+/// which the Inspector panel shows.
 /// A row's context menu, the one below the rows, the panel's + menu and the Entity menu create
 /// empty entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
-/// copy, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants. A row's context
+/// copies, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants: all those
+/// picked at once, as one edit, those under another picked going with it, from the Entity menu,
+/// Ctrl+D, the panel's keys, or the context menu of a picked one's row. A row's context
 /// menu also renames its entity in its row, copies its ID and moves it to the roots; a row dragged
 /// onto another makes its entity the other's last child, and onto the space below the rows a root,
 /// each keeping where it is in the world, as [`World::reparent_in_place`] says;
 /// and a double click on a row, or its menu's Frame in View, frames its entity in the view, through
 /// the link, as [`InspectorLink::framed`] says. While the panel has the keys, from a press in it
-/// until a press elsewhere, F frames the entity picked, F2 renames it and Delete deletes it. The
-/// Inspector
-/// panel shows the picked entity's components, each field with a widget for its type and hints, and
+/// until a press elsewhere, F frames the entities picked, F2 renames the active one and Delete
+/// deletes them. The Inspector
+/// panel shows the active entity's components, each field with a widget for its type and hints, and
 /// sets a field as its widget changes it, through a [`Log`] of the edits, as [`World::set_field`]
 /// does. That checks the value: a value refused shows beside its field, and is logged, as an
 /// operation refused is, which shows above the components. An enum switches its variant from a
@@ -98,9 +103,11 @@ use crate::{
 /// neither a replay nor a lockstep peer of its commands would have.
 #[derive(Default)]
 pub struct Inspector {
-    /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
-    /// is gone.
+    /// The entity picked last, the active one, which the Inspector panel shows, by its ID, which
+    /// outlives it, so that a pick despawned is still named by its ID: its name is gone. And the
+    /// others picked with it, in the order they were picked: none unless one is active.
     picked: Option<EntityId>,
+    others: Vec<EntityId>,
     /// The rows of the Entities panel's tree that are open, showing their children's, by their
     /// entities' IDs, which outlive them: an entity an undo gives back comes back open.
     expanded: HashSet<EntityId>,
@@ -160,6 +167,7 @@ struct Left {
     world: u64,
     log: Log,
     picked: Option<EntityId>,
+    others: Vec<EntityId>,
     expanded: HashSet<EntityId>,
 }
 
@@ -345,9 +353,8 @@ impl Layer for Inspector {
         }
         // Kept for its memory.
         self.queued.0 = queued;
-        let linked = &mut *self.link.borrow_mut();
-        linked.queued = false;
-        linked.picked = self.picked;
+        self.link.borrow_mut().queued = false;
+        self.share_picks();
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -396,11 +403,14 @@ impl Layer for Inspector {
             Some(remote) => remote.send(pass, self),
             None => self.queue(pass),
         }
+        self.share_picks();
         let linked = &mut *self.link.borrow_mut();
-        linked.picked = self.picked;
         linked.placed = remote
             .as_ref()
             .and_then(|remote| remote.placed(self.picked));
+        linked.along = remote
+            .as_ref()
+            .and_then(|remote| remote.along(&linked.picks));
         self.remote = remote;
     }
 }
@@ -474,12 +484,20 @@ impl Inspector {
         let Some(pick) = self.link.borrow_mut().pick.take() else {
             return;
         };
-        match pick.filter(|&id| world.alive(id) != Some(false)) {
-            Some(id) => {
-                self.pick(id);
+        let alive = |id: &EntityId| world.alive(*id) != Some(false);
+        match pick {
+            Picking::Only(ids) => {
+                let ids: Vec<EntityId> = ids.into_iter().filter(alive).collect();
+                for &id in &ids {
+                    self.open_ancestors(world, id);
+                }
+                self.pick_all(ids);
+            }
+            Picking::Toggle(id) if alive(&id) => {
+                self.toggle(id);
                 self.open_ancestors(world, id);
             }
-            None => self.unpick(),
+            Picking::Toggle(_) => {}
         }
     }
 
@@ -505,10 +523,11 @@ impl Inspector {
         chosen
     }
 
-    /// The Entity menu: Create Empty, which makes a root; while an entity is picked, Unpick; and,
-    /// while it's alive, Create Empty Child, which makes a child of it, Duplicate, which copies it
-    /// and its descendants, as Ctrl+D (Cmd+D on macOS) does too, and Delete, which deletes it and
-    /// its descendants. The operation chosen goes in `operations`.
+    /// The Entity menu: Create Empty, which makes a root; while an entity is picked, Unpick, which
+    /// unpicks every one; while the active one is alive, Create Empty Child, which makes a child of
+    /// it; and while one picked is alive, Duplicate, which copies those picked and their
+    /// descendants, as Ctrl+D (Cmd+D on macOS) does too, and Delete, which deletes them and their
+    /// descendants, each as one edit. The operation chosen goes in `operations`.
     fn entity_menu(
         &mut self,
         world: &dyn Inspected,
@@ -516,39 +535,38 @@ impl Inspector {
         operations: &mut Vec<Command>,
     ) {
         let live = self.picked.filter(|&id| world.alive(id) == Some(true));
+        let uppermost = self.uppermost(world);
+        let any = !uppermost.is_empty();
         if ui.button("Create Empty").clicked() {
             operations.push(empty(None));
         }
         let child = ui.add_enabled(live.is_some(), egui::Button::new("Create Empty Child"));
         let shortcut = ui.ctx().format_shortcut(&DUPLICATE);
         let duplicate = egui::Button::new("Duplicate").shortcut_text(shortcut);
-        let duplicate = ui.add_enabled(live.is_some(), duplicate);
-        let delete = ui.add_enabled(live.is_some(), egui::Button::new("Delete"));
+        let duplicate = ui.add_enabled(any, duplicate);
+        let delete = ui.add_enabled(any, egui::Button::new("Delete"));
         // A pick despawned unpicks too, since it stays picked for an undo to bring it back.
         let unpick = ui.add_enabled(self.picked.is_some(), egui::Button::new("Unpick"));
         if unpick.clicked() {
             self.unpick();
         }
-        let Some(id) = live else {
-            return;
-        };
-        if child.clicked() {
+        if let Some(id) = live.filter(|_| child.clicked()) {
             operations.push(empty(Some(id)));
         }
-        if duplicate.clicked() {
-            operations.push(Command::Duplicate(id));
+        if any && duplicate.clicked() {
+            operations.push(Command::Duplicate(uppermost.clone()));
         }
-        if delete.clicked() {
-            operations.push(Command::Delete(id));
+        if any && delete.clicked() {
+            operations.push(Command::Delete(uppermost));
         }
     }
 
-    /// Has `pass` duplicate the entity picked, while it's alive in `world`, if its input's Ctrl+D
+    /// Has `pass` duplicate the entities picked that are alive in `world`, if its input's Ctrl+D
     /// asks for that.
     fn duplicate_picked(&self, world: &dyn Inspected, pass: &mut Pass) {
-        let live = self.picked.filter(|&id| world.alive(id) == Some(true));
-        if let Some(id) = live.filter(|_| pass.cues.duplicate) {
-            pass.operations.push(Command::Duplicate(id));
+        let uppermost = self.uppermost(world);
+        if pass.cues.duplicate && !uppermost.is_empty() {
+            pass.operations.push(Command::Duplicate(uppermost));
         }
     }
 
@@ -646,10 +664,18 @@ impl Inspector {
                 };
                 self.operate(world, create);
             }
-            Command::Delete(entity) => self.operate(world, Operation::Delete { entity }),
-            Command::Duplicate(entity) => {
-                let copies = Vec::new();
-                self.operate(world, Operation::Duplicate { entity, copies });
+            Command::Delete(entities) => {
+                let deletes = entities
+                    .into_iter()
+                    .map(|entity| Operation::Delete { entity });
+                self.operate_all(world, deletes.collect());
+            }
+            Command::Duplicate(entities) => {
+                let duplicates = entities.into_iter().map(|entity| Operation::Duplicate {
+                    entity,
+                    copies: Vec::new(),
+                });
+                self.operate_all(world, duplicates.collect());
             }
             Command::Add(entity, component, value) => {
                 self.forget(entity, &component);
@@ -707,11 +733,13 @@ impl Inspector {
     }
 
     /// Applies `operations`, which the panels chose, through the log, as one edit, which ends the
-    /// edit going on; then picks the entity a create made, or a duplicate's copy of its entity,
-    /// opening the rows of its ancestors. A refusal shows above the components, and is logged, of
-    /// the first operation.
+    /// edit going on; then picks the entities its creates made, and its duplicates' copies of their
+    /// entities, the last the active one, opening the rows of their ancestors. A refusal shows
+    /// above the components, and is logged, of the first operation. None do nothing.
     fn operate_all(&mut self, world: &mut World, operations: Vec<Operation>) {
-        let first = operations.first().expect("an operation");
+        let Some(first) = operations.first() else {
+            return;
+        };
         let (entity, said) = (first.entity().map(display), first.to_string());
         if let Err(error) = self.log.apply_all(world, operations) {
             warn!(code = error.code(), entity, operation = %said, "{error}");
@@ -719,16 +747,20 @@ impl Inspector {
             return;
         }
         self.not_done = None;
-        let made = self.log.undoable().and_then(<[_]>::first);
-        let made = made.and_then(|done| match done {
-            Operation::Create { .. } | Operation::Duplicate { .. } => done.entity(),
-            _ => None,
-        });
-        let Some(made) = made else {
+        let done = self.log.undoable().unwrap_or_default();
+        let made: Vec<EntityId> = (done.iter())
+            .filter_map(|done| match done {
+                Operation::Create { .. } | Operation::Duplicate { .. } => done.entity(),
+                _ => None,
+            })
+            .collect();
+        if made.is_empty() {
             return;
-        };
-        self.pick(made);
-        self.open_ancestors(&*world, made);
+        }
+        for &id in &made {
+            self.open_ancestors(&*world, id);
+        }
+        self.pick_all(made);
     }
 
     /// Forgets the values `entity`'s `component` refused, if it's the entity picked, whose
@@ -740,16 +772,99 @@ impl Inspector {
         }
     }
 
+    /// Picks the entity of ID `id` alone.
     fn pick(&mut self, id: EntityId) {
-        if self.picked != Some(id) {
-            self.picked = Some(id);
+        self.pick_all([id]);
+    }
+
+    /// Picks the entities of IDs `ids` alone, in this order, the last the active one: none
+    /// unpicks.
+    fn pick_all(&mut self, ids: impl IntoIterator<Item = EntityId>) {
+        let mut ids: Vec<EntityId> = ids.into_iter().collect();
+        let active = ids.pop();
+        self.others.clear();
+        for id in ids {
+            if Some(id) != active && !self.others.contains(&id) {
+                self.others.push(id);
+            }
+        }
+        self.activate(active);
+    }
+
+    fn unpick(&mut self) {
+        self.others.clear();
+        self.activate(None);
+    }
+
+    /// Makes `id` the active pick, forgetting the refusals of the one before, if it's another.
+    fn activate(&mut self, id: Option<EntityId>) {
+        if self.picked != id {
+            self.picked = id;
             self.refusals.clear();
         }
     }
 
-    fn unpick(&mut self) {
-        self.picked = None;
-        self.refusals.clear();
+    /// Adds the entity of ID `id` to the picks, as the active one, from among the others if it's
+    /// one of them.
+    fn add(&mut self, id: EntityId) {
+        self.others.retain(|&other| other != id);
+        if let Some(active) = self.picked.filter(|&active| active != id) {
+            self.others.push(active);
+        }
+        self.activate(Some(id));
+    }
+
+    /// Adds the entity of ID `id` to the picks, as the active one, or takes it out if it's
+    /// picked: the one picked before it becomes the active one if it was.
+    fn toggle(&mut self, id: EntityId) {
+        if self.picked == Some(id) {
+            let before = self.others.pop();
+            self.activate(before);
+        } else if self.others.contains(&id) {
+            self.others.retain(|&other| other != id);
+        } else {
+            self.add(id);
+        }
+    }
+
+    /// Every entity picked, in the order they were, the active one last.
+    fn picks(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.others.iter().copied().chain(self.picked)
+    }
+
+    /// Whether the entity of ID `id` is picked, the active one or another.
+    fn is_picked(&self, id: EntityId) -> bool {
+        self.picked == Some(id) || self.others.contains(&id)
+    }
+
+    /// The entities picked and alive in `world` that have no picked ancestor, in the order they
+    /// were picked: those a delete or a duplicate of them all acts on, as one under another would
+    /// go, or be copied, with it.
+    fn uppermost(&self, world: &dyn Inspected) -> Vec<EntityId> {
+        let picks = self.picks().filter(|&id| world.alive(id) == Some(true));
+        picks.filter(|&id| !self.under_a_pick(world, id)).collect()
+    }
+
+    /// Whether an ancestor of the entity of ID `id` is picked, up to one met again, as a hierarchy
+    /// put together from reads of a game's world at two moments may have it.
+    fn under_a_pick(&self, world: &dyn Inspected, id: EntityId) -> bool {
+        let mut met = HashSet::from([id]);
+        let mut up = world.parent(id);
+        while let Some(parent) = up.filter(|&parent| met.insert(parent)) {
+            if self.is_picked(parent) {
+                return true;
+            }
+            up = world.parent(parent);
+        }
+        false
+    }
+
+    /// Tells the link what's picked.
+    fn share_picks(&self) {
+        let linked = &mut *self.link.borrow_mut();
+        linked.picked = self.picked;
+        linked.picks.clear();
+        linked.picks.extend(self.picks());
     }
 
     /// Goes from the world it showed to the one whose serial is `serial`, another: another world's
@@ -763,12 +878,14 @@ impl Inspector {
             world,
             log: mem::take(&mut self.log),
             picked: self.picked,
+            others: mem::take(&mut self.others),
             expanded: mem::take(&mut self.expanded),
         });
         self.unpick();
         if let Some(back) = self.left.take().filter(|left| left.world == serial) {
             self.log = back.log;
             self.picked = back.picked;
+            self.others = back.others;
             self.expanded = back.expanded;
         }
         self.left = left;
@@ -795,7 +912,8 @@ impl Inspector {
         }
     }
 
-    /// The Inspector panel: the picked entity's components, each under a header that collapses,
+    /// The Inspector panel: the active pick's components, how many are picked above them if it's
+    /// one of several, each under a header that collapses,
     /// with its fields' widgets, and beside it a menu that removes it; and below them, a menu that
     /// adds one; each drawn as what's `pending` will leave it. The fields they change, the
     /// operations the menus choose, and what the input of the window it draws in says of them, go
@@ -815,6 +933,10 @@ impl Inspector {
             ui.label("Nothing picked: pick an entity in the Entities panel");
             return;
         };
+        if !self.others.is_empty() {
+            let n = self.others.len() + 1;
+            ui.label(format!("{n} entities picked: the last one picked is below"));
+        }
         match world.alive(id) {
             Some(true) => {}
             Some(false) => {

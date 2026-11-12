@@ -51,9 +51,12 @@
 //! [`camera`](crate::camera) says.
 //!
 //! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
-//! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
-//! handles move, turn and scale it through the Inspector's link, each drag one edit of the
-//! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
+//! game's view shows there alone, as the API's `pick` finds it, which the panels show picked, and
+//! with Ctrl (Cmd on macOS) or Shift held adds it to what's picked, or takes it out; the handles,
+//! at the entity picked last, move, turn and scale it, and the others picked with it by the same
+//! change, each about its own origin, but those under another picked, whose drag carries them,
+//! through the Inspector's link, each drag one edit of the editor's, which its Edit menu undoes;
+//! F frames them all; and the view's bottom left names what's under the cursor.
 //! Move's and Rotate's go along the entity's own axes or the world's, as the toolbar's space switch
 //! says, which X flips; Scale's are always the entity's own.
 //! The toolbar's Probe tool reads what shading took and made at the pixel clicked, through gg-api's
@@ -124,7 +127,7 @@ use crate::assets::{Assets, Dragged};
 use crate::camera::Tool;
 use crate::debugger::Debugger;
 use crate::file::{self, Choice, Item, Message};
-use crate::handles::{Picked, Reading, Sight};
+use crate::handles::{Along, Picked, Reading, Sight};
 use crate::hub::{self, Hub};
 use crate::look::{Looking, Part, Parts};
 use crate::overlay::{self, Mode, Toolbar};
@@ -233,10 +236,10 @@ struct Game {
     /// The game's look, as the editor keeps it.
     looking: Looking,
     /// What the editor's wanted parts of the look went by as the last update left them, and the
-    /// pick that update asked the Inspector for as the look's outline, if it asked for one:
-    /// `Some(None)` unpicks.
+    /// picks that update asked the Inspector for as the look's outline, if it asked for them: none
+    /// unpicks.
     wants: Wants,
-    took_pick: Option<Option<EntityId>>,
+    took_pick: Option<Vec<EntityId>>,
     /// The entity the Entities panel asked to frame in the view, while the link doesn't place it
     /// yet, as it doesn't a pick just made until a read of it comes.
     framing: Option<EntityId>,
@@ -420,7 +423,7 @@ impl Found {
 struct Wants {
     through: bool,
     viewpoint: Viewpoint,
-    picked: Option<EntityId>,
+    picks: Vec<EntityId>,
     grid: bool,
     plane: Plane,
     colliders: bool,
@@ -1487,7 +1490,7 @@ impl Game {
     /// Takes the parts of the look that `taken` sets, as another client set them: a viewpoint the
     /// editor's camera adopts, driving the view, and `null` turns the view back to the game's
     /// camera, either turn taking the grid with it, as the user's does, unless another client set
-    /// the grid; an outline's entity the Inspector picks, and `null` unpicks; and the grid and the
+    /// the grid; an outline's entities the Inspector picks, and `null` unpicks; and the grid and the
     /// colliders set the toolbar's switches, and the grid its plane; and what the view shows and
     /// the passes it leaves out set the toolbar's choices.
     fn take_look(&mut self, taken: gg_api::Look) {
@@ -1505,9 +1508,10 @@ impl Game {
             self.looking.follow(Part::Grid);
         }
         if let Some(outline) = taken.outline {
-            let id = outline.and_then(|outline| outline.ids.first()?.parse().ok());
-            self.view.link.pick(id);
-            self.took_pick = Some(id);
+            let ids = outline.iter().flat_map(|outline| &outline.ids);
+            let ids: Vec<EntityId> = ids.filter_map(|id| id.parse().ok()).collect();
+            self.view.link.pick_all(&ids);
+            self.took_pick = Some(ids);
         }
         if let Some(grid) = taken.grid {
             toolbar.grid = grid.is_some();
@@ -1563,7 +1567,12 @@ impl Game {
             }
         }
         if let Some(found) = view::answer(&mut self.view.asked, &self.answered) {
-            self.view.link.pick(found.map(|found| found.id));
+            // Nothing found, with Ctrl or Shift held, leaves what's picked.
+            match found {
+                Some(found) if self.view.toggles => self.view.link.toggle(found.id),
+                None if self.view.toggles => {}
+                found => self.view.link.pick(found.map(|found| found.id)),
+            }
             self.took_pick = None;
         }
     }
@@ -1742,8 +1751,8 @@ impl Game {
     /// Tells the look which of its parts the user changed since the last update, as what the parts
     /// the editor wants go by changed since, to `now`: the viewpoint, as the editor's camera moved
     /// while it drives the view, by its input, an ease or flying, or the view turned, to the
-    /// editor's camera or back to the game's; the outline, as the pick changed, but to what the
-    /// Inspector made of the pick the look's outline asked for, its entity, or none for an ID a
+    /// editor's camera or back to the game's; the outline, as the picks changed, but to what the
+    /// Inspector made of the picks the look's outline asked for, its entities, or none for IDs a
     /// read of the game has found gone; the grid, as the view turned, or the toolbar's grid or its
     /// plane changed; the colliders, as their switch did; and what the view shows and the passes it
     /// leaves out, as the toolbar's choices did.
@@ -1756,8 +1765,8 @@ impl Game {
         // A pick of the user's in the Inspector's pass that made the outline's is theirs; an
         // unpick of theirs there passes for the outline's.
         let took = self.took_pick.take();
-        let taken = took.is_some_and(|asked| now.picked == asked || now.picked.is_none());
-        if now.picked != was.picked && !taken {
+        let taken = took.is_some_and(|asked| now.picks == asked || now.picks.is_empty());
+        if now.picks != was.picks && !taken {
             self.looking.change(Part::Outline);
         }
         if turned || now.grid != was.grid || now.plane != was.plane {
@@ -1774,8 +1783,9 @@ impl Game {
         }
     }
 
-    /// Frames the entity the Entities panel asked to frame, as the view's F does, once the link
-    /// places it: the pick, as the panel picks what it frames; or drops the ask as the pick changes.
+    /// Frames what the Entities panel asked to frame, as the view's F does, once the link places
+    /// every pick: the active one, as the panel picks what it frames, and the others; or drops the
+    /// ask as the active pick changes.
     fn frame_asked(&mut self) {
         let link = &self.view.link;
         if let Some(asked) = link.framed() {
@@ -1793,7 +1803,8 @@ impl Game {
     }
 
     /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
-    /// editor's camera's viewpoint while it drives the view; the Inspector's pick outlined; the
+    /// editor's camera's viewpoint while it drives the view; every entity the Inspector has picked
+    /// outlined; the
     /// toolbar's grid, while it's on and the editor's camera drives; the colliders' outlines while
     /// their switch is on, or else whether the game shows them; what the toolbar has the view show,
     /// or else its light; and the passes the toolbar has it leave out, if any.
@@ -1805,14 +1816,15 @@ impl Game {
             ..
         } = &self.view;
         let driving = !toolbar.world_camera;
-        let outline = |id: EntityId| gg_api::Outline {
-            ids: vec![id.to_string()],
+        let picks = link.picks();
+        let outline = (!picks.is_empty()).then(|| gg_api::Outline {
+            ids: picks.iter().map(EntityId::to_string).collect(),
             color: OUTLINE.to_array(),
             width: OUTLINE_WIDTH * scale,
-        };
+        });
         Parts {
             viewpoint: driving.then(|| api_viewpoint(&camera.viewpoint())),
-            outline: link.picked().map(outline),
+            outline,
             grid: (driving && toolbar.grid).then(|| api_plane(toolbar.plane)),
             colliders: toolbar.colliders.then_some(true),
             show: toolbar.show.clone(),
@@ -1857,7 +1869,9 @@ impl Game {
         let handled = if shortcut || (through && !lets_go(event)) {
             ControlFlow::Continue(())
         } else {
-            self.view.take(event, reading, picked(&self.view.link))
+            let along = along(&self.view.link);
+            self.view
+                .take(event, reading, picked(&self.view.link), &along)
         };
         if through
             && !shortcut
@@ -1866,8 +1880,9 @@ impl Game {
         {
             self.queue(input);
         }
-        if let Some(at) = self.view.picking.take() {
+        if let Some((at, toggles)) = self.view.picking.take() {
             self.view.asked = self.ask_pick(at, origin);
+            self.view.toggles = toggles;
         }
         // Escape closes the Probe tool's numbers, and a probe asked shows its own in their place.
         if escape {
@@ -2031,7 +2046,7 @@ fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
     Wants {
         through: view.toolbar.world_camera,
         viewpoint: view.camera.viewpoint(),
-        picked: view.link.picked(),
+        picks: view.link.picks(),
         grid: view.toolbar.grid,
         plane: view.toolbar.plane,
         colliders: view.toolbar.colliders,
@@ -2040,10 +2055,12 @@ fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
     }
 }
 
-/// What the Inspector has picked, as the handles see it, as `link`, its link, places it in the
-/// game's world.
+/// What the Inspector has picked last, the active pick, as the handles see it, as `link`, its link,
+/// places it in the game's world: once the others picked are placed too, as [`along`] gives them,
+/// so that no drag leaves one of them behind.
 fn picked(link: &InspectorLink) -> Option<Picked> {
     let placed = link.placed()?;
+    let along = link.along()?;
     Some(Picked {
         entity: placed.id,
         serial: placed.generation,
@@ -2051,7 +2068,22 @@ fn picked(link: &InspectorLink) -> Option<Picked> {
         parent: placed.space,
         stepped: link.stepped(),
         waiting: link.waiting(),
+        moves: along.iter().any(|other| other.id == placed.id),
     })
+}
+
+/// The others picked that a drag of the handles moves with the active one, as `link`, the
+/// Inspector's link, places them: those with no picked ancestor, as [`InspectorLink::along`] says.
+fn along(link: &InspectorLink) -> Vec<Along> {
+    let active = link.picked();
+    let along = link.along().unwrap_or_default().into_iter();
+    let others = along.filter(|placed| Some(placed.id) != active);
+    let others = others.map(|placed| Along {
+        entity: placed.id,
+        local: placed.local,
+        parent: placed.space,
+    });
+    others.collect()
 }
 
 /// `at`, in the main window's pixels, in the game's view's, whose top left is at `origin`.
@@ -4091,21 +4123,21 @@ mod tests {
         let [before, users]: [EntityId; 2] =
             ["fedcba9876543210", "00000000000000ff"].map(|id| id.parse().expect("an ID"));
         let was = Wants {
-            picked: Some(before),
+            picks: vec![before],
             ..game.wants.clone()
         };
         game.wants = was.clone();
-        for (picked, sends) in [(Some(x), false), (None, false), (Some(users), true)] {
+        for (picks, sends) in [(vec![x], false), (vec![], false), (vec![users], true)] {
             game.take_look(Look {
                 outline: Some(Some(outline.clone())),
                 ..Look::default()
             });
             game.changes(Wants {
-                picked,
+                picks: picks.clone(),
                 ..was.clone()
             });
             let wanted = Parts {
-                outline: picked.map(|id| Outline {
+                outline: picks.first().map(|id| Outline {
                     ids: vec![id.to_string()],
                     color: OUTLINE.to_array(),
                     width: OUTLINE_WIDTH,
@@ -4116,7 +4148,7 @@ mod tests {
                 outline: Some(wanted.outline.clone()),
                 ..Look::default()
             });
-            assert_eq!(game.looking.ask(&wanted), sent, "{picked:?}");
+            assert_eq!(game.looking.ask(&wanted), sent, "{picks:?}");
         }
     }
 

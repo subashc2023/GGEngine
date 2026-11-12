@@ -13,7 +13,7 @@ use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::{Context, Event, Input, InspectorLink, Key, Ui, Viewpoint, Viewport};
 
 use crate::camera::{Move, OrbitCamera, Screen, Side, Tool};
-use crate::handles::{Aim, Handles, Picked, Reading, Reply, Sight};
+use crate::handles::{Aim, Along, Handles, Picked, Reading, Reply, Sight};
 use crate::overlay::{self, Toolbar};
 
 /// The color of the outline round what's picked, in linear RGBA: an orange, as other editors
@@ -38,15 +38,19 @@ pub struct ViewTools<T, F> {
     /// hit against.
     pub shown: Option<Viewpoint>,
     /// Where the last press over the view off the handles asked to pick, in the main window's
-    /// pixels, until the layer asks for it, keeping the ticket in `asked`.
-    pub picking: Option<[f64; 2]>,
+    /// pixels, until the layer asks for it, keeping the ticket in `asked`; and whether Ctrl (Cmd
+    /// on macOS) or Shift was held at it, for its answer to add what it finds to what's picked, or
+    /// take it out, rather than pick it alone.
+    pub picking: Option<([f64; 2], bool)>,
     /// Where the last press over the view with the Probe tool asked to probe, in the main window's
     /// pixels, until the layer asks for it.
     pub probing: Option<[f64; 2]>,
     /// The ticket of the latest pick asked for, until its answer comes back, which the layer has
     /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
-    /// handle drops it, so that it picks nothing else under the drag.
+    /// handle drops it, so that it picks nothing else under the drag. And whether it toggles, as
+    /// its press's `picking` said.
     pub asked: Option<T>,
+    pub toggles: bool,
     /// What the view shows under the cursor, from the picks asked at the cursor while it's over the
     /// view, which the view's bottom left names.
     pub hover: Hover<T, F>,
@@ -65,6 +69,7 @@ impl<T, F> ViewTools<T, F> {
             picking: None,
             probing: None,
             asked: None,
+            toggles: false,
             hover: Hover::default(),
         }
     }
@@ -77,18 +82,21 @@ impl<T, F> ViewTools<T, F> {
     }
 
     /// Does what `event` does, as the editor reads the window, `reading`, with what the Inspector
-    /// has picked, `picked`: first the handles, which take a press that grabs one from the camera,
-    /// and while a drag lasts, every other press, the wheel and Home, setting what the drag gives
-    /// through the link and sealing its edit as it ends, or as the pick, the world or the
-    /// Inspector's steps change; and which have a press off them ask for a pick. Then Q, W, E and
-    /// R, which pick a tool, and X, which flips the handles' space; then F, which frames the pick, as [`frame`](Self::frame) does; then
-    /// the camera, which the view goes back to as it takes a press, the wheel or Home. `Break` for
-    /// what the handles, F or the camera took.
+    /// has picked, `picked`, the active one, and `along`, the others a drag moves with it: first
+    /// the handles, which take a press that grabs one from the camera, and while a drag lasts,
+    /// every other press, the wheel and Home, setting what the drag gives through the link and
+    /// sealing its edit as it ends, or as the pick, the world or the Inspector's steps change; and
+    /// which have a press off them ask for a pick, which adds what it finds to what's picked, or
+    /// takes it out, with Ctrl (Cmd on macOS) or Shift held. Then Q, W, E and R, which pick a tool,
+    /// and X, which flips the handles' space; then F, which frames what's picked, as
+    /// [`frame`](Self::frame) does; then the camera, which the view goes back to as it takes a
+    /// press, the wheel or Home. `Break` for what the handles, F or the camera took.
     pub fn take(
         &mut self,
         event: &Event<'_>,
         reading: &Reading,
         picked: Option<Picked>,
+        along: &[Along],
     ) -> ControlFlow<()> {
         if self.handles.hold(picked.as_ref()) {
             self.link.seal();
@@ -98,6 +106,7 @@ impl<T, F> ViewTools<T, F> {
             space: self.toolbar.space,
             viewpoint: self.shown,
             picked,
+            along,
             camera: self.camera.moving().is_some(),
             easing: self.camera.eases(),
         };
@@ -108,13 +117,15 @@ impl<T, F> ViewTools<T, F> {
                 self.asked = None;
                 return ControlFlow::Break(());
             }
-            Reply::Set(entity, field) => {
-                self.link
-                    .set(entity, "Transform", field.path(), field.value());
+            Reply::Set(..) => {
+                for (entity, field) in self.handles.sets() {
+                    self.link
+                        .set(entity, "Transform", field.path(), field.value());
+                }
             }
             Reply::Seal => self.link.seal(),
             // For the layer, which asks for picks, to ask.
-            Reply::Pick(at) => self.picking = Some(at),
+            Reply::Pick(at) => self.picking = Some((at, reading.command || reading.shift)),
             // As a pick's, and the camera doesn't take it.
             Reply::Probe(at) => {
                 self.probing = Some(at);
@@ -165,26 +176,34 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Eases the editor's camera to look at `picked`, the view going back to it, as F over the
-    /// view and the Entities panel ask: at the sphere round what it and those under it draw, as
-    /// the game's last read of it gave it, filling the view, as [`OrbitCamera::frame_sphere`] says;
-    /// else at its origin, as [`OrbitCamera::frame`] says.
+    /// Eases the editor's camera to look at what's picked, `picked` the active one, the view going
+    /// back to it, as F over the view and the Entities panel ask: at a sphere round the spheres
+    /// round what each entity picked and those under it draw, and the origins of those that draw
+    /// nothing, as the game's last reads of them gave them, filling the view, as
+    /// [`OrbitCamera::frame_sphere`] says; or, where that's a point, as for one entity that draws
+    /// nothing, at it, as [`OrbitCamera::frame`] says. The active one alone until the reads of the
+    /// others have come, as [`InspectorLink::along`] says.
     pub fn frame(&mut self, picked: &Picked) {
-        let bounds = (self.link.placed())
-            .filter(|placed| placed.id == picked.entity)
-            .and_then(|placed| placed.bounds);
-        self.frame_bounds(picked, bounds);
+        let placed =
+            (self.link.along()).unwrap_or_else(|| self.link.placed().into_iter().collect());
+        let origin = |local: &gg_engine::Transform, parent: &gg_engine::Pose| {
+            (parent.matrix).transform_point3(local.translation)
+        };
+        let spheres = placed
+            .iter()
+            .map(|placed| (placed.bounds).unwrap_or((origin(&placed.local, &placed.space), 0.0)));
+        self.frame_bounds(picked, spheres.reduce(enclosing));
     }
 
-    /// Frames `picked` by `bounds`, the center and radius of the sphere round what it draws, if the
-    /// game gave one.
+    /// Frames `picked` by `bounds`, a sphere's center and radius, as [`frame`](Self::frame) finds
+    /// it: by the sphere where it has a radius; else at its center, or for none at the pick's
+    /// origin, from as far as the camera is.
     fn frame_bounds(&mut self, picked: &Picked, bounds: Option<(Vec3, f32)>) {
+        let origin = (picked.parent.matrix).transform_point3(picked.local.translation);
         match bounds {
-            Some((center, radius)) => self.camera.frame_sphere(center, radius),
-            None => {
-                let origin = (picked.parent.matrix).transform_point3(picked.local.translation);
-                self.camera.frame(origin);
-            }
+            Some((center, radius)) if radius > 0.0 => self.camera.frame_sphere(center, radius),
+            Some((center, _)) => self.camera.frame(center),
+            None => self.camera.frame(origin),
         }
         self.toolbar.world_camera = false;
     }
@@ -278,8 +297,8 @@ impl<T, F> ViewTools<T, F> {
 }
 
 /// What the editor reads of the window, as `cx` has it, as an event comes, with the game's view
-/// shown at `view`, in the main window's pixels: the scale; whether Alt is held, and the command
-/// key, which egui's shortcuts take as it, Ctrl, or Cmd on macOS; and where the cursor is.
+/// shown at `view`, in the main window's pixels: the scale; whether Alt is held, the command key,
+/// which egui's shortcuts take as it, Ctrl, or Cmd on macOS, and Shift; and where the cursor is.
 pub fn reading(cx: &Context, view: Option<Viewport>) -> Reading {
     let input = cx.input();
     let command = if cfg!(target_os = "macos") {
@@ -287,15 +306,32 @@ pub fn reading(cx: &Context, view: Option<Viewport>) -> Reading {
     } else {
         [Key::ControlLeft, Key::ControlRight]
     };
+    let down = |keys: [Key; 2]| keys.into_iter().any(|key| input.key_down(key));
     Reading {
         screen: Screen {
             view,
             scale: cx.scale() as f32,
             alt: alt_down(input),
         },
-        command: command.into_iter().any(|key| input.key_down(key)),
+        command: down(command),
+        shift: down([Key::ShiftLeft, Key::ShiftRight]),
         cursor: input.cursor(),
     }
+}
+
+/// A sphere round spheres `a` and `b`, each a center and a radius: the smallest, the larger of them
+/// where it holds the other.
+fn enclosing(a: (Vec3, f32), b: (Vec3, f32)) -> (Vec3, f32) {
+    let ((a, r), (b, s)) = (a, b);
+    let apart = a.distance(b);
+    if apart + s <= r {
+        return (a, r);
+    }
+    if apart + r <= s {
+        return (b, s);
+    }
+    let radius = (apart + r + s) / 2.0;
+    (a + (b - a) * ((radius - r) / apart), radius)
 }
 
 /// Whether `event` is a press of F, not a repeat, without `command` held, which a shortcut's would
@@ -419,6 +455,7 @@ mod tests {
             parent: Pose::IDENTITY,
             stepped: 0,
             waiting: false,
+            moves: true,
         })
     }
 
@@ -432,9 +469,9 @@ mod tests {
         pressed: bool,
     ) -> ControlFlow<()> {
         let moved = Event::CursorMoved { x: at[0], y: at[1] };
-        let _ = tools.take(&moved, &reading(at), picked);
+        let _ = tools.take(&moved, &reading(at), picked, &[]);
         let event = Event::MouseButton { button, pressed };
-        tools.take(&event, &reading(at), picked)
+        tools.take(&event, &reading(at), picked, &[])
     }
 
     /// Tools dragging Move's X arrow of `at_the_origin`, through the editor's camera as it starts.
@@ -457,7 +494,7 @@ mod tests {
         let picked = at_the_origin();
         for x in [620.0, 650.0, 680.0] {
             let moved = Event::CursorMoved { x, y: 360.0 };
-            let handled = tools.take(&moved, &reading([x, 360.0]), picked);
+            let handled = tools.take(&moved, &reading([x, 360.0]), picked, &[]);
             assert_eq!(handled, ControlFlow::Continue(()));
         }
         let at = [680.0, 360.0];
@@ -504,7 +541,7 @@ mod tests {
             wheel,
             home,
         ] {
-            let handled = tools.take(&event, &reading(ON_X), picked);
+            let handled = tools.take(&event, &reading(ON_X), picked, &[]);
             assert_eq!(handled, ControlFlow::Break(()), "{event:?}");
         }
         tools.camera.update(Duration::from_secs(1));
@@ -542,14 +579,14 @@ mod tests {
             (f(true), reading([0.0, 0.0]), Some(placed)),
             (f(false), ctrl, Some(placed)),
         ] {
-            let _ = tools.take(&event, &reading, picked);
+            let _ = tools.take(&event, &reading, picked, &[]);
             assert!(!tools.camera.eases(), "{event:?}");
         }
         let mut dragging = dragging();
-        let _ = dragging.take(&f(false), &reading(ON_X), Some(placed));
+        let _ = dragging.take(&f(false), &reading(ON_X), Some(placed), &[]);
         assert!(!dragging.camera.eases(), "dragging");
         tools.toolbar.world_camera = true;
-        let handled = tools.take(&f(false), &reading([0.0, 0.0]), Some(placed));
+        let handled = tools.take(&f(false), &reading([0.0, 0.0]), Some(placed), &[]);
         assert_eq!(handled, ControlFlow::Break(()));
         assert!(!tools.toolbar.world_camera, "the editor's camera");
         tools.camera.update(Duration::from_secs(1));
@@ -562,6 +599,54 @@ mod tests {
             looked_at.abs_diff_eq(Vec3::new(2.0, 3.0, 0.0), 1e-4),
             "{looked_at}"
         );
+    }
+
+    /// A press off the handles with Ctrl or Shift held asks for a pick that adds what it finds to
+    /// what's picked, or takes it out; one without them, for one that picks it alone.
+    #[test]
+    fn a_press_with_ctrl_or_shift_asks_for_a_pick_that_toggles() {
+        let off = [200.0, 500.0];
+        for (command, shift) in [(false, false), (true, false), (false, true)] {
+            let mut tools = fresh();
+            tools.shown = Some(tools.camera.viewpoint());
+            let held = Reading {
+                command,
+                shift,
+                ..reading(off)
+            };
+            let moved = Event::CursorMoved {
+                x: off[0],
+                y: off[1],
+            };
+            let _ = tools.take(&moved, &held, at_the_origin(), &[]);
+            let press = Event::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            };
+            let _ = tools.take(&press, &held, at_the_origin(), &[]);
+            assert_eq!(tools.picking, Some((off, command || shift)));
+        }
+    }
+
+    /// The sphere framing several picks frames holds the spheres round each: the smallest that
+    /// holds two apart, the larger of two where it holds the other, and of two points the one
+    /// round both.
+    #[test]
+    fn the_sphere_round_two_holds_both() {
+        let (center, radius) = enclosing((Vec3::ZERO, 1.0), (Vec3::new(4.0, 0.0, 0.0), 1.0));
+        assert!(
+            center.abs_diff_eq(Vec3::new(2.0, 0.0, 0.0), 1e-6),
+            "{center}"
+        );
+        assert!((radius - 3.0).abs() < 1e-6, "{radius}");
+        for (a, b) in [
+            ((Vec3::ZERO, 5.0), (Vec3::X, 1.0)),
+            ((Vec3::X, 1.0), (Vec3::ZERO, 5.0)),
+        ] {
+            assert_eq!(enclosing(a, b), (Vec3::ZERO, 5.0));
+        }
+        let (center, radius) = enclosing((Vec3::ZERO, 0.0), (Vec3::new(0.0, 2.0, 0.0), 0.0));
+        assert!(center.abs_diff_eq(Vec3::Y, 1e-6) && (radius - 1.0).abs() < 1e-6);
     }
 
     /// Framing a pick the game gave a sphere for centers the view on the sphere, not on the pick's
@@ -634,10 +719,10 @@ mod tests {
         tools.choose_tool(&key(Key::KeyE, false), false);
         assert_eq!(tools.toolbar.tool, Tool::Select, "flying");
         let mut tools = dragging();
-        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
+        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin(), &[]);
         assert_eq!(tools.toolbar.tool, Tool::Move, "dragging");
         let _ = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, false);
-        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
+        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin(), &[]);
         assert_eq!(tools.toolbar.tool, Tool::Scale, "let go");
     }
 
@@ -678,10 +763,10 @@ mod tests {
         tools.choose_tool(&key(false), false);
         assert_eq!(tools.toolbar.space, Space::Local, "flying");
         let mut tools = dragging();
-        let _ = tools.take(&key(false), &reading(ON_X), at_the_origin());
+        let _ = tools.take(&key(false), &reading(ON_X), at_the_origin(), &[]);
         assert_eq!(tools.toolbar.space, Space::Local, "dragging");
         let _ = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, false);
-        let _ = tools.take(&key(false), &reading(ON_X), at_the_origin());
+        let _ = tools.take(&key(false), &reading(ON_X), at_the_origin(), &[]);
         assert_eq!(tools.toolbar.space, Space::World, "let go");
     }
 
@@ -706,7 +791,7 @@ mod tests {
         assert_eq!(pressed, ControlFlow::Break(()), "World");
         let to = [ON_X[0] + 40.0, ON_X[1] + 25.0];
         let moved = Event::CursorMoved { x: to[0], y: to[1] };
-        let _ = tools.take(&moved, &reading(to), picked);
+        let _ = tools.take(&moved, &reading(to), picked, &[]);
         let pending = tools.link.pending();
         let [Some((_, _, _, Value::Vec3(moved)))] = &pending[..] else {
             panic!("a set: {pending:?}");
@@ -741,13 +826,13 @@ mod tests {
             tools.shown = Some(tools.camera.viewpoint());
             let pressed = press_at(&mut tools, at_the_origin(), off, MouseButton::Left, true);
             assert_eq!(pressed, ControlFlow::Continue(()), "{tool:?}");
-            assert_eq!(tools.picking, Some(off), "{tool:?}");
+            assert_eq!(tools.picking, Some((off, false)), "{tool:?}");
         }
         let mut tools = fresh();
         tools.toolbar.world_camera = true;
         let pressed = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, true);
         assert_eq!(pressed, ControlFlow::Continue(()));
-        assert_eq!(tools.picking, Some(ON_X));
+        assert_eq!(tools.picking, Some((ON_X, false)));
         assert!(tools.toolbar.world_camera);
         for tool in [Tool::Pan, Tool::Orbit] {
             let mut tools = fresh();
@@ -762,7 +847,7 @@ mod tests {
         };
         let mut held = reading(off);
         held.screen.alt = true;
-        let _ = tools.take(&alt, &held, at_the_origin());
+        let _ = tools.take(&alt, &held, at_the_origin(), &[]);
         assert_eq!(tools.picking, None, "with Alt");
         let tools = dragging();
         assert_eq!(tools.picking, None, "on a handle");

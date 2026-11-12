@@ -59,7 +59,8 @@ use text::Text;
 const FORMAT: &str = "gg-recording 6";
 
 /// The format of the recordings before an `Amend` held several operations, whose `Amend` has one
-/// `operation`, which this engine reads too.
+/// `operation`, and before the Inspector's `Delete` and `Duplicate` held several entities, whose
+/// have one `entity`, which this engine reads too.
 const BEFORE_GESTURES: &str = "gg-recording 5";
 
 /// The format of the recordings before patches, `patch` lines, which this engine reads too.

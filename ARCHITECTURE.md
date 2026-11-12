@@ -83,7 +83,9 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   (`--stopped`), its world the world as edited; and shows the game's view; the
   game's world in its Entities and Inspector panels, a remote Inspector's, which edit it through
   the API as the editor's own edits, as the handles in the view do, a click picking what the view
-  shows under the cursor through the API; its camera, the pick's outline, its grid and the
+  shows under the cursor through the API, with Ctrl or Shift held adding it to what's picked, the
+  handles moving every entity picked by the same change, each drag one edit; its camera, the
+  outline of what's picked, its grid and the
   colliders' outlines going to the game as the API's look, which it takes up from other clients
   too; the game's events in its Logs as the game logs them; and the project's assets in its Assets
   panel, an ID file beside its asset hidden, from which a texture dropped on the view sets the
@@ -1105,7 +1107,8 @@ at each other in place, through `Reflect::entities_mut`, rather than setting the
 Inspector reads the world through these calls, its IDs and its hierarchy, and edits it through
 operations, all of which the tool API serves, so that a remote Inspector shows a game's world in
 another process, as the editor's does: it reads the game's entities and the picked one's
-components through the API a few times a second, and the descriptions of its types once, and
+components through the API a few times a second, where the others picked are as often as it
+lists the entities, and the descriptions of its types once, and
 again as a type it hasn't comes or the types' revision moves on, as a script's reload changes
 them, with one request at a time, so that what it reads after an edit's
 answer shows the edit, and edits the world as the game's client, drawing what waits for an answer
