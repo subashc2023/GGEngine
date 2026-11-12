@@ -49,7 +49,8 @@ const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Surface normal", Some(Shown::SurfaceNormal)),
     ("Metallic", Some(Shown::Metallic)),
     ("Roughness", Some(Shown::Roughness)),
-    ("Occlusion", Some(Shown::Occlusion)),
+    // "Occlusion" alone reads as occlusion culling.
+    ("AO", Some(Shown::Occlusion)),
     ("Emission", Some(Shown::Emission)),
     ("Specular color", Some(Shown::SpecularColor)),
     ("Direct light", Some(Shown::DirectLight)),
@@ -1067,7 +1068,7 @@ pub fn probe_text(probed: Option<&Result<Probe, Failure>>) -> String {
         ("Surface normal", color(probe.surface_normal)),
         ("Metallic", value(probe.metallic)),
         ("Roughness", value(probe.roughness)),
-        ("Occlusion", value(probe.occlusion)),
+        ("AO", value(probe.occlusion)),
         ("Emission", color(probe.emission)),
         ("Specular color", color(probe.specular_color)),
         ("Direct light", light(probe.direct_light)),
