@@ -20,8 +20,8 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Antialiasing, Blend, Circle, Draws, Grade, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps,
-    ModelParams, ModelVertex, Outline, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming,
-    Texels, Texture, Textures, Tonemapper, Viewpoint, Viewport,
+    ModelParams, ModelVertex, Scene, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels,
+    Texture, Textures, Tonemapper, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
@@ -317,6 +317,15 @@ impl fmt::Display for Seer {
     }
 }
 
+/// An entity and every entity under it to outline in the view, in a color and a width, as
+/// [`Context::outline`] says; a frame turns it into those entities' IDs, the renderer's outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Outlining {
+    pub(crate) id: EntityId,
+    pub(crate) color: Vec4,
+    pub(crate) width: f32,
+}
+
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
@@ -379,7 +388,9 @@ pub struct Context {
     /// Whether the world's navmesh and its agents' paths draw, over the rest.
     navmesh: bool,
     /// What to outline in the view this frame, if anything.
-    outline: Option<Outline>,
+    outline: Option<Outlining>,
+    /// Scratch space for walking the outlined entity's subtree, kept so that frames don't allocate.
+    outline_walk: Vec<Entity>,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
     /// The size of the pixels the view shows in place of what's drawn, while it shows any; the
@@ -734,6 +745,7 @@ impl Context {
             colliders: false,
             navmesh: false,
             outline: None,
+            outline_walk: Vec::new(),
             view: None,
             shown: None,
             shown_bytes: Vec::new(),
@@ -3731,22 +3743,24 @@ impl Context {
         }
     }
 
-    /// Outlines what the game's view shows of entity `id` this frame, as the editor outlines what's
-    /// picked: round whatever shape the pixels make where its draws are on top, its colliders'
-    /// outlines among them, even across something in front of it, but not round what's hidden;
-    /// over what the view shows and under the UI, in `color`, linear RGBA with alpha not
-    /// multiplied in, `width` pixels of the view wide, at most 8, its outer edge smoothed. One
-    /// entity a frame: a later call replaces an earlier one's.
+    /// Outlines what the game's view shows of entity `id` and of every entity under it this frame,
+    /// as the editor outlines what's picked, a model's nodes or a prefab's entities among them:
+    /// round whatever shape the pixels make together where their draws are on top, their
+    /// colliders' outlines among them, even across something in front of them, but not round
+    /// what's hidden; over what the view shows and under the UI, in `color`, linear RGBA with
+    /// alpha not multiplied in: a solid band `width` pixels of the view wide, at most 8, its outer
+    /// edge smoothed, then a glow at up to half its alpha that fades over as far again. An entity
+    /// that's gone outlines nothing. One entity and its subtree a frame: a later call replaces an
+    /// earlier one's.
     pub fn outline(&mut self, id: EntityId, color: Vec4, width: f32) {
-        let id = id.get();
-        self.outline = Some(Outline { id, color, width });
+        self.outline = Some(Outlining { id, color, width });
     }
 
     /// What a layer has [outlined](Self::outline) this frame, if anything: the entity, the color
     /// and the width.
     pub fn outlined(&self) -> Option<(EntityId, Vec4, f32)> {
-        let Outline { id, color, width } = self.outline?;
-        Some((EntityId::new(id)?, color, width))
+        let Outlining { id, color, width } = self.outline?;
+        Some((id, color, width))
     }
 
     /// Whether the world's colliders' outlines draw, as
@@ -4511,7 +4525,11 @@ impl Context {
         frame.cut = self.seer != Some((seer, perspective));
         self.seer = Some((seer, perspective));
         (self.audio).hear_from(&frame.viewpoint, viewport.size, &self.world);
-        frame.outline = outline;
+        frame.outline = outline.map(|Outlining { id, color, width }| {
+            let (walk, ids) = (&mut self.outline_walk, &mut frame.outline_ids);
+            self.world.fill_subtree_ids(id, walk, ids);
+            (color, width)
+        });
         #[cfg(feature = "dev")]
         {
             self.look.seen = Some(frame.viewpoint);
@@ -8770,15 +8788,64 @@ mod tests {
         cx.outline(later, orange, 3.0);
         assert_eq!(cx.outlined(), Some((later, orange, 3.0)));
         cx.extract(&mut frame, viewport);
-        let taken = Outline {
-            id: later.get(),
-            color: orange,
-            width: 3.0,
-        };
-        assert_eq!(frame.outline, Some(taken));
+        assert_eq!(frame.outline, Some((orange, 3.0)));
         assert_eq!(cx.outlined(), None);
         cx.extract(&mut frame, viewport);
         assert_eq!(frame.outline, None, "the next frame outlines nothing");
+    }
+
+    /// A frame hands the renderer the IDs of the outlined entity and of every entity under it,
+    /// sorted: a parent's children and theirs, but not its siblings or its own parent; a model's
+    /// root, which draws nothing, its nodes. An entity that's gone gives none, and the next frame
+    /// reuses the IDs' memory.
+    #[test]
+    fn an_outline_covers_the_entity_and_every_entity_under_it() {
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        let mut frame = render_thread::Extracted::default();
+        let mut cx = Context::seeded(1);
+        let (model, _) = crate::model::tests::added(&mut cx, "m", crate::model::tests::imported());
+        let world = cx.world_mut();
+        let root = model.spawn(world, Transform::IDENTITY);
+        let [above, parent, child, grandchild, sibling] =
+            [(); 5].map(|()| world.spawn(Transform::IDENTITY));
+        for (entity, under) in [(parent, above), (child, parent), (grandchild, child)] {
+            world.set_parent(entity, Some(under)).expect("alive");
+        }
+        world.set_parent(sibling, Some(above)).expect("alive");
+        let id = |world: &World, entity| world.id(entity).expect("alive");
+        let sorted = |mut ids: Vec<u64>| {
+            ids.sort_unstable();
+            ids
+        };
+        let outline = |cx: &mut Context, frame: &mut render_thread::Extracted, id| {
+            cx.outline(id, Vec4::ONE, 2.0);
+            cx.extract(frame, viewport);
+            frame.outline_ids.clone()
+        };
+
+        let want = [parent, child, grandchild].map(|entity| id(cx.world(), entity).get());
+        let parent_id = id(cx.world(), parent);
+        let got = outline(&mut cx, &mut frame, parent_id);
+        assert_eq!(got, sorted(want.to_vec()));
+
+        let world = cx.world();
+        let nodes = world.query::<(Entity, &ModelNode)>();
+        let nodes = nodes.filter(|&(node, _)| world.node_root(node) == root);
+        let mut want: Vec<u64> = nodes.map(|(node, _)| id(world, node).get()).collect();
+        assert!(want.len() > 1, "a model with nodes");
+        let root_id = id(world, root);
+        want.push(root_id.get());
+        let got = outline(&mut cx, &mut frame, root_id);
+        assert_eq!(got, sorted(want));
+
+        // Gone: outlined, but with no IDs to match.
+        let gone = id(cx.world(), grandchild);
+        cx.world_mut().despawn(grandchild).expect("alive");
+        assert_eq!(outline(&mut cx, &mut frame, gone), Vec::<u64>::new());
+        assert!(frame.outline.is_some());
     }
 
     #[test]

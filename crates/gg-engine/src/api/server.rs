@@ -40,7 +40,7 @@ use gg_api::{
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
 use gg_core::{Error, Result};
-use gg_renderer::{MAX_PICKS, Outline, Projection, Viewpoint};
+use gg_renderer::{MAX_PICKS, Projection, Viewpoint};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -52,7 +52,7 @@ use crate::assets::Asset;
 use crate::edits::{Done, Edit};
 use crate::grant::{Capability, Grant};
 use crate::grid::Plane;
-use crate::layer::{Offered, Stack};
+use crate::layer::{Offered, Outlining, Stack};
 use crate::luau::Debugger;
 use crate::main_loop::Stepper;
 use crate::net::Ticket;
@@ -1125,10 +1125,8 @@ impl Api {
         }
         let look = &mut cx.look;
         look.viewpoint = viewpoint.as_ref().map(engine_viewpoint);
-        look.outline = outline.as_ref().map(|outline| Outline {
-            id: (outline.id.parse::<EntityId>())
-                .expect("checked as it was read")
-                .get(),
+        look.outline = outline.as_ref().map(|outline| Outlining {
+            id: (outline.id.parse::<EntityId>()).expect("checked as it was read"),
             color: Vec4::from_array(outline.color),
             width: outline.width,
         });

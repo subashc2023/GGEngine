@@ -1185,11 +1185,13 @@ fn the_canvas_matches_its_reference() {
     check(renderer, "canvas", WIDTH, HEIGHT);
 }
 
-/// Outlines what the view shows of one ID, 3 pixels wide, and compares it with its reference image:
-/// a disc and a square of ID 7, which it goes round alike; the square's corner under a square of ID
-/// 3, along whose edges it goes across the square, and its bottom past the view's, where it stops;
-/// and beside them a square of no entity and one of ID 5, which it leaves alone. First, an outline
-/// of ID 0, and outlines 0 and NaN pixels wide, change no pixel of a frame without one; and the
+/// Outlines what the view shows of the IDs 3 and 7, 3 pixels wide, and compares it with its
+/// reference image: a disc and a square of ID 7, which it goes round alike; the square's corner
+/// under a square of ID 3, which it goes round together with the square, as one shape, and the
+/// square's bottom past the view's, where it stops; and beside them a square of no entity and one
+/// of ID 5, which it leaves alone. The band, the glow and where they end are read off the disc's
+/// row. First, outlines of no IDs, and 0, NaN and negative pixels wide, change no pixel of a frame
+/// without one; and the
 /// frames that outline read picks back first, which synchronization validation sees the outline's
 /// reads of the IDs wait for. The outline is drawn into the view, so the view read back shows it
 /// as the frame does.
@@ -1240,14 +1242,13 @@ fn outlines_match_their_reference() {
         .into_iter(),
     );
     let orange = Vec4::new(1.0, 0.35, 0.02, 1.0);
-    let outline = |id, width| Outline {
-        id,
+    let outline = |ids, width| Outline {
+        ids,
         color: orange,
         width,
     };
     // Each pixel as a frame without an outline has it, once everything is drawable: an outline of
-    // ID 0 would go round every draw's, inside its edges, and one wider than 0 round the disc and
-    // the square.
+    // the square and the disc's ID, wider than 0, would go round them.
     settle(
         &mut renderer,
         &mut stores,
@@ -1256,7 +1257,12 @@ fn outlines_match_their_reference() {
         &draws,
     );
     let mut plain = None;
-    let nothing = [outline(0, 3.0), outline(7, 0.0), outline(7, f32::NAN)];
+    let nothing = [
+        outline(&[], 3.0),
+        outline(&[7], 0.0),
+        outline(&[7], f32::NAN),
+        outline(&[3, 7], -1.0),
+    ];
     for outlined in [None].into_iter().chain(nothing.map(Some)) {
         let data = RenderData {
             outline: outlined,
@@ -1283,15 +1289,55 @@ fn outlines_match_their_reference() {
     for _ in 0..3 {
         let data = RenderData {
             picks: &picks,
-            outline: Some(outline(7, 3.0)),
+            outline: Some(outline(&[3, 7], 3.0)),
             read_view: true,
             ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
     }
     let read = view_read(&renderer);
-    assert_eq!(read, Some(([WIDTH, HEIGHT], frame_pixels(&mut renderer))));
-    check(renderer, "outlines", WIDTH, HEIGHT);
+    let pixels = frame_pixels(&mut renderer);
+    assert_eq!(read, Some(([WIDTH, HEIGHT], pixels.clone())));
+    // Out from the disc's left edge along its middle row: its ID's first pixel is x = 30, so a
+    // pixel `away` to the left of it is that far from the nearest. Red goes from the clear color's
+    // 39 to the outline's 255 as its alpha rises, blended as light: the band solid to 3 pixels,
+    // smoothed over the next, whose alpha is 0 there; then the glow, half the band's alpha at the
+    // band's inner edge and falling by the square of the way left to twice the width, 6 pixels.
+    let linear = |c: f32| {
+        let c = c / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            math::libm::powf((c + 0.055) / 1.055, 2.4)
+        }
+    };
+    let encode = |l: f32| {
+        let c = if l <= 0.003_130_8 {
+            l * 12.92
+        } else {
+            1.055 * math::libm::powf(l, 1.0 / 2.4) - 0.055
+        };
+        (c * 255.0).round()
+    };
+    let (clear, orange_red) = (linear(39.0), 1.0);
+    for (away, alpha) in [
+        (1, 1.0),
+        (2, 1.0),
+        (3, 1.0),
+        (4, 0.5 * (2.0f32 / 3.0) * (2.0 / 3.0)),
+        (5, 0.5 * (1.0f32 / 3.0) * (1.0 / 3.0)),
+        (6, 0.0),
+        (9, 0.0),
+    ] {
+        let red = f32::from(pixels[((50 * WIDTH + 30 - away) * 4) as usize]);
+        let want = encode(clear + alpha * (orange_red - clear));
+        assert!(
+            (red - want).abs() <= 2.0,
+            "{away} pixels from the disc, red is {red}, not {want}"
+        );
+    }
+    shut_down(renderer);
+    compare("outlines", WIDTH, HEIGHT, &pixels);
 }
 
 /// Draws grids, each a frame of its own, and compares each with its reference image: on the ground
@@ -4024,7 +4070,7 @@ fn a_view_in_the_ui_matches_its_reference() {
     let across = Mat4::from_translation(Vec3::new(2.0, 0.5, 0.0));
     draws.extend_sprites([(across, yellow, 7)].into_iter());
     let outline = Outline {
-        id: 7,
+        ids: &[7],
         color: Vec4::new(1.0, 0.35, 0.02, 1.0),
         width: 3.0,
     };

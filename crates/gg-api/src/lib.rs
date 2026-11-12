@@ -79,7 +79,8 @@
 //!   frame starts, and answers `{}`.
 //! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
 //!   last to set a part winning, and which last until a client changes them or the run ends: the
-//!   viewpoint the view is seen from, the outline round an entity, a grid, whether colliders'
+//!   viewpoint the view is seen from, the outline round an entity and every entity under it, with a
+//!   glow past its band, a grid, whether colliders'
 //!   outlines show, what the view shows in place of its light, [`Shown`], and the passes it leaves
 //!   out, [`Pass`]; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
 //!   It's set as a frame starts,
@@ -766,9 +767,11 @@ pub enum Projection {
     Perspective { fov: f32, near: f32 },
 }
 
-/// An outline round what the view shows of an entity, by its ID, 16 hex digits: its color, in
-/// linear RGBA, alpha not multiplied in; and its width, how far out it reaches from the entity's
-/// pixels, in the view's pixels, a width past 8 drawing 8.
+/// An outline round what the view shows of an entity and of every entity under it, a model's nodes
+/// or a prefab's entities among them, by the entity's ID, 16 hex digits: its color, in linear RGBA,
+/// alpha not multiplied in; and its width, how wide the solid band is that reaches out from their
+/// pixels, in the view's pixels, a width past 8 drawing 8. A glow, at up to half the band's alpha,
+/// fades over as far again past it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Outline {
@@ -800,7 +803,8 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub viewpoint: Option<Option<Viewpoint>>,
-    /// The outline round an entity, in place of any the game's layers draw.
+    /// The outline round an entity and every entity under it, in place of any the game's layers
+    /// draw.
     #[serde(
         default,
         deserialize_with = "present",

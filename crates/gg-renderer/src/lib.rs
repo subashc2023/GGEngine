@@ -16,7 +16,7 @@
 //! blurred by its depth of field and its motion, bloomed, graded, seen through a lens's vignette,
 //! chromatic aberration and grain, and mapped by a tonemapper into the range it shows; picks,
 //! which read back the ID of the draw the view shows at a pixel; an outline round what the view
-//! shows of an ID;
+//! shows of a set of IDs;
 //! and each frame's passes in a render graph, which places the barriers between them and makes the
 //! view's images and the shadows' maps.
 //!
@@ -135,7 +135,7 @@ use smaa::SmaaPass;
 use taa::TaaPass;
 use tonemap::TonemapPass;
 use ui::UiPass;
-use view::{OutlinePass, ViewPass};
+use view::{OutlinePass, OutlinePlan, ViewPass};
 
 /// The debug name of a headless renderer's image.
 const OFFSCREEN: &str = "offscreen color";
@@ -419,7 +419,7 @@ pub struct RenderData<'a> {
     pub read_picks: bool,
     /// What the frame outlines in the view, after reading the picks back, if anything: drawn into
     /// the view's image, so that the view read back shows it too.
-    pub outline: Option<Outline>,
+    pub outline: Option<Outline<'a>>,
     /// Whether the frame reads the view back as it renders it, outline and all, which
     /// [`Renderer::view_read`] then gives.
     pub read_view: bool,
@@ -614,7 +614,6 @@ struct ViewPasses {
     hdr: ImageId,
     /// What it shows, tonemapped.
     color: ImageId,
-    ids: ImageId,
     /// How far what's opaque in it moved in the world since the frame before.
     motion: ImageId,
     /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing;
@@ -660,8 +659,8 @@ struct ViewPasses {
     tonemapper: Tonemapper,
     /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
     read_ids: Option<PassId>,
-    /// What outlines what the view shows of an ID, if anything.
-    outline: Option<(PassId, Outline)>,
+    /// What outlines what the view shows of a set of IDs, if anything.
+    outline: Option<OutlinePlan>,
     /// What reads the view back, if the frame does.
     read_view: Option<PassId>,
 }
@@ -1551,14 +1550,8 @@ impl Renderer {
                 .add();
             // Into the view's image, from the IDs the picks read, so that wherever the view shows,
             // and as it's read back, it shows outlined.
-            let outline = data.outline.filter(Outline::shows).map(|outline| {
-                let pass = graph
-                    .render(label!("outline"))
-                    .keep(color)
-                    .sample(ids)
-                    .add();
-                (pass, outline)
-            });
+            let outline = (data.outline.as_ref().is_some_and(Outline::shows))
+                .then(|| OutlinePass::plan(graph, color, ids, size));
             let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
             ViewPasses {
                 skin: skin_plan,
@@ -1568,7 +1561,6 @@ impl Renderer {
                 shadows,
                 hdr,
                 color,
-                ids,
                 motion,
                 first,
                 second,
@@ -2198,11 +2190,8 @@ impl Renderer {
                 let shown = pass.sampled(view.shown);
                 self.tonemap.draw(&mut pass, shown, view.tonemapper);
                 drop(pass);
-                if let Some((outlined, outline)) = view.outline {
-                    let mut pass =
-                        (frame.render(outlined)).expect("the graph's own images are always there");
-                    let ids = pass.sampled(view.ids);
-                    self.outline.draw(&mut pass, ids, outline);
+                if let (Some(plan), Some(outline)) = (&view.outline, data.outline) {
+                    self.outline.record(&mut frame, plan, outline)?;
                 }
                 if let Some(read) = view.read_view {
                     self.view_read = frame.number();

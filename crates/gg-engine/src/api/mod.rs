@@ -35,7 +35,7 @@ pub(crate) enum Api {}
 #[derive(Default)]
 pub(crate) struct Look {
     pub(crate) viewpoint: Option<gg_renderer::Viewpoint>,
-    pub(crate) outline: Option<gg_renderer::Outline>,
+    pub(crate) outline: Option<crate::layer::Outlining>,
     pub(crate) grid: Option<crate::grid::Plane>,
     pub(crate) colliders: Option<bool>,
     pub(crate) show: Option<Shown>,

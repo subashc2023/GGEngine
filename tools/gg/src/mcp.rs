@@ -429,7 +429,8 @@ fn tools() -> Value {
                 },
                 "outline": {
                     "type": ["object", "null"],
-                    "description": "An outline round what the view shows of an entity, in place \
+                    "description": "An outline round what the view shows of an entity and of \
+                                    every entity under it, with a glow past its band, in place \
                                     of any the game draws",
                     "properties": {
                         "id": id,
@@ -437,7 +438,8 @@ fn tools() -> Value {
                         "width": {
                             "type": "number",
                             "exclusiveMinimum": 0,
-                            "description": "In the view's pixels, past 8 drawing 8",
+                            "description": "The band's width in the view's pixels, past 8 \
+                                            drawing 8; the glow reaches as far again",
                         },
                     },
                     "required": ["id", "color", "width"],

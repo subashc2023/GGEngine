@@ -2193,11 +2193,20 @@ the pixel back. The view renders its IDs every frame, picks or not: a pipeline i
 targets its pass has, so leaving them out of frames that pick nothing would take a second pipeline
 for each shader, or `VK_EXT_dynamic_rendering_unused_attachments`.
 
-`Context::outline` outlines what the view shows of an entity for a frame, as the editor outlines
-what's picked, from the same IDs: a pass samples the image of IDs, which has a slot in the bindless
-set, and draws into the view's image once the view's passes have drawn it, so that captures and the
-view shared show it too, round whatever shape the entity shows, its colliders' outlines among it,
-going across what's in front of it rather than round what's hidden.
+`Context::outline` outlines what the view shows of an entity and of every entity under it for a
+frame, as the editor outlines what's picked, from the same IDs: a model's root draws nothing, its
+nodes, entities under it, do. The frame collects the IDs of the entity and its descendants, sorted,
+into a list it keeps from frame to frame, and uploads it. A compute pass reads the image of IDs,
+which has a slot in the bindless set, finds each pixel's ID in the list by binary search, once per
+workgroup, and writes how far along its row each pixel is from the nearest that's in it, within the
+reach of the glow. A pass that draws into the view's image once the view's passes have drawn it, so
+that captures and the view shared show it too, then takes for each pixel the least over the rows
+within that reach of the root of that distance squared and the row's own: Euclidean distance
+separates, so a pixel reads 2 × reach + 1 distances for an exact one, and its cost grows with the
+width, not its square. A solid band of the width, its outer edge smoothed over a pixel, then a glow
+at up to half the band's alpha that falls by the square of the way left to as far again, round
+whatever shape the entities show together, their colliders' outlines among it, going across what's
+in front of them rather than round what's hidden.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,

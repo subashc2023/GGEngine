@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use gg_core::math::Vec4;
 use gg_core::{Error, Result};
 use gg_renderer::{
     Antialiasing, DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer,
@@ -82,8 +83,11 @@ pub(crate) struct Extracted {
     pub(crate) uploads: Uploads,
     /// What the frame asks of the view, each pick's tag the number of the context's ticket.
     pub(crate) picks: Vec<Pick>,
-    /// What the frame outlines in the view, if anything.
-    pub(crate) outline: Option<Outline>,
+    /// What the frame outlines in the view, if anything: the color and the width, of the draws of
+    /// the IDs in `outline_ids`, sorted, which are the outlined entity's and those under it, kept
+    /// from frame to frame so that the frames don't allocate.
+    pub(crate) outline: Option<(Vec4, f32)>,
+    pub(crate) outline_ids: Vec<u64>,
     /// The answers to picks that came in as the frame rendered, as
     /// [`Renderer::picked`] gives them.
     pub(crate) picked: Vec<(u64, u64)>,
@@ -191,6 +195,7 @@ impl Default for Extracted {
             uploads: Uploads::default(),
             picks: Vec::new(),
             outline: None,
+            outline_ids: Vec::new(),
             picked: Vec::new(),
             primitives: Vec::new(),
             textures: TextureChanges::default(),
@@ -314,7 +319,11 @@ impl Render for Renderer {
             canvas: &frame.canvas,
             picks: &frame.picks,
             read_picks,
-            outline: frame.outline,
+            outline: frame.outline.map(|(color, width)| Outline {
+                ids: &frame.outline_ids,
+                color,
+                width,
+            }),
             read_view,
             list_images,
             pixels,
