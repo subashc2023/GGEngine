@@ -271,7 +271,7 @@ mod tests {
 
     fn outline(id: &str) -> Outline {
         Outline {
-            id: id.to_owned(),
+            ids: vec![id.to_owned()],
             color: [1.0, 0.35, 0.02, 1.0],
             width: 3.0,
         }

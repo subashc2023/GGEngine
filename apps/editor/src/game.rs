@@ -1505,7 +1505,7 @@ impl Game {
             self.looking.follow(Part::Grid);
         }
         if let Some(outline) = taken.outline {
-            let id = outline.and_then(|outline| outline.id.parse().ok());
+            let id = outline.and_then(|outline| outline.ids.first()?.parse().ok());
             self.view.link.pick(id);
             self.took_pick = Some(id);
         }
@@ -1806,7 +1806,7 @@ impl Game {
         } = &self.view;
         let driving = !toolbar.world_camera;
         let outline = |id: EntityId| gg_api::Outline {
-            id: id.to_string(),
+            ids: vec![id.to_string()],
             color: OUTLINE.to_array(),
             width: OUTLINE_WIDTH * scale,
         };
@@ -4053,7 +4053,7 @@ mod tests {
         assert_eq!(looks(&ends), [Look::default()], "a read");
         let x: EntityId = "0123456789abcdef".parse().expect("an ID");
         let outline = Outline {
-            id: x.to_string(),
+            ids: vec![x.to_string()],
             color: [0.0, 1.0, 0.0, 1.0],
             width: 3.0,
         };
@@ -4106,7 +4106,7 @@ mod tests {
             });
             let wanted = Parts {
                 outline: picked.map(|id| Outline {
-                    id: id.to_string(),
+                    ids: vec![id.to_string()],
                     color: OUTLINE.to_array(),
                     width: OUTLINE_WIDTH,
                 }),

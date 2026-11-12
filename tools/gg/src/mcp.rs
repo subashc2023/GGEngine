@@ -59,7 +59,7 @@ lasts. `edits` lists each author's edits. `scene` saves the open scene, the scen
 names, whose `unsaved` says whether it differs from the file, and `edited` whether you or another \
 author edited it since, as play changes it too, writing its entities, never those \
 the game's code made; or opens another scene file in its place, or empties it, neither of which \
-can be undone. `look` sets parts of the view's look, its viewpoint, an outline round an entity, a \
+can be undone. `look` sets parts of the view's look, its viewpoint, an outline round entities, a \
 grid, whether colliders' outlines show, and `show`, which part of the lit shading or which image \
 the frame makes the view shows in place of its light, which the editor and any other client set \
 too, the last to set a part winning; give back, as null, what you set when you're done. `capture` \
@@ -429,11 +429,16 @@ fn tools() -> Value {
                 },
                 "outline": {
                     "type": ["object", "null"],
-                    "description": "An outline round what the view shows of an entity and of \
-                                    every entity under it, with a glow past its band, in place \
-                                    of any the game draws",
+                    "description": "An outline round what the view shows of entities and of \
+                                    every entity under each, one shape where they touch, with \
+                                    a glow past its band, in place of any the game draws; no \
+                                    IDs outline nothing",
                     "properties": {
-                        "id": id,
+                        "ids": {
+                            "type": "array",
+                            "items": id,
+                            "description": "The entities to outline, by ID",
+                        },
                         "color": numbers(4, "Linear RGBA, alpha not multiplied in"),
                         "width": {
                             "type": "number",
@@ -442,7 +447,7 @@ fn tools() -> Value {
                                             drawing 8; the glow reaches as far again",
                         },
                     },
-                    "required": ["id", "color", "width"],
+                    "required": ["ids", "color", "width"],
                 },
                 "grid": {
                     "type": ["string", "null"],

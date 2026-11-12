@@ -2197,7 +2197,8 @@ for each shader, or `VK_EXT_dynamic_rendering_unused_attachments`.
 
 `Context::outline` outlines what the view shows of an entity and of every entity under it for a
 frame, as the editor outlines what's picked, from the same IDs: a model's root draws nothing, its
-nodes, entities under it, do. The frame collects the IDs of the entity and its descendants, sorted,
+nodes, entities under it, do. The tool API's look outlines several entities so. The frame collects
+the IDs of the entities and their descendants, sorted and each once,
 into a list it keeps from frame to frame, and uploads it. A compute pass reads the image of IDs,
 which has a slot in the bindless set, finds each pixel's ID in the list by binary search, once per
 workgroup, and writes how far along its row each pixel is from the nearest that's in it, within the

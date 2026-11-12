@@ -317,11 +317,13 @@ impl fmt::Display for Seer {
     }
 }
 
-/// An entity and every entity under it to outline in the view, in a color and a width, as
-/// [`Context::outline`] says; a frame turns it into those entities' IDs, the renderer's outline.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Entities and every entity under each to outline in the view, in a color and a width, as the
+/// look's outline says; a frame turns it into those entities' IDs, the renderer's outline. Kept
+/// as the look sets it, so that frames don't build it again.
+#[cfg(feature = "dev")]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outlining {
-    pub(crate) id: EntityId,
+    pub(crate) ids: Vec<EntityId>,
     pub(crate) color: Vec4,
     pub(crate) width: f32,
 }
@@ -387,9 +389,14 @@ pub struct Context {
     colliders: bool,
     /// Whether the world's navmesh and its agents' paths draw, over the rest.
     navmesh: bool,
-    /// What to outline in the view this frame, if anything.
-    outline: Option<Outlining>,
-    /// Scratch space for walking the outlined entity's subtree, kept so that frames don't allocate.
+    /// The color and width a layer outlines in the view this frame, if it does, of the entity in
+    /// `outline_root`.
+    outline: Option<(Vec4, f32)>,
+    /// The entity a layer outlines: at most one, kept as a list for the walk, so that frames don't
+    /// allocate.
+    outline_root: Vec<EntityId>,
+    /// Scratch space for walking the outlined entities' subtrees, kept so that frames don't
+    /// allocate.
     outline_walk: Vec<Entity>,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
@@ -745,6 +752,7 @@ impl Context {
             colliders: false,
             navmesh: false,
             outline: None,
+            outline_root: Vec::new(),
             outline_walk: Vec::new(),
             view: None,
             shown: None,
@@ -3753,14 +3761,16 @@ impl Context {
     /// that's gone outlines nothing. One entity and its subtree a frame: a later call replaces an
     /// earlier one's.
     pub fn outline(&mut self, id: EntityId, color: Vec4, width: f32) {
-        self.outline = Some(Outlining { id, color, width });
+        self.outline_root.clear();
+        self.outline_root.push(id);
+        self.outline = Some((color, width));
     }
 
     /// What a layer has [outlined](Self::outline) this frame, if anything: the entity, the color
     /// and the width.
     pub fn outlined(&self) -> Option<(EntityId, Vec4, f32)> {
-        let Outlining { id, color, width } = self.outline?;
-        Some((id, color, width))
+        let (color, width) = self.outline?;
+        Some((*self.outline_root.first()?, color, width))
     }
 
     /// Whether the world's colliders' outlines draw, as
@@ -4517,13 +4527,18 @@ impl Context {
             (None, Some((camera, viewpoint))) => (Seer::Camera(camera), viewpoint),
             (None, None) => (Seer::Default, Viewpoint::default()),
         };
+        let layers = outline.map(|(color, width)| (&self.outline_root[..], color, width));
         #[cfg(feature = "dev")]
         let (seen, outline) = if self.look.bare {
-            (seen, outline)
+            (seen, layers)
         } else {
             let looked = (self.look.viewpoint).map(|looked| (Seer::Look(looked), looked));
-            (looked.unwrap_or(seen), self.look.outline.or(outline))
+            let wanted = (self.look.outline.as_ref())
+                .map(|Outlining { ids, color, width }| (&ids[..], *color, *width));
+            (looked.unwrap_or(seen), wanted.or(layers))
         };
+        #[cfg(not(feature = "dev"))]
+        let outline = layers;
         let (seer, viewpoint) = seen;
         let viewpoint = camera::checked(viewpoint, seer, &mut self.projection);
         frame.viewpoint = viewpoint;
@@ -4531,9 +4546,9 @@ impl Context {
         frame.cut = self.seer != Some((seer, perspective));
         self.seer = Some((seer, perspective));
         (self.audio).hear_from(&frame.viewpoint, viewport.size, &self.world);
-        frame.outline = outline.map(|Outlining { id, color, width }| {
+        frame.outline = outline.map(|(roots, color, width)| {
             let (walk, ids) = (&mut self.outline_walk, &mut frame.outline_ids);
-            self.world.fill_subtree_ids(id, walk, ids);
+            self.world.fill_subtree_ids(roots, walk, ids);
             (color, width)
         });
         #[cfg(feature = "dev")]

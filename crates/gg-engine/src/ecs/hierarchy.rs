@@ -207,24 +207,26 @@ impl World {
         Ok(iter::successors(first, next).map(|slot| self.entity_at(slot)))
     }
 
-    /// Replaces the contents of `ids` with the IDs of the entity whose ID is `root` and of every
-    /// entity under it, children, theirs and so on, sorted, which draws' IDs are searched by: none
-    /// if no entity has that ID. `pending` is scratch space for the walk, which empties it. Neither
+    /// Replaces the contents of `ids` with the IDs of the entities whose IDs are `roots` and of
+    /// every entity under each, children, theirs and so on, sorted and each once, which draws' IDs
+    /// are searched by: none for an ID no entity has. `pending` is scratch space for the walk, which empties it. Neither
     /// allocates once it has held as many entities.
     pub(crate) fn fill_subtree_ids(
         &self,
-        root: EntityId,
+        roots: &[EntityId],
         pending: &mut Vec<Entity>,
         ids: &mut Vec<u64>,
     ) {
         ids.clear();
         pending.clear();
-        pending.extend(self.entity(root));
+        pending.extend(roots.iter().filter_map(|&root| self.entity(root)));
         while let Some(entity) = pending.pop() {
             ids.push(self.id(entity).expect("alive").get());
             pending.extend(self.children(entity).expect("alive"));
         }
+        // A root under another is walked twice.
         ids.sort_unstable();
+        ids.dedup();
     }
 
     /// `entity`'s parent, as its [`Parent`] has it; `None` if it's a root.

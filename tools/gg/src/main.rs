@@ -179,8 +179,8 @@ Talk to a running game, through its tool API:
                                  prints an array of the answers
   look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
                                  part winning; with LOOK, a JSON object of parts as the API's `look`
-                                 takes them, `viewpoint`, `outline`, round an entity and every entity
-                                 under it, `{\"outline\":{\"id\":ID,\"color\":[1,0.5,0,1],\"width\":3}}`, a
+                                 takes them, `viewpoint`, `outline`, round entities and every entity
+                                 under each, `{\"outline\":{\"ids\":[ID,ID],\"color\":[1,0.5,0,1],\"width\":3}}`, a
                                  band of `width` pixels and a glow as far again, `grid`, `colliders`, `show`,
                                  what the view shows in place of its light, a name as `capture`'s
                                  `--show` has it, `{\"show\":\"roughness\"}` or

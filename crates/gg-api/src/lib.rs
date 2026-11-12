@@ -79,17 +79,17 @@
 //!   frame starts, and answers `{}`.
 //! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
 //!   last to set a part winning, and which last until a client changes them or the run ends: the
-//!   viewpoint the view is seen from, the outline round an entity and every entity under it, with a
-//!   glow past its band, a grid, whether colliders'
+//!   viewpoint the view is seen from, the outline round several entities and every entity under
+//!   each, with a glow past its band, a grid, whether colliders'
 //!   outlines show, what the view shows in place of its light, [`Shown`], and the passes it leaves
 //!   out, [`Pass`]; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
 //!   It's set as a frame starts,
 //!   which draws with it. It fails with `api.bad_params`, saying why, for a viewpoint that isn't
 //!   finite, whose rotation doesn't normalize, or whose projection can't project, as
-//!   [`Projection`] says; for an outline whose ID isn't 16 hex digits, whose color isn't finite, or
-//!   whose width isn't finite and positive; or for an image's name that's empty or longer than
-//!   [`MOST_IMAGE_NAME`] bytes. An outline of an ID no entity has outlines nothing, and isn't
-//!   refused, nor is an image's name the frame doesn't make.
+//!   [`Projection`] says; for an outline with an ID that isn't 16 hex digits, whose color isn't
+//!   finite, or whose width isn't finite and positive; or for an image's name that's empty or
+//!   longer than [`MOST_IMAGE_NAME`] bytes. An outline of no IDs, or of an ID no entity has,
+//!   outlines nothing, and isn't refused, nor is an image's name the frame doesn't make.
 //! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
 //!   look among it, in the frame that reads it, about four frames after it's asked.
 //! - `images`: answers [`ImageList`], the images the next frame that renders makes that
@@ -770,15 +770,16 @@ pub enum Projection {
     Perspective { fov: f32, near: f32 },
 }
 
-/// An outline round what the view shows of an entity and of every entity under it, a model's nodes
-/// or a prefab's entities among them, by the entity's ID, 16 hex digits: its color, in linear RGBA,
-/// alpha not multiplied in; and its width, how wide the solid band is that reaches out from their
-/// pixels, in the view's pixels, a width past 8 drawing 8. A glow, at up to half the band's alpha,
-/// fades over as far again past it.
+/// An outline round what the view shows of several entities and of every entity under each, a
+/// model's nodes or a prefab's entities among them, by the entities' IDs, 16 hex digits each: one
+/// shape where they touch, in one color, in linear RGBA, alpha not multiplied in; and one width,
+/// how wide the solid band is that reaches out from their pixels, in the view's pixels, a width
+/// past 8 drawing 8. A glow, at up to half the band's alpha, fades over as far again past it. No
+/// IDs outline nothing, as an ID no entity has does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Outline {
-    pub id: String,
+    pub ids: Vec<String>,
     pub color: [f32; 4],
     pub width: f32,
 }
@@ -806,8 +807,8 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub viewpoint: Option<Option<Viewpoint>>,
-    /// The outline round an entity and every entity under it, in place of any the game's layers
-    /// draw.
+    /// The outline round several entities and every entity under each, in place of any the game's
+    /// layers draw.
     #[serde(
         default,
         deserialize_with = "present",
@@ -2251,15 +2252,23 @@ mod tests {
             serde_json::to_string(&orthographic).unwrap(),
             r#"{"Orthographic":{"height":2.0,"near":-1.0,"far":1.0}}"#
         );
-        let set = r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0.5, 0, 1], "width": 2},
-            "colliders": false}"#;
+        let set = r#"{"outline": {"ids": ["2b7e151628aed2a6", "0123456789abcdef"],
+            "color": [1, 0.5, 0, 1], "width": 2}, "colliders": false}"#;
         let look: Look = serde_json::from_str(set).unwrap();
         let outline = Outline {
-            id: "2b7e151628aed2a6".to_owned(),
+            ids: vec!["2b7e151628aed2a6".to_owned(), "0123456789abcdef".to_owned()],
             color: [1.0, 0.5, 0.0, 1.0],
             width: 2.0,
         };
-        assert_eq!(look.outline, Some(Some(outline)));
+        assert_eq!(look.outline, Some(Some(outline.clone())));
+        let written = serde_json::to_value(&outline).unwrap();
+        assert_eq!(
+            written["ids"],
+            serde_json::json!(["2b7e151628aed2a6", "0123456789abcdef"])
+        );
+        let empty = r#"{"outline": {"ids": [], "color": [1, 0, 0, 1], "width": 1}}"#;
+        let none: Look = serde_json::from_str(empty).unwrap();
+        assert_eq!(none.outline.unwrap().unwrap().ids, Vec::<String>::new());
         assert_eq!(look.colliders, Some(Some(false)));
         // What the view shows: a part of shading by its name, or an image by its own.
         let shows = [
@@ -2316,7 +2325,8 @@ mod tests {
             r#"{"show": {"image": "view depth", "level": 0}}"#,
             r#"{"grid": "XZ"}"#,
             r#"{"colliders": true, "camera": null}"#,
-            r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0, 0, 1]}}"#,
+            r#"{"outline": {"ids": ["2b7e151628aed2a6"], "color": [1, 0, 0, 1]}}"#,
+            r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0, 0, 1], "width": 2}}"#,
             r#"{"viewpoint": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1],
                 "projection": {"perspective": {"fov": 1.0, "near": 0.01}}}}"#,
             r#"{"viewpoint": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1],
@@ -2369,7 +2379,7 @@ mod tests {
     #[test]
     fn looked_reads_as_its_docs_say() {
         let json = r#"{"viewpoint": null, "grid": "xy", "colliders": null,
-            "outline": {"id": "2b7e151628aed2a6", "color": [1, 0.5, 0, 1], "width": 2},
+            "outline": {"ids": ["2b7e151628aed2a6"], "color": [1, 0.5, 0, 1], "width": 2},
             "by": {"viewpoint": null, "outline": "editor", "grid": "gg", "colliders": null},
             "revision": 3, "run": 7, "seen": {"position": [0, 0, 5], "rotation": [0, 0, 0, 1],
             "projection": {"Orthographic": {"height": 2, "near": -1, "far": 1}}}}"#;
@@ -2386,7 +2396,7 @@ mod tests {
         let expected = Looked {
             viewpoint: None,
             outline: Some(Outline {
-                id: "2b7e151628aed2a6".to_owned(),
+                ids: vec!["2b7e151628aed2a6".to_owned()],
                 color: [1.0, 0.5, 0.0, 1.0],
                 width: 2.0,
             }),

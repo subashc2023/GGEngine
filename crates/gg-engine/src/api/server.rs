@@ -1127,7 +1127,9 @@ impl Api {
         let look = &mut cx.look;
         look.viewpoint = viewpoint.as_ref().map(engine_viewpoint);
         look.outline = outline.as_ref().map(|outline| Outlining {
-            id: (outline.id.parse::<EntityId>()).expect("checked as it was read"),
+            ids: (outline.ids.iter())
+                .map(|id| id.parse::<EntityId>().expect("checked as it was read"))
+                .collect(),
             color: Vec4::from_array(outline.color),
             width: outline.width,
         });
@@ -2669,8 +2671,8 @@ fn engine_named(name: &str, extension: &str) -> bool {
 /// passes it leaves out in [`gg_api::Pass::ALL`]'s order, each once, an empty list given back.
 ///
 /// Fails with `api.bad_params`, saying why, for a viewpoint that isn't finite, whose rotation has
-/// no length, or whose projection can't project, as [`Projection`] says; and for an outline whose
-/// ID isn't an entity's, or whose color isn't finite, or whose width isn't finite and positive.
+/// no length, or whose projection can't project, as [`Projection`] says; and for an outline with
+/// an ID that isn't an entity's, or whose color isn't finite, or whose width isn't finite and positive.
 fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> {
     if let Some(Some(viewpoint)) = &mut given.viewpoint {
         if !viewpoint.is_finite() {
@@ -2694,9 +2696,11 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
         }
     }
     if let Some(Some(outline)) = &given.outline {
-        if let Err(error) = outline.id.parse::<EntityId>() {
-            let what = format!("takes an outline of an entity's ID: {error}");
-            return Err(bad_params(method, what));
+        for id in &outline.ids {
+            if let Err(error) = id.parse::<EntityId>() {
+                let what = format!("takes an outline of entities' IDs: {error}");
+                return Err(bad_params(method, what));
+            }
         }
         if !outline.color.iter().all(|channel| channel.is_finite()) {
             return Err(bad_params(method, "takes an outline whose color is finite"));
@@ -5399,7 +5403,7 @@ mod tests {
         };
         let look = json!({
             "viewpoint": looked,
-            "outline": {"id": hero.to_string(), "color": [1, 0.5, 0, 1], "width": 3},
+            "outline": {"ids": [hero.to_string()], "color": [1, 0.5, 0, 1], "width": 3},
             "grid": "xy",
             "colliders": true,
             "show": {"image": "view depth"},
@@ -5476,6 +5480,60 @@ mod tests {
         cx.look.captured = Some(rough.clone());
         set(&mut cx);
         assert_eq!(drawn(&mut cx).show, Some(rough), "what the capture shows");
+    }
+
+    /// A look's outline of several entities' IDs draws the frame's outline over each one's subtree
+    /// once, sorted; an ID that isn't an entity's among them is refused, leaving the look as it
+    /// was; and no IDs outline nothing.
+    #[test]
+    fn the_looks_outline_covers_the_subtree_of_each_entity() {
+        let (mut api, session) = started("Api Look Outlines");
+        let mut cx = Context::seeded(11);
+        let view = Viewport {
+            origin: [0, 0],
+            size: [64, 32],
+        };
+        let [a, under_a, b, other] = [(); 4].map(|()| cx.world_mut().spawn(Transform::IDENTITY));
+        cx.world_mut().set_parent(under_a, Some(a)).expect("alive");
+        let [a_id, under_id, b_id, other_id] =
+            [a, under_a, b, other].map(|entity| cx.world().id(entity).expect("alive"));
+        let mut stepper = Stepper::default();
+        let mut look = |cx: &mut Context, params: Value| {
+            let client = move |mut client: Client| client.call("look", params).is_ok();
+            let (api, session) = (&mut api, session.clone());
+            serving(
+                api,
+                cx,
+                &mut Stack::default(),
+                &mut stepper,
+                session,
+                client,
+                |_, _, _| {},
+            )
+        };
+        let drawn = |cx: &mut Context| {
+            let mut frame = Extracted::default();
+            cx.extract(&mut frame, view);
+            (frame.outline, frame.outline_ids)
+        };
+        let wanted = [b_id, under_id, a_id].map(|id| id.to_string());
+        let params = json!({"outline": {"ids": wanted, "color": [1, 0.5, 0, 1], "width": 3}});
+        assert!(look(&mut cx, params), "an outline of IDs");
+        let orange = Vec4::new(1.0, 0.5, 0.0, 1.0);
+        let mut want = vec![a_id.get(), under_id.get(), b_id.get()];
+        want.sort_unstable();
+        assert_eq!(drawn(&mut cx), (Some((orange, 3.0)), want.clone()));
+        assert_ne!(other_id, a_id, "an entity left out");
+
+        let refused = json!({"outline": {"ids": [b_id.to_string(), "nope"], "color": [1, 1, 1, 1],
+            "width": 1}});
+        assert!(!look(&mut cx, refused), "an ID that doesn't parse");
+        assert_eq!(drawn(&mut cx), (Some((orange, 3.0)), want), "as it was");
+
+        let none = json!({"outline": {"ids": [], "color": [1, 0, 0, 1], "width": 2}});
+        assert!(look(&mut cx, none), "no IDs");
+        let red = Vec4::new(1.0, 0.0, 0.0, 1.0);
+        assert_eq!(drawn(&mut cx), (Some((red, 2.0)), vec![]));
     }
 
     /// A capture of the game's own view rides with a bare frame, which isn't published nor paced
@@ -5961,7 +6019,7 @@ mod tests {
         };
         let rotation = look.viewpoint.flatten().map(|viewpoint| viewpoint.rotation);
         assert_eq!(rotation, Some([0.0, 0.0, 0.6, 0.8]), "normalized");
-        let outline = |id: &str, color: [f32; 4], width: f32| json!({"outline": {"id": id, "color": color, "width": width}});
+        let outline = |ids: &[&str], color: [f32; 4], width: f32| json!({"outline": {"ids": ids, "color": color, "width": width}});
         let id = "5f3a9c0e12b47d68";
         let half = json!({"table": {"lib": "patch.dll"}});
         let refused = parse(&request("patch", half.clone())).err();
@@ -6033,15 +6091,15 @@ mod tests {
             ),
             (
                 "look",
-                outline("5F3A9C0E12B47D68", [1.0; 4], 2.0),
+                outline(&[id, "5F3A9C0E12B47D68"], [1.0; 4], 2.0),
                 "api.bad_params",
             ),
             (
                 "look",
-                json!({"outline": {"id": id, "color": [1e39, 0, 0, 1], "width": 2}}),
+                json!({"outline": {"ids": [id], "color": [1e39, 0, 0, 1], "width": 2}}),
                 "api.bad_params",
             ),
-            ("look", outline(id, [1.0; 4], 0.0), "api.bad_params"),
+            ("look", outline(&[id], [1.0; 4], 0.0), "api.bad_params"),
             ("look", json!({"grid": "xw"}), "api.bad_params"),
             ("pick", Value::Null, "api.bad_params"),
             ("pick", json!({"at": [1]}), "api.bad_params"),
