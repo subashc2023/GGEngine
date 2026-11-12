@@ -3809,6 +3809,12 @@ impl Context {
         &self.world
     }
 
+    /// The meshes the layers added, which the tool API reads their extents from.
+    #[cfg(feature = "dev")]
+    pub(crate) fn meshes(&self) -> &Meshes {
+        &self.meshes
+    }
+
     /// The world, to change as a layer attaches or detaches. At any other time it changes only at
     /// ticks, which [`Layer::tick`] is given it for, and this panics: a layer queues a command for
     /// its next tick instead.

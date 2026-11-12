@@ -4342,6 +4342,7 @@ mod remote {
             id: hero_id,
             local: Transform::IDENTITY,
             space: crate::Pose::IDENTITY,
+            bounds: None,
             generation: 1,
         };
         assert_eq!(placed, expected);

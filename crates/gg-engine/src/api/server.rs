@@ -40,7 +40,7 @@ use gg_api::{
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
 use gg_core::{Error, Result};
-use gg_renderer::{MAX_PICKS, Projection, Viewpoint};
+use gg_renderer::{MAX_PICKS, Meshes, Projection, Viewpoint};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -49,6 +49,7 @@ use tracing::{Level, debug, info, warn};
 
 use super::{Shown, Waiting, json};
 use crate::assets::Asset;
+use crate::bounds;
 use crate::edits::{Done, Edit};
 use crate::grant::{Capability, Grant};
 use crate::grid::Plane;
@@ -822,7 +823,7 @@ impl Api {
                 Call::Entities { with, skip, take } => {
                     reply.send(list(world, with.as_deref(), skip, take));
                 }
-                Call::Entity(id) => reply.send(entity(world, id)),
+                Call::Entity(id) => reply.send(entity(world, cx.meshes(), id)),
                 Call::Get {
                     id,
                     component,
@@ -1475,8 +1476,9 @@ fn listed(world: &World, entity: Entity) -> Listed {
     }
 }
 
-/// The entity of ID `id` in `world`, as `entity` answers it.
-fn entity(world: &World, id: EntityId) -> Result<String, Failure> {
+/// The entity of ID `id` in `world`, as `entity` answers it, its `bounds` by the extents `meshes`
+/// keeps.
+fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<String, Failure> {
     let entity = found(world, id)?;
     let about = |error: Error| failure(&error);
     let mut out = String::from("{\"id\":");
@@ -1523,6 +1525,13 @@ fn entity(world: &World, id: EntityId) -> Result<String, Failure> {
     out.push_str(",\"rotation\":");
     json::floats(&mut out, &space.rotation.to_array());
     out.push('}');
+    if let Some((center, radius)) = bounds::of(world, meshes, entity) {
+        out.push_str(",\"bounds\":{\"center\":");
+        json::floats(&mut out, &center.to_array());
+        out.push_str(",\"radius\":");
+        json::float32(&mut out, radius);
+        out.push('}');
+    }
     // An instance whose prefab's text no longer loads gives none, as its load warned.
     if let Some(instanced) = instanced(world, entity) {
         out.push_str(",\"instance\":");
@@ -3161,6 +3170,7 @@ mod tests {
         all: EntityList,
         entity: Value,
         kid: Value,
+        sprite: Value,
         field: f32,
         types: gg_api::Types,
         hash: Hash,
@@ -3183,14 +3193,13 @@ mod tests {
         let hero = world.spawn((at, Name("Hero".to_owned())));
         let kid = world.spawn(Transform::IDENTITY);
         world.set_parent(kid, Some(hero)).expect("alive");
-        for _ in 0..3 {
-            world.spawn((Transform::IDENTITY, Sprite::default()));
-        }
-        let [hero, kid] = [hero, kid].map(|entity| world.id(entity).expect("alive").to_string());
+        let sprites = [(); 3].map(|()| world.spawn((at, Sprite::default())));
+        let [hero, kid, sprite] =
+            [hero, kid, sprites[0]].map(|entity| world.id(entity).expect("alive").to_string());
         let mut stepper = Stepper::default();
-        let asked = [hero.clone(), kid.clone()];
+        let asked = [hero.clone(), kid.clone(), sprite];
         let client = move |mut client: Client| {
-            let [hero, kid] = asked;
+            let [hero, kid, sprite] = asked;
             let field = json!({"id": hero, "component": "Transform", "path": "translation.y"});
             let refused = [
                 ("entity", json!({"id": "0000000000000001"})),
@@ -3214,6 +3223,9 @@ mod tests {
                 kid: client
                     .call_as("entity", json!({"id": kid}))
                     .expect("the kid"),
+                sprite: client
+                    .call_as("entity", json!({"id": sprite}))
+                    .expect("a sprite"),
                 field: client.call_as("get", field).expect("its y"),
                 types: client.call_as("types", ()).expect("the types"),
                 hash: client.call_as("hash", ()).expect("a hash"),
@@ -3266,6 +3278,13 @@ mod tests {
         assert_eq!(read.entity["space"], space([0.0; 3]));
         assert_eq!(read.kid["space"], space([1.0, 2.0, 3.0]));
         assert_eq!(read.field, 2.0);
+        // What draws has `bounds`, in the world; what doesn't, and has nothing under it that does,
+        // hasn't.
+        let bounds = &read.sprite["bounds"];
+        assert_eq!(bounds["center"], json!([1.0, 2.0, 3.0]));
+        let radius = bounds["radius"].as_f64().expect("a radius") as f32;
+        assert_eq!(radius, std::f32::consts::FRAC_1_SQRT_2);
+        assert!(read.entity.get("bounds").is_none() && read.kid.get("bounds").is_none());
         let types = cx.world().types();
         let names: Vec<&str> = read
             .types

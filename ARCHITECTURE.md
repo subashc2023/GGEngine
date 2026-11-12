@@ -111,9 +111,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   starts, which frames the scene opened, until, in Edit, a frame through it shows: then the
   editor's camera takes over from where it sees, with the handles and the grid. F over the view,
   and a double click on a row of its Entities panel, that row's Frame in View or F in the panel,
-  frame the pick: the editor's camera eases to look at its origin, turned as it was and as far
-  back, as no entity's size reaches the editor, and the view turns to it. Its Scenes panel, below
-  the Entities, lists the scene files in
+  frame the pick: the game answers `entity` with the sphere round what the pick and everything
+  under it draw, its meshes, sprites and circles, and the editor's camera eases to look at the
+  sphere, turned as it was and back far enough that it fills 80% of the view's height; for a pick
+  that draws nothing, it looks at its origin from as far back as it was. The view turns to the
+  editor's camera. Its Scenes panel, below the Entities, lists the scene files in
   the project's scenes folders, a click opening one as the File menu's Open does. Its Debugger
   panel debugs the game's scripts through the API: the source of each script the game runs, a click
   on a line's number setting or clearing a breakpoint there, which the editor keeps and gives each

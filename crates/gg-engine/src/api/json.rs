@@ -489,7 +489,7 @@ pub(crate) fn floats(out: &mut String, xs: &[f32]) {
 
 /// Writes `x` as the shortest number that reads back to its bits as an `f32`, as `0.1` for 0.1,
 /// rather than as the `f64` it widens to.
-fn float32(out: &mut String, x: f32) {
+pub(crate) fn float32(out: &mut String, x: f32) {
     if x.is_finite() {
         let text = serde_json::to_string(&x).expect("a finite float is a number");
         out.push_str(&text);

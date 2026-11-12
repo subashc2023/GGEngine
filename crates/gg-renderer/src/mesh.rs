@@ -239,6 +239,9 @@ pub struct Meshes {
     count: u32,
     /// Those removed, whose handles are never given out again.
     removed: HashSet<u32>,
+    /// Each handed-out mesh's bounding sphere, its center and radius in the mesh's own space, by
+    /// its handle; `None` for one without a finite sphere, and for one removed.
+    spheres: Vec<Option<(Vec3, f32)>>,
     /// The handle of the engine's grid mesh, which is added the first time it's asked for, once
     /// it has been.
     grid: Option<u32>,
@@ -313,6 +316,32 @@ impl Meshes {
         self.count - self.removed.len() as u32
     }
 
+    /// The sphere round the vertices of the mesh `draw` draws, as its levels of detail hold it: its
+    /// center and radius in the mesh's own space. `None` for a mesh whose sphere is infinite, as one
+    /// added without levels of detail is, whose vertex positions can't be read, and for one removed.
+    /// Readable at once, before a frame has streamed the mesh to the GPU.
+    pub fn sphere_of(&self, draw: &MeshDraw) -> Option<(Vec3, f32)> {
+        self.spheres.get(draw.mesh as usize).copied().flatten()
+    }
+
+    /// Keeps `lods`' sphere as the sphere of the mesh of index `index`, unless it was removed.
+    fn keep_sphere(&mut self, index: u32, lods: &Lods) {
+        if self.removed.contains(&index) {
+            return;
+        }
+        let sphere = lods
+            .radius
+            .is_finite()
+            .then_some((lods.center, lods.radius));
+        match self.spheres.get_mut(index as usize) {
+            Some(kept) => *kept = sphere,
+            None => {
+                debug_assert_eq!(self.spheres.len(), index as usize, "handles come in order");
+                self.spheres.push(sphere);
+            }
+        }
+    }
+
     /// The engine's grid mesh, a unit square as four triangles from its center, added as a game's
     /// meshes are the first time it's asked for: a renderer draws grids with it, but uploads
     /// nothing for it without them, and games' handles come where they would have.
@@ -380,6 +409,7 @@ impl Meshes {
         mesh.check(name)?;
         let index = self.count;
         self.count += 1;
+        self.keep_sphere(index, &mesh.lods);
         self.changes
             .push(Change::Added(Added::model(index, false, name, mesh)));
         Ok(Mesh::new(index))
@@ -395,6 +425,7 @@ impl Meshes {
     ) -> Mesh<V> {
         let index = self.count;
         self.count += 1;
+        self.keep_sphere(index, &lods);
         self.changes.push(Change::Added(Added {
             index,
             replacement: false,
@@ -469,6 +500,7 @@ impl Meshes {
             check_lods(name, indices, lods)?;
         }
         let lods = lods.unwrap_or_else(|| Lods::whole(indices.len()));
+        self.keep_sphere(mesh.index, &lods);
         self.replace_added(Added {
             index: mesh.index,
             replacement: true,
@@ -502,6 +534,7 @@ impl Meshes {
             "mesh {name:?} replaces one of another `Meshes`"
         );
         model.check(name)?;
+        self.keep_sphere(mesh.index, &model.lods);
         self.replace_added(Added::model(mesh.index, true, name, model));
         Ok(())
     }
@@ -555,6 +588,7 @@ impl Meshes {
         );
         let removed = self.removed.insert(index);
         if removed {
+            self.spheres[index as usize] = None;
             self.changes.push(Change::Removed(index));
         }
         removed
@@ -657,6 +691,7 @@ impl Default for Meshes {
             changes: Vec::new(),
             count: 0,
             removed: HashSet::new(),
+            spheres: Vec::new(),
             grid: None,
         };
         let quad = meshes
@@ -2448,6 +2483,46 @@ mod tests {
         // After the engine's quad.
         assert_eq!(add(&[0, 1, 2]).ok(), Some(1));
         assert_eq!(add(&[2, 1, 0]).ok(), Some(2));
+    }
+
+    /// A mesh's sphere is the one its levels of detail hold, at once, through replacements; a mesh
+    /// without a finite sphere, or removed, has none.
+    #[test]
+    fn a_mesh_s_sphere_is_the_one_its_levels_hold() {
+        let mut meshes = Meshes::default();
+        let draw =
+            |index| MeshDraw::from_parts(index, 0, false, false, &[]).expect("no parameters");
+        let sphere = |meshes: &Meshes, index| meshes.sphere_of(&draw(index));
+        let mut round = lods(&[0.0], 2.0);
+        round.center = Vec3::new(1.0, 0.0, 0.0);
+        let a = meshes
+            .add_lods("a", &TRIANGLE, &[0, 1, 2], round)
+            .expect("a");
+        let b = meshes.add("b", &TRIANGLE, &[0, 1, 2]).expect("b");
+        let c = meshes
+            .add_lods("c", &TRIANGLE, &[0, 1, 2], lods(&[0.0], 1.0))
+            .expect("c");
+        let quad = sprite::QUAD.index;
+        assert_eq!(sphere(&meshes, a.index), Some((Vec3::X, 2.0)));
+        assert_eq!(
+            [quad, b.index].map(|index| sphere(&meshes, index)),
+            [None, None],
+            "infinite spheres"
+        );
+        // A replacement without levels has none; one with them has theirs.
+        meshes.replace("a", a, &TRIANGLE, &[0, 1, 2]).expect("a");
+        assert_eq!(sphere(&meshes, a.index), None);
+        let replacement = lods(&[0.0], 3.0);
+        let replaced = meshes.replace_lods("b", b, &TRIANGLE, &[0, 1, 2], replacement);
+        replaced.expect("b");
+        assert_eq!(sphere(&meshes, b.index), Some((Vec3::ZERO, 3.0)));
+        // Removed, and a replacement of it dropped.
+        assert!(meshes.remove(c));
+        assert_eq!(sphere(&meshes, c.index), None);
+        let again = meshes.replace_lods("c", c, &TRIANGLE, &[0, 1, 2], lods(&[0.0], 4.0));
+        again.expect("c");
+        assert_eq!(sphere(&meshes, c.index), None);
+        assert_eq!(sphere(&meshes, 99), None, "a handle never handed out");
     }
 
     #[test]

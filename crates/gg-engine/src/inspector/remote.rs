@@ -28,7 +28,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use gg_api::{Client, Failure, Session};
-    use gg_core::math::Mat4;
+    use gg_core::math::{Mat4, Vec3};
     use serde::Deserialize;
     use serde_json::{Map, Value as JsonValue, json};
     use tracing::field::display;
@@ -205,8 +205,9 @@ mod imp {
 
     /// An entity as the game gave it: its name, parent and children, and its components' types, in
     /// the order they registered; with, for the picked entity, their values, or why one can't be
-    /// read, where the space its transform is in sits, if that was given, and finite, and what of
-    /// it differs from its prefab, if it's an instance's.
+    /// read, where the space its transform is in sits, if that was given, and finite, the sphere
+    /// round what it draws, if it was given, and what of it differs from its prefab, if it's an
+    /// instance's.
     struct Known {
         id: EntityId,
         name: Option<String>,
@@ -215,11 +216,12 @@ mod imp {
         components: Vec<String>,
         values: Vec<Result<Value, String>>,
         space: Option<Pose>,
+        bounds: Option<gg_api::Sphere>,
         instance: Option<gg_api::Instanced>,
     }
 
-    /// The entity `entity` answers, its `space` and `instance` as they came, which a game of an
-    /// older engine doesn't give.
+    /// The entity `entity` answers, its `space`, `bounds` and `instance` as they came, which a game
+    /// of an older engine doesn't give.
     #[derive(Deserialize)]
     struct Answered {
         name: Option<String>,
@@ -228,6 +230,8 @@ mod imp {
         components: Map<String, JsonValue>,
         #[serde(default)]
         space: Option<JsonValue>,
+        #[serde(default)]
+        bounds: Option<gg_api::Sphere>,
         #[serde(default)]
         instance: Option<gg_api::Instanced>,
     }
@@ -544,6 +548,7 @@ mod imp {
                     components: listed.components,
                     values: Vec::new(),
                     space: None,
+                    bounds: None,
                     instance: None,
                 });
             }
@@ -612,6 +617,7 @@ mod imp {
                     .space
                     .as_ref()
                     .and_then(|space| space_of(space, &names)),
+                bounds: answered.bounds,
                 instance: answered.instance,
             };
             self.types_due |= entity
@@ -639,6 +645,8 @@ mod imp {
                 id: *id,
                 local: Transform::from_value(local).ok()?,
                 space: entity.space?,
+                bounds: (entity.bounds)
+                    .map(|sphere| (Vec3::from_array(sphere.center), sphere.radius)),
                 generation: self.generation,
             })
         }
@@ -1370,9 +1378,15 @@ mod imp {
                 id: a,
                 local,
                 space: parent,
+                bounds: None,
                 generation: 0,
             };
             assert_eq!(placed, expected);
+            // The sphere round what it draws comes with the read, if the game gives one.
+            let bounds = r#","bounds":{"center":[1,2,3],"radius":2.5}"#;
+            remote.entity(a, answer(&format!("{}{bounds}", space("4"))), Some(a));
+            let bounded = remote.placed(Some(a)).expect("placed");
+            assert_eq!(bounded.bounds, Some((Vec3::new(1.0, 2.0, 3.0), 2.5)));
             assert_eq!(remote.placed(Some(b)), None, "while another is picked");
             for unplaced in ["", &space(r#""inf""#), r#","space":{"rotation":[0,0,0,1]}"#] {
                 remote.entity(a, answer(unplaced), Some(a));

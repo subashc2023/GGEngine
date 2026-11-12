@@ -42,6 +42,8 @@ mod args;
 mod asset_watch;
 mod assets;
 mod audio;
+#[cfg(feature = "dev")]
+mod bounds;
 mod camera;
 mod canvas;
 // In development builds alone, as `dev` has the UI.

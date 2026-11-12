@@ -104,7 +104,10 @@
 //!   components in the order their types registered; and `space`, where the space its `Transform`
 //!   is in sits in the world, as the last tick left it: its parent's pose, as a matrix of 16 floats,
 //!   column by column, and a rotation, `[x, y, z, w]`, without the parent's scales; the identity
-//!   for a root. Its floats are written as a value's are. An instance's entity, its root or one its
+//!   for a root. Its floats are written as a value's are. `bounds` is a [`Sphere`] in the world,
+//!   `{"center":[x,y,z],"radius":r}`, round what the entity and every entity under it draw, as the
+//!   last tick left them: meshes, sprites and circles, but not text, particles or lines, nor a mesh
+//!   whose extent the engine doesn't know; absent when nothing there draws. An instance's entity, its root or one its
 //!   prefab gives, has `instance` too, [`Instanced`]: what of it differs from its prefab, which
 //!   `revert` sets back, as a scene saves it; reading it parses the prefab's text, and changes
 //!   nothing.
@@ -1103,6 +1106,15 @@ pub struct Listed {
 #[serde(deny_unknown_fields)]
 pub struct Entity {
     pub id: String,
+}
+
+/// A sphere in the world's space, as `entity` answers `bounds`: the center, in world units, and the
+/// radius.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sphere {
+    pub center: [f32; 3],
+    pub radius: f32,
 }
 
 /// What `entity` answers of an instance's entity, its root or one its prefab gives, under
@@ -2407,6 +2419,19 @@ mod tests {
         };
         let back: Looked = serde_json::from_str(&serde_json::to_string(&shown).unwrap()).unwrap();
         assert_eq!(back, shown);
+    }
+
+    /// A sphere reads as `entity` writes `bounds`, and takes no other field.
+    #[test]
+    fn spheres_read_as_their_docs_say() {
+        let sphere = r#"{"center": [1, 2.5, -3], "radius": 0.5}"#;
+        let expected = Sphere {
+            center: [1.0, 2.5, -3.0],
+            radius: 0.5,
+        };
+        assert_eq!(serde_json::from_str::<Sphere>(sphere).unwrap(), expected);
+        let extra = r#"{"center": [0, 0, 0], "radius": 1, "color": 0}"#;
+        assert!(serde_json::from_str::<Sphere>(extra).is_err());
     }
 
     /// A pick names a pixel of the view, and its answer an entity, or none; a capture is of the

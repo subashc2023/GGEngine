@@ -25,6 +25,8 @@ const FOV: f32 = PI / 3.0;
 const START_HEIGHT: f32 = 10.0;
 /// The least and most the camera is from its pivot.
 const DISTANCES: [f32; 2] = [0.01, 100_000.0];
+/// How much of the view's height a framed sphere fills.
+const FRAMED: f32 = 0.8;
 /// How far looking about turns it for a point the mouse moves, in radians: the fly camera
 /// controller's for a point the cursor is dragged. The mouse's raw motion counts as physical pixels,
 /// as Windows moves the cursor by it at its default speed without enhanced pointer precision.
@@ -554,11 +556,34 @@ impl OrbitCamera {
     }
 
     /// Eases to look at `point` from where it would be, keeping which way it faces and how far
-    /// back it is, as framing what's picked does: the size of what's there isn't known, so it
+    /// back it is, as framing what's picked does when the size of what's there isn't known: it
     /// stays as big as the view showed things at the pivot.
     pub fn frame(&mut self, point: Vec3) {
         self.ease_to(Pose {
             pivot: point,
+            ..self.pose
+        });
+    }
+
+    /// Eases to look at the sphere of `radius` round `center`, keeping which way it faces, from as
+    /// far back as the sphere fills [`FRAMED`] of the view's height: in perspective, where it just
+    /// subtends that part of the field of view; orthographically, where the view is as tall as the
+    /// sphere's diameter over [`FRAMED`]. Within the distances the camera goes. A sphere of no size,
+    /// or none that is finite, is framed as a point is, at the distance the camera has.
+    pub fn frame_sphere(&mut self, center: Vec3, radius: f32) {
+        if !radius.is_finite() || radius <= 0.0 {
+            self.frame(center);
+            return;
+        }
+        let distance = if self.perspective {
+            radius / libm::sinf(FRAMED * FOV / 2.0)
+        } else {
+            radius / FRAMED / tan_half_fov()
+        };
+        let [least, most] = DISTANCES;
+        self.ease_to(Pose {
+            pivot: center,
+            distance: distance.clamp(least, most),
             ..self.pose
         });
     }
@@ -816,6 +841,64 @@ mod tests {
             assert_near(pixel(&camera, point), middle, "the point");
             let distance = eye(&camera).distance(point);
             assert!((distance - 12.0).abs() < 1e-4, "{distance}");
+        }
+    }
+
+    /// Framing a sphere puts its center in the middle of the view, turned as the camera was, and
+    /// as far back as it fills 80% of the view's height: in perspective, its edge that high above
+    /// the middle seen from the eye; orthographically, the view as tall as its diameter over 0.8,
+    /// whatever the distance it had. A sphere too large or small for the distances goes as far as
+    /// they do.
+    #[test]
+    fn framing_a_sphere_fills_80_percent_of_the_views_height() {
+        let center = Vec3::new(-4.0, 6.0, 2.5);
+        for perspective in [false, true] {
+            let mut camera = turned(perspective);
+            let before = camera.viewpoint();
+            camera.frame_sphere(center, 3.0);
+            eased(&mut camera);
+            let after = camera.viewpoint();
+            assert!(after.rotation.abs_diff_eq(before.rotation, 1e-6));
+            let middle = Vec2::from(VIEW.origin.map(|at| at as f32))
+                + Vec2::from(VIEW.size.map(|side| side as f32)) / 2.0;
+            assert_near(pixel(&camera, center), middle, "the center");
+            if !perspective {
+                // The sphere's top, a radius above its center in the view's up, is 80% of the way
+                // from the middle to the view's top edge. (In perspective the eye's tangent to the
+                // sphere is, and a point at the center's depth is nearer the middle.)
+                let up = after.rotation * Vec3::Y;
+                let top = pixel(&camera, center + up * 3.0);
+                let want = middle.y - 0.8 * VIEW.size[1] as f32 / 2.0;
+                assert!((top.y - want).abs() < 0.5, "{} vs {want}", top.y);
+            }
+        }
+        let mut camera = turned(false);
+        camera.frame_sphere(center, 3.0);
+        eased(&mut camera);
+        let Projection::Orthographic { height, .. } = camera.viewpoint().projection else {
+            panic!("orthographic");
+        };
+        assert!((height - 2.0 * 3.0 / 0.8).abs() < 1e-4, "{height}");
+        let mut camera = turned(true);
+        camera.frame_sphere(center, 3.0);
+        eased(&mut camera);
+        let distance = eye(&camera).distance(center);
+        let want = 3.0 / libm::sinf(0.8 * FOV / 2.0);
+        assert!((distance - want).abs() < 1e-3, "{distance} vs {want}");
+        for (radius, want) in [
+            (1e-9, 0.01),
+            (0.0, 12.0),
+            (f32::NAN, 12.0),
+            (1e12, 100_000.0),
+        ] {
+            let mut camera = turned(true);
+            camera.frame_sphere(center, radius);
+            eased(&mut camera);
+            let distance = eye(&camera).distance(center);
+            assert!(
+                (distance - want).abs() < want * 1e-4,
+                "{radius}: {distance}"
+            );
         }
     }
 

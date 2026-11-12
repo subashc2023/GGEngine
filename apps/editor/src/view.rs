@@ -165,14 +165,27 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Eases the editor's camera to look at `picked`'s origin, the view going back to it, as F over
-    /// the view and the Entities panel ask, as [`OrbitCamera::frame`] says.
+    /// Eases the editor's camera to look at `picked`, the view going back to it, as F over the
+    /// view and the Entities panel ask: at the sphere round what it and those under it draw, as
+    /// the game's last read of it gave it, filling the view, as [`OrbitCamera::frame_sphere`] says;
+    /// else at its origin, as [`OrbitCamera::frame`] says.
     pub fn frame(&mut self, picked: &Picked) {
-        let origin = picked
-            .parent
-            .matrix
-            .transform_point3(picked.local.translation);
-        self.camera.frame(origin);
+        let bounds = (self.link.placed())
+            .filter(|placed| placed.id == picked.entity)
+            .and_then(|placed| placed.bounds);
+        self.frame_bounds(picked, bounds);
+    }
+
+    /// Frames `picked` by `bounds`, the center and radius of the sphere round what it draws, if the
+    /// game gave one.
+    fn frame_bounds(&mut self, picked: &Picked, bounds: Option<(Vec3, f32)>) {
+        match bounds {
+            Some((center, radius)) => self.camera.frame_sphere(center, radius),
+            None => {
+                let origin = (picked.parent.matrix).transform_point3(picked.local.translation);
+                self.camera.frame(origin);
+            }
+        }
         self.toolbar.world_camera = false;
     }
 
@@ -379,7 +392,7 @@ mod tests {
 
     use gg_engine::math::Quat;
     use gg_engine::reflect::Value;
-    use gg_engine::{EntityId, Inspector, MouseButton, Pick, Pose, Scroll, Transform};
+    use gg_engine::{EntityId, Inspector, MouseButton, Pick, Pose, Projection, Scroll, Transform};
 
     use super::*;
     use crate::camera::Space;
@@ -507,9 +520,9 @@ mod tests {
         assert_eq!(tools.picking, None);
     }
 
-    /// F frames the pick, eased to look at its origin, turning the view to the editor's camera
-    /// from the game's: not without a pick, as it repeats, with Ctrl held, nor during a drag of the
-    /// handles.
+    /// F frames the pick, eased to look at its origin as it has no sphere, turning the view to the
+    /// editor's camera from the game's: not without a pick, as it repeats, with Ctrl held, nor
+    /// during a drag of the handles.
     #[test]
     fn f_frames_the_pick_turning_the_view_to_the_editors_camera() {
         let f = |repeat| Event::Key {
@@ -549,6 +562,35 @@ mod tests {
             looked_at.abs_diff_eq(Vec3::new(2.0, 3.0, 0.0), 1e-4),
             "{looked_at}"
         );
+    }
+
+    /// Framing a pick the game gave a sphere for centers the view on the sphere, not on the pick's
+    /// origin, and goes back far enough to fill the view with it, and turns the view to the
+    /// editor's camera; one without a sphere is framed at its origin, as it was.
+    #[test]
+    fn framing_a_pick_with_a_sphere_looks_at_the_sphere() {
+        let placed = at_the_origin().expect("picked");
+        let center = Vec3::new(7.0, 8.0, 9.0);
+        let mut tools = fresh();
+        tools.toolbar.world_camera = true;
+        tools.frame_bounds(&placed, Some((center, 2.0)));
+        assert!(!tools.toolbar.world_camera, "the editor's camera");
+        tools.camera.update(Duration::from_secs(1));
+        let framed = tools.camera.viewpoint();
+        let ahead = framed.rotation * Vec3::NEG_Z;
+        let looked_at = framed.position + ahead * (center - framed.position).dot(ahead);
+        assert!(looked_at.abs_diff_eq(center, 1e-4), "{looked_at}");
+        let Projection::Orthographic { height, .. } = framed.projection else {
+            panic!("the camera starts orthographic");
+        };
+        assert!((height - 5.0).abs() < 1e-4, "2 * 2 / 0.8, not {height}");
+        tools.frame_bounds(&placed, None);
+        tools.camera.update(Duration::from_secs(1));
+        let at_origin = tools.camera.viewpoint();
+        let ahead = at_origin.rotation * Vec3::NEG_Z;
+        let looked_at = at_origin.position + ahead * (-at_origin.position).dot(ahead);
+        assert!(looked_at.abs_diff_eq(Vec3::ZERO, 1e-4), "{looked_at}");
+        assert_eq!(at_origin.projection, framed.projection, "as far back");
     }
 
     /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,
