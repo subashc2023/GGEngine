@@ -70,6 +70,28 @@ pub enum Tool {
     Probe,
 }
 
+/// Which axes the Move and Rotate handles go along, which the toolbar picks and X flips; Scale's
+/// are always the entity's own, since scaling a turned entity along the world's would shear it,
+/// which a transform can't hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Space {
+    /// The entity's own axes, as drawing carries them.
+    #[default]
+    Local,
+    /// The world's axes, at the entity's origin.
+    World,
+}
+
+impl Space {
+    /// The other one.
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Local => Self::World,
+            Self::World => Self::Local,
+        }
+    }
+}
+
 /// What a drag does to the camera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {

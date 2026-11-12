@@ -1,8 +1,8 @@
 //! The editor's transform handles: what the Move, Rotate and Scale tools show over the entity the
-//! Inspector has picked, at its origin, along its own axes and as big on screen however far it is,
-//! which the left button drags to move, turn and scale it, each drag one edit of the Inspector's,
-//! through its link; and the press over the view off them, which asks for a pick of what's under
-//! the cursor.
+//! Inspector has picked, at its origin, along its own axes, or Move's and Rotate's along the
+//! world's, as the toolbar's space says, and as big on screen however far it is, which the left
+//! button drags to move, turn and scale it, each drag one edit of the Inspector's, through its
+//! link; and the press over the view off them, which asks for a pick of what's under the cursor.
 
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
@@ -14,7 +14,7 @@ use gg_engine::{
     EntityId, Event, Key, MouseButton, Pose, Projection, Transform, Viewpoint, Viewport,
 };
 
-use crate::camera::{Screen, Tool};
+use crate::camera::{Screen, Space, Tool};
 
 /// How long the handles are, in points: a segment of their length along the camera's right, at
 /// their origin, spans it on screen.
@@ -105,13 +105,15 @@ pub struct Reading {
     pub cursor: Option<[f64; 2]>,
 }
 
-/// What else the handles go by as an event comes: the toolbar's tool; what the view on screen sees
-/// from, while it sees through the editor's camera; the pick; whether the camera drags, which no
-/// drag of theirs nor pick starts while it does; and whether it eases, as Home and the gizmo's
-/// snaps have it, which no drag of theirs starts while it does, since the view would turn under it.
+/// What else the handles go by as an event comes: the toolbar's tool, and the space Move's and
+/// Rotate's axes are in; what the view on screen sees from, while it sees through the editor's
+/// camera; the pick; whether the camera drags, which no drag of theirs nor pick starts while it
+/// does; and whether it eases, as Home and the gizmo's snaps have it, which no drag of theirs starts
+/// while it does, since the view would turn under it.
 #[derive(Clone, Copy, Debug)]
 pub struct Aim {
     pub tool: Tool,
+    pub space: Space,
     pub viewpoint: Option<Viewpoint>,
     pub picked: Option<Picked>,
     pub camera: bool,
@@ -342,7 +344,8 @@ impl Handles {
     }
 
     /// Paints the handles `tool` shows for `picked` with `painter`, the view's layer's, as `sight`
-    /// sees them, `ppp` egui's pixels per point: lighting the one being dragged, or else the one
+    /// sees them, `ppp` egui's pixels per point, Move's and Rotate's along `space`'s axes, the
+    /// pair `(tool, space)` as the toolbar has it: lighting the one being dragged, or else the one
     /// at `hover`, in pixels, which the editor gives while the cursor is over the view, the camera
     /// neither drags nor eases, and Alt isn't held.
     pub fn paint(
@@ -350,14 +353,14 @@ impl Handles {
         painter: &Painter,
         ppp: f32,
         sight: &Sight,
-        tool: Tool,
+        (tool, space): (Tool, Space),
         picked: Option<&Picked>,
         hover: Option<Vec2>,
     ) {
         let Some(picked) = picked else {
             return;
         };
-        let Some(placed) = self.placed(sight, tool, picked) else {
+        let Some(placed) = self.placed(sight, tool, space, picked) else {
             return;
         };
         let lit = match &self.drag {
@@ -461,14 +464,15 @@ impl Handles {
         }
     }
 
-    /// Where the handles `tool` shows for `picked` are, as `sight` sees them: none for a tool
-    /// without handles, nor for Move while the parent's space has no room to move in.
-    fn placed(&self, sight: &Sight, tool: Tool, picked: &Picked) -> Option<Placed> {
+    /// Where the handles `tool` shows for `picked` are, as `sight` sees them, Move's and Rotate's
+    /// along `space`'s axes, and Scale's along the entity's own: none for a tool without handles,
+    /// nor for Move while the parent's space has no room to move in.
+    fn placed(&self, sight: &Sight, tool: Tool, space: Space, picked: &Picked) -> Option<Placed> {
+        let local = self.shown(picked);
         match tool {
             Tool::Move if carried(&picked.parent).is_none() => None,
-            Tool::Move | Tool::Rotate | Tool::Scale => {
-                place(sight, &picked.parent, &self.shown(picked))
-            }
+            Tool::Move | Tool::Rotate => place(sight, space, &picked.parent, &local),
+            Tool::Scale => place(sight, Space::Local, &picked.parent, &local),
             Tool::Select | Tool::Pan | Tool::Orbit | Tool::Probe => None,
         }
     }
@@ -478,7 +482,7 @@ impl Handles {
     fn under(&self, at: Vec2, reading: &Reading, aim: &Aim) -> Option<(Picked, Grabbed)> {
         let picked = aim.picked?;
         let sight = Sight::new(aim.viewpoint?, reading.screen.view?, reading.screen.scale)?;
-        let placed = self.placed(&sight, aim.tool, &picked)?;
+        let placed = self.placed(&sight, aim.tool, aim.space, &picked)?;
         let handle = placed.hit(&sight, aim.tool, at)?;
         let grabbed = Grabbed {
             tool: aim.tool,
@@ -616,7 +620,6 @@ impl Drag {
             origin,
             center,
             axes,
-            handed,
             length,
             toward,
             ..
@@ -673,12 +676,11 @@ impl Drag {
                 } else {
                     angle
                 };
-                // A turn of its own about an axis turns it about the axis in the world, but the
-                // other way where the axes are left-handed: for an orthogonal F, F q(n, a) F^T is
-                // q(F n, a det F).
-                let own = [Vec3::X, Vec3::Y, Vec3::Z][i];
-                let turned = self.start.rotation * Quat::from_axis_angle(own, handed * angle);
-                Some(Field::Rotation(turned.normalize()))
+                Some(Field::Rotation(self.placed.turn(
+                    self.start.rotation,
+                    axis,
+                    angle,
+                )))
             }
             (Tool::Rotate, Handle::Outer, Grab::Screen) => {
                 let [from, to] = [self.press, cursor].map(|at| {
@@ -691,12 +693,12 @@ impl Drag {
                 } else {
                     angle
                 };
-                // About the view's axis, pointing away from the camera, in the entity's own space:
-                // how far it goes along each of the axes. The other way where they're
-                // left-handed, as a ring's.
-                let own = Vec3::from_array(axes.map(|axis| axis.dot(-toward))).normalize();
-                let turned = self.start.rotation * Quat::from_axis_angle(own, handed * angle);
-                Some(Field::Rotation(turned.normalize()))
+                // About the view's axis, pointing away from the camera.
+                Some(Field::Rotation(self.placed.turn(
+                    self.start.rotation,
+                    -toward,
+                    angle,
+                )))
             }
             _ => None,
         }
@@ -893,6 +895,12 @@ struct Placed {
     /// world.
     axes: [Vec3; 3],
     handed: f32,
+    /// Which axes they are: the entity's own, or the world's, which Move's and Rotate's can be;
+    /// and the orthogonal factor of the parent's 3x3 that carries the entity's own, which a turn
+    /// about the world's axes is taken into the entity's space by. `handed` is its determinant's
+    /// sign in either.
+    space: Space,
+    carry: Mat3,
     /// How long the handles are in the world, at the origin.
     length: f32,
     /// Which way the camera is from the origin.
@@ -904,20 +912,30 @@ struct Placed {
 }
 
 /// The handles placed about an entity whose own transform is `local`, carried by a parent at
-/// `parent`, as `sight` sees them: at its origin in the world; along its own axes as drawing
+/// `parent`, as `sight` sees them: at its origin in the world; along the world's axes in
+/// [`Space::World`], and otherwise along its own axes as drawing
 /// places them, its rotation carried by the [`orthogonal`] factor of the parent's 3x3, which takes
 /// the parent's scale out but keeps its signs; and as long in the world as [`LENGTH`] points along
 /// the camera's right there. Under a parent that scales unevenly, a turned entity's drawn axes
 /// aren't square to each other, and the handles' are the nearest that are; under a flat one,
 /// whose 3x3 has no inverse, its rotation and its ancestors' turn them, their scales aside. `None`
 /// while the origin isn't past the near plane, or the origin, the axes or the length isn't finite.
-fn place(sight: &Sight, parent: &Pose, local: &Transform) -> Option<Placed> {
+fn place(sight: &Sight, space: Space, parent: &Pose, local: &Transform) -> Option<Placed> {
     let origin = parent.matrix.transform_point3(local.translation);
-    let frame = match carried(parent) {
-        Some(carries) => orthogonal(carries) * Mat3::from_quat(local.rotation.normalize()),
-        None => Mat3::from_quat((parent.rotation * local.rotation).normalize()),
+    let (carry, frame) = match carried(parent) {
+        Some(carries) => {
+            let carry = orthogonal(carries);
+            (carry, carry * Mat3::from_quat(local.rotation.normalize()))
+        }
+        None => (
+            Mat3::from_quat(parent.rotation),
+            Mat3::from_quat((parent.rotation * local.rotation).normalize()),
+        ),
     };
-    let axes = [frame.x_axis, frame.y_axis, frame.z_axis].map(Vec3::normalize);
+    let axes = match space {
+        Space::Local => [frame.x_axis, frame.y_axis, frame.z_axis].map(Vec3::normalize),
+        Space::World => [Vec3::X, Vec3::Y, Vec3::Z],
+    };
     let handed = frame.determinant().signum();
     let center = sight.project(origin)?;
     let right = sight.viewpoint.rotation * Vec3::X;
@@ -925,6 +943,7 @@ fn place(sight: &Sight, parent: &Pose, local: &Transform) -> Option<Placed> {
     let toward = sight.toward(origin);
     let finite = origin.is_finite()
         && center.is_finite()
+        && frame.is_finite()
         && axes.iter().all(|axis| axis.is_finite())
         && toward.is_finite();
     if !(finite && length.is_finite() && length > 0.0) {
@@ -938,6 +957,8 @@ fn place(sight: &Sight, parent: &Pose, local: &Transform) -> Option<Placed> {
         center,
         axes,
         handed,
+        space,
+        carry,
         length,
         toward,
         axis,
@@ -987,6 +1008,27 @@ fn fade(angle: f32) -> f32 {
 }
 
 impl Placed {
+    /// The rotation `start`, an entity's own, turned in the world by `angle` about `about`, a unit
+    /// axis there, counterclockwise as it points at the viewer. With F the matrix that carries the
+    /// entity's own axes, whose determinant's sign is `handed`: for an orthogonal F,
+    /// F q(n, a) F^T is q(F n, a det F), so a turn of its own about F^T `about` is the turn in the
+    /// world, the other way where the axes are left-handed. Under the world's axes, the same
+    /// turn is made before the entity's: with P the parent's factor, `carry`, P^T q(n, a) P is
+    /// q(P^T n, a det P), and the entity's rotation R becomes that times R.
+    fn turn(&self, start: Quat, about: Vec3, angle: f32) -> Quat {
+        let turned = match self.space {
+            Space::Local => {
+                let own = Vec3::from_array(self.axes.map(|axis| axis.dot(about))).normalize();
+                start * Quat::from_axis_angle(own, self.handed * angle)
+            }
+            Space::World => {
+                let own = (self.carry.transpose() * about).normalize();
+                Quat::from_axis_angle(own, self.handed * angle) * start
+            }
+        };
+        turned.normalize()
+    }
+
     /// The handle `tool` shows at `at`, in pixels, of those within [`HIT`] points of it that show:
     /// for Move and Scale, the center first, then the nearest of the rest; for Rotate, the
     /// nearest ring's half toward the camera, then the outer ring, then the rings' halves away
@@ -1312,6 +1354,7 @@ mod tests {
     fn aim(tool: Tool, viewpoint: Viewpoint, picked: Picked) -> Aim {
         Aim {
             tool,
+            space: Space::Local,
             viewpoint: Some(viewpoint),
             picked: Some(picked),
             camera: false,
@@ -1442,7 +1485,7 @@ mod tests {
     fn presses_hit_each_handle_and_none_hidden() {
         for perspective in [false, true] {
             let sight = sight(aside(Vec3::ZERO, perspective));
-            let placed = place(&sight, &Pose::IDENTITY, &turned()).expect("in view");
+            let placed = place(&sight, Space::Local, &Pose::IDENTITY, &turned()).expect("in view");
             let shown = placed.axis.iter().chain(&placed.plane);
             assert!(shown.into_iter().all(|&shown| shown > 0.5), "{placed:?}");
             let Placed {
@@ -1482,7 +1525,8 @@ mod tests {
         // From the front, Z points at the camera, and the planes through it are edge-on: a press
         // on their squares, slivers along X and Y, hits those axes; 14° off, Z is half shown.
         let front = sight(camera(Vec3::ZERO, [0.0; 3], 40.0, false));
-        let placed = place(&front, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
+        let placed =
+            place(&front, Space::Local, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
         assert_eq!(
             (placed.axis, placed.plane),
             ([1.0, 1.0, 0.0], [0.0, 0.0, 1.0])
@@ -1505,7 +1549,13 @@ mod tests {
             40.0,
             false,
         ));
-        let placed = place(&fourteen, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
+        let placed = place(
+            &fourteen,
+            Space::Local,
+            &Pose::IDENTITY,
+            &Transform::IDENTITY,
+        )
+        .expect("in view");
         assert!((placed.axis[2] - 0.5).abs() < 1e-3, "{:?}", placed.axis);
         let flat = Pose {
             matrix: Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0)),
@@ -1513,8 +1563,16 @@ mod tests {
         };
         let on_flat = picked(Transform::IDENTITY, flat);
         let handles = Handles::default();
-        assert!(handles.placed(&front, Tool::Move, &on_flat).is_none());
-        assert!(handles.placed(&front, Tool::Rotate, &on_flat).is_some());
+        assert!(
+            handles
+                .placed(&front, Tool::Move, Space::Local, &on_flat)
+                .is_none()
+        );
+        assert!(
+            handles
+                .placed(&front, Tool::Rotate, Space::Local, &on_flat)
+                .is_some()
+        );
         // Nor anything for an entity out at infinity, or turned by what's no rotation.
         let infinite = Transform {
             translation: Vec3::new(f32::INFINITY, 0.0, 0.0),
@@ -1526,7 +1584,7 @@ mod tests {
         };
         for local in [infinite, lost] {
             assert!(
-                place(&front, &Pose::IDENTITY, &local).is_none(),
+                place(&front, Space::Local, &Pose::IDENTITY, &local).is_none(),
                 "{local:?}"
             );
         }
@@ -1543,7 +1601,7 @@ mod tests {
             let local = turned();
             let picked = picked(local, Pose::IDENTITY);
             let aim = aim(Tool::Move, viewpoint, picked);
-            let placed = place(&sight, &picked.parent, &local).expect("in view");
+            let placed = place(&sight, Space::Local, &picked.parent, &local).expect("in view");
             let Placed {
                 origin,
                 center,
@@ -1595,7 +1653,8 @@ mod tests {
         let sight = sight(viewpoint);
         let picked = picked(Transform::IDENTITY, Pose::IDENTITY);
         let aim = aim(Tool::Move, viewpoint, picked);
-        let placed = place(&sight, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
+        let placed =
+            place(&sight, Space::Local, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
         let middle = (PLANE.0 + PLANE.1) / 2.0 * placed.length;
         let from = sight
             .project(Vec3::new(middle, 0.0, middle))
@@ -1634,7 +1693,8 @@ mod tests {
             let sight = sight(viewpoint);
             let picked = picked(Transform::IDENTITY, Pose::IDENTITY);
             let aim = aim(Tool::Rotate, viewpoint, picked);
-            let placed = place(&sight, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
+            let placed = place(&sight, Space::Local, &Pose::IDENTITY, &Transform::IDENTITY)
+                .expect("in view");
             let grabbed = facing(Vec3::Y, placed.toward) * placed.length;
             let turned = Quat::from_rotation_y(0.6) * grabbed;
             let [from, to] = [grabbed, turned].map(|point| sight.project(point).expect("in view"));
@@ -1656,7 +1716,8 @@ mod tests {
                 let sight = sight(viewpoint);
                 let picked = picked(Transform::IDENTITY, Pose::IDENTITY);
                 let aim = aim(Tool::Rotate, viewpoint, picked);
-                let placed = place(&sight, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
+                let placed = place(&sight, Space::Local, &Pose::IDENTITY, &Transform::IDENTITY)
+                    .expect("in view");
                 let edge_on = Vec3::Y.dot(placed.toward).abs() < EDGE_ON;
                 assert_eq!(edge_on, degrees < 5.0, "{degrees}°");
                 let near = facing(Vec3::Y, placed.toward) * placed.length;
@@ -1688,7 +1749,7 @@ mod tests {
             let sight = sight(viewpoint);
             let picked = picked(local, Pose::IDENTITY);
             let aim = aim(Tool::Rotate, viewpoint, picked);
-            let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+            let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
             let radius = sight.pixels(OUTER * LENGTH);
             let from = placed.center - Vec2::new(0.0, radius);
             // Clockwise on screen, whose y goes down.
@@ -1719,7 +1780,7 @@ mod tests {
         };
         let picked = picked(local, Pose::IDENTITY);
         let aim = aim(Tool::Scale, viewpoint, picked);
-        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
         let Placed {
             origin,
             center,
@@ -1775,7 +1836,7 @@ mod tests {
         let sight = sight(viewpoint);
         let local = turned();
         let picked = picked(local, Pose::IDENTITY);
-        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
         let Placed {
             origin,
             axes,
@@ -1877,20 +1938,56 @@ mod tests {
             scale: Vec3::ONE,
         };
         for parent in [carrying(parent_at), skewed] {
-            moves_along_its_axes(parent, local);
+            moves_along_its_axes(parent, local, Space::Local);
         }
     }
 
-    /// Checks that `local`, under `parent`, moves in the world along each axis the handles show,
-    /// as far as the cursor goes along it, in either projection.
-    fn moves_along_its_axes(parent: Pose, local: Transform) {
+    /// In the world's space, Move's arrows run along the world's X, Y and Z, and a drag of one
+    /// moves an entity turned 45° about Z, under a parent turned another way, scaled unevenly,
+    /// and under that one's, which skews the 3x3 that carries it, along that axis in the world
+    /// alone: the world X arrow changes its world position in X only.
+    #[test]
+    fn in_the_worlds_space_a_move_goes_along_the_worlds_axes_under_a_turned_parent() {
+        let parent_at = Transform {
+            translation: Vec3::new(1.0, 2.0, 0.5),
+            rotation: Quat::from_rotation_y(0.9) * Quat::from_rotation_x(-0.4),
+            scale: Vec3::new(2.0, 0.5, 1.5),
+        };
+        let grandparent_at = Transform {
+            rotation: Quat::from_rotation_y(0.4) * Quat::from_rotation_z(-0.5),
+            scale: Vec3::new(100.0, 1.0, 0.01),
+            ..Transform::IDENTITY
+        };
+        let skewed = Pose {
+            matrix: grandparent_at.matrix() * parent_at.matrix(),
+            rotation: grandparent_at.rotation * parent_at.rotation,
+        };
+        let local = Transform {
+            translation: Vec3::new(0.3, -0.4, 0.2),
+            rotation: Quat::from_rotation_z(FRAC_PI_4),
+            scale: Vec3::ONE,
+        };
+        for parent in [carrying(parent_at), skewed] {
+            moves_along_its_axes(parent, local, Space::World);
+        }
+    }
+
+    /// Checks that `local`, under `parent`, moves in the world along each axis the handles show in
+    /// `space`, as far as the cursor goes along it, in either projection.
+    fn moves_along_its_axes(parent: Pose, local: Transform, space: Space) {
         let world = parent.matrix.transform_point3(local.translation);
         for perspective in [false, true] {
             let viewpoint = aside(world, perspective);
             let sight = sight(viewpoint);
             let picked = picked(local, parent);
-            let aim = aim(Tool::Move, viewpoint, picked);
-            let placed = place(&sight, &parent, &local).expect("in view");
+            let aim = Aim {
+                space,
+                ..aim(Tool::Move, viewpoint, picked)
+            };
+            let placed = place(&sight, space, &parent, &local).expect("in view");
+            if space == Space::World {
+                assert_eq!(placed.axes, [Vec3::X, Vec3::Y, Vec3::Z]);
+            }
             let Placed {
                 origin,
                 axes,
@@ -1928,7 +2025,7 @@ mod tests {
                 rotation,
                 ..Transform::IDENTITY
             };
-            let placed = place(&sight, parent, &local).expect("in view");
+            let placed = place(&sight, Space::Local, parent, &local).expect("in view");
             for (i, axis) in placed.axes.into_iter().enumerate() {
                 let expected = expected.col(i).normalize();
                 assert!(
@@ -1983,7 +2080,7 @@ mod tests {
                     let viewpoint = camera(origin, [0.5, -0.9, 0.0], 40.0, perspective);
                     let sight = sight(viewpoint);
                     let aim = aim(Tool::Rotate, viewpoint, picked(local, parent));
-                    let placed = place(&sight, &parent, &local).expect("in view");
+                    let placed = place(&sight, Space::Local, &parent, &local).expect("in view");
                     let Placed {
                         center,
                         axes,
@@ -2044,7 +2141,9 @@ mod tests {
                 let viewpoint = aside(origin, perspective);
                 let sight = sight(viewpoint);
                 let picked = picked(local, parent);
-                let length = place(&sight, &parent, &local).expect("in view").length;
+                let length = place(&sight, Space::Local, &parent, &local)
+                    .expect("in view")
+                    .length;
                 let at = |point: Vec3| sight.project(point).expect("in view");
                 let frame = drawn(&parent, local.rotation);
                 for i in 0..3 {
@@ -2081,6 +2180,116 @@ mod tests {
         }
     }
 
+    /// In the world's space, a ring's drag turns an entity about the world's axis the ring shows by
+    /// the angle the cursor goes round it, and the outer ring's about the view's axis: so that its
+    /// world rotation is the turn times the one it had, under a parent that is turned, mirrored,
+    /// or both, whether the entity is turned or not, in either projection.
+    #[test]
+    fn in_the_worlds_space_the_rings_turn_it_about_the_worlds_axes() {
+        let turned_parent = carrying(Transform {
+            translation: Vec3::new(1.0, 2.0, 0.5),
+            rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
+            scale: Vec3::splat(2.0),
+        });
+        for perspective in [false, true] {
+            for parent in flipping().into_iter().chain([turned_parent]) {
+                for rotation in [Quat::IDENTITY, turned().rotation] {
+                    let local = Transform {
+                        rotation,
+                        ..Transform::IDENTITY
+                    };
+                    let origin = parent.matrix.transform_point3(local.translation);
+                    let viewpoint = camera(origin, [0.5, -0.9, 0.0], 40.0, perspective);
+                    let sight = sight(viewpoint);
+                    let aim = Aim {
+                        space: Space::World,
+                        ..aim(Tool::Rotate, viewpoint, picked(local, parent))
+                    };
+                    let placed = place(&sight, Space::World, &parent, &local).expect("in view");
+                    assert_eq!(placed.axes, [Vec3::X, Vec3::Y, Vec3::Z]);
+                    let (center, length, toward) = (placed.center, placed.length, placed.toward);
+                    let at = |point: Vec3| sight.project(point).expect("in view");
+                    let before = drawn(&parent, rotation);
+                    let turns = |from: Vec2, to: Vec2, expected: Mat3| {
+                        let replies = drag(&mut Handles::default(), &aim, from, &[to], false);
+                        let Field::Rotation(dragged) = set(&replies) else {
+                            panic!("{replies:?}");
+                        };
+                        let now = drawn(&parent, dragged);
+                        let tolerance = 1e-3 * expected.x_axis.length();
+                        assert!(
+                            now.abs_diff_eq(expected, tolerance),
+                            "{parent:?}, {local:?}: {now}, not {expected}"
+                        );
+                    };
+                    for (i, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+                        let turn = Quat::from_axis_angle(axis, 0.6);
+                        let grabbed = facing(axis, toward) * length;
+                        let from = at(origin + grabbed);
+                        assert_eq!(
+                            placed.hit(&sight, Tool::Rotate, from),
+                            Some(Handle::Ring(i)),
+                            "{parent:?}, {local:?}"
+                        );
+                        let to = at(origin + turn * grabbed);
+                        turns(from, to, Mat3::from_quat(turn) * before);
+                    }
+                    let radius = sight.pixels(OUTER * LENGTH);
+                    let way = Vec2::new(libm::sinf(0.5), -libm::cosf(0.5));
+                    let from = center - Vec2::new(0.0, radius);
+                    let turn = Quat::from_axis_angle(-toward, 0.5);
+                    turns(from, center + way * radius, Mat3::from_quat(turn) * before);
+                }
+            }
+        }
+    }
+
+    /// Scale shows and drags the entity's own axes in the world's space too, as in its own, since
+    /// scaling a turned entity along the world's would shear it; while Move's and Rotate's go
+    /// along the world's.
+    #[test]
+    fn in_the_worlds_space_scale_keeps_the_entitys_own_axes() {
+        let parent = carrying(Transform {
+            rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
+            ..Transform::IDENTITY
+        });
+        let local = turned();
+        let origin = parent.matrix.transform_point3(local.translation);
+        let viewpoint = aside(origin, false);
+        let sight = sight(viewpoint);
+        let picked = picked(local, parent);
+        let own = place(&sight, Space::Local, &parent, &local).expect("in view");
+        assert_ne!(own.axes, [Vec3::X, Vec3::Y, Vec3::Z]);
+        let handles = Handles::default();
+        let space = Space::World;
+        let scaling = handles.placed(&sight, Tool::Scale, space, &picked);
+        assert_eq!(scaling.expect("in view").axes, own.axes);
+        for tool in [Tool::Move, Tool::Rotate] {
+            let placed = handles
+                .placed(&sight, tool, space, &picked)
+                .expect("in view");
+            assert_eq!(placed.axes, [Vec3::X, Vec3::Y, Vec3::Z], "{tool:?}");
+        }
+        // From axis Y's end, a handles' length further along it, which doubles it.
+        let at = |point: Vec3| sight.project(point).expect("in view");
+        let axis = own.axes[1];
+        let end = own.origin + axis * own.length;
+        let to = at(end + axis * own.length);
+        let aim = Aim {
+            space,
+            ..aim(Tool::Scale, viewpoint, picked)
+        };
+        let replies = drag(&mut Handles::default(), &aim, at(end), &[to], false);
+        let Field::Scale(scaled) = set(&replies) else {
+            panic!("{replies:?}");
+        };
+        let expected = Vec3::new(local.scale.x, 2.0 * local.scale.y, local.scale.z);
+        assert!(
+            scaled.abs_diff_eq(expected, 1e-4),
+            "{scaled}, not {expected}"
+        );
+    }
+
     /// Each color `shape` paints with, filling or stroking.
     fn colors(shape: &Shape, found: &mut Vec<Color32>) {
         match shape {
@@ -2108,7 +2317,7 @@ mod tests {
     fn the_handles_paint_the_one_under_the_cursor_lit() {
         let sight = sight(aside(Vec3::ZERO, true));
         let picked = picked(turned(), Pose::IDENTITY);
-        let placed = place(&sight, &Pose::IDENTITY, &picked.local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &picked.local).expect("in view");
         let outer = placed.center - Vec2::new(0.0, sight.pixels(OUTER * LENGTH));
         let ctx = egui::Context::default();
         for (tool, under) in [
@@ -2125,7 +2334,8 @@ mod tests {
                 let handles = Handles::default();
                 let mut output = ctx.run_ui(input, |ui| {
                     let painter = ui.ctx().layer_painter(egui::LayerId::background());
-                    handles.paint(&painter, 1.5, &sight, tool, Some(&picked), hover);
+                    let shown = (tool, Space::Local);
+                    handles.paint(&painter, 1.5, &sight, shown, Some(&picked), hover);
                 });
                 output.textures_delta.clear();
                 let mut found = Vec::new();
@@ -2148,7 +2358,7 @@ mod tests {
         let local = turned();
         let picked = picked(local, Pose::IDENTITY);
         let aim = aim(Tool::Move, viewpoint, picked);
-        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
         let from = sight.project(placed.origin + placed.axes[0] * placed.length * 0.7);
         let from = from.expect("in view");
         let to = from + Vec2::new(30.0, 0.0);
@@ -2212,7 +2422,7 @@ mod tests {
             easing: true,
             ..aim(Tool::Move, viewpoint, picked(local, Pose::IDENTITY))
         };
-        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
         let on = sight.project(placed.origin + placed.axes[0] * placed.length * 0.7);
         let mut handles = Handles::default();
         for (at, reply) in [
@@ -2234,7 +2444,7 @@ mod tests {
         let sight = sight(viewpoint);
         let local = turned();
         let aim = aim(Tool::Probe, viewpoint, picked(local, Pose::IDENTITY));
-        let placed = place(&sight, &Pose::IDENTITY, &local).expect("in view");
+        let placed = place(&sight, Space::Local, &Pose::IDENTITY, &local).expect("in view");
         let on = sight.project(placed.origin + placed.axes[0] * placed.length * 0.7);
         let on = on.expect("in view");
         let mut handles = Handles::default();

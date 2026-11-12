@@ -54,6 +54,8 @@
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
 //! handles move, turn and scale it through the Inspector's link, each drag one edit of the
 //! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
+//! Move's and Rotate's go along the entity's own axes or the world's, as the toolbar's space switch
+//! says, which X flips; Scale's are always the entity's own.
 //! The toolbar's Probe tool reads what shading took and made at the pixel clicked, through gg-api's
 //! [`probe`](gg_api::probe), as `gg probe` does, pausing a playing game for its captures, and shows
 //! the numbers beside the pixel until Escape, another probe or another tool.

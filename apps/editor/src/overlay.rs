@@ -20,7 +20,7 @@ use gg_engine::math::{self, Quat, libm};
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::camera::{OrbitCamera, Side, Tool};
+use crate::camera::{OrbitCamera, Side, Space, Tool};
 
 /// The file the editor keeps the toolbar's [`Placement`] in, as [`Context::read_state`] names it.
 const FILE: &str = "toolbar.json";
@@ -113,12 +113,15 @@ fn pass_label(pass: Pass) -> &'static str {
     }
 }
 
-/// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
+/// What the toolbar sets: what the left button does over the view, which axes Move's and Rotate's
+/// handles go along, whether the grid shows, and in
 /// which plane, whether the view sees through the game's camera, whether the game's colliders'
 /// outlines show, what the view shows in place of its light and the passes it leaves out; and
 /// where it is over the view, and whether it's folded.
 pub struct Toolbar {
     pub tool: Tool,
+    /// Which axes Move's and Rotate's handles go along: the entity's own, or the world's.
+    pub space: Space,
     pub grid: bool,
     pub plane: Plane,
     /// Whether the view sees through the game's own camera rather than the editor's, and shows
@@ -151,6 +154,7 @@ impl Default for Toolbar {
     fn default() -> Self {
         Self {
             tool: Tool::default(),
+            space: Space::default(),
             grid: true,
             plane: Plane::XY,
             world_camera: false,
@@ -281,7 +285,8 @@ impl Toolbar {
 
     /// Draws the toolbar into `ui`: its grip, which a drag of moves it, as [`place`](Self::place)
     /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, Probe
-    /// last, whose tooltips name the keys that pick them, the camera's projection, which a click
+    /// last, whose tooltips name the keys that pick them, the space of Move's and Rotate's axes,
+    /// Local or World, which a click or X switches, the camera's projection, which a click
     /// switches, the
     /// grid's switch and its plane, the switch that sees through the game's camera, and the
     /// colliders' switch, the list of what the view shows in place of its light, and the Passes
@@ -373,6 +378,21 @@ impl Toolbar {
                     {
                         self.tool = tool;
                     }
+                }
+                let (label, tip) = match self.space {
+                    Space::Local => (
+                        "Local",
+                        "Local (X): Move's and Rotate's handles go along the picked entity's own \
+                         axes; click, or press X, for the world's",
+                    ),
+                    Space::World => (
+                        "World",
+                        "World (X): Move's and Rotate's handles go along the world's axes; click, \
+                         or press X, for the entity's own. Scale's always go along its own",
+                    ),
+                };
+                if ui.button(label).on_hover_text(tip).clicked() {
+                    self.space = self.space.flipped();
                 }
                 ui.separator();
                 ui.add_enabled_ui(!self.world_camera, |ui| {
@@ -1282,7 +1302,8 @@ mod tests {
     #[test]
     fn dragging_the_grip_moves_the_toolbar_with_the_pointer_within_the_view() {
         let ctx = egui::Context::default();
-        let view = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 400.0));
+        // Wider than the toolbar, which has no room to move in a view as wide as it is.
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 400.0));
         let mut toolbar = Toolbar::default();
         // The first pass sizes it.
         show_toolbar(&ctx, &mut toolbar, view, Vec::new());
