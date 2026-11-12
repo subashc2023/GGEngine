@@ -3,9 +3,10 @@
 //! taken back to where each pixel's point was by its motion and clipped to its neighborhood, as
 //! `shaders/taa.slang` says; into one of two images of the view's size, which the next frame
 //! resolves against in turn, beside two more of what each pixel's offsets drew, which keep a still
-//! pixel's history unclipped where only the offsets change it.
+//! pixel's history unclipped where only the offsets change it, and two of what its flicker test
+//! keeps, resolved into and against in turn as the colors are, which keep the luminance of a
+//! pixel that flickers as the view moves.
 
-use std::iter;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
@@ -29,7 +30,10 @@ pub enum Antialiasing {
     /// as its motion says, clipped to what's round it this frame, so that its edges average what's
     /// drawn across their pixels; and, where it stands still and each offset draws it as it did a
     /// cycle before, unclipped, so that what's thinner than a pixel averages too, rather than
-    /// flicker. What's drawn on the canvas, after it, isn't antialiased. Each frame draws
+    /// flicker, as it does where the clip keeps throwing out what the frames draw of a pixel as
+    /// the view moves, which keeps its luminance and takes less of each frame. What's drawn and
+    /// gone again faster than every 20 frames, as it or the view moves, shows its mean there
+    /// too. What's drawn on the canvas, after it, isn't antialiased. Each frame draws
     /// what's opaque in the view with how far it moved in the world since the frame before: a
     /// model's by its instance's transform the frame before, of the world's opaque meshes, and a
     /// game's shader's as it returns it, and the rest with the camera alone.
@@ -56,7 +60,7 @@ impl Antialiasing {
 const OFFSETS: u64 = 8;
 
 /// How many of the frame's targets a [`History`] takes, from [`TaaPass::plan`]'s `first`.
-pub(crate) const TARGETS: usize = 4;
+pub(crate) const TARGETS: usize = 6;
 
 /// The `index`th number of the Halton sequence of base `base`: its digits in that base, mirrored
 /// about the point, from 0 to 1.
@@ -116,6 +120,9 @@ struct Resolve {
     seen_first: u32,
     seen_second: u32,
     phase: u32,
+    flicker: u32,
+    flickers: u32,
+    unused: [u32; 2],
 }
 
 /// What the resolve pushes: `Push` in `shaders/taa.slang`.
@@ -146,9 +153,10 @@ pub(crate) struct TaaPass {
 }
 
 /// What the game's view resolves into and against: two images of its size, made again as it
-/// changes, each frame resolving into the one the frame before didn't, against the other; and two
-/// more, of what each pixel's offsets drew, which each frame reads and writes in place, as
-/// `shaders/taa.slang` says; all four of which frames that resolve take as their targets, apart
+/// changes, each frame resolving into the one the frame before didn't, against the other; two
+/// more, of what each pixel's offsets drew, which each frame reads and writes in place; and two of
+/// what the flicker test keeps of each pixel, written and read in turn as the first two are, as
+/// `shaders/taa.slang` says; all six of which frames that resolve take as their targets, apart
 /// from [`TaaPass`], as a frame holds them while it records the resolve.
 #[derive(Default)]
 pub(crate) struct History {
@@ -170,6 +178,8 @@ impl History {
             image("taa history 1")?,
             image("taa seen 0")?,
             image("taa seen 1")?,
+            image("taa flicker 0")?,
+            image("taa flicker 1")?,
         ]);
         Ok(())
     }
@@ -183,8 +193,10 @@ impl History {
 
 /// A frame's resolve in its graph: its pass; the view's size, and its colors, depth and motion, as
 /// its passes drew them; the image it resolves into, and the one it resolves against, if the frame
-/// before resolved one it can take; the two of what each pixel's offsets drew; and the view's
-/// resolved colors, if it writes them apart, for its canvas to be drawn over.
+/// before resolved one it can take; the two of what each pixel's offsets drew; the image the
+/// flicker test writes, and the one it reads, as the frame before wrote it, if its history is
+/// taken; and the view's resolved colors, if it writes them apart, for its canvas to be drawn
+/// over.
 pub(crate) struct Plan {
     pass: PassId,
     size: [u32; 2],
@@ -192,6 +204,8 @@ pub(crate) struct Plan {
     target: ImageId,
     history: Option<ImageId>,
     seen: [ImageId; 2],
+    flickers: ImageId,
+    flicker: Option<ImageId>,
     resolved: Option<ImageId>,
 }
 
@@ -233,8 +247,9 @@ impl TaaPass {
     /// depth and motion, `drawn`, into the image of a [`History`]'s two of colors, at targets
     /// `first` and 1 past it, that the frame before didn't resolve into, against the other, if that
     /// one resolved the view at its size; reading and writing its two of what the offsets drew, at
-    /// the two targets past those; and into the view's resolved colors too, made in `graph`, if
-    /// `apart`.
+    /// the two targets past those; writing the flicker test's, at the two past those, as it does
+    /// the colors, into one and against the other; and into the view's resolved colors too, made
+    /// in `graph`, if `apart`.
     pub(crate) fn plan(
         &self,
         graph: &mut Graph,
@@ -246,17 +261,21 @@ impl TaaPass {
     ) -> Plan {
         let images = [graph.target(first), graph.target(first + 1)];
         let seen = [graph.target(first + 2), graph.target(first + 3)];
-        let target = images[(frame % 2) as usize];
-        let history = (self.last)
-            .filter(|last| last.frame + 1 == frame && last.size == size)
-            .map(|_| images[((frame + 1) % 2) as usize]);
+        let states = [graph.target(first + 4), graph.target(first + 5)];
+        let (into, against) = ((frame % 2) as usize, ((frame + 1) % 2) as usize);
+        let (target, flickers) = (images[into], states[into]);
+        let taken = (self.last).filter(|last| last.frame + 1 == frame && last.size == size);
+        let history = taken.map(|_| images[against]);
+        let flicker = taken.map(|_| states[against]);
         let resolved = apart.then(|| graph.hdr("view resolved", size));
         let pass = graph.compute(label!("taa resolve"));
         let pass = drawn
             .into_iter()
             .chain(history)
+            .chain(flicker)
             .fold(pass, |pass, image| pass.sample(image));
-        let pass = iter::once(target)
+        let pass = [target, flickers]
+            .into_iter()
             .chain(resolved)
             .fold(pass, |pass, image| pass.overwrite(image));
         let pass = seen.into_iter().fold(pass, |pass, image| pass.write(image));
@@ -267,6 +286,8 @@ impl TaaPass {
             target,
             history,
             seen,
+            flickers,
+            flicker,
             resolved,
         }
     }
@@ -307,6 +328,9 @@ impl TaaPass {
             seen_second: pass.storage(plan.seen[1], 0),
             // The offset `offset` gave this frame, which `self.resolved` counts to.
             phase: (self.resolved % OFFSETS) as u32,
+            flicker: plan.flicker.map_or(0, |flicker| pass.sampled(flicker)),
+            flickers: pass.storage(plan.flickers, 0),
+            unused: [0; 2],
         };
         let push = ResolvePush {
             resolve: pass.upload(bytemuck::bytes_of(&resolve))?.address(),

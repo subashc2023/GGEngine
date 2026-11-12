@@ -40,6 +40,29 @@
 // and Unreal's TSR where it flickers within a bound: this test asks more, the same luminance at the
 // same offset, so that no change but the offsets' is kept.
 //
+// A view that moves has no cycle to match: each frame draws each point at another place in its
+// pixel, and what's thinner than a pixel shows as dashes, where a frame's pixels land on it, that
+// run along it many times as fast as the view moves, each thrown out by the clip the frame after.
+// So beside the real resolve each pixel tries one of its luminance alone, kept with the history
+// and taken where it is: clamped to this frame's pixels round it, then moved a quarter of the way
+// to this frame's own. Where that clamp keeps taking back what the frames' own colors put in, the
+// pixel flickers: it's drawn, and then nothing round it holds what was drawn. A change is told
+// from that by the way the clamp pushes: what arrives, leaves or is lit otherwise pushes the way
+// the frames' colors pull already, or where they pulled nothing, which ends the evidence, so that
+// it leaves no more of a trail than without the test; an edge isn't pushed at all, as the pixels
+// round it hold both its sides; and a pixel that stands still and is drawn by an offset otherwise
+// than a cycle before, which the offsets alone don't do, changes, whatever the clamp does: what
+// blinks before a still view shows as each frame draws it. A pixel taken to flicker keeps its
+// history's luminance past the pixels round it, on the side the clamp pushed it from and as far
+// as the frames drew, and takes less of each frame: it shows the mean of what the frames draw, as
+// it does at rest, rather than each frame's in turn, as Unreal's TSR does where luminance
+// flickers (`r.TSR.ShadingRejection.Flickering`). Its chroma is clipped as any pixel's. The test
+// costs what such tests do: behind what crosses such pixels the evidence starts again, and they
+// show as without the test for some tens of frames, until it's back; and what's drawn and gone
+// again faster than every 20 frames, while it or the view moves, is taken to flicker and shows
+// its mean. What's a pixel wide or more, which the pixels round it always hold, isn't taken to
+// flicker, and ripples by a moving pixel's share as it did.
+//
 // `Resolve` and `Push` match `Resolve` and `ResolvePush` in src/taa.rs, field for field.
 
 [[vk::binding(0, 0)]] Texture2D textures[];
@@ -89,6 +112,50 @@ static const float SAME = 2.0 / 1024.0;
 // reprojecting a still view's points rounds to.
 static const float STILL = 0.01;
 
+// How much of each pixel this frame's luminance makes of the resolve the flicker test tries: a
+// quarter, more than the real resolve takes, so that what one frame puts in is plain to measure
+// as the next frame's clamp takes it back.
+static const float TRIED = 0.25;
+
+// The least of a clamp's push that tells anything, of the luminance pushed: 2%, under which a
+// push neither counts as flicker nor as change.
+static const float TOLD = 0.02;
+
+// The evidence that a pixel flickers: what a push that takes back all that the frames put in
+// adds, 0.3; what's left of it a frame later, so that it halves in 23 frames without another;
+// and the most it comes to. A pixel is taken to flicker from 0.35, more than one such push
+// leaves, so that what passes over it once, and is clamped away once, changes nothing; and
+// wholly by 0.75, three close together. What's drawn and gone again every 20 frames or more
+// stays under that: at 0.95 a frame it does every 10, but slats 2.5 pixels apart, whose pixels
+// mostly hold a slat's dashes, then flicker half as much as without the test at some pans,
+// rather than a quarter; and at 0.985 what blinks every 20 frames is taken to flicker.
+static const float EVIDENCE_GAIN = 0.3;
+static const float EVIDENCE_FADES = 0.97;
+static const float EVIDENCE_MOST = 2.0;
+static const float FLICKERS_FROM = 0.35;
+static const float FLICKERS_BY = 0.75;
+
+// How many times the swing a push that the frames' colors don't explain comes to as it ends the
+// evidence; a smaller one cuts it in proportion.
+static const float CHANGE = 1.5;
+
+// What's left a frame later of the swing, the largest push that took back what the frames put
+// in, which halves in 23 frames too, and of what they put in that no push has taken back yet,
+// which halves in 34: where the pixels round a line mostly hold it, the push comes many frames
+// after.
+static const float SWING_FADES = 0.97;
+static const float UNSETTLED_FADES = 0.98;
+
+// How much of a pixel that flickers this frame's color makes, once the evidence has come to
+// `SETTLED_BY`: as much as the last 33 frames' or so, a third of the ripple a moving pixel's
+// share leaves as its line is drawn or missed. Until then it takes the share it would, which
+// brings its history from what the clip left to what the frames draw in a few frames. The
+// evidence's most is well past `SETTLED_BY`, so that a pixel that keeps flickering keeps one
+// share: the evidence rises on the frames that miss, and a share that followed it would weigh
+// the frames that hit more, and darken the pixel.
+static const float CURRENT_FLICKERS = 0.03;
+static const float SETTLED_BY = 1.2;
+
 struct Resolve {
     // From the view's clip space, as this frame draws it, offset, to the world, homogeneous.
     float4x4 world_from_clip;
@@ -124,6 +191,14 @@ struct Resolve {
     uint seen_second;
     // Which of the offsets this frame draws at, from 0.
     uint phase;
+    // What the flicker test keeps of each pixel: what the frame before left, a texture of the
+    // bindless set's, taken bilinearly where the history is, and what this frame leaves, a storage
+    // image. Red, the luminance its tried resolve holds, as `weighed` has it; green, how far the
+    // frames' own colors have moved that which no clamp has taken back yet; blue, the swing, the
+    // largest push that took such a move back, of late, signed as the push; alpha, the evidence.
+    uint flicker;
+    uint flickers;
+    uint2 unused;
 };
 
 struct Push {
@@ -162,6 +237,12 @@ float3 unweighed(float3 ycocg) {
     float t = ycocg.x - ycocg.z;
     float3 c = max(float3(t + ycocg.y, ycocg.x + ycocg.z, t - ycocg.y), 0.0);
     return c / max(1.0 - luminance(c), 1.0 / 65504.0);
+}
+
+// A gray's luminance as `weighed` has it, of light `scale` times as bright.
+float relit(float weighed, float scale) {
+    float light = max(weighed, 0.0) / max(1.0 - weighed, 1.0 / 65504.0) * scale;
+    return light / (1.0 + light);
 }
 
 // `history` clipped toward the middle of the box from `least` to `most`, along the line between
@@ -258,6 +339,8 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
     float3 history = float3(0.0);
     float share = 1.0;
     bool still = false;
+    float4 flicker = float4(current.x, 0.0, 0.0, 0.0);
+    float2 from = float2(0.0);
     if (resolve.held != 0) {
         // Where the nearest pixel's point is, homogeneous, at infinity for depth 0 under
         // perspective, and where it was, before it moved.
@@ -281,19 +364,36 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
                 still = pixels <= STILL;
                 share = max(lerp(CURRENT_STILL, CURRENT_MOVED, saturate(pixels)),
                             1.0 / (float(resolve.held) + 1.0));
+                from = uv;
+                float4 left = textures[resolve.flicker].SampleLevel(samplers[LINEAR_CLAMP], uv, 0.0);
+                if (!any(isnan(left))) {
+                    flicker = left;
+                    if (resolve.history_scale != 1.0) {
+                        // Of this frame's light, as the history is: what it tried, and what's
+                        // measured from that.
+                        float lit = relit(left.x, resolve.history_scale);
+                        flicker.x = lit;
+                        flicker.y = relit(left.x + left.y, resolve.history_scale) - lit;
+                        flicker.z = relit(left.x + left.z, resolve.history_scale) - lit;
+                    }
+                }
             }
         }
     }
     // What each offset drew of the pixel: this frame's offset's, against the cycle before, where
     // the pixel stood still, and none of any other where it didn't, as they drew another point.
+    // Where it stood still and the offset draws it otherwise than it did, the pixel itself changed.
     uint3 to = uint3(pixel.xy, 0);
     float4 first = storage[resolve.seen_first][to];
     float4 second = storage[resolve.seen_second][to];
     float seen[OFFSETS] = { first.x, first.y, first.z, first.w,
                             second.x, second.y, second.z, second.w };
     float drew = max(current.x, 0.0) + KEPT_BLACK;
+    bool changed = false;
     if (still) {
-        bool same = abs(abs(seen[resolve.phase]) - drew) <= SAME * drew;
+        float before = abs(seen[resolve.phase]);
+        bool same = abs(before - drew) <= SAME * drew;
+        changed = before != 0.0 && !same;
         seen[resolve.phase] = same ? drew : -drew;
     } else {
         for (uint i = 0; i < OFFSETS; i++) {
@@ -311,12 +411,57 @@ void resolve_main(uint3 pixel: SV_DispatchThreadID) {
         mean_drawn += seen[i] - KEPT_BLACK;
     }
     mean_drawn /= float(OFFSETS);
+    // The flicker test's resolve of the luminance alone, tried beside the real one: what it held,
+    // clamped to this frame's pixels round it, and then `TRIED` of the way to this frame's.
+    float tried = clamp(flicker.x, least.x, most.x);
+    float push = tried - flicker.x;
+    float pull = TRIED * (current.x - tried);
+    // How much of the clamp's push takes back what the frames' own colors put in, which is what
+    // flickering is, and how much doesn't, which is the view changing; neither where the push is
+    // too small to tell. A pixel that changed where it stood still, which the offsets alone
+    // don't do, doesn't flicker either, whatever the clamp does.
+    float told = TOLD * (tried + KEPT_BLACK);
+    float undone = push * flicker.y < 0.0 ? min(abs(push), abs(flicker.y)) : 0.0;
+    float unexplained = abs(push) - undone;
+    float evidence = flicker.w * EVIDENCE_FADES;
+    if (unexplained > told) {
+        evidence *= saturate(1.0 - unexplained / (CHANGE * abs(flicker.z) + told));
+    }
+    if (undone > told) {
+        evidence = min(evidence + EVIDENCE_GAIN * undone / abs(flicker.y), EVIDENCE_MOST);
+    }
+    if (changed) {
+        evidence = 0.0;
+    }
+    float swing = flicker.z * SWING_FADES;
+    if (undone > abs(swing)) {
+        swing = sign(push) * undone;
+    }
+    float unsettled = (flicker.y + sign(push) * undone) * UNSETTLED_FADES + pull;
+    storage[resolve.flickers][to] = float4(tried + pull, unsettled, swing, evidence);
+    // How far the pixel is taken to flicker, from 0 to 1.
+    float flickers = saturate((evidence - FLICKERS_FROM) / (FLICKERS_BY - FLICKERS_FROM));
     if (taken) {
         if (repeats) {
             resolved = float3(lerp(history.x, mean_drawn, CURRENT_STILL),
                               lerp(history.yz, current.yz, CURRENT_REPEATS));
         } else {
-            resolved = lerp(clipped(history, least, most), current, share);
+            float3 kept = clipped(history, least, most);
+            if (flickers > 0.0) {
+                // Its luminance, past the pixels round it on the side the clamp pushed it from,
+                // and no further than the frames drew: taken half by the sharp filter and half
+                // bilinearly, as the sharp one alone, unclipped, darkens a lone line frame by
+                // frame, and a bilinear one alone fades it.
+                float3 plain = textures[resolve.history]
+                    .SampleLevel(samplers[LINEAR_CLAMP], from, 0.0).rgb;
+                float smooth = weighed(plain * resolve.history_scale).x;
+                float past = abs(swing) / TRIED;
+                float wide = clamp(0.5 * (history.x + smooth), least.x - (swing > 0.0 ? past : 0.0),
+                                   most.x + (swing < 0.0 ? past : 0.0));
+                kept.x = lerp(kept.x, wide, flickers);
+            }
+            float settled = saturate((evidence - FLICKERS_BY) / (SETTLED_BY - FLICKERS_BY));
+            resolved = lerp(kept, current, lerp(share, min(share, CURRENT_FLICKERS), settled));
         }
     }
     // Within a half float: unweighing a saturated color near the weighing's limit can pass it.

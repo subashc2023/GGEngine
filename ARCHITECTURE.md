@@ -2769,9 +2769,23 @@ of this frame's. Anything else that changes it, something passing over it, a sha
 that changes, breaks the match for two cycles, which the clip resolves as it otherwise does, so
 that it leaves no trail; and a pixel that moves keeps none. FSR 2's luma instability and Unreal's
 TSR keep the history unclipped where a pixel's luminance flickers; this asks the same luminance at
-the same offset, so that no change but the offsets' is kept. Those images are 16 bytes a pixel, as
-much as the two of the history. Its history is one of two images of the view's size, each frame
-resolving into the one the frame before didn't, against the other, which a frame at another size,
+the same offset, so that no change but the offsets' is kept. A view that moves has no cycle to
+match, and there what's thinner than a pixel shows as dashes, where each frame's pixels land on it,
+which the clip throws out the frame after. So the resolve tries, beside its own, one of each
+pixel's luminance alone, kept in two more images that it writes and reads in turn, as it does the
+history's, taken where the history is: clamped to this frame's pixels round it, then moved a
+quarter of the way to this frame's. A pixel whose clamp keeps taking back what the frames' own
+colors put in flickers: it keeps its history's luminance past the pixels round it, on the side the
+clamp pushed it from and as far as the frames drew, and takes a 33rd of each frame, so that it
+shows the mean of what the frames draw, as TSR does where luminance flickers. A clamp that pushes
+otherwise, as where something arrives, leaves or is lit otherwise, ends that, and so does a pixel
+that stood still and was drawn by an offset otherwise than a cycle before: what crosses such
+pixels leaves no more of a trail than it did, though they flicker behind it for some tens of
+frames, and what blinks before a still view shows as it's drawn; what's drawn and gone again
+faster than every 20 frames, while it or the view moves, shows its mean. These four images are 32
+bytes a pixel, twice the two of the history. Its history is one of two images of the view's size,
+each frame resolving into the one the frame before didn't, against the other, which a frame at
+another size,
 or after one that resolved no view, starts afresh. The canvas draws after the resolve, in a pass of
 its own over the view's resolved colors, which the resolve then writes apart from its history, so
 that a game's UI stays sharp and out of the history. The view's IDs are drawn off by the frame's

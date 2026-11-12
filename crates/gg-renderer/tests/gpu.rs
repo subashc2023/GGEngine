@@ -160,6 +160,9 @@ fn main() -> ExitCode {
         antialiasing_settles_without_a_jump_once_the_view_stops,
         antialiasing_keeps_still_dark_colors_as_drawn,
         antialiasing_leaves_no_trail_behind_dark_specks,
+        antialiasing_steadies_what_is_thinner_than_a_pixel_as_the_view_moves,
+        antialiasing_leaves_no_trail_behind_what_crosses_flickering_pixels,
+        antialiasing_keeps_no_ghost_of_what_blinks_in_a_still_view,
         smaa_smooths_edges_in_a_frame,
         smaa_blends_by_how_much_of_each_pixel_the_edge_covers,
         smaa_blends_along_diagonals_by_how_much_they_cover,
@@ -11130,6 +11133,368 @@ fn antialiasing_leaves_no_trail_behind_dark_specks() {
             shut_down(renderer);
         }
     }
+}
+
+/// How many pixels a unit is across at the origin, 4 from [`seeing_from`]'s camera, whose view is a
+/// quarter turn tall, in a view `size` pixels a side.
+fn pixels_a_unit(size: u32) -> f32 {
+    size as f32 / (2.0 * 4.0 * math::libm::tanf(PI / 8.0))
+}
+
+/// A view that moves past what stands still at the origin's depth: what it shows there moves
+/// `across` pixels and `down` every `over` frames, a whole number of pixels, so that each pixel's
+/// point is at a pixel again then.
+#[derive(Clone, Copy, Debug)]
+struct Pan {
+    across: i32,
+    down: i32,
+    over: usize,
+}
+
+impl Pan {
+    /// Where frame `frame` sees from, in a view `size` pixels a side.
+    fn seeing(self, frame: usize, size: u32) -> Viewpoint {
+        let moved = frame as f32 / (self.over as f32 * pixels_a_unit(size));
+        seeing_from(Vec3::new(
+            -(self.across as f32) * moved,
+            self.down as f32 * moved,
+            0.0,
+        ))
+    }
+}
+
+/// The slats [`slats_seen`] draws, as the side faces of a slatted table's slats show from 9 m:
+/// how tall each is and how far apart they are, both in pixels, and how much they rise for each
+/// pixel across, so that each frame's one sample a pixel shows each as dashes, 5 pixels long every
+/// 14, that run along it as the view moves up or down; and their light and the plate's behind
+/// them.
+const SLAT_TALL: f32 = 0.36;
+const SLATS_APART: f32 = 2.5;
+const SLAT_RISE: f32 = 1.0 / 14.0;
+const SLAT_LIGHT: f32 = 0.05;
+const SLATS_PLATE: f32 = 0.8;
+
+/// A dark speck that crosses [`slats_seen`]'s view, `speed` pixels a frame across it from 8 pixels
+/// in, 2 above its middle, once the frames are kept: drawn by a shader that returns how far it
+/// moved, or by one that doesn't.
+#[derive(Clone, Copy, Debug)]
+struct Speck {
+    speed: f32,
+    returns_motion: bool,
+}
+
+/// Half a [`Speck`]'s side, in units, 3.9 from the camera: about 3 pixels across at 64 a side.
+const SPECK_HALF: f32 = 0.08;
+
+impl Speck {
+    /// Where its middle shows, in pixels, in the `kept`th frame kept of a view `size` a side.
+    fn seen(self, kept: usize, size: u32) -> [f32; 2] {
+        [8.0 + self.speed * kept as f32, size as f32 / 2.0 - 2.0]
+    }
+}
+
+/// Frames `frames` of a view `size` pixels a side, antialiased, panning as `pan` says from frame 0
+/// past dark slats at the origin's depth, thinner than a pixel, right before a bright plate. With
+/// `speck` crossing them.
+fn slats_seen(
+    size: u32,
+    pan: Pan,
+    frames: std::ops::Range<usize>,
+    speck: Option<Speck>,
+) -> Vec<Vec<u8>> {
+    let mut renderer = renderer(size, size);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let moving = (stores.shaders)
+        .add::<[f32; 3], Vec4>("moving", &shader("moving.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let black = Vec4::new(0.01, 0.01, 0.01, 1.0);
+    let speck_draw = MeshDraw::new(square, moving, black);
+    let unit = pixels_a_unit(size);
+    let apart = SLATS_APART / unit;
+    let half = size as f32 / (2.0 * unit);
+    let start = frames.start;
+    let drawing = |stores: &mut Stores, frame: usize| {
+        let camera = pan.seeing(frame, size).position;
+        let mut draws = Draws::default();
+        // Right behind the slats, so that the two show moving alike.
+        let behind = Mat4::from_translation(Vec3::new(0.0, 0.0, -0.01))
+            * Mat4::from_scale(Vec3::splat(800.0));
+        draws.push(square, flat, behind, Vec3::splat(SLATS_PLATE).extend(1.0));
+        // The slats that cross the view: each stands where it does whatever the frame.
+        let middle = ((camera.y - camera.x * SLAT_RISE) / apart).round() as i32;
+        let rows = ((half * (1.0 + SLAT_RISE) + 0.2) / apart).ceil() as i32;
+        for row in middle - rows..=middle + rows {
+            let slat = Mat4::from_scale_rotation_translation(
+                Vec3::new(800.0, SLAT_TALL / unit, 1.0),
+                Quat::from_rotation_z(math::libm::atanf(SLAT_RISE)),
+                Vec3::new(0.0, row as f32 * apart, 0.0),
+            );
+            draws.push(square, flat, slat, Vec3::splat(SLAT_LIGHT).extend(1.0));
+        }
+        if let Some(speck) = speck {
+            let nearer = size as f32 / (2.0 * 3.9 * math::libm::tanf(PI / 8.0));
+            let seen = speck.seen(frame.saturating_sub(start), size);
+            let at = Vec3::new(
+                camera.x + (seen[0] - size as f32 / 2.0) / nearer,
+                camera.y - (seen[1] - size as f32 / 2.0) / nearer,
+                0.1,
+            );
+            let placed =
+                Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(2.0 * SPECK_HALF));
+            if speck.returns_motion {
+                stores.scene.set(0, placed, &speck_draw, 1);
+                draws.draw_scene();
+            } else {
+                draws.push(square, flat, placed, black);
+            }
+        }
+        draws
+    };
+    let viewport = filling([size, size]);
+    let draws = drawing(&mut stores, 0);
+    settle(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        pan.seeing(0, size),
+        &draws,
+    );
+    let mut drawn = Vec::new();
+    for frame in 0..frames.end {
+        let draws = drawing(&mut stores, frame);
+        let data = RenderData {
+            antialiasing: Antialiasing::Taa,
+            ..stores.data(viewport, pan.seeing(frame, size), &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        if frame >= start {
+            drawn.push(frame_pixels(&mut renderer));
+        }
+    }
+    shut_down(renderer);
+    drawn
+}
+
+/// How long a point has shown, in frames, where the tests of a panning view measure it: where
+/// it's come into view since, its history is as young.
+const AGED: usize = 48;
+
+/// Whether the point at (`x`, `y`) of a view that pans as `pan` says has shown for [`AGED`]
+/// frames, 2 pixels or more inside a view `size` a side.
+fn aged(pan: Pan, size: u32, [x, y]: [i32; 2]) -> bool {
+    let old = |at: i32, moves: i32| at * pan.over as i32 >= AGED as i32 * moves;
+    let inside = 2..size as i32 - 2;
+    inside.contains(&x) && inside.contains(&y) && old(x, pan.across) && old(y, pan.down)
+}
+
+/// How each point changes as a view pans: over `samples` of `frames`, `pan.over` apart, each
+/// [`aged`] pixel of the first against where its point shows in the others. How many points; how
+/// many whose channel that changes most ranges over more than 8 levels; and the mean range.
+fn wander(frames: &[Vec<u8>], size: u32, pan: Pan, samples: usize) -> (usize, usize, f32) {
+    let seen = |x: i32, y: i32, i: usize| [x + i as i32 * pan.across, y + i as i32 * pan.down];
+    let (mut points, mut over, mut sum) = (0, 0, 0.0);
+    for y in 0..size as i32 {
+        for x in 0..size as i32 {
+            if !aged(pan, size, [x, y]) || !aged(pan, size, seen(x, y, samples - 1)) {
+                continue;
+            }
+            let range = (0..3)
+                .map(|channel| {
+                    let values = (0..samples).map(|i| {
+                        let at = seen(x, y, i).map(|v| v as u32);
+                        pixel_at(&frames[i * pan.over], size, at)[channel]
+                    });
+                    values.clone().max().unwrap_or(0) - values.min().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+            points += 1;
+            over += usize::from(range > 8);
+            sum += f32::from(range);
+        }
+    }
+    (points, over, sum / points as f32)
+}
+
+/// [`slats_seen`]'s slats antialiased as the view pans, a third of a pixel a frame across and
+/// down, and 1.3 across and 0.4 down: once a point has shown for [`AGED`] frames, its pixel holds
+/// as the view carries it along. Over 8 samples and over 4, each where the point is at a pixel
+/// again, the pixels' mean range is under 5 levels, and under 1 in 20 ranges over more than 8; and
+/// the frame is darker than the plate by at least what the slats cover of it, in linear light, as
+/// a still view settles at 1.5 times that, the resolve blending colors weighed by their luminance.
+/// A resolve that clips each pixel's history to the pixels round it alone, which miss a slat in
+/// most frames, shows each frame's dashes in turn: a mean range of 8.4 and 12 levels, 46% and 63%
+/// of the pixels over 8, and 0.19 and 0.36 of that darkness.
+fn antialiasing_steadies_what_is_thinner_than_a_pixel_as_the_view_moves() {
+    const WARM: usize = 96;
+    let pans = [
+        (
+            Pan {
+                across: 1,
+                down: 1,
+                over: 3,
+            },
+            96,
+            8,
+        ),
+        (
+            Pan {
+                across: 9,
+                down: 3,
+                over: 7,
+            },
+            128,
+            4,
+        ),
+    ];
+    for (pan, size, samples) in pans {
+        let frames = slats_seen(size, pan, WARM..WARM + samples * pan.over, None);
+        let (points, over, mean) = wander(&frames, size, pan, samples);
+        assert!(points > 3000, "{pan:?}: {points} points");
+        assert!(
+            over * 20 <= points && mean <= 5.0,
+            "{pan:?}: of {points} points {over} range over more than 8 levels, and their mean \
+             range is {mean}"
+        );
+        // The mean light of the last frame's aged pixels, below the plate's.
+        let last = frames.last().expect("frames");
+        let lights: Vec<f32> = (0..size * size)
+            .map(|i| [i % size, i / size])
+            .filter(|at| aged(pan, size, at.map(|v| v as i32)))
+            .map(|at| decoded(pixel_at(last, size, at)[1]))
+            .collect();
+        let darker = SLATS_PLATE - lights.iter().sum::<f32>() / lights.len() as f32;
+        // What the slats cover of the plate, as much darker as they are.
+        let cover = SLAT_TALL * math::libm::sqrtf(1.0 + SLAT_RISE * SLAT_RISE) / SLATS_APART;
+        let covered = cover * (SLATS_PLATE - SLAT_LIGHT);
+        assert!(
+            darker >= covered,
+            "{pan:?}: the frame is {darker} darker than the plate, and the slats cover {covered}"
+        );
+    }
+}
+
+/// A dark speck crossing [`slats_seen`]'s slats, antialiased, as the view pans a third of a pixel
+/// a frame across and down, at a quarter of a pixel a frame and at a pixel, drawn by a shader that
+/// returns how far it moved and by one that doesn't, as nothing moves where a shadow crosses what
+/// stands still: against the same frames without it. The slats' pixels flicker, and keep their
+/// history past the pixels round them; the speck is a change, not flicker, which ends that. So it
+/// leaves no trail: under 10 pixels a frame, 3 or more past its edge, show more than 2 levels
+/// darker than without it, 5 at the most, where a flicker test that kept its evidence through a
+/// change left 100 behind the slower speck. And one that returns its motion, whose pixels' history
+/// and evidence are its own, taken where it was, shows dark, its middle no brighter than 90, where
+/// one that doesn't shows as bright as 102 and 193.
+fn antialiasing_leaves_no_trail_behind_what_crosses_flickering_pixels() {
+    const SIZE: u32 = 64;
+    const WARM: usize = 64;
+    let pan = Pan {
+        across: 1,
+        down: 1,
+        over: 3,
+    };
+    // Pixels a unit at the speck's depth, 3.9 from the camera.
+    let unit = SIZE as f32 / (2.0 * 3.9 * math::libm::tanf(PI / 8.0));
+    let reach = SPECK_HALF * unit + 3.0;
+    for speed in [0.25, 1.0] {
+        let frames = WARM..WARM + (40.0 / speed) as usize;
+        let without = slats_seen(SIZE, pan, frames.clone(), None);
+        for returns_motion in [true, false] {
+            let speck = Speck {
+                speed,
+                returns_motion,
+            };
+            let with = slats_seen(SIZE, pan, frames.clone(), Some(speck));
+            let (mut darker, mut faintest) = (0, 0);
+            for (kept, (with, without)) in with.iter().zip(&without).enumerate() {
+                let center = speck.seen(kept, SIZE);
+                let away = |at: u32, middle: f32| (at as f32 + 0.5 - middle).abs() > reach;
+                darker += (0..SIZE * SIZE)
+                    .map(|i| [i % SIZE, i / SIZE])
+                    .filter(|&[x, y]| away(x, center[0]) || away(y, center[1]))
+                    .filter(|&at| {
+                        let shown = pixel_at(with, SIZE, at)[1];
+                        shown.saturating_add(2) < pixel_at(without, SIZE, at)[1]
+                    })
+                    .count();
+                let middle = pixel_at(with, SIZE, center.map(|v| v as u32));
+                faintest = faintest.max(middle[1]);
+            }
+            let how = if returns_motion {
+                "returning its motion"
+            } else {
+                "without its motion"
+            };
+            assert!(
+                darker <= 10 * with.len(),
+                "at {speed} pixels a frame, {how}: {darker} pixels over {} frames show darker \
+                 behind the speck than without it",
+                with.len()
+            );
+            // The speck's 0.01, sRGB-encoded, is 25.
+            assert!(
+                !returns_motion || faintest <= 90,
+                "at {speed} pixels a frame, {how}: the speck's middle shows as bright as {faintest}"
+            );
+        }
+    }
+}
+
+/// A bright square 4 pixels a side that shows for 5 frames and then doesn't for 5, over and over,
+/// before a dark plate in a still view, antialiased: once it has blinked for 100 frames, the last
+/// frame of each time it doesn't show shows the plate where its middle was, within a level, as
+/// the clip throws its light out. Each time it goes, its edge's pixels were drawn and are then
+/// held by nothing round them, as what flickers is; but they stood still, and an offset drew them
+/// otherwise than it did a cycle before, which the offsets alone don't do: a resolve that took
+/// them to flicker all the same kept the square's light there, as bright as 135.
+fn antialiasing_keeps_no_ghost_of_what_blinks_in_a_still_view() {
+    const SIZE: u32 = 64;
+    const SHOWS: usize = 5;
+    /// The plate's 0.05, sRGB-encoded.
+    const DARK: u8 = 63;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let drawing = |frame: usize| {
+        let mut draws = Draws::default();
+        let behind =
+            Mat4::from_translation(Vec3::new(0.0, 0.0, -0.01)) * Mat4::from_scale(Vec3::splat(8.0));
+        draws.push(square, flat, behind, Vec4::new(0.05, 0.05, 0.05, 1.0));
+        if (frame / SHOWS).is_multiple_of(2) {
+            let lit = Mat4::from_scale(Vec3::splat(4.0 / pixels_a_unit(SIZE)));
+            draws.push(square, flat, lit, Vec4::new(0.8, 0.8, 0.8, 1.0));
+        }
+        draws
+    };
+    let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
+    let draws = drawing(0);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    for frame in 0..160 {
+        let draws = drawing(frame);
+        let data = RenderData {
+            antialiasing: Antialiasing::Taa,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        if frame < 100 || frame % (2 * SHOWS) != 2 * SHOWS - 1 {
+            continue;
+        }
+        let pixels = frame_pixels(&mut renderer);
+        let middle = region(&pixels, SIZE, [SIZE / 2 - 1, SIZE / 2 - 1], [3, 3]);
+        let brightest = middle.as_chunks::<4>().0.iter().map(|pixel| pixel[1]).max();
+        assert!(
+            brightest <= Some(DARK + 1),
+            "frame {frame}, the last of 5 without the square, shows as bright as {brightest:?} \
+             where its middle was"
+        );
+    }
+    shut_down(renderer);
 }
 
 /// [`edges_seen`]'s view antialiased by SMAA, against its reference of it without antialiasing and
