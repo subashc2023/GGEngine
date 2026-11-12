@@ -117,7 +117,9 @@ fn main() -> ExitCode {
         ambient_occlusion_darkens_the_skys_light_near_what_hides_it,
         ambient_occlusion_leaves_the_lights_alone,
         ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass,
-        antialiased_ambient_occlusion_averages_its_noise_away,
+        ambient_occlusion_averages_its_noise_away,
+        ambient_occlusion_holds_to_the_world_as_the_view_pans,
+        ambient_occlusion_leaves_no_trail_behind_what_moves,
         specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
         reflections_mirror_what_the_view_shows,
         reflections_follow_an_exposures_jump,
@@ -7109,9 +7111,9 @@ fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
 /// otherwise; through the panel's hole, the floor under it, as the depth of a masked material is
 /// cut out as it is; out in the open, and where the strip was bound, it's as it is without; and the
 /// back wall, which reads none, shows its color either way. Against its reference image, without
-/// antialiasing and antialiased alike; antialiased, each offset takes noise of its own, the same
-/// each time it comes round: two frames drawn at the same offset, each starting afresh, are the
-/// same.
+/// antialiasing and antialiased alike. In a still view, the occlusion takes 8 frames' noise in
+/// turn, which its history averages: once it settles, each frame draws the view as the frame 8
+/// before it did, as temporal antialiasing's resolve asks of a still pixel it keeps unclipped.
 fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7178,11 +7180,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         "the back wall reads no occlusion"
     );
     compare("ambient_occlusion", WIDTH, HEIGHT, &with);
-    // Antialiased, each offset takes its own noise each time it comes round. Its first frame, after
-    // one that resolved nothing, starts afresh, as does the one after the next 7 and a frame that
-    // resolves nothing, at the same offset of the 8: the two are the same, as noise that changed
-    // other than with the offset would differ where the occlusion shows.
-    let taa = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
+    let frame = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
         let data = RenderData {
             ambient_occlusion: on,
             antialiasing,
@@ -7190,22 +7188,24 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         };
         render_without_ui(renderer, data);
     };
-    taa(&mut renderer, &mut stores, Antialiasing::Taa);
-    let first = frame_pixels(&mut renderer);
-    for _ in 0..7 {
-        taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    // Settled, the frame 8 after one draws it again: the noise and the history have both come
+    // round, as noise that changed other than with its 8 frames, or a history that hadn't settled,
+    // wouldn't.
+    for _ in 0..128 {
+        frame(&mut renderer, &mut stores, Antialiasing::None);
     }
-    taa(&mut renderer, &mut stores, Antialiasing::None);
-    taa(&mut renderer, &mut stores, Antialiasing::Taa);
+    let first = frame_pixels(&mut renderer);
+    for _ in 0..8 {
+        frame(&mut renderer, &mut stores, Antialiasing::None);
+    }
     let again = frame_pixels(&mut renderer);
-    assert_eq!(wall(&again), wall(&first), "the frames are drawn alike");
-    let moved = (first.as_chunks::<4>().0.iter())
+    let changed = (first.as_chunks::<4>().0.iter())
         .zip(again.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
-    assert_eq!(moved, 0, "pixels differ, as the occlusion's noise changed");
+    assert_eq!(changed, 0, "pixels differ 8 frames on in a still view");
     for _ in 0..16 {
-        taa(&mut renderer, &mut stores, Antialiasing::Taa);
+        frame(&mut renderer, &mut stores, Antialiasing::Taa);
     }
     check(renderer, "ambient_occlusion", WIDTH, HEIGHT);
 }
@@ -7262,16 +7262,18 @@ fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
     shut_down(renderer);
 }
 
-/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, in a still view:
-/// antialiased temporally, each of the offsets takes noise of its own, which the resolve averages
-/// away, rather than one noise every frame, which would stay where it is on the screen, a grain over
+/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, in a still view: its
+/// history averages each frame's noise with the frames' before, antialiased temporally or not,
+/// rather than keep one noise every frame, which would stay where it is on the screen, a grain over
 /// what's occluded. Grain is measured where the floor is darkened, away from its edges, as what's
-/// left of the mean of the 3 by 3 pixels round each once the 9 by 9's is taken from it. The
-/// antialiased frame keeps at most 0.8 of the grain of a frame without antialiasing, whose noise
-/// stays, and at least 0.4 of that grain is the frame's alone, left once the antialiased frame is
-/// taken from it; one noise every frame kept 0.94 and left 0.18 on an RTX 4090, and the offsets'
-/// own 0.69 and 0.63. The floor is darkened as much either way, within a tenth.
-fn antialiased_ambient_occlusion_averages_its_noise_away() {
+/// left of the mean of the 3 by 3 pixels round each once the 9 by 9's is taken from it. Settled,
+/// without antialiasing and antialiased, a frame keeps at most 0.8 of the grain of the first frame
+/// with ambient occlusion, whose history holds nothing, and at least 0.4 of that grain is the first
+/// frame's alone, left once the settled frame is taken from it. Before the history, one noise every
+/// frame without antialiasing kept all of it and left none, and antialiased, each offset's own kept
+/// 0.69 and left 0.63; the history keeps 0.68 and 0.61 and leaves 0.56 and 0.61, on an RTX 4090.
+/// The floor is darkened as much either way, within a tenth.
+fn ambient_occlusion_averages_its_noise_away() {
     const WIDTH: u32 = 768;
     const HEIGHT: u32 = 512;
     let mut renderer = renderer(WIDTH, HEIGHT);
@@ -7299,7 +7301,9 @@ fn antialiased_ambient_occlusion_averages_its_noise_away() {
         frame_pixels(&mut renderer)
     };
     let lit = render(None, Antialiasing::None, 2);
-    let still = render(on, Antialiasing::None, 2);
+    // The first frame since frames without ambient occlusion, whose history holds nothing.
+    let still = render(on, Antialiasing::None, 1);
+    let settled = render(on, Antialiasing::None, 64);
     // Three cycles of the offsets for each to draw each pixel alike, and more for the resolve to
     // settle on their mean, as 400 frames do no further.
     let antialiased = render(on, Antialiasing::Taa, 128);
@@ -7344,7 +7348,7 @@ fn antialiased_ambient_occlusion_averages_its_noise_away() {
         .map(|&green| f64::from(u8::from((green - floor).abs() > 1.0)))
         .collect();
     let off_floor = summed(&off_floor);
-    let (still, antialiased) = (greens(&still), greens(&antialiased));
+    let (still, settled, antialiased) = (greens(&still), greens(&settled), greens(&antialiased));
     // The floor's pixels whose 9 by 9 is the floor's, and 2 more round it, as the resolve's 3 by 3
     // and its offsets blend what's beside an edge in; of those, where the occlusion darkens it.
     let margin = FAR + 2;
@@ -7368,25 +7372,324 @@ fn antialiased_ambient_occlusion_averages_its_noise_away() {
         let by = |&[x, y]: &[usize; 2]| lit[y * width + x] - frame[y * width + x];
         darkened.iter().map(by).sum::<f64>() / darkened.len() as f64
     };
-    let (still_grain, antialiased_grain) = (grain(&still), grain(&antialiased));
-    assert!(
-        antialiased_grain <= 0.8 * still_grain,
-        "antialiased, the floor's grain is {antialiased_grain:.3}, not 0.8 of {still_grain:.3} \
-         without antialiasing: the noise stays from frame to frame"
-    );
-    let apart: Vec<f64> = still.iter().zip(&antialiased).map(|(a, b)| a - b).collect();
-    let apart_grain = grain(&apart);
-    assert!(
-        apart_grain >= 0.4 * still_grain,
-        "{apart_grain:.3} of the grain of {still_grain:.3} without antialiasing is its alone, not \
-         0.4 of it: the antialiased frame shares its noise"
-    );
-    let (still, antialiased) = (darkness(&still), darkness(&antialiased));
-    assert!(
-        (antialiased - still).abs() <= 0.1 * still,
-        "the floor darkened by {antialiased:.2} antialiased, not near {still:.2} without"
-    );
+    let (still_grain, still_darkness) = (grain(&still), darkness(&still));
+    for (name, settled) in [
+        ("without antialiasing", &settled),
+        ("antialiased", &antialiased),
+    ] {
+        let kept = grain(settled);
+        let apart: Vec<f64> = still.iter().zip(settled).map(|(a, b)| a - b).collect();
+        let left = grain(&apart);
+        assert!(
+            kept <= 0.8 * still_grain,
+            "{name}, settled, the floor's grain is {kept:.3}, not 0.8 of the first frame's \
+             {still_grain:.3}: the noise stays from frame to frame"
+        );
+        assert!(
+            left >= 0.4 * still_grain,
+            "{name}, {left:.3} of the first frame's grain of {still_grain:.3} is its alone, not \
+             0.4 of it: the settled frame shares its noise"
+        );
+        let darkened = darkness(settled);
+        assert!(
+            (darkened - still_darkness).abs() <= 0.1 * still_darkness,
+            "{name}, the floor darkened by {darkened:.2} settled, not near {still_darkness:.2} in \
+             the first frame"
+        );
+    }
     shut_down(renderer);
+}
+
+/// [`floor_and_ball`]'s floor, and its sphere rolling across it under a still view from
+/// [`FLOOR_ABOVE`] straight down, 1 and 3 pixels a frame for 48 frames: its last frame, without
+/// antialiasing, against a view of the sphere resting where it ends up, once settled. Behind the
+/// sphere, at most 400 pixels of the floor differ by more than 2 levels: the occlusion's history,
+/// which follows the camera alone, is bounded by what each frame's own terms round each pixel range
+/// over. Unbounded, 1,843 and 2,791 did on an RTX 4090, and bounded, 265 and 289; ahead of the
+/// sphere, where the occlusion it brings comes a few frames late, 448 and 546, by at most 8 levels.
+fn ambient_occlusion_leaves_no_trail_behind_what_moves() {
+    const WIDTH: u32 = 384;
+    const HEIGHT: u32 = 256;
+    const SIZE: [u32; 2] = [WIDTH, HEIGHT];
+    const FRAMES: usize = 48;
+    let [width, height] = [WIDTH as usize, HEIGHT as usize];
+    let unit = HEIGHT as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
+    let viewpoint = floor_seen(0, 1, SIZE);
+    for speed in [1.0, 3.0] {
+        // Ending in the middle of the view.
+        let at = |frame: usize| {
+            let x = (frame as f32 - FRAMES as f32) * speed / unit;
+            Vec3::new(x, FLOOR_BALL, 0.0)
+        };
+        // The last of the frames from `first` to `last`, the sphere at `at` of each, but no further
+        // than where it ends up.
+        let run = |first: usize, last: usize| {
+            let mut renderer = renderer(WIDTH, HEIGHT);
+            let mut stores = Stores {
+                ambient_occlusion: Some(AmbientOcclusion::default()),
+                ..Stores::default()
+            };
+            let (floor, round) = floor_and_ball(&mut stores);
+            let draws = |frame: usize| floor_with_balls(&floor, &round, [at(frame.min(FRAMES))]);
+            let viewport = filling(SIZE);
+            settle(
+                &mut renderer,
+                &mut stores,
+                viewport,
+                viewpoint,
+                &draws(first),
+            );
+            for frame in first..=last {
+                let drawn = draws(frame);
+                render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &drawn));
+            }
+            let pixels = frame_pixels(&mut renderer);
+            shut_down(renderer);
+            (pixels.as_chunks::<4>().0.iter())
+                .map(|pixel| f64::from(pixel[1]))
+                .collect::<Vec<f64>>()
+        };
+        let (rolled, rested) = (run(0, FRAMES), run(FRAMES, FRAMES + 64));
+        // Of the floor behind the sphere, the half of the view it came from, 4 pixels or more from
+        // it, the pixels that differ by more than 2 levels.
+        let ball = floor_balls_shown(viewpoint, SIZE, [at(FRAMES)].into_iter(), 4);
+        let behind = (0..height)
+            .flat_map(|y| (0..width / 2).map(move |x| y * width + x))
+            .filter(|&at| !ball[at] && (rolled[at] - rested[at]).abs() > 2.0)
+            .count();
+        assert!(
+            behind <= 400,
+            "rolling {speed} pixels a frame, {behind} of the floor's pixels behind the sphere \
+             differ by more than 2 levels from where it rests, not at most 400: its occlusion \
+             leaves a trail"
+        );
+    }
+}
+
+/// How high above [`occlusion_floor`] the view looks straight down at it, and its field of view.
+const FLOOR_ABOVE: f32 = 3.0;
+const FLOOR_FOV: f32 = PI / 3.0;
+/// The radius of [`occlusion_floor`]'s spheres, and how far apart they stand.
+const FLOOR_BALL: f32 = 0.25;
+const FLOOR_BALLS_APART: f32 = 0.8;
+
+/// What draws a floor of a gray of 0.8 and a sphere of [`FLOOR_BALL`] of it, under a sky of 0.5
+/// every way, which the stores light by.
+fn floor_and_ball(stores: &mut Stores) -> (MeshDraw, MeshDraw) {
+    let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let model = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 1.0, 24, 48);
+    let gray = Material {
+        color: Vec4::new(0.8, 0.8, 0.8, 1.0),
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    };
+    let gray = stores.materials.add(&gray);
+    let (materials, shaders) = (&stores.materials, &mut stores.shaders);
+    let floor = MeshDraw::with_material(model, gray, materials, shaders);
+    let round = MeshDraw::with_material(ball, gray, materials, shaders);
+    (floor, round)
+}
+
+/// [`floor_and_ball`]'s floor, `floor`, and its sphere, `round`, standing on it centered at `at`.
+fn floor_with_balls(
+    floor: &MeshDraw,
+    round: &MeshDraw,
+    at: impl IntoIterator<Item = Vec3>,
+) -> Draws {
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), floor, 0);
+    for at in at {
+        let scale = Vec3::splat(FLOOR_BALL);
+        let placed = Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, at);
+        draws.push_draw(placed, round, 0);
+    }
+    draws
+}
+
+/// Where [`occlusion_floor`]'s spheres' centers are.
+fn floor_balls() -> impl Iterator<Item = Vec3> + Clone {
+    (-8..=8).flat_map(|x| {
+        (-3..=3).map(move |z| {
+            Vec3::new(x as f32, 0.0, z as f32) * FLOOR_BALLS_APART + Vec3::Y * FLOOR_BALL
+        })
+    })
+}
+
+/// [`floor_and_ball`]'s floor, with its spheres standing on it [`FLOOR_BALLS_APART`] apart, in rows
+/// along X and Z, each darkening the floor round it.
+fn occlusion_floor(stores: &mut Stores) -> Draws {
+    let (floor, round) = floor_and_ball(stores);
+    floor_with_balls(&floor, &round, floor_balls())
+}
+
+/// [`occlusion_floor`] seen from [`FLOOR_ABOVE`] straight down, panning along X so that the floor
+/// moves a pixel to the left every `over` frames in a view `size` pixels: where frame `frame` sees
+/// from.
+fn floor_seen(frame: usize, over: usize, size: [u32; 2]) -> Viewpoint {
+    let unit = size[1] as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
+    Viewpoint {
+        position: Vec3::new(frame as f32 / (over as f32 * unit), FLOOR_ABOVE, 0.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_2),
+        projection: Projection::Perspective {
+            fov: FLOOR_FOV,
+            near: 0.1,
+        },
+    }
+}
+
+/// Which pixels of a view `size` pixels that `viewpoint`, [`floor_seen`]'s, sees from show a sphere
+/// of [`FLOOR_BALL`] centered at one of `centers`, or come within `margin` pixels of one, row after
+/// row.
+fn floor_balls_shown(
+    viewpoint: Viewpoint,
+    size: [u32; 2],
+    centers: impl Iterator<Item = Vec3> + Clone,
+    margin: usize,
+) -> Vec<bool> {
+    let [width, height] = size.map(|side| side as f32);
+    let tan = math::libm::tanf(FLOOR_FOV / 2.0);
+    let hits = |x: u32, y: u32| {
+        let ndc = Vec2::new(
+            (x as f32 + 0.5) / width * 2.0 - 1.0,
+            (y as f32 + 0.5) / height * 2.0 - 1.0,
+        );
+        // Looking down -Y, the view's up along -Z: its pixels' rows run down along +Z.
+        let way = Vec3::new(ndc.x * tan * width / height, -1.0, ndc.y * tan).normalize();
+        centers.clone().any(|center| {
+            let to = center - viewpoint.position;
+            let along = to.dot(way);
+            (to - way * along).length_squared() <= FLOOR_BALL * FLOOR_BALL
+        })
+    };
+    let shows: Vec<bool> = (0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| [x, y]))
+        .map(|[x, y]| hits(x, y))
+        .collect();
+    // Widened by `margin` each way, across and then down.
+    let [width, height] = size.map(|side| side as usize);
+    let near =
+        |line: usize, length: usize| line.saturating_sub(margin)..(line + margin + 1).min(length);
+    let across: Vec<bool> = (0..width * height)
+        .map(|at| near(at % width, width).any(|x| shows[at - at % width + x]))
+        .collect();
+    (0..width * height)
+        .map(|at| near(at / width, height).any(|y| across[y * width + at % width]))
+        .collect()
+}
+
+/// [`occlusion_floor`] as [`floor_seen`] pans across it, antialiased temporally and not, a pixel a
+/// frame and a pixel every 8: between frames 8 pixels of panning apart, at the same offset of
+/// antialiasing's 8, the points of the floor that ambient occlusion darkens, where each shows in
+/// each, change by at most 0.35 of a level on average, as only noise that doesn't move with the
+/// floor changes them: without ambient occlusion, they're the same. Noise that stayed on the screen
+/// as the view moved under it, the same every frame without antialiasing and each offset's own
+/// under it, as before the occlusion had a history, changed them by 1.11 and 1.07 without
+/// antialiasing and 0.50 and 0.55 antialiased, panning a pixel a frame and every 8, on an RTX 4090;
+/// the history leaves 0.24 and 0.27, and 0.21 and 0.24.
+fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
+    const WIDTH: u32 = 384;
+    const HEIGHT: u32 = 256;
+    const SIZE: [u32; 2] = [WIDTH, HEIGHT];
+    // The pixels a point moves between the frames compared.
+    const MOVED: usize = 8;
+    // How far the occlusion reaches round a point of the floor, in pixels: its default radius times
+    // XeGTAO's 1.457, 0.73 of the world's units, 54 pixels in this view. XeGTAO takes what's past
+    // the view's edges as the edges' own pixels, so that what occludes a point within its reach of
+    // one changes as the view pans: in a slow pan, by 4 to 10 levels on average within 32 pixels of
+    // the view's sides, against a few tenths away from them, with the history or without.
+    const REACH: usize = 56;
+    let [width, height] = [WIDTH as usize, HEIGHT as usize];
+    let greens = |frame: &[u8]| -> Vec<f64> {
+        (frame.as_chunks::<4>().0.iter())
+            .map(|pixel| f64::from(pixel[1]))
+            .collect()
+    };
+    for antialiasing in [Antialiasing::None, Antialiasing::Taa] {
+        for over in [1, 8] {
+            let apart = MOVED * over;
+            // From frame 96, so that every history has settled, four pairs a cycle of the offsets
+            // apart.
+            let firsts = [96, 104, 112, 120];
+            let compared: Vec<usize> = (firsts.iter())
+                .flat_map(|&first| [first, first + apart])
+                .collect();
+            let mut renderer = renderer(WIDTH, HEIGHT);
+            let mut stores = Stores::default();
+            let draws = occlusion_floor(&mut stores);
+            let viewport = filling(SIZE);
+            settle(
+                &mut renderer,
+                &mut stores,
+                viewport,
+                floor_seen(0, over, SIZE),
+                &draws,
+            );
+            let mut shown = std::collections::HashMap::new();
+            for frame in 0..=firsts[3] + apart {
+                let data = RenderData {
+                    ambient_occlusion: Some(AmbientOcclusion::default()),
+                    antialiasing,
+                    ..stores.data(viewport, floor_seen(frame, over, SIZE), &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                if compared.contains(&frame) {
+                    shown.insert(frame, greens(&frame_pixels(&mut renderer)));
+                }
+            }
+            // Without ambient occlusion or antialiasing, which carry nothing from frame to frame.
+            let mut lit = std::collections::HashMap::new();
+            for &frame in &compared {
+                let data = stores.data(viewport, floor_seen(frame, over, SIZE), &draws);
+                render_without_ui(&mut renderer, data);
+                lit.insert(frame, greens(&frame_pixels(&mut renderer)));
+            }
+            shut_down(renderer);
+            let (mut points, mut changed, mut lit_changed) = (0usize, 0.0, 0usize);
+            for &first in &firsts {
+                // Clear of the spheres by 6 pixels, so that their edges, and how the offsets draw
+                // them, don't count; past the occlusion's reach of the view's edges in both
+                // frames; shown for 48 frames, entering from the right; and darkened.
+                let viewpoint = floor_seen(first, over, SIZE);
+                let ball = floor_balls_shown(viewpoint, SIZE, floor_balls(), 6);
+                let right = (width - REACH).min(width - 2 - 48 / over);
+                let (lit_first, shown_first) = (&lit[&first], &shown[&first]);
+                let (lit_then, shown_then) = (&lit[&(first + apart)], &shown[&(first + apart)]);
+                for y in REACH..height - REACH {
+                    for x in MOVED + REACH..right {
+                        let at = y * width + x;
+                        if shown_first[at] > lit_first[at] - 4.0 || ball[at] {
+                            continue;
+                        }
+                        let then = at - MOVED;
+                        points += 1;
+                        changed += (shown_first[at] - shown_then[then]).abs();
+                        lit_changed += usize::from(lit_first[at] != lit_then[then]);
+                    }
+                }
+            }
+            let case = format!("{antialiasing:?}, panning a pixel every {over} frames");
+            assert!(
+                points >= 10_000,
+                "{case}, {points} points darkened, too few"
+            );
+            assert_eq!(
+                lit_changed, 0,
+                "{case}, points change without ambient occlusion: the view doesn't pan by whole \
+                 pixels"
+            );
+            let changed = changed / points as f64;
+            assert!(
+                changed <= 0.35,
+                "{case}, the floor's darkened points change by {changed:.3} on average as the view \
+                 pans 8 pixels, not at most 0.35: the occlusion's noise stays on the screen"
+            );
+        }
+    }
 }
 
 /// [`occlusion_scene`] lit by a sun alone, casting shadows, under a sky that's black every way,
@@ -9296,7 +9599,9 @@ impl FoggedScene {
 /// fog of no opacity has its pass fog what's opaque and draws what blends after it; fog that takes
 /// some light draws it otherwise. Likewise with ambient occlusion, which has the view draw what's
 /// opaque again, shaded, once the occlusion is found, after which the fog's pass fogs it: the sky,
-/// which the occlusion doesn't darken, as fogged as without it.
+/// which the occlusion doesn't darken, as fogged as without it. The frames compared are 8 apart,
+/// once the occlusion's history has settled: a still view's occlusion takes 8 frames' noise in
+/// turn, which its history averages, so that each frame draws it as the frame 8 before it did.
 fn fog_of_no_density_or_opacity_changes_nothing() {
     const SIZE: [u32; 2] = [96, 64];
     let mut scene = FoggedScene::new(SIZE[0], SIZE[1]);
@@ -9314,17 +9619,27 @@ fn fog_of_no_density_or_opacity_changes_nothing() {
         density: 0.5,
         ..Fog::default()
     };
+    // The 8th of the frames from now, in `fog`, the 7 before it without.
+    let eighth = |scene: &mut FoggedScene, fog| {
+        for _ in 0..7 {
+            scene.render(None);
+        }
+        scene.render(fog)
+    };
     let mut fogged = Vec::new();
     for occlusion in [None, Some(AmbientOcclusion::default())] {
         scene.stores.ambient_occlusion = occlusion;
+        for _ in 0..128 {
+            scene.render(None);
+        }
         let without = scene.render(None);
         for (name, fog) in [("no density", thin), ("no opacity", clear)] {
             assert!(
-                scene.render(Some(fog)) == without,
+                eighth(&mut scene, Some(fog)) == without,
                 "fog of {name} changes what's drawn, with ambient occlusion {occlusion:?}"
             );
         }
-        let frame = scene.render(Some(foggy));
+        let frame = eighth(&mut scene, Some(foggy));
         assert!(
             frame != without,
             "fog changes nothing, with ambient occlusion {occlusion:?}"

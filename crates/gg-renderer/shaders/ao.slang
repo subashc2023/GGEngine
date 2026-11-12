@@ -9,17 +9,43 @@
 // distance ahead of the view, in levels of half the size each, each texel a mean of the 2 by 2 under
 // it weighted toward the farthest; `occlusion_main` searches each pixel's horizons along slices of
 // the hemisphere round its normal, found from the depth around it, turned by noise that changes from
-// pixel to pixel along a Hilbert curve, and with `Push::noise`, each of temporal antialiasing's
-// offsets' own and otherwise the same every frame, and writes how much of it they leave open and
-// where the depth breaks round it; and the denoise, once or more, blurs each pixel with the 8 round
-// it but across those breaks, `denoise_main` from one buffer into the other and `denoise_last_main`
-// into the view's ambient occlusion. The view's space here is XeGTAO's: X right, Y up and Z ahead,
-// so that depth is positive.
+// pixel to pixel along a Hilbert curve, and with `Push::noise`, which changes from frame to frame,
+// and writes how much of it they leave open and where the depth breaks round it; and the denoise,
+// once or more, blurs each pixel with the 8 round it but across those breaks, `denoise_main` from one
+// buffer into another and `denoise_last_main` into the view's ambient occlusion. The view's space
+// here is XeGTAO's: X right, Y up and Z ahead, so that depth is positive.
 //
-// `Push` matches `Push` in src/ao.rs field for field.
+// The noise is on the screen, where the view moves under it, and blurring leaves blotches of it a few
+// pixels across, which neither the blur nor temporal antialiasing, which clips each pixel's history to
+// what this frame drew round it, takes away. So `denoise_last_main` also averages each pixel's
+// occlusion over the frames before, each with noise of its own, by a history of its own (reverse
+// reprojection caching: Nehab, Sander, Lawrence, Tatarchuk and Isidoro, "Accelerating Real-Time
+// Shading with Reverse Reprojection Caching", 2007): from where the pixel's point showed in the frame
+// before, as the camera moved, unless the depth there is of another point, as what's uncovered or
+// moved is; bounded by what the last denoise's own terms round the pixel range over, and a little
+// more, so that the occlusion of something that moves leaves little trail; and accumulated for the
+// next. What's left of the noise then moves with the world.
+//
+// `Push` and `Accumulation` match `Push` and `Accumulation` in src/ao.rs field for field.
 
 [[vk::binding(0, 0)]] Texture2D<float> depths[];
+[[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(2, 0)]] [format("r32f")] RWTexture2DArray<float> scalars[];
+[[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
+
+// What the last denoise accumulates by.
+struct Accumulation {
+    // From the view's space, as `position` has it, to the clip space of the view as the frame before
+    // drew it, offset as it was.
+    float4x4 previous_clip_from_view;
+    // What the frame before accumulated, a texture of the bindless set's, if `taken` isn't 0; and
+    // what this frame accumulates, a storage image. Each pixel's occlusion; the depth of its point,
+    // as far as a half float holds; and how many frames' occlusion it holds.
+    uint history;
+    uint accumulated;
+    uint taken;
+    uint unused;
+};
 
 struct Push {
     // The view-space depth's levels, one after another, each a row after another.
@@ -56,6 +82,7 @@ struct Push {
     uint start3;
     uint start4;
     uint unused;
+    Accumulation* accumulation;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -85,6 +112,22 @@ static const uint STEPS = 3;
 // How near a sample may be, in pixels, before it's pushed out to that: the pixel itself tells
 // nothing.
 static const float PIXEL_TOO_CLOSE = 1.3;
+// How many frames' occlusion a history holds at most, so that each frame's makes at least a
+// sixteenth of a pixel's: in a view that moves, about the last 31 frames' noise together, a sixth of
+// one frame's; and what changes the occlusion settles in some 16 frames.
+static const float HELD_MOST = 15.0;
+// How far the depth a history keeps may be from that of the point it's taken for, as a share of the
+// point's: past what the depth changes to the next pixel along its surface, a fiftieth.
+static const float DEPTH_SLACK = 0.02;
+// How far a history may lie outside what the last denoise's terms round the pixel range over: some
+// 5 of a byte's levels, past the noise two denoises leave, so that a still view's history, which
+// averages the frames' noise, isn't clipped back to this frame's; but a change the terms show, as
+// occlusion that moved, takes it along. With none, a floor's grain as a 768 by 512 view panned over
+// it, without antialiasing, doubled; with 0.05, a sphere rolling across the floor left 5 to 7 times
+// the trail, in the GPU test `ambient_occlusion_leaves_no_trail_behind_what_moves`.
+static const float HISTORY_MARGIN = 0.02;
+// The largest a half float holds, short of infinity: the depth a history keeps of what's farther.
+static const float HALF_MOST = 65504.0;
 
 // Level `level`'s size: the view's halved that many times, rounded down, at least a texel.
 uint2 level_size(uint level) {
@@ -443,16 +486,83 @@ void denoise_main(uint3 thread: SV_DispatchThreadID) {
     push.denoised[pixel.y * push.size.x + pixel.x] = packed(term, center >> 16);
 }
 
+// Adds to `sum` and `held` what the frame before accumulated at `texel`, in `history`, by `weight`,
+// and that to `weights`, if it's inside the view and its depth is within `slack` of `depth`.
+void take(uint history, int2 texel, float weight, float depth, float slack,
+          inout float sum, inout float held, inout float weights) {
+    if (any(texel < 0) || any(texel >= int2(push.size))) {
+        return;
+    }
+    float4 kept = textures[history].Load(int3(texel, 0));
+    if (abs(kept.y - depth) <= slack) {
+        sum += kept.x * weight;
+        held += kept.z * weight;
+        weights += weight;
+    }
+}
+
 // The last denoise, from `terms` into the view's ambient occlusion: the fraction of the light from
-// all around that reaches each pixel, from 0 to 1.
+// all around that reaches each pixel, from 0 to 1, averaged with what the frame before accumulated
+// where the pixel's point showed, and accumulated for the next.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
+    // Loaded whole, as the model shaders load the frame's data.
+    Accumulation accumulation = *push.accumulation;
     uint2 pixel = thread.xy;
     if (pixel.x >= push.size.x || pixel.y >= push.size.y) {
         return;
     }
     uint center;
-    float term = denoised_at(int2(pixel), center);
-    scalars[push.target][uint3(pixel, 0)] = min(term * TERM_SCALE, 1.0);
+    float occlusion = min(denoised_at(int2(pixel), center) * TERM_SCALE, 1.0);
+    int2 at = int2(pixel);
+    float z = depth_at(at);
+    // How many frames' occlusion the history held where the point showed: none where it's taken
+    // from nowhere.
+    float held = 0.0;
+    if (accumulation.taken != 0 && z < FARTHEST) {
+        float2 size = float2(push.size);
+        float2 uv = (float2(pixel) + 0.5) / size;
+        float4 clip = mul(accumulation.previous_clip_from_view, float4(position(uv, z), 1.0));
+        if (clip.w > 0.0) {
+            // How far the frame before's view saw the point, and how far each of the 4 pixels round
+            // where it showed may then have seen theirs: as far, give or take a fiftieth, and what
+            // the depth changes to the next pixel each way along the surface, the smaller of the
+            // two sides', as across an edge is another surface.
+            float across = min(abs(depth_at(at + int2(1, 0)) - z), abs(z - depth_at(at + int2(-1, 0))));
+            float down = min(abs(depth_at(at + int2(0, 1)) - z), abs(z - depth_at(at + int2(0, -1))));
+            float slack = DEPTH_SLACK * clip.w + across + down;
+            float2 texel = (clip.xy / clip.w * 0.5 + 0.5) * size - 0.5;
+            float2 floored = floor(texel);
+            float2 f = texel - floored;
+            float2 g = 1.0 - f;
+            int2 corner = int2(floored);
+            float sum = 0.0;
+            float held_sum = 0.0;
+            float weights = 0.0;
+            take(accumulation.history, corner, g.x * g.y, clip.w, slack, sum, held_sum, weights);
+            take(accumulation.history, corner + int2(1, 0), f.x * g.y, clip.w, slack, sum, held_sum, weights);
+            take(accumulation.history, corner + int2(0, 1), g.x * f.y, clip.w, slack, sum, held_sum, weights);
+            take(accumulation.history, corner + int2(1, 1), f.x * f.y, clip.w, slack, sum, held_sum, weights);
+            if (weights > 0.0) {
+                // Within what the terms round the pixel range over, as this frame's denoised
+                // occlusion, their weighted mean, is, widened by `HISTORY_MARGIN`.
+                float least = 1.0;
+                float most = 0.0;
+                for (int y = -1; y <= 1; y++) {
+                    for (int x = -1; x <= 1; x++) {
+                        float near = min(term_of(term_at(at + int2(x, y))) * TERM_SCALE, 1.0);
+                        least = min(least, near);
+                        most = max(most, near);
+                    }
+                }
+                float past = clamp(sum / weights, least - HISTORY_MARGIN, most + HISTORY_MARGIN);
+                held = held_sum / weights;
+                occlusion = lerp(past, occlusion, 1.0 / (held + 1.0));
+            }
+        }
+    }
+    scalars[push.target][uint3(pixel, 0)] = occlusion;
+    storage[accumulation.accumulated][uint3(pixel, 0)] =
+        float4(occlusion, min(z, HALF_MOST), min(held + 1.0, HELD_MOST), 0.0);
 }

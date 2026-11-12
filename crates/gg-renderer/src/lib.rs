@@ -569,8 +569,10 @@ pub struct Renderer {
     skinning: Skinning,
     /// What writes emitters' particles' births before the frame draws them, and draws them.
     particles: ParticlePass,
-    /// What computes the view's ambient occlusion.
+    /// What computes the view's ambient occlusion, and the history it averages it over the frames
+    /// by, apart from it, as frames take its images as targets while they record its passes.
     ao: AoPass,
+    ao_history: ao::History,
     /// What traces the view's reflections and keeps its colors for them, and the images it keeps
     /// them in, apart from it, as frames take them as targets while they record its passes.
     reflections: ReflectionPass,
@@ -885,6 +887,7 @@ impl Renderer {
             skinning: Skinning::new(device)?,
             particles: ParticlePass::new(device)?,
             ao: AoPass::new(device)?,
+            ao_history: ao::History::default(),
             reflections: ReflectionPass::new(device)?,
             reflected: reflections::Images::default(),
             exposure: ExposurePass::new(device)?,
@@ -1153,6 +1156,15 @@ impl Renderer {
         let perspective = matches!(data.viewpoint.projection, Projection::Perspective { .. });
         let occluded = (data.ambient_occlusion)
             .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
+        // Averaged over the frames by a history in images of the view's size, let go of by a frame
+        // that renders the view without; against what the frame before accumulated, if it did, at
+        // this size, and the view isn't cut to where it sees from.
+        if occluded.is_some() {
+            self.ao_history.prepare(&self.device, data.viewport.size)?;
+        } else if renders_view {
+            self.ao_history.forget();
+        }
+        let occluded_against = (self.ao_history).against(number, data.viewport.size, data.cut);
         // The view's reflections, where they show anything: in place of the sky's specular light,
         // under a perspective, whose depth they're traced through, against the colors the frame
         // before kept, which each frame that reflects keeps for the next, in images of the view's
@@ -1194,9 +1206,12 @@ impl Renderer {
         // windows'.
         let resolved = 1 + windows_drawn;
         let resolves = if antialiased { taa::TARGETS } else { 0 };
-        // The reflections' images are the targets after those.
+        // The reflections' images are the targets after those, and the ambient occlusion's history's
+        // after those.
         let reflections_first = resolved + resolves;
         let reflects = if reflected.is_some() { 2 } else { 0 };
+        let occlusion_first = reflections_first + reflects;
+        let occludes = if occluded.is_some() { 2 } else { 0 };
         // First, the atmosphere's tables, if the frame shows one, which the view samples and its
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
@@ -1208,7 +1223,7 @@ impl Renderer {
         // targets after those. A frame that doesn't takes the light from those before.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
-                let first = reflections_first + reflects;
+                let first = occlusion_first + occludes;
                 let sampled = tables.as_ref().map(atmosphere::Plan::sky_view);
                 let sky_light = &mut self.sky_light;
                 Some(sky_light.plan(&self.device, graph, first, source, sampled)?)
@@ -1388,7 +1403,10 @@ impl Renderer {
                     });
                 let alone = opaque_depth.unwrap_or(depth);
                 let depths = [if visibility.is_some() { depth } else { alone }, alone];
-                let ao = occluded.map(|_| AoPass::plan(graph, depths, size));
+                let ao = occluded.map(|_| {
+                    let against = occluded_against;
+                    AoPass::plan(graph, depths, size, occlusion_first, number, against)
+                });
                 // Each depth's, as they pair.
                 let found = [normals, drawn_normals].map(|pair| pair.map(|(_, normals)| normals));
                 let reflections = (traced)
@@ -1597,11 +1615,15 @@ impl Renderer {
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
         let history = antialiased.then(|| self.history.targets());
         let kept = reflected.is_some().then(|| self.reflected.targets());
+        // Which noise the occlusion takes, as the history says, before the frame takes its images.
+        let occlusion_noise = self.ao_history.noise(unjittered);
+        let accumulated = occluded.is_some().then(|| self.ao_history.targets());
         let lit = (plan.is_some()).then(|| self.sky_light.targets());
         let targets = iter::once(target)
             .chain(others)
             .chain(history.into_iter().flatten())
             .chain(kept.into_iter().flatten())
+            .chain(accumulated.into_iter().flatten())
             .chain(lit.into_iter().flatten());
         let Some(mut frame) = self.frames.begin(targets, &self.graph)? else {
             // The births the frame planned aren't written.
@@ -1662,9 +1684,13 @@ impl Renderer {
             }
             pass.prefilter(&mut frame, plan);
         }
-        // Whether the frame keeps the view's colors for the next frame's reflections, which it
-        // notes once it's submitted.
+        // Whether the frame keeps the view's colors for the next frame's reflections, and
+        // accumulates its ambient occlusion for the next frame's, which it notes once it's
+        // submitted.
         let keeps = (view.as_ref()).is_some_and(|view| view.keep.is_some());
+        let accumulates = (view.as_ref())
+            .and_then(|view| view.early.as_ref())
+            .is_some_and(|early| early.ao.is_some());
         // What the view shows, how much of its area that covers, what its draws that weren't
         // culled drew, and whether the frame culled any.
         let (counts, view, culled) = match (view, pixels_shown) {
@@ -1807,20 +1833,21 @@ impl Renderer {
                 // space, offset as the frame draws it; and the reflections', from its space to the
                 // world.
                 let clip_from_view = taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect);
-                let phase = antialiased.then(|| self.taa.phase());
+                let world_from_view = Mat4::from_rotation_translation(
+                    data.viewpoint.rotation,
+                    data.viewpoint.position,
+                );
                 let occlusion_seen = occluded.map(|settings| ao::Seen {
                     clip_from_view,
+                    world_from_view,
                     settings,
-                    phase,
+                    noise: occlusion_noise,
                 });
                 let reflections_seen =
                     traced.map(
                         |(settings, (kept_clip_from_world, kept))| reflections::Seen {
                             clip_from_view,
-                            world_from_view: Mat4::from_rotation_translation(
-                                data.viewpoint.rotation,
-                                data.viewpoint.position,
-                            ),
+                            world_from_view,
                             kept_clip_from_world,
                             kept_scale: exposure::rescale(exposure, kept),
                             settings,
@@ -2259,6 +2286,9 @@ impl Renderer {
             self.reflected.kept(number, size, unjittered, self.exposed);
         } else if data.show.is_some() && traced.is_some() {
             self.reflected.carry(number);
+        }
+        if accumulates {
+            (self.ao_history).accumulated(number, size, view_projection, unjittered);
         }
         self.waited = self.frames.waited();
         Ok(true)

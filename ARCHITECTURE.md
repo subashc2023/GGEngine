@@ -2642,15 +2642,23 @@ own, each texel the mean of the 2 by 2 under it weighted toward the farthest, so
 level keeps to what's behind a thin occluder; the second searches each pixel's horizons along
 three slices of the hemisphere round its normal, which the depth round it gives, three steps each
 way, out as far as the environment's radius, half a unit by default, reaching farther steps through
-coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and,
-where the view is antialiased temporally, is each of its 8 offsets' own, the same each time the
-offset comes round, so that the resolve, which averages what a still pixel's offsets draw once
-each draws it as it did a cycle before, averages the noise away too, where noise the same every
-frame would stay on the screen as a grain while the view moves under it; and stays still where the
-view isn't; and the denoise blurs each pixel with the eight round it, but across where the depth
-breaks, three times, into an
-image of the graph's own of a float a pixel, the fraction of the light from all around that
-reaches it, raised to the environment's strength times XeGTAO's 2.2. Shading darkens the sky's
+coarser levels, the slices turned by noise that runs along a Hilbert curve from pixel to pixel and
+changes from frame to frame; and the denoise blurs each pixel with the eight round it, but across
+where the depth breaks, three times, into an image of the graph's own of a float a pixel, the
+fraction of the light from all around that reaches it, raised to the environment's strength times
+XeGTAO's 2.2. The last denoise also averages each pixel's with what the frame before accumulated
+where the camera then saw the pixel's point, by reverse reprojection caching (Nehab and others,
+2007), and accumulates it for the next frame, in two images of the view's size that last from frame
+to frame: up to 15 frames' occlusion, none where the depth the frame before kept there is of
+another point, as what's uncovered is, and bounded by what the last denoise's terms round the pixel
+range over, give or take 0.02, so that the occlusion of what moves across the view, which the
+history doesn't follow, leaves little trail. Noise that stayed where it is on the screen would show
+as a grain while the view moves under it; averaged, what's left of it moves with the world. A still
+view takes 8 frames' noise in turn, as many as temporal antialiasing has offsets, so that each
+offset draws a still pixel as it did a cycle before, as the resolve asks of what it keeps; one that
+moves goes on through XeGTAO's 64. A frame that renders the view without ambient occlusion lets the
+history go; one of another size, or that cuts to where the view sees from, starts it again, as one
+after a frame that drew no view does. Shading darkens the sky's
 light, never the lights', by the less of that and the material's occlusion map: both estimate how
 much of the same light reaches the point, the map at its texels' scale, so that their product would
 darken twice where both see one occluder, as Filament takes them. That darkens the sky's diffuse
