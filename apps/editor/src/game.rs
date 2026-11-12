@@ -60,7 +60,8 @@
 //! toolbar has the view show in place of its light, and the passes its Passes list leaves out, to
 //! narrow down which one makes what the view shows, reach the game as parts of its look, as
 //! [`look`](crate::look) says: each as the user changes it, the editor taking the parts another
-//! client, such as an agent, sets.
+//! client, such as an agent, sets. The list of what the view shows lists, after the parts of
+//! shading, the images the game's frame makes, as the API's `images` answers them as it opens.
 //!
 //! A texture, a model, a font or a prefab dragged from the Assets panel outlines the view while it's
 //! held over it, and is let go there as an edit of the editor's, through the Inspector's link,
@@ -96,7 +97,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::asset::{AssetKind, Meta};
 use gg_api::view::Reader;
-use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status};
+use gg_api::{
+    Client, Failure, ImageList, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status,
+};
 use gg_engine::egui::{
     self, Color32, Response, RichText, ScrollArea, TextStyle, TextWrapMode, ViewportCommand,
     ViewportId,
@@ -785,6 +788,16 @@ impl Game {
                         }
                     }
                 }
+                ("images", Ok(listed)) => match serde_json::from_value::<ImageList>(listed) {
+                    Ok(listed) => {
+                        self.view.toolbar.images = listed.images;
+                        self.view.toolbar.images_refused = None;
+                    }
+                    Err(error) => {
+                        let message = format!("`images`: an answer that isn't one: {error}");
+                        self.log(Level::Error, message);
+                    }
+                },
                 ("look", Ok(looked)) => match serde_json::from_value::<Looked>(looked) {
                     Ok(looked) => {
                         let taken = self.looking.read(looked);
@@ -806,6 +819,11 @@ impl Game {
                     }
                     if method == "look" {
                         self.looking.failed();
+                    }
+                    // As an older game, which doesn't know `images`, refuses it.
+                    if method == "images" {
+                        let Failure { code, message } = &failure;
+                        self.view.toolbar.images_refused = Some(format!("[{code}] {message}"));
                     }
                     // What the File menu goes on from, rather than refusals to show.
                     let goes_on =
@@ -2071,6 +2089,12 @@ impl Layer for Game {
             if let Some(look) = self.looking.ask(&wanted) {
                 talker.ask("look", json!(look));
             }
+        }
+        // The images the game's frame makes, for the list of what the view shows, as it opens.
+        if mem::take(&mut self.view.toolbar.ask_images)
+            && let Some(talker) = &self.talker
+        {
+            talker.ask("images", Value::Null);
         }
         if let Some(talker) = &self.talker
             && !self.input.is_empty()
@@ -4016,6 +4040,43 @@ mod tests {
         game.view.toolbar.skip.clear();
         game.update(&mut cx, Duration::ZERO);
         assert_eq!(looks(&ends), [skips(None)], "the user's null");
+    }
+
+    /// The images the game's frame makes are asked for as the list of what the view shows opens,
+    /// and listed as the game answers; a refusal, as an older game's, says why in their place.
+    #[test]
+    fn the_images_are_asked_for_as_the_list_opens_and_listed() {
+        use gg_api::{FrameImage, ImageKind};
+
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        let asked = |ends: &Ends| methods(ends).iter().filter(|m| *m == "images").count();
+        assert_eq!(asked(&ends), 0, "not before the list opens");
+        // The list's opening, for which a test sets the field, since it can't run `ui`.
+        game.view.toolbar.ask_images = true;
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(asked(&ends), 1, "as it opens");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(asked(&ends), 0, "once");
+        let depth = FrameImage {
+            name: "view depth".to_owned(),
+            kind: ImageKind::Depth,
+            size: [64, 32],
+        };
+        let listed = json!({ "images": [depth.clone()] });
+        ends.answer
+            .send(("images".to_owned(), Ok(listed)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.view.toolbar.images, [depth]);
+        let refused = Failure::new("api.unknown_method", "there's no method `images`");
+        ends.answer
+            .send(("images".to_owned(), Err(refused)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let why = "[api.unknown_method] there's no method `images`";
+        assert_eq!(game.view.toolbar.images_refused.as_deref(), Some(why));
     }
 
     /// While the game hasn't answered the last `input`, as while a script has stopped it, the

@@ -7,7 +7,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use gg_api::{Pass, Shown};
+use gg_api::{FrameImage, ImageKind, Pass, Shown};
 use gg_engine::Context;
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Popup,
@@ -39,53 +39,60 @@ const LABEL: f32 = 18.0;
 /// [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
 const INSET: f32 = 8.0;
 
-/// What the toolbar's list of what the view shows in place of its light has for an entry: the
-/// game's own light, a part of how it's shaded, or an image the frame makes, by its debug name.
-enum Channel {
-    Lit,
-    Part(Shown),
-    Image(&'static str),
+/// The entries of the list of what the view shows before its images, as the toolbar names them:
+/// the game's own light, `None`, then the parts of how it's shaded.
+const CHANNELS: &[(&str, Option<Shown>)] = &[
+    ("Lit", None),
+    ("Base color", Some(Shown::BaseColor)),
+    ("Normal", Some(Shown::Normal)),
+    ("Surface normal", Some(Shown::SurfaceNormal)),
+    ("Metallic", Some(Shown::Metallic)),
+    ("Roughness", Some(Shown::Roughness)),
+    ("Occlusion", Some(Shown::Occlusion)),
+    ("Emission", Some(Shown::Emission)),
+    ("Specular color", Some(Shown::SpecularColor)),
+    ("Direct light", Some(Shown::DirectLight)),
+    ("Sky light", Some(Shown::SkyLight)),
+    ("Reflection", Some(Shown::Reflection)),
+    ("Diffuse light", Some(Shown::DiffuseLight)),
+    ("Specular light", Some(Shown::SpecularLight)),
+];
+
+/// What the list calls the images the frame makes that it has a name of its own for, by their
+/// debug names; it calls the rest by theirs.
+const IMAGE_LABELS: &[(&str, &str)] = &[
+    ("view depth", "Depth"),
+    ("view motion", "Motion"),
+    ("view ids", "IDs"),
+    ("view visibility", "Visibility buffer"),
+    ("ambient occlusion", "Ambient occlusion"),
+    ("shadow cascade 0", "Shadow cascade 0"),
+    ("shadow cascade 1", "Shadow cascade 1"),
+    ("shadow cascade 2", "Shadow cascade 2"),
+    ("shadow cascade 3", "Shadow cascade 3"),
+    ("view colors", "Before tonemapping"),
+];
+
+/// What the list calls the image the frame makes by debug name `name`.
+fn image_label(name: &str) -> &str {
+    IMAGE_LABELS
+        .iter()
+        .find(|(named, _)| *named == name)
+        .map_or(name, |(_, label)| label)
 }
 
-impl Channel {
-    /// What the look's `show` is for it: `None` for the game's own light.
-    fn shown(&self) -> Option<Shown> {
-        match self {
-            Self::Lit => None,
-            Self::Part(shown) => Some(shown.clone()),
-            Self::Image(name) => Some(Shown::Image((*name).to_owned())),
-        }
+/// What an image the frame makes holds, as its entry's tooltip says.
+fn kind_label(kind: ImageKind) -> &'static str {
+    match kind {
+        ImageKind::Color => "colors",
+        ImageKind::Hdr => "colors of high dynamic range",
+        ImageKind::Ids => "IDs, a color for each",
+        ImageKind::Motion => "motion, shown as normals are",
+        ImageKind::Visibility => "a visibility buffer, a color for each value",
+        ImageKind::Depth => "depth",
+        ImageKind::Scalar => "a value a pixel",
     }
 }
-
-/// The entries of the list of what the view shows, as the toolbar names them, the images after a
-/// separator.
-const CHANNELS: &[(&str, Channel)] = &[
-    ("Lit", Channel::Lit),
-    ("Base color", Channel::Part(Shown::BaseColor)),
-    ("Normal", Channel::Part(Shown::Normal)),
-    ("Surface normal", Channel::Part(Shown::SurfaceNormal)),
-    ("Metallic", Channel::Part(Shown::Metallic)),
-    ("Roughness", Channel::Part(Shown::Roughness)),
-    ("Occlusion", Channel::Part(Shown::Occlusion)),
-    ("Emission", Channel::Part(Shown::Emission)),
-    ("Specular color", Channel::Part(Shown::SpecularColor)),
-    ("Direct light", Channel::Part(Shown::DirectLight)),
-    ("Sky light", Channel::Part(Shown::SkyLight)),
-    ("Reflection", Channel::Part(Shown::Reflection)),
-    ("Diffuse light", Channel::Part(Shown::DiffuseLight)),
-    ("Specular light", Channel::Part(Shown::SpecularLight)),
-    ("Depth", Channel::Image("view depth")),
-    ("Motion", Channel::Image("view motion")),
-    ("IDs", Channel::Image("view ids")),
-    ("Visibility buffer", Channel::Image("view visibility")),
-    ("Ambient occlusion", Channel::Image("ambient occlusion")),
-    ("Shadow cascade 0", Channel::Image("shadow cascade 0")),
-    ("Shadow cascade 1", Channel::Image("shadow cascade 1")),
-    ("Shadow cascade 2", Channel::Image("shadow cascade 2")),
-    ("Shadow cascade 3", Channel::Image("shadow cascade 3")),
-    ("Before tonemapping", Channel::Image("view colors")),
-];
 
 /// What the toolbar's list of the passes the view can leave out calls `pass`.
 fn pass_label(pass: Pass) -> &'static str {
@@ -122,6 +129,15 @@ pub struct Toolbar {
     /// What the view shows in place of its light, to see how it's made, through either camera;
     /// `None` for the game's own light.
     pub show: Option<Shown>,
+    /// The images the game's frame made that the view can show, as the game last answered them,
+    /// which the list of what the view shows lists after its parts; empty until it answers.
+    pub images: Vec<FrameImage>,
+    /// Why the game didn't list them, if it refused, as an older game that doesn't know `images`
+    /// does, which the list says in their place.
+    pub images_refused: Option<String>,
+    /// Whether the pointer came over that list's button, or clicked it, since this was last taken,
+    /// for the images to be asked for again.
+    pub ask_images: bool,
     /// The passes the view leaves out, to narrow down which one makes what it shows, through
     /// either camera, in [`Pass::ALL`]'s order, as the game answers them; empty for none. Not kept
     /// from run to run, so that none is left out unawares.
@@ -138,6 +154,9 @@ impl Default for Toolbar {
             world_camera: false,
             colliders: false,
             show: None,
+            images: Vec::new(),
+            images_refused: None,
+            ask_images: false,
             skip: Vec::new(),
             placement: Placement::default(),
         }
@@ -387,34 +406,51 @@ impl Toolbar {
                 {
                     self.colliders = !self.colliders;
                 }
-                // An image another client names that the list lacks shows by its name.
-                let selected = match CHANNELS
-                    .iter()
-                    .find(|(_, channel)| channel.shown() == self.show)
-                {
+                // An image shows by its label, or its name, whether the list has it or not, as one
+                // another client shows may not be.
+                let selected = match (CHANNELS.iter()).find(|(_, shown)| *shown == self.show) {
                     Some((label, _)) => (*label).to_owned(),
                     None => match &self.show {
-                        Some(Shown::Image(name)) => name.clone(),
+                        Some(Shown::Image(name)) => image_label(name).to_owned(),
                         _ => "Lit".to_owned(),
                     },
                 };
-                egui::ComboBox::from_id_salt("toolbar show")
+                // As tall as the window, past egui's default, so that the parts and the first
+                // images show without scrolling.
+                let list = egui::ComboBox::from_id_salt("toolbar show")
                     .selected_text(selected)
+                    .height(ui.ctx().content_rect().height())
                     .show_ui(ui, |ui| {
-                        let mut images = false;
-                        for (label, channel) in CHANNELS {
-                            if !images && matches!(channel, Channel::Image(_)) {
-                                images = true;
-                                ui.separator();
-                            }
-                            ui.selectable_value(&mut self.show, channel.shown(), *label);
+                        for (label, shown) in CHANNELS {
+                            ui.selectable_value(&mut self.show, shown.clone(), *label);
+                        }
+                        ui.separator();
+                        if self.images.is_empty() {
+                            match &self.images_refused {
+                                Some(why) => ui.weak(format!("No images listed: {why}")),
+                                None => ui.weak("No images listed"),
+                            };
+                        }
+                        for FrameImage { name, kind, size } in &self.images {
+                            let image = Some(Shown::Image(name.clone()));
+                            let [width, height] = size;
+                            let tip = format!("{name}: {}, {width}×{height}", kind_label(*kind));
+                            (ui.selectable_value(&mut self.show, image, image_label(name)))
+                                .on_hover_text(tip);
                         }
                     })
                     .response
                     .on_hover_text(
-                        "What the view shows in place of its light, to see how it's made; agents \
-                         can set it too",
+                        "What the view shows in place of its light, to see how it's made: a part of \
+                         its shading, or an image its frame makes, as the game lists them as the \
+                         list opens; agents can set it too",
                     );
+                // Asked as the pointer comes over the list, so that they're there as it opens,
+                // which sizes it to them, and again as it opens.
+                let hovered = list.hovered();
+                let was_hovered = (ui.ctx()).data(|data| data.get_temp(list.id).unwrap_or(false));
+                ui.ctx().data_mut(|data| data.insert_temp(list.id, hovered));
+                self.ask_images |= (hovered && !was_hovered) || list.clicked();
                 let label = match self.skip.len() {
                     0 => "Passes".to_owned(),
                     off => format!("Passes: {off} off"),
@@ -1279,14 +1315,14 @@ mod tests {
         }
     }
 
-    /// Runs a pass of `toolbar` at the top left of a view of 1400 by 400 points, with `events`;
-    /// returns what it drew.
+    /// Runs a pass of `toolbar` at the top left of a view of 1400 by 800 points, tall enough for
+    /// the list of what the view shows, with `events`; returns what it drew.
     fn toolbar_pass(
         ctx: &egui::Context,
         toolbar: &mut Toolbar,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        let view = Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 400.0));
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 800.0));
         let input = RawInput {
             screen_rect: Some(view),
             events,
@@ -1351,6 +1387,53 @@ mod tests {
         assert_eq!(toolbar.skip, [Pass::Shadows], "drawn again");
         click_toolbar(&ctx, &mut toolbar, all);
         assert_eq!(toolbar.skip, [], "all drawn again");
+    }
+
+    /// The list of what the view shows asks for the images the game lists as the pointer comes
+    /// over it, and again as it opens, and lists them after the parts, by their labels or their
+    /// names, showing the one clicked; and says why there are none where the game refused to list
+    /// them.
+    #[test]
+    fn the_list_shows_the_images_the_game_lists() {
+        let ctx = egui::Context::default();
+        let mut toolbar = Toolbar::default();
+        let drawn = [(); 2].map(|()| toolbar_pass(&ctx, &mut toolbar, Vec::new()));
+        let list = text_at(&drawn[1], "Lit").expect("the list");
+        toolbar_pass(&ctx, &mut toolbar, vec![egui::Event::PointerMoved(list)]);
+        assert!(
+            std::mem::take(&mut toolbar.ask_images),
+            "asked as the pointer comes"
+        );
+        toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        assert!(!toolbar.ask_images, "once while it's over the list");
+        toolbar.images = vec![
+            FrameImage {
+                name: "view depth".to_owned(),
+                kind: ImageKind::Depth,
+                size: [64, 32],
+            },
+            FrameImage {
+                name: "bloom 1".to_owned(),
+                kind: ImageKind::Hdr,
+                size: [32, 16],
+            },
+        ];
+        // A pass for the list to size its longer scroll, then one that draws it all.
+        click_toolbar(&ctx, &mut toolbar, list);
+        assert!(std::mem::take(&mut toolbar.ask_images), "asked as it opens");
+        let opened = toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        assert!(text_at(&opened, "Depth").is_some(), "by its label");
+        let bloom = text_at(&opened, "bloom 1").expect("by its name");
+        click_toolbar(&ctx, &mut toolbar, bloom);
+        assert_eq!(toolbar.show, Some(Shown::Image("bloom 1".to_owned())));
+        toolbar.images.clear();
+        toolbar.images_refused = Some("[api.unknown_method] no `images`".to_owned());
+        let drawn = toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        let list = text_at(&drawn, "bloom 1").expect("the list, showing its image");
+        click_toolbar(&ctx, &mut toolbar, list);
+        let opened = toolbar_pass(&ctx, &mut toolbar, Vec::new());
+        let why = "No images listed: [api.unknown_method] no `images`";
+        assert!(text_at(&opened, why).is_some(), "says why");
     }
 
     /// The list of what the view shows names each part by its label, as it shows on the closed
