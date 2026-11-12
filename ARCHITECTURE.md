@@ -430,7 +430,8 @@ in the editor is out of an agent's reach.
   frames too; and, after them in the header, whether the game's layers want the cursor grabbed,
   which the editor, as the client, grabs its own window's for in Play while the view has the keys,
   the mouse's raw motion going to the game through `input`, letting go at Escape, which the game
-  gets too, as a game may not let go itself, until a press in the view. A game run `--embedded`
+  gets too, as a game may not let go itself, until a press in the view; a click of Play grabs it
+  for any game, giving the view the keys, until Escape. A game run `--embedded`
   renders its view at the size the client asks, and runs each
   frame once the client has taken the last, rather than rendering frames it never takes: so a
   client sends what the next frame is to draw with, its look and input, before it takes the last,

@@ -43,8 +43,12 @@
 //! says it does, has the editor grab its own window's in Play while the view has the keys, the
 //! mouse's raw motion going to the game; Escape lets go of it, whatever the game does with the key,
 //! which it gets, as a game may not let go itself, and a press in the view grabs it again;
-//! Simulate and Stop let go. The editor's camera grabs the cursor too, while it looks about, orbits
-//! or dollies, as [`camera`](crate::camera) says.
+//! Simulate and Stop let go. Play, and Resume in Play, capture the view's input for any game: they
+//! give the view the keys, which their click in the title bar took, and grab the cursor, which the
+//! engine moves onto the view, until Escape, after which a press in the view grabs it again only for
+//! a game that asks. In Play, an outline round the view says while it has the keys, which go to the
+//! game. The editor's camera grabs the cursor too, while it looks about, orbits or dollies, as
+//! [`camera`](crate::camera) says.
 //!
 //! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
@@ -240,6 +244,10 @@ struct Game {
     inputting: bool,
     /// Whether Escape let go of the cursor grabbed for the game, until a press in the view.
     escaped: bool,
+    /// Whether Play captured the view's input for the game, the cursor grabbed whether or not the
+    /// game asks: from a click of Play, or of Resume in Play, until Escape, or the view's input
+    /// stopping going to the game, but while a Play clicked waits for the game's answer.
+    captured: bool,
     run_state: RunState,
     /// Whether the game's simulation is paused, and whether the game is stopped, as it last
     /// answered: stopped until a game that serves answers, so that nothing goes to it before.
@@ -476,6 +484,7 @@ impl Game {
             input: Vec::new(),
             inputting: false,
             escaped: false,
+            captured: false,
             run_state: RunState::Building(None),
             paused: false,
             stopped: true,
@@ -867,8 +876,14 @@ impl Game {
     }
 
     /// Does what a click of the title bar's controls asks, while a game serves, as
-    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it.
+    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it. Play, and Resume
+    /// in Play, capture the view's input for the game, as the module says; any other click ends
+    /// the capture.
     fn click(&mut self, clicked: overlay::Clicked) {
+        let resumes_play = clicked == overlay::Clicked::Resume && self.mode() == Mode::Play;
+        self.captured = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
+        // What Escape let go of, a capture grabs again.
+        self.escaped &= !self.captured;
         match clicked {
             overlay::Clicked::To(to) => self.run(to),
             overlay::Clicked::Pause => self.ask("pause"),
@@ -1513,7 +1528,7 @@ impl Game {
             return;
         }
         if response.dnd_hover_payload::<Dragged>().is_some() {
-            overlay::outline_drop(egui, response);
+            overlay::outline_view(egui, response);
         }
         let Some(dropped) = response.dnd_release_payload::<Dragged>() else {
             return;
@@ -1754,8 +1769,8 @@ impl Game {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
         // Escape lets go of the cursor grabbed for the game, whatever the game does with it, as a
-        // game may not let go itself; a press in the view grabs it again. The game gets both, as
-        // its own window would give them.
+        // game may not let go itself, and ends Play's capture; a press in the view grabs it again,
+        // if the game asks. The game gets both, as its own window would give them.
         let escape = matches!(
             *event,
             Event::Key {
@@ -1766,6 +1781,7 @@ impl Game {
         );
         if through && escape {
             self.escaped = true;
+            self.captured = false;
         }
         if through && matches!(*event, Event::MouseButton { pressed: true, .. }) {
             self.escaped = false;
@@ -2026,12 +2042,14 @@ impl Layer for Game {
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        // The game's grab, in Play alone, a Stop or Simulate ending what Escape did too; and the
-        // editor's camera's, while it looks about, orbits or dollies.
+        // The game's grab, as it asks or Play captured the view's input for it, in Play alone, a
+        // Stop or Simulate ending what Escape and Play did too, but while a Play clicked waits for
+        // its answer; and the editor's camera's, while it looks about, orbits or dollies.
         let through = self.through();
         self.escaped &= through;
+        self.captured &= through || self.playing > 0;
         let asked = self.reader.as_ref().is_some_and(Reader::cursor_grabbed);
-        let games = through && asked && !self.escaped;
+        let games = through && !self.escaped && (asked || self.captured);
         cx.set_cursor_grabbed(games || self.view.camera.grabs());
         let picked = picked(&self.view.link);
         self.view.hold(picked.as_ref());
@@ -2177,6 +2195,10 @@ impl Layer for Game {
         let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();
         if let Some(clicked) = clicked.flatten() {
             self.click(clicked);
+            // A capture gives the view the keys, which the click's press, off the view, took.
+            if self.captured {
+                ui.focus_view();
+            }
         }
         // A click on a scene, once the menus' choices are done, as a New of the File menu.
         let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());
@@ -2238,6 +2260,10 @@ impl Layer for Game {
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
         if let Some(view) = ui.view() {
             self.rates.paint(ui.egui(), &view);
+            // Where the keys go in Play, which are the game's.
+            if self.through() && ui.view_focused() {
+                overlay::outline_view(ui.egui(), &view);
+            }
         }
         self.view.overlay(ui, self.screen(cx.view()));
         self.view.toolbar.save(cx);
@@ -3994,6 +4020,64 @@ mod tests {
         game.view.toolbar.world_camera = false;
         game.update(&mut cx, Duration::ZERO);
         assert!(!cx.cursor_grabbed(), "Simulate lets go");
+    }
+
+    /// Play captures the view's input for a game that doesn't ask for the cursor grabbed: the
+    /// editor grabs its own from the game's answer until Escape, after which a press in the view
+    /// grabs nothing; Resume in Play captures again, after an Escape too, as Play from Simulate
+    /// does; and another client's stop lets go, as Simulate and Stop do, for good: a switch back to
+    /// the game's camera after another client's play isn't a click of Play.
+    #[test]
+    fn play_captures_the_views_input_for_any_game_until_escape() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let mut grabbed = |game: &mut Game| {
+            game.update(&mut cx, Duration::ZERO);
+            cx.cursor_grabbed()
+        };
+        let answer = |method: &str, stopped| {
+            let answer = (method.to_owned(), status(stopped, false));
+            ends.answer.send(answer).expect("sent");
+        };
+        game.stopped = true;
+        game.click(overlay::Clicked::To(Mode::Play));
+        assert!(!grabbed(&mut game), "before the game plays");
+        answer("play", false);
+        assert!(grabbed(&mut game), "once it plays");
+        let at = reading([300.0, 200.0]);
+        let escape = Event::Key {
+            key: Key::Escape,
+            pressed: true,
+            repeat: false,
+        };
+        let _ = game.route(&escape, &at, Some(VIEW));
+        assert!(!grabbed(&mut game), "let go at Escape");
+        game.click(overlay::Clicked::Pause);
+        assert!(!grabbed(&mut game), "Pause");
+        game.click(overlay::Clicked::Resume);
+        assert!(grabbed(&mut game), "Resume in Play");
+        let _ = game.route(&escape, &at, Some(VIEW));
+        let press = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        let _ = game.route(&press, &at, Some(VIEW));
+        assert!(!grabbed(&mut game), "a press in the view after Escape");
+        game.click(overlay::Clicked::Resume);
+        answer("status", true);
+        assert!(!grabbed(&mut game), "another client's stop");
+        answer("status", false);
+        game.view.toolbar.world_camera = true;
+        assert!(
+            !grabbed(&mut game),
+            "another client's play, through the game's camera"
+        );
+        game.click(overlay::Clicked::To(Mode::Simulate));
+        assert!(!grabbed(&mut game), "Simulate");
+        game.click(overlay::Clicked::To(Mode::Play));
+        assert!(grabbed(&mut game), "Play from Simulate");
+        game.click(overlay::Clicked::To(Mode::Edit));
+        assert!(!grabbed(&mut game), "Stop");
     }
 
     /// Through the editor's camera, the editor grabs the cursor while the camera looks about, from

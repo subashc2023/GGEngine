@@ -914,10 +914,11 @@ pub fn label(
     painter.galley(inner.min, galley, color);
 }
 
-/// Outlines `view`, which takes a texture or a model from the Assets panel let go over it, inside
-/// its edges in the selection's color, as egui lights its drop zones: painted on the view's own
-/// layer, as the name under the cursor is.
-pub fn outline_drop(egui: &egui::Context, view: &Response) {
+/// Outlines `view` inside its edges in the selection's color, as egui lights its drop zones: while
+/// an asset from the Assets panel is held over it, which it takes let go there, and in Play while it
+/// has the keys, which go to the game. Painted on the view's own layer, as the name under the cursor
+/// is.
+pub fn outline_view(egui: &egui::Context, view: &Response) {
     let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
     let color = egui.global_style().visuals.selection.stroke.color;
     painter.rect_stroke(view.rect, 0.0, Stroke::new(2.0, color), StrokeKind::Inside);
