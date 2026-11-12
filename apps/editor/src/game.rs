@@ -43,7 +43,8 @@
 //! says it does, has the editor grab its own window's in Play while the view has the keys, the
 //! mouse's raw motion going to the game; Escape lets go of it, whatever the game does with the key,
 //! which it gets, as a game may not let go itself, and a press in the view grabs it again;
-//! Simulate and Stop let go.
+//! Simulate and Stop let go. The editor's camera grabs the cursor too, while it looks about, orbits
+//! or dollies, as [`camera`](crate::camera) says.
 //!
 //! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
 //! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
@@ -2025,16 +2026,13 @@ impl Layer for Game {
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        self.take_frame(cx);
-        let published = self.reader.as_ref().map(Reader::published);
-        self.rates.see(Instant::now(), published);
-        // The game's grab, in Play alone; a Stop or Simulate ends what Escape did too.
+        // The game's grab, in Play alone, a Stop or Simulate ending what Escape did too; and the
+        // editor's camera's, while it looks about, orbits or dollies.
         let through = self.through();
         self.escaped &= through;
         let asked = self.reader.as_ref().is_some_and(Reader::cursor_grabbed);
-        cx.set_cursor_grabbed(through && asked && !self.escaped);
-        let driving = !self.view.toolbar.world_camera;
-        self.view.shown = self.seen.filter(|_| driving);
+        let games = through && asked && !self.escaped;
+        cx.set_cursor_grabbed(games || self.view.camera.grabs());
         let picked = picked(&self.view.link);
         self.view.hold(picked.as_ref());
         self.tell(cx.input().cursor(), cx.view());
@@ -2053,6 +2051,15 @@ impl Layer for Game {
             talker.ask("input", json!({ "events": events }));
             self.inputting = true;
         }
+        // After the look and the input: the game starts its next frame as the editor takes this
+        // one, and draws it with what came before. Sent after the take, a camera moving steadily
+        // showed the viewpoint of the frame before in a third of the game's frames, and twice the
+        // step in the next.
+        self.take_frame(cx);
+        let published = self.reader.as_ref().map(Reader::published);
+        self.rates.see(Instant::now(), published);
+        let driving = !self.view.toolbar.world_camera;
+        self.view.shown = self.seen.filter(|_| driving);
         // The File menu's request, and a close's status, once the game has answered the Inspector's
         // edits, which go on a connection of their own: so that the game has them first.
         let idle = self.view.link.idle();
@@ -2643,7 +2650,7 @@ mod tests {
 
     use super::*;
     use crate::assets::tests::{Scratch, find, texts};
-    use crate::camera::Tool;
+    use crate::camera::{Move, Tool};
     use crate::tests::{SCALE, VIEW, reading};
 
     /// The game runs embedded and starts stopped either way; `--release-game` has `gg run` build
@@ -3732,7 +3739,10 @@ mod tests {
         answer(mine.clone(), [Some(CLIENT), None, Some(CLIENT)], 1);
         let agents = orthographic([-3.0, 1.0, 4.0]);
         frame(agents, 2);
-        update(&mut game);
+        // At the update after the one that takes the frame, which sends before it takes.
+        for _ in 0..2 {
+            update(&mut game);
+        }
         assert_eq!(looks(&ends), [Look::default()], "a read");
         let x: EntityId = "0123456789abcdef".parse().expect("an ID");
         let outline = Outline {
@@ -3984,6 +3994,28 @@ mod tests {
         game.view.toolbar.world_camera = false;
         game.update(&mut cx, Duration::ZERO);
         assert!(!cx.cursor_grabbed(), "Simulate lets go");
+    }
+
+    /// Through the editor's camera, the editor grabs the cursor while the camera looks about, from
+    /// the right button's press in the view to its release; not while it pans.
+    #[test]
+    fn the_editors_camera_grabs_the_cursor_while_it_looks_about() {
+        let (mut game, _ends) = serving();
+        // Simulate, whose view's input is the editor's camera's.
+        game.view.toolbar.world_camera = false;
+        game.view.camera.perspective = true;
+        let mut cx = Context::seeded(1);
+        let at = reading([300.0, 200.0]);
+        let button = |button, pressed| Event::MouseButton { button, pressed };
+        for (pressed, grabbed) in [(true, true), (false, false)] {
+            let _ = game.route(&button(MouseButton::Right, pressed), &at, Some(VIEW));
+            game.update(&mut cx, Duration::ZERO);
+            assert_eq!(cx.cursor_grabbed(), grabbed, "right pressed: {pressed}");
+        }
+        let _ = game.route(&button(MouseButton::Middle, true), &at, Some(VIEW));
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.view.camera.moving(), Some(Move::Pan));
+        assert!(!cx.cursor_grabbed(), "panning");
     }
 
     #[test]

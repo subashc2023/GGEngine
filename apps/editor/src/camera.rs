@@ -3,7 +3,11 @@
 //! cursor; the middle button trucks and pedestals, keeping what's under the cursor there; the right
 //! button looks about in perspective and pans in orthographic, and, while it's held, W, A, S and D
 //! fly and Q and E roll; Alt with the left button orbits the pivot, and Alt with the right dollies.
-//! The left button alone does what the toolbar's tool says.
+//! The left button alone does what the toolbar's tool says. Looking about, orbiting and dollying go
+//! by the mouse's raw motion, the cursor grabbed meanwhile, hidden, and held where the drag started
+//! where the platform locks it: so that they go on past the screen's edges, and by the mouse's own
+//! steps, which pointer acceleration, as Windows' enhanced pointer precision, makes finer than the
+//! cursor's pixels at slow speeds. Panning follows the cursor.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::ops::ControlFlow;
@@ -21,10 +25,11 @@ const FOV: f32 = PI / 3.0;
 const START_HEIGHT: f32 = 10.0;
 /// The least and most the camera is from its pivot.
 const DISTANCES: [f32; 2] = [0.01, 100_000.0];
-/// How far looking about turns it for a point the cursor is dragged, in radians: the fly camera
-/// controller's.
+/// How far looking about turns it for a point the mouse moves, in radians: the fly camera
+/// controller's for a point the cursor is dragged. The mouse's raw motion counts as physical pixels,
+/// as Windows moves the cursor by it at its default speed without enhanced pointer precision.
 const LOOK: f32 = 0.003;
-/// How far orbiting turns it for a point the cursor is dragged, in radians.
+/// How far orbiting turns it for a point the mouse moves, in radians.
 const ORBIT: f32 = 0.005;
 /// How much a line of the wheel dollies it.
 const ZOOM: f32 = 1.1;
@@ -332,6 +337,12 @@ impl OrbitCamera {
         self.drag.map(|drag| drag.what)
     }
 
+    /// Whether the drag under way wants the cursor grabbed: looking about, orbiting and dollying,
+    /// which go by the mouse's raw motion; not panning, which keeps what's under the cursor there.
+    pub fn grabs(&self) -> bool {
+        self.drag.is_some_and(|drag| drag.what != Move::Pan)
+    }
+
     /// Whether it eases to where Home or a snap sends it.
     pub fn eases(&self) -> bool {
         self.ease.is_some()
@@ -409,13 +420,22 @@ impl OrbitCamera {
                 ControlFlow::Continue(())
             }
             Event::CursorMoved { x, y } => {
-                if let (Some(drag), Some([from_x, from_y]), Some(view)) =
-                    (self.drag, self.cursor, screen.view)
-                {
+                if let (Some(drag), Some([from_x, from_y]), Some(view)) = (
+                    self.drag.filter(|_| !self.grabs()),
+                    self.cursor,
+                    screen.view,
+                ) {
                     let pixels = Vec2::new((x - from_x) as f32, (y - from_y) as f32);
                     self.drag_by(drag, pixels, view, screen.scale);
                 }
                 self.cursor = Some([x, y]);
+                ControlFlow::Continue(())
+            }
+            Event::MouseMotion { x, y } => {
+                if let (Some(drag), Some(view)) = (self.drag.filter(|_| self.grabs()), screen.view)
+                {
+                    self.drag_by(drag, Vec2::new(x as f32, y as f32), view, screen.scale);
+                }
                 ControlFlow::Continue(())
             }
             Event::CursorLeft => {
@@ -560,8 +580,9 @@ impl OrbitCamera {
         });
     }
 
-    /// Moves the camera as `drag` does, for the cursor's move by `pixels`, in the main window's
-    /// physical pixels, `scale` to a point, over `view`.
+    /// Moves the camera as `drag` does, for a move by `pixels`, in the main window's physical
+    /// pixels, `scale` to a point, over `view`: the cursor's, for a pan, and the mouse's raw motion,
+    /// counted as pixels, for the drags that grab the cursor.
     fn drag_by(&mut self, drag: Drag, pixels: Vec2, view: Viewport, scale: f32) {
         let points = pixels / scale;
         match drag.what {
@@ -700,12 +721,25 @@ mod tests {
         send(camera, event, false, Tool::Select)
     }
 
-    /// Drags `button` from `from` to `to` in a few moves, holding Alt if `alt`, and lets go.
+    /// The mouse's raw motion by `by`.
+    fn motion(camera: &mut OrbitCamera, by: Vec2) {
+        let event = Event::MouseMotion {
+            x: f64::from(by.x),
+            y: f64::from(by.y),
+        };
+        let _ = send(camera, event, false, Tool::Select);
+    }
+
+    /// Drags `button` from `from` to `to` in a few moves, holding Alt if `alt`, and lets go: each
+    /// the mouse's raw motion and the cursor's move by as much, as a mouse at the OS's default
+    /// pointer speed gives both.
     fn drag(camera: &mut OrbitCamera, button: MouseButton, alt: bool, from: Vec2, to: Vec2) {
         move_to(camera, from);
         self::button(camera, button, true, alt, Tool::Select);
-        for step in 1..=4 {
-            move_to(camera, from + (to - from) * step as f32 / 4.0);
+        let step = (to - from) / 4.0;
+        for steps in 1..=4 {
+            motion(camera, step);
+            move_to(camera, from + step * steps as f32);
         }
         self::button(camera, button, false, alt, Tool::Select);
     }
@@ -881,6 +915,41 @@ mod tests {
         drag(&mut camera, MouseButton::Left, true, from, to);
         assert_eq!(camera.pose.pivot, pivot);
         assert!(!eye(&camera).abs_diff_eq(start, 0.1));
+    }
+
+    /// Looking about, orbiting and dollying go by the mouse's raw motion alone, and want the cursor
+    /// grabbed, which holds it still, so that they go on past the screen's edges; panning goes by
+    /// the cursor alone, and doesn't.
+    #[test]
+    fn turning_and_dollying_go_by_the_mouses_motion_and_panning_by_the_cursor() {
+        for (perspective, button, alt, what) in [
+            (true, MouseButton::Right, false, Move::Look),
+            (true, MouseButton::Left, true, Move::Orbit),
+            (true, MouseButton::Right, true, Move::Dolly),
+            (false, MouseButton::Middle, false, Move::Pan),
+        ] {
+            let mut camera = turned(perspective);
+            let from = Vec2::new(400.0, 300.0);
+            move_to(&mut camera, from);
+            assert!(!camera.grabs(), "{what:?}, before the press");
+            self::button(&mut camera, button, true, alt, Tool::Select);
+            assert_eq!(camera.moving(), Some(what));
+            let grabs = what != Move::Pan;
+            assert_eq!(camera.grabs(), grabs, "{what:?}");
+            let pose = camera.pose;
+            // The cursor held, as a grab holds it, while the mouse goes on.
+            motion(&mut camera, Vec2::new(30.0, -20.0));
+            assert_eq!(
+                camera.pose != pose,
+                grabs,
+                "{what:?}, by the mouse's motion"
+            );
+            let pose = camera.pose;
+            move_to(&mut camera, from + Vec2::new(30.0, -20.0));
+            assert_eq!(camera.pose != pose, !grabs, "{what:?}, by the cursor");
+            self::button(&mut camera, button, false, alt, Tool::Select);
+            assert!(!camera.grabs(), "{what:?}, let go");
+        }
     }
 
     #[test]

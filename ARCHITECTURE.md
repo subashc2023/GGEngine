@@ -432,7 +432,9 @@ in the editor is out of an agent's reach.
   the mouse's raw motion going to the game through `input`, letting go at Escape, which the game
   gets too, as a game may not let go itself, until a press in the view. A game run `--embedded`
   renders its view at the size the client asks, and runs each
-  frame once the client has taken the last, rather than rendering frames it never takes. The view
+  frame once the client has taken the last, rather than rendering frames it never takes: so a
+  client sends what the next frame is to draw with, its look and input, before it takes the last,
+  or that frame draws without them. The view
   has one look, as the engine renders one view, which every client sets part by part, the last to
   set a part winning: the viewpoint it sees from, in place of the game's own; the entity it
   outlines; a grid on one of the world's axis planes; whether the colliders' outlines show; and
