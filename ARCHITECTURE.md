@@ -108,10 +108,12 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
   turns the view to the editor's camera, which carries on from where the view was, as it does
   whenever it takes the view over; a New or an Open turns it to the game's camera, as the editor
-  starts, which frames the scene opened. F over the view, and a double click on a row of its
-  Entities panel, that row's Frame in View or F in the panel, frame the pick: the editor's camera
-  eases to look at its origin, turned as it was and as far back, as no entity's size reaches the
-  editor, and the view turns to it. Its Scenes panel, below the Entities, lists the scene files in
+  starts, which frames the scene opened, until, in Edit, a frame through it shows: then the
+  editor's camera takes over from where it sees, with the handles and the grid. F over the view,
+  and a double click on a row of its Entities panel, that row's Frame in View or F in the panel,
+  frame the pick: the editor's camera eases to look at its origin, turned as it was and as far
+  back, as no entity's size reaches the editor, and the view turns to it. Its Scenes panel, below
+  the Entities, lists the scene files in
   the project's scenes folders, a click opening one as the File menu's Open does. Its Debugger
   panel debugs the game's scripts through the API: the source of each script the game runs, a click
   on a line's number setting or clearing a breakpoint there, which the editor keeps and gives each

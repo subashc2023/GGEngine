@@ -102,6 +102,18 @@ impl Looking {
         self.drawn = revision;
     }
 
+    /// Whether a frame that drew with the look's revision `drawn` drew through the game's own
+    /// camera, as far as the editor knows: the look it last read, the one the frame drew with, has
+    /// no viewpoint, and the editor hasn't changed the viewpoint since, nor asked to set it in a
+    /// look whose answer waits. A frame of a later look waits for the editor to read it.
+    pub fn through_games_camera(&self, drawn: u64) -> bool {
+        let asked = (self.asked.as_ref()).is_some_and(|look| look.viewpoint.is_some());
+        drawn == self.revision
+            && self.known.viewpoint.is_none()
+            && !self.changed[Part::Viewpoint as usize]
+            && !asked
+    }
+
     /// The look to send the game, while none waits for its answer: the parts changed since the
     /// last, of those `wanted` that the look doesn't hold, as they're wanted now; or else, if a
     /// frame drew with a later look than the editor knows, a read, which sets nothing.

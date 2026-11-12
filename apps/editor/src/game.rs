@@ -246,6 +246,12 @@ struct Game {
     /// if that projects.
     size: Option<[u32; 2]>,
     seen: Option<Viewpoint>,
+    /// Whether the view sees through the game's camera only for the editor's camera to adopt where
+    /// it sees from, as the editor starts and as a New or an Open is done, so that the view frames
+    /// the scene the game has: in Edit, the first frame that drew through it turns the view to the
+    /// editor's camera, which shows the handles and the grid. Any other turn of the view, and a
+    /// Play or Simulate, end it.
+    adopting: bool,
     /// The memory the game's view is shared through, and memory a `view` asked the game to share it
     /// through instead, until the game answers; and whether the game refused a `view`, after which
     /// the editor asks for none until another game serves.
@@ -461,8 +467,9 @@ enum Level {
 }
 
 impl Game {
-    /// The layer of the project in directory `dir`, or of none, through the game's camera at
-    /// first, whose tools pick and edit through `inspector`, the Inspector's link.
+    /// The layer of the project in directory `dir`, or of none, through the game's camera until
+    /// the editor's adopts where it sees from, whose tools pick and edit through `inspector`, the
+    /// Inspector's link.
     fn new(dir: Option<PathBuf>, inspector: InspectorLink) -> Self {
         let (send, lines) = mpsc::channel();
         let toolbar = Toolbar {
@@ -502,6 +509,7 @@ impl Game {
             told: false,
             size: None,
             seen: None,
+            adopting: true,
             reader: None,
             asked: None,
             refused: false,
@@ -969,6 +977,7 @@ impl Game {
         self.ask("play");
         self.playing += 1;
         self.view.toolbar.world_camera = to == Mode::Play;
+        self.adopting = false;
     }
 
     /// Asks the game for a step, a tick, which pauses it; a stopped game is first paused, then
@@ -1298,15 +1307,16 @@ impl Game {
     }
 
     /// Goes on from the File menu's request, `scene`, that the game did: from a New or an Open, to
-    /// the view through the game's camera, as the editor starts, so that it frames the scene the
-    /// game has now, rather than the editor's camera framing the one before, whose grid goes too,
-    /// as the user's turn would; but not while a Play or Simulate clicked since waits for its
-    /// answer, which turned the view itself; from a save, to what was to follow it.
+    /// the view through the game's camera, as the editor starts, until the editor's adopts where it
+    /// sees from, so that it frames the scene the game has now, rather than the one before, whose
+    /// grid goes too, as the user's turn would; but not while a Play or Simulate clicked since waits
+    /// for its answer, which turned the view itself; from a save, to what was to follow it.
     fn scene_done(&mut self, scene: &Scene) {
         if scene.action != SceneAction::Save {
             let toolbar = &mut self.view.toolbar;
             if !toolbar.world_camera && self.playing == 0 {
                 toolbar.world_camera = true;
+                self.adopting = true;
                 // `changes`, which runs before the answers are taken, doesn't see this turn.
                 self.looking.change(Part::Viewpoint);
                 self.looking.follow(Part::Grid);
@@ -1684,8 +1694,12 @@ impl Game {
 
     /// Shows the game's latest frame, if one came since: what it was drawn from is what the handles
     /// are hit against, while it projects, and the editor's camera adopts it while the game's
-    /// drives the view; and the look it drew with may have changed since the editor last read it.
+    /// drives the view, in Edit turning the view to the editor's camera, if the game's turned only
+    /// for that, once a frame drew through the game's; and the look it drew with may have changed
+    /// since the editor last read it.
     fn take_frame(&mut self, cx: &mut Context) {
+        // Another turn of the view's ends the adoption.
+        self.adopting &= self.view.toolbar.world_camera;
         let Some(reader) = &mut self.reader else {
             return;
         };
@@ -1703,6 +1717,11 @@ impl Game {
             && let Some(seen) = self.seen
         {
             self.view.camera.adopt(&seen);
+            let edit = self.mode() == Mode::Edit && self.playing == 0;
+            if self.adopting && edit && self.looking.through_games_camera(frame.look) {
+                self.view.toolbar.world_camera = false;
+                self.adopting = false;
+            }
         }
         self.looking.drew(frame.look);
     }
@@ -3725,6 +3744,112 @@ mod tests {
         assert_eq!(looks(&ends), [back]);
     }
 
+    /// The game's camera, which the view sees through as the editor starts and after a New or an
+    /// Open, only frames the scene: stopped, the first frame that drew through it turns the view to
+    /// the editor's camera, from where it saw, the handles and the grid showing, whose viewpoint
+    /// goes to the game with the grid. Not a frame drawn before the game gave its viewpoint back,
+    /// whose answer it waits for; nor through the toolbar's switch, which the user turned.
+    #[test]
+    fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        let reader = Reader::create(4, 4).expect("memory");
+        let mut writer = Writer::open(reader.name()).expect("opened");
+        game.reader = Some(reader);
+        // A viewpoint at `position`, turned as the editor's camera starts, 4 units tall.
+        let orthographic = |position| gg_api::Viewpoint {
+            position,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Orthographic {
+                height: 4.0,
+                near: -40.0,
+                far: 40.0,
+            },
+        };
+        let mut frame = |viewpoint, look| {
+            let published = writer.publish([4, 4], 0, SystemTime::now(), viewpoint, look, |_| {});
+            published.expect("published");
+        };
+        // The game answers a look whose viewpoint and grid the editor set, or else the game's own,
+        // at `revision`.
+        let answer = |parts: Parts, revision| {
+            let mine = |set: bool| set.then(|| CLIENT.to_owned());
+            let looked = Looked {
+                by: By {
+                    viewpoint: mine(parts.viewpoint.is_some()),
+                    grid: mine(parts.grid.is_some()),
+                    ..By::default()
+                },
+                viewpoint: parts.viewpoint,
+                outline: None,
+                grid: parts.grid,
+                colliders: None,
+                show: None,
+                skip: None,
+                revision,
+                run: 1,
+                seen: None,
+            };
+            let answer = ("look".to_owned(), Ok(json!(looked)));
+            ends.answer.send(answer).expect("sent");
+        };
+        let mut cx = Context::seeded(1);
+        let mut update = |game: &mut Game| game.update(&mut cx, Duration::ZERO);
+        assert!(game.view.toolbar.world_camera, "as it starts");
+        frame(orthographic([1.0, 2.0, 5.0]), 0);
+        update(&mut game);
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        let seen = game.view.camera.viewpoint();
+        assert_eq!(seen.position.truncate(), Vec2::new(1.0, 2.0), "as it saw");
+        update(&mut game);
+        let mine = Parts {
+            viewpoint: Some(api_viewpoint(&game.view.camera.viewpoint())),
+            grid: Some(gg_api::Plane::Xy),
+            ..Parts::default()
+        };
+        let sent = Look {
+            viewpoint: Some(mine.viewpoint),
+            grid: Some(mine.grid),
+            ..Look::default()
+        };
+        assert_eq!(looks(&ends), [sent]);
+        answer(mine.clone(), 1);
+        update(&mut game);
+        // An Open, done as a frame drawn from the editor's viewpoint comes.
+        game.open(PathBuf::from("scenes/level2.ron"));
+        update(&mut game);
+        let opened = scene_status(Some("scenes/level2.ron"), false);
+        ends.answer
+            .send(("scene".to_owned(), opened))
+            .expect("sent");
+        frame(mine.viewpoint.expect("a viewpoint"), 1);
+        update(&mut game);
+        assert!(
+            game.view.toolbar.world_camera,
+            "until the game gives it back"
+        );
+        let _ = looks(&ends);
+        answer(Parts::default(), 2);
+        frame(orthographic([-3.0, 1.0, 4.0]), 2);
+        update(&mut game);
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        let seen = game.view.camera.viewpoint();
+        assert_eq!(seen.position.truncate(), Vec2::new(-3.0, 1.0), "as it saw");
+        update(&mut game);
+        assert_eq!(looks(&ends).len(), 1, "its viewpoint and the grid");
+        answer(mine, 3);
+        update(&mut game);
+        // The toolbar's switch, for which a test sets the field.
+        game.view.toolbar.world_camera = true;
+        update(&mut game);
+        answer(Parts::default(), 4);
+        frame(orthographic([0.0, 0.0, 4.0]), 4);
+        for _ in 0..2 {
+            update(&mut game);
+        }
+        assert!(game.view.toolbar.world_camera, "the user's turn");
+    }
+
     /// In Play, a press or a repeat of N, O or S with the command key held, a key of the File
     /// menu's shortcuts, goes neither to the game nor to the view's tools; its release does, and so
     /// do other keys with it, and those keys without it.
@@ -3831,7 +3956,8 @@ mod tests {
     }
 
     /// A part of the look goes to the game only as the user changes it: not as the editor's camera
-    /// adopts the frames' viewpoints through the game's camera, nor as it takes another client's
+    /// adopts the frames' viewpoints through the game's camera, which the toolbar's switch turned
+    /// the view to, nor as it takes another client's
     /// viewpoint while it drives, nor as it settles after; nor as the Inspector makes the pick
     /// another client's outline asks for. A wheel, while the game is stopped, turns the view to the
     /// editor's camera, from where the frames left it, whose viewpoint goes, with the grid; the
@@ -3840,8 +3966,9 @@ mod tests {
     #[test]
     fn the_look_goes_to_the_game_as_the_user_changes_it() {
         let (mut game, ends) = serving();
-        // As it starts, so that the wheel is the editor's camera's.
-        (game.stopped, game.told) = (true, false);
+        // Stopped, so that the wheel is the editor's camera's, through the game's camera by the
+        // toolbar's switch, rather than as it starts, whose first frame would turn the view.
+        (game.stopped, game.told, game.adopting) = (true, false, false);
         let reader = Reader::create(4, 4).expect("memory");
         let mut writer = Writer::open(reader.name()).expect("opened");
         game.reader = Some(reader);
