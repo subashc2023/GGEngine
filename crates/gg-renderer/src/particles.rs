@@ -549,6 +549,8 @@ struct EmitPush {
     from: u64,
     count: u32,
     first: u32,
+    shift: [f32; 3],
+    unused: u32,
 }
 
 /// What `shaders/particles.slang` pushes: `DrawPush` there.
@@ -729,6 +731,8 @@ pub(crate) struct ParticlePlan {
     pub(crate) pool: BufferId,
     emit: PassId,
     grow: Option<(BufferId, PassId, u32)>,
+    /// The pass that moves the pool's particles as the origin moved, by how far, and its slots.
+    moved: Option<(PassId, Vec3, u32)>,
 }
 
 impl ParticlePlan {
@@ -751,10 +755,14 @@ pub(crate) struct Emitted {
 pub(crate) struct ParticlePass {
     emit: ComputePipeline,
     grow: ComputePipeline,
+    moved: ComputePipeline,
     draw: Pipeline,
     rings: Rings,
     /// Each planned emitter's part of the frame, as the shaders read it.
     emitters: Vec<GpuEmitter>,
+    /// How far the origin moved since the frame that last drew particles, which the next frame
+    /// that draws them moves them by.
+    shift: Vec3,
 }
 
 impl ParticlePass {
@@ -780,10 +788,19 @@ impl ParticlePass {
         Ok(Self {
             emit: ComputePipeline::new(device, "particle emission", EMIT, c"emit_main")?,
             grow: ComputePipeline::new(device, "particle pool growth", EMIT, c"grow_main")?,
+            moved: ComputePipeline::new(device, "particle pool moved", EMIT, c"moved_main")?,
             draw,
             rings: Rings::default(),
             emitters: Vec::new(),
+            shift: Vec3::ZERO,
         })
+    }
+
+    /// Takes the particles alive into the space of a frame whose origin is `by` further along than
+    /// the frame before's, as the next frame that draws them moves them, before their births:
+    /// what was at `p` is at `p - by`, as [`RenderData::origin`](crate::RenderData::origin) says.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        self.shift += by;
     }
 
     /// Declares in `graph` what `draws`' particles take, if it has any, as [`Rings::plan`] plans
@@ -791,6 +808,9 @@ impl ParticlePass {
     /// a frame that grows it, and the pass that writes the births, on the graphics queue, before
     /// the passes that draw.
     pub(crate) fn plan(&mut self, graph: &mut Graph, draws: &Draws) -> Option<ParticlePlan> {
+        // What the origin moved by since the pool's particles were born, which a frame without
+        // them, which lets them go, forgets.
+        let shift = std::mem::replace(&mut self.shift, Vec3::ZERO);
         let pool = self.rings.plan(&draws.particles)?;
         let bytes = |slots: u32| u64::from(slots) * RECORD;
         let from = (pool.grown_from.filter(|&slots| slots > 0))
@@ -802,6 +822,10 @@ impl ParticlePass {
             let pass = grow.write_buffer(from).write_buffer(buffer).add();
             (from, pass, slots)
         });
+        let moved = (shift != Vec3::ZERO).then(|| {
+            let moved = graph.compute(label!("particles moved"));
+            (moved.write_buffer(buffer).add(), shift, pool.slots)
+        });
         let emit = (graph.compute(label!("particles")))
             .write_buffer(buffer)
             .add();
@@ -809,6 +833,7 @@ impl ParticlePass {
             pool: buffer,
             emit,
             grow,
+            moved,
         })
     }
 
@@ -847,6 +872,29 @@ impl ParticlePass {
                     from,
                     count: words,
                     first,
+                    shift: [0.0; 3],
+                    unused: 0,
+                };
+                pass.push_constants(bytemuck::bytes_of(&push));
+                pass.dispatch([groups, 1, 1]);
+                first += groups * GROUP;
+            }
+        }
+        if let Some((pass, by, slots)) = plan.moved {
+            let mut pass = frame.compute(pass);
+            let pool = pass.address(plan.pool);
+            pass.set_pipeline(&self.moved);
+            let mut first = 0;
+            while first < slots {
+                let groups = (slots - first).div_ceil(GROUP).min(MOST_GROUPS);
+                let push = EmitPush {
+                    pool,
+                    emitter: 0,
+                    from: 0,
+                    count: slots,
+                    first,
+                    shift: by.to_array(),
+                    unused: 0,
                 };
                 pass.push_constants(bytemuck::bytes_of(&push));
                 pass.dispatch([groups, 1, 1]);
@@ -871,6 +919,8 @@ impl ParticlePass {
                 from: 0,
                 count,
                 first: 0,
+                shift: [0.0; 3],
+                unused: 0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             // At most `MAX_PARTICLES` slots, of 16,384 workgroups.

@@ -115,6 +115,9 @@ pub(crate) fn same(a: &Value, b: &Value) -> bool {
         (Value::Vec2(a), Value::Vec2(b)) => floats(a.as_ref(), b.as_ref()),
         (Value::Vec3(a), Value::Vec3(b)) => floats(a.as_ref(), b.as_ref()),
         (Value::Vec4(a), Value::Vec4(b)) => floats(a.as_ref(), b.as_ref()),
+        (Value::DVec3(a), Value::DVec3(b)) => {
+            a.to_array().map(f64::to_bits) == b.to_array().map(f64::to_bits)
+        }
         (Value::Quat(a), Value::Quat(b)) => floats(&a.to_array(), &b.to_array()),
         (Value::Option(Some(a)), Value::Option(Some(b))) => same(a, b),
         (Value::List(a), Value::List(b)) => {
@@ -196,7 +199,7 @@ fn types_describe_their_fields_once_each() {
     let ty = |name| field(types, &transform, name).ty.clone();
     assert_eq!(
         [ty("translation"), ty("rotation"), ty("scale")],
-        [Type::Vec3, Type::Quat, Type::Vec3]
+        [Type::DVec3, Type::Quat, Type::Vec3]
     );
     assert_eq!(
         field(types, &transform, "rotation").meta.doc,
@@ -459,7 +462,7 @@ fn paths_lead_to_fields_and_their_hints() {
             Type::Named(types.find("Transform").expect("described"))
         )
     );
-    assert_eq!(at("Transform", "translation.x"), (vec![0, 0], Type::F32));
+    assert_eq!(at("Transform", "translation.x"), (vec![0, 0], Type::F64));
     assert_eq!(at("Transform", "scale.z"), (vec![2, 2], Type::F32));
     assert_eq!(at("Sprite", "rect[1].y"), (vec![2, 1, 1], Type::F32));
     let u16 = Type::Int {
@@ -596,7 +599,7 @@ fn values_come_back_bit_for_bit() {
     round_trip(Pair(1, -1));
     round_trip(Unit);
     round_trip(Transform {
-        translation: Vec3::new(1.0, -0.0, 2.0),
+        translation: DVec3::new(1.0, -0.0, 2.0),
         rotation: Quat::from_rotation_z(0.5),
         scale: Vec3::splat(2.0),
     });

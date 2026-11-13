@@ -5,7 +5,7 @@
 
 use std::any::Any;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 
 use super::{
     Angle, Color, Digest, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind,
@@ -167,9 +167,9 @@ impl Ranged for f32 {}
 impl Ranged for f64 {}
 impl Angle for f32 {}
 
-/// Vectors, whose components are their parts.
+/// Vectors, whose components, each a `$S`, are their parts, digested as `$S`s are.
 macro_rules! vectors {
-    ($($T:ident,)*) => {$(
+    ($($T:ident: $S:ident,)*) => {$(
         impl Reflect for $T {
             fn describe(_: &mut Types) -> Result<Type> {
                 Ok(Type::$T)
@@ -196,19 +196,19 @@ macro_rules! vectors {
             }
 
             fn part(&self, index: u32) -> Option<&dyn Reflect> {
-                let components: &[f32] = self.as_ref();
+                let components: &[$S] = self.as_ref();
                 Some(components.get(index as usize)?)
             }
 
             fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
-                let components: &mut [f32] = self.as_mut();
+                let components: &mut [$S] = self.as_mut();
                 Some(components.get_mut(index as usize)?)
             }
 
             fn digest(&self, to: &mut Digest<'_>) {
-                let components: &[f32] = self.as_ref();
+                let components: &[$S] = self.as_ref();
                 for &component in components {
-                    to.f32(component);
+                    to.$S(component);
                 }
             }
 
@@ -220,9 +220,10 @@ macro_rules! vectors {
 }
 
 vectors! {
-    Vec2,
-    Vec3,
-    Vec4,
+    Vec2: f32,
+    Vec3: f32,
+    Vec4: f32,
+    DVec3: f64,
 }
 
 impl Color for Vec3 {}

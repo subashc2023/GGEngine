@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use bytemuck::NoUninit;
 #[cfg(feature = "dev")]
 use gg_api::asset::{AssetId, AssetKind};
-use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Antialiasing, Blend, Circle, Draws, Grade, Line, MAX_PICKS, Materials, Mesh, Meshes, Mipmaps,
@@ -350,6 +350,8 @@ pub struct Context {
     antialiasing: Option<Antialiasing>,
     /// What a layer set the view to see from this frame, in place of the world's camera.
     viewpoint: Option<Viewpoint>,
+    /// What the frame's draws are relative to, as [`origin`](Self::origin) says.
+    origin: DVec3,
     /// Where the world's camera saw from as the world was last drawn, if it has one, and its ID.
     seen: Option<(EntityId, Viewpoint)>,
     /// Where the view's viewpoint came from in the last frame handed off, and whether it had
@@ -748,6 +750,7 @@ impl Context {
             clear_color: [0.02, 0.02, 0.02, 1.0],
             antialiasing: None,
             viewpoint: None,
+            origin: DVec3::ZERO,
             seen: None,
             seer: None,
             tie: None,
@@ -1017,6 +1020,29 @@ impl Context {
     /// could, or the default's, once for a warning (`engine.bad_projection`) as the frame takes it.
     pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
         self.viewpoint = Some(viewpoint);
+    }
+
+    /// What every matrix and position a frame draws is relative to, in `f32`, as
+    /// [`RenderData::origin`](gg_renderer::RenderData::origin) says: the engine draws the world
+    /// from it, and takes what layers draw in the world, by [`draw`](Self::draw),
+    /// [`draw_sprite`](Self::draw_sprite) and the rest, from it, so that what's near the view draws
+    /// as precisely 1,000 km from the world's origin as at it, but as far as a layer's `f32`s
+    /// reach. A multiple of 1,024 on each axis near where the view saw from the frame before, or,
+    /// in a development build, where the look's viewpoint is: it moves once the view is more than
+    /// 1,024 from it on an axis, to the nearest, so never while the view stays within 1,024 of the
+    /// world's origin.
+    pub fn origin(&self) -> DVec3 {
+        self.origin
+    }
+
+    /// Moves the [origin](Self::origin) to follow the look's viewpoint, in a frame that isn't bare,
+    /// before the layers draw, so that a frame drawn the moment a tool looks from far off draws
+    /// near it as precisely as the frames after.
+    #[cfg(feature = "dev")]
+    pub(crate) fn follow_look(&mut self) {
+        if let Some(looked) = self.look.viewpoint.filter(|_| !self.look.bare) {
+            self.origin = followed(self.origin, looked.position);
+        }
     }
 
     /// Where the game's view was in the main window as the last frame handed it to the renderer:
@@ -3603,6 +3629,7 @@ impl Context {
         transform: Mat4,
         params: P,
     ) {
+        let transform = relative(transform, self.origin);
         self.draws.push(mesh, shader, transform, params);
     }
 
@@ -3612,7 +3639,7 @@ impl Context {
     /// Unscaled, a sprite is a unit square around the transform's translation, as [`Sprite`] says.
     /// It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
-        self.draws.push_sprite(transform, sprite);
+        (self.draws).push_sprite(relative(transform, self.origin), sprite);
     }
 
     /// Draws `circle` this frame, where `transform` places it in the world, over what's drawn
@@ -3621,6 +3648,7 @@ impl Context {
     /// Unscaled, a circle is a unit across, around the transform's translation, as [`Circle`]
     /// says. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_circle(&mut self, transform: Mat4, circle: Circle) {
+        let transform = relative(transform, self.origin);
         self.draws.push_circle(&mut self.shaders, transform, circle);
     }
 
@@ -3641,6 +3669,7 @@ impl Context {
     ///
     /// If `style.font` is another context's.
     pub fn draw_text(&mut self, transform: Mat4, text: &str, style: &TextStyle) {
+        let transform = relative(transform, self.origin);
         let glyphs = self.fonts.lay_out(transform, text, style, 0);
         self.draws.extend_glyphs(&mut self.shaders, glyphs);
     }
@@ -3652,9 +3681,10 @@ impl Context {
     /// well as what layers draw, but where an opaque mesh is nearer, so that it shows as debugging
     /// wants. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_line(&mut self, from: Vec3, to: Vec3, color: Vec4, width: f32) {
+        let origin = self.origin.as_vec3();
         let line = Line {
-            from,
-            to,
+            from: from - origin,
+            to: to - origin,
             color,
             width,
         };
@@ -3666,6 +3696,7 @@ impl Context {
     /// across around its translation unscaled, as a sprite is: its four sides, as
     /// [`draw_line`](Self::draw_line) draws lines, which meet at its corners.
     pub fn draw_rect(&mut self, transform: Mat4, color: Vec4, width: f32) {
+        let transform = relative(transform, self.origin);
         self.over
             .push_rect(&mut self.shaders, transform, color, width, 0);
     }
@@ -3766,8 +3797,8 @@ impl Context {
         let Some(view) = self.view else {
             return;
         };
-        if let Some((transform, grid)) = grid::quad(viewpoint, view, grid::shown(viewpoint, plane))
-        {
+        let shown = grid::shown(viewpoint, plane);
+        if let Some((transform, grid)) = grid::quad(viewpoint, view, shown, self.origin) {
             (self.draws).push_grid(&mut self.meshes, &mut self.shaders, transform, grid);
         }
     }
@@ -4286,10 +4317,10 @@ impl Context {
         let mut radius = VIEWED_RADIUS;
         for (entity, viewer) in self.world.query::<(Entity, &cells::Viewer)>() {
             radius = radius.max(viewer.radius);
-            let at = self.world.pose(entity).expect("alive").matrix.w_axis;
+            let at = self.world.pose(entity).expect("alive").matrix.translation;
             viewers.push(gg_api::ViewerAt {
                 entity: self.world.id(entity).map(|id| id.to_string()),
-                position: at.truncate().to_array(),
+                position: at.to_array(),
                 radius: viewer.radius,
             });
         }
@@ -5150,11 +5181,18 @@ impl Context {
         (self.placed).draw(&self.world, &self.past, alpha, self.tick_started, held);
         let (made, meshes, draws) = (&self.loaded.made, &mut self.meshes, &mut self.draws);
         (self.skins).find(&self.world, &self.placed, made, meshes, draws);
-        (self.opaque).hold(&self.world, &self.placed, &self.skins, &mut self.scene);
+        let origin = self.origin;
+        (self.opaque).hold(
+            &self.world,
+            &self.placed,
+            &self.skins,
+            &mut self.scene,
+            origin,
+        );
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         self.seen = camera::seen(world, past, placed, alpha, &mut self.tie);
         self.environment = environment::seen(world, &mut self.environment_tie);
-        (self.lit).find(world, past, placed, alpha, self.tick_started);
+        (self.lit).find(world, past, placed, (alpha, self.origin), self.tick_started);
         self.time = time;
         #[cfg(feature = "dev")]
         if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
@@ -5166,12 +5204,13 @@ impl Context {
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
         let scratch = &mut self.scratch;
+        let drawn = (alpha, self.origin);
         draw::draw_world(
-            world, past, placed, alpha, ticks, draws, shaders, fonts, scratch,
+            world, past, placed, drawn, ticks, draws, shaders, fonts, scratch,
         );
         let (colliders, navmesh) = (self.colliders_drawn(), self.navmesh_drawn());
         if (colliders || navmesh)
-            && let Some(poses) = Poses::new(world, past, placed, alpha)
+            && let Some(poses) = Poses::new(world, past, placed, alpha, self.origin)
         {
             let scale = self.scale() as f32;
             let (over, shaders) = (&mut self.over, &mut self.shaders);
@@ -5202,7 +5241,7 @@ impl Context {
         let cells_in = state.cells_in.iter().map(|&cell| (cell, CELL_IN));
         let refused = state.refused.iter().map(|&cell| (cell, CELL_REFUSED));
         for (cell, color) in cells_in.chain(refused) {
-            let low = cell.0.as_vec3() * size;
+            let low = (cell.0.as_dvec3() * f64::from(size) - self.origin).as_vec3();
             // Along each axis, the four edges from the corners low on it.
             for (axis, corner) in (0..3).flat_map(|axis| (0..4).map(move |corner| (axis, corner))) {
                 let mut from = low;
@@ -5253,8 +5292,9 @@ impl Context {
     /// viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
     /// default, which hears the sounds playing from a place, as [`Place`] says, and whether the
-    /// view is cut to it, as it comes from elsewhere than the last frame's, as [`Seer`] says; what
-    /// a layer
+    /// view is cut to it, as it comes from elsewhere than the last frame's, as [`Seer`] says; the
+    /// origin the frame drew from, which then follows that viewpoint, as [`origin`](Self::origin)
+    /// says; what a layer
     /// outlined this frame, which it forgets too; the pixels the view shows,
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
     /// last took it, after what `frame` still holds, the images the loader has decoded since among
@@ -5336,6 +5376,8 @@ impl Context {
         let (seer, viewpoint) = seen;
         let viewpoint = camera::checked(viewpoint, seer, &mut self.projection);
         frame.viewpoint = viewpoint;
+        frame.origin = self.origin;
+        self.origin = followed(self.origin, viewpoint.position);
         let perspective = matches!(viewpoint.projection, crate::Projection::Perspective { .. });
         frame.cut = self.seer != Some((seer, perspective));
         self.seer = Some((seer, perspective));
@@ -5406,6 +5448,30 @@ impl Context {
             self.picked.push((pick, None));
         }
     }
+}
+
+/// How far apart on each axis the points a frame's [origin](Context::origin) can be at are, and how
+/// far on one the view goes from it before it moves: a power of two, so that the origin is exact
+/// in `f32`, and positions within it of the origin step by less than 0.25 mm in `f32`.
+const ORIGIN_STEP: f64 = 1024.0;
+
+/// The origin a frame after one drawn from `origin` draws from, the view having seen from `at`:
+/// `origin` while `at` is within [`ORIGIN_STEP`] of it on every axis, or isn't finite; else `at`
+/// rounded to a multiple of it on each axis. So it moves at most once for each half a step the view
+/// travels, and never for a view within a step of the world's origin.
+fn followed(origin: DVec3, at: DVec3) -> DVec3 {
+    let near = (at - origin).abs().cmple(DVec3::splat(ORIGIN_STEP)).all();
+    if near || !at.is_finite() {
+        return origin;
+    }
+    (at / ORIGIN_STEP).round() * ORIGIN_STEP
+}
+
+/// `transform`, which places something in the world, placing it relative to `origin` instead.
+fn relative(transform: Mat4, origin: DVec3) -> Mat4 {
+    let mut relative = transform;
+    relative.w_axis -= origin.as_vec3().extend(0.0);
+    relative
 }
 
 /// The refusal of the scene `scene` in a run without an asset root, as [`App::root`] gives one
@@ -6722,6 +6788,63 @@ mod tests {
         assert_eq!(lines(&mut cx), 3 * 12);
     }
 
+    /// The frame's origin stays at the world's while the view is within 1,024 of it on every axis,
+    /// and from the frame after one whose view went past, is where the view was, rounded to a
+    /// multiple of 1,024 on each axis, the frame that went past drawing from where it was; what a
+    /// layer draws in the world is drawn from it; a view that isn't finite leaves it; and in a
+    /// development build, the look's viewpoint moves it as a frame starts.
+    #[test]
+    fn the_origin_follows_the_view_a_step_of_1024_at_a_time() {
+        let x = |x| DVec3::new(x, 0.0, 0.0);
+        let near = DVec3::new(1024.0, -1024.0, 3.0);
+        assert_eq!(followed(DVec3::ZERO, near), DVec3::ZERO);
+        let past = DVec3::new(1024.5, 0.0, -1500.0);
+        assert_eq!(
+            followed(DVec3::ZERO, past),
+            DVec3::new(1024.0, 0.0, -1024.0)
+        );
+        assert_eq!(followed(x(1024.0), x(2048.0)), x(1024.0));
+        assert_eq!(followed(x(1024.0), x(2049.0)), x(2048.0));
+        for broken in [DVec3::new(f64::NAN, 1.0e9, 0.0), x(f64::INFINITY)] {
+            assert_eq!(followed(x(1024.0), broken), x(1024.0), "{broken}");
+        }
+
+        let mut cx = Context::seeded(1);
+        let far = Viewpoint {
+            position: DVec3::new(1.0e6 + 0.3, 0.0, 2.0),
+            ..Viewpoint::default()
+        };
+        cx.set_viewpoint(far);
+        assert_eq!(
+            handed_off(&mut cx).origin,
+            DVec3::ZERO,
+            "the frame that went past"
+        );
+        let origin = x(1_000_448.0);
+        assert_eq!(cx.origin(), origin);
+        cx.set_viewpoint(far);
+        let at = Mat4::from_translation(Vec3::new(1_000_448.25, 0.0, 0.0));
+        cx.draw_sprite(at, Sprite::default());
+        let frame = handed_off(&mut cx);
+        assert_eq!(frame.origin, origin);
+        let mut expected = Draws::default();
+        let relative = Mat4::from_translation(Vec3::new(0.25, 0.0, 0.0));
+        expected.push_sprite(relative, Sprite::default());
+        expected.draw_scene();
+        assert_eq!(frame.draws, expected);
+        #[cfg(feature = "dev")]
+        {
+            let looked = DVec3::new(-5000.0, 0.0, 0.0);
+            cx.look.viewpoint = Some(Viewpoint {
+                position: looked,
+                ..far
+            });
+            cx.follow_look();
+            assert_eq!(cx.origin(), x(-5120.0));
+            assert_eq!(handed_off(&mut cx).origin, x(-5120.0));
+        }
+    }
+
     /// The view is antialiased as a layer sets, in place of its world's environment's, and of none
     /// for a world without one, and as the environment says again once it's unset; the world, its
     /// environment and its hash among it, stays as it was.
@@ -6748,7 +6871,7 @@ mod tests {
     /// A camera at `x` along X, of perspective, primary or not.
     fn camera_at(x: f32, primary: bool) -> (Transform, Camera) {
         let at = Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(f64::from(x), 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let projection = Projection::Perspective {
@@ -6778,7 +6901,7 @@ mod tests {
         };
         let camera = cx.world_mut().spawn((
             Transform {
-                translation: Vec3::X,
+                translation: DVec3::X,
                 ..Transform::IDENTITY
             },
             Camera {
@@ -6793,7 +6916,7 @@ mod tests {
         let warnings = || logged.codes.try_iter().collect::<Vec<_>>();
         let first = seen(&mut cx);
         assert_eq!(first.projection, Viewpoint::default().projection, "no last");
-        assert_eq!(first.position, Vec3::X, "from where the camera is");
+        assert_eq!(first.position, DVec3::X, "from where the camera is");
         assert_eq!(warnings(), ["engine.bad_projection"]);
         let set = |cx: &mut Context, projection| {
             let camera = cx.world_mut().get_mut::<Camera>(camera).expect("alive");
@@ -7017,7 +7140,7 @@ mod tests {
         cx.set_viewpoint(Viewpoint::default());
         assert!(cut(&mut cx), "a layer setting a viewpoint doesn't cut");
         cx.set_viewpoint(Viewpoint {
-            position: Vec3::X,
+            position: DVec3::X,
             ..Viewpoint::default()
         });
         assert!(!cut(&mut cx), "the layer's viewpoint moving cuts");
@@ -7051,14 +7174,14 @@ mod tests {
         seen(&mut cx);
         assert_eq!(seen(&mut cx), (false, false), "the camera");
         let looked = Viewpoint {
-            position: Vec3::new(1.0, 2.0, 10.0),
+            position: DVec3::new(1.0, 2.0, 10.0),
             ..Viewpoint::default()
         };
         cx.look.viewpoint = Some(looked);
         assert_eq!(seen(&mut cx), (true, true), "the look set");
         assert_eq!(seen(&mut cx), (false, true), "the look held");
         cx.look.viewpoint = Some(Viewpoint {
-            position: Vec3::ZERO,
+            position: DVec3::ZERO,
             ..looked
         });
         assert_eq!(seen(&mut cx), (true, true), "the look changed");
@@ -8537,7 +8660,7 @@ mod tests {
         };
         let draw = |cx: &Context| *cx.world().get::<MeshDraw>(node(cx)).expect("a draw");
         assert_eq!(cx.world().get::<ModelNode>(node(&cx)), Some(&ModelNode(0)));
-        assert_eq!(at(&cx), Vec3::ZERO);
+        assert_eq!(at(&cx), DVec3::ZERO);
         let drew = draw(&cx);
 
         // Frame starts, as a run that's `recorded` or not, until `done`.
@@ -8551,7 +8674,7 @@ mod tests {
         };
         let path = root.join("assets/tri.gltf");
         std::fs::write(&path, gltf([0.0, 5.0, 0.0], 0.5)).expect("an edit");
-        let moved = |cx: &Context| at(cx) == Vec3::new(0.0, 5.0, 0.0);
+        let moved = |cx: &Context| at(cx) == DVec3::new(0.0, 5.0, 0.0);
         until(&mut cx, false, &moved, "the node moves");
         // Its material's color changed in the table of materials, where its draw reads it.
         assert_eq!(draw(&cx), drew, "the same draw, of the same material");
@@ -9885,7 +10008,7 @@ mod tests {
                 entity: id,
                 component: "Transform".into(),
                 path: "translation.x".to_owned(),
-                value: Value::F32(x),
+                value: Value::F64(f64::from(x)),
             }],
         };
         let queued = |stack: &mut Stack| stack.commands_of(0).expect("a queue").len();

@@ -421,6 +421,9 @@ enum Field {
     Vec2,
     Vec3,
     Vec4,
+    /// An f64 vector, as an entity's translation: a script's vector, whose f32s step 2 mm 16 km
+    /// from the origin, as LUAU.md says.
+    DVec3,
     Quat,
     Entity,
     MaybeEntity,
@@ -439,6 +442,7 @@ impl Field {
             Type::Vec2 => Self::Vec2,
             Type::Vec3 => Self::Vec3,
             Type::Vec4 => Self::Vec4,
+            Type::DVec3 => Self::DVec3,
             Type::Quat => Self::Quat,
             Type::Entity => Self::Entity,
             Type::Option(inner) if **inner == Type::Entity => Self::MaybeEntity,
@@ -1555,6 +1559,7 @@ fn hashed(component: &str, name: &str, ty: Field) -> u32 {
         Field::Entity => 9,
         Field::MaybeEntity => 10,
         Field::MaybeVec3 => 11,
+        Field::DVec3 => 12,
     };
     let names = component.bytes().chain([0]).chain(name.bytes()).chain([0]);
     names.chain([held]).fold(0x811c_9dc5, |hash, byte| {
@@ -1966,6 +1971,7 @@ fn to_lua(field: &dyn Reflect, ty: Field) -> Lua_ {
         Value::Vec2(v) => Lua_::Vector(Vector::new(v.x, v.y, 0.0, 0.0)),
         Value::Vec3(v) => Lua_::Vector(Vector::new(v.x, v.y, v.z, 0.0)),
         Value::Vec4(v) => Lua_::Vector(Vector::new(v.x, v.y, v.z, v.w)),
+        Value::DVec3(v) => Lua_::Vector(vector3_of(v.as_vec3())),
         Value::Quat(q) => Lua_::Vector(vector_of(q)),
         Value::Entity(entity) => Lua_::LightUserData(handle(entity.to_bits())),
         _ => unreachable!("scripts reach only fields of the types `Field` names"),
@@ -2055,6 +2061,7 @@ fn value_of(ty: Field, value: &Lua_) -> Result<Value> {
         Field::Vec2 => Value::Vec2(vector().map(|v| Vec2::new(v.x(), v.y()))?),
         Field::Vec3 => Value::Vec3(vector().map(|v| Vec3::new(v.x(), v.y(), v.z()))?),
         Field::Vec4 => Value::Vec4(vector().map(|v| Vec4::new(v.x(), v.y(), v.z(), v.w()))?),
+        Field::DVec3 => Value::DVec3(vec3_of(vector()?).as_dvec3()),
         Field::Quat => Value::Quat(quat_of(vector()?)),
         Field::Entity => Value::Entity(entity_in(value)?),
     })
@@ -2151,7 +2158,7 @@ fn cast(
             let what = "a cast, which reads where every collider is,";
             return Err(denied("read", what));
         }
-        let mut cast = Cast::new(vec3_of(from), vec3_of(toward));
+        let mut cast = Cast::new(vec3_of(from).as_dvec3(), vec3_of(toward));
         if let Some(distance) = distance {
             cast = cast.within(distance as f32);
         }
@@ -2162,7 +2169,7 @@ fn cast(
         Ok(match run(&world, cast) {
             Some(hit) => (
                 Lua_::LightUserData(handle(hit.entity.to_bits())),
-                Lua_::Vector(vector3_of(hit.point)),
+                Lua_::Vector(vector3_of(hit.point.as_vec3())),
                 Lua_::Vector(vector3_of(hit.normal)),
                 Lua_::Number(f64::from(hit.distance)),
             ),
@@ -2236,7 +2243,7 @@ fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Resul
             (TweenValue::Number(_), &Lua_::Number(x)) => TweenValue::Number(x),
             (TweenValue::Number(_), &Lua_::Integer(n)) => TweenValue::Number(n as f64),
             (TweenValue::Vec2(_), Lua_::Vector(v)) => TweenValue::Vec2(Vec2::new(v.x(), v.y())),
-            (TweenValue::Vec3(_), Lua_::Vector(v)) => TweenValue::Vec3(vec3_of(*v)),
+            (TweenValue::Vec3(_), Lua_::Vector(v)) => TweenValue::Vec3(vec3_of(*v).as_dvec3()),
             (TweenValue::Vec4(_), Lua_::Vector(v)) => {
                 TweenValue::Vec4(Vec4::new(v.x(), v.y(), v.z(), v.w()))
             }
@@ -2535,6 +2542,8 @@ mod watch {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use gg_core::math::DVec3;
 
     use super::*;
     use crate::Component;
@@ -3489,9 +3498,9 @@ return Look
             scale,
             ..Transform::IDENTITY
         };
-        let floor_at = at(Vec3::ZERO, Vec3::new(10.0, 1.0, 10.0));
+        let floor_at = at(DVec3::ZERO, Vec3::new(10.0, 1.0, 10.0));
         let floor = world.spawn((floor_at, fixed, BoxCollider3D::default()));
-        let boxed_at = at(Vec3::new(0.0, 1.0, 0.0), Vec3::ONE);
+        let boxed_at = at(DVec3::new(0.0, 1.0, 0.0), Vec3::ONE);
         let boxed = world.spawn((boxed_at, fixed, BoxCollider3D::default()));
         step_physics(world);
         let looker = world.spawn(());
@@ -3544,7 +3553,7 @@ return Drive
             ..RigidBody3D::default()
         };
         let at = |x| Transform {
-            translation: Vec3::new(x, 1.0, 0.0),
+            translation: DVec3::new(x, 1.0, 0.0),
             ..Transform::IDENTITY
         };
         let post = world.spawn((at(0.0), fixed, BoxCollider3D::default()));
@@ -3621,7 +3630,7 @@ return Steer
             ..RigidBody3D::default()
         };
         let floor = Transform {
-            translation: Vec3::new(0.0, -0.5, 0.0),
+            translation: DVec3::new(0.0, -0.5, 0.0),
             scale: Vec3::new(10.0, 1.0, 10.0),
             ..Transform::IDENTITY
         };

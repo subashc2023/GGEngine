@@ -1,13 +1,13 @@
 //! The sphere round what an entity and every entity under it draw, which the tool API's `entity`
 //! answers as `bounds` and the editor frames.
 
-use gg_core::math::Vec3;
+use gg_core::math::{DVec3, Vec3};
 use gg_renderer::{Circle, MeshDraw, Meshes, Sprite};
 
 use crate::{Entity, Transform, World};
 
-/// A sphere: its center and radius.
-pub(crate) type Sphere = (Vec3, f32);
+/// A sphere: its center, in `f64`, as positions are, and radius.
+pub(crate) type Sphere = (DVec3, f64);
 
 /// The radius of the sphere round a sprite's or a circle's unit square, centered on its origin: the
 /// square's half diagonal.
@@ -38,12 +38,14 @@ pub(crate) fn of(world: &World, meshes: &Meshes, root: Entity) -> Option<Sphere>
             continue;
         }
         let pose = world.pose(entity).ok()?.matrix;
-        let scale = [pose.x_axis, pose.y_axis, pose.z_axis]
-            .map(|axis| axis.truncate().length())
+        let axes = pose.matrix3;
+        let scale = [axes.x_axis, axes.y_axis, axes.z_axis]
+            .map(DVec3::length)
             .into_iter()
-            .fold(0.0, f32::max);
+            .fold(0.0, f64::max);
         for (center, radius) in own.into_iter().flatten() {
-            let placed = (pose.transform_point3(center), radius * scale);
+            let center = pose.transform_point3(center.as_dvec3());
+            let placed = (center, f64::from(radius) * scale);
             if placed.0.is_finite() && placed.1.is_finite() {
                 bounds = Some(bounds.map_or(placed, |bounds| union(bounds, placed)));
             }
@@ -91,12 +93,12 @@ mod tests {
 
     fn at(x: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(f64::from(x), 0.0, 0.0),
             ..Transform::IDENTITY
         }
     }
 
-    fn close(sphere: Option<Sphere>, center: Vec3, radius: f32) {
+    fn close(sphere: Option<Sphere>, center: DVec3, radius: f64) {
         let (found, found_radius) = sphere.expect("a sphere");
         assert!(
             found.distance(center) < 1e-5 && (found_radius - radius).abs() < 1e-5,
@@ -109,14 +111,14 @@ mod tests {
         let (mut world, mut meshes) = (World::default(), Meshes::default());
         let draw = mesh(&mut meshes, Vec3::new(1.0, 0.0, 0.0), 2.0);
         let turned = Transform {
-            translation: Vec3::new(0.0, 10.0, 0.0),
+            translation: DVec3::new(0.0, 10.0, 0.0),
             rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
             scale: Vec3::new(2.0, 3.0, 1.0),
         };
         let entity = world.spawn((turned, draw));
         // (1, 0, 0) scaled to (2, 0, 0), turned a quarter about Z to (0, 2, 0), then moved up 10;
         // the radius is scaled by the largest scale.
-        close(of(&world, &meshes, entity), Vec3::new(0.0, 12.0, 0.0), 6.0);
+        close(of(&world, &meshes, entity), DVec3::new(0.0, 12.0, 0.0), 6.0);
     }
 
     #[test]
@@ -131,9 +133,13 @@ mod tests {
         let root = world.spawn(at(100.0));
         world.set_parent(crate_, Some(root)).expect("alive");
         // Two unit spheres 10 apart, under parents at 100: one of radius 6 between them.
-        close(of(&world, &meshes, root), Vec3::new(105.0, 0.0, 0.0), 6.0);
-        close(of(&world, &meshes, crate_), Vec3::new(105.0, 0.0, 0.0), 6.0);
-        close(of(&world, &meshes, node), Vec3::new(100.0, 0.0, 0.0), 1.0);
+        close(of(&world, &meshes, root), DVec3::new(105.0, 0.0, 0.0), 6.0);
+        close(
+            of(&world, &meshes, crate_),
+            DVec3::new(105.0, 0.0, 0.0),
+            6.0,
+        );
+        close(of(&world, &meshes, node), DVec3::new(100.0, 0.0, 0.0), 1.0);
     }
 
     #[test]
@@ -146,8 +152,12 @@ mod tests {
         let sprite = world.spawn((scaled, Sprite::default()));
         let circle = world.spawn((at(0.0), Circle::default()));
         let half_diagonal = SQUARE * 4.0;
-        close(of(&world, &meshes, sprite), Vec3::X, half_diagonal);
-        close(of(&world, &meshes, circle), Vec3::ZERO, SQUARE);
+        close(
+            of(&world, &meshes, sprite),
+            DVec3::X,
+            f64::from(half_diagonal),
+        );
+        close(of(&world, &meshes, circle), DVec3::ZERO, f64::from(SQUARE));
     }
 
     #[test]
@@ -169,11 +179,11 @@ mod tests {
 
     #[test]
     fn two_spheres_merge_into_the_smallest_that_holds_both() {
-        let a = (Vec3::ZERO, 1.0);
-        let b = (Vec3::new(4.0, 0.0, 0.0), 1.0);
-        close(Some(union(a, b)), Vec3::new(2.0, 0.0, 0.0), 3.0);
+        let a = (DVec3::ZERO, 1.0);
+        let b = (DVec3::new(4.0, 0.0, 0.0), 1.0);
+        close(Some(union(a, b)), DVec3::new(2.0, 0.0, 0.0), 3.0);
         // One inside the other gives the larger, whichever way round.
-        let big = (Vec3::new(1.0, 0.0, 0.0), 5.0);
+        let big = (DVec3::new(1.0, 0.0, 0.0), 5.0);
         for (x, y) in [(a, big), (big, a)] {
             close(Some(union(x, y)), big.0, big.1);
         }

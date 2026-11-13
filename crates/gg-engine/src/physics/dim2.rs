@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use gg_core::math::{Mat4, Quat, Vec2, Vec3, libm};
+use gg_core::math::{DVec2, Mat4, Quat, Vec2, Vec3, libm};
 use rapier2d::prelude::{
     ActiveCollisionTypes, BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle,
     ColliderSet, Group, ImpulseJointSet, IntegrationParameters, InteractionGroups,
@@ -107,11 +107,11 @@ impl BoxCollider2D {
     fn collider(&self, scale: Vec3) -> Collider {
         let scale = scale.truncate();
         let half = (self.size * scale).abs() * 0.5;
-        let shape = ColliderBuilder::cuboid(half.x, half.y)
+        let shape = ColliderBuilder::cuboid(half.x.into(), half.y.into())
             .translation(vector(self.offset * scale))
-            .density(self.density)
-            .friction(self.friction)
-            .restitution(self.restitution);
+            .density(self.density.into())
+            .friction(self.friction.into())
+            .restitution(self.restitution.into());
         met(shape, self.sensor, self.membership, self.filter).build()
     }
 }
@@ -170,11 +170,11 @@ impl CircleCollider2D {
     /// radius by the larger of the two scales.
     fn collider(&self, scale: Vec3) -> Collider {
         let scale = scale.truncate();
-        let shape = ColliderBuilder::ball(self.radius * scale.abs().max_element())
+        let shape = ColliderBuilder::ball((self.radius * scale.abs().max_element()).into())
             .translation(vector(self.offset * scale))
-            .density(self.density)
-            .friction(self.friction)
-            .restitution(self.restitution);
+            .density(self.density.into())
+            .friction(self.friction.into())
+            .restitution(self.restitution.into());
         met(shape, self.sensor, self.membership, self.filter).build()
     }
 }
@@ -246,7 +246,7 @@ struct Linked {
     circle_collider: Option<CircleCollider2D>,
     /// How far the body was turned, as rapier gives it, from which the next step's turn is
     /// written into the transform.
-    angle: f32,
+    angle: f64,
 }
 
 impl Link for Linked {
@@ -270,7 +270,7 @@ impl Default for Physics2D {
                 soft_bodies: SoftBodySet::new(),
                 ccd: CCDSolver::new(),
                 parameters: IntegrationParameters {
-                    dt: Tick::DT.as_secs_f32(),
+                    dt: Tick::DT.as_secs_f64(),
                     ..IntegrationParameters::default()
                 },
             },
@@ -339,7 +339,7 @@ struct SavedLinked {
     transform: String,
     box_collider: Option<String>,
     circle_collider: Option<String>,
-    angle: f32,
+    angle: f64,
 }
 
 /// Saved through rapier's own serialization, written as RON, so that a world restored in another
@@ -601,13 +601,18 @@ impl Physics2D {
             }
             let at = body.translation();
             let turned = body.rotation().angle();
-            let (velocity, angular_velocity) = (body.linvel(), body.angvel());
+            // Rapier's velocities are `f64`s, the components' `f32`s, which a step takes in only
+            // as they change from what was written.
+            let linvel = body.linvel();
+            let velocity = Vec2::new(linvel.x as f32, linvel.y as f32);
+            let angular_velocity = body.angvel() as f32;
             let was = &mut linked.transform;
+            let moved = at.x.to_bits() != was.translation.x.to_bits()
+                || at.y.to_bits() != was.translation.y.to_bits();
             let bits = |a: f32, b: f32| a.to_bits() != b.to_bits();
-            let moved = bits(at.x, was.translation.x) || bits(at.y, was.translation.y);
             if moved || turned != linked.angle {
                 if turned != linked.angle {
-                    let by = Quat::from_rotation_z(turned - linked.angle);
+                    let by = Quat::from_rotation_z((turned - linked.angle) as f32);
                     was.rotation = by * was.rotation;
                     linked.angle = turned;
                 }
@@ -665,10 +670,10 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     let box_collider = world.get::<BoxCollider2D>(entity).copied();
     let circle_collider = world.get::<CircleCollider2D>(entity).copied();
     let mut built = RigidBodyBuilder::new(body_type(rigid_body.body_type))
-        .translation(vector(transform.translation.truncate()))
+        .translation(at(transform.translation.truncate()))
         .rotation(angle(transform.rotation))
         .linvel(vector(rigid_body.velocity))
-        .angvel(rigid_body.angular_velocity)
+        .angvel(rigid_body.angular_velocity.into())
         .ccd_enabled(rigid_body.continuous_collision)
         .user_data(user_data(entity));
     if rigid_body.fixed_rotation {
@@ -725,11 +730,11 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
         body.set_linvel(vector(rigid_body.velocity), true);
     }
     if rigid_body.angular_velocity != was.angular_velocity {
-        body.set_angvel(rigid_body.angular_velocity, true);
+        body.set_angvel(rigid_body.angular_velocity.into(), true);
     }
-    let at = transform.translation.truncate();
-    if at != linked.transform.translation.truncate() {
-        body.set_translation(vector(at), true);
+    let moved = transform.translation.truncate();
+    if moved != linked.transform.translation.truncate() {
+        body.set_translation(at(moved), true);
     }
     if transform.rotation != linked.transform.rotation {
         body.set_rotation(Rotation::new(angle(transform.rotation)), true);
@@ -852,19 +857,26 @@ pub(super) fn outlines(world: &World, poses: &Poses<'_>, each: &mut impl FnMut(O
 }
 
 /// How far `rotation` turns +X about Z, counterclockwise as seen from +Z: how an entity is turned
-/// in the XY plane, the turn 2D physics has.
-fn angle(rotation: Quat) -> f32 {
+/// in the XY plane, the turn 2D physics has, in `f64`, as rapier's builds of it are.
+fn angle(rotation: Quat) -> f64 {
     let x = rotation * Vec3::X;
-    libm::atan2f(x.y, x.x)
+    libm::atan2f(x.y, x.x).into()
 }
 
-/// `v` as rapier's, whose glam is another.
+/// `v`, a component's, as rapier's, whose glam is another, of `f64`s.
 fn vector(v: Vec2) -> Vector {
+    Vector::new(v.x.into(), v.y.into())
+}
+
+/// `v`, a position, as rapier's.
+fn at(v: DVec2) -> Vector {
     Vector::new(v.x, v.y)
 }
 
 #[cfg(test)]
 mod tests {
+    use gg_core::math::{DVec3, Vec4};
+
     use super::*;
     use crate::interpolation::Past;
     use crate::placed::Placed;
@@ -886,7 +898,7 @@ mod tests {
     /// A dynamic unit box at `x`, `y`, z 2, turned `angle` about Z.
     pub(super) fn crate_at(world: &mut World, x: f32, y: f32, angle: f32) -> Entity {
         let at = Transform {
-            translation: Vec3::new(x, y, 2.0),
+            translation: Vec3::new(x, y, 2.0).as_dvec3(),
             rotation: Quat::from_rotation_z(angle),
             ..Transform::IDENTITY
         };
@@ -932,6 +944,46 @@ mod tests {
                 scale: Vec3::new(10.0, 1.0, 1.0),
                 ..Transform::IDENTITY
             }
+        );
+    }
+
+    /// 1,000 km from the origin, a turned box falls onto a floor, tips and rests on it as one at
+    /// the origin does, every step of its way within a tenth of a millimeter, its quaternion's
+    /// parts within 1e-4, where `f32` would place it to the nearest 6 cm.
+    #[test]
+    fn far_from_the_origin_a_box_falls_and_rests_as_at_it() {
+        let way = |offset: DVec3| {
+            let mut world = World::default();
+            let floor = floor(&mut world);
+            let dropped = crate_at(&mut world, 0.5, 3.0, 0.3);
+            for entity in [floor, dropped] {
+                let at = world.get_mut::<Transform>(entity).expect("one");
+                at.translation += offset;
+            }
+            let mut way = Vec::new();
+            for _ in 0..30 {
+                step(&mut world, 8);
+                way.push(transform(&world, dropped));
+            }
+            way
+        };
+        let far = DVec3::new(1.0e6, -1.0e6, 0.0);
+        let (near, far_way) = (way(DVec3::ZERO), way(far));
+        let (mut most_apart, mut most_turned) = (0.0f64, 0.0f32);
+        for (near, far_at) in near.iter().zip(&far_way) {
+            let apart = far_at.translation - far - near.translation;
+            most_apart = most_apart.max(apart.abs().max_element());
+            let turned = Vec4::from(near.rotation) - Vec4::from(far_at.rotation);
+            most_turned = most_turned.max(turned.abs().max_element());
+        }
+        // Its fall within a few nanometers; as it settles, rapier's contacts, which let it into the
+        // floor by up to 5 mm, rest it within a few hundredths of a millimeter of the first.
+        assert!(most_apart < 1e-4, "{most_apart}");
+        assert!(most_turned < 1e-4, "{most_turned}");
+        let rested = near.last().expect("stepped").translation;
+        assert!(
+            (rested.y - 1.0).abs() < 0.02,
+            "on the floor's top: {rested}"
         );
     }
 
@@ -997,7 +1049,7 @@ mod tests {
             .get_mut::<Transform>(blown)
             .expect("alive")
             .translation
-            .x = f32::NAN;
+            .x = f64::from(f32::NAN);
         step(&mut world, 30);
         assert_eq!(warned(), 1, "once, though it stepped 30 times");
         assert!(
@@ -1030,7 +1082,7 @@ mod tests {
         world
             .get_mut::<Transform>(blown)
             .expect("alive")
-            .translation = Vec3::new(-2.0, 1.0, 2.0);
+            .translation = DVec3::new(-2.0, 1.0, 2.0);
         step(&mut world, 1);
         let taken = transform(&world, blown).translation;
         assert!((taken.x - -2.0).abs() < 1e-3, "{taken}");
@@ -1103,7 +1155,14 @@ mod tests {
         let mut world = World::seeded(7);
         world.register_saved::<Physics2D>().expect("saved");
         let bodies = pile(&mut world);
+        // Until a step whose contacts started or stopped, which the loaded world has too.
         step(&mut world, 40);
+        for _ in 0..40 {
+            if world.contact_events().next().is_some() {
+                break;
+            }
+            step(&mut world, 1);
+        }
         // An edit since the last step, which the next takes.
         let pushed = world.get_mut::<RigidBody2D>(bodies[5]).expect("a body");
         pushed.velocity = Vec2::new(3.0, 1.0);
@@ -1215,7 +1274,7 @@ mod tests {
         pile(&mut world);
         step(&mut world, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0x58bd_495d_6fa4_58c8, "{content:#018x}");
+        assert_eq!(content, 0xee9d_ca22_6f92_2904, "{content:#018x}");
     }
 
     /// What a game or an edit changes of a body's components between steps, the next step takes:
@@ -1266,7 +1325,7 @@ mod tests {
     fn continuous_collision_stops_what_a_step_would_carry_through_a_thin_wall() {
         let mut world = World::default();
         let wall = Transform {
-            translation: Vec3::new(5.0, 0.0, 0.0),
+            translation: DVec3::new(5.0, 0.0, 0.0),
             scale: Vec3::new(0.05, 8.0, 1.0),
             ..Transform::IDENTITY
         };
@@ -1278,7 +1337,7 @@ mod tests {
         // 0.9375 units a step: from x 0, at 4.6875, short of the wall, then at 5.625, past it.
         let fired = |world: &mut World, y: f32, continuous_collision: bool| {
             let at = Transform {
-                translation: Vec3::new(0.0, y, 0.0),
+                translation: DVec3::new(0.0, f64::from(y), 0.0),
                 ..Transform::IDENTITY
             };
             let body = RigidBody2D {
@@ -1307,7 +1366,7 @@ mod tests {
         let mut world = World::default();
         floor(&mut world);
         let at = Transform {
-            translation: Vec3::new(0.0, 3.0, 0.0),
+            translation: DVec3::new(0.0, 3.0, 0.0),
             scale: Vec3::new(2.0, 1.0, 1.0),
             ..Transform::IDENTITY
         };
@@ -1329,7 +1388,7 @@ mod tests {
         let mut world = World::default();
         floor(&mut world);
         let at = Transform {
-            translation: Vec3::new(0.0, 4.0, 0.0),
+            translation: DVec3::new(0.0, 4.0, 0.0),
             ..Transform::IDENTITY
         };
         let upright = RigidBody2D {
@@ -1360,7 +1419,7 @@ mod tests {
     fn colliders_outline_where_their_entities_draw() {
         let mut world = World::default();
         let stretched = Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_z(0.4),
             scale: Vec3::new(2.0, 0.5, 1.0),
         };
@@ -1376,7 +1435,7 @@ mod tests {
         };
         let both = world.spawn((stretched, boxed, round));
         let parent = world.spawn(Transform {
-            translation: Vec3::new(-3.0, 0.0, 0.0),
+            translation: DVec3::new(-3.0, 0.0, 0.0),
             ..Transform::IDENTITY
         });
         let child = world.spawn((Transform::IDENTITY, round));
@@ -1384,7 +1443,7 @@ mod tests {
         world.spawn(boxed);
         let past = Past::default();
         let placed = Placed::of(&world, &past, 1.0);
-        let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
+        let poses = Poses::new(&world, &past, &placed, 1.0, DVec3::ZERO).expect("transforms");
         let mut found = Vec::new();
         outlines(&world, &poses, &mut |outline, id| found.push((outline, id)));
         let id = |entity| world.id(entity).expect("alive").get();
@@ -1403,13 +1462,13 @@ mod tests {
         let entitys = stretched.matrix();
         assert!(near(
             corner,
-            entitys.transform_point3(Vec3::new(1.0, 0.5, 0.0))
+            (entitys.transform_point3(DVec3::new(1.0, 0.5, 0.0))).as_vec3()
         ));
         // The circle's middle, and its edge 0.75 times 2 from it, across and up.
         let middle = ring.transform_point3(Vec3::ZERO);
         assert!(near(
             middle,
-            entitys.transform_point3(Vec3::new(0.5, 1.0, 0.0))
+            (entitys.transform_point3(DVec3::new(0.5, 1.0, 0.0))).as_vec3()
         ));
         for axis in [Vec3::X, Vec3::Y] {
             let reach = ring.transform_point3(axis).distance(middle);
@@ -1476,7 +1535,7 @@ mod tests {
         floor(&mut world);
         let pusher = world.spawn((
             Transform {
-                translation: Vec3::new(-3.0, 1.0, 0.0),
+                translation: DVec3::new(-3.0, 1.0, 0.0),
                 ..Transform::IDENTITY
             },
             RigidBody2D {
@@ -1509,7 +1568,7 @@ mod tests {
     /// A static box 4 units wide around (0, 4), a sensor.
     fn zone(world: &mut World) -> Entity {
         let at = Transform {
-            translation: Vec3::new(0.0, 4.0, 0.0),
+            translation: DVec3::new(0.0, 4.0, 0.0),
             scale: Vec3::new(4.0, 1.0, 1.0),
             ..Transform::IDENTITY
         };

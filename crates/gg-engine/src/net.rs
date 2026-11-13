@@ -2211,6 +2211,9 @@ mod tests {
 
     use tracing_subscriber::layer::SubscriberExt;
 
+    #[cfg(feature = "dev")]
+    use gg_core::math::DVec3;
+
     use super::*;
     use crate::layer::Stack;
     use crate::testing::Codes;
@@ -3342,8 +3345,6 @@ mod tests {
     fn offered_edits_and_scene_saves_apply_on_both_peers() {
         use std::fs;
 
-        use gg_core::math::Vec3;
-
         use crate::Transform;
         use crate::dirs::tests::Scratch;
 
@@ -3379,7 +3380,7 @@ mod tests {
         // The scene file saved, before either peer's first look, which finds it changed from the
         // text it loaded as.
         let moved = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         };
         file.insert(a, moved).expect("alive");

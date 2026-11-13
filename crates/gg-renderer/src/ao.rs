@@ -186,6 +186,17 @@ struct Accumulated {
 }
 
 impl History {
+    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
+    /// further along than the frame before's: what was at `p` is at `p - by`, as
+    /// [`RenderData::origin`](crate::RenderData::origin) says.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        if let Some(last) = &mut self.last {
+            let along = Mat4::from_translation(by);
+            last.clip_from_world *= along;
+            last.unjittered *= along;
+        }
+    }
+
     /// Makes its images at `size`, if they're another size, or there are none, forgetting what
     /// those there accumulated.
     pub(crate) fn prepare(&mut self, device: &Arc<Device>, size: [u32; 2]) -> Result<()> {
@@ -220,7 +231,7 @@ impl History {
 
     /// Whether a frame that sees from `unjittered`, from the world to the view's clip space without
     /// antialiasing's offset, sees from elsewhere than the last frame to accumulate.
-    fn moved(&self, unjittered: Mat4) -> bool {
+    fn sees_elsewhere(&self, unjittered: Mat4) -> bool {
         self.last.is_none_or(|last| last.unjittered != unjittered)
     }
 
@@ -229,7 +240,7 @@ impl History {
     /// has offsets, whose cycle repeats; in one that moves, the cycle moves on every [`PHASES`]
     /// frames.
     pub(crate) fn noise(&self, unjittered: Mat4) -> u32 {
-        let moving = self.moving + u64::from(self.moved(unjittered));
+        let moving = self.moving + u64::from(self.sees_elsewhere(unjittered));
         let cycle = moving / PHASES % CYCLES;
         (self.accumulated % PHASES + PHASES * cycle) as u32
     }
@@ -244,7 +255,7 @@ impl History {
         clip_from_world: Mat4,
         unjittered: Mat4,
     ) {
-        self.moving += u64::from(self.moved(unjittered));
+        self.moving += u64::from(self.sees_elsewhere(unjittered));
         self.accumulated += 1;
         self.last = Some(Accumulated {
             frame,
@@ -498,11 +509,39 @@ impl AoPass {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat, Vec3};
 
     use super::*;
     use crate::taa::jitter;
     use crate::{Projection, Viewpoint};
+
+    /// The history, moved with the origin by `by`, projects a point from where it is from the new
+    /// origin, `p - by`, where it projected it from the old, `p`, with antialiasing's offset and
+    /// without.
+    #[test]
+    fn the_history_moves_with_the_origin() {
+        let viewpoint = Viewpoint {
+            position: DVec3::new(2.0, -1.0, 5.0),
+            rotation: Quat::from_rotation_y(0.3),
+            projection: Projection::Perspective {
+                fov: 0.8,
+                near: 0.1,
+            },
+        };
+        let unjittered = viewpoint.view_projection(1.5);
+        let jittered = jitter(Vec2::new(0.001, -0.002)) * unjittered;
+        let mut history = History::default();
+        history.accumulated(7, [64, 32], jittered, unjittered);
+        let by = Vec3::new(1024.0, 0.0, -2048.0);
+        history.moved(by);
+        let moved = history.against(8, [64, 32], false).expect("accumulated");
+        let p = Vec3::new(0.3, 1.2, -3.0);
+        let (was, is) = (jittered.project_point3(p), moved.project_point3(p - by));
+        assert!(is.abs_diff_eq(was, 1e-4), "{is}, not {was}");
+        let moved = history.last.expect("accumulated").unjittered;
+        let (was, is) = (unjittered.project_point3(p), moved.project_point3(p - by));
+        assert!(is.abs_diff_eq(was, 1e-4), "{is}, not {was}");
+    }
 
     /// A point in the view's space, projected by a perspective that antialiasing moves a fraction
     /// of a pixel, comes back from its texture coordinates and depth where it was: X right, Y up
@@ -510,7 +549,7 @@ mod tests {
     #[test]
     fn pixels_unproject_to_where_their_points_are() {
         let viewpoint = Viewpoint {
-            position: Vec3::new(3.0, 1.0, -2.0),
+            position: DVec3::new(3.0, 1.0, -2.0),
             rotation: Quat::from_rotation_y(0.4),
             projection: Projection::Perspective {
                 fov: 1.1,
@@ -590,10 +629,11 @@ mod tests {
     #[test]
     fn points_reproject_to_where_the_frame_before_saw_them() {
         let view_from_world = |viewpoint: &Viewpoint| {
-            Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position).inverse()
+            Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position.as_vec3())
+                .inverse()
         };
         let now = Viewpoint {
-            position: Vec3::new(3.0, 1.0, -2.0),
+            position: DVec3::new(3.0, 1.0, -2.0),
             rotation: Quat::from_rotation_y(0.4),
             projection: Projection::Perspective {
                 fov: 1.1,
@@ -601,11 +641,11 @@ mod tests {
             },
         };
         let before = Viewpoint {
-            position: Vec3::new(2.6, 1.2, -1.5),
+            position: DVec3::new(2.6, 1.2, -1.5),
             rotation: Quat::from_rotation_y(0.32) * Quat::from_rotation_x(-0.05),
             ..now
         };
-        let world_from_view = Mat4::from_rotation_translation(now.rotation, now.position);
+        let world_from_view = Mat4::from_rotation_translation(now.rotation, now.position.as_vec3());
         let previous = jitter(Vec2::new(-0.0008, 0.0011)) * before.view_projection(16.0 / 9.0);
         let reprojected = reprojection(previous, world_from_view);
         for world in [

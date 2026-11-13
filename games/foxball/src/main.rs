@@ -41,7 +41,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use gg_engine::math::libm::{atan2f, expf};
-use gg_engine::math::{Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, AnimationParam, AnimationState, AnimationStates, Animator, Antialiasing, App, Binding,
     BlendPoint, Bus, CapsuleCollider3D, Change, CharacterController3D, Commands, Component,
@@ -642,7 +642,7 @@ impl Layer for Foxball {
             .into_iter()
             .find(|(player, _)| player.index == self.player);
         if let Some((player, at)) = own.map(|(player, at)| (*player, *at)) {
-            let target = at.translation + Vec3::Y * VIEW_ABOVE;
+            let target = at.translation.as_vec3() + Vec3::Y * VIEW_ABOVE;
             let caught = 1.0 - expf(-VIEW_FOLLOW * dt.as_secs_f32());
             let seen = self.seen.map_or(target, |seen| seen.lerp(target, caught));
             self.seen = Some(seen);
@@ -789,7 +789,7 @@ fn build(world: &mut World, fox: Model) {
     let (height, radius) = CAPSULE;
     for (index, &(start, yaw)) in STARTS.iter().enumerate() {
         let at = Transform {
-            translation: start,
+            translation: start.as_dvec3(),
             rotation: Quat::from_rotation_y(yaw),
             ..Transform::IDENTITY
         };
@@ -813,7 +813,7 @@ fn build(world: &mut World, fox: Model) {
         let character = CharacterController3D::default();
         let body = world.spawn((at, capsule, character, player, owner, name));
         let feet = Transform {
-            translation: Vec3::new(0.0, -height / 2.0, 0.0),
+            translation: DVec3::new(0.0, f64::from(-height / 2.0), 0.0),
             scale: Vec3::splat(FOX_SCALE),
             ..Transform::IDENTITY
         };
@@ -824,7 +824,7 @@ fn build(world: &mut World, fox: Model) {
         let parented = driven.and_then(|()| world.set_parent(model, Some(body)));
         parented.expect("the fox and its body, just spawned");
         let behind = Transform {
-            translation: DUST_AT,
+            translation: DUST_AT.as_dvec3(),
             ..Transform::IDENTITY
         };
         let dust = world.spawn((behind, DUST, Name(format!("Dust {}", index + 1))));
@@ -922,7 +922,7 @@ fn kick(world: &mut World, player: u8, sounds: Option<Sounds>) {
     let mut kicker = None;
     let players = world.query_mut::<(&mut Player, &Transform)>();
     for (fox, at) in players.filter(|(fox, _)| fox.index == player && fox.cooldown == 0) {
-        kicker = Some((at.translation, fox.yaw));
+        kicker = Some((at.translation.as_vec3(), fox.yaw));
         fox.cooldown = KICK_EVERY;
     }
     let Some((from, yaw)) = kicker else {
@@ -932,7 +932,7 @@ fn kick(world: &mut World, player: u8, sounds: Option<Sounds>) {
     let balls = world.query_mut::<(Entity, &Ball, &Transform, &mut RigidBody3D)>();
     let mut kicked = None;
     for (ball, _, at, body) in balls {
-        if reaches(from, yaw, at.translation) {
+        if reaches(from, yaw, at.translation.as_vec3()) {
             body.velocity = forward * KICK_SPEED + Vec3::Y * KICK_LIFT;
             kicked = Some(ball);
         }
@@ -1017,18 +1017,18 @@ fn play_bots(
     kicks: &mut Vec<u8>,
 ) {
     let ball = world.query::<(&Ball, &Transform)>().next();
-    let Some(ball) = ball.map(|(_, at)| at.translation) else {
+    let Some(ball) = ball.map(|(_, at)| at.translation.as_vec3()) else {
         return;
     };
     let level = world.query::<&Match>().next().map(|found| found.difficulty);
     let level = level.unwrap_or_default();
     foxes.clear();
     let placed = world.query::<(&Player, &Transform)>();
-    foxes.extend(placed.map(|(fox, at)| (fox.index, at.translation)));
+    foxes.extend(placed.map(|(fox, at)| (fox.index, at.translation.as_vec3())));
     let most = BOT_TURN_SPEED * Tick::DT.as_secs_f32();
     let bots = world.query_mut::<(&mut Bot, &mut Player, &mut Transform, &mut NavAgent)>();
     for (bot, fox, transform, agent) in bots {
-        let at = transform.translation;
+        let at = transform.translation.as_vec3();
         // Player 0 attacks the far goal, at +Z, and player 1 the near one.
         let toward = if fox.index == 0 { 1.0 } else { -1.0 };
         if bot.wait == 0 {
@@ -1224,7 +1224,7 @@ fn animate(world: &mut World, speeds: &mut Vec<(Entity, f32)>) {
 /// that has left the arena goes back to its start alone.
 fn score(world: &mut World, sounds: Option<Sounds>) {
     let ball = world.query::<(&Ball, &Transform)>().next();
-    let Some(at) = ball.map(|(_, at)| at.translation) else {
+    let Some(at) = ball.map(|(_, at)| at.translation.as_vec3()) else {
         return;
     };
     let into = at.z.abs() > FIELD.y + GOAL_DEPTH && at.x.abs() < GOAL;
@@ -1245,7 +1245,7 @@ fn score(world: &mut World, sounds: Option<Sounds>) {
             emitter.bursts = emitter.bursts.wrapping_add(1);
         }
         if let Some(sounds) = sounds {
-            world.play_sound(sounds.goal, Place::At(at));
+            world.play_sound(sounds.goal, Place::At(at.as_dvec3()));
             if won {
                 world.play_sound(sounds.win, Place::Nowhere);
             }
@@ -1263,7 +1263,7 @@ fn to_starts(world: &mut World) {
     for (fox, at, character) in foxes {
         let (start, yaw) = STARTS[usize::from(fox.index) % STARTS.len()];
         fox.yaw = yaw;
-        at.translation = start;
+        at.translation = start.as_dvec3();
         at.rotation = Quat::from_rotation_y(yaw);
         character.velocity = Vec3::ZERO;
     }
@@ -1272,7 +1272,7 @@ fn to_starts(world: &mut World) {
 /// Puts the ball back at its start, still.
 fn to_ball_start(world: &mut World) {
     for (_, at, body) in world.query_mut::<(&Ball, &mut Transform, &mut RigidBody3D)>() {
-        at.translation = BALL_START;
+        at.translation = BALL_START.as_dvec3();
         at.rotation = Quat::IDENTITY;
         body.velocity = Vec3::ZERO;
         body.angular_velocity = Vec3::ZERO;
@@ -1286,7 +1286,7 @@ fn follow(seen: Vec3, yaw: f32, pitch: f32) -> Viewpoint {
     let rotation = Quat::from_rotation_y(yaw + PI) * Quat::from_rotation_x(-pitch);
     let looking = rotation * Vec3::NEG_Z;
     Viewpoint {
-        position: seen - looking * VIEW_DISTANCE,
+        position: (seen - looking * VIEW_DISTANCE).as_dvec3(),
         rotation,
         projection: Projection::Perspective {
             fov: 1.1,

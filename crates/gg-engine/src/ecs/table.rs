@@ -389,6 +389,7 @@ fn described(
         let finite = match default {
             Value::F64(x) => x.is_finite(),
             Value::Vec3(v) => v.is_finite(),
+            Value::DVec3(v) => v.is_finite(),
             _ => true,
         };
         if !finite {

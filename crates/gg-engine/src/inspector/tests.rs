@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use egui::PointerButton::{Primary, Secondary};
 use egui::ecolor::Hsva;
-use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{self, DVec3, EulerRot, Quat, Vec2, Vec3, Vec4};
 
 use super::entities::{Tree, row_label};
 use super::*;
@@ -1346,7 +1346,7 @@ fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
         .expect("alive")
         .next()
         .expect("its bulb");
-    let up = Value::Vec3(Vec3::new(0.0, 5.0, 0.0));
+    let up = Value::DVec3(DVec3::new(0.0, 5.0, 0.0));
     world
         .set_field(bulb, "Transform", "translation", &up)
         .expect("set");
@@ -1400,7 +1400,7 @@ fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
     let revert = find(&texts, &of, "Revert to Prefab");
     shown(&mut inspector, &mut world, click(Primary, revert.center()));
     let place = |world: &World| world.get::<Transform>(bulb).expect("alive").translation;
-    assert_eq!(place(&world), Vec3::new(0.0, 1.0, 0.0), "the prefab's");
+    assert_eq!(place(&world), DVec3::new(0.0, 1.0, 0.0), "the prefab's");
     assert_eq!(inspector.log.edits().len(), 1, "one edit");
     let undo = |inspector: &mut Inspector, world: &mut World| {
         inspector.queue(Pass {
@@ -1410,7 +1410,7 @@ fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
         Layer::tick(inspector, world, Tick { number: 0 });
     };
     undo(&mut inspector, &mut world);
-    assert_eq!(place(&world), Vec3::new(0.0, 5.0, 0.0), "undone");
+    assert_eq!(place(&world), DVec3::new(0.0, 5.0, 0.0), "undone");
 
     inspector.pick(root_id);
     let mut texts = Vec::new();
@@ -3519,7 +3519,7 @@ fn a_variant_that_holds_whats_opaque_shows_disabled() {
 fn axis_buttons_set_their_component_to_its_default() {
     let mut world = World::default();
     let transform = Transform {
-        translation: Vec3::new(1.0, 2.0, 3.0),
+        translation: DVec3::new(1.0, 2.0, 3.0),
         rotation: Quat::from_euler(EulerRot::ZYX, 0.3, 0.2, 0.1),
         scale: Vec3::new(2.0, 3.0, 4.0),
     };
@@ -3552,7 +3552,7 @@ fn axis_buttons_set_their_component_to_its_default() {
         run(&mut inspector, &mut world, click(Primary, at));
     }
     let set = world.get::<Transform>(entity).expect("a transform");
-    assert_eq!(set.translation, Vec3::new(0.0, 2.0, 3.0));
+    assert_eq!(set.translation, DVec3::new(0.0, 2.0, 3.0));
     assert_eq!(set.scale, Vec3::new(2.0, 1.0, 4.0));
     let (z, y, x) = set.rotation.to_euler(EulerRot::ZYX);
     let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
@@ -3653,7 +3653,7 @@ fn an_axis_drag_sets_its_component_alone() {
         shortcut(egui::Key::Z, false),
         true,
     );
-    assert_eq!(translation(&world), Vec3::new(0.0, 5.0, 0.0));
+    assert_eq!(translation(&world), DVec3::new(0.0, 5.0, 0.0));
 }
 
 /// Sets of a vector and of its components that wait for a tick draw it as they'll make it, in
@@ -3671,19 +3671,19 @@ fn sets_of_a_vector_and_of_its_components_draw_in_order() {
         path: path.to_owned(),
         value,
     };
-    let whole = |x, y, z| Value::Vec3(Vec3::new(x, y, z));
+    let whole = |x, y, z| Value::DVec3(DVec3::new(x, y, z));
     let mut time = 0.0;
     for (sets, made) in [
         (
             vec![
                 set("translation", whole(1.5, 2.5, 3.5)),
-                set("translation.x", Value::F32(7.5)),
+                set("translation.x", Value::F64(7.5)),
             ],
             Vec3::new(7.5, 2.5, 3.5),
         ),
         (
             vec![
-                set("translation.y", Value::F32(8.5)),
+                set("translation.y", Value::F64(8.5)),
                 set("translation", whole(4.5, 5.5, 6.5)),
             ],
             Vec3::new(4.5, 5.5, 6.5),
@@ -3710,7 +3710,7 @@ fn sets_of_a_vector_and_of_its_components_draw_in_order() {
         assert_eq!(Vec3::from(shown), made, "{texts:?}");
         Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
         let held = world.get::<Transform>(entity).expect("a transform");
-        assert_eq!(held.translation, made);
+        assert_eq!(held.translation, made.as_dvec3());
     }
 }
 
@@ -3766,7 +3766,7 @@ fn a_vectors_numbers_hold_still_as_they_change() {
 fn a_vectors_axes_fit_a_panel_as_narrow_as_the_editors() {
     let mut world = World::default();
     let turned = Transform {
-        translation: Vec3::new(-1.875, 0.0, -1.25),
+        translation: DVec3::new(-1.875, 0.0, -1.25),
         ..Transform::IDENTITY
     };
     let entity = world.spawn(turned);
@@ -3873,7 +3873,7 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     let mut inspector = Inspector::default();
     inspector.pick(picked);
     let link = inspector.link();
-    let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+    let at = |x: f64| Value::DVec3(DVec3::new(x, 0.0, 0.0));
     let count = |n| Edit {
         component: "Everything".to_owned(),
         path: "count".to_owned(),
@@ -3914,7 +3914,7 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     assert_eq!(queued_names(&inspector), names);
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
     let translation = |world: &World| world.get::<Transform>(entity).map(|at| at.translation);
-    assert_eq!(translation(&world), Some(Vec3::new(3.0, 0.0, 0.0)));
+    assert_eq!(translation(&world), Some(DVec3::new(3.0, 0.0, 0.0)));
     assert_eq!(
         inspector.log.edits().len(),
         2,
@@ -3928,7 +3928,7 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
             ..Pass::default()
         },
     );
-    assert_eq!(translation(&world), Some(Vec3::ZERO));
+    assert_eq!(translation(&world), Some(DVec3::ZERO));
     let typed = world.get::<Everything>(entity).map(|all| all.count);
     assert_eq!(typed, Some(7));
     // The panels' set ends a gesture of the link's going on.
@@ -3970,7 +3970,7 @@ fn the_links_sets_wait_until_a_tick_makes_them() {
     let picked = id(&world, entity);
     let mut inspector = Inspector::default();
     let link = inspector.link();
-    let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+    let at = |x: f64| Value::DVec3(DVec3::new(x, 0.0, 0.0));
     assert!(!link.waiting());
     link.set(picked, "Transform", "translation", at(1.0));
     assert!(link.waiting(), "from the set");
@@ -4083,7 +4083,7 @@ fn another_world_drops_what_the_link_asked_of_the_one_before() {
     let link = inspector.link();
     // So that it knows the world.
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
-    let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+    let at = |x: f64| Value::DVec3(DVec3::new(x, 0.0, 0.0));
     link.set(picked, "Transform", "translation", at(1.0));
     inspector.queue(Pass::default());
     link.set(picked, "Transform", "translation", at(2.0));
@@ -4138,24 +4138,29 @@ fn the_link_keeps_the_latest_value_of_each_field_between_passes() {
     let link = Inspector::default().link();
     let [a, b]: [EntityId; 2] =
         ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
-    let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+    let at = |x: f64| Value::DVec3(DVec3::new(x, 0.0, 0.0));
     for x in [1.0, 2.0] {
         link.set(a, "Transform", "translation", at(x));
         link.set(b, "Transform", "translation", at(x));
     }
-    link.set(a, "Transform", "scale", at(5.0));
+    link.set(
+        a,
+        "Transform",
+        "scale",
+        Value::Vec3(Vec3::new(5.0, 0.0, 0.0)),
+    );
     link.seal();
     link.seal();
     link.set(a, "Transform", "translation", at(3.0));
-    let set = |id, path: &str, x| Some((id, "Transform".to_owned(), path.to_owned(), at(x)));
+    let set = |id, path: &str, value| Some((id, "Transform".to_owned(), path.to_owned(), value));
     assert_eq!(
         link.pending(),
         [
-            set(a, "translation", 2.0),
-            set(b, "translation", 2.0),
-            set(a, "scale", 5.0),
+            set(a, "translation", at(2.0)),
+            set(b, "translation", at(2.0)),
+            set(a, "scale", Value::Vec3(Vec3::new(5.0, 0.0, 0.0))),
             None,
-            set(a, "translation", 3.0)
+            set(a, "translation", at(3.0))
         ]
     );
 }
@@ -4193,13 +4198,13 @@ fn a_link_refuses_a_set_of_a_struct_whole() {
 fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
     let link = Inspector::default().link();
     let id: EntityId = "0123456789abcdef".parse().expect("an ID");
-    let whole = |x: f32| Value::Vec3(Vec3::splat(x));
+    let whole = |x: f64| Value::DVec3(DVec3::splat(x));
     link.set(id, "Transform", "translation", whole(1.0));
-    link.set(id, "Transform", "translation.x", Value::F32(5.0));
+    link.set(id, "Transform", "translation.x", Value::F64(5.0));
     link.set(id, "Transform", "translation", whole(2.0));
     let set = |path: &str, value| Some((id, "Transform".to_owned(), path.to_owned(), value));
     let expected = [
-        set("translation.x", Value::F32(5.0)),
+        set("translation.x", Value::F64(5.0)),
         set("translation", whole(2.0)),
     ];
     assert_eq!(link.pending(), expected);
@@ -4217,10 +4222,10 @@ fn a_create_through_the_link_makes_a_root_and_picks_it() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let link = inspector.link();
-    let at = Value::Vec3(Vec3::new(1.0, 0.0, 0.0));
+    let at = Value::DVec3(DVec3::new(1.0, 0.0, 0.0));
     link.set(picked, "Transform", "translation", at);
     let made = Transform {
-        translation: Vec3::new(0.0, 2.0, 0.0),
+        translation: DVec3::new(0.0, 2.0, 0.0),
         ..Transform::IDENTITY
     };
     let components: Vec<(Ident, Value)> = vec![
@@ -4250,7 +4255,7 @@ fn a_create_through_the_link_makes_a_root_and_picks_it() {
     );
     assert_eq!(world.entity(id(&world, entity)), Some(entity));
     let translation = world.get::<Transform>(entity).map(|at| at.translation);
-    assert_eq!(translation, Some(Vec3::X), "the set stays");
+    assert_eq!(translation, Some(DVec3::X), "the set stays");
     assert_eq!(
         world.entities(None).expect("all").len(),
         1,
@@ -4396,7 +4401,7 @@ mod remote {
 
     fn x(game: &Game, entity: Entity) -> f32 {
         let transform = game.cx.world().get::<Transform>(entity);
-        transform.expect("a transform").translation.x
+        transform.expect("a transform").translation.x as f32
     }
 
     /// A remote Inspector lists a game's entities through its API, as they come and go, shows the
@@ -4475,7 +4480,7 @@ mod remote {
         let set = |x: f32| Edit {
             component: "Transform".to_owned(),
             path: "translation.x".to_owned(),
-            value: Value::F32(x),
+            value: Value::F64(f64::from(x)),
         };
         for x in [5.0, 6.0] {
             game.frame();
@@ -4563,7 +4568,7 @@ mod remote {
         assert_eq!(game.cx.world().entities(None).expect("all").len(), 2);
         // One the link creates, picked too.
         let made = Transform {
-            translation: Vec3::new(0.0, 3.0, 0.0),
+            translation: DVec3::new(0.0, 3.0, 0.0),
             ..Transform::IDENTITY
         };
         inspector.link().create(vec![
@@ -4612,7 +4617,7 @@ mod remote {
         // The hero placed away from the world's origin, turned and scaled, which the rock is kept
         // clear of as it's made its child.
         let away = Transform {
-            translation: Vec3::new(10.0, 0.0, -2.0),
+            translation: DVec3::new(10.0, 0.0, -2.0),
             rotation: Quat::from_rotation_z(0.5),
             scale: Vec3::splat(2.0),
         };
@@ -4624,7 +4629,7 @@ mod remote {
         let parent = |game: &Game, id| game.cx.world().parent(entity(game, id)).expect("alive");
         let kept = |game: &Game| {
             let pose = game.cx.world().pose(entity(game, rock)).expect("alive");
-            let at = pose.matrix.w_axis.truncate();
+            let at = pose.matrix.translation;
             at.abs_diff_eq(made.translation, 1e-4)
         };
         let mut operate = |command: Command, done: &dyn Fn(&Game) -> bool| {

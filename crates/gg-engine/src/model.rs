@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     AlphaMode, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
@@ -142,7 +142,8 @@ impl Nodes {
         let mut placed: Vec<Mat4> = Vec::with_capacity(self.parts.len());
         let mut corners: Vec<[Vec3; 3]> = Vec::new();
         for part in &self.parts {
-            let own = part.transform.matrix();
+            // A model's parts are near its root, where `f32` holds.
+            let own = part.transform.matrix_from(DVec3::ZERO);
             let matrix = part.parent.map_or(own, |parent| placed[parent] * own);
             placed.push(matrix);
             let surface = part
@@ -693,7 +694,7 @@ pub(crate) mod tests {
 
     fn mirrored() -> Transform {
         Transform {
-            translation: Vec3::new(2.0, 0.0, 0.0),
+            translation: DVec3::new(2.0, 0.0, 0.0),
             scale: Vec3::new(-1.0, 1.0, 1.0),
             ..Transform::IDENTITY
         }
@@ -846,7 +847,7 @@ pub(crate) mod tests {
     #[test]
     fn a_models_triangles_are_where_its_surfaces_are_whatever_their_order() {
         let at = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             rotation: Quat::from_rotation_y(0.5),
             scale: Vec3::new(2.0, 1.0, 1.0),
         };
@@ -893,8 +894,10 @@ pub(crate) mod tests {
         // Each where its node puts it, within half a step of the grid it packs on.
         let matrix = at.matrix();
         for corner in corners {
-            let placed = matrix.transform_point3(Vec3::from(corner));
-            let near = vertices.iter().any(|vertex| vertex.distance(placed) < 1e-4);
+            let placed = matrix.transform_point3(Vec3::from(corner).as_dvec3());
+            let near = vertices
+                .iter()
+                .any(|vertex| vertex.distance(placed.as_vec3()) < 1e-4);
             assert!(near, "{placed} among {vertices:?}");
         }
     }
@@ -916,7 +919,7 @@ pub(crate) mod tests {
         let (model, _) = added(&mut cx, "m", imported());
         added(&mut again, "m", imported());
         let at = Transform {
-            translation: Vec3::new(0.0, 0.0, -5.0),
+            translation: DVec3::new(0.0, 0.0, -5.0),
             ..Transform::IDENTITY
         };
         let root = model.spawn(cx.world_mut(), at);

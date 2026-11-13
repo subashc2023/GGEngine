@@ -27,7 +27,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
     Commands, Component, Context, Entity, Error, Event, Font, Grant, Key, Layer, Mesh, Mods,
@@ -534,7 +534,7 @@ fn build(world: &mut World) {
         primary: true,
     };
     let above = Transform {
-        translation: Vec3::Z * 10.0,
+        translation: DVec3::Z * 10.0,
         ..Transform::IDENTITY
     };
     world.spawn((above, camera, Name("Camera".to_owned())));
@@ -548,7 +548,7 @@ fn build(world: &mut World) {
     ));
     for (index, start) in STARTS.into_iter().enumerate() {
         let at = Transform {
-            translation: start.extend(PLAYER_Z),
+            translation: start.extend(PLAYER_Z).as_dvec3(),
             scale: Vec3::splat(PLAYER_SIZE),
             ..Transform::IDENTITY
         };
@@ -600,7 +600,7 @@ fn build(world: &mut World) {
 fn place(world: &mut World, shard: Entity) {
     let players: Vec<Vec2> = world
         .query::<(&Player, &Transform)>()
-        .map(|(_, at)| at.translation.truncate())
+        .map(|(_, at)| at.translation.truncate().as_vec2())
         .collect();
     let Some(found) = world.query_mut::<&mut Match>().next() else {
         return;
@@ -617,7 +617,7 @@ fn place(world: &mut World, shard: Entity) {
         }
     }
     if let Some(transform) = world.get_mut::<Transform>(shard) {
-        transform.translation = at.extend(SHARD_Z);
+        transform.translation = at.extend(SHARD_Z).as_dvec3();
     }
 }
 
@@ -661,12 +661,12 @@ fn steer(world: &mut World, dt: Duration) {
 fn collect(world: &mut World, sounds: Option<Sounds>) {
     let players: Vec<(u8, Vec2)> = world
         .query::<(&Player, &Transform)>()
-        .map(|(player, at)| (player.index, at.translation.truncate()))
+        .map(|(player, at)| (player.index, at.translation.truncate().as_vec2()))
         .collect();
     let touched: Vec<(Entity, u8)> = world
         .query::<(Entity, &Shard, &Transform)>()
         .filter_map(|(shard, _, at)| {
-            let at = at.translation.truncate();
+            let at = at.translation.truncate().as_vec2();
             let reach = (PLAYER_SIZE + SHARD_SIZE) / 2.0;
             let by = players
                 .iter()
@@ -706,7 +706,9 @@ fn collect(world: &mut World, sounds: Option<Sounds>) {
 fn to_starts(world: &mut World) {
     let players = world.query_mut::<(&Player, &mut Transform, &mut RigidBody2D)>();
     for (player, at, body) in players {
-        at.translation = STARTS[usize::from(player.index)].extend(PLAYER_Z);
+        at.translation = STARTS[usize::from(player.index)]
+            .extend(PLAYER_Z)
+            .as_dvec3();
         body.velocity = Vec2::ZERO;
     }
 }

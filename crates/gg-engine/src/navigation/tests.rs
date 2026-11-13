@@ -1,6 +1,6 @@
 //! Navigation's tests: the bake, paths, agents, re-bakes and snapshots, and its reference hash.
 
-use gg_core::math::{Quat, Vec2, Vec3, libm};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, libm};
 
 use super::*;
 use crate::{CharacterController3D, step_physics};
@@ -8,7 +8,7 @@ use crate::{CharacterController3D, step_physics};
 /// A static box of `size` around `at`, turned by `rotation`.
 fn solid(world: &mut World, at: Vec3, size: Vec3, rotation: Quat) -> Entity {
     let transform = Transform {
-        translation: at,
+        translation: at.as_dvec3(),
         rotation,
         ..Transform::IDENTITY
     };
@@ -32,7 +32,7 @@ fn floor(world: &mut World, size: f32) -> Entity {
 /// A volume around `at`, of `size`, its agent half a unit in radius and its cells the defaults'.
 fn volume(world: &mut World, at: Vec3, size: Vec3) -> Entity {
     let placed = Transform {
-        translation: at,
+        translation: at.as_dvec3(),
         ..Transform::IDENTITY
     };
     let volume = NavMeshVolume {
@@ -328,7 +328,7 @@ fn a_world_without_a_volume_finds_no_path() {
 /// An agent at `at` heading for `to`, which nothing but navigation moves.
 fn walker(world: &mut World, at: Vec3, to: Vec3) -> Entity {
     let placed = Transform {
-        translation: at,
+        translation: at.as_dvec3(),
         ..Transform::IDENTITY
     };
     let agent = NavAgent {
@@ -351,7 +351,10 @@ fn agents_head_on_keep_apart_and_arrive() {
         walker(&mut world, west, east),
         walker(&mut world, east, west),
     ];
-    let at = |world: &World, agent| world.get::<Transform>(agent).expect("alive").translation;
+    let at = |world: &World, agent| {
+        let transform = world.get::<Transform>(agent).expect("alive");
+        transform.translation.as_vec3()
+    };
     let mut nearest = f32::INFINITY;
     for _ in 0..384 {
         step_navigation(&mut world);
@@ -509,7 +512,7 @@ fn crossing(world: &mut World) -> Vec<Entity> {
             _ => Vec3::new(-cos * 6.5, 0.0, -sin * 6.5),
         };
         let placed = Transform {
-            translation: at,
+            translation: at.as_dvec3(),
             scale: Vec3::new(0.7, 0.8, 0.7),
             ..Transform::IDENTITY
         };
@@ -620,7 +623,7 @@ fn navigation_hashes_as_its_reference_says() {
         .filter(|&&agent| world.get::<NavAgent>(agent).expect("an agent").arrived);
     assert_eq!(arrived.count(), agents.len(), "each where it was going");
     let content = world.hash().content;
-    assert_eq!(content, 0x0673_2bf4_fbe9_5a7f, "{content:#018x}");
+    assert_eq!(content, 0x7ffa_24ca_9031_2387, "{content:#018x}");
 }
 
 /// A platform 3 high over walkable ground, and a ramp up to it from its far side, along +X.
@@ -653,7 +656,7 @@ fn agents_take_no_floor_over_or_under_their_way_for_their_own() {
     for _ in 0..960 {
         step_navigation(&mut world);
         let at = world.get::<Transform>(agent).expect("alive").translation;
-        highest = highest.max(at.y);
+        highest = highest.max(at.y as f32);
     }
     let walked = world.get::<NavAgent>(agent).expect("an agent");
     let at = world.get::<Transform>(agent).expect("alive").translation;
@@ -720,7 +723,7 @@ fn a_plan_that_fails_is_tried_again_as_the_agent_lands() {
     );
     let to = Vec3::new(3.0, 0.0, 0.0);
     let placed = Transform {
-        translation: Vec3::new(-3.0, 5.0, 0.0),
+        translation: DVec3::new(-3.0, 5.0, 0.0),
         ..Transform::IDENTITY
     };
     let agent = NavAgent {
@@ -738,7 +741,11 @@ fn a_plan_that_fails_is_tried_again_as_the_agent_lands() {
     assert!(falling.corners.is_empty(), "off the navmesh: {falling:?}");
     run(&mut world, 320);
     let landed = world.get::<NavAgent>(agent).expect("an agent");
-    let at = world.get::<Transform>(agent).expect("alive").translation;
+    let at = world
+        .get::<Transform>(agent)
+        .expect("alive")
+        .translation
+        .as_vec3();
     assert!(landed.arrived, "{at} {landed:?}");
     assert!(Vec2::new(at.x - to.x, at.z - to.z).length() < 0.2, "{at}");
 }

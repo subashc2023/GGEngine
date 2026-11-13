@@ -1653,10 +1653,33 @@ World space is right-handed with +Y up, as glTF's is: a camera without rotation 
 with +X to its right, as glTF's cameras do. glTF assets need no conversion as they're imported,
 and scenes, physics and the editor share these axes.
 
+Positions are `f64`, so that a world 1,000 km across is as precise at its edges as at its origin,
+where `f32` steps 6 cm: a `Transform`'s translation, which scenes, JSON, recordings and the hash
+take as `f64`s, and where an entity is in the world, its own transform and its ancestors' composed
+as glam's `DAffine3`, rotation and scale staying `f32`; physics, in rapier's `f64` builds; cells,
+sounds, bounds, interpolation and the editor's handles, which measure between positions in `f64`
+and narrow what's near; and the tool API's positions and viewpoints. The GPU stays `f32`: each
+frame draws relative to an origin of its own, `Context::origin` and the renderer's
+`RenderData::origin`, a multiple of 1,024 on each axis near where the view saw from the frame
+before, which moves to the nearest once the view is more than 1,024 from it on an axis, and never
+while it stays within 1,024 of the world's origin. What a frame hands the renderer, the scene's
+instances, its draws, lights and particles' births, is `f32` from it, and its viewpoint `f64`,
+which the renderer takes from it; what the layers draw in the world, in `f32`, the engine takes
+from it too. As the origin moves, the engine sets every instance of the renderer's scene again,
+and the renderer moves what it keeps from the frame before, the scene's last transforms, the
+particles alive and the matrices antialiasing's, ambient occlusion's, reflections' and motion
+blur's histories reproject by, so that the view goes on without a cut. Fog's height and the
+atmosphere's altitude stay the world's own Y. What stays `f32` in world space: navigation, which
+bakes and walks there, precise within about 16 km of the origin; Luau's vectors, which read and
+set positions to `f32`'s precision ([LUAU.md](docs/LUAU.md)); and models, local to their nodes.
+
 ## Physics
 
-Physics is rapier's, rapier2d's in 2D and rapier3d's in 3D, in gg-engine's `physics` module, and
-games reach it through components. An entity with a `Transform` and a `RigidBody2D` is a body
+Physics is rapier's, rapier2d's in 2D and rapier3d's in 3D, their `f64` builds, `rapier2d-f64`
+and `rapier3d-f64`, which the manifests name `rapier2d` and `rapier3d`, in gg-engine's `physics`
+module, and games reach it through components. Bodies' positions go into rapier and come back as
+`f64`s, whole; velocities, sizes, offsets and gravity stay their components' `f32`s. An entity
+with a `Transform` and a `RigidBody2D` is a body
 moving in the XY plane, and a `BoxCollider2D` or a `CircleCollider2D` beside it, or both, is the
 shape it collides as; one with a `RigidBody3D` moves in space, its translation and rotation whole,
 and collides as whichever of a `BoxCollider3D`, a `SphereCollider3D`, a `CapsuleCollider3D` and a
@@ -1917,7 +1940,8 @@ draw, picked as the volume's entity and the agent's.
 Each frame the engine extracts that frame's render data, as plain data, which the render thread
 hands `gg-renderer`: the color the view clears to, the game's view, the viewpoint it sees the world
 from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
-parameters that shader takes, and a transform that places it in the world. The view is the main
+parameters that shader takes, and a transform that places it in the world, from the frame's
+origin, as [World space](#world-space) says. The view is the main
 window's central area, which the dock leaves the game, or a dockspace's view panel. It renders into
 images of its own, that area's size in pixels, made again as that size changes, which the frame
 then shows there, a pixel to a pixel, so that tonemapping, post-processing and the tool API's
@@ -3187,7 +3211,7 @@ thread, and threads that can't start leave the main thread to decode, warning (`
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
-| Physics | `rapier2d` and `rapier3d`, with `enhanced-determinism`, for 2D and 3D, their state resources of the world; see [Physics](#physics) |
+| Physics | `rapier2d-f64` and `rapier3d-f64`, with `enhanced-determinism`, for 2D and 3D, their state resources of the world; see [Physics](#physics) |
 | Navigation | Our own; see [Navigation](#navigation) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |

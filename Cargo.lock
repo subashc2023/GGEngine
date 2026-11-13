@@ -1171,8 +1171,8 @@ dependencies = [
  "libc",
  "mlua",
  "png",
- "rapier2d",
- "rapier3d",
+ "rapier2d-f64",
+ "rapier3d-f64",
  "rayon-core",
  "rfd",
  "ron",
@@ -2592,10 +2592,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "parry2d"
+name = "parry2d-f64"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe1ba500175e957aaa27ddc92290ec8ff503d73331365443660816d6302e2a31"
+checksum = "4f0d7c5731bcbff3cefdca822e64693f9654598377475030f25946a3417be856"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2621,10 +2621,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "parry3d"
+name = "parry3d-f64"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b626edc0b497dba4bdf6e1e0797895294ed9f61dac2bd28cb5d34d37ad2ca7e"
+checksum = "ffb9e04261f1783d8f66f36767b2b73132a63c9b30b12a5ed47e1faa240f7591"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2647,7 +2647,6 @@ dependencies = [
  "slab",
  "smallvec",
  "spade",
- "static_assertions",
  "thiserror 2.0.21",
 ]
 
@@ -2860,10 +2859,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rapier2d"
+name = "rapier2d-f64"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b73d84c8e78f4fbd46fb5c800bbdb15cad6ef2bd517de6a4d31fe60edd838f8d"
+checksum = "a44772074d1310f0639ec43400559ee5c675c443d0ea9967fe988292ded0136c"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2872,20 +2871,19 @@ dependencies = [
  "log",
  "nalgebra 0.35.0",
  "num-traits",
- "parry2d",
+ "parry2d-f64",
  "profiling",
  "serde",
  "simba 0.10.2",
  "static_assertions",
  "thiserror 2.0.21",
- "wide 1.7.1",
 ]
 
 [[package]]
-name = "rapier3d"
+name = "rapier3d-f64"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "033e2edc815d61ab97bd74ed5d1cbea5ebe575218774a7cfedbd3551f0033317"
+checksum = "f4588855e9c5451702147b5c6ddff4d93887f1e59c9504b6ac3571818f6ec3d2"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2894,13 +2892,12 @@ dependencies = [
  "log",
  "nalgebra 0.35.0",
  "num-traits",
- "parry3d",
+ "parry3d-f64",
  "profiling",
  "serde",
  "simba 0.10.2",
  "static_assertions",
  "thiserror 2.0.21",
- "wide 1.7.1",
 ]
 
 [[package]]

@@ -29,7 +29,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use gg_api::{Client, Failure, Session};
-    use gg_core::math::{Mat4, Vec3};
+    use gg_core::math::{DAffine3, DMat4, DVec3, Vec3};
     use serde::Deserialize;
     use serde_json::{Map, Value as JsonValue, json};
     use tracing::field::display;
@@ -737,7 +737,7 @@ mod imp {
                 local: Transform::from_value(local).ok()?,
                 space: entity.space?,
                 bounds: (entity.bounds)
-                    .map(|sphere| (Vec3::from_array(sphere.center), sphere.radius)),
+                    .map(|sphere| (DVec3::from_array(sphere.center), sphere.radius)),
                 node: entity.components.iter().any(|name| name == "ModelNode"),
                 generation: self.generation,
             })
@@ -785,6 +785,11 @@ mod imp {
         /// `placed`, with the sets of its transform's fields that wait for the game made, in the
         /// order they were: whole, or a vector's component, as a link sets them.
         fn waited(&self, mut placed: Placed) -> Placed {
+            /// A transform's vector a set reaches: its translation, of `f64`s, or its scale.
+            enum Axes<'a> {
+                Wide(&'a mut DVec3),
+                Narrow(&'a mut Vec3),
+            }
             let sets = self.waiting.iter().filter(|set| set.id == placed.id);
             let local = &mut placed.local;
             for Edit {
@@ -801,8 +806,8 @@ mod imp {
                     None => (path.as_str(), None),
                 };
                 let vector = match field {
-                    "translation" => &mut local.translation,
-                    "scale" => &mut local.scale,
+                    "translation" => Axes::Wide(&mut local.translation),
+                    "scale" => Axes::Narrow(&mut local.scale),
                     "rotation" => {
                         if let (None, &Value::Quat(rotation)) = (axis, value) {
                             local.rotation = rotation;
@@ -811,13 +816,12 @@ mod imp {
                     }
                     _ => continue,
                 };
-                match (axis, value) {
-                    (None, &Value::Vec3(whole)) => *vector = whole,
-                    (Some(axis), &Value::F32(x)) => {
-                        if let Some(i) = ["x", "y", "z"].iter().position(|&name| name == axis) {
-                            vector[i] = x;
-                        }
-                    }
+                let i = axis.and_then(|axis| ["x", "y", "z"].iter().position(|&name| name == axis));
+                match (vector, axis, i, value) {
+                    (Axes::Wide(vector), None, _, &Value::DVec3(whole)) => *vector = whole,
+                    (Axes::Wide(vector), Some(_), Some(i), &Value::F64(x)) => vector[i] = x,
+                    (Axes::Narrow(vector), None, _, &Value::Vec3(whole)) => *vector = whole,
+                    (Axes::Narrow(vector), Some(_), Some(i), &Value::F32(x)) => vector[i] = x,
                     _ => {}
                 }
             }
@@ -1378,16 +1382,16 @@ mod imp {
     /// reads them: if it gives one, finite.
     fn space_of(space: &JsonValue, names: &Names) -> Option<Pose> {
         let matrix = space.get("matrix")?;
-        let matrix = json::read(matrix, &Type::Array(Box::new(Type::F32), 16), names).ok()?;
+        let matrix = json::read(matrix, &Type::Array(Box::new(Type::F64), 16), names).ok()?;
         let Value::List(columns) = matrix else {
             return None;
         };
         let floats = columns.iter().map(|value| match *value {
-            Value::F32(x) => Some(x),
+            Value::F64(x) => Some(x),
             _ => None,
         });
-        let floats: Vec<f32> = floats.collect::<Option<_>>()?;
-        let matrix = Mat4::from_cols_slice(&floats);
+        let floats: Vec<f64> = floats.collect::<Option<_>>()?;
+        let matrix = DAffine3::from_mat4(DMat4::from_cols_slice(&floats));
         let rotation = json::read(space.get("rotation")?, &Type::Quat, names).ok()?;
         let Value::Quat(rotation) = rotation else {
             return None;
@@ -1407,7 +1411,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use gg_core::math::{Quat, Vec3};
+        use gg_core::math::Quat;
 
         use super::*;
 
@@ -1506,7 +1510,7 @@ mod imp {
                 edit: Edit {
                     component: "Transform".to_owned(),
                     path: "translation.x".to_owned(),
-                    value: Value::F32(1.0),
+                    value: Value::F64(1.0),
                 },
                 applied,
             };
@@ -1594,11 +1598,11 @@ mod imp {
             remote.entity(a, answer(&space("4")), Some(a));
             let placed = remote.placed(Some(a)).expect("placed");
             let local = Transform {
-                translation: Vec3::new(1.0, 2.0, 3.0),
+                translation: DVec3::new(1.0, 2.0, 3.0),
                 ..Transform::IDENTITY
             };
             let parent = Pose {
-                matrix: Mat4::from_translation(Vec3::new(4.0, 5.0, 0.0)),
+                matrix: DAffine3::from_translation(DVec3::new(4.0, 5.0, 0.0)),
                 rotation: Quat::IDENTITY,
             };
             let expected = Placed {
@@ -1614,7 +1618,7 @@ mod imp {
             let bounds = r#","bounds":{"center":[1,2,3],"radius":2.5}"#;
             remote.entity(a, answer(&format!("{}{bounds}", space("4"))), Some(a));
             let bounded = remote.placed(Some(a)).expect("placed");
-            assert_eq!(bounded.bounds, Some((Vec3::new(1.0, 2.0, 3.0), 2.5)));
+            assert_eq!(bounded.bounds, Some((DVec3::new(1.0, 2.0, 3.0), 2.5)));
             // A model's node, as its `ModelNode` says, is placed as one.
             let transform = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
             let components = format!(r#""components":{{"Transform":{transform},"ModelNode":0}}"#);
@@ -1692,7 +1696,7 @@ mod imp {
                 edit: Edit {
                     component: "Transform".to_owned(),
                     path: "translation".to_owned(),
-                    value: Value::Vec3(Vec3::new(7.0, 8.0, 9.0)),
+                    value: Value::DVec3(DVec3::new(7.0, 8.0, 9.0)),
                 },
                 applied: true,
             });
@@ -1701,7 +1705,7 @@ mod imp {
             let along = remote.along(&picks).expect("placed");
             assert_eq!(
                 along[0].local.translation,
-                Vec3::new(7.0, 8.0, 9.0),
+                DVec3::new(7.0, 8.0, 9.0),
                 "as it will be"
             );
             remote.entity(b, answer(None), Some(a));
@@ -1877,7 +1881,7 @@ mod imp {
                 edit: Edit {
                     component: "Transform".to_owned(),
                     path: "translation.x".to_owned(),
-                    value: Value::F32(1.0),
+                    value: Value::F64(1.0),
                 },
                 applied: false,
             });
@@ -1921,7 +1925,7 @@ mod imp {
             };
             let a = id(1);
             assert!(link.idle(), "nothing made");
-            link.set(a, "Transform", "translation.x", Value::F32(1.0));
+            link.set(a, "Transform", "translation.x", Value::F64(1.0));
             assert!(!link.idle(), "until the pass");
             remote.send(Pass::default(), &mut inspector);
             assert_eq!(methods(), ["apply"]);

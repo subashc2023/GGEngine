@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use ron::Options;
 use ron::de::SpannedError;
@@ -973,6 +973,7 @@ struct Read<'a, 'w> {
 
 /// A vector's components' type.
 static F32: Type = Type::F32;
+static F64: Type = Type::F64;
 
 impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
     type Value = Value;
@@ -1020,7 +1021,7 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
                     _ => deserializer.deserialize_str(leaf),
                 }
             }
-            Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::Quat => {
+            Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::DVec3 | Type::Quat => {
                 let vector = Vector {
                     load,
                     item,
@@ -1312,7 +1313,7 @@ impl Vector<'_, '_> {
     fn len(&self) -> usize {
         match self.ty {
             Type::Vec2 => 2,
-            Type::Vec3 => 3,
+            Type::Vec3 | Type::DVec3 => 3,
             _ => 4,
         }
     }
@@ -1331,13 +1332,16 @@ impl<'de> Visitor<'de> for Vector<'_, '_> {
             Type::Vec2 => "a Vec2",
             Type::Vec3 => "a Vec3",
             Type::Vec4 => "a Vec4",
+            Type::DVec3 => "a DVec3",
             _ => "a quaternion",
         };
+        // Each read as the f32 or f64 it is, so that an f32's text rounds once.
+        let wide = *self.ty == Type::DVec3;
         let mut xs = [0.0; 4];
         for (i, x) in xs[..len].iter_mut().enumerate() {
             let read = Read {
                 load: &mut *self.load,
-                ty: &F32,
+                ty: if wide { &F64 } else { &F32 },
                 meta: self.meta,
                 depth: self.depth,
             };
@@ -1346,8 +1350,9 @@ impl<'de> Visitor<'de> for Vector<'_, '_> {
                 .next_element_seed(read)
                 .inspect_err(within!(self.load, step))?
             {
-                Some(Value::F32(component)) => *x = component,
-                Some(_) => unreachable!("an f32 is read as one"),
+                Some(Value::F32(component)) => *x = f64::from(component),
+                Some(Value::F64(component)) => *x = component,
+                Some(_) => unreachable!("a float is read as one"),
                 None => {
                     let error = Error::new(
                         "reflect.wrong_length",
@@ -1363,11 +1368,14 @@ impl<'de> Visitor<'de> for Vector<'_, '_> {
                 format!("{what} has {len} components, but it's given more"),
             )
         }))?;
+        // An f32's components went through f64 exactly.
+        let narrow = xs.map(|x| x as f32);
         let value = match self.ty {
-            Type::Vec2 => Value::Vec2(Vec2::new(xs[0], xs[1])),
-            Type::Vec3 => Value::Vec3(Vec3::new(xs[0], xs[1], xs[2])),
-            Type::Vec4 => Value::Vec4(Vec4::from_array(xs)),
-            _ => Value::Quat(Quat::from_array(xs)),
+            Type::Vec2 => Value::Vec2(Vec2::new(narrow[0], narrow[1])),
+            Type::Vec3 => Value::Vec3(Vec3::new(narrow[0], narrow[1], narrow[2])),
+            Type::Vec4 => Value::Vec4(Vec4::from_array(narrow)),
+            Type::DVec3 => Value::DVec3(DVec3::new(xs[0], xs[1], xs[2])),
+            _ => Value::Quat(Quat::from_array(narrow)),
         };
         if let Value::Quat(_) = value
             && let Err(error) = Quat::from_value(&value)

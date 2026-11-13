@@ -23,7 +23,7 @@ use crate::{Projection, Viewpoint};
 const PIXEL: usize = 4;
 
 /// What the memory begins with: its layout's name and version, in the last byte.
-const MAGIC: u64 = u64::from_le_bytes(*b"ggview\0\x02");
+const MAGIC: u64 = u64::from_le_bytes(*b"ggview\0\x03");
 
 /// Where the slots begin, a page in, past the header.
 const SLOTS_AT: usize = 4096;
@@ -38,7 +38,7 @@ const NEW: u64 = 1 << 32;
 pub const MAX_SIDE: u32 = 8192;
 
 /// The words a slot holds its frame's viewpoint in, as [`pack_viewpoint`] lays it out.
-const VIEWPOINT_WORDS: usize = 11;
+const VIEWPOINT_WORDS: usize = 14;
 
 /// The memory's header, at its start. Each field is atomic, as both processes read it while the
 /// other may write it, and each has one writer: the client, which made the memory, or the game.
@@ -459,19 +459,20 @@ fn unpack(packed: u64) -> [u32; 2] {
 }
 
 /// `viewpoint` in words: its projection's kind, 0 orthographic or 1 perspective, then its three
-/// numbers, a perspective one's third 0, its position and its rotation, each a float's bits.
+/// numbers, a perspective one's third 0, and its rotation, each an `f32`'s bits, then its
+/// position, each an `f64`'s bits, low word first.
 fn pack_viewpoint(viewpoint: &Viewpoint) -> [u32; VIEWPOINT_WORDS] {
     let (kind, projection) = match viewpoint.projection {
         Projection::Orthographic { height, near, far } => (0, [height, near, far]),
         Projection::Perspective { fov, near } => (1, [fov, near, 0.0]),
     };
-    let numbers = projection
-        .iter()
-        .chain(&viewpoint.position)
-        .chain(&viewpoint.rotation);
+    let numbers = projection.iter().chain(&viewpoint.rotation);
+    let position =
+        (viewpoint.position.iter()).flat_map(|x| [x.to_bits() as u32, (x.to_bits() >> 32) as u32]);
     let mut words = [kind; VIEWPOINT_WORDS];
-    for (word, number) in words[1..].iter_mut().zip(numbers) {
-        *word = number.to_bits();
+    let bits = numbers.map(|number| number.to_bits()).chain(position);
+    for (word, bits) in words[1..].iter_mut().zip(bits) {
+        *word = bits;
     }
     words
 }
@@ -479,8 +480,12 @@ fn pack_viewpoint(viewpoint: &Viewpoint) -> [u32; VIEWPOINT_WORDS] {
 /// The viewpoint [`pack_viewpoint`] packed into `words`: `None` for a kind of projection there's
 /// none of, or a number that isn't finite.
 fn unpack_viewpoint(words: [u32; VIEWPOINT_WORDS]) -> Option<Viewpoint> {
-    let [kind, numbers @ ..] = words;
-    let [a, b, c, x, y, z, i, j, k, w] = numbers.map(f32::from_bits);
+    let [kind, a, b, c, i, j, k, w, position @ ..] = words;
+    let [a, b, c, i, j, k, w] = [a, b, c, i, j, k, w].map(f32::from_bits);
+    let wide = |at: usize| {
+        f64::from_bits(u64::from(position[2 * at]) | (u64::from(position[2 * at + 1]) << 32))
+    };
+    let [x, y, z] = [0, 1, 2].map(wide);
     let projection = match kind {
         0 => Projection::Orthographic {
             height: a,
@@ -946,8 +951,9 @@ mod tests {
     fn a_frame_carries_the_viewpoint_it_was_drawn_from_and_its_look() {
         let mut reader = Reader::create(1, 1).expect("memory for a view");
         let mut writer = Writer::open(reader.name()).expect("the memory");
+        // 1,000 km out, its position in `f64`, which `f32` would round to 1,000,000.3125.
         let perspective = Viewpoint {
-            position: [1.0, -2.5, 3.0],
+            position: [1_000_000.3, -2.5, 3.0],
             rotation: [0.0, 0.6, 0.0, 0.8],
             projection: Projection::Perspective {
                 fov: std::f32::consts::FRAC_PI_3,
@@ -992,7 +998,7 @@ mod tests {
         assert_eq!(reader.take(), None, "a projection there's none of");
         assert_eq!(reader.frame(), None);
         let nowhere = Viewpoint {
-            position: [f32::NAN, 0.0, 0.0],
+            position: [f64::from(f32::NAN), 0.0, 0.0],
             ..SEEN
         };
         let unbounded = Viewpoint {

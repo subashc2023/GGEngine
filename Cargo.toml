@@ -107,9 +107,12 @@ quote = "1.0.47"
 # and zeros of one sign; its solver's SIMD stays four lanes wide, which keeps that, where eight
 # wouldn't. Its glam is 0.33, not the engine's, so vectors and rotations cross between them as
 # numbers. serde-serialize, so that snapshot files hold its bodies and contacts, which a restored
-# world steps on from as the world saved would have.
-rapier2d = { version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
-rapier3d = { version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
+# world steps on from as the world saved would have. Its f64 builds, dimforge's, under the names the
+# code uses, as the engine's translations are f64, so that a body 1,000 km from the origin moves as
+# precisely as one at it; rapier3d-f64's defaults add block-solver, which rapier3d's don't, so its
+# others are named, keeping the solver the f32 build had.
+rapier2d = { package = "rapier2d-f64", version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
+rapier3d = { package = "rapier3d-f64", version = "0.36.1", default-features = false, features = ["dim3", "f64", "std", "enhanced-determinism", "serde-serialize"] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 # The job system's pool and `join`, with the thread that ticks as a thread of the pool: `join` from
 # one keeps its job on the stack, where a call from outside the pool allocates through its queue.
@@ -215,7 +218,7 @@ opt-level = 3
 # Debug builds make a mesh collider's BVH in the step its body is made, at each Play's first tick
 # in the editor: Sponza's in 1.37 s unoptimized, 0.11 s so. Floats step to the same bits at any
 # level, so a world's hash doesn't change with it.
-[profile.dev.package.parry3d]
+[profile.dev.package.parry3d-f64]
 opt-level = 3
 
 # Debug builds draw their development UI through egui each frame, and its text through the crates

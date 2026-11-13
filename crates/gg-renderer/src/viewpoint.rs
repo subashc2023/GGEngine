@@ -4,14 +4,17 @@
 use std::f32::consts::PI;
 
 use gg_core::math::camera::rh::proj::vulkan;
-use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Quat, Vec3, Vec4};
 
 /// Where the game's view sees the world from, and how. World space is right-handed with +Y up, and
 /// a viewpoint without rotation looks down -Z, with +X to its right and +Y up, as glTF's cameras
 /// do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewpoint {
-    pub position: Vec3,
+    /// Where it is, in `f64`, as the engine's translations are, so that it sees as precisely 1,000
+    /// km from the origin as at it: a frame draws relative to its
+    /// [`origin`](crate::RenderData::origin), near the viewpoint, in `f32`.
+    pub position: DVec3,
     /// Which way it faces, as a unit quaternion. A 2D game's camera turns about Z, with
     /// [`Quat::from_rotation_z`]: turning it counterclockwise turns the scene clockwise on screen.
     pub rotation: Quat,
@@ -64,7 +67,7 @@ impl Default for Viewpoint {
     /// 1 behind it to 1 in front.
     fn default() -> Self {
         Self {
-            position: Vec3::ZERO,
+            position: DVec3::ZERO,
             rotation: Quat::IDENTITY,
             projection: Projection::Orthographic {
                 height: 2.0,
@@ -76,14 +79,26 @@ impl Default for Viewpoint {
 }
 
 impl Viewpoint {
+    /// The viewpoint where it is in a world whose origin is moved to `origin`, as a frame draws
+    /// relative to its own: the same but for its position, `origin` taken from it, in `f64`.
+    pub fn relative_to(self, origin: DVec3) -> Self {
+        Self {
+            position: self.position - origin,
+            ..self
+        }
+    }
+
     /// The matrix from world space to Vulkan's clip space, whose Y points down, for a view
-    /// `aspect` times as wide as it's tall.
+    /// `aspect` times as wide as it's tall: in `f32`, so that far from the origin its translation
+    /// rounds, as `f32`s do, 6 cm at 1,000 km; one [`relative_to`](Self::relative_to) a point near
+    /// it maps the world relative to that point.
     ///
     /// # Panics
     ///
     /// If its projection can't project, as [`Projection`] says.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        let view = Mat4::from_rotation_translation(self.rotation, self.position).inverse();
+        let view =
+            Mat4::from_rotation_translation(self.rotation, self.position.as_vec3()).inverse();
         self.projection_matrix(aspect) * view
     }
 
@@ -143,7 +158,7 @@ impl Viewpoint {
     pub(crate) fn eye(&self) -> Vec4 {
         match self.projection {
             Projection::Orthographic { .. } => (self.rotation * Vec3::Z).extend(0.0),
-            Projection::Perspective { .. } => self.position.extend(1.0),
+            Projection::Perspective { .. } => self.position.as_vec3().extend(1.0),
         }
     }
 }
@@ -162,7 +177,7 @@ mod tests {
         // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
         // +Y.
         let viewpoint = Viewpoint {
-            position: Vec3::new(3.0, -2.0, 5.0),
+            position: DVec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             projection: Projection::Orthographic {
                 height: 4.0,
@@ -204,7 +219,7 @@ mod tests {
         // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
         // +Y; a quarter turn from bottom to top, so the view spans as far up as it is in front.
         let viewpoint = Viewpoint {
-            position: Vec3::new(3.0, -2.0, 5.0),
+            position: DVec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             projection: Projection::Perspective {
                 fov: FRAC_PI_2,
@@ -242,7 +257,7 @@ mod tests {
     #[test]
     fn each_pixel_sees_the_way_it_shows() {
         let viewpoint = Viewpoint {
-            position: Vec3::new(3.0, -2.0, 5.0),
+            position: DVec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             projection: Projection::Perspective {
                 fov: FRAC_PI_2,

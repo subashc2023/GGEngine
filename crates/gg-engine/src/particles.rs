@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use gg_core::math::{Mat4, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Vec3, Vec4};
 use gg_renderer::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Particles};
 
 use crate::{Component, EntityId, Reflect, Texture, Tick};
@@ -199,6 +199,8 @@ pub(crate) struct Emitters {
     by_id: HashMap<EntityId, Emitting>,
     /// How many frames have begun, which each emitter's `seen` is the number of one of.
     frame: u64,
+    /// The origin of the frame begun last, which each emitter's `from` is relative to.
+    origin: DVec3,
 }
 
 /// What a frame emits an emitter's particles from.
@@ -221,11 +223,20 @@ struct Emitting {
 }
 
 impl Emitters {
-    /// Begins a frame's emitting: lets go of what the frame before didn't draw.
-    pub(crate) fn begin(&mut self) {
+    /// Begins a frame's emitting, whose draws are relative to `origin`: lets go of what the frame
+    /// before didn't draw, and takes where the frame before drew the rest into `origin`'s space.
+    pub(crate) fn begin(&mut self, origin: DVec3) {
         let last = self.frame;
         self.by_id.retain(|_, emitting| emitting.seen == last);
         self.frame += 1;
+        let moved = (self.origin - origin).as_vec3();
+        self.origin = origin;
+        if moved != Vec3::ZERO {
+            let moved = Mat4::from_translation(moved);
+            for emitting in self.by_id.values_mut() {
+                emitting.from = moved * emitting.from;
+            }
+        }
     }
 
     /// The particles of `emitter`, of entity `id`, this frame, which draws it where `drawn` places
@@ -386,6 +397,8 @@ fn bursts(
 
 #[cfg(test)]
 mod tests {
+    use gg_core::math::DVec3;
+
     use super::*;
     use crate::draw::{self, Scratch};
     use crate::font::Fonts;
@@ -410,7 +423,7 @@ mod tests {
         let id = EntityId::new(7).expect("not 0");
         let mut born = Vec::new();
         for &(ticked, drawn) in frames {
-            emitters.begin();
+            emitters.begin(DVec3::ZERO);
             let clock = Clock { ticked, drawn };
             let particles = emitters.emit(id, emitter, Mat4::IDENTITY, Mat4::IDENTITY, clock);
             let births = particles.births;
@@ -459,7 +472,7 @@ mod tests {
         let mut emitters = Emitters::default();
         let id = EntityId::new(7).expect("not 0");
         let mut at = |emitter: &ParticleEmitter, ticked: u64, drawn: f64| {
-            emitters.begin();
+            emitters.begin(DVec3::ZERO);
             let clock = Clock { ticked, drawn };
             emitters.emit(id, emitter, Mat4::IDENTITY, Mat4::IDENTITY, clock)
         };
@@ -483,6 +496,32 @@ mod tests {
         assert_eq!(at(&at_rate(32.0), 5, 5.0).births.first, 0);
     }
 
+    /// An emitter standing still while the frame's origin moves on gives the frame after the move
+    /// births between where the frame before drew it and where this one does, both from the new
+    /// origin: the same place, so they're born where it stands rather than along a line from
+    /// where it stood from the old one.
+    #[test]
+    fn births_come_from_where_the_emitter_was_as_the_origin_moves() {
+        let mut emitters = Emitters::default();
+        let id = EntityId::new(7).expect("not 0");
+        let emitter = at_rate(16.0);
+        let stands = DVec3::new(1_000_000.25, 2.0, -999_999.5);
+        let mut frame = |origin: DVec3, ticked: u64| {
+            emitters.begin(origin);
+            let drawn = Mat4::from_translation((stands - origin).as_vec3());
+            let clock = Clock {
+                ticked,
+                drawn: ticked as f64,
+            };
+            emitters.emit(id, &emitter, drawn, drawn, clock).births
+        };
+        let first = DVec3::new(1_000_448.0, 0.0, -1_000_448.0);
+        frame(first, 0);
+        let moved = frame(first + DVec3::new(1024.0, 0.0, 0.0), 8);
+        assert_eq!(moved.count, 2);
+        assert_eq!(moved.from, moved.to);
+    }
+
     /// What `world`'s emitters give the frame drawn after `ticks` ticks, its draws' particles.
     fn drawn(world: &World, ticks: u64, scratch: &mut Scratch) -> Vec<Particles> {
         let mut draws = Draws::default();
@@ -491,7 +530,7 @@ mod tests {
             world,
             &past,
             &Placed::of(world, &past, 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             ticks,
             &mut draws,
             &mut Shaders::default(),
@@ -515,7 +554,7 @@ mod tests {
             ..ParticleEmitter::default()
         };
         let at = Transform {
-            translation: Vec3::new(1.0, 2.0, 0.0),
+            translation: DVec3::new(1.0, 2.0, 0.0),
             ..Transform::IDENTITY
         };
         let entity = world.spawn((at, emitter));

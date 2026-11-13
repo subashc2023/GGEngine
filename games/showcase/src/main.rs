@@ -606,7 +606,7 @@ impl Showcase {
             launch.time += dt;
             if launch.time >= launch.every {
                 launch.time -= launch.every;
-                transform.translation = launch.from;
+                transform.translation = launch.from.as_dvec3();
                 transform.rotation = Quat::IDENTITY;
                 body.velocity = launch.velocity;
                 body.angular_velocity = Vec3::ZERO;
@@ -619,7 +619,7 @@ impl Showcase {
     fn tether(&mut self, world: &mut World) {
         let anchored = |body: Option<Entity>, anchor: Vec3| {
             let transform = world.get::<Transform>(body?)?;
-            Some(transform.matrix().transform_point3(anchor))
+            Some(transform.matrix().transform_point3(anchor.as_dvec3()))
         };
         for (entity, tether, joint) in world.query::<(Entity, &Tether, &Joint3D)>() {
             let (Some(from), Some(to)) = (
@@ -628,7 +628,7 @@ impl Showcase {
             ) else {
                 continue;
             };
-            let along = to - from;
+            let along = (to - from).as_vec3();
             let placed = Transform {
                 translation: (from + to) * 0.5,
                 rotation: Quat::from_rotation_arc(Vec3::Y, along.normalize_or(Vec3::Y)),

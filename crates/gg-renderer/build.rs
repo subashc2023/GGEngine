@@ -62,7 +62,7 @@ const COMPUTE: [(&str, &[&str]); 22] = [
             "composite_main",
         ],
     ),
-    ("emit", &["emit_main", "grow_main"]),
+    ("emit", &["emit_main", "grow_main", "moved_main"]),
     (
         "exposure",
         &["clear_main", "histogram_main", "average_main"],

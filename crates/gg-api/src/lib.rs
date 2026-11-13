@@ -627,7 +627,7 @@ pub struct WorldCells {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ViewerAt {
     pub entity: Option<String>,
-    pub position: [f32; 3],
+    pub position: [f64; 3],
     pub radius: f32,
 }
 
@@ -869,13 +869,14 @@ pub enum Scroll {
     Pixels([f64; 2]),
 }
 
-/// Where the game's view is seen from, and how: from `position`, facing as `rotation`, a unit
-/// quaternion, turns it, through `projection`. World space is right-handed with +Y up, and a
-/// viewpoint without rotation looks down -Z, with +X to its right and +Y up.
+/// Where the game's view is seen from, and how: from `position`, in `f64`s, as the engine's
+/// positions are, facing as `rotation`, a unit quaternion, turns it, through `projection`. World
+/// space is right-handed with +Y up, and a viewpoint without rotation looks down -Z, with +X to its
+/// right and +Y up.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Viewpoint {
-    pub position: [f32; 3],
+    pub position: [f64; 3],
     pub rotation: [f32; 4],
     pub projection: Projection,
 }
@@ -887,10 +888,10 @@ impl Viewpoint {
             Projection::Orthographic { height, near, far } => [height, near, far],
             Projection::Perspective { fov, near } => [fov, near, 0.0],
         };
-        (self.position.iter())
-            .chain(&self.rotation)
-            .chain(&projection)
-            .all(|number| number.is_finite())
+        self.position.iter().all(|number| number.is_finite())
+            && (self.rotation.iter())
+                .chain(&projection)
+                .all(|number| number.is_finite())
     }
 }
 
@@ -1261,7 +1262,7 @@ pub struct Entity {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sphere {
-    pub center: [f32; 3],
+    pub center: [f64; 3],
     pub radius: f32,
 }
 
@@ -1398,9 +1399,10 @@ pub struct VariantInfo {
 }
 
 /// A field's type: `"bool"`, `{"int":{"bits":32,"signed":true}}`, `"f32"`, `"f64"`, `"string"`,
-/// `"vec2"`, `"vec3"`, `"vec4"`, `"quat"`, `"entity"`, `"texture"`, `"model"`, `"font"`,
-/// `"prefab"`, `{"option":...}`, `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a
-/// type `types` describes, or `"opaque"`, a field reflection leaves as it is.
+/// `"vec2"`, `"vec3"`, `"vec4"`, `"dvec3"` (three `f64`s, as an entity's translation), `"quat"`,
+/// `"entity"`, `"texture"`, `"model"`, `"font"`, `"prefab"`, `{"option":...}`, `{"list":...}`,
+/// `{"array":[..., 4]}`, `{"named":"Transform"}`, a type `types` describes, or `"opaque"`, a field
+/// reflection leaves as it is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Type {
@@ -1412,6 +1414,7 @@ pub enum Type {
     Vec2,
     Vec3,
     Vec4,
+    Dvec3,
     Quat,
     Entity,
     Texture,
@@ -2364,12 +2367,12 @@ mod tests {
     /// written as it's read; a projection is written as reflection writes a camera's.
     #[test]
     fn looks_read_as_their_docs_say() {
-        let json = r#"{"viewpoint": {"position": [0, 1, 2.5], "rotation": [0, 0, 0, 1],
+        let json = r#"{"viewpoint": {"position": [1000000.3, 1, 2.5], "rotation": [0, 0, 0, 1],
             "projection": {"Perspective": {"fov": 1.0, "near": 0.01}}}, "outline": null,
             "grid": "xz"}"#;
         let look: Look = serde_json::from_str(json).unwrap();
         let viewpoint = Viewpoint {
-            position: [0.0, 1.0, 2.5],
+            position: [1_000_000.3, 1.0, 2.5],
             rotation: [0.0, 0.0, 0.0, 1.0],
             projection: Projection::Perspective {
                 fov: 1.0,
@@ -2583,12 +2586,14 @@ mod tests {
     /// A sphere reads as `entity` writes `bounds`, and takes no other field.
     #[test]
     fn spheres_read_as_their_docs_say() {
-        let sphere = r#"{"center": [1, 2.5, -3], "radius": 0.5}"#;
+        let sphere = r#"{"center": [1000000.3, 2.5, -3], "radius": 0.5}"#;
         let expected = Sphere {
-            center: [1.0, 2.5, -3.0],
+            center: [1_000_000.3, 2.5, -3.0],
             radius: 0.5,
         };
         assert_eq!(serde_json::from_str::<Sphere>(sphere).unwrap(), expected);
+        let written = serde_json::to_string(&expected).unwrap();
+        assert_eq!(written, r#"{"center":[1000000.3,2.5,-3.0],"radius":0.5}"#);
         let extra = r#"{"center": [0, 0, 0], "radius": 1, "color": 0}"#;
         assert!(serde_json::from_str::<Sphere>(extra).is_err());
     }

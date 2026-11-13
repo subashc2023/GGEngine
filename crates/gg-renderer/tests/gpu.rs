@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytemuck::NoUninit;
-use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{self, DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
     Channel, Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog,
@@ -161,6 +161,7 @@ fn main() -> ExitCode {
         removed_assets_draw_nothing_or_their_stand_in,
         antialiasing_smooths_edges_frame_by_frame,
         antialiasing_follows_what_moves,
+        a_far_scene_draws_as_at_the_origin_through_its_origins_move,
         antialiasing_leaves_no_trail,
         antialiasing_steadies_what_is_thinner_than_a_pixel,
         antialiasing_settles_without_a_jump_once_the_view_stops,
@@ -449,6 +450,7 @@ impl Stores {
             lens: Lens::NONE,
             viewport,
             viewpoint,
+            origin: DVec3::ZERO,
             cut: false,
             uploads,
             draws,
@@ -647,7 +649,7 @@ fn meshes_match_their_reference(path: UploadPath) {
     // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
     // ways; the view's center is (1, 0.5).
     let viewpoint = Viewpoint {
-        position: Vec3::new(1.0, 0.5, 0.0),
+        position: DVec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
@@ -1109,7 +1111,7 @@ fn the_canvas_matches_its_reference() {
         size: [160, 120],
     };
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 4.0),
+        position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
@@ -1357,7 +1359,7 @@ fn grids_match_their_reference() {
     // 2 over the ground, looking 22.5° down, seeing a sixth of a turn from the view's bottom to its
     // top, which shows the horizon; on a square around its foot a thousand times that across.
     let above = Viewpoint {
-        position: Vec3::new(0.3, 2.0, 3.0),
+        position: DVec3::new(0.3, 2.0, 3.0),
         rotation: Quat::from_rotation_x(-PI / 8.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
@@ -1383,7 +1385,7 @@ fn grids_match_their_reference() {
     // 10 units from the view's bottom to its top, 16 pixels a unit, over (5, 1.5); on a square
     // twice the view's width across and its height up.
     let facing = Viewpoint {
-        position: Vec3::new(5.0, 1.5, 0.0),
+        position: DVec3::new(5.0, 1.5, 0.0),
         projection: Projection::Orthographic {
             height: 10.0,
             near: -1.0,
@@ -1445,7 +1447,7 @@ fn lines_match_their_reference() {
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units, 34.6 pixels a unit.
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 4.0),
+        position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
@@ -1867,7 +1869,7 @@ fn views_match_their_reference() {
     let mut stores = Stores::default();
     // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
     let viewpoint = Viewpoint {
-        position: Vec3::new(1.0, 0.5, 0.0),
+        position: DVec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
@@ -2002,7 +2004,7 @@ fn depth_matches_its_reference() {
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 4.0),
+        position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
@@ -3109,7 +3111,7 @@ fn models_match_their_reference() {
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 4.0),
+        position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
@@ -3252,7 +3254,7 @@ fn skinned_meshes_move_with_their_joints() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 4.0,
             near: 0.1,
@@ -3345,7 +3347,7 @@ fn particles_match_their_reference() {
         .expect("a shader");
     let square = square(&mut stores.meshes);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Perspective {
             fov: 1.0,
             near: 0.1,
@@ -5293,7 +5295,7 @@ fn adapted_frames_match_their_reference() {
     drawn(&mut stores, square, orange, true, over);
     let viewport = filling([SIZE, SIZE]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.0, 5.0),
+        position: DVec3::new(0.0, 2.0, 5.0),
         rotation: Quat::from_rotation_x(-0.3),
         projection: Projection::Perspective {
             fov: 0.9,
@@ -6197,7 +6199,7 @@ fn shaders_read_the_frames_data() {
     let huge = Mat4::from_scale(Vec3::splat(100.0));
     draws.push(square, shader, huge, Vec4::ZERO);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.1, 0.2, 0.3),
+        position: DVec3::new(0.1, 0.2, 0.3),
         ..Viewpoint::default()
     };
     let viewport = filling([SIZE, SIZE]);
@@ -6260,7 +6262,7 @@ fn lights_shade_as_gltf_defines() {
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 1.0,
             near: 0.5,
@@ -6489,7 +6491,7 @@ fn back_faces_flip_their_normal_maps() {
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 1.0,
             near: 0.5,
@@ -6613,7 +6615,7 @@ fn lit_spheres_match_their_reference() {
     let mut renderer = renderer(SIZE, SIZE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 9.0),
+        position: DVec3::new(0.0, 0.0, 9.0),
         projection: Projection::Perspective {
             fov: PI / 6.0,
             near: 0.5,
@@ -6744,7 +6746,7 @@ fn many_lights_match_their_reference() {
     let viewport = filling([WIDTH, HEIGHT]);
     let tilt = -math::libm::atan2f(7.0, 10.0);
     let perspective = Viewpoint {
-        position: Vec3::new(0.0, 7.0, 10.0),
+        position: DVec3::new(0.0, 7.0, 10.0),
         rotation: Quat::from_rotation_x(tilt),
         projection: Projection::Perspective {
             fov: FRAC_PI_4,
@@ -6798,7 +6800,7 @@ fn a_uniform_sky_lights_white_as_itself() {
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 1.0,
             near: 0.5,
@@ -6941,7 +6943,7 @@ fn the_sky_shows_each_way_behind_the_world() {
     let viewport = filling([SIZE, SIZE]);
     // Facing `way`, from anywhere: the sky is as far as can be.
     let looking = |way: Vec3| Viewpoint {
-        position: Vec3::new(5.0, -3.0, 2.0),
+        position: DVec3::new(5.0, -3.0, 2.0),
         rotation: Quat::from_rotation_arc(Vec3::NEG_Z, way),
         projection: Projection::Perspective {
             fov: 0.1,
@@ -7019,7 +7021,7 @@ fn sky_lit_spheres_match_their_reference() {
     let mut renderer = renderer(SIZE, SIZE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 9.0),
+        position: DVec3::new(0.0, 0.0, 9.0),
         projection: Projection::Perspective {
             fov: PI / 6.0,
             near: 0.5,
@@ -7195,7 +7197,7 @@ fn occlusion_scene(stores: &mut Stores) -> OcclusionScene {
     );
     draws.skin(strip, [Mat4::from_translation(Vec3::new(0.0, 0.0, -1.0))]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.4, 3.4),
+        position: DVec3::new(0.0, 2.4, 3.4),
         rotation: Quat::from_rotation_x(-0.6),
         projection: Projection::Perspective {
             fov: PI / 3.0,
@@ -7655,7 +7657,7 @@ fn occlusion_floor(stores: &mut Stores) -> Draws {
 fn floor_seen(frame: usize, over: usize, size: [u32; 2]) -> Viewpoint {
     let unit = size[1] as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
     Viewpoint {
-        position: Vec3::new(frame as f32 / (over as f32 * unit), FLOOR_ABOVE, 0.0),
+        position: Vec3::new(frame as f32 / (over as f32 * unit), FLOOR_ABOVE, 0.0).as_dvec3(),
         rotation: Quat::from_rotation_x(-FRAC_PI_2),
         projection: Projection::Perspective {
             fov: FLOOR_FOV,
@@ -7683,7 +7685,7 @@ fn floor_balls_shown(
         // Looking down -Y, the view's up along -Z: its pixels' rows run down along +Z.
         let way = Vec3::new(ndc.x * tan * width / height, -1.0, ndc.y * tan).normalize();
         centers.clone().any(|center| {
-            let to = center - viewpoint.position;
+            let to = center - viewpoint.position.as_vec3();
             let along = to.dot(way);
             (to - way * along).length_squared() <= FLOOR_BALL * FLOOR_BALL
         })
@@ -7963,7 +7965,7 @@ fn reflection_scene(
     );
     draws.push_draw(standing, &panel, 0);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 1.2, 4.0),
+        position: DVec3::new(0.0, 1.2, 4.0),
         rotation: Quat::from_rotation_x(-0.2),
         projection: Projection::Perspective {
             fov: PI / 3.0,
@@ -8054,7 +8056,7 @@ fn reflections_mirror_what_the_view_shows() {
     // The camera moved since the frame before, farther than the sphere is wide on screen: what a
     // ray finds is taken from where it showed then.
     let moved = Viewpoint {
-        position: viewpoint.position + Vec3::new(0.6, 0.0, 0.0),
+        position: viewpoint.position + DVec3::new(0.6, 0.0, 0.0),
         ..viewpoint
     };
     let data = RenderData {
@@ -8320,7 +8322,7 @@ fn mirror_about_the_shading_normal(beside_cut: bool) {
         for i in 0..=240 {
             for j in 0..=400 {
                 let at = Vec3::new(-3.6 + 0.01 * i as f32, 0.0, -1.0 + 0.01 * j as f32);
-                let way = (at - viewpoint.position).normalize();
+                let way = (at - viewpoint.position.as_vec3()).normalize();
                 let ray = way - 2.0 * way.dot(normal) * normal;
                 let along = (middle - at).dot(ray).max(0.0);
                 let apart = (at + ray * along - middle).length();
@@ -8366,7 +8368,7 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 1.0,
             near: 0.5,
@@ -8474,7 +8476,7 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 2.0,
             near: 0.5,
@@ -8712,7 +8714,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 2.0,
             near: 0.5,
@@ -8836,7 +8838,7 @@ fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
     let mut renderer = renderer(WIDTH, SIDE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Orthographic {
             height: 1.0,
             near: 0.5,
@@ -8964,7 +8966,7 @@ fn a_skys_sun_lights_once() {
     let mut renderer = renderer(SIZE, SIZE);
     let mut stores = Stores::default();
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 5.0, 0.0),
+        position: DVec3::new(0.0, 5.0, 0.0),
         rotation: Quat::from_rotation_x(-FRAC_PI_2),
         projection: Projection::Orthographic {
             height: 1.0,
@@ -9151,11 +9153,15 @@ fn assert_fogged(
         // From the camera, or without perspective, the one way it looks, from its plane.
         let (origin, way) = match viewpoint.projection {
             Projection::Perspective { .. } => {
-                (viewpoint.position, (near - viewpoint.position).normalize())
+                let eye = viewpoint.position.as_vec3();
+                (eye, (near - eye).normalize())
             }
             Projection::Orthographic { .. } => {
                 let way = viewpoint.rotation * Vec3::NEG_Z;
-                (near - way * (near - viewpoint.position).dot(way), way)
+                (
+                    near - way * (near - viewpoint.position.as_vec3()).dot(way),
+                    way,
+                )
             }
         };
         let sunlight = sun.map_or(Vec3::ZERO, |(light, to_sun)| {
@@ -9347,7 +9353,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
         draws
     };
     let looking = Viewpoint {
-        position: Vec3::new(0.0, 2.0, 0.0),
+        position: DVec3::new(0.0, 2.0, 0.0),
         projection: Projection::Perspective {
             fov: 1.0,
             near: 0.1,
@@ -9484,7 +9490,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
     // From 100 units above the fog's height, looking down on a floor at it.
     stores.lights.clear();
     let above = Viewpoint {
-        position: Vec3::new(0.0, 100.0, 0.0),
+        position: DVec3::new(0.0, 100.0, 0.0),
         rotation: Quat::from_rotation_x(-FRAC_PI_2),
         ..looking
     };
@@ -9556,7 +9562,7 @@ impl FoggedScene {
             shadow_distance: Some(60.0),
         }];
         let viewpoint = Viewpoint {
-            position: Vec3::new(0.0, 1.2, 5.0),
+            position: DVec3::new(0.0, 1.2, 5.0),
             rotation: Quat::from_rotation_x(-0.08),
             projection: Projection::Perspective {
                 fov: 0.9,
@@ -9866,7 +9872,7 @@ fn atmospheres_match_their_references() {
     draws.push_draw(tall, &wall, 0);
     let viewport = filling([WIDTH, HEIGHT]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.0, 0.0),
+        position: DVec3::new(0.0, 2.0, 0.0),
         rotation: Quat::from_rotation_x(0.12),
         projection: Projection::Perspective {
             fov: 1.3,
@@ -9966,7 +9972,7 @@ fn the_suns_disk_shows_the_transmittance() {
             ..sun(-to_sun, None)
         }];
         let viewpoint = Viewpoint {
-            position: Vec3::new(0.0, 1000.0, 0.0),
+            position: DVec3::new(0.0, 1000.0, 0.0),
             rotation: Quat::from_rotation_arc(Vec3::NEG_Z, to_sun),
             projection: Projection::Perspective {
                 fov: half / 2.0,
@@ -10081,7 +10087,7 @@ fn the_haze_dims_and_lights_what_is_far() {
     });
     let viewport = filling([SIZE, SIZE]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.0, 0.0),
+        position: DVec3::new(0.0, 2.0, 0.0),
         rotation: Quat::IDENTITY,
         projection: Projection::Perspective {
             fov: 0.05,
@@ -10172,7 +10178,7 @@ fn the_skys_light_falls_smoothly_through_dusk() {
     draws.push_draw(facing_up(20.0, Vec3::ZERO), &floor, 0);
     let viewport = filling([SIZE, SIZE]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 3.0, 0.0),
+        position: DVec3::new(0.0, 3.0, 0.0),
         rotation: Quat::from_rotation_x(-FRAC_PI_2),
         projection: Projection::Perspective {
             fov: 0.2,
@@ -10264,7 +10270,7 @@ fn an_image_sky_renders_as_it_did_before_an_atmosphere() {
     draws.push_draw(Mat4::IDENTITY, &ball, 0);
     let viewport = filling([SIZE, SIZE]);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.5, 3.0),
+        position: DVec3::new(0.0, 0.5, 3.0),
         projection: Projection::Perspective {
             fov: 1.0,
             near: 0.1,
@@ -10322,7 +10328,7 @@ fn sun(direction: Vec3, shadow_distance: Option<f32>) -> Light {
 /// across, its top toward -Z, seeing what's from 1 to `far` below it.
 fn looking_down(at: Vec3, across: f32, far: f32) -> Viewpoint {
     Viewpoint {
-        position: at,
+        position: at.as_dvec3(),
         rotation: Quat::from_rotation_x(-FRAC_PI_2),
         projection: Projection::Orthographic {
             height: across,
@@ -10655,7 +10661,7 @@ fn occlusion_culled(occluded: bool) {
     // 5 in front of the origin, seeing a sixth of a turn across: 22 pixels a unit at z = 0, the
     // wall's, and 14 at z = -3, the plates'.
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.1,
@@ -10885,7 +10891,7 @@ fn surfaces_cast_no_shadows_on_themselves() {
     let mut draws = Draws::default();
     draws.push_draw(facing_up(400.0, Vec3::ZERO), &floor, 0);
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.0, 0.0),
+        position: DVec3::new(0.0, 2.0, 0.0),
         rotation: Quat::from_rotation_x(math::to_radians(-25.0)),
         projection: Projection::Perspective {
             fov: PI / 3.0,
@@ -11109,7 +11115,7 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
             ..sun(Vec3::new(0.9, -0.8, 0.7), Some(30.0))
         }];
         let viewpoint = Viewpoint {
-            position: Vec3::new(0.0, 3.0, 7.0),
+            position: DVec3::new(0.0, 3.0, 7.0),
             rotation: Quat::from_rotation_x(-0.35),
             projection: Projection::Perspective {
                 fov: PI / 4.0,
@@ -11220,7 +11226,7 @@ fn shadowed_models_match_their_reference() {
         },
     ];
     let viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 2.6, 4.2),
+        position: DVec3::new(0.0, 2.6, 4.2),
         rotation: Quat::from_rotation_x(-0.5),
         projection: Projection::Perspective {
             fov: PI / 4.0,
@@ -11255,7 +11261,7 @@ fn front_light() -> Light {
 /// about 19 pixels a unit at the origin in a view 64 pixels a side; as far again as `moved`.
 fn seeing_from(moved: Vec3) -> Viewpoint {
     Viewpoint {
-        position: Vec3::new(0.0, 0.0, 4.0) + moved,
+        position: DVec3::new(0.0, 0.0, 4.0) + moved.as_dvec3(),
         projection: Projection::Perspective {
             fov: PI / 4.0,
             near: 0.5,
@@ -11513,6 +11519,172 @@ fn antialiasing_follows_what_moves() {
         assert!(
             apart < 0.0015,
             "{moved:?}: the view moving is {apart} from the view standing still"
+        );
+    }
+}
+
+/// A scene 1,000 km from the world's origin, drawn from an origin near it, as the engine draws: a
+/// lit sphere on a floor, both the scene's, and a fire's particles, under fog and ambient
+/// occlusion, antialiased and motion-blurred, as the view and the sphere move along; halfway, the
+/// origin moves a step on, the scene's instances set again from it, as the engine sets them. Frame
+/// by frame, it draws as the same scene at the world's origin, drawn from it, does, within
+/// rounding: antialiasing's, ambient occlusion's and motion blur's histories, the floor's motion,
+/// none, and the particles alive all carried through the move.
+fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
+    const SIZE: u32 = 96;
+    const FRAMES: u32 = 12;
+    const MOVED_AT: u32 = 6;
+    let fire = Emission {
+        shape: ParticleShape::Sphere { radius: 0.15 },
+        speed: [0.1, 0.4],
+        lifetime: [0.5, 0.9],
+        spin: [0.0; 2],
+        acceleration: Vec3::new(0.0, 3.0, 0.0),
+        drag: 1.5,
+        size: [0.25, 0.1],
+        color: [
+            Vec4::new(4.0, 1.6, 0.4, 0.8),
+            Vec4::new(1.5, 0.2, 0.05, 0.0),
+        ],
+        texture: None,
+        cells: [1, 1],
+        additive: true,
+    };
+    // Each frame's pixels, of the scene `far` from the world's origin, drawn from the first of
+    // `origins` until `MOVED_AT`, then from the second.
+    let render = |far: DVec3, origins: [DVec3; 2]| {
+        let mut renderer = renderer(SIZE, SIZE);
+        let mut stores = Stores::default();
+        let (ball, _) = Moved::Indices.draw(&mut stores);
+        let plate = model_square(&mut stores.meshes);
+        let white = stores.materials.add(&Material {
+            workflow: metallic(0.0, 1.0),
+            ..Material::default()
+        });
+        let floor = MeshDraw::with_material(plate, white, &stores.materials, &mut stores.shaders);
+        let flat = (stores.shaders)
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let square = square(&mut stores.meshes);
+        stores.lights = vec![front_light()];
+        // A sky alike every way, whose light the ambient occlusion darkens.
+        let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [1.0; 3]);
+        stores.sky = Some(Sky {
+            texture: sky,
+            luminance: 0.6,
+        });
+        stores.ambient_occlusion = Some(AmbientOcclusion::default());
+        let viewport = filling([SIZE, SIZE]);
+        let origin = |frame: u32| origins[usize::from(frame >= MOVED_AT)];
+        // Where `at`, from the scene's own origin, is from the frame's.
+        let from_origin = |frame: u32, at: Vec3| (far + at.as_dvec3() - origin(frame)).as_vec3();
+        let viewpoint = |frame: u32| Viewpoint {
+            position: far
+                + DVec3::new(0.0, 1.0, 4.0)
+                + DVec3::new(0.03, 0.01, -0.02) * f64::from(frame),
+            rotation: Quat::from_rotation_x(-0.2),
+            projection: Projection::Perspective {
+                fov: FRAC_PI_4,
+                near: 0.5,
+            },
+        };
+        let fog = Fog {
+            density: 0.08,
+            falloff: 0.5,
+            height: (far.y + 0.5) as f32,
+            luminance: 0.3,
+            ..Fog::default()
+        };
+        let fire_at = |frame| Mat4::from_translation(from_origin(frame, Vec3::new(-0.9, 0.2, 0.0)));
+        let draws = |frame: u32| {
+            let mut draws = Draws::default();
+            draws.draw_scene();
+            // A wall of stripes behind, of draws, which the camera's motion alone blurs.
+            for stripe in -12..12 {
+                let at = from_origin(frame, Vec3::new(0.1 + 0.2 * stripe as f32, 1.5, -1.5));
+                let at = Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.2, 3.0, 1.0),
+                    Quat::IDENTITY,
+                    at,
+                );
+                let shade = if stripe % 2 == 0 { 0.5 } else { 0.05 };
+                draws.push(square, flat, at, Vec4::new(shade, shade, shade * 1.2, 1.0));
+            }
+            let at = fire_at(frame);
+            let births = Births {
+                first: u64::from(frame) * 4,
+                count: 4,
+                time: f64::from(frame) - 0.75,
+                every: 0.25,
+                from: at,
+                to: at,
+                along: 0.25,
+                step: 0.25,
+            };
+            draws.push_particles(Particles {
+                id: 1,
+                fresh: false,
+                most: 64,
+                now: f64::from(frame),
+                tick: 1.0 / 64.0,
+                births,
+                bursts: Bursts::none(at),
+                emission: fire,
+            });
+            draws
+        };
+        let mut drawn = Vec::new();
+        for frame in 0..FRAMES {
+            let ball_at = Vec3::new(0.2 + 0.02 * frame as f32, 0.4, 0.0);
+            stores.scene.set(
+                0,
+                Mat4::from_translation(from_origin(frame, ball_at)),
+                &ball,
+                1,
+            );
+            // The floor, still, set as it comes and again as the origin moves.
+            if frame == 0 || frame == MOVED_AT {
+                let at = facing_up(6.0, from_origin(frame, Vec3::ZERO));
+                stores.scene.set(1, at, &floor, 2);
+            }
+            let draws = draws(frame);
+            // The first frame's again until its meshes are drawable.
+            for _ in 0..200 {
+                let data = RenderData {
+                    antialiasing: Antialiasing::Taa,
+                    motion_blur: Some(MotionBlur { shutter: 0.5 }),
+                    fog: Some(fog),
+                    origin: origin(frame),
+                    ..stores.data(viewport, viewpoint(frame), &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                if frame > 0 || renderer.streaming().is_empty() {
+                    break;
+                }
+            }
+            drawn.push(frame_pixels(&mut renderer));
+        }
+        shut_down(renderer);
+        drawn
+    };
+    let at_the_origin = render(DVec3::ZERO, [DVec3::ZERO; 2]);
+    let far = DVec3::new(1.0e6 + 0.3, 1024.0, -1.0e6 - 0.7);
+    let first = DVec3::new(1_000_448.0, 1024.0, -1_000_448.0);
+    let moved = first + DVec3::new(1024.0, 0.0, 0.0);
+    let far_out = render(far, [first, moved]);
+    // Within rounding, of the scene's points 1,500 or so from the origin they're drawn from, at
+    // most 0.0005 apart on average in linear light, and a few pixels; where a renderer that left
+    // one of what it keeps as it was draws the frame of the move apart: by 0.0045 for the scene's
+    // motion, 0.014 for antialiasing's history and 0.02 for motion blur's, or by 27 pixels for the
+    // particles alive.
+    for (frame, (near, far)) in at_the_origin.iter().zip(&far_out).enumerate() {
+        let apart = linear_distance(near, far);
+        let off = (near.chunks(4).zip(far.chunks(4)))
+            .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32))
+            .count();
+        assert!(
+            apart < 0.001 && off <= 12,
+            "frame {frame}: {apart} apart, {off} pixels off by more than 32"
         );
     }
 }
@@ -11994,7 +12166,7 @@ fn slats_seen(
     let half = size as f32 / (2.0 * unit);
     let start = frames.start;
     let drawing = |stores: &mut Stores, frame: usize| {
-        let camera = pan.seeing(frame, size).position;
+        let camera = pan.seeing(frame, size).position.as_vec3();
         let mut draws = Draws::default();
         // Right behind the slats, so that the two show moving alike.
         let behind = Mat4::from_translation(Vec3::new(0.0, 0.0, -0.01))

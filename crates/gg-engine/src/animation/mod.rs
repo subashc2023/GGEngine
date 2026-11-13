@@ -111,6 +111,6 @@ mod tests {
         let codes: Vec<String> = logged.codes.try_iter().collect();
         assert!(codes.is_empty(), "every tween set its field: {codes:?}");
         let content = world.hash().content;
-        assert_eq!(content, 0x67ff_00cd_b39a_493b, "{content:#018x}");
+        assert_eq!(content, 0xf582_1fb6_3439_e843, "{content:#018x}");
     }
 }

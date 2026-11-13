@@ -323,7 +323,7 @@ pub(super) fn links_field(types: &Types, edit: &Edit) -> bool {
         return false;
     };
     match (&field.ty, axis) {
-        (Type::Vec2 | Type::Vec3 | Type::Vec4, Some(axis)) => {
+        (Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::DVec3, Some(axis)) => {
             AXES.iter().any(|&(named, ..)| named == axis)
         }
         (_, Some(_)) | (Type::List(_) | Type::Array(..), None) => false,

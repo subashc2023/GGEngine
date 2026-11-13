@@ -775,14 +775,14 @@ fn header(line: &str) -> Option<Header> {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::Vec3;
+    use gg_core::math::{DVec3, Vec3};
 
     use super::*;
 
     /// A transform at `x`.
     fn at(x: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(f64::from(x), 0.0, 0.0),
             ..Transform::IDENTITY
         }
     }
@@ -790,7 +790,7 @@ mod tests {
     /// The x where `drawn` has the entity `id` drawn.
     fn x_of(drawn: &[(EntityId, Transform)], id: EntityId) -> f32 {
         let found = drawn.iter().find(|&&(of, _)| of == id);
-        found.expect("drawn").1.translation.x
+        found.expect("drawn").1.translation.x as f32
     }
 
     /// A state after a tick the server can't have run yet, as a packet from elsewhere may name,
@@ -897,7 +897,7 @@ mod tests {
 
         let mut server = World::seeded(3);
         let floor = Transform {
-            translation: Vec3::new(0.0, -0.5, 0.0),
+            translation: DVec3::new(0.0, -0.5, 0.0),
             scale: Vec3::new(10.0, 1.0, 10.0),
             ..Transform::IDENTITY
         };

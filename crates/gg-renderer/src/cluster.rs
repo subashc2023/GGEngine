@@ -123,7 +123,7 @@ impl Lighting {
         for light in lights.iter().filter(|light| !light.everywhere()) {
             self.lights.push(GpuLight::new(light));
             let range = light.range.expect("a light that's binned has a range");
-            let reach = ahead.dot(light.position - viewpoint.position) + range;
+            let reach = ahead.dot(light.position - viewpoint.position.as_vec3()) + range;
             self.reach = self.reach.max(reach);
         }
         assert!(
@@ -194,7 +194,8 @@ impl Lighting {
         };
         let projection = viewpoint.projection_matrix(aspect);
         let view =
-            Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position).inverse();
+            Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position.as_vec3())
+                .inverse();
         let push = BinPush {
             right: view.row(0),
             up: view.row(1),
@@ -254,7 +255,7 @@ fn clusters(everywhere: u32, reach: f32, viewpoint: &Viewpoint, aspect: f32) -> 
         x: (x + w) * (0.5 * ACROSS as f32),
         y: (y + w) * (0.5 * DOWN as f32),
         w,
-        depth: ahead.extend(-ahead.dot(viewpoint.position)),
+        depth: ahead.extend(-ahead.dot(viewpoint.position.as_vec3())),
         slice_scale,
         slice_bias,
         perspective,
@@ -269,7 +270,7 @@ fn clusters(everywhere: u32, reach: f32, viewpoint: &Viewpoint, aspect: f32) -> 
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use gg_core::math::Quat;
+    use gg_core::math::{DVec3, Quat};
 
     use super::*;
 
@@ -305,7 +306,7 @@ mod tests {
     fn clusters_span_the_view() {
         let aspect = 16.0 / 9.0;
         let viewpoint = Viewpoint {
-            position: Vec3::new(1.0, 2.0, 3.0),
+            position: DVec3::new(1.0, 2.0, 3.0),
             rotation: Quat::from_rotation_y(0.5),
             projection: Projection::Perspective {
                 fov: FRAC_PI_2,
@@ -319,7 +320,7 @@ mod tests {
         // `aspect` times as far across.
         let seen = |depth: f32, across: f32, upward: f32| {
             let off = right * (across * depth * aspect) + up * (upward * depth);
-            viewpoint.position + ahead * depth + off
+            viewpoint.position.as_vec3() + ahead * depth + off
         };
         let data = clusters(3, 32.0, &viewpoint, aspect);
         assert_eq!(data.everywhere, 3);
@@ -351,7 +352,7 @@ mod tests {
         };
         let seen = |depth: f32, across: f32, upward: f32| {
             let off = right * (across * 2.0 * aspect) + up * (upward * 2.0);
-            viewpoint.position + ahead * depth + off
+            viewpoint.position.as_vec3() + ahead * depth + off
         };
         let data = clusters(0, 32.0, &orthographic, aspect);
         assert!(near_to(

@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use serde_json::{Map, Value as JsonValue};
 
@@ -179,18 +179,12 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
         Value::Int(n) => write!(out, "{n}").expect("a string takes any text"),
         Value::UInt(n) => write!(out, "{n}").expect("a string takes any text"),
         &Value::F32(x) => float32(out, x),
-        &Value::F64(x) => {
-            if x.is_finite() {
-                let text = serde_json::to_string(&x).expect("a finite float is a number");
-                out.push_str(&text);
-            } else {
-                not_finite(out, x.is_nan(), x > 0.0);
-            }
-        }
+        &Value::F64(x) => float64(out, x),
         Value::String(text) => string(out, text),
         Value::Vec2(v) => floats(out, &v.to_array()),
         Value::Vec3(v) => floats(out, &v.to_array()),
         Value::Vec4(v) => floats(out, &v.to_array()),
+        Value::DVec3(v) => float64s(out, &v.to_array()),
         Value::Quat(q) => floats(out, &q.to_array()),
         &Value::Entity(entity) => match names.id(entity) {
             Some(id) => string(out, &id.to_string()),
@@ -286,20 +280,21 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         },
         _ => Err(wrong("a number")),
     };
-    let floats = |n: usize| -> Result<Vec<f32>> {
+    let float64s = |n: usize| -> Result<Vec<f64>> {
         let expected = format!("an array of {n} numbers");
         match json {
             JsonValue::Array(items) if items.len() == n => items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    let x = float(item).map_err(|error| reflect::within(error, &format!("[{i}]")));
-                    x.map(|x| x as f32)
+                    float(item).map_err(|error| reflect::within(error, &format!("[{i}]")))
                 })
                 .collect(),
             _ => Err(wrong(&expected)),
         }
     };
+    let floats =
+        |n: usize| -> Result<Vec<f32>> { Ok(float64s(n)?.into_iter().map(|x| x as f32).collect()) };
     Ok(match ty {
         Type::Bool => match json {
             &JsonValue::Bool(b) => Value::Bool(b),
@@ -323,6 +318,7 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         Type::Vec2 => Value::Vec2(Vec2::from_slice(&floats(2)?)),
         Type::Vec3 => Value::Vec3(Vec3::from_slice(&floats(3)?)),
         Type::Vec4 => Value::Vec4(Vec4::from_slice(&floats(4)?)),
+        Type::DVec3 => Value::DVec3(DVec3::from_slice(&float64s(3)?)),
         Type::Quat => Value::Quat(Quat::from_slice(&floats(4)?)),
         Type::Entity => match json {
             JsonValue::String(text) => names.entity(text.parse()?)?,
@@ -487,6 +483,28 @@ pub(crate) fn floats(out: &mut String, xs: &[f32]) {
     out.push(']');
 }
 
+/// Writes `xs` as an array of numbers, as [`floats`] does, each as [`float64`] writes it.
+pub(crate) fn float64s(out: &mut String, xs: &[f64]) {
+    out.push('[');
+    for (i, &x) in xs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        float64(out, x);
+    }
+    out.push(']');
+}
+
+/// Writes `x` as the shortest number that reads back to its bits, a string if it isn't finite.
+pub(crate) fn float64(out: &mut String, x: f64) {
+    if x.is_finite() {
+        let text = serde_json::to_string(&x).expect("a finite float is a number");
+        out.push_str(&text);
+    } else {
+        not_finite(out, x.is_nan(), x > 0.0);
+    }
+}
+
 /// Writes `x` as the shortest number that reads back to its bits as an `f32`, as `0.1` for 0.1,
 /// rather than as the `f64` it widens to.
 pub(crate) fn float32(out: &mut String, x: f32) {
@@ -591,6 +609,7 @@ fn api_type(types: &Types, ty: &Type) -> gg_api::Type {
         Type::Vec2 => Api::Vec2,
         Type::Vec3 => Api::Vec3,
         Type::Vec4 => Api::Vec4,
+        Type::DVec3 => Api::Dvec3,
         Type::Quat => Api::Quat,
         Type::Entity => Api::Entity,
         Type::Texture => Api::Texture,
@@ -748,6 +767,7 @@ fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, Strin
         Api::Vec2 => Type::Vec2,
         Api::Vec3 => Type::Vec3,
         Api::Vec4 => Type::Vec4,
+        Api::Dvec3 => Type::DVec3,
         Api::Quat => Type::Quat,
         Api::Entity => Type::Entity,
         Api::Texture => Type::Texture,
@@ -776,7 +796,7 @@ fn own_bound(bound: gg_api::Bound) -> Bound {
 mod tests {
     use std::borrow::Cow;
 
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat, Vec3};
     use serde_json::json;
 
     use super::*;
@@ -824,6 +844,24 @@ mod tests {
         assert_eq!(out, want);
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("JSON");
         assert_eq!(parsed["at"][2].as_f64().map(|x| x as f32), Some(1e-7));
+    }
+
+    /// A position far from the origin writes as the shortest JSON that reads back to its `f64`s,
+    /// and reads back to their bits, where `f32` would round 1,000,000.1 to 1,000,000.125.
+    #[test]
+    fn a_far_position_keeps_its_f64s_through_json() {
+        let world = World::seeded(3);
+        let far = DVec3::new(1.0e6 + 0.1, -0.0, -1.0e12 - 0.5);
+        let mut out = String::new();
+        write(&mut out, &Value::DVec3(far), &world);
+        assert_eq!(out, "[1000000.1,-0.0,-1000000000000.5]");
+        let json: JsonValue = serde_json::from_str(&out).expect("JSON");
+        let read = read(&json, &Type::DVec3, &world).expect("read");
+        let Value::DVec3(back) = read else {
+            panic!("{read:?}");
+        };
+        let bits = |v: DVec3| v.to_array().map(f64::to_bits);
+        assert_eq!(bits(back), bits(far));
     }
 
     /// A component's value written as JSON reads back by its type to a value that sets it as it

@@ -740,7 +740,7 @@ mod tests {
     use ParamTest::{Above, Below, False, True};
     use ParamValue::{Bool, Float, Trigger};
     use Playback::{Loop, Once};
-    use gg_core::math::Vec3;
+    use gg_core::math::DVec3;
 
     use super::*;
     use crate::animation::animator::tests::{at, clips, node, spawned, weights};
@@ -1281,7 +1281,7 @@ mod tests {
         let foxes: Vec<Entity> = (0..4)
             .map(|i| {
                 let at = Transform {
-                    translation: Vec3::new(2.0 * i as f32, 0.0, 0.0),
+                    translation: DVec3::new(f64::from(2.0 * i as f32), 0.0, 0.0),
                     ..Transform::IDENTITY
                 };
                 let root = model.spawn(world, at);
@@ -1313,6 +1313,6 @@ mod tests {
             .collect();
         assert_eq!(states, ["Idle"; 4], "each stands again");
         let content = world.hash().content;
-        assert_eq!(content, 0xdb6e_55df_f632_98c5, "{content:#018x}");
+        assert_eq!(content, 0x31aa_474f_5d5e_f2dd, "{content:#018x}");
     }
 }

@@ -1,6 +1,6 @@
 use std::fs;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{Mipmaps, Textures};
 
 use super::{read_scene, write_scene};
@@ -172,7 +172,7 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
         "the white texture"
     );
     let transform = world.get::<Transform>(cell).expect("a transform");
-    assert_eq!(transform.translation, Vec3::new(-0.9, 0.5, 0.2));
+    assert_eq!(transform.translation, DVec3::new(-0.9, 0.5, 0.2));
     assert_eq!(transform.rotation, Quat::IDENTITY);
     assert_eq!(transform.scale, Vec3::new(0.18, 0.18, 1.0));
     assert_eq!(world.get::<Parent>(mover), Some(&Parent(cell)));
@@ -833,6 +833,27 @@ fn every_kind_of_value_comes_back_bit_for_bit() {
     assert!(text.contains(pair), "{text}");
 }
 
+/// A translation far from the origin saves as the shortest numbers that read back to its `f64`s,
+/// and loads back to their bits, where `f32` would round 1,000,000.1 to 1,000,000.125.
+#[test]
+fn a_far_translation_comes_back_bit_for_bit() {
+    let mut world = World::seeded(11);
+    let far = DVec3::new(1.0e6 + 0.1, -0.0, -1.0e12 - 0.5);
+    let entity = world.spawn(Transform {
+        translation: far,
+        ..Transform::IDENTITY
+    });
+    let text = world.save_scene(&[entity]).expect("saved");
+    let written = "translation: (1000000.1, -0.0, -1000000000000.5),";
+    assert!(text.lines().any(|line| line.trim() == written), "{text}");
+    let mut other = World::seeded(12);
+    other.register::<Transform>().expect("registered");
+    let roots = other.load_scene(&text).expect("loaded");
+    let loaded = other.get::<Transform>(roots[0]).expect("loaded");
+    let bits = |v: DVec3| v.to_array().map(f64::to_bits);
+    assert_eq!(bits(loaded.translation), bits(far));
+}
+
 #[derive(Clone, Debug, PartialEq, crate::Component)]
 struct Numbers {
     singles: Vec<f32>,
@@ -989,7 +1010,7 @@ fn a_field_set_changes_only_its_lines() {
             cell,
             "Transform",
             "translation.y",
-            Value::F32(9.0),
+            Value::F64(9.0),
             "translation: (-0.9",
             1,
         ),

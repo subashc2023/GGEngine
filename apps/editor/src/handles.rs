@@ -9,7 +9,7 @@ use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
 use gg_engine::egui::{self, Color32, Painter, Pos2, Rgba, Shape, Stroke};
 use gg_engine::grid;
-use gg_engine::math::{DMat3, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
+use gg_engine::math::{DMat3, DVec3, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
 use gg_engine::reflect::Value;
 use gg_engine::{
     EntityId, Event, Key, MouseButton, Pose, Projection, Transform, Viewpoint, Viewport,
@@ -165,7 +165,8 @@ pub enum Reply {
 /// A field of a transform, which a drag sets whole.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Field {
-    Translation(Vec3),
+    /// In `f64`, as translations are.
+    Translation(DVec3),
     /// A unit quaternion.
     Rotation(Quat),
     Scale(Vec3),
@@ -194,7 +195,8 @@ impl Field {
     /// Its value, as reflection has it.
     pub fn value(self) -> Value {
         match self {
-            Self::Translation(v) | Self::Scale(v) => Value::Vec3(v),
+            Self::Translation(v) => Value::DVec3(v),
+            Self::Scale(v) => Value::Vec3(v),
             Self::Rotation(q) => Value::Quat(q),
         }
     }
@@ -217,7 +219,8 @@ impl Field {
     /// Whether a transform takes it: finite, and a rotation a unit, as reflection has it.
     fn takes(self) -> bool {
         match self {
-            Self::Translation(v) | Self::Scale(v) => v.is_finite(),
+            Self::Translation(v) => v.is_finite(),
+            Self::Scale(v) => v.is_finite(),
             Self::Rotation(q) => q.is_finite() && q.is_normalized(),
         }
     }
@@ -607,8 +610,7 @@ impl Change {
         Some(match self {
             Self::Move(by) => {
                 let into = carried(parent)?.inverse();
-                let by = (into * by.as_dvec3()).as_vec3();
-                Field::Translation(local.translation + by)
+                Field::Translation(local.translation + into * by.as_dvec3())
             }
             Self::Turn { about, angle } => {
                 let carry = carry(parent);
@@ -743,9 +745,8 @@ impl Drag {
                 }
                 // Into the parent's space, which the translation is in: in f64, since f32's inverse
                 // of a parent turned and scaled very unevenly loses some of the move.
-                let into = Mat3::from_mat4(self.parent.matrix).as_dmat3().inverse();
-                let moved = (into * by.as_dvec3()).as_vec3();
-                let field = Field::Translation(self.start.translation + moved);
+                let into = self.parent.matrix.matrix3.inverse();
+                let field = Field::Translation(self.start.translation + into * by.as_dvec3());
                 Some((field, Change::Move(by)))
             }
             (Tool::Scale, Handle::Axis(i), Grab::Plane { normal, from }) => {
@@ -842,6 +843,11 @@ fn angle_about(from: Vec3, to: Vec3, axis: Vec3) -> f32 {
 /// window, in pixels, and how many pixels a point spans.
 #[derive(Clone, Copy, Debug)]
 pub struct Sight {
+    /// Where its viewpoint is, in the world, which every point it takes and gives is from, in
+    /// `f32`, so that what's near the camera is placed as precisely far from the world's origin as
+    /// at it.
+    eye: DVec3,
+    /// Its viewpoint, at `eye`, its position the origin.
     viewpoint: Viewpoint,
     view: Viewport,
     scale: f32,
@@ -882,7 +888,10 @@ impl Sight {
             return None;
         }
         let aspect = view.aspect();
+        let eye = viewpoint.position;
+        let viewpoint = viewpoint.relative_to(eye);
         Some(Self {
+            eye,
             viewpoint,
             view,
             scale,
@@ -941,11 +950,19 @@ impl Sight {
         Some((ends, [start, end]))
     }
 
-    /// The point pixel `at` shows on the plane through the origin square to `normal`, as the grid
-    /// lies: `None` where its ray runs along the plane, and in perspective, where it meets it
-    /// behind the camera.
-    pub fn on_plane(&self, at: Vec2, normal: Vec3) -> Option<Vec3> {
-        self.ray(at).meet(Vec3::ZERO, normal)
+    /// The point pixel `at` shows on the plane through the world's origin square to `normal`, as
+    /// the grid lies, in the world, in `f64`: `None` where its ray runs along the plane, and in
+    /// perspective, where it meets it behind the camera.
+    pub fn on_plane(&self, at: Vec2, normal: Vec3) -> Option<DVec3> {
+        let ray = self.ray(at);
+        let (from, toward) = (self.eye + ray.from.as_dvec3(), ray.toward.as_dvec3());
+        let normal = normal.as_dvec3();
+        let across = toward.dot(normal);
+        let along = -from.dot(normal) / across;
+        // What's no number meets nothing, failing both.
+        let meets = across.abs() > f64::from(GRAZE) && (along > 0.0 || !ray.perspective);
+        let met = from + toward * along;
+        (meets && met.is_finite()).then_some(met)
     }
 
     /// The ray through pixel `at`.
@@ -962,7 +979,7 @@ impl Sight {
                 let tan = libm::tanf(fov / 2.0);
                 let toward = Vec3::new(x * tan * self.aspect, -y * tan, -1.0);
                 Ray {
-                    from: position,
+                    from: position.as_vec3(),
                     toward: (rotation * toward).normalize(),
                     perspective: true,
                 }
@@ -971,7 +988,7 @@ impl Sight {
                 let half = height / 2.0;
                 let across = Vec3::new(x * half * self.aspect, -y * half, 0.0);
                 Ray {
-                    from: position + rotation * across,
+                    from: position.as_vec3() + rotation * across,
                     toward: rotation * Vec3::NEG_Z,
                     perspective: false,
                 }
@@ -982,7 +999,9 @@ impl Sight {
     /// Which way the camera is from `point`, a unit vector.
     fn toward(&self, point: Vec3) -> Vec3 {
         match self.viewpoint.projection {
-            Projection::Perspective { .. } => (self.viewpoint.position - point).normalize(),
+            Projection::Perspective { .. } => {
+                (self.viewpoint.position.as_vec3() - point).normalize()
+            }
             Projection::Orthographic { .. } => self.viewpoint.rotation * Vec3::Z,
         }
     }
@@ -991,7 +1010,7 @@ impl Sight {
 /// The handles as a sight sees them about an entity.
 #[derive(Clone, Copy, Debug)]
 struct Placed {
-    /// Where its origin is, in the world and in pixels.
+    /// Where its origin is, from its sight's eye, and in pixels.
     origin: Vec3,
     center: Vec2,
     /// Its axes, X to Z, a unit long and square to each other, as [`place`] places them; and 1
@@ -1026,7 +1045,7 @@ struct Placed {
 /// whose 3x3 has no inverse, its rotation and its ancestors' turn them, their scales aside. `None`
 /// while the origin isn't past the near plane, or the origin, the axes or the length isn't finite.
 fn place(sight: &Sight, space: Space, parent: &Pose, local: &Transform) -> Option<Placed> {
-    let origin = parent.matrix.transform_point3(local.translation);
+    let origin = (parent.matrix.transform_point3(local.translation) - sight.eye).as_vec3();
     let carry = carry(parent);
     let frame = match carried(parent) {
         Some(_) => carry * Mat3::from_quat(local.rotation.normalize()),
@@ -1070,7 +1089,7 @@ fn place(sight: &Sight, space: Space, parent: &Pose, local: &Transform) -> Optio
 /// axes are factored from; `None` for a flat parent, whose 3x3 has no inverse. Its determinant
 /// decides it in f64, where a parent a ten-thousandth as big each way is far from none.
 fn carried(parent: &Pose) -> Option<DMat3> {
-    let carries = Mat3::from_mat4(parent.matrix).as_dmat3();
+    let carries = parent.matrix.matrix3;
     let determinant = carries.determinant();
     (determinant.is_finite() && determinant != 0.0).then_some(carries)
 }
@@ -1360,7 +1379,7 @@ impl Pen<'_> {
 
 #[cfg(test)]
 mod tests {
-    use gg_engine::math::EulerRot;
+    use gg_engine::math::{DAffine3, EulerRot};
 
     use super::*;
     use crate::tests::{SCALE, VIEW, reading};
@@ -1387,7 +1406,7 @@ mod tests {
             }
         };
         Viewpoint {
-            position: target - rotation * Vec3::NEG_Z * distance,
+            position: (target - rotation * Vec3::NEG_Z * distance).as_dvec3(),
             rotation,
             projection,
         }
@@ -1419,7 +1438,7 @@ mod tests {
     /// Off the origin, turned every way and scaled unevenly.
     fn turned() -> Transform {
         Transform {
-            translation: Vec3::new(0.5, 0.2, -0.3),
+            translation: DVec3::new(0.5, 0.2, -0.3),
             rotation: Quat::from_euler(EulerRot::XYZ, 0.3, -0.2, 0.5),
             scale: Vec3::new(2.0, 1.0, 0.5),
         }
@@ -1449,7 +1468,7 @@ mod tests {
             along(Vec3::new(-1.0, -1.0, 1.0)),
             along(Vec3::new(-1e-4, 1e-4, 1e-4)),
             carrying(Transform {
-                translation: Vec3::new(1.0, 2.0, 0.5),
+                translation: DVec3::new(1.0, 2.0, 0.5),
                 rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
                 scale: Vec3::new(2.0, 2.0, -2.0),
             }),
@@ -1459,7 +1478,7 @@ mod tests {
     /// The 3x3 that drawing carries an entity turned by `rotation` under `parent` by, but for its
     /// own scale: its columns run along its axes as drawn.
     fn drawn(parent: &Pose, rotation: Quat) -> Mat3 {
-        Mat3::from_mat4(parent.matrix) * Mat3::from_quat(rotation)
+        parent.matrix.matrix3.as_mat3() * Mat3::from_quat(rotation)
     }
 
     fn aim(tool: Tool, viewpoint: Viewpoint, picked: Picked) -> Aim<'static> {
@@ -1551,8 +1570,9 @@ mod tests {
                 Vec3::new(3.0, 1.0, -2.0),
                 Vec3::new(-4.0, 2.5, 3.0),
             ] {
-                // As the renderer places it, Vulkan's y down.
+                // As the renderer places it, Vulkan's y down; and from the sight's eye.
                 let ndc = clip.project_point3(point);
+                let point = point - sight.eye.as_vec3();
                 let expected = Vec2::new(
                     100.0 + (ndc.x + 1.0) / 2.0 * 800.0,
                     50.0 + (ndc.y + 1.0) / 2.0 * 600.0,
@@ -1577,10 +1597,11 @@ mod tests {
         let viewpoint = camera(Vec3::ZERO, [0.4, -0.3, 0.0], 12.0, true);
         let sight = sight(viewpoint);
         let forward = viewpoint.rotation * Vec3::NEG_Z;
-        let behind = viewpoint.position - forward * 3.0;
-        let (_, [start, end]) = sight.segment(Vec3::ZERO, behind).expect("partly in front");
-        let cut = Vec3::ZERO.lerp(behind, end);
-        let depth = (cut - viewpoint.position).dot(forward);
+        // From the sight's eye, which its points are from: the world's origin, and 3 behind it.
+        let (origin, behind) = (-sight.eye.as_vec3(), -forward * 3.0);
+        let (_, [start, end]) = sight.segment(origin, behind).expect("partly in front");
+        let cut = origin.lerp(behind, end);
+        let depth = cut.dot(forward);
         assert!(
             start == 0.0 && (depth - 0.01).abs() < 1e-4,
             "{start}, {depth}"
@@ -1670,7 +1691,7 @@ mod tests {
         .expect("in view");
         assert!((placed.axis[2] - 0.5).abs() < 1e-3, "{:?}", placed.axis);
         let flat = Pose {
-            matrix: Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0)),
+            matrix: DAffine3::from_scale(DVec3::new(1.0, 0.0, 1.0)),
             rotation: Quat::IDENTITY,
         };
         let on_flat = picked(Transform::IDENTITY, flat);
@@ -1687,7 +1708,7 @@ mod tests {
         );
         // Nor anything for an entity out at infinity, or turned by what's no rotation.
         let infinite = Transform {
-            translation: Vec3::new(f32::INFINITY, 0.0, 0.0),
+            translation: DVec3::new(f64::from(f32::INFINITY), 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let lost = Transform {
@@ -1730,7 +1751,7 @@ mod tests {
                 let Field::Translation(moved) = set(&replies) else {
                     panic!("{replies:?}");
                 };
-                let expected = local.translation + axis * 1.5;
+                let expected = local.translation + (axis * 1.5).as_dvec3();
                 assert!(
                     moved.abs_diff_eq(expected, 1e-3),
                     "{axis}: {moved}, not {expected}"
@@ -1748,7 +1769,7 @@ mod tests {
                     panic!("{replies:?}");
                 };
                 let grabbed = sight.ray(from).meet(origin, normal).expect("on the plane");
-                let now = at(grabbed + (moved - local.translation));
+                let now = at(grabbed + (moved - local.translation).as_vec3());
                 assert!(now.abs_diff_eq(to, 0.05), "{normal}: {now}, not {to}");
             }
         }
@@ -1769,7 +1790,7 @@ mod tests {
             place(&sight, Space::Local, &Pose::IDENTITY, &Transform::IDENTITY).expect("in view");
         let middle = (PLANE.0 + PLANE.1) / 2.0 * placed.length;
         let from = sight
-            .project(Vec3::new(middle, 0.0, middle))
+            .project(Vec3::new(middle, 0.0, middle) + placed.origin)
             .expect("in view");
         let horizon = 50.0 + (1.0 - libm::tanf(15.0 * PI / 180.0) / libm::tanf(PI / 6.0)) * 300.0;
         let steps: Vec<Vec2> = (1..60)
@@ -1809,7 +1830,8 @@ mod tests {
                 .expect("in view");
             let grabbed = facing(Vec3::Y, placed.toward) * placed.length;
             let turned = Quat::from_rotation_y(0.6) * grabbed;
-            let [from, to] = [grabbed, turned].map(|point| sight.project(point).expect("in view"));
+            let [from, to] = [grabbed, turned]
+                .map(|point| sight.project(placed.origin + point).expect("in view"));
             assert_eq!(
                 placed.hit(&sight, Tool::Rotate, from),
                 Some(Handle::Ring(1))
@@ -1833,7 +1855,7 @@ mod tests {
                 let edge_on = Vec3::Y.dot(placed.toward).abs() < EDGE_ON;
                 assert_eq!(edge_on, degrees < 5.0, "{degrees}°");
                 let near = facing(Vec3::Y, placed.toward) * placed.length;
-                let from = sight.project(near).expect("in view");
+                let from = sight.project(placed.origin + near).expect("in view");
                 assert_eq!(
                     placed.hit(&sight, Tool::Rotate, from),
                     Some(Handle::Ring(1))
@@ -1844,7 +1866,9 @@ mod tests {
                 let Field::Rotation(rotation) = set(&replies) else {
                     panic!("{replies:?}");
                 };
-                let now = sight.project(rotation * near).expect("in view");
+                let now = sight
+                    .project(placed.origin + rotation * near)
+                    .expect("in view");
                 assert!(now.distance(to) < 0.1, "{degrees}°: {now}, not {to}");
             }
         }
@@ -1857,7 +1881,7 @@ mod tests {
         for perspective in [false, true] {
             let local = turned();
             // At the view's middle, where a turn about the view's axis turns the image about it.
-            let viewpoint = aside(local.translation, perspective);
+            let viewpoint = aside(local.translation.as_vec3(), perspective);
             let sight = sight(viewpoint);
             let picked = picked(local, Pose::IDENTITY);
             let aim = aim(Tool::Rotate, viewpoint, picked);
@@ -1965,7 +1989,7 @@ mod tests {
             panic!("{replies:?}");
         };
         assert!(
-            went.abs_diff_eq(local.translation + axes[0] * 1.5, 1e-4),
+            went.abs_diff_eq(local.translation + (axes[0] * 1.5).as_dvec3(), 1e-4),
             "{went}"
         );
         // Ring Z, turned 50° round.
@@ -2019,8 +2043,8 @@ mod tests {
         else {
             panic!("{unsnapped:?}, {snapped:?}");
         };
-        assert!(first.abs_diff_eq(local.translation + axes[0] * 1.3, 1e-4));
-        assert!(snap.abs_diff_eq(local.translation + axes[0] * 1.5, 1e-4));
+        assert!(first.abs_diff_eq(local.translation + (axes[0] * 1.3).as_dvec3(), 1e-4));
+        assert!(snap.abs_diff_eq(local.translation + (axes[0] * 1.5).as_dvec3(), 1e-4));
         assert_eq!(again, unsnapped);
     }
 
@@ -2031,7 +2055,7 @@ mod tests {
     #[test]
     fn a_child_under_a_turned_scaled_parent_moves_along_its_axis_in_the_world() {
         let parent_at = Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
             scale: Vec3::new(2.0, 0.5, 1.5),
         };
@@ -2045,7 +2069,7 @@ mod tests {
             rotation: grandparent_at.rotation * parent_at.rotation,
         };
         let local = Transform {
-            translation: Vec3::new(0.3, -0.4, 0.2),
+            translation: DVec3::new(0.3, -0.4, 0.2),
             rotation: Quat::from_rotation_y(0.7),
             scale: Vec3::ONE,
         };
@@ -2061,7 +2085,7 @@ mod tests {
     #[test]
     fn in_the_worlds_space_a_move_goes_along_the_worlds_axes_under_a_turned_parent() {
         let parent_at = Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_y(0.9) * Quat::from_rotation_x(-0.4),
             scale: Vec3::new(2.0, 0.5, 1.5),
         };
@@ -2075,7 +2099,7 @@ mod tests {
             rotation: grandparent_at.rotation * parent_at.rotation,
         };
         let local = Transform {
-            translation: Vec3::new(0.3, -0.4, 0.2),
+            translation: DVec3::new(0.3, -0.4, 0.2),
             rotation: Quat::from_rotation_z(FRAC_PI_4),
             scale: Vec3::ONE,
         };
@@ -2089,7 +2113,7 @@ mod tests {
     fn moves_along_its_axes(parent: Pose, local: Transform, space: Space) {
         let world = parent.matrix.transform_point3(local.translation);
         for perspective in [false, true] {
-            let viewpoint = aside(world, perspective);
+            let viewpoint = aside(world.as_vec3(), perspective);
             let sight = sight(viewpoint);
             let picked = picked(local, parent);
             let aim = Aim {
@@ -2106,7 +2130,7 @@ mod tests {
                 length,
                 ..
             } = placed;
-            assert!(origin.abs_diff_eq(world, 1e-5));
+            assert!(origin.abs_diff_eq((world - sight.eye).as_vec3(), 1e-5));
             let at = |point: Vec3| sight.project(point).expect("in view");
             for axis in axes {
                 let grabbed = origin + axis * length * 0.7;
@@ -2116,7 +2140,7 @@ mod tests {
                     panic!("{replies:?}");
                 };
                 let now = parent.matrix.transform_point3(moved);
-                let expected = origin + axis * 1.5;
+                let expected = sight.eye + (origin + axis * 1.5).as_dvec3();
                 assert!(
                     now.abs_diff_eq(expected, 1e-3),
                     "{axis}: {now}, not {expected}"
@@ -2189,8 +2213,9 @@ mod tests {
                     let origin = parent.matrix.transform_point3(local.translation);
                     // As the ring test above sees it, from where no ring is edge-on here; at the
                     // view's middle, where a turn about the view's axis turns the image about it.
-                    let viewpoint = camera(origin, [0.5, -0.9, 0.0], 40.0, perspective);
+                    let viewpoint = camera(origin.as_vec3(), [0.5, -0.9, 0.0], 40.0, perspective);
                     let sight = sight(viewpoint);
+                    let origin = (origin - sight.eye).as_vec3();
                     let aim = aim(Tool::Rotate, viewpoint, picked(local, parent));
                     let placed = place(&sight, Space::Local, &parent, &local).expect("in view");
                     let Placed {
@@ -2250,8 +2275,9 @@ mod tests {
         for perspective in [false, true] {
             for parent in flipping() {
                 let origin = parent.matrix.transform_point3(local.translation);
-                let viewpoint = aside(origin, perspective);
+                let viewpoint = aside(origin.as_vec3(), perspective);
                 let sight = sight(viewpoint);
+                let origin = (origin - sight.eye).as_vec3();
                 let picked = picked(local, parent);
                 let length = place(&sight, Space::Local, &parent, &local)
                     .expect("in view")
@@ -2268,7 +2294,7 @@ mod tests {
                         panic!("{replies:?}");
                     };
                     let now = parent.matrix.transform_point3(moved);
-                    let expected = origin + axis * 1.5;
+                    let expected = sight.eye + (origin + axis * 1.5).as_dvec3();
                     assert!(
                         now.abs_diff_eq(expected, 1e-3),
                         "{parent:?}, {i}: {now}, not {expected}"
@@ -2299,7 +2325,7 @@ mod tests {
     #[test]
     fn in_the_worlds_space_the_rings_turn_it_about_the_worlds_axes() {
         let turned_parent = carrying(Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
             scale: Vec3::splat(2.0),
         });
@@ -2311,8 +2337,9 @@ mod tests {
                         ..Transform::IDENTITY
                     };
                     let origin = parent.matrix.transform_point3(local.translation);
-                    let viewpoint = camera(origin, [0.5, -0.9, 0.0], 40.0, perspective);
+                    let viewpoint = camera(origin.as_vec3(), [0.5, -0.9, 0.0], 40.0, perspective);
                     let sight = sight(viewpoint);
+                    let origin = (origin - sight.eye).as_vec3();
                     let aim = Aim {
                         space: Space::World,
                         ..aim(Tool::Rotate, viewpoint, picked(local, parent))
@@ -2364,12 +2391,12 @@ mod tests {
     #[test]
     fn a_drag_changes_the_others_picked_by_the_same_change() {
         let parent = carrying(Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.3),
             scale: Vec3::splat(2.0),
         });
         let theirs = carrying(Transform {
-            translation: Vec3::new(-3.0, 0.0, 1.0),
+            translation: DVec3::new(-3.0, 0.0, 1.0),
             rotation: Quat::from_rotation_y(1.1),
             scale: Vec3::splat(0.5),
         });
@@ -2380,8 +2407,9 @@ mod tests {
         };
         let local = Transform::IDENTITY;
         let origin = parent.matrix.transform_point3(local.translation);
-        let viewpoint = camera(origin, [0.5, -0.9, 0.0], 40.0, false);
+        let viewpoint = camera(origin.as_vec3(), [0.5, -0.9, 0.0], 40.0, false);
         let sight = sight(viewpoint);
+        let origin = (origin - sight.eye).as_vec3();
         let at = |point: Vec3| sight.project(point).expect("in view");
         // What the drag from `from` to `to` sets, as the cursor reaches `to`: the active one's
         // field, and the other's.
@@ -2425,10 +2453,11 @@ mod tests {
         let (Field::Translation(mine), Field::Translation(its)) = (own, set) else {
             panic!("{own:?}, {set:?}");
         };
-        let moved_by = parent.matrix.transform_point3(mine) - origin;
+        let moved_by = parent.matrix.transform_point3(mine)
+            - parent.matrix.transform_point3(local.translation);
         let its_by = theirs.matrix.transform_point3(its)
             - theirs.matrix.transform_point3(other.local.translation);
-        assert!(moved_by.abs_diff_eq(Vec3::X, 1e-3), "{moved_by}");
+        assert!(moved_by.abs_diff_eq(DVec3::X, 1e-3), "{moved_by}");
         assert!(
             its_by.abs_diff_eq(moved_by, 1e-3),
             "{its_by}, not {moved_by}"
@@ -2490,7 +2519,7 @@ mod tests {
         });
         let local = turned();
         let origin = parent.matrix.transform_point3(local.translation);
-        let viewpoint = aside(origin, false);
+        let viewpoint = aside(origin.as_vec3(), false);
         let sight = sight(viewpoint);
         let picked = picked(local, parent);
         let own = place(&sight, Space::Local, &parent, &local).expect("in view");

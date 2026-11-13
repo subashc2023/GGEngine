@@ -124,7 +124,8 @@ impl Cascades {
             let (center, radius) = across.sphere(from, to);
             // Grown so that the slice keeps MARGIN texels inside its map's edges.
             let radius = radius / (1.0 - 2.0 * MARGIN / MAP_SIZE as f32);
-            let center = light_from_world.transform_point3(viewpoint.position + forward * center);
+            let center =
+                light_from_world.transform_point3(viewpoint.position.as_vec3() + forward * center);
             let texel = 2.0 * radius / MAP_SIZE as f32;
             let snapped = (center.truncate() / texel).round() * texel;
             snapped.extend(center.z).extend(radius)
@@ -133,7 +134,7 @@ impl Cascades {
             light: crate::light::shader_index(lights, light),
             light_from_world,
             spheres,
-            view_depth: forward.extend(-forward.dot(viewpoint.position)),
+            view_depth: forward.extend(-forward.dot(viewpoint.position.as_vec3())),
             fade_from: far - (far - near) * (1.0 - FADE_FROM),
             reach: far,
         })
@@ -289,7 +290,7 @@ mod tests {
     /// With perspective, seeing a third of a turn from bottom to top, from 0.1 ahead.
     fn looking(position: Vec3, rotation: Quat) -> Viewpoint {
         Viewpoint {
-            position,
+            position: position.as_dvec3(),
             rotation,
             projection: Projection::Perspective {
                 fov: FRAC_PI_3,

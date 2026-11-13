@@ -178,6 +178,16 @@ struct Kept {
 }
 
 impl Images {
+    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
+    /// further along than the frame before's: what was at `p` is at `p - by`, as
+    /// [`RenderData::origin`](crate::RenderData::origin) says.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        if let Some(last) = &mut self.last {
+            let along = Mat4::from_translation(by);
+            last.clip_from_world *= along;
+        }
+    }
+
     /// Makes its images at `size`, if they're another size, or there are none, forgetting the
     /// colors kept in those there.
     pub(crate) fn prepare(&mut self, device: &Arc<Device>, size: [u32; 2]) -> Result<()> {
@@ -527,6 +537,33 @@ impl ReflectionPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What's kept of the frame before, moved with the origin by `by`, projects a point from where
+    /// it is from the new origin, `p - by`, where it projected it from the old, `p`.
+    #[test]
+    fn the_kept_view_moves_with_the_origin() {
+        let viewpoint = crate::Viewpoint {
+            position: gg_core::math::DVec3::new(2.0, -1.0, 5.0),
+            rotation: gg_core::math::Quat::from_rotation_y(0.3),
+            projection: crate::Projection::Perspective {
+                fov: 0.8,
+                near: 0.1,
+            },
+        };
+        let clip_from_world = viewpoint.view_projection(1.5);
+        let mut images = Images::default();
+        images.kept(7, [64, 32], clip_from_world, 0.5);
+        let by = Vec3::new(1024.0, 0.0, -2048.0);
+        images.moved(by);
+        let (moved, exposure) = images.traced_against(8, [64, 32]).expect("kept");
+        assert_eq!(exposure, 0.5);
+        let p = Vec3::new(0.3, 1.2, -3.0);
+        let (was, is) = (
+            clip_from_world.project_point3(p),
+            moved.project_point3(p - by),
+        );
+        assert!(is.abs_diff_eq(was, 1e-4), "{is}, not {was}");
+    }
 
     /// The pyramid's levels halve the view, rounded up, to a texel, one after another, as the shader
     /// reads them, as many as that takes, but no more than its most.

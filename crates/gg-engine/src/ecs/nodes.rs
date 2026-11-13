@@ -262,6 +262,8 @@ pub(crate) fn node_id(root: EntityId, part: usize) -> Option<EntityId> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "dev")]
+    use gg_core::math::DVec3;
     use gg_core::math::Vec3;
 
     use super::*;
@@ -534,7 +536,7 @@ mod tests {
             .insert(turned, Name("turned".to_owned()))
             .expect("code may");
         let moved = Transform {
-            translation: Vec3::new(0.0, 9.0, 0.0),
+            translation: DVec3::new(0.0, 9.0, 0.0),
             ..Transform::IDENTITY
         };
         world.insert(mirror, moved).expect("code may");

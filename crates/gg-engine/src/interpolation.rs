@@ -6,7 +6,7 @@
 
 use std::iter;
 
-use gg_core::math::Vec3;
+use gg_core::math::{DVec3, Vec3};
 
 use crate::{Entity, EntityId, Parent, Transform, World};
 
@@ -293,19 +293,24 @@ fn continuous(was: &Transform, now: &Transform) -> bool {
 /// finite, or a scale changed its sign, as a sprite mirrored does, which would otherwise shrink to
 /// nothing on its way. What's equal in both comes out as `to` has it, bit for bit, so that what
 /// didn't move draws as it would without interpolating. A rotation takes the shorter way round,
-/// normalized, which is near enough to a slerp for the angle a tick turns.
+/// normalized, which is near enough to a slerp for the angle a tick turns. A translation goes its
+/// way in `f64`, as it's held, so that an entity far from the origin moves as smoothly as one at
+/// it.
 pub(crate) fn between(from: &Transform, to: &Transform, alpha: f32) -> Transform {
     if !continuous(from, to) {
         return *to;
     }
     let blend = |from: Vec3, to: Vec3| Vec3::select(from.cmpeq(to), to, from.lerp(to, alpha));
+    let (from_at, to_at) = (from.translation, to.translation);
+    let moved = from_at.lerp(to_at, f64::from(alpha));
+    let translation = DVec3::select(from_at.cmpeq(to_at), to_at, moved);
     let rotation = if from.rotation == to.rotation {
         to.rotation
     } else {
         from.rotation.lerp(to.rotation, alpha)
     };
     Transform {
-        translation: blend(from.translation, to.translation),
+        translation,
         rotation,
         scale: blend(from.scale, to.scale),
     }
@@ -320,12 +325,13 @@ mod tests {
     use crate::draw::{Scratch, draw_world};
     use crate::font::Fonts;
     use crate::placed::Placed;
+    use crate::transform::from_origin;
     use crate::{Log, Operation};
 
     /// A transform at `x` and `z`, which tell the cases apart.
     fn at(x: f32, z: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, 0.0, z),
+            translation: Vec3::new(x, 0.0, z).as_dvec3(),
             ..Transform::IDENTITY
         }
     }
@@ -350,7 +356,7 @@ mod tests {
             world,
             past,
             &Placed::of(world, past, 0.5),
-            0.5,
+            (0.5, DVec3::ZERO),
             0,
             &mut draws,
             shaders,
@@ -417,21 +423,28 @@ mod tests {
         let mut want = Draws::default();
         want.draw_scene();
         for (matrix, n, entity) in [
-            (at(1.0, 0.0).matrix(), 0.0, mover),
-            (at(3.0, 0.1).matrix(), 1.0, spawned),
-            (at(4.0, 0.2).matrix(), 2.0, given),
-            (at(6.0, 0.3).matrix(), 3.0, reused),
-            (at(8.0, 0.4).matrix(), 4.0, deleted),
-            (at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix(), 5.0, child),
+            (at(1.0, 0.0).matrix_from(DVec3::ZERO), 0.0, mover),
+            (at(3.0, 0.1).matrix_from(DVec3::ZERO), 1.0, spawned),
+            (at(4.0, 0.2).matrix_from(DVec3::ZERO), 2.0, given),
+            (at(6.0, 0.3).matrix_from(DVec3::ZERO), 3.0, reused),
+            (at(8.0, 0.4).matrix_from(DVec3::ZERO), 4.0, deleted),
             (
-                Transform::IDENTITY.matrix() * at(10.0, 0.6).matrix(),
+                from_origin(at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix(), DVec3::ZERO),
+                5.0,
+                child,
+            ),
+            (
+                from_origin(
+                    Transform::IDENTITY.matrix() * at(10.0, 0.6).matrix(),
+                    DVec3::ZERO,
+                ),
                 6.0,
                 rooted,
             ),
-            (at(13.0, 0.7).matrix(), 7.0, reset),
-            (at(14.0, 0.8).matrix(), 8.0, unfinite),
-            (flipped.matrix(), 10.0, mirrored),
-            (at(31.0, 0.9).matrix(), 11.0, swapped),
+            (at(13.0, 0.7).matrix_from(DVec3::ZERO), 7.0, reset),
+            (at(14.0, 0.8).matrix_from(DVec3::ZERO), 8.0, unfinite),
+            (flipped.matrix_from(DVec3::ZERO), 10.0, mirrored),
+            (at(31.0, 0.9).matrix_from(DVec3::ZERO), 11.0, swapped),
         ] {
             let id = world.id(entity).expect("alive").get();
             want.extend_sprites(iter::once((matrix, sprite(n), id)));
@@ -459,9 +472,13 @@ mod tests {
         let mut want = Draws::default();
         want.draw_scene();
         for (matrix, n, entity) in [
-            (pose.matrix(), 1.0, theirs),
-            (pose.matrix() * at(1.0, 0.05).matrix(), 2.0, child),
-            (at(1.0, 0.3).matrix(), 3.0, ours),
+            (pose.matrix_from(DVec3::ZERO), 1.0, theirs),
+            (
+                from_origin(pose.matrix() * at(1.0, 0.05).matrix(), DVec3::ZERO),
+                2.0,
+                child,
+            ),
+            (at(1.0, 0.3).matrix_from(DVec3::ZERO), 3.0, ours),
         ] {
             want.extend_sprites(iter::once((matrix, sprite(n), id(entity).get())));
         }
@@ -491,8 +508,16 @@ mod tests {
         let carried = at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix();
         let halfway_there = Transform::IDENTITY.matrix() * at(1.0, 0.6).matrix();
         let drawn = [
-            (carried, sprite(5.0), id(moved_away)),
-            (halfway_there, sprite(6.0), id(sibling)),
+            (
+                from_origin(carried, DVec3::ZERO),
+                sprite(5.0),
+                id(moved_away),
+            ),
+            (
+                from_origin(halfway_there, DVec3::ZERO),
+                sprite(6.0),
+                id(sibling),
+            ),
         ];
         want.extend_sprites(drawn.into_iter());
         assert_eq!(halfway(&world, &mut past), want);
@@ -512,7 +537,11 @@ mod tests {
         let id = world.id(mover).expect("alive").get();
         let mut want = Draws::default();
         want.draw_scene();
-        want.extend_sprites(iter::once((at(2.0, 0.0).matrix(), sprite(0.0), id)));
+        want.extend_sprites(iter::once((
+            at(2.0, 0.0).matrix_from(DVec3::ZERO),
+            sprite(0.0),
+            id,
+        )));
         assert_eq!(halfway(&world, &mut past), want, "restored");
 
         past.capture(&mut world);
@@ -523,7 +552,11 @@ mod tests {
         let id = world.id(same).expect("alive").get();
         let mut want = Draws::default();
         want.draw_scene();
-        want.extend_sprites(iter::once((at(4.0, 0.0).matrix(), sprite(0.0), id)));
+        want.extend_sprites(iter::once((
+            at(4.0, 0.0).matrix_from(DVec3::ZERO),
+            sprite(0.0),
+            id,
+        )));
         assert_eq!(halfway(&world, &mut past), want, "replaced");
     }
 

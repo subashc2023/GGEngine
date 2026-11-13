@@ -1,10 +1,11 @@
 // Particles' births, written into their emitters' rings in the pool before the frame draws them:
 // `emit_main`, a thread for each slot an emitter's frame writes, its births', or, for a ring made or
 // grown, every slot of it, the particles kept from its old ring first, then the births, then
-// nothing; and `grow_main`, a thread for each word of the pool copied into the pool that takes its
-// place, a larger one, in the same slots. A birth's randomness is a hash of its emitter's ID and
-// its number, so that it's born alike whatever the frames. `EmitPush` in src/particles.rs matches
-// the one here byte for byte.
+// nothing; `grow_main`, a thread for each word of the pool copied into the pool that takes its
+// place, a larger one, in the same slots; and `moved_main`, a thread for each slot of the pool,
+// moving each particle's birth by `-shift`, as a frame whose origin moved by `shift` does. A
+// birth's randomness is a hash of its emitter's ID and its number, so that it's born alike whatever
+// the frames. `EmitPush` in src/particles.rs matches the one here byte for byte.
 
 #include "particle.slang"
 
@@ -17,8 +18,11 @@ struct EmitPush {
     uint* from;
     // The slots `emit_main` writes, or the words of the pool before it grew.
     uint count;
-    // The first word this dispatch of `grow_main` copies.
+    // The first word this dispatch of `grow_main` copies, or slot `moved_main` moves.
     uint first;
+    // How far the frame's origin moved, for `moved_main`.
+    float3 shift;
+    uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<EmitPush> push;
 
@@ -68,6 +72,16 @@ void grow_main(uint3 thread: SV_DispatchThreadID) {
         return;
     }
     ((uint*)push.pool)[word] = push.from[word];
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void moved_main(uint3 thread: SV_DispatchThreadID) {
+    uint slot = push.first + thread.x;
+    if (slot >= push.count) {
+        return;
+    }
+    push.pool[slot].position = push.pool[slot].position - push.shift;
 }
 
 // Birth `i` of the emitter's frame: its births, then its burst particles.

@@ -560,7 +560,7 @@ impl Log {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use gg_core::math::{Quat, Vec3, Vec4};
+    use gg_core::math::{DVec3, Quat, Vec3, Vec4};
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
@@ -605,7 +605,7 @@ pub(super) mod tests {
                 entity: x.id(x.r),
                 component: "Transform".into(),
                 path: "translation.x".to_owned(),
-                value: Value::F32(-0.0),
+                value: Value::F64(-0.0),
             },
             Operation::Delete { entity: x.id(x.a) },
             Operation::Create {
@@ -785,7 +785,7 @@ pub(super) mod tests {
             entity: world.id(other).expect("alive"),
             component: "Transform".into(),
             path: "translation.x".to_owned(),
-            value: Value::F32(1.0),
+            value: Value::F64(1.0),
         };
         log.apply(&mut world, set).expect("set");
         assert_eq!((log.kept(), vacated(&world)), (1, 1));
@@ -1199,7 +1199,7 @@ pub(super) mod tests {
     ) -> (Ident, Value) {
         let value = match name {
             "Transform" => Transform {
-                translation: Vec3::new(step as f32, -0.0, 1.0),
+                translation: DVec3::new(f64::from(step as f32), -0.0, 1.0),
                 ..Transform::IDENTITY
             }
             .to_value(),
@@ -1325,7 +1325,7 @@ pub(super) mod tests {
                 let target = rng.below(3) != 0;
                 let target = target.then(|| Box::new(Value::Entity(pick(rng))));
                 let sets = [
-                    ("Transform", "translation.x", Value::F32(float)),
+                    ("Transform", "translation.x", Value::F64(f64::from(float))),
                     ("Transform", "scale", Value::Vec3(Vec3::splat(float))),
                     ("Everything", "target", Value::Option(target)),
                     // Above its max now and then.

@@ -1435,7 +1435,7 @@ mod tests {
                         entity: made,
                         component: "Transform".into(),
                         path: "translation.y".to_owned(),
-                        value: crate::reflect::Value::F32(frame as f32),
+                        value: crate::reflect::Value::F64(frame as f64),
                     }],
                 },
                 (7, _) => Edit::Apply {
@@ -1602,7 +1602,7 @@ mod tests {
             .map(|at| at.translation.x);
         assert_eq!(
             x,
-            Some((3 + 10 * (ticks - 3)) as f32),
+            Some((3 + 10 * (ticks - 3)) as f64),
             "reloaded at the fourth tick"
         );
         let stepped = ended.entities(Some("Step")).expect("a type").next();
@@ -1665,7 +1665,7 @@ mod tests {
             .query::<&Transform>()
             .next()
             .map(|at| at.translation.x);
-        assert_eq!(x, Some(2.0 * ticks as f32));
+        assert_eq!(x, Some(2.0 * ticks as f64));
         fs::remove_dir_all(&folder).expect("removed");
         let replayed = replay_all(app(), &text).map_err(|(_, error)| error.to_string());
         assert_eq!(replayed, Ok((ticks, ended.hash())));

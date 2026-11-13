@@ -98,13 +98,18 @@ fn facing(camera: &Viewpoint) -> Option<Plane> {
     [Plane::XY, Plane::XZ, Plane::YZ].into_iter().find(along)
 }
 
-/// Where the grid's quad goes, as the transform from the unit square to the world, and what its
-/// shader gets, for `camera` seeing `plane` in `view`: in perspective, a square around the camera's
-/// foot on the plane, `ACROSS` times its height above the plane across; orthographically, the
-/// parallelogram where the rays through the view's corners meet the plane, stretched across to
-/// `SLACK` times the view's width. `None` while the view has no area, or the plane is too near
-/// edge-on for any of it to show through the fade toward grazing angles.
-pub(crate) fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Grid)> {
+/// Where the grid's quad goes, as the transform from the unit square to the world from `origin`,
+/// the frame's, and what its shader gets, for `camera` seeing `plane` in `view`: in perspective, a
+/// square around the camera's foot on the plane, `ACROSS` times its height above the plane across;
+/// orthographically, the parallelogram where the rays through the view's corners meet the plane,
+/// stretched across to `SLACK` times the view's width. `None` while the view has no area, or the
+/// plane is too near edge-on for any of it to show through the fade toward grazing angles.
+pub(crate) fn quad(
+    camera: &Viewpoint,
+    view: Viewport,
+    plane: Plane,
+    origin: DVec3,
+) -> Option<(Mat4, Grid)> {
     if view.size.contains(&0) {
         return None;
     }
@@ -112,7 +117,7 @@ pub(crate) fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(
     let aspect = f64::from(view.aspect());
     let rotation = camera.rotation.as_dquat();
     let forward = rotation * DVec3::NEG_Z;
-    let eye = camera.position.as_dvec3();
+    let eye = camera.position;
     let normal = plane.normal().as_dvec3();
     let [(first, first_color), (second, second_color)] = plane.axes();
     let [first, second] = [first.as_dvec3(), second.as_dvec3()];
@@ -168,9 +173,10 @@ pub(crate) fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(
             // which round apart from these, can't pass it where they pick the next power up.
             let coarsest = level(footprint(first).max(footprint(second))) + 3;
             // The GPU places the quad through `f32` matrices, which round by a few times a
-            // float's precision at the camera's and the quad's distances from the origin: a margin
-            // of more than that keeps the view covered far from the origin.
-            let rounding = 16.0 * f64::from(f32::EPSILON) * (eye.length() + center.length());
+            // float's precision at the camera's and the quad's distances from the frame's origin:
+            // a margin of more than that keeps the view covered far from it.
+            let from = (eye - origin).length() + (center - origin).length();
+            let rounding = 16.0 * f64::from(f32::EPSILON) * from;
             let edges = [
                 across * (2.0 * SLACK + 2.0 * rounding / (half * aspect)),
                 up * (2.0 + 2.0 * rounding / half),
@@ -183,9 +189,9 @@ pub(crate) fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(
             (center, edges, coarsest, lines)
         }
     };
-    // Where the GPU has it.
-    let center = center.as_vec3();
-    let exact = center.as_dvec3();
+    // Where the GPU has it, from the frame's origin.
+    let center = (center - origin).as_vec3();
+    let exact = origin + center.as_dvec3();
     let modulus = libm::pow(10.0, f64::from(coarsest));
     // Within half the modulus of 0, which every spacing drawn divides, so that the lines are where
     // they'd be from the plane's origin.
@@ -265,7 +271,7 @@ mod tests {
             }
         };
         Viewpoint {
-            position: pivot - rotation * Vec3::NEG_Z * distance,
+            position: (pivot - rotation * Vec3::NEG_Z * distance).as_dvec3(),
             rotation,
             projection,
         }
@@ -308,7 +314,7 @@ mod tests {
             (camera(far, [0.0; 3], 0.1, false), Plane::XY),
             (camera(far, [20.0, 30.0, 0.0], 1.0, false), Plane::XY),
         ] {
-            let (transform, _) = quad(&camera, VIEW, plane).expect("the plane shows");
+            let (transform, _) = quad(&camera, VIEW, plane, DVec3::ZERO).expect("the plane shows");
             // In the view, and in one that's widened to twice its width since, as the view may
             // have in the frame the quad is drawn in.
             for wider in [1.0, 2.0] {
@@ -348,9 +354,10 @@ mod tests {
         ] {
             let mut camera = camera(Vec3::new(1.0, 0.0, -2.0), turn, distance, true);
             camera.position.y += 1e-3;
-            let height = camera.position.y;
-            let (transform, grid) = quad(&camera, VIEW, Plane::XZ).expect("the plane shows");
-            let foot = Vec3::new(camera.position.x, 0.0, camera.position.z);
+            let height = camera.position.y as f32;
+            let (transform, grid) =
+                quad(&camera, VIEW, Plane::XZ, DVec3::ZERO).expect("the plane shows");
+            let foot = Vec3::new(camera.position.x as f32, 0.0, camera.position.z as f32);
             let side = 1000.0 * height.abs();
             let expected = Mat4::from_cols(
                 Vec4::new(side, 0.0, 0.0, 0.0),
@@ -376,6 +383,7 @@ mod tests {
                 &camera(Vec3::ZERO, [10.0, pitch, 0.0], 8.0, false),
                 VIEW,
                 Plane::XZ,
+                DVec3::ZERO,
             )
         };
         assert!(seen_at(0.0019).is_none());
@@ -383,10 +391,11 @@ mod tests {
         // In perspective by the camera's height above it: in the plane nothing shows, but just over
         // it the plane shows toward the bottom of the view, though the camera looks along it.
         let mut level = camera(Vec3::ZERO, [10.0, 0.0, 0.0], 8.0, true);
-        assert!(quad(&level, VIEW, Plane::XZ).is_none());
+        assert!(quad(&level, VIEW, Plane::XZ, DVec3::ZERO).is_none());
         // Twelve times the least height that shows past its near plane, 0.0008 away.
         level.position.y = 2e-5;
-        let (transform, grid) = quad(&level, VIEW, Plane::XZ).expect("the plane shows");
+        let (transform, grid) =
+            quad(&level, VIEW, Plane::XZ, DVec3::ZERO).expect("the plane shows");
         let finite = transform.is_finite() && grid.eye.is_finite();
         let centers = [grid.first_center, grid.second_center, grid.coarsest];
         assert!(
@@ -403,7 +412,8 @@ mod tests {
             camera(far, [0.0; 3], 0.1, false),
             camera(far, [30.0, -20.0, 0.0], 0.1, true),
         ] {
-            let (transform, grid) = quad(&camera, VIEW, Plane::XY).expect("the plane shows");
+            let (transform, grid) =
+                quad(&camera, VIEW, Plane::XY, DVec3::ZERO).expect("the plane shows");
             let center = Vec2::new(grid.first_center, grid.second_center);
             for corner in [
                 [0.0, 0.0],
@@ -444,7 +454,7 @@ mod tests {
     #[test]
     fn lines_go_crisp_only_orthographically_with_a_square_basis() {
         let lines = |camera: &Viewpoint| {
-            let quad = quad(camera, VIEW, shown(camera, Plane::XY));
+            let quad = quad(camera, VIEW, shown(camera, Plane::XY), DVec3::ZERO);
             quad.map(|(_, grid)| grid.lines)
         };
         let ortho = |turn| camera(Vec3::ZERO, turn, 8.0, false);

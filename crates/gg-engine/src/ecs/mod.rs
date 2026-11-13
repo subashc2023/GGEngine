@@ -1114,7 +1114,7 @@ mod tests {
         world.advance();
         world.insert(c, Index(7))?;
         world.advance();
-        world.set_field(a, "Transform", "translation.x", &Value::F32(2.5))?;
+        world.set_field(a, "Transform", "translation.x", &Value::F64(2.5))?;
         assert_eq!(
             [a, b, c].map(|entity| at(&world, entity)),
             [(0, 3), (1, 0), (2, 0)],

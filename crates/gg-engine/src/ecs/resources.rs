@@ -401,7 +401,7 @@ mod tests {
         let entity = world.spawn(Transform::IDENTITY);
         let copied = world.resource_scope(|world, gravity: &mut Gravity| {
             let at = world.get_mut::<Transform>(entity).expect("alive");
-            at.translation.y = gravity.0;
+            at.translation.y = f64::from(gravity.0);
             gravity.0 = 1.0;
             let copy = world.clone();
             world.insert_resource(Gravity(5.0));
@@ -410,6 +410,6 @@ mod tests {
         assert_eq!(copied, Some(None), "a copy leaves it out");
         assert_eq!(world.resource::<Gravity>(), Some(&Gravity(1.0)));
         let at = world.get::<Transform>(entity).expect("alive");
-        assert_eq!(at.translation.y, -9.81);
+        assert_eq!(at.translation.y, f64::from(-9.81f32));
     }
 }

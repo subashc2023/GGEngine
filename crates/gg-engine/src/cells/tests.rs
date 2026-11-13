@@ -39,7 +39,7 @@ impl Layer for Walker {
             };
             if let Some(moved) = moved {
                 let transform = world.get_mut::<Transform>(moved).expect("placed");
-                transform.translation.x = x;
+                transform.translation.x = f64::from(x);
             }
         }
     }
@@ -106,7 +106,7 @@ fn streaming(root: &Path, folder: &str) -> (Context, Entity) {
 
 fn at(x: f32) -> Transform {
     Transform {
-        translation: Vec3::new(x, 0.0, 0.0),
+        translation: DVec3::new(f64::from(x), 0.0, 0.0),
         ..Transform::IDENTITY
     }
 }
@@ -114,7 +114,7 @@ fn at(x: f32) -> Transform {
 /// Moves `entity` to x `x`.
 fn move_to(cx: &mut Context, entity: Entity, x: f32) {
     let transform = cx.world_mut().get_mut::<Transform>(entity);
-    transform.expect("placed").translation.x = x;
+    transform.expect("placed").translation.x = f64::from(x);
 }
 
 /// The x of each cell in, in order.
@@ -135,7 +135,7 @@ fn found(cx: &Context, id: EntityId) -> Option<(f32, bool)> {
         .get::<Transform>(entity)
         .expect("placed")
         .translation
-        .x;
+        .x as f32;
     Some((x, world.get::<Streamed>(entity).is_some()))
 }
 
@@ -185,21 +185,26 @@ fn a_cell_s_file_names_it_by_its_place() {
 /// without `Cells`, or of a size that isn't finite and positive, has no cells.
 #[test]
 fn a_point_is_in_the_cell_of_its_floor_over_the_size() {
-    let cell = Cell::at(Vec3::new(25.0, -0.5, 0.0), 10.0);
+    let cell = Cell::at(DVec3::new(25.0, -0.5, 0.0), 10.0);
     assert_eq!(cell, Cell(IVec3::new(2, -1, 0)));
+    // 1,000 km out, a millimeter either side of a cell's edge, which `f32` would round onto it.
+    let edge = 1.0e6 + 10.0;
+    let sides = [edge - 0.001, edge + 0.001].map(|x| Cell::at(DVec3::new(x, 0.0, -x), 10.0));
+    assert_eq!(sides[0], Cell(IVec3::new(100_000, 0, -100_001)));
+    assert_eq!(sides[1], Cell(IVec3::new(100_001, 0, -100_002)));
     let mut cx = Context::seeded(1);
-    assert_eq!(cx.world().cell_at(Vec3::ZERO), None);
+    assert_eq!(cx.world().cell_at(DVec3::ZERO), None);
     let world = cx.world_mut();
     let cells = world.spawn(Cells {
         folder: "cells".to_owned(),
         size: 10.0,
     });
     assert_eq!(
-        world.cell_at(Vec3::new(-1.0, 0.0, 0.0)),
+        world.cell_at(DVec3::new(-1.0, 0.0, 0.0)),
         Some(Cell(IVec3::NEG_X))
     );
     world.get_mut::<Cells>(cells).expect("one").size = f32::NAN;
-    assert_eq!(world.cell_at(Vec3::ZERO), None);
+    assert_eq!(world.cell_at(DVec3::ZERO), None);
 }
 
 /// Cells come in as a viewer comes within its radius, with their files' entities, which stream,
@@ -856,7 +861,7 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
 #[cfg(feature = "dev")]
 pub(crate) fn look_at(cx: &mut Context, x: f32) {
     cx.look.viewpoint = Some(gg_renderer::Viewpoint {
-        position: Vec3::new(x, 0.0, 0.0),
+        position: DVec3::new(f64::from(x), 0.0, 0.0),
         ..Default::default()
     });
 }

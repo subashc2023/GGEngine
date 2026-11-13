@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat4, Vec2, Vec4};
+use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Result, label};
 use gg_gpu::{ComputePipeline, Device, Frame, Graph, ImageId, PassId, StorageImage, Target};
 
@@ -228,6 +228,16 @@ pub(crate) struct Drawn {
 }
 
 impl TaaPass {
+    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
+    /// further along than the frame before's: what was at `p` is at `p - by`, as
+    /// [`RenderData::origin`](crate::RenderData::origin) says.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        if let Some(last) = &mut self.last {
+            let along = Mat4::from_translation(by);
+            last.clip_from_world *= along;
+        }
+    }
+
     pub(crate) fn new(device: &Arc<Device>) -> Result<Self> {
         Ok(Self {
             resolve: ComputePipeline::new(device, "taa resolve", SPIRV, c"resolve_main")?,

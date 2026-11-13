@@ -33,7 +33,7 @@ pub enum Chosen {
     New,
     /// Frame the sphere round a cell, its center in the world and its radius, in the editor's
     /// camera.
-    Frame([f32; 3], f32),
+    Frame([f64; 3], f32),
 }
 
 /// The Scenes panel, as the module says: the scenes folders, the asset root, which names a scene as
@@ -223,7 +223,7 @@ fn show_cells(ui: &mut egui::Ui, cells: &WorldCells) -> Option<Chosen> {
                 let tip = format!("Frame cell {x}_{y}_{z} of {} in the camera", cells.folder);
                 if ui.add(row).on_hover_text(tip).clicked() {
                     let size = cells.size;
-                    let center = cell.cell.map(|n| (n as f32 + 0.5) * size);
+                    let center = cell.cell.map(|n| (f64::from(n) + 0.5) * f64::from(size));
                     chosen = Some(Chosen::Frame(center, size * 3f32.sqrt() / 2.0));
                 }
             }

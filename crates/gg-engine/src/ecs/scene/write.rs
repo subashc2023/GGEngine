@@ -333,6 +333,7 @@ impl Writer<'_> {
             (_, Value::Vec2(v)) => floats(out, v.as_ref()),
             (_, Value::Vec3(v)) => floats(out, v.as_ref()),
             (_, Value::Vec4(v)) => floats(out, v.as_ref()),
+            (_, Value::DVec3(v)) => floats(out, v.as_ref()),
             (_, Value::Quat(q)) => floats(out, &q.to_array()),
             (_, &Value::Entity(entity)) => self.reference(entity)?,
             (_, &Value::Texture(texture)) => {
@@ -524,7 +525,7 @@ pub(crate) fn float(
 }
 
 /// Writes a vector's or a quaternion's components, as `(x, y, z)`.
-fn floats(out: &mut String, xs: &[f32]) {
+fn floats<F: Float>(out: &mut String, xs: &[F]) {
     out.push('(');
     for (i, &x) in xs.iter().enumerate() {
         if i > 0 {
@@ -534,6 +535,33 @@ fn floats(out: &mut String, xs: &[f32]) {
     }
     out.push(')');
 }
+
+/// An `f32` or an `f64`, as a vector's components are.
+trait Float: Copy + fmt::Display {
+    fn is_nan(self) -> bool;
+    fn is_sign_negative(self) -> bool;
+    fn is_finite(self) -> bool;
+}
+
+macro_rules! floats {
+    ($($F:ty),*) => {$(
+        impl Float for $F {
+            fn is_nan(self) -> bool {
+                <$F>::is_nan(self)
+            }
+
+            fn is_sign_negative(self) -> bool {
+                <$F>::is_sign_negative(self)
+            }
+
+            fn is_finite(self) -> bool {
+                <$F>::is_finite(self)
+            }
+        }
+    )*};
+}
+
+floats!(f32, f64);
 
 /// Writes `text` quoted, by the scene's own escapes: `\\`, `\"`, `\n`, `\r` and `\t`; `\u{..}` for
 /// the other characters that are [`hidden`]; and everything else as it is.

@@ -2060,7 +2060,7 @@ impl Inverse {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat};
     use gg_renderer::{Mipmaps, Texture, Textures};
 
     use super::*;
@@ -2121,7 +2121,7 @@ pub(super) mod tests {
             .assets_mut()
             .add_texture(texture, "own.png".into(), "own.png".into());
         let at = |x: f32| Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(f64::from(x), 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let r = world.spawn(at(0.0));

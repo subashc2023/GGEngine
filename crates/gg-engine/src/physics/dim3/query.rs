@@ -1,22 +1,22 @@
 //! Casts through the world's 3D colliders: a ray, or a shape swept along a line, giving what it
 //! hits first.
 
-use gg_core::math::{Quat, Vec3};
+use gg_core::math::{DVec3, Quat, Vec3};
 use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::pipeline::QueryPipeline;
 use rapier3d::prelude::{
     Ball, Capsule, Collider, ColliderHandle, Cuboid, Pose, QueryFilter, Ray, Shape,
 };
 
-use super::{Physics3D, vector};
+use super::{Physics3D, at, vector};
 use crate::{Entity, World};
 
 /// A cast through the world's 3D colliders: where it starts, which way it goes, how far, and an
 /// entity whose colliders it passes through, as a character's own as it looks about.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cast {
-    /// Where it starts, in the world's space.
-    pub from: Vec3,
+    /// Where it starts, in the world's space, in `f64`, as positions are.
+    pub from: DVec3,
     /// Which way it goes, of any length but none.
     pub toward: Vec3,
     /// How far it goes, in units: without end at `f32::INFINITY`.
@@ -27,7 +27,7 @@ pub struct Cast {
 
 impl Cast {
     /// A cast from `from` toward `toward`, without end, through every collider.
-    pub fn new(from: Vec3, toward: Vec3) -> Self {
+    pub fn new(from: DVec3, toward: Vec3) -> Self {
         Self {
             from,
             toward,
@@ -78,13 +78,16 @@ impl Shape3D {
     /// What `f` gives of the shape as rapier's, of sizes of no less than 0, made where it's
     /// given rather than allocated, as a script's cast allocates nothing.
     fn with<R>(self, f: impl FnOnce(&dyn Shape) -> R) -> R {
-        let at_least_0 = |x: f32| if x > 0.0 { x } else { 0.0 };
+        let at_least_0 = |x: f32| f64::from(if x > 0.0 { x } else { 0.0 });
         match self {
             Self::Box { size } => f(&Cuboid::new(vector(size.abs() * 0.5))),
             Self::Sphere { radius } => f(&Ball::new(at_least_0(radius))),
             Self::Capsule { height, radius } => {
-                let radius = at_least_0(radius);
-                f(&Capsule::new_y(at_least_0(height * 0.5 - radius), radius))
+                let radius = if radius > 0.0 { radius } else { 0.0 };
+                f(&Capsule::new_y(
+                    at_least_0(height * 0.5 - radius),
+                    radius.into(),
+                ))
             }
         }
     }
@@ -95,8 +98,8 @@ impl Shape3D {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit3D {
     pub entity: Entity,
-    /// Where it hit the collider, in the world's space.
-    pub point: Vec3,
+    /// Where it hit the collider, in the world's space, in `f64`, as positions are.
+    pub point: DVec3,
     /// The unit vector out of the collider's surface where it hit: none where the cast started
     /// inside it.
     pub normal: Vec3,
@@ -114,12 +117,13 @@ impl World {
     pub fn cast_ray(&self, cast: Cast) -> Option<Hit3D> {
         let physics = self.resource::<Physics3D>()?;
         let toward = cast.way()?;
-        let ray = Ray::new(vector(cast.from), vector(toward));
+        let ray = Ray::new(at(cast.from), vector(toward));
+        let max_distance = f64::from(cast.max_distance);
         physics.cast(self, cast.exclude, |queries| {
-            let (collider, hit) = queries.cast_ray_and_get_normal(&ray, cast.max_distance, true)?;
-            let point = cast.from + toward * hit.time_of_impact;
-            let normal = Vec3::from_array(hit.normal.to_array());
-            Some((collider, point, normal, hit.time_of_impact))
+            let (collider, hit) = queries.cast_ray_and_get_normal(&ray, max_distance, true)?;
+            let point = cast.from + toward.as_dvec3() * hit.time_of_impact;
+            let normal = Vec3::from_array(hit.normal.to_array().map(|x| x as f32));
+            Some((collider, point, normal, hit.time_of_impact as f32))
         })
     }
 
@@ -130,9 +134,9 @@ impl World {
     pub fn cast_shape(&self, shape: Shape3D, rotation: Quat, cast: Cast) -> Option<Hit3D> {
         let physics = self.resource::<Physics3D>()?;
         let toward = cast.way()?;
-        let at = Pose::from_parts(vector(cast.from), super::rotation(rotation));
+        let at = Pose::from_parts(at(cast.from), super::rotation(rotation));
         let options = ShapeCastOptions {
-            max_time_of_impact: cast.max_distance,
+            max_time_of_impact: cast.max_distance.into(),
             target_distance: 0.0,
             stop_at_penetration: true,
             compute_impact_geometry_on_penetration: true,
@@ -140,9 +144,9 @@ impl World {
         physics.cast(self, cast.exclude, |queries| {
             let cast = |shape: &dyn Shape| queries.cast_shape(&at, vector(toward), shape, options);
             let (collider, hit) = shape.with(cast)?;
-            let point = Vec3::from_array(hit.witness1.to_array());
-            let normal = Vec3::from_array(hit.normal1.to_array());
-            Some((collider, point, normal, hit.time_of_impact))
+            let point = DVec3::from_array(hit.witness1.to_array());
+            let normal = Vec3::from_array(hit.normal1.to_array().map(|x| x as f32));
+            Some((collider, point, normal, hit.time_of_impact as f32))
         })
     }
 }
@@ -185,7 +189,7 @@ impl Physics3D {
 }
 
 /// What a cast gives as it hits: the collider, where it hit, its surface's way there, and how far.
-type Cast3D = (ColliderHandle, Vec3, Vec3, f32);
+type Cast3D = (ColliderHandle, DVec3, Vec3, f32);
 
 #[cfg(test)]
 mod tests {
@@ -213,11 +217,11 @@ mod tests {
     #[test]
     fn rays_hit_the_nearest_collider() {
         let (world, floor, boxed) = stepped();
-        let down = Cast::new(Vec3::new(0.25, 5.0, -0.25), Vec3::new(0.0, -2.0, 0.0));
+        let down = Cast::new(DVec3::new(0.25, 5.0, -0.25), Vec3::new(0.0, -2.0, 0.0));
         let hit = world.cast_ray(down).expect("the box");
         assert_eq!(hit.entity, boxed);
         assert!(
-            hit.point.abs_diff_eq(Vec3::new(0.25, 1.5, -0.25), 1e-5),
+            hit.point.abs_diff_eq(DVec3::new(0.25, 1.5, -0.25), 1e-5),
             "{hit:?}"
         );
         assert!(hit.normal.abs_diff_eq(Vec3::Y, 1e-5), "{hit:?}");
@@ -226,10 +230,10 @@ mod tests {
         assert_eq!(through.entity, floor);
         assert!((through.distance - 4.5).abs() < 1e-5, "{through:?}");
         assert_eq!(world.cast_ray(down.within(3.0)), None);
-        let across = Cast::new(Vec3::new(-4.0, 1.0, 0.0), Vec3::X);
+        let across = Cast::new(DVec3::new(-4.0, 1.0, 0.0), Vec3::X);
         let side = world.cast_ray(across).expect("the box's side");
         assert!(side.normal.abs_diff_eq(Vec3::NEG_X, 1e-5) && (side.distance - 3.5).abs() < 1e-5);
-        let inside = world.cast_ray(Cast::new(Vec3::new(0.0, 1.0, 0.0), Vec3::X));
+        let inside = world.cast_ray(Cast::new(DVec3::new(0.0, 1.0, 0.0), Vec3::X));
         let inside = inside.expect("the box, from inside it");
         assert_eq!((inside.entity, inside.distance), (boxed, 0.0));
     }
@@ -239,7 +243,7 @@ mod tests {
     #[test]
     fn shapes_hit_where_their_surfaces_touch() {
         let (world, _, boxed) = stepped();
-        let down = Cast::new(Vec3::new(0.1, 5.0, 0.0), Vec3::NEG_Y);
+        let down = Cast::new(DVec3::new(0.1, 5.0, 0.0), Vec3::NEG_Y);
         for (shape, reach) in [
             (Shape3D::Sphere { radius: 0.5 }, 0.5),
             (
@@ -283,10 +287,10 @@ mod tests {
     #[test]
     fn casts_find_only_what_the_last_step_left() {
         let empty = World::default();
-        let down = Cast::new(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y);
+        let down = Cast::new(DVec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y);
         assert_eq!(empty.cast_ray(down), None);
         let (mut world, floor, boxed) = stepped();
-        assert_eq!(world.cast_ray(Cast::new(Vec3::ZERO, Vec3::ZERO)), None);
+        assert_eq!(world.cast_ray(Cast::new(DVec3::ZERO, Vec3::ZERO)), None);
         assert_eq!(world.cast_ray(down.within(f32::NAN)), None);
         world.despawn(boxed).expect("alive");
         let made = character(&mut world, Vec3::new(0.0, 2.0, 0.0));

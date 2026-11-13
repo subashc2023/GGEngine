@@ -436,6 +436,8 @@ pub(crate) fn run_frame(
         cx.paused = true;
     }
     let ticked = Instant::now();
+    #[cfg(feature = "dev")]
+    cx.follow_look();
     stack.update(cx, dt);
     stack.interpolate(cx, dt);
     let alpha = stepper.alpha();
@@ -1021,7 +1023,7 @@ pub(crate) mod tests {
     use std::iter;
     use std::rc::Rc;
 
-    use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+    use gg_core::math::{DVec3, Mat4, Quat, Vec3, Vec4};
     use gg_renderer::Draws;
 
     use super::*;
@@ -1072,7 +1074,7 @@ pub(crate) mod tests {
     /// Where [`Slider`]'s sprites are: at `x`, and at their own `z`.
     fn slid(x: f32, z: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, 0.0, z),
+            translation: Vec3::new(x, 0.0, z).as_dvec3(),
             ..Transform::IDENTITY
         }
     }
@@ -1126,14 +1128,18 @@ pub(crate) mod tests {
     fn slider_draws(world: &World, slider: f32, jumper: f32, spawned: bool) -> Draws {
         let id = |z: f32| {
             let mut placed = world.query::<(Entity, &Transform)>();
-            let found = placed.find(|(_, at)| at.translation.z == z);
+            let found = placed.find(|(_, at)| at.translation.z == f64::from(z));
             let (entity, _) = found.expect("a sprite at each z");
             world.id(entity).expect("alive").get()
         };
         let mut want = Draws::default();
         want.draw_scene();
         let mut sprite = |x: f32, z: f32| {
-            want.extend_sprites(iter::once((slid(x, z).matrix(), red(), id(z))));
+            want.extend_sprites(iter::once((
+                slid(x, z).matrix_from(DVec3::ZERO),
+                red(),
+                id(z),
+            )));
         };
         sprite(slider, 0.0);
         sprite(jumper, 0.1);
@@ -1463,7 +1469,7 @@ pub(crate) mod tests {
         let mut expected = Draws::default();
         expected.push_sprite(Mat4::IDENTITY, Sprite::default());
         expected.draw_scene();
-        let red_one = (Transform::IDENTITY.matrix(), red(), id);
+        let red_one = (Transform::IDENTITY.matrix_from(DVec3::ZERO), red(), id);
         expected.extend_sprites(iter::once(red_one));
         let viewport = Viewport {
             origin: [0, 0],
@@ -1496,7 +1502,7 @@ pub(crate) mod tests {
 
     /// What [`Overlooker`] sets.
     const OVERLOOKING: Viewpoint = Viewpoint {
-        position: Vec3::new(0.0, 0.0, 5.0),
+        position: DVec3::new(0.0, 0.0, 5.0),
         rotation: Quat::IDENTITY,
         projection: Projection::Orthographic {
             height: 3.0,
@@ -1507,7 +1513,7 @@ pub(crate) mod tests {
 
     /// What [`Overlooker`]'s camera sees from.
     const ITS_CAMERA: Viewpoint = Viewpoint {
-        position: Vec3::new(1.0, 2.0, 0.0),
+        position: DVec3::new(1.0, 2.0, 0.0),
         rotation: Quat::IDENTITY,
         projection: Projection::Orthographic {
             height: 6.0,

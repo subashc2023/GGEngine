@@ -186,7 +186,7 @@ impl Seen {
             }
             None => (Vec3::Y, 0.0, Vec3::ZERO),
         };
-        let height = (atmosphere.altitude + viewpoint.position.y)
+        let height = ((f64::from(atmosphere.altitude) + viewpoint.position.y) as f32)
             .clamp(OFFSET * 1000.0, (TOP - GROUND - OFFSET) * 1000.0);
         let radius = GROUND + height / 1000.0;
         Self {
@@ -679,14 +679,14 @@ impl AtmospherePass {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Quat, to_radians};
+    use gg_core::math::{DVec3, Quat, to_radians};
 
     use super::*;
     use crate::Projection;
 
     fn viewpoint(height: f32) -> Viewpoint {
         Viewpoint {
-            position: Vec3::new(3.0, height, -2.0),
+            position: DVec3::new(3.0, f64::from(height), -2.0),
             rotation: Quat::IDENTITY,
             projection: Projection::Perspective {
                 fov: 1.0,

@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
     use std::fs::{self, File};
     use std::time::{Duration, SystemTime};
 
-    use gg_core::math::Vec3;
+    use gg_core::math::{DVec3, Vec3};
 
     use super::*;
     use crate::args::Net;
@@ -1263,7 +1263,7 @@ pub(crate) mod tests {
             entity: id,
             component: "Transform".into(),
             path: "translation.x".to_owned(),
-            value: Value::F32(x),
+            value: Value::F64(f64::from(x)),
         }
     }
 
@@ -1301,7 +1301,7 @@ pub(crate) mod tests {
     }
 
     /// The x of entity `id`'s translation in `world`.
-    fn x(world: &World, id: EntityId) -> f32 {
+    fn x(world: &World, id: EntityId) -> f64 {
         let entity = world.entity(id).expect("alive");
         world
             .get::<Transform>(entity)
@@ -1380,7 +1380,7 @@ pub(crate) mod tests {
         look(&mut cx, &mut stack);
         assert_eq!(cx.authors.logs(cx.world()).count(), 0);
         let moved = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         };
         file.insert(a, moved).expect("alive");
@@ -1444,7 +1444,7 @@ pub(crate) mod tests {
         look(&mut cx, &mut stack);
         stack.play(&mut cx, 0);
         let moved = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         };
         file.insert(a, moved).expect("alive");
@@ -1487,7 +1487,7 @@ pub(crate) mod tests {
         };
         look(&mut cx, &mut stack);
         let moved = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         };
         file.insert(a, moved).expect("alive");
@@ -1713,7 +1713,7 @@ pub(crate) mod tests {
         file.insert(
             a,
             Transform {
-                translation: Vec3::X,
+                translation: DVec3::X,
                 ..Transform::IDENTITY
             },
         )
@@ -1903,7 +1903,7 @@ pub(crate) mod tests {
         // Watched: its save applies, as its own edit.
         look_now(&mut cx, &mut stack);
         let moved = Transform {
-            translation: Vec3::X,
+            translation: DVec3::X,
             ..Transform::IDENTITY
         };
         level

@@ -115,7 +115,8 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
             rotation,
             scale,
         } = part.transform;
-        floats(&mut bytes, &translation.to_array());
+        // A model's parts are near its root, where `f32` holds.
+        floats(&mut bytes, &translation.as_vec3().to_array());
         floats(&mut bytes, &rotation.to_array());
         floats(&mut bytes, &scale.to_array());
         index(&mut bytes, part.parent);
@@ -364,7 +365,7 @@ impl<'a> Reader<'a> {
             let name = (!name.is_empty()).then(|| Arc::from(name));
             let [x, y, z, rx, ry, rz, rw, sx, sy, sz] = self.floats()?;
             let transform = Transform {
-                translation: Vec3::new(x, y, z),
+                translation: Vec3::new(x, y, z).as_dvec3(),
                 rotation: Quat::from_xyzw(rx, ry, rz, rw),
                 scale: Vec3::new(sx, sy, sz),
             };
@@ -857,6 +858,8 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use gg_core::math::DVec3;
+
     use super::*;
     use crate::image::tests::ktx2;
     use gg_renderer::ModelVertex;
@@ -949,7 +952,7 @@ mod tests {
             reach: None,
         };
         let turned = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             rotation: Quat::from_rotation_y(0.1),
             scale: Vec3::new(1.0, -2.0, 0.5),
         };
@@ -1083,7 +1086,7 @@ mod tests {
         ));
         cases.push((
             "a part moved by a NaN",
-            edited(&|imported| imported.parts[1].transform.translation.x = f32::NAN),
+            edited(&|imported| imported.parts[1].transform.translation.x = f64::from(f32::NAN)),
         ));
         cases.push((
             "a part scaled infinitely",

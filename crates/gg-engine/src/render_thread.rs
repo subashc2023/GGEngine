@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use gg_core::math::Vec4;
+use gg_core::math::{DVec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Antialiasing, DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer,
@@ -75,6 +75,8 @@ pub(crate) struct Extracted {
     pub(crate) time: f32,
     pub(crate) viewport: Viewport,
     pub(crate) viewpoint: Viewpoint,
+    /// What the frame's draws are relative to, as [`RenderData::origin`] says.
+    pub(crate) origin: DVec3,
     /// Whether the view is cut to its viewpoint from elsewhere, as [`RenderData::cut`] says.
     pub(crate) cut: bool,
     pub(crate) draws: Draws,
@@ -189,6 +191,7 @@ impl Default for Extracted {
                 size: [0, 0],
             },
             viewpoint: Viewpoint::default(),
+            origin: DVec3::ZERO,
             cut: true,
             draws: Draws::default(),
             canvas: Draws::default(),
@@ -313,6 +316,7 @@ impl Render for Renderer {
             lens: frame.lens,
             viewport: frame.viewport,
             viewpoint: frame.viewpoint,
+            origin: frame.origin,
             cut: frame.cut,
             uploads: &mut frame.uploads,
             draws: &frame.draws,

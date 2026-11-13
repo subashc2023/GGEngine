@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 
 use gg_engine::egui::{self, Align2, CursorIcon};
 use gg_engine::grid;
-use gg_engine::math::{Vec2, Vec3, Vec4};
+use gg_engine::math::{DVec3, Vec2, Vec3, Vec4};
 use gg_engine::{Context, Event, Input, InspectorLink, Key, Ui, Viewpoint, Viewport};
 
 use crate::camera::{Move, OrbitCamera, Screen, Side, Tool};
@@ -198,7 +198,7 @@ impl<T, F> ViewTools<T, F> {
     /// Frames `picked` by `bounds`, a sphere's center and radius, as [`frame`](Self::frame) finds
     /// it: by the sphere where it has a radius; else at its center, or for none at the pick's
     /// origin, from as far as the camera is.
-    fn frame_bounds(&mut self, picked: &Picked, bounds: Option<(Vec3, f32)>) {
+    fn frame_bounds(&mut self, picked: &Picked, bounds: Option<(DVec3, f32)>) {
         let origin = (picked.parent.matrix).transform_point3(picked.local.translation);
         match bounds {
             Some((center, radius)) if radius > 0.0 => self.camera.frame_sphere(center, radius),
@@ -321,17 +321,18 @@ pub fn reading(cx: &Context, view: Option<Viewport>) -> Reading {
 
 /// A sphere round spheres `a` and `b`, each a center and a radius: the smallest, the larger of them
 /// where it holds the other.
-fn enclosing(a: (Vec3, f32), b: (Vec3, f32)) -> (Vec3, f32) {
+fn enclosing(a: (DVec3, f32), b: (DVec3, f32)) -> (DVec3, f32) {
     let ((a, r), (b, s)) = (a, b);
+    let (r, s) = (f64::from(r), f64::from(s));
     let apart = a.distance(b);
     if apart + s <= r {
-        return (a, r);
+        return (a, r as f32);
     }
     if apart + r <= s {
-        return (b, s);
+        return (b, s as f32);
     }
     let radius = (apart + r + s) / 2.0;
-    (a + (b - a) * ((radius - r) / apart), radius)
+    (a + (b - a) * ((radius - r) / apart), radius as f32)
 }
 
 /// Whether `event` is a press of F, not a repeat, without `command` held, which a shortcut's would
@@ -426,7 +427,7 @@ mod tests {
 
     use std::f32::consts::FRAC_PI_4;
 
-    use gg_engine::math::Quat;
+    use gg_engine::math::{DAffine3, Quat};
     use gg_engine::reflect::Value;
     use gg_engine::{EntityId, Inspector, MouseButton, Pick, Pose, Projection, Scroll, Transform};
 
@@ -501,7 +502,7 @@ mod tests {
         let _ = press_at(&mut tools, picked, at, MouseButton::Left, false);
         assert!(!tools.handles.dragging());
         let pending = tools.link.pending();
-        let [Some((id, component, path, Value::Vec3(moved))), None] = &pending[..] else {
+        let [Some((id, component, path, Value::DVec3(moved))), None] = &pending[..] else {
             panic!("a set and a seal: {pending:?}");
         };
         let entity = picked.expect("picked").entity;
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(field, (entity, "Transform", "translation"));
         // 75 pixels right, at 60 a unit.
         assert!(
-            moved.abs_diff_eq(Vec3::new(1.25, 0.0, 0.0), 1e-4),
+            moved.abs_diff_eq(DVec3::new(1.25, 0.0, 0.0), 1e-4),
             "{moved}"
         );
         assert_eq!(tools.picking, None, "it picked nothing");
@@ -568,8 +569,8 @@ mod tests {
             repeat,
         };
         let mut placed = at_the_origin().expect("picked");
-        placed.local.translation = Vec3::new(2.0, 0.0, 0.0);
-        placed.parent.matrix = gg_engine::math::Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0));
+        placed.local.translation = DVec3::new(2.0, 0.0, 0.0);
+        placed.parent.matrix = DAffine3::from_translation(DVec3::new(0.0, 3.0, 0.0));
         let mut tools = fresh();
         let seen = tools.camera.viewpoint();
         let mut ctrl = reading([0.0, 0.0]);
@@ -592,11 +593,11 @@ mod tests {
         tools.camera.update(Duration::from_secs(1));
         let framed = tools.camera.viewpoint();
         assert_eq!(framed.rotation, seen.rotation);
-        let ahead = framed.rotation * Vec3::NEG_Z;
+        let ahead = (framed.rotation * Vec3::NEG_Z).as_dvec3();
         let looked_at =
-            framed.position + ahead * (Vec3::new(2.0, 3.0, 0.0) - framed.position).dot(ahead);
+            framed.position + ahead * (DVec3::new(2.0, 3.0, 0.0) - framed.position).dot(ahead);
         assert!(
-            looked_at.abs_diff_eq(Vec3::new(2.0, 3.0, 0.0), 1e-4),
+            looked_at.abs_diff_eq(DVec3::new(2.0, 3.0, 0.0), 1e-4),
             "{looked_at}"
         );
     }
@@ -633,20 +634,20 @@ mod tests {
     /// round both.
     #[test]
     fn the_sphere_round_two_holds_both() {
-        let (center, radius) = enclosing((Vec3::ZERO, 1.0), (Vec3::new(4.0, 0.0, 0.0), 1.0));
+        let (center, radius) = enclosing((DVec3::ZERO, 1.0), (DVec3::new(4.0, 0.0, 0.0), 1.0));
         assert!(
-            center.abs_diff_eq(Vec3::new(2.0, 0.0, 0.0), 1e-6),
+            center.abs_diff_eq(DVec3::new(2.0, 0.0, 0.0), 1e-6),
             "{center}"
         );
         assert!((radius - 3.0).abs() < 1e-6, "{radius}");
         for (a, b) in [
-            ((Vec3::ZERO, 5.0), (Vec3::X, 1.0)),
-            ((Vec3::X, 1.0), (Vec3::ZERO, 5.0)),
+            ((DVec3::ZERO, 5.0), (DVec3::X, 1.0)),
+            ((DVec3::X, 1.0), (DVec3::ZERO, 5.0)),
         ] {
-            assert_eq!(enclosing(a, b), (Vec3::ZERO, 5.0));
+            assert_eq!(enclosing(a, b), (DVec3::ZERO, 5.0));
         }
-        let (center, radius) = enclosing((Vec3::ZERO, 0.0), (Vec3::new(0.0, 2.0, 0.0), 0.0));
-        assert!(center.abs_diff_eq(Vec3::Y, 1e-6) && (radius - 1.0).abs() < 1e-6);
+        let (center, radius) = enclosing((DVec3::ZERO, 0.0), (DVec3::new(0.0, 2.0, 0.0), 0.0));
+        assert!(center.abs_diff_eq(DVec3::Y, 1e-6) && (radius - 1.0).abs() < 1e-6);
     }
 
     /// Framing a pick the game gave a sphere for centers the view on the sphere, not on the pick's
@@ -655,14 +656,14 @@ mod tests {
     #[test]
     fn framing_a_pick_with_a_sphere_looks_at_the_sphere() {
         let placed = at_the_origin().expect("picked");
-        let center = Vec3::new(7.0, 8.0, 9.0);
+        let center = DVec3::new(7.0, 8.0, 9.0);
         let mut tools = fresh();
         tools.toolbar.world_camera = true;
         tools.frame_bounds(&placed, Some((center, 2.0)));
         assert!(!tools.toolbar.world_camera, "the editor's camera");
         tools.camera.update(Duration::from_secs(1));
         let framed = tools.camera.viewpoint();
-        let ahead = framed.rotation * Vec3::NEG_Z;
+        let ahead = (framed.rotation * Vec3::NEG_Z).as_dvec3();
         let looked_at = framed.position + ahead * (center - framed.position).dot(ahead);
         assert!(looked_at.abs_diff_eq(center, 1e-4), "{looked_at}");
         let Projection::Orthographic { height, .. } = framed.projection else {
@@ -672,9 +673,9 @@ mod tests {
         tools.frame_bounds(&placed, None);
         tools.camera.update(Duration::from_secs(1));
         let at_origin = tools.camera.viewpoint();
-        let ahead = at_origin.rotation * Vec3::NEG_Z;
+        let ahead = (at_origin.rotation * Vec3::NEG_Z).as_dvec3();
         let looked_at = at_origin.position + ahead * (-at_origin.position).dot(ahead);
-        assert!(looked_at.abs_diff_eq(Vec3::ZERO, 1e-4), "{looked_at}");
+        assert!(looked_at.abs_diff_eq(DVec3::ZERO, 1e-4), "{looked_at}");
         assert_eq!(at_origin.projection, framed.projection, "as far back");
     }
 
@@ -793,7 +794,7 @@ mod tests {
         let moved = Event::CursorMoved { x: to[0], y: to[1] };
         let _ = tools.take(&moved, &reading(to), picked, &[]);
         let pending = tools.link.pending();
-        let [Some((_, _, _, Value::Vec3(moved)))] = &pending[..] else {
+        let [Some((_, _, _, Value::DVec3(moved)))] = &pending[..] else {
             panic!("a set: {pending:?}");
         };
         assert!(moved.x > 0.5 && moved.y == 0.0 && moved.z == 0.0, "{moved}");

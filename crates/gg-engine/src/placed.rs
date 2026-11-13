@@ -5,7 +5,7 @@
 
 use std::mem;
 
-use gg_core::math::{Mat4, Quat, Vec3};
+use gg_core::math::{DAffine3, DVec3, Quat};
 
 use crate::ecs::ComponentId;
 use crate::interpolation::{self, Past};
@@ -44,21 +44,21 @@ pub(crate) struct Placed {
     stack: Vec<(Entity, Option<Place>)>,
 }
 
-/// Where an entity is: its matrix from its own space to the world's, its transform's and each
-/// ancestor's in turn, an ancestor without a transform carrying its children as though it were at
-/// the origin, unturned, at its own size; and its rotation, its own turned by each ancestor's in
+/// Where an entity is: its matrix from its own space to the world's, in `f64`, its transform's and
+/// each ancestor's in turn, an ancestor without a transform carrying its children as though it were
+/// at the origin, unturned, at its own size; and its rotation, its own turned by each ancestor's in
 /// turn, their scales aside, so that a mirrored ancestor mirrors where it is but not which way it
 /// faces, as a viewpoint and a light face.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Place {
-    pub(crate) matrix: Mat4,
+    pub(crate) matrix: DAffine3,
     pub(crate) rotation: Quat,
 }
 
 impl Place {
     /// At the origin, unturned, at its own size.
     const ORIGIN: Self = Self {
-        matrix: Mat4::IDENTITY,
+        matrix: DAffine3::IDENTITY,
         rotation: Quat::IDENTITY,
     };
 
@@ -82,8 +82,8 @@ impl Place {
 
     /// Its position, where a sprite of its matrix draws, and its rotation, normalized, since each
     /// product of unit quaternions rounds a little off a unit.
-    pub(crate) fn pose(&self) -> (Vec3, Quat) {
-        (self.matrix.w_axis.truncate(), self.rotation.normalize())
+    pub(crate) fn pose(&self) -> (DVec3, Quat) {
+        (self.matrix.translation, self.rotation.normalize())
     }
 }
 
@@ -340,7 +340,7 @@ mod tests {
 
     fn at(x: f32, y: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, y, 0.0),
+            translation: Vec3::new(x, y, 0.0).as_dvec3(),
             rotation: Quat::from_rotation_z(x + y),
             scale: Vec3::new(1.0, 2.0, 1.0),
         }
@@ -476,5 +476,49 @@ mod tests {
         placed.draw(&world, &past, 1.0, started, None);
         assert_eq!(placed.moving(), []);
         assert_eq!(placed.drawn(kid), placed.kept(kid));
+    }
+
+    /// 1,000 km from the world's origin, a parent moving 1 mm a tick draws on its way between
+    /// ticks, and its child 1 mm from it draws 1 mm from it, as drawing draws them, from an origin
+    /// near them, in `f32`: where `f32` places the world, they'd be to the nearest 6 cm.
+    #[test]
+    fn far_from_the_origin_what_moves_draws_on_its_way_to_the_millimeter() {
+        let mut world = World::default();
+        let far = DVec3::new(1.0e6 + 0.3, 0.0, -1.0e6);
+        let parent = world.spawn(Transform {
+            translation: far,
+            ..Transform::IDENTITY
+        });
+        let child = world.spawn(Transform {
+            translation: DVec3::new(0.001, 0.0, 0.0),
+            ..Transform::IDENTITY
+        });
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        let mut placed = Placed::default();
+        placed.place(&world);
+        world.advance();
+        let mut past = Past::default();
+        past.capture(&mut world);
+        let started = world.change_tick();
+        let moved = world.get_mut::<Transform>(parent).expect("it has one");
+        moved.translation.x += 0.001;
+        past.resolve(&world);
+        placed.place(&world);
+        placed.draw(&world, &past, 0.5, started, None);
+        let origin = DVec3::new(1.0e6, 0.0, -1.0e6);
+        let drawn = |entity| {
+            let place = placed.drawn(entity).expect("placed");
+            crate::transform::from_origin(place.matrix, origin)
+                .w_axis
+                .truncate()
+        };
+        let halfway = Vec3::new(0.3005, 0.0, 0.0);
+        assert!(
+            drawn(parent).abs_diff_eq(halfway, 1e-6),
+            "{}",
+            drawn(parent)
+        );
+        let apart = drawn(child) - drawn(parent);
+        assert!(apart.abs_diff_eq(Vec3::X * 0.001, 1e-6), "{apart}");
     }
 }

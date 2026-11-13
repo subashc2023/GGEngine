@@ -13,7 +13,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, libm};
+use gg_engine::math::{DVec3, EulerRot, Quat, Vec2, Vec3, libm};
 use gg_engine::{
     Actions, Binding, Change, Event, Key, MouseButton, Projection, Scroll, Source, Viewpoint,
     Viewport,
@@ -204,10 +204,12 @@ enum Action {
 }
 
 /// Where the camera is: the point it looks at and orbits, which way it faces, as turns about the
-/// world's up, then about its own right, then about where it looks, and how far back it is.
+/// world's up, then about its own right, then about where it looks, and how far back it is. The
+/// pivot is in `f64`, as the world's positions are, so that the camera flies as smoothly 1,000 km
+/// from the origin as at it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Pose {
-    pivot: Vec3,
+    pivot: DVec3,
     yaw: f32,
     /// From straight down to straight up, both included, so that the views from the top and the
     /// bottom are exact; the yaw kept apart keeps the turn about the world's up there.
@@ -220,7 +222,7 @@ impl Pose {
     /// Looking at the origin along -Z, seeing [`START_HEIGHT`] of the world at it.
     fn start() -> Self {
         Self {
-            pivot: Vec3::ZERO,
+            pivot: DVec3::ZERO,
             yaw: 0.0,
             pitch: 0.0,
             roll: 0.0,
@@ -245,13 +247,13 @@ struct Drag {
     what: Move,
     /// For a dolly, the point it dollies toward: what was under the press, on the plane through
     /// the pivot facing the view.
-    toward: Vec3,
+    toward: DVec3,
 }
 
 /// An ease to [`OrbitCamera::pose`], from where the camera was as it started.
 #[derive(Clone, Copy, Debug)]
 struct Ease {
-    pivot: Vec3,
+    pivot: DVec3,
     rotation: Quat,
     distance: f32,
     /// Seconds since it started.
@@ -326,7 +328,7 @@ impl OrbitCamera {
             }
         };
         Viewpoint {
-            position: pivot - rotation * Vec3::NEG_Z * distance,
+            position: pivot - (rotation * Vec3::NEG_Z * distance).as_dvec3(),
             rotation,
             projection,
         }
@@ -352,7 +354,7 @@ impl OrbitCamera {
             roll,
             distance: distance.clamp(least, most),
         };
-        pose.pivot += pose.forward() * pose.distance;
+        pose.pivot += (pose.forward() * pose.distance).as_dvec3();
         self.pose = pose;
         self.perspective = matches!(viewpoint.projection, Projection::Perspective { .. });
         self.ease = None;
@@ -517,9 +519,9 @@ impl OrbitCamera {
         let rotation = self.pose.rotation();
         let step = self.pose.distance * fast * seconds;
         if self.perspective {
-            self.pose.pivot += rotation * Vec3::new(fly.x, 0.0, -fly.y) * step;
+            self.pose.pivot += (rotation * Vec3::new(fly.x, 0.0, -fly.y) * step).as_dvec3();
         } else {
-            self.pose.pivot += rotation * Vec3::X * fly.x * step;
+            self.pose.pivot += (rotation * Vec3::X * fly.x * step).as_dvec3();
             let [least, most] = DISTANCES;
             let distance = self.pose.distance * libm::expf(-fly.y * fast * seconds);
             self.pose.distance = distance.clamp(least, most);
@@ -558,7 +560,7 @@ impl OrbitCamera {
     /// Eases to look at `point` from where it would be, keeping which way it faces and how far
     /// back it is, as framing what's picked does when the size of what's there isn't known: it
     /// stays as big as the view showed things at the pivot.
-    pub fn frame(&mut self, point: Vec3) {
+    pub fn frame(&mut self, point: DVec3) {
         self.ease_to(Pose {
             pivot: point,
             ..self.pose
@@ -570,7 +572,7 @@ impl OrbitCamera {
     /// subtends that part of the field of view; orthographically, where the view is as tall as the
     /// sphere's diameter over [`FRAMED`]. Within the distances the camera goes. A sphere of no size,
     /// or none that is finite, is framed as a point is, at the distance the camera has.
-    pub fn frame_sphere(&mut self, center: Vec3, radius: f32) {
+    pub fn frame_sphere(&mut self, center: DVec3, radius: f32) {
         if !radius.is_finite() || radius <= 0.0 {
             self.frame(center);
             return;
@@ -596,9 +598,9 @@ impl OrbitCamera {
         if self.perspective || self.ease.is_some() {
             return;
         }
-        let forward = self.pose.forward();
+        let (forward, normal) = (self.pose.forward().as_dvec3(), normal.as_dvec3());
         let across = forward.dot(normal);
-        if across.abs() >= GRAZING {
+        if across.abs() >= f64::from(GRAZING) {
             self.pose.pivot -= forward * (self.pose.pivot.dot(normal) / across);
         }
     }
@@ -606,7 +608,7 @@ impl OrbitCamera {
     /// Where it is, which way it faces, and how far back from the pivot: on the way from where an
     /// ease started to where it's going, while it eases, the turn slerped and the distance
     /// changing by the same factor each moment, so that neither spins nor rushes.
-    fn current(&self) -> (Vec3, Quat, f32) {
+    fn current(&self) -> (DVec3, Quat, f32) {
         let pose = &self.pose;
         let Some(ease) = &self.ease else {
             return (pose.pivot, pose.rotation(), pose.distance);
@@ -615,7 +617,11 @@ impl OrbitCamera {
         let s = t * t * (3.0 - 2.0 * t);
         let distance = ease.distance * libm::powf(pose.distance / ease.distance, s);
         let rotation = ease.rotation.slerp(pose.rotation(), s);
-        (ease.pivot.lerp(pose.pivot, s), rotation, distance)
+        (
+            ease.pivot.lerp(pose.pivot, f64::from(s)),
+            rotation,
+            distance,
+        )
     }
 
     fn ease_to(&mut self, to: Pose) {
@@ -653,7 +659,7 @@ impl OrbitCamera {
         let per_pixel = 2.0 * self.half_height() / view.size[1] as f32;
         // The window's y goes down.
         let by = self.pose.rotation() * Vec3::new(pixels.x, -pixels.y, 0.0);
-        self.pose.pivot -= by * per_pixel;
+        self.pose.pivot -= (by * per_pixel).as_dvec3();
     }
 
     /// Turns the camera `by` radians, as the cursor went across and down the view: about the
@@ -662,40 +668,40 @@ impl OrbitCamera {
     /// turned by the roll first, so that it turns the view the way the cursor goes however the
     /// view is rolled.
     fn turn(&mut self, by: Vec2, orbit: bool) {
-        let position = self.pose.pivot - self.pose.forward() * self.pose.distance;
+        let position = self.pose.pivot - (self.pose.forward() * self.pose.distance).as_dvec3();
         let (sin, cos) = libm::sincosf(self.pose.roll);
         let up = -by.y;
         let (across, up) = (by.x * cos - up * sin, by.x * sin + up * cos);
         self.pose.yaw = wrap(self.pose.yaw - across);
         self.pose.pitch = (self.pose.pitch + up).clamp(-FRAC_PI_2, FRAC_PI_2);
         if !orbit {
-            self.pose.pivot = position + self.pose.forward() * self.pose.distance;
+            self.pose.pivot = position + (self.pose.forward() * self.pose.distance).as_dvec3();
         }
     }
 
     /// Scales the distance by `by`, as far as it goes, and moves the pivot that much of the way
     /// toward `toward`, on the plane through the pivot facing the view, so that it stays where it
     /// is in the view. At either end of the distances, it moves nothing.
-    fn dolly(&mut self, by: f32, toward: Vec3) {
+    fn dolly(&mut self, by: f32, toward: DVec3) {
         let [least, most] = DISTANCES;
         let distance = (self.pose.distance * by).clamp(least, most);
         if distance == self.pose.distance {
             return;
         }
         let taken = distance / self.pose.distance;
-        self.pose.pivot = toward + (self.pose.pivot - toward) * taken;
+        self.pose.pivot = toward + (self.pose.pivot - toward) * f64::from(taken);
         self.pose.distance = distance;
     }
 
     /// The point `at`, in the main window's pixels, shows, on the plane through the pivot facing
     /// the view, which `view` shows.
-    pub fn under(&self, at: [f64; 2], view: Viewport) -> Vec3 {
+    pub fn under(&self, at: [f64; 2], view: Viewport) -> DVec3 {
         let [width, height] = view.size.map(|side| side as f32);
         let x = (at[0] - f64::from(view.origin[0])) as f32 / width * 2.0 - 1.0;
         let y = 1.0 - (at[1] - f64::from(view.origin[1])) as f32 / height * 2.0;
         let half = self.half_height();
         let across = Vec3::new(x * half * width / height, y * half, 0.0);
-        self.pose.pivot + self.pose.rotation() * across
+        self.pose.pivot + (self.pose.rotation() * across).as_dvec3()
     }
 
     /// Half the height of the world the view sees at the pivot.
@@ -731,7 +737,7 @@ mod tests {
         let mut camera = OrbitCamera::new();
         camera.perspective = perspective;
         camera.pose = Pose {
-            pivot: Vec3::new(3.0, -2.0, 1.0),
+            pivot: DVec3::new(3.0, -2.0, 1.0),
             yaw: 0.4,
             pitch: -0.3,
             roll: 0.2,
@@ -808,7 +814,7 @@ mod tests {
 
     /// Where the camera is.
     fn eye(camera: &OrbitCamera) -> Vec3 {
-        camera.viewpoint().position
+        camera.viewpoint().position.as_vec3()
     }
 
     fn assert_near(got: Vec2, want: Vec2, what: &str) {
@@ -830,7 +836,7 @@ mod tests {
             let mut camera = turned(perspective);
             let before = camera.viewpoint();
             let point = Vec3::new(-4.0, 6.0, 2.5);
-            camera.frame(point);
+            camera.frame(point.as_dvec3());
             assert!(camera.eases());
             eased(&mut camera);
             let after = camera.viewpoint();
@@ -855,7 +861,7 @@ mod tests {
         for perspective in [false, true] {
             let mut camera = turned(perspective);
             let before = camera.viewpoint();
-            camera.frame_sphere(center, 3.0);
+            camera.frame_sphere(center.as_dvec3(), 3.0);
             eased(&mut camera);
             let after = camera.viewpoint();
             assert!(after.rotation.abs_diff_eq(before.rotation, 1e-6));
@@ -873,14 +879,14 @@ mod tests {
             }
         }
         let mut camera = turned(false);
-        camera.frame_sphere(center, 3.0);
+        camera.frame_sphere(center.as_dvec3(), 3.0);
         eased(&mut camera);
         let Projection::Orthographic { height, .. } = camera.viewpoint().projection else {
             panic!("orthographic");
         };
         assert!((height - 2.0 * 3.0 / 0.8).abs() < 1e-4, "{height}");
         let mut camera = turned(true);
-        camera.frame_sphere(center, 3.0);
+        camera.frame_sphere(center.as_dvec3(), 3.0);
         eased(&mut camera);
         let distance = eye(&camera).distance(center);
         let want = 3.0 / libm::sinf(0.8 * FOV / 2.0);
@@ -892,7 +898,7 @@ mod tests {
             (1e12, 100_000.0),
         ] {
             let mut camera = turned(true);
-            camera.frame_sphere(center, radius);
+            camera.frame_sphere(center.as_dvec3(), radius);
             eased(&mut camera);
             let distance = eye(&camera).distance(center);
             assert!(
@@ -909,7 +915,7 @@ mod tests {
         assert!(
             camera
                 .position
-                .abs_diff_eq(Vec3::new(0.0, 0.0, 8.660254), 1e-5),
+                .abs_diff_eq(DVec3::new(0.0, 0.0, 8.660254), 1e-5),
             "{}",
             camera.position
         );
@@ -928,8 +934,8 @@ mod tests {
         let mut camera = turned(false);
         let up = camera.pose.rotation() * Vec3::Y;
         // Half the view's height above the pivot: its top edge, in both.
-        let top = camera.pose.pivot + up * camera.half_height();
-        let center = pixel(&camera, camera.pose.pivot);
+        let top = camera.pose.pivot.as_vec3() + up * camera.half_height();
+        let center = pixel(&camera, camera.pose.pivot.as_vec3());
         for perspective in [false, true] {
             camera.perspective = perspective;
             assert_near(pixel(&camera, top), Vec2::new(center.x, 50.0), "the top");
@@ -943,13 +949,17 @@ mod tests {
             let at = Vec2::new(250.0, 500.0);
             move_to(&mut camera, at);
             let point = camera.under([250.0, 500.0], VIEW);
-            assert_near(pixel(&camera, point), at, "before");
+            assert_near(pixel(&camera, point.as_vec3()), at, "before");
             for (lines, factor) in [(3.0, 1.0 / 1.331), (-5.0, 1.61051)] {
                 let distance = camera.pose.distance;
                 assert_eq!(scroll(&mut camera, lines), ControlFlow::Break(()));
                 let ratio = camera.pose.distance / distance;
                 assert!((ratio - factor).abs() < 1e-4, "{lines} lines: {ratio}");
-                assert_near(pixel(&camera, point), at, &format!("{lines} lines"));
+                assert_near(
+                    pixel(&camera, point.as_vec3()),
+                    at,
+                    &format!("{lines} lines"),
+                );
             }
         }
     }
@@ -989,7 +999,7 @@ mod tests {
             let to = from + Vec2::new(37.0, -23.0);
             move_to(&mut camera, to);
             let what = format!("{button:?}, perspective {perspective}");
-            assert_near(pixel(&camera, point), to, &what);
+            assert_near(pixel(&camera, point.as_vec3()), to, &what);
         }
     }
 
@@ -1005,7 +1015,7 @@ mod tests {
             drag(&mut camera, MouseButton::Right, true, from, from + by);
             let ratio = camera.pose.distance / distance;
             assert!((ratio - 1.0 / 1.21).abs() < 1e-4, "{ratio}");
-            assert_near(pixel(&camera, point), from, "the press");
+            assert_near(pixel(&camera, point.as_vec3()), from, "the press");
         }
     }
 
@@ -1081,7 +1091,7 @@ mod tests {
                 center,
                 center + right,
             );
-            let moved = pixel(&camera, point) - Vec2::new(600.0, 350.0);
+            let moved = pixel(&camera, point.as_vec3()) - Vec2::new(600.0, 350.0);
             assert!(
                 moved.x < -5.0 && moved.y.abs() < moved.x.abs() / 10.0,
                 "looking about, rolled {roll}: {moved}"
@@ -1089,7 +1099,8 @@ mod tests {
             // Orbiting to the right takes what's nearer than the pivot along with the cursor, as
             // though the world were grabbed.
             let mut camera = level(roll);
-            let nearer = camera.pose.pivot - camera.pose.forward() * camera.pose.distance / 2.0;
+            let nearer =
+                camera.pose.pivot.as_vec3() - camera.pose.forward() * camera.pose.distance / 2.0;
             let before = pixel(&camera, nearer);
             drag(&mut camera, MouseButton::Left, true, center, center + right);
             let moved = pixel(&camera, nearer) - before;
@@ -1142,14 +1153,20 @@ mod tests {
         let (pivot, forward) = (camera.pose.pivot, camera.pose.forward());
         camera.update(Duration::from_millis(500));
         let flown = camera.pose.pivot - pivot;
-        assert!(flown.abs_diff_eq(forward * 6.0, 1e-4), "{flown}");
+        assert!(
+            flown.abs_diff_eq((forward * 6.0).as_dvec3(), 1e-4),
+            "{flown}"
+        );
         key(&mut camera, Key::KeyW, false);
         key(&mut camera, Key::ShiftLeft, true);
         key(&mut camera, Key::KeyD, true);
         let (pivot, right) = (camera.pose.pivot, camera.pose.rotation() * Vec3::X);
         camera.update(Duration::from_millis(500));
         let flown = camera.pose.pivot - pivot;
-        assert!(flown.abs_diff_eq(right * 18.0, 1e-3), "{flown}");
+        assert!(
+            flown.abs_diff_eq((right * 18.0).as_dvec3(), 1e-3),
+            "{flown}"
+        );
 
         // Orthographic, W zooms in about the view's center: a factor of e a second.
         let mut camera = turned(false);
@@ -1400,7 +1417,7 @@ mod tests {
         }
         // A game's own, which sees a depth of its own: rolled, 20 units tall about (3, 1).
         let game = Viewpoint {
-            position: Vec3::new(3.0, 1.0, 10.0),
+            position: DVec3::new(3.0, 1.0, 10.0),
             rotation: Quat::from_rotation_z(0.3),
             projection: Projection::Orthographic {
                 height: 20.0,

@@ -295,7 +295,7 @@ impl World {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use gg_core::math::Vec3;
+    use gg_core::math::DVec3;
 
     use super::*;
     use crate::animation::{Interpolation, step_animation};
@@ -457,7 +457,7 @@ pub(crate) mod tests {
             let moved = at(world, node(world, root, 0)).translation;
             assert_eq!(
                 moved,
-                Vec3::new(x, 0.0, 0.0),
+                DVec3::new(x, 0.0, 0.0),
                 "{playback:?} after {ticks} ticks"
             );
         }
@@ -474,7 +474,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             at(world, node(world, root, 0)).translation,
-            Vec3::new(0.0, 2.0, 0.0)
+            DVec3::new(0.0, 2.0, 0.0)
         );
         assert_eq!(at(world, child), rest);
     }
@@ -504,7 +504,7 @@ pub(crate) mod tests {
         }
         // Slide's (2, 0, 0) a quarter and Lift's (0, 4, 0) three quarters.
         let root_node = node(world, root, 0);
-        assert_eq!(at(world, root_node).translation, Vec3::new(0.5, 3.0, 0.0));
+        assert_eq!(at(world, root_node).translation, DVec3::new(0.5, 3.0, 0.0));
         world.play(root, "Slide", 0.25).expect("its clip");
         // Slide, at 1, has nowhere to ease to; Lift eases from 3 toward 0 at 4 a second.
         step_animation(world);
@@ -517,7 +517,7 @@ pub(crate) mod tests {
             step_animation(world);
         }
         assert_eq!(weights(world, root), [("Slide".to_owned(), 1.0)]);
-        assert_eq!(at(world, root_node).translation, Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(at(world, root_node).translation, DVec3::new(2.0, 0.0, 0.0));
         world.play(root, "Swing", 0.5).expect("its clip");
         step_animation(world);
         let joined = weights(world, root);
@@ -598,6 +598,6 @@ pub(crate) mod tests {
         let codes: Vec<String> = logged.codes.try_iter().collect();
         assert!(codes.is_empty(), "every clip played: {codes:?}");
         let content = world.hash().content;
-        assert_eq!(content, 0xb28c_f951_6ace_60ff, "{content:#018x}");
+        assert_eq!(content, 0x416a_9d4b_facf_9131, "{content:#018x}");
     }
 }

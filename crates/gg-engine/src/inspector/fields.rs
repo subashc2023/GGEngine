@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
-use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{self, DVec3, EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use super::commands::Command;
@@ -88,7 +88,7 @@ impl Fields<'_> {
         let (waiting, component) = (self.waiting, self.component);
         let sets = waiting.iter().filter(|set| set.component == component);
         // By the type, so that a struct's field named `x` isn't taken for a component.
-        if !matches!(slot.ty, Type::Vec2 | Type::Vec3 | Type::Vec4) {
+        if !matches!(slot.ty, Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::DVec3) {
             let set = sets.rev().find(|set| set.path == path);
             let value = set.map_or(value, |set| &set.value);
             return self.draw(ui, slot, value, path, whole);
@@ -97,8 +97,12 @@ impl Fields<'_> {
         for set in sets {
             if set.path == path {
                 drawn = Cow::Borrowed(&set.value);
-            } else if let (Some(axis), &Value::F32(x)) = (axis_of(path, &set.path), &set.value) {
-                set_component(drawn.to_mut(), axis, x);
+            } else if let Some(axis) = axis_of(path, &set.path) {
+                match set.value {
+                    Value::F32(x) => set_component(drawn.to_mut(), axis, x.into()),
+                    Value::F64(x) => set_component(drawn.to_mut(), axis, x),
+                    _ => {}
+                }
             }
         }
         self.draw(ui, slot, &drawn, path, whole)
@@ -203,24 +207,28 @@ impl Fields<'_> {
                 changed.then_some(Value::String(text))
             }
             (Type::Vec2, &Value::Vec2(v)) => {
-                let v = self.vector(ui, slot, v.to_array(), path, whole)?;
-                Some(Value::Vec2(Vec2::from(v)))
+                let v = self.vector(ui, slot, v.as_dvec2().to_array(), path, whole, true)?;
+                Some(Value::Vec2(Vec2::from(v.map(|x| x as f32))))
             }
             (Type::Vec3, &Value::Vec3(v)) if meta.show == Show::Color => {
                 let rgba = self.color(ui, v.extend(1.0).to_array(), Alpha::Opaque, path)?;
                 Some(Value::Vec3(Vec4::from(rgba).truncate()))
             }
             (Type::Vec3, &Value::Vec3(v)) => {
-                let v = self.vector(ui, slot, v.to_array(), path, whole)?;
-                Some(Value::Vec3(Vec3::from(v)))
+                let v = self.vector(ui, slot, v.as_dvec3().to_array(), path, whole, true)?;
+                Some(Value::Vec3(Vec3::from(v.map(|x| x as f32))))
+            }
+            (Type::DVec3, &Value::DVec3(v)) => {
+                let v = self.vector(ui, slot, v.to_array(), path, whole, false)?;
+                Some(Value::DVec3(DVec3::from(v)))
             }
             (Type::Vec4, &Value::Vec4(v)) if meta.show == Show::Color => {
                 let rgba = self.color(ui, v.to_array(), Alpha::OnlyBlend, path)?;
                 Some(Value::Vec4(Vec4::from(rgba)))
             }
             (Type::Vec4, &Value::Vec4(v)) => {
-                let v = self.vector(ui, slot, v.to_array(), path, whole)?;
-                Some(Value::Vec4(Vec4::from(v)))
+                let v = self.vector(ui, slot, v.as_dvec4().to_array(), path, whole, true)?;
+                Some(Value::Vec4(Vec4::from(v.map(|x| x as f32))))
             }
             (Type::Quat, &Value::Quat(q)) => self.rotation(ui, slot, q, path),
             // By the type, as another process's world keeps them otherwise than its own.
@@ -628,10 +636,11 @@ impl Fields<'_> {
         &mut self,
         ui: &mut egui::Ui,
         slot: Slot<'_>,
-        mut components: [f32; N],
+        mut components: [f64; N],
         path: &str,
         whole: bool,
-    ) -> Option<[f32; N]> {
+        is_f32: bool,
+    ) -> Option<[f64; N]> {
         let mut changed = false;
         ui.horizontal(|ui| {
             let width = axes_row(ui, N);
@@ -639,12 +648,12 @@ impl Fields<'_> {
                 let new = ui.horizontal(|ui| {
                     axis_spacing(ui, width);
                     let reset = axis_button(ui, axis);
-                    let dragged = float(ui, (*component).into(), slot.meta, true);
+                    let dragged = float(ui, *component, slot.meta, is_f32);
                     if reset {
                         let default = self.default_at(slot, path)?;
                         component_of(&default, axis)
                     } else {
-                        dragged.map(|x| x as f32)
+                        dragged.map(|x| if is_f32 { f64::from(x as f32) } else { x })
                     }
                 });
                 let Some(new) = new.inner else {
@@ -654,7 +663,12 @@ impl Fields<'_> {
                 if whole {
                     changed = true;
                 } else {
-                    self.edit(&reflect::join(path, AXES[axis].0), Value::F32(new));
+                    let new = if is_f32 {
+                        Value::F32(new as f32)
+                    } else {
+                        Value::F64(new)
+                    };
+                    self.edit(&reflect::join(path, AXES[axis].0), new);
                 }
             }
         });
@@ -730,7 +744,7 @@ impl Fields<'_> {
     /// Shows, each on a row of its own, why the field at `path`, of type `ty`, last refused a
     /// value, if it did, and, if it's a vector, why each of its components did.
     pub(super) fn refusal(&self, ui: &mut egui::Ui, ty: &Type, path: &str) {
-        let vector = matches!(ty, Type::Vec2 | Type::Vec3 | Type::Vec4);
+        let vector = matches!(ty, Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::DVec3);
         let refused = self.refusals.iter().filter(|refusal| {
             refusal.component == self.component
                 && (refusal.path == path || (vector && axis_of(path, &refusal.path).is_some()))
@@ -942,22 +956,24 @@ fn axis_of(path: &str, at: &str) -> Option<usize> {
 }
 
 /// Component `axis` of `value`, a vector; `None` if it's of another kind, or hasn't that one.
-fn component_of(value: &Value, axis: usize) -> Option<f32> {
+fn component_of(value: &Value, axis: usize) -> Option<f64> {
     match value {
-        Value::Vec2(v) if axis < 2 => Some(v[axis]),
-        Value::Vec3(v) if axis < 3 => Some(v[axis]),
-        Value::Vec4(v) if axis < 4 => Some(v[axis]),
+        Value::Vec2(v) if axis < 2 => Some(v[axis].into()),
+        Value::Vec3(v) if axis < 3 => Some(v[axis].into()),
+        Value::Vec4(v) if axis < 4 => Some(v[axis].into()),
+        Value::DVec3(v) if axis < 3 => Some(v[axis]),
         _ => None,
     }
 }
 
 /// Sets component `axis` of `value`, a vector, to `x`; leaves it as it is if it's of another kind,
 /// or hasn't that one.
-fn set_component(value: &mut Value, axis: usize, x: f32) {
+fn set_component(value: &mut Value, axis: usize, x: f64) {
     match value {
-        Value::Vec2(v) if axis < 2 => v[axis] = x,
-        Value::Vec3(v) if axis < 3 => v[axis] = x,
-        Value::Vec4(v) if axis < 4 => v[axis] = x,
+        Value::Vec2(v) if axis < 2 => v[axis] = x as f32,
+        Value::Vec3(v) if axis < 3 => v[axis] = x as f32,
+        Value::Vec4(v) if axis < 4 => v[axis] = x as f32,
+        Value::DVec3(v) if axis < 3 => v[axis] = x,
         _ => {}
     }
 }

@@ -444,7 +444,7 @@ fn made(world: &World, component: &str, fields: &[(String, Lua_)]) -> Result<Val
 mod tests {
     use std::fs;
 
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat, Vec3};
     use mlua::{FromLuaMulti, IntoLuaMulti};
 
     use super::super::{BUDGET, Held, Host, Scripts, lent};
@@ -688,7 +688,7 @@ return Kid
         let world = cx.world();
         assert_eq!(world.parent(root).expect("alive"), Some(parent));
         let transform = world.get::<Transform>(root).expect("its own");
-        assert_eq!(transform.translation, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(transform.translation, DVec3::new(1.0, 2.0, 3.0));
         let halves: Vec<Entity> = world.children(root).expect("alive").collect();
         assert_eq!(halves.len(), 1, "the prefab's");
         let half = halves[0];
@@ -703,6 +703,29 @@ return Kid
             return half[gg.component(\"Transform\").translation]";
         let read = call::<Lua_>(host, cx.world_mut(), text, held(half));
         assert_eq!(code(read), "ecs.no_entity");
+    }
+
+    /// A script reads a translation, `f64`, as a vector, `f32`, its nearest, and sets one from a
+    /// vector as it is: 1,000 km out, to the nearest 6 cm, as LUAU.md says.
+    #[test]
+    fn a_script_reads_and_sets_a_far_translation_as_a_vector() {
+        let dir = Scratch::new("luau-entities-far");
+        let (mut cx, scripts) = loaded(&dir, &[("scripts/kid.luau", KID)]);
+        let far = Transform {
+            translation: DVec3::new(1.0e6 + 0.3, -0.5, 2.0),
+            ..Transform::IDENTITY
+        };
+        let entity = cx.world_mut().spawn(far);
+        let host = &mut *scripts.host.borrow_mut();
+        let text = "local entity = ...\n\
+            local translation = gg.component(\"Transform\").translation\n\
+            local at = entity[translation]\n\
+            entity[translation] = at + vector.create(0, 1, 0)\n\
+            return at.x, at.y";
+        let read: (f64, f64) = call(host, cx.world_mut(), text, held(entity)).expect("ran");
+        assert_eq!(read, (1_000_000.312_5, -0.5));
+        let set = cx.world().get::<Transform>(entity).expect("its own");
+        assert_eq!(set.translation, DVec3::new(1_000_000.312_5, 0.5, 2.0));
     }
 
     /// What a script's call to change the world's entities refuses, it refuses with the engine's

@@ -46,14 +46,14 @@ fn fox(world: &World, index: u8) -> (Vec3, Player) {
     let mut foxes = world.query::<(&Player, &Transform)>();
     let found = foxes.find(|(player, _)| player.index == index);
     let (player, at) = found.expect("the player");
-    (at.translation, *player)
+    (at.translation.as_vec3(), *player)
 }
 
 /// The ball: where it is, and how fast it goes.
 fn ball(world: &World) -> (Vec3, Vec3) {
     let mut balls = world.query::<(&Ball, &Transform, &RigidBody3D)>();
     let (_, at, body) = balls.next().expect("the ball");
-    (at.translation, body.velocity)
+    (at.translation.as_vec3(), body.velocity)
 }
 
 /// How many times the ball's emitter has burst.
@@ -74,7 +74,7 @@ fn goal_bursts(world: &World) -> [u32; 2] {
 /// Puts the ball at `at`, still.
 fn put_ball(world: &mut World, at: Vec3) {
     for (_, transform, body) in world.query_mut::<(&Ball, &mut Transform, &mut RigidBody3D)>() {
-        transform.translation = at;
+        transform.translation = at.as_dvec3();
         body.velocity = Vec3::ZERO;
     }
 }
@@ -291,8 +291,9 @@ fn goals_score_and_five_win_a_match() {
     assert_eq!(goal_bursts(world), [1, 0]);
     assert_eq!(ball(world).0, BALL_START);
     assert_eq!(fox(world, 0).0, STARTS[0].0);
-    let far =
-        |(sound, place)| sound == sounds.goal && matches!(place, Place::At(at) if at.z > FIELD.y);
+    let far = |(sound, place)| {
+        sound == sounds.goal && matches!(place, Place::At(at) if at.z > f64::from(FIELD.y))
+    };
     assert!(world.sounds_queued().any(far), "from the far goal");
     put_ball(world, Vec3::new(-0.5, 0.4, -FIELD.y - 1.0));
     tick(&mut game, world);

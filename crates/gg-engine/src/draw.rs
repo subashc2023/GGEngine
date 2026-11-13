@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use gg_core::math::{Mat4, Quat, Vec3};
+use gg_core::math::{DVec3, Mat4, Quat};
 use gg_renderer::{Circle, Draws, MeshDraw, Shaders, Sprite};
 
 use crate::ecs::ComponentId;
@@ -11,6 +11,7 @@ use crate::interpolation::{self, Past};
 use crate::jobs;
 use crate::particles::{Clock, Emitters, ParticleEmitter};
 use crate::placed::Placed;
+use crate::transform::from_origin;
 use crate::{Entity, EntityId, Parent, Text, Transform, World};
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
@@ -22,9 +23,9 @@ pub(crate) struct Scratch {
     segments: Vec<Segment>,
     /// The segments `items` were sorted from, which each frame's are compared with.
     last: Vec<Segment>,
-    /// The matrices of the rows of tables of roots that draw between ticks, which draw by them:
-    /// kept at its longest, so that the job system's threads write into it rather than its being
-    /// filled anew each frame.
+    /// The matrices of the rows of tables of roots that draw between ticks, from the frame's
+    /// origin, which draw by them: kept at its longest, so that the job system's threads write into
+    /// it rather than its being filled anew each frame.
     blended: Vec<Mat4>,
     /// Where each table's rows start in `blended`, by the table's index, if they're there.
     blends: Vec<Option<usize>>,
@@ -47,7 +48,7 @@ pub(crate) struct Scratch {
 #[derive(Clone)]
 struct Segment {
     /// Its rows' z, as [`depth`] gives it.
-    z: f32,
+    z: f64,
     /// Which segment it was found as: tables in the order they were made, then a table's sprites,
     /// circles, texts and meshes, then its rows in order.
     order: u32,
@@ -117,7 +118,7 @@ struct Group {
 /// where its ancestors carry it, as `placed` has it draw, and is ordered by where the tick left
 /// it; roots, in tables without a [`Parent`], draw by their transforms alone, which those that
 /// draw between ticks blend first, in their tables' order, in runs of rows that the job system's
-/// threads take.
+/// threads take. Every draw's matrix is from `origin`, the frame's, in `f32`.
 ///
 /// It sorts runs of consecutive rows at one z every frame, so it's quick while each table's rows at
 /// one z stay together. Spawning entities of a table at mixed z's, or despawning, which moves a
@@ -137,7 +138,7 @@ pub(crate) fn draw_world(
     world: &World,
     past: &Past,
     placed: &Placed,
-    alpha: f32,
+    (alpha, origin): (f32, DVec3),
     ticks: u64,
     draws: &mut Draws,
     shaders: &mut Shaders,
@@ -158,12 +159,12 @@ pub(crate) fn draw_world(
         meshes_seen,
         emitters,
     } = scratch;
-    emitters.begin();
+    emitters.begin(origin);
     let clock = Clock::new(ticks, alpha);
     segments.clear();
     blends.clear();
     blends.resize(world.tables().len(), None);
-    let Some(poses) = Poses::new(world, past, placed, alpha) else {
+    let Some(poses) = Poses::new(world, past, placed, alpha, origin) else {
         return;
     };
     let transform = poses.transform;
@@ -225,7 +226,7 @@ pub(crate) fn draw_world(
                     .kept(entities[row])
                     .expect("a drawn entity is placed"))
                 .matrix
-                .w_axis
+                .translation
                 .z
             }
             false => transforms[row].translation.z,
@@ -248,15 +249,15 @@ pub(crate) fn draw_world(
                 }
                 let out = &mut blended[blended_len..end];
                 match from {
-                    Some(from) => blend(out, &from[..len], transforms, alpha),
+                    Some(from) => blend(out, &from[..len], transforms, (alpha, origin)),
                     None => {
                         for (out, local) in out.iter_mut().zip(transforms) {
-                            *out = local.matrix();
+                            *out = local.matrix_from(origin);
                         }
                     }
                 }
                 for &(_, row, pose) in instead {
-                    out[row as usize] = pose.matrix();
+                    out[row as usize] = pose.matrix_from(origin);
                 }
                 blends[index] = Some(blended_len);
                 blended_len = end;
@@ -288,11 +289,11 @@ pub(crate) fn draw_world(
         (table, transforms, drawn)
     };
     let matrix = |transforms: &[Transform], drawn: Drawn<'_>, row: usize| match drawn {
-        Drawn::Transforms => transforms[row].matrix(),
+        Drawn::Transforms => transforms[row].matrix_from(origin),
         Drawn::Blended(blended) => blended[row],
         Drawn::Placed(entities) => {
             let place = placed.drawn(entities[row]);
-            place.expect("a drawn entity is placed").matrix
+            from_origin(place.expect("a drawn entity is placed").matrix, origin)
         }
     };
     // Kept across groups, whose segments' indices differ.
@@ -380,9 +381,11 @@ pub(crate) fn draw_world(
                     let ticked = match drawn {
                         Drawn::Placed(entities) => {
                             let place = placed.kept(entities[row]);
-                            place.expect("a drawn entity is placed").matrix
+                            from_origin(place.expect("a drawn entity is placed").matrix, origin)
                         }
-                        Drawn::Transforms | Drawn::Blended(_) => transforms[row].matrix(),
+                        Drawn::Transforms | Drawn::Blended(_) => {
+                            transforms[row].matrix_from(origin)
+                        }
                     };
                     let particles = emitters.emit(item.id, &emitted[row], at, ticked, clock);
                     draws.push_particles(particles);
@@ -404,12 +407,14 @@ enum Drawn<'a> {
 /// Where the world's entities draw this frame: each `alpha` of the way from what `past` has it draw
 /// from to where the latest tick left it, while it draws between ticks, or as `past` has it draw
 /// instead, as [`Past::instead`] says; and children where their ancestors carry them as they draw,
-/// as `placed` has them, once it has placed the world and drawn the frame.
+/// as `placed` has them, once it has placed the world and drawn the frame; their matrices from
+/// `origin`, the frame's, as drawing's are.
 pub(crate) struct Poses<'a> {
     world: &'a World,
     past: &'a Past,
     placed: &'a Placed,
     alpha: f32,
+    origin: DVec3,
     /// [`Transform`]'s id among the world's components.
     transform: ComponentId,
 }
@@ -421,12 +426,14 @@ impl<'a> Poses<'a> {
         past: &'a Past,
         placed: &'a Placed,
         alpha: f32,
+        origin: DVec3,
     ) -> Option<Self> {
         Some(Self {
             world,
             past,
             placed,
             alpha,
+            origin,
             transform: world.component::<Transform>()?,
         })
     }
@@ -474,22 +481,27 @@ impl<'a> Poses<'a> {
         (local, drawn, parents.map(|parents| &parents[row]))
     }
 
-    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, as
-    /// [`draw_world`] draws it, bit for bit: its transform's, drawn between ticks while it is, and
-    /// carried by its ancestors as they draw.
+    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, from the
+    /// frame's origin, as [`draw_world`] draws it, bit for bit: its transform's, drawn between
+    /// ticks while it is, and carried by its ancestors as they draw.
     pub(crate) fn matrix(&self, table: usize, row: usize) -> Mat4 {
         let (local, drawn, parent) = self.row(table, row);
         match parent {
-            None => drawn.unwrap_or(*local).matrix(),
-            Some(_) => self.placed(table, row).matrix,
+            None => drawn.unwrap_or(*local).matrix_from(self.origin),
+            Some(_) => from_origin(self.placed(table, row).matrix, self.origin),
         }
+    }
+
+    /// The frame's origin, which [`matrix`](Self::matrix) is from.
+    pub(crate) fn origin(&self) -> DVec3 {
+        self.origin
     }
 
     /// Where row `row` of table `table`, which has transforms, draws this frame, for a viewpoint to
     /// see from: its position, where a sprite of its transform draws, bit for bit; and its
     /// rotation, its own turned by each ancestor's in turn as they draw, their scales aside, so
     /// that a mirrored ancestor mirrors where it is but not which way it faces.
-    pub(crate) fn pose(&self, table: usize, row: usize) -> (Vec3, Quat) {
+    pub(crate) fn pose(&self, table: usize, row: usize) -> (DVec3, Quat) {
         let (local, drawn, parent) = self.row(table, row);
         if parent.is_none() {
             let drawn = drawn.unwrap_or(*local);
@@ -502,15 +514,16 @@ impl<'a> Poses<'a> {
 /// How many rows a job blends.
 const CHUNK: usize = 1024;
 
-/// Writes into `out` the matrix of each row drawn `alpha` of the way from `from` to `to`, splitting
-/// the rows in two at a multiple of [`CHUNK`], for two jobs, until each run is a chunk or less.
-fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], alpha: f32) {
+/// Writes into `out` the matrix of each row drawn `alpha` of the way from `from` to `to`, from
+/// `origin`, splitting the rows in two at a multiple of [`CHUNK`], for two jobs, until each run is
+/// a chunk or less.
+fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], (alpha, origin): (f32, DVec3)) {
     let len = out.len();
     if len <= CHUNK {
         // A shorter run can take less than the 10 µs or so a zone is for.
         let _zone = (len == CHUNK).then(|| gg_core::zone!("blend"));
         for ((out, from), to) in out.iter_mut().zip(from).zip(to) {
-            *out = interpolation::between(from, to, alpha).matrix();
+            *out = interpolation::between(from, to, alpha).matrix_from(origin);
         }
         return;
     }
@@ -518,8 +531,8 @@ fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], alpha: f32) {
     let (a, b) = out.split_at_mut(mid);
     let ((from_a, from_b), (to_a, to_b)) = (from.split_at(mid), to.split_at(mid));
     jobs::join(
-        || blend(a, from_a, to_a, alpha),
-        || blend(b, from_b, to_b, alpha),
+        || blend(a, from_a, to_a, (alpha, origin)),
+        || blend(b, from_b, to_b, (alpha, origin)),
     );
 }
 
@@ -528,12 +541,12 @@ fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], alpha: f32) {
 fn cut(
     segments: &mut Vec<Segment>,
     rows: impl Iterator<Item = usize>,
-    z: impl Fn(usize) -> f32,
+    z: impl Fn(usize) -> f64,
     kind: Kind,
     table: u32,
     children: bool,
 ) {
-    let mut push = |rows: Range<usize>, z: f32| {
+    let mut push = |rows: Range<usize>, z: f64| {
         let order = segments.len() as u32;
         segments.push(Segment {
             z,
@@ -545,7 +558,7 @@ fn cut(
         });
     };
     // The run so far, and its z.
-    let mut run: Option<(Range<usize>, f32)> = None;
+    let mut run: Option<(Range<usize>, f64)> = None;
     for row in rows {
         let at = depth(z(row));
         match &mut run {
@@ -565,7 +578,7 @@ fn cut(
 /// `z` as drawing orders by it: -0.0 as 0.0, since they're one depth, and every other z as it is,
 /// bit for bit, which `total_cmp` orders the same way on every machine. Compared rather than added
 /// to 0.0, which would leave a NaN's bits to the platform.
-fn depth(z: f32) -> f32 {
+fn depth(z: f64) -> f64 {
     if z == 0.0 { 0.0 } else { z }
 }
 
@@ -710,7 +723,7 @@ mod tests {
         let mut new = |z: f32| {
             next += 1.0;
             let at = Transform {
-                translation: Vec3::new(next, 0.0, z),
+                translation: Vec3::new(next, 0.0, z).as_dvec3(),
                 ..Transform::IDENTITY
             };
             let sprite = Sprite {
@@ -763,10 +776,10 @@ mod tests {
         for expected in &expected {
             match expected {
                 Expected::Sprite(entity, at, sprite) => {
-                    sprite_of(&mut want, at.matrix(), *sprite, id(entity));
+                    sprite_of(&mut want, at.matrix_from(DVec3::ZERO), *sprite, id(entity));
                 }
                 Expected::Mesh(entity, at, mesh) => {
-                    want.push_draw(at.matrix(), mesh, id(entity).get());
+                    want.push_draw(at.matrix_from(DVec3::ZERO), mesh, id(entity).get());
                 }
             }
         }
@@ -775,7 +788,7 @@ mod tests {
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             &mut Shaders::default(),
@@ -811,10 +824,10 @@ mod tests {
         want.draw_scene();
         let id = |entity: Entity| world.id(entity).expect("alive");
         for &(entity, at, sprite) in &sprites {
-            sprite_of(&mut want, at.matrix(), sprite, id(entity));
+            sprite_of(&mut want, at.matrix_from(DVec3::ZERO), sprite, id(entity));
         }
         for &(entity, at, mesh) in &meshes {
-            want.push_draw(at.matrix(), &mesh, id(entity).get());
+            want.push_draw(at.matrix_from(DVec3::ZERO), &mesh, id(entity).get());
         }
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
@@ -823,7 +836,7 @@ mod tests {
                 world,
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
-                1.0,
+                (1.0, DVec3::ZERO),
                 0,
                 &mut draws,
                 shaders,
@@ -853,7 +866,7 @@ mod tests {
     fn children_draw_where_their_ancestors_carry_them() {
         let (triangle, flat) = flat_triangle();
         let placed = |x: f32, z: f32, turn: f32, scale: [f32; 2]| Transform {
-            translation: Vec3::new(x, 0.25 * x, z),
+            translation: Vec3::new(x, 0.25 * x, z).as_dvec3(),
             rotation: Quat::from_rotation_z(turn),
             scale: Vec3::new(scale[0], scale[1], 1.0),
         };
@@ -904,21 +917,46 @@ mod tests {
         let twins = twins.map(|(id, at)| (id, pivot * middle * at.matrix()));
         let mut want = Draws::default();
         want.draw_scene();
-        sprite_of(&mut want, low.matrix(), sprite(1.0), lowest);
-        sprite_of(&mut want, pivot * middle, sprite(4.0), middle_id);
+        sprite_of(&mut want, low.matrix_from(DVec3::ZERO), sprite(1.0), lowest);
+        sprite_of(
+            &mut want,
+            from_origin(pivot * middle, DVec3::ZERO),
+            sprite(4.0),
+            middle_id,
+        );
         let grandchild = pivot * middle * grand_at.matrix();
-        sprite_of(&mut want, grandchild, sprite(3.0), grand);
+        sprite_of(
+            &mut want,
+            from_origin(grandchild, DVec3::ZERO),
+            sprite(3.0),
+            grand,
+        );
         let meshed_at = pivot * middle * mesh_at.matrix();
-        sprite_of(&mut want, meshed_at, sprite(5.0), meshed);
-        want.push_draw(meshed_at, &mesh, meshed.get());
+        sprite_of(
+            &mut want,
+            from_origin(meshed_at, DVec3::ZERO),
+            sprite(5.0),
+            meshed,
+        );
+        want.push_draw(from_origin(meshed_at, DVec3::ZERO), &mesh, meshed.get());
         for (id, twin) in twins {
-            sprite_of(&mut want, twin, sprite(7.0), id);
+            sprite_of(&mut want, from_origin(twin, DVec3::ZERO), sprite(7.0), id);
         }
         for (id, twin) in twins {
-            want.push_draw(twin, &mesh, id.get());
+            want.push_draw(from_origin(twin, DVec3::ZERO), &mesh, id.get());
         }
-        sprite_of(&mut want, pivot * kid_at.matrix(), sprite(6.0), kid);
-        sprite_of(&mut want, high.matrix(), sprite(2.0), highest);
+        sprite_of(
+            &mut want,
+            from_origin(pivot * kid_at.matrix(), DVec3::ZERO),
+            sprite(6.0),
+            kid,
+        );
+        sprite_of(
+            &mut want,
+            high.matrix_from(DVec3::ZERO),
+            sprite(2.0),
+            highest,
+        );
         let mut scratch = Scratch::default();
         let mut draws = Draws::default();
         let shaders = &mut Shaders::default();
@@ -926,7 +964,7 @@ mod tests {
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             shaders,
@@ -940,7 +978,7 @@ mod tests {
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut again,
             shaders,
@@ -967,7 +1005,7 @@ mod tests {
         let mut spawn = |world: &mut World, meshed: bool, marked: bool| {
             n += 1.0;
             let at = Transform {
-                translation: Vec3::new(n, 0.0, 0.5),
+                translation: Vec3::new(n, 0.0, 0.5).as_dvec3(),
                 ..Transform::IDENTITY
             };
             let sprite = Sprite {
@@ -998,7 +1036,7 @@ mod tests {
                 world,
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
-                1.0,
+                (1.0, DVec3::ZERO),
                 0,
                 &mut draws,
                 shaders,
@@ -1010,7 +1048,7 @@ mod tests {
                 world,
                 &Past::default(),
                 &Placed::of(world, &Past::default(), 1.0),
-                1.0,
+                (1.0, DVec3::ZERO),
                 0,
                 &mut fresh,
                 &mut Shaders::default(),
@@ -1138,16 +1176,30 @@ mod tests {
         let id = |entity: Entity| world.id(entity).expect("alive");
         let mut expected = Draws::default();
         expected.draw_scene();
-        sprite_of(&mut expected, far.matrix(), sprite(18.0), id(farther));
-        sprite_of(&mut expected, near.matrix(), sprite(17.0), id(nearer));
-        expected.push_draw(blending_at.matrix(), &blending, id(blender).get());
-        expected.push_draw(among_at.matrix(), &among, id(amid).get());
+        sprite_of(
+            &mut expected,
+            far.matrix_from(DVec3::ZERO),
+            sprite(18.0),
+            id(farther),
+        );
+        sprite_of(
+            &mut expected,
+            near.matrix_from(DVec3::ZERO),
+            sprite(17.0),
+            id(nearer),
+        );
+        expected.push_draw(
+            blending_at.matrix_from(DVec3::ZERO),
+            &blending,
+            id(blender).get(),
+        );
+        expected.push_draw(among_at.matrix_from(DVec3::ZERO), &among, id(amid).get());
         let mut draws = Draws::default();
         draw_world(
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             &mut Shaders::default(),
@@ -1189,22 +1241,31 @@ mod tests {
         want.draw_scene();
         let carried = at_x(10.0, 0.0).matrix() * at_x(4.0, 0.3).matrix();
         let circles = [
-            (at_x(1.0, 0.2).matrix(), 1.0, id(far)),
-            (carried, 4.0, id(child)),
+            (at_x(1.0, 0.2).matrix_from(DVec3::ZERO), 1.0, id(far)),
+            (from_origin(carried, DVec3::ZERO), 4.0, id(child)),
         ];
         for (matrix, n, id) in circles {
             want.extend_circles(&mut shaders, iter::once((matrix, circle(n), id.get())));
         }
-        sprite_of(&mut want, at_x(2.0, 0.5).matrix(), sprite(2.0), id(all));
-        let pair = pair.map(|(id, x)| (at_x(x, 0.5).matrix(), circle(x), id.get()));
+        sprite_of(
+            &mut want,
+            at_x(2.0, 0.5).matrix_from(DVec3::ZERO),
+            sprite(2.0),
+            id(all),
+        );
+        let pair = pair.map(|(id, x)| (at_x(x, 0.5).matrix_from(DVec3::ZERO), circle(x), id.get()));
         want.extend_circles(&mut shaders, pair.into_iter());
-        want.push_draw(at_x(2.0, 0.5).matrix(), &mesh, id(all).get());
+        want.push_draw(
+            at_x(2.0, 0.5).matrix_from(DVec3::ZERO),
+            &mesh,
+            id(all).get(),
+        );
         let mut draws = Draws::default();
         draw_world(
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             &mut Shaders::default(),
@@ -1237,7 +1298,12 @@ mod tests {
         want.draw_scene();
         let glyphs = |fonts: &mut Fonts, at: Transform, entity| {
             let laid: Vec<_> = fonts
-                .lay_out(at.matrix(), &text.text, &text.style(), id(entity))
+                .lay_out(
+                    at.matrix_from(DVec3::ZERO),
+                    &text.text,
+                    &text.style(),
+                    id(entity),
+                )
                 .collect();
             assert_eq!(laid.len(), 2, "a glyph a letter");
             assert!(
@@ -1250,20 +1316,24 @@ mod tests {
             &mut shaders,
             glyphs(&mut fonts, at_x(1.0, 0.2), far).into_iter(),
         );
-        let circle = (at_x(2.0, 0.5).matrix(), Circle::default(), id(all));
+        let circle = (
+            at_x(2.0, 0.5).matrix_from(DVec3::ZERO),
+            Circle::default(),
+            id(all),
+        );
         want.extend_circles(&mut shaders, iter::once(circle));
         want.extend_glyphs(
             &mut shaders,
             glyphs(&mut fonts, at_x(2.0, 0.5), all).into_iter(),
         );
-        want.push_draw(at_x(2.0, 0.5).matrix(), &mesh, id(all));
+        want.push_draw(at_x(2.0, 0.5).matrix_from(DVec3::ZERO), &mesh, id(all));
         let mut draws = Draws::default();
         let scratch = &mut Scratch::default();
         draw_world(
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             &mut Shaders::default(),
@@ -1276,7 +1346,7 @@ mod tests {
     /// A transform at `x` and `z`.
     fn at_x(x: f32, z: f32) -> Transform {
         Transform {
-            translation: Vec3::new(x, 0.0, z),
+            translation: Vec3::new(x, 0.0, z).as_dvec3(),
             ..Transform::IDENTITY
         }
     }
@@ -1289,7 +1359,7 @@ mod tests {
             world,
             past,
             &Placed::of(world, past, alpha),
-            alpha,
+            (alpha, DVec3::ZERO),
             0,
             &mut draws,
             &mut Shaders::default(),
@@ -1315,7 +1385,7 @@ mod tests {
         past.capture(&mut world);
         for (i, &(entity, _)) in movers.iter().enumerate() {
             let to = world.get_mut::<Transform>(entity).expect("alive");
-            to.translation.x += 1.0 + i as f32 / 1000.0;
+            to.translation.x += f64::from(1.0 + i as f32 / 1000.0);
         }
         movers.sort_by_key(|&(entity, _)| world.id(entity));
         let mut want = Draws::default();
@@ -1324,7 +1394,12 @@ mod tests {
             let to = world.get::<Transform>(entity).expect("alive");
             let drawn = interpolation::between(&from, to, 0.3).matrix();
             let id = world.id(entity).expect("alive");
-            sprite_of(&mut want, drawn, Sprite::default(), id);
+            sprite_of(
+                &mut want,
+                from_origin(drawn, DVec3::ZERO),
+                Sprite::default(),
+                id,
+            );
         }
         let bits = |draws: &Draws| format!("{draws:?}");
         let one = between_ticks(&world, &mut past, 0.3, &mut Scratch::default());
@@ -1358,7 +1433,12 @@ mod tests {
         want.draw_scene();
         let drawn = halfway.matrix() * local.matrix();
         let id = world.id(child).expect("alive");
-        sprite_of(&mut want, drawn, Sprite::default(), id);
+        sprite_of(
+            &mut want,
+            from_origin(drawn, DVec3::ZERO),
+            Sprite::default(),
+            id,
+        );
         assert_eq!(draws, want);
     }
 
@@ -1378,12 +1458,12 @@ mod tests {
         // Where glam's lerp of equal ends rounds, at the fractions drawn, and a turn that its
         // normalizing changes.
         let still = Transform {
-            translation: Vec3::new(3.7, -1.9, 0.5),
+            translation: DVec3::new(3.7, -1.9, 0.5),
             rotation: Quat::from_xyzw(0.0, 0.0, 0.006_849_946_5, 0.999_976_5),
             scale: Vec3::splat(0.123),
         };
         let signed = Transform {
-            translation: Vec3::new(-1.9, 3.7, -0.0),
+            translation: DVec3::new(-1.9, 3.7, -0.0),
             rotation: Quat::from_rotation_z(-1.3),
             scale: Vec3::new(0.123, 0.123, 1.0),
         };
@@ -1418,8 +1498,16 @@ mod tests {
             moved(entity, at_x(i + 4.0, 0.1));
         }
         swarm.sort_by_key(|&(entity, _)| world.id(entity));
-        // glam's lerp, as drawing computes it for what moves.
-        let lerp = |from: f32, to: f32, alpha: f32| from * (1.0 - alpha) + to * alpha;
+        // glam's lerp, as drawing computes it for what moves, a translation in `f64`.
+        let lerp = |from: f32, to: f32, alpha: f32| {
+            let (from, to, alpha) = (f64::from(from), f64::from(to), f64::from(alpha));
+            from * (1.0 - alpha) + to * alpha
+        };
+        // At `x` and `z` in `f64`, as a translation drawn on its way is.
+        let at = |x: f64, z: f64| Transform {
+            translation: DVec3::new(x, 0.0, z),
+            ..Transform::IDENTITY
+        };
         // Bit for bit, which `Debug` shows of a zero's sign, and `==` doesn't.
         let bits = |draws: &Draws| format!("{draws:?}");
         let mut kept = Scratch::default();
@@ -1430,21 +1518,51 @@ mod tests {
             // mesh at 0.9.
             let mut want = Draws::default();
             want.draw_scene();
-            sprite_of(&mut want, signed.matrix(), sprite(2.0), id(zero));
+            sprite_of(
+                &mut want,
+                signed.matrix_from(DVec3::ZERO),
+                sprite(2.0),
+                id(zero),
+            );
             for &(entity, i) in &swarm {
-                let drifted = at_x(lerp(i, i + 4.0, alpha), 0.1);
-                sprite_of(&mut want, drifted.matrix(), sprite(4.0 + i), id(entity));
+                let drifted = at(lerp(i, i + 4.0, alpha), f64::from(0.1f32));
+                sprite_of(
+                    &mut want,
+                    drifted.matrix_from(DVec3::ZERO),
+                    sprite(4.0 + i),
+                    id(entity),
+                );
             }
-            sprite_of(&mut want, still.matrix(), sprite(1.0), id(stays));
-            let passer_at = at_x(0.0, lerp(0.375, 0.625, alpha));
-            sprite_of(&mut want, passer_at.matrix(), sprite(3.0), id(passer));
+            sprite_of(
+                &mut want,
+                still.matrix_from(DVec3::ZERO),
+                sprite(1.0),
+                id(stays),
+            );
+            let passer_at = at(0.0, lerp(0.375, 0.625, alpha));
+            sprite_of(
+                &mut want,
+                passer_at.matrix_from(DVec3::ZERO),
+                sprite(3.0),
+                id(passer),
+            );
             let parent = at_x(10.0, 0.0).matrix();
             let passed_at = parent * at_x(0.0, 0.75).matrix();
-            sprite_of(&mut want, passed_at, sprite(30.0), id(passed));
-            let passing_at = parent * at_x(0.0, lerp(0.6875, 0.8125, alpha)).matrix();
-            sprite_of(&mut want, passing_at, sprite(31.0), id(passing));
-            let meshed_at = at_x(lerp(0.0, 4.0, alpha), 0.9).matrix();
-            want.push_draw(meshed_at, &mesh, id(meshed).get());
+            sprite_of(
+                &mut want,
+                from_origin(passed_at, DVec3::ZERO),
+                sprite(30.0),
+                id(passed),
+            );
+            let passing_at = parent * at(0.0, lerp(0.6875, 0.8125, alpha)).matrix();
+            sprite_of(
+                &mut want,
+                from_origin(passing_at, DVec3::ZERO),
+                sprite(31.0),
+                id(passing),
+            );
+            let meshed_at = at(lerp(0.0, 4.0, alpha), f64::from(0.9f32));
+            want.push_draw(meshed_at.matrix_from(DVec3::ZERO), &mesh, id(meshed).get());
             let draws = between_ticks(&world, &mut past, alpha, &mut kept);
             assert_eq!(bits(&draws), bits(&want), "at {alpha}, a scratch kept");
             let draws = between_ticks(&world, &mut past, alpha, &mut Scratch::default());

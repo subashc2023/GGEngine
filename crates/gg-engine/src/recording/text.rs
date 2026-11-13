@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use ron::Options;
 use ron::extensions::Extensions;
@@ -37,6 +37,10 @@ pub(crate) fn write_folded(out: &mut String, value: &Value, world: &World) {
 
 fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
     let float32 = |out: &mut String, x: f32| {
+        let negative = x.is_sign_negative() && !(fold && x.is_nan());
+        float(out, x, x.is_nan(), negative, x.is_finite());
+    };
+    let float64 = |out: &mut String, x: f64| {
         let negative = x.is_sign_negative() && !(fold && x.is_nan());
         float(out, x, x.is_nan(), negative, x.is_finite());
     };
@@ -76,8 +80,7 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
         }
         &Value::F64(x) => {
             out.push_str("F64(");
-            let negative = x.is_sign_negative() && !(fold && x.is_nan());
-            float(out, x, x.is_nan(), negative, x.is_finite());
+            float64(out, x);
             out.push(')');
         }
         Value::String(text) => {
@@ -88,6 +91,16 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
         Value::Vec2(v) => floats(out, "Vec2", v.as_ref()),
         Value::Vec3(v) => floats(out, "Vec3", v.as_ref()),
         Value::Vec4(v) => floats(out, "Vec4", v.as_ref()),
+        Value::DVec3(v) => {
+            out.push_str("DVec3(");
+            for (i, &x) in v.as_ref().iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                float64(out, x);
+            }
+            out.push(')');
+        }
         Value::Quat(q) => floats(out, "Quat", &q.to_array()),
         &Value::Entity(entity) => match world.id(entity) {
             Some(id) => write!(out, "Entity(\"{id}\")").expect("a string takes any text"),
@@ -236,6 +249,7 @@ pub(crate) enum Text {
     Vec2(f32, f32),
     Vec3(f32, f32, f32),
     Vec4(f32, f32, f32, f32),
+    DVec3(f64, f64, f64),
     Quat(f32, f32, f32, f32),
     Entity(Id),
     /// An entity that wasn't alive as it was written.
@@ -283,6 +297,7 @@ impl Text {
             Self::Vec2(..) => "Vec2",
             Self::Vec3(..) => "Vec3",
             Self::Vec4(..) => "Vec4",
+            Self::DVec3(..) => "DVec3",
             Self::Quat(..) => "Quat",
             Self::Entity(_) => "Entity",
             Self::Dead => "Dead",
@@ -367,6 +382,7 @@ impl Text {
             &Self::Vec2(x, y) => Value::Vec2(Vec2::new(x, y)),
             &Self::Vec3(x, y, z) => Value::Vec3(Vec3::new(x, y, z)),
             &Self::Vec4(x, y, z, w) => Value::Vec4(Vec4::new(x, y, z, w)),
+            &Self::DVec3(x, y, z) => Value::DVec3(DVec3::new(x, y, z)),
             &Self::Quat(x, y, z, w) => Value::Quat(Quat::from_xyzw(x, y, z, w)),
             Self::Entity(Id(id)) => Value::Entity(world.entity(*id).unwrap_or(Entity::DEAD)),
             Self::Dead => Value::Entity(Entity::DEAD),
@@ -434,6 +450,7 @@ mod tests {
             Value::Vec2(Vec2::new(-0.0, 1.5)),
             Value::Vec3(Vec3::new(1.0, f32::from_bits(1), -2.0)),
             Value::Vec4(Vec4::new(0.3, 0.6, 0.9, 0.0)),
+            Value::DVec3(DVec3::new(1.0e6 + 0.1, f64::from_bits(1), -0.0)),
             Value::Quat(Quat::from_rotation_z(1.0)),
             Value::Option(None),
             Value::Option(Some(Box::new(Value::Option(None)))),

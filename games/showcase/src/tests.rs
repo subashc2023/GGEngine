@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use gg_api::{Fetch, Project};
 use gg_engine::Transform;
-use gg_engine::math::{Quat, Vec3};
+use gg_engine::math::{DVec3, Quat, Vec3};
 use gg_engine::reflect::Value;
 
 use super::*;
@@ -327,13 +327,13 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
         ..RigidBody3D::default()
     };
     let floor = Transform {
-        translation: Vec3::new(0.0, -0.5, 0.0),
+        translation: DVec3::new(0.0, -0.5, 0.0),
         scale: Vec3::new(40.0, 1.0, 40.0),
         ..Transform::IDENTITY
     };
     world.spawn((floor, fixed, BoxCollider3D::default()));
     let at = Transform {
-        translation: Vec3::new(0.0, 1.02, 0.0),
+        translation: DVec3::new(0.0, 1.02, 0.0),
         ..Transform::IDENTITY
     };
     let moved = (
@@ -378,7 +378,7 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
     );
     // The camera 5 behind, along +Z, and 2 above, as the last tick found the walker.
     let followed = transform(cx.world(), camera);
-    let want = Vec3::new(walked.x, walked.y + 2.0, walked.z + 5.0);
+    let want = DVec3::new(walked.x, walked.y + 2.0, walked.z + 5.0);
     assert!(followed.translation.distance(want) < 0.1, "{followed:?}");
     // Half a second turning right, still, then a jump.
     let heading = Vec2::new(1.0, 0.0);
@@ -405,7 +405,7 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
     // A wall 2 behind it, the way the camera is: the camera comes in front of it.
     let behind = transform(cx.world(), walker).rotation * Vec3::Z;
     let wall = Transform {
-        translation: transform(cx.world(), walker).translation + behind * 2.0,
+        translation: transform(cx.world(), walker).translation + (behind * 2.0).as_dvec3(),
         rotation: transform(cx.world(), walker).rotation,
         scale: Vec3::new(6.0, 8.0, 0.5),
     };
@@ -414,7 +414,7 @@ fn the_walker_walks_turns_and_jumps_and_its_camera_follows() {
     run(&mut showcase, cx.world_mut(), 2);
     let near = transform(cx.world(), camera).translation;
     let walker_at = transform(cx.world(), walker).translation;
-    let off = near - walker_at - Vec3::Y * 2.0;
+    let off = near - walker_at - DVec3::Y * 2.0;
     assert!(off.length() < 1.75, "in front of the wall: {off}");
 }
 
@@ -448,7 +448,9 @@ fn the_joints_scene_holds_its_bodies_and_stops_only_whats_swept() {
     let transform = |world: &World, entity| *world.get::<Transform>(entity).expect("placed");
     let anchored = |world: &World, body: Option<Entity>, anchor: Vec3| {
         let body = body.expect("a body");
-        transform(world, body).matrix().transform_point3(anchor)
+        transform(world, body)
+            .matrix()
+            .transform_point3(anchor.as_dvec3())
     };
     let door_turned = |world: &World| {
         let x = transform(world, door).rotation * Vec3::X;
@@ -951,7 +953,7 @@ fn the_navigation_scenes_agents_walk_their_tours() {
                 was[i] = now;
             }
             let at = world.get::<Transform>(agent).expect("placed").translation;
-            highest = highest.max(at.y);
+            highest = highest.max(at.y as f32);
         }
     }
     assert!(world.resource::<Navigation>().is_some(), "baked");

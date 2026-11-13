@@ -53,7 +53,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gg_engine::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{self, DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Adaptation, Align, Antialiasing, App, Atmosphere, Binding, Blend, BoxCollider2D,
     Camera, Change, Circle, CircleCollider2D, Component, Context, DepthOfField, Entity,
@@ -143,7 +143,7 @@ impl Drifter {
         let moved = self.start + self.velocity * (tick % PERIOD) as f32;
         let at = moved.rem_euclid(FIELD) - FIELD / 2.0;
         Transform {
-            translation: at.extend(self.z),
+            translation: at.extend(self.z).as_dvec3(),
             scale: Vec3::splat(0.2),
             ..Transform::IDENTITY
         }
@@ -228,14 +228,14 @@ impl Scene {
     fn spawn_subtree(&mut self, world: &mut World, slot: usize) {
         let assets = self.assets.as_ref().expect("attached");
         let at = Transform {
-            translation: Vec3::new(slot as f32 * 0.05, -3.0, 0.5),
+            translation: DVec3::new(f64::from(slot as f32 * 0.05), -3.0, 0.5),
             scale: Vec3::splat(0.3),
             ..Transform::IDENTITY
         };
         let sprite = assets.sheet.sprite([1, 1], [1, 1]);
         let root = world.spawn((at, sprite, BoxCollider2D::default()));
         let below = Transform {
-            translation: Vec3::new(0.0, -1.0, 0.0),
+            translation: DVec3::new(0.0, -1.0, 0.0),
             ..Transform::IDENTITY
         };
         let child = if slot.is_multiple_of(8) {
@@ -259,7 +259,7 @@ impl Scene {
     /// Spawns a copy of the plain model at `x`, the newest of the pool.
     fn spawn_copy(&mut self, world: &mut World, x: f32) {
         let at = Transform {
-            translation: Vec3::new(x, 3.0, -1.0),
+            translation: DVec3::new(f64::from(x), 3.0, -1.0),
             ..Transform::IDENTITY
         };
         let copy = self.assets().plain.spawn(world, at);
@@ -341,7 +341,7 @@ impl Layer for Scene {
         }
         // A parent that turns, carrying a child of each kind, and a grandchild.
         let at = |x: f32, y: f32, z: f32| Transform {
-            translation: Vec3::new(x, y, z),
+            translation: Vec3::new(x, y, z).as_dvec3(),
             ..Transform::IDENTITY
         };
         let red = MeshDraw::new(assets.quad, assets.opaque, Vec4::new(0.8, 0.1, 0.1, 1.0));
@@ -382,7 +382,7 @@ impl Layer for Scene {
         let pivot = world.spawn(Transform::IDENTITY);
         let tilt = Quat::from_rotation_x(-0.25);
         let looking = Transform {
-            translation: tilt * Vec3::new(0.0, 0.0, 16.0),
+            translation: (tilt * Vec3::new(0.0, 0.0, 16.0)).as_dvec3(),
             rotation: tilt,
             ..Transform::IDENTITY
         };
@@ -457,7 +457,7 @@ impl Layer for Scene {
             .par_for_each(|(entity, drifter, transform)| {
                 let to = drifter.at(tick.number + 1);
                 let moved = (to.translation - transform.translation).truncate().abs();
-                if moved.cmpgt(FIELD / 2.0).any() {
+                if moved.cmpgt((FIELD / 2.0).as_dvec2()).any() {
                     found.lock().expect("no job panics holding it").push(entity);
                 }
                 *transform = to;

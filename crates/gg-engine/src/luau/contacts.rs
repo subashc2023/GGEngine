@@ -96,7 +96,7 @@ fn table(lua: &Lua, other: Entity, sensor: bool, started: Option<bool>) -> mlua:
 mod tests {
     use std::fs;
 
-    use gg_core::math::Vec3;
+    use gg_core::math::{DVec3, Vec3};
 
     use super::super::Scripts;
     use crate::dirs::tests::Scratch;
@@ -145,7 +145,7 @@ return Zone
             ..RigidBody2D::default()
         };
         let at = |y, width| Transform {
-            translation: Vec3::new(0.0, y, 0.0),
+            translation: DVec3::new(0.0, y, 0.0),
             scale: Vec3::new(width, 1.0, 1.0),
             ..Transform::IDENTITY
         };

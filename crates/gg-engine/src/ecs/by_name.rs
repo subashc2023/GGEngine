@@ -621,7 +621,7 @@ impl ExactSizeIterator for Entities<'_> {}
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+    use gg_core::math::{DVec3, Quat, Vec2, Vec4};
     use gg_renderer::{Mipmaps, Textures};
 
     use super::*;
@@ -646,11 +646,11 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn((Transform::IDENTITY, everything()));
         let x = world.get_field(entity, "Transform", "translation.x");
-        assert_eq!(x.expect("a field"), Value::F32(0.0));
-        let old = world.set_field(entity, "Transform", "translation.x", &Value::F32(2.5));
-        assert_eq!(old.expect("set"), Value::F32(0.0));
+        assert_eq!(x.expect("a field"), Value::F64(0.0));
+        let old = world.set_field(entity, "Transform", "translation.x", &Value::F64(2.5));
+        assert_eq!(old.expect("set"), Value::F64(0.0));
         let transform = world.get::<Transform>(entity).expect("a transform");
-        assert_eq!(transform.translation, Vec3::new(2.5, 0.0, 0.0));
+        assert_eq!(transform.translation, DVec3::new(2.5, 0.0, 0.0));
 
         let before = snapshot(&world);
         for (path, value) in [
@@ -1297,7 +1297,7 @@ mod tests {
         let mut world = World::default();
         let [parent, child, root] = [0.0, 1.0, 2.0].map(|x| {
             let at = Transform {
-                translation: Vec3::splat(x),
+                translation: DVec3::splat(x),
                 ..Transform::IDENTITY
             };
             world.spawn(at)

@@ -1396,6 +1396,12 @@ impl MeshPass {
         }
     }
 
+    /// Takes the scene's records into the space of a frame whose origin is `by` further along than
+    /// the frame before's, as [`Kept::moved`](scene::Kept::moved) says.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        self.scene.moved(by);
+    }
+
     /// Makes the pipelines of the shaders in `uploads`, taking them, and drops those of the shaders
     /// it removes. A shader that has a pipeline already, compiled again, gets a new one in place of
     /// the old, which retires until the GPU is done with it; one whose new pipeline can't be made
@@ -2852,7 +2858,7 @@ mod tests {
         let rotation = Quat::from_rotation_y(1.0) * Quat::from_rotation_x(-0.4);
         let position = Vec3::new(3.0, -2.0, 5.0);
         let viewpoint = Viewpoint {
-            position,
+            position: position.as_dvec3(),
             rotation,
             projection: perspective,
         };

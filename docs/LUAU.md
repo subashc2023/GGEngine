@@ -60,7 +60,7 @@ this one, at its defaults, before the tick.
 | field handle | Light userdata a `gg.component` or `gg.declare` table holds for each field, only a key of `entity[...]`; it isn't an entity (`reflect.wrong_kind` where one is given). |
 | number | Every number field, integers too, as an `f64`: an integer past 2^53 loses its low bits. |
 | boolean, nil | Bool fields; nil is an absent `Option<Entity>` or `Option<Vec3>` (a nav agent's destination). |
-| vector | Luau's four-wide native `vector`, `vector.create(x, y, z, w)`, w optional. A `Vec2` reads as `(x, y, 0, 0)` and writes from `x`, `y`; a `Vec3` as `(x, y, z, 0)`; a `Vec4` whole. `vector.angle` is gone. |
+| vector | Luau's four-wide native `vector`, `vector.create(x, y, z, w)`, w optional. A `Vec2` reads as `(x, y, 0, 0)` and writes from `x`, `y`; a `Vec3` as `(x, y, z, 0)`; a `Vec4` whole. A `DVec3`, a position, as a `Transform`'s `translation`, reads as a `Vec3` does, each part rounded to the nearest `f32`, and writes from `x`, `y`, `z` as they are: in steps of 2 mm 16 km from the world's origin and 6 cm 1,000 km from it, as are the positions `gg.cast_ray` and the other casts take and give. `vector.angle` is gone. |
 | quaternion | A vector `(x, y, z, w)`, as `gg.quat` makes. Identity is `(0, 0, 0, 1)`. |
 
 Strings, enums, structs and lists are fields scripts don't reach: they have no handle.

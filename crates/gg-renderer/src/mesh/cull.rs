@@ -1349,7 +1349,7 @@ impl Culling {
 mod tests {
     use super::*;
     use crate::{Projection, Viewpoint};
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat, Vec3};
 
     /// A point inside each plane is in what the view sees.
     fn inside(planes: &[Vec4; 6], point: Vec3) -> bool {
@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn a_views_planes_hold_what_it_sees() {
         let viewpoint = Viewpoint {
-            position: Vec3::ZERO,
+            position: DVec3::ZERO,
             rotation: Quat::IDENTITY,
             projection: Projection::Perspective {
                 fov: std::f32::consts::FRAC_PI_2,
@@ -1399,7 +1399,7 @@ mod tests {
         let position = Vec3::new(3.0, -2.0, 5.5);
         let seen = |projection| {
             let viewpoint = Viewpoint {
-                position,
+                position: position.as_dvec3(),
                 rotation,
                 projection,
             };

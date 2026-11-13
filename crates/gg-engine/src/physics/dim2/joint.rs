@@ -150,7 +150,7 @@ impl Joint2D {
             .contacts_enabled(self.bodies_collide);
         // Compared, so that one that isn't a number drives with none either.
         let max_force = if self.max_force > 0.0 {
-            self.max_force
+            f64::from(self.max_force)
         } else {
             0.0
         };
@@ -168,17 +168,17 @@ impl Joint2D {
         };
         if let Some(free) = free {
             if self.limited {
-                built = built.limits(free, [self.lower, self.upper]);
+                built = built.limits(free, [self.lower.into(), self.upper.into()]);
             }
             // rapier's motor with neither drives as hard as it can toward nothing, which none means.
             if self.stiffness > 0.0 || self.damping > 0.0 {
                 built = built
                     .set_motor(
                         free,
-                        self.target_position,
-                        self.target_velocity,
-                        self.stiffness,
-                        self.damping,
+                        self.target_position.into(),
+                        self.target_velocity.into(),
+                        self.stiffness.into(),
+                        self.damping.into(),
                     )
                     .motor_max_force(free, max_force);
             }
@@ -190,13 +190,14 @@ impl Joint2D {
             JointKind2D::Rope => {
                 built = built
                     .coupled_axes(JointAxesMask::LIN_AXES)
-                    .limits(JointAxis::LinX, [0.0, self.length]);
+                    .limits(JointAxis::LinX, [0.0, self.length.into()]);
             }
             JointKind2D::Spring => {
                 built = built.coupled_axes(JointAxesMask::LIN_AXES);
                 if self.stiffness > 0.0 || self.damping > 0.0 {
+                    let (length, stiffness) = (self.length.into(), self.stiffness.into());
                     built = built
-                        .motor_position(JointAxis::LinX, self.length, self.stiffness, self.damping)
+                        .motor_position(JointAxis::LinX, length, stiffness, self.damping.into())
                         .motor_model(JointAxis::LinX, MotorModel::ForceBased)
                         .motor_max_force(JointAxis::LinX, max_force);
                 }
@@ -358,13 +359,14 @@ pub(in crate::physics) fn joint_lines(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{crate_at, step, transform};
+
     use super::*;
     use crate::{BodyType, BoxCollider2D, RigidBody2D, Transform};
 
     /// A static unit box at `x`, `y`.
     fn post(world: &mut World, x: f32, y: f32) -> Entity {
         let at = Transform {
-            translation: Vec3::new(x, y, 0.0),
+            translation: Vec3::new(x, y, 0.0).as_dvec3(),
             ..Transform::IDENTITY
         };
         let body = RigidBody2D {
@@ -386,7 +388,10 @@ mod tests {
     /// Where `anchor`, in `entity`'s space, is in the world's, across and up.
     fn anchored(world: &World, entity: Entity, anchor: Vec2) -> Vec2 {
         let matrix = transform(world, entity).matrix();
-        matrix.transform_point3(anchor.extend(0.0)).truncate()
+        (matrix
+            .transform_point3(anchor.extend(0.0).as_dvec3())
+            .truncate())
+        .as_vec2()
     }
 
     /// A rig of each kind of 2D joint, from a post: a chain of three boxes on revolute joints,
@@ -606,7 +611,7 @@ mod tests {
             ..RigidBody2D::default()
         };
         let placed = |x: f32, y: f32, scale: Vec2| Transform {
-            translation: Vec3::new(x, y, 0.0),
+            translation: Vec3::new(x, y, 0.0).as_dvec3(),
             scale: scale.extend(1.0),
             ..Transform::IDENTITY
         };
@@ -627,6 +632,6 @@ mod tests {
         world.spawn((placed(-9.0, 1.5, Vec2::ONE), fired, ball));
         step(&mut world, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0xbc40_66fa_d42e_202f, "{content:#018x}");
+        assert_eq!(content, 0x73e9_af50_2ebf_08c2, "{content:#018x}");
     }
 }

@@ -116,8 +116,11 @@ impl Skins {
                 let joints =
                     (skin.joints.iter().zip(&skin.inverse_binds)).map(|(&joint, &bind)| {
                         let joint = node_id(id, joint as usize).and_then(|node| world.entity(node));
+                        // In `f64` up to the mesh's space, near the mesh, where `f32` holds.
                         match joint.and_then(|joint| placed.drawn(joint)) {
-                            Some(joint) => into_mesh * joint.matrix * bind,
+                            Some(joint) => {
+                                Mat4::from((into_mesh * joint.matrix).as_affine3a()) * bind
+                            }
                             None => Mat4::IDENTITY,
                         }
                     });

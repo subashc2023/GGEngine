@@ -38,7 +38,7 @@ use gg_api::{
     Scene, SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
-use gg_core::math::{Quat, Vec3, Vec4};
+use gg_core::math::{DMat4, DVec3, Quat, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{MAX_PICKS, Meshes, Projection, Viewpoint};
 use serde::Serialize;
@@ -1748,15 +1748,15 @@ fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<String, Failur
         None => Pose::IDENTITY,
     };
     out.push_str("},\"space\":{\"matrix\":");
-    json::floats(&mut out, &space.matrix.to_cols_array());
+    json::float64s(&mut out, &DMat4::from(space.matrix).to_cols_array());
     out.push_str(",\"rotation\":");
     json::floats(&mut out, &space.rotation.to_array());
     out.push('}');
     if let Some((center, radius)) = bounds::of(world, meshes, entity) {
         out.push_str(",\"bounds\":{\"center\":");
-        json::floats(&mut out, &center.to_array());
+        json::float64s(&mut out, &center.to_array());
         out.push_str(",\"radius\":");
-        json::float32(&mut out, radius);
+        json::float32(&mut out, radius as f32);
         out.push('}');
     }
     // An instance whose prefab's text no longer loads gives none, as its load warned.
@@ -2136,7 +2136,7 @@ pub(crate) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
 /// The viewpoint the tool API's `given` is.
 fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
     Viewpoint {
-        position: Vec3::from_array(given.position),
+        position: DVec3::from_array(given.position),
         rotation: Quat::from_array(given.rotation),
         projection: engine_projection(given.projection),
     }
@@ -3386,7 +3386,7 @@ mod tests {
     use std::time::Instant;
 
     use gg_api::{Client, LogEvents, Session};
-    use gg_core::math::Mat4;
+    use gg_core::math::{Mat4, Vec3};
     use gg_renderer::Streaming;
     use serde_json::json;
 
@@ -3551,7 +3551,7 @@ mod tests {
         let mut cx = Context::seeded(1);
         let world = cx.world_mut();
         let at = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         };
         let hero = world.spawn((at, Name("Hero".to_owned())));
@@ -4987,7 +4987,7 @@ mod tests {
             size: 10.0,
         });
         let at = Transform {
-            translation: Vec3::new(5.0, 0.0, 0.0),
+            translation: DVec3::new(5.0, 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let viewer = world.spawn((at, crate::Viewer { radius: 10.0 }));
@@ -5572,7 +5572,7 @@ mod tests {
     /// A viewpoint at `z` on the Z axis, looking down -Z, as the tool API gives one.
     fn at_z(z: f32) -> gg_api::Viewpoint {
         gg_api::Viewpoint {
-            position: [0.0, 0.0, z],
+            position: [0.0, 0.0, f64::from(z)],
             rotation: [0.0, 0.0, 0.0, 1.0],
             projection: gg_api::Projection::Perspective {
                 fov: 1.0,
@@ -5653,7 +5653,7 @@ mod tests {
         let first = Some(engine_viewpoint(&at_z(1.0)));
         assert!(waiting.len() >= 3, "it waits out what's on its way");
         assert!(waiting.iter().all(|viewpoint| *viewpoint == first));
-        let viewpoints: Vec<[f32; 3]> = (framed.frames.iter())
+        let viewpoints: Vec<[f64; 3]> = (framed.frames.iter())
             .map(|shot| shot.viewpoint.position)
             .collect();
         assert_eq!(
@@ -6798,8 +6798,9 @@ mod tests {
                 "api.bad_params",
             ),
             ("view", json!({"memory": 3}), "api.bad_params"),
-            // A viewpoint whose rotation has no length, too far for an `f32`, or that can't
-            // project; an outline of no entity's ID, of a color that isn't finite, or of no width.
+            // A viewpoint whose rotation has no length, whose position isn't three numbers, or that
+            // can't project; an outline of no entity's ID, of a color that isn't finite, or of no
+            // width.
             (
                 "look",
                 json!({"viewpoint": viewpoint([0.0; 4], orthographic.clone())}),
@@ -6807,7 +6808,7 @@ mod tests {
             ),
             (
                 "look",
-                json!({"viewpoint": {"position": [1e39, 0, 0], "rotation": [0, 0, 0, 1],
+                json!({"viewpoint": {"position": [1, 0], "rotation": [0, 0, 0, 1],
                     "projection": orthographic.clone()}}),
                 "api.bad_params",
             ),

@@ -611,7 +611,7 @@ mod tests {
             entity: id,
             component: "Transform".into(),
             path: "translation.y".to_owned(),
-            value: Value::F32(y),
+            value: Value::F64(f64::from(y)),
         }
     }
 

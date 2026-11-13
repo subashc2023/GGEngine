@@ -636,6 +636,12 @@ fn migrate(
         (Type::Vec2, &Text::Vec2(x, y)) => Value::Vec2([x, y].into()),
         (Type::Vec3, &Text::Vec3(x, y, z)) => Value::Vec3([x, y, z].into()),
         (Type::Vec4, &Text::Vec4(x, y, z, w)) => Value::Vec4([x, y, z, w].into()),
+        (Type::DVec3, &Text::DVec3(x, y, z)) => Value::DVec3([x, y, z].into()),
+        // As a translation was before it was `f64`, widened exactly.
+        (Type::DVec3, &Text::Vec3(x, y, z)) => {
+            converted("a `DVec3`");
+            Value::DVec3([x, y, z].map(f64::from).into())
+        }
         (Type::Quat, &Text::Quat(x, y, z, w)) => {
             let rotation = Quat::from_xyzw(x, y, z, w);
             let length = rotation.length();
@@ -852,7 +858,7 @@ fn depth(value: &Value) -> u32 {
 // They save worlds, which only development builds do.
 #[cfg(all(test, feature = "dev"))]
 mod tests {
-    use gg_core::math::{Vec2, Vec3};
+    use gg_core::math::{DVec3, Vec2, Vec3};
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
@@ -993,6 +999,7 @@ mod tests {
         path: Vec<Vec2>,
         turn: Quat,
         big: u64,
+        far: Vec3,
     }
 
     #[derive(Clone, crate::Reflect)]
@@ -1004,8 +1011,8 @@ mod tests {
 
     /// [`Before`] as its type changed: its fields reordered, one dropped, one added, a number
     /// widened, a variant gone, an array longer, under bounds, a list's elements of another kind,
-    /// and a number taken by a type that can't hold it exactly; its rotation as it was, but
-    /// written off unit length.
+    /// a number taken by a type that can't hold it exactly, and a vector widened, as a
+    /// translation was; its rotation as it was, but written off unit length.
     #[derive(Clone, Debug, PartialEq, crate::Component)]
     #[reflect(name = "Shape")]
     struct After {
@@ -1019,6 +1026,7 @@ mod tests {
         path: Vec<Vec3>,
         turn: Quat,
         big: f64,
+        far: DVec3,
     }
 
     #[derive(Clone, Debug, PartialEq, crate::Reflect)]
@@ -1043,6 +1051,7 @@ mod tests {
             path,
             turn: Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
             big: u64::MAX,
+            far: Vec3::new(1.0e6, 0.1, -2.5),
         };
         let kept = saved.spawn((
             Transform::IDENTITY,
@@ -1067,6 +1076,7 @@ mod tests {
             path: Vec::new(),
             turn: Quat::IDENTITY,
             big: 0.0,
+            far: DVec3::new(1.0e6, f64::from(0.1f32), -2.5),
         };
         assert_eq!(loaded.get::<After>(kept), Some(&after(NewMode::Idle)));
         assert_eq!(loaded.get::<After>(gone), Some(&after(NewMode::Idle)));
@@ -1088,6 +1098,7 @@ mod tests {
                 2,
             ),
             ("`Shape.d`: added, at its default", 2),
+            ("`Shape.far`: its `Vec3` taken as a `DVec3`", 2),
             (
                 "`Shape.mode`: its type no longer has a variant `Gone`, so it takes its default",
                 1,

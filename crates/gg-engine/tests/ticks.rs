@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{fs, process, thread};
 
-use gg_engine::math::{Quat, Vec3};
+use gg_engine::math::{DVec3, Quat, Vec3};
 use gg_engine::reflect::Value;
 use gg_engine::{
     AnimationParam, AnimationState, AnimationStates, BlendPoint, BodyType, BoxCollider3D,
@@ -108,7 +108,7 @@ const WALKERS: u32 = 24;
 /// A static box of `size` around `at`, which the navmesh is baked from.
 fn solid(world: &mut World, at: Vec3, size: Vec3) {
     let placed = Transform {
-        translation: at,
+        translation: at.as_dvec3(),
         ..Transform::default()
     };
     let body = RigidBody3D {
@@ -358,7 +358,7 @@ impl Layer for Movers {
             let z = (i / 2) as f32 * 0.4 - 2.2;
             let (from, to) = if i % 2 == 0 { (-3.0, 3.0) } else { (3.0, -3.0) };
             let placed = Transform {
-                translation: Vec3::new(from, 0.0, z),
+                translation: DVec3::new(from, 0.0, f64::from(z)),
                 ..Transform::default()
             };
             let agent = NavAgent {
@@ -381,7 +381,7 @@ impl Layer for Movers {
         world
             .query_mut::<(&Velocity, &mut Transform)>()
             .par_for_each(|(velocity, transform)| {
-                transform.translation += velocity.0 * speed;
+                transform.translation += (velocity.0 * speed).as_dvec3();
                 if on_a_worker() {
                     ON_WORKERS.fetch_add(1, Ordering::Relaxed);
                 }

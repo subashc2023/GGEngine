@@ -4,7 +4,7 @@
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
-use gg_core::math::{Quat, Vec3};
+use gg_core::math::{DVec3, Quat, Vec3};
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::parry::bounding_volume::BoundingVolume;
 use rapier3d::parry::query::ShapeCastOptions;
@@ -16,7 +16,7 @@ use rapier3d::prelude::{
 use tracing::warn;
 
 use super::{
-    CapsuleCollider3D, Physics3D, Rapier, RigidBody3D, groups, remove_body, replace, rotation,
+    CapsuleCollider3D, Physics3D, Rapier, RigidBody3D, at, groups, remove_body, replace, rotation,
     user_data, vector,
 };
 use crate::physics::{Link, kept, unfinite};
@@ -92,7 +92,7 @@ impl CharacterController3D {
         };
         let slope = if slope > 0.0 { slope } else { 0.0 };
         let autostep = (self.step_height > 0.0).then_some(CharacterAutostep {
-            max_height: CharacterLength::Absolute(self.step_height),
+            max_height: CharacterLength::Absolute(self.step_height.into()),
             // The room it needs past a step's edge to climb onto it: rapier's own, half its width,
             // leaves no room for stairs narrower than that, as a person's are.
             min_width: CharacterLength::Absolute(0.1),
@@ -102,9 +102,10 @@ impl CharacterController3D {
         KinematicCharacterController {
             up: Vector::Y,
             autostep,
-            max_slope_climb_angle: slope,
-            min_slope_slide_angle: slope,
-            snap_to_ground: (self.snap > 0.0).then_some(CharacterLength::Absolute(self.snap)),
+            max_slope_climb_angle: slope.into(),
+            min_slope_slide_angle: slope.into(),
+            snap_to_ground: (self.snap > 0.0)
+                .then_some(CharacterLength::Absolute(self.snap.into())),
             ..KinematicCharacterController::default()
         }
     }
@@ -209,7 +210,8 @@ impl Physics3D {
     /// controller into its entity's, as it changed: its velocity, pulled down by gravity and
     /// stopped by the ground and by what's above it, and whether it's grounded.
     pub(super) fn move_characters(&mut self, world: &mut World) {
-        let dt = Tick::DT.as_secs_f32();
+        // The components' `f32`s, and rapier's `f64`s.
+        let (dt, step) = (Tick::DT.as_secs_f32(), Tick::DT.as_secs_f64());
         let Rapier {
             bodies,
             colliders,
@@ -230,7 +232,7 @@ impl Physics3D {
         held.clear();
         if !self.characters.linked.is_empty() {
             let nudge =
-                Vector::Y * (KinematicCharacterController::default().normal_nudge_factor / dt);
+                Vector::Y * (KinematicCharacterController::default().normal_nudge_factor / step);
             for linked in &self.links.linked {
                 let body = &mut bodies[linked.body];
                 if body.body_type() == RigidBodyType::KinematicVelocityBased {
@@ -306,7 +308,7 @@ impl Physics3D {
             };
             self.hits.clear();
             let hits = &mut self.hits;
-            let moved = moving.move_shape(dt, &queries, &*shape, &at, vector(way), |hit| {
+            let moved = moving.move_shape(step, &queries, &*shape, &at, vector(way), |hit| {
                 hits.push(hit);
             });
             // Carried and pushed by what moves it, swept against the rest: without stepping or
@@ -326,11 +328,11 @@ impl Physics3D {
                 let body = &bodies[under];
                 let was = *body.position();
                 let velocities = RigidBodyVelocity { linvel, angvel };
-                let will = velocities.integrate(dt, &was, &body.local_center_of_mass());
+                let will = velocities.integrate(step, &was, &body.local_center_of_mass());
                 let middle = (Pose::from_translation(total) * at).translation;
                 let way = will.transform_point(was.inverse_transform_point(middle)) - middle;
                 let turn = will.rotation * was.rotation.inverse();
-                let yaw = Quat::from_xyzw(0.0, turn.y, 0.0, turn.w);
+                let yaw = Quat::from_xyzw(0.0, turn.y as f32, 0.0, turn.w as f32);
                 turned = (yaw.length() > 0.0)
                     .then(|| yaw.normalize())
                     .filter(|yaw| yaw.is_finite() && *yaw != Quat::IDENTITY);
@@ -346,7 +348,7 @@ impl Physics3D {
                     let queries =
                         broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
                     let from = Pose::from_translation(total) * at;
-                    let went = carried.move_shape(dt, &queries, &*shape, &from, way, |hit| {
+                    let went = carried.move_shape(step, &queries, &*shape, &from, way, |hit| {
                         hits.push(hit);
                     });
                     total += went.translation;
@@ -365,7 +367,7 @@ impl Physics3D {
                 // Only one near enough to reach it this step, as their boxes tell, is cast.
                 let reach = shape
                     .compute_aabb(&from)
-                    .loosened(speed.length() * dt + gap);
+                    .loosened(speed.length() * step + gap);
                 let near = bodies[by].colliders().iter().any(|&collider| {
                     let collider = colliders.get(collider);
                     collider.is_some_and(|it| it.compute_aabb().intersects(&reach))
@@ -384,7 +386,7 @@ impl Physics3D {
                     .predicate(&on_it);
                 let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
                 let toward = ShapeCastOptions {
-                    max_time_of_impact: dt,
+                    max_time_of_impact: step,
                     target_distance: gap,
                     stop_at_penetration: false,
                     compute_impact_geometry_on_penetration: true,
@@ -401,8 +403,8 @@ impl Physics3D {
                     .groups(met)
                     .predicate(&beside);
                 let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
-                let push = speed * (dt - hit.time_of_impact);
-                let went = carried.move_shape(dt, &queries, &*shape, &from, push, |hit| {
+                let push = speed * (step - hit.time_of_impact);
+                let went = carried.move_shape(step, &queries, &*shape, &from, push, |hit| {
                     hits.push(hit);
                 });
                 total += went.translation;
@@ -412,7 +414,7 @@ impl Physics3D {
                 let mut pushing =
                     broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
                 let hits = &self.hits;
-                moving.solve_character_collision_impulses(dt, &mut pushing, &*shape, mass, hits);
+                moving.solve_character_collision_impulses(step, &mut pushing, &*shape, mass, hits);
             }
             let body = &mut bodies[character.body];
             body.set_next_kinematic_translation(body.translation() + total);
@@ -424,7 +426,7 @@ impl Physics3D {
                 transform.rotation = facing;
                 character.transform.rotation = facing;
             }
-            let went = Vec3::from_array(moved.translation.to_array());
+            let went = Vec3::from_array(moved.translation.to_array().map(|x| x as f32));
             if moved.grounded && velocity.y < 0.0 {
                 velocity.y = 0.0;
             } else if way.y > 0.0 && went.y < way.y {
@@ -452,7 +454,7 @@ impl Physics3D {
     pub(super) fn write_back_characters(&mut self, world: &mut World) {
         for character in &mut self.characters.linked {
             let body = &self.rapier.bodies[character.body];
-            let at = Vec3::from_array(body.translation().to_array());
+            let at = DVec3::from_array(body.translation().to_array());
             if at != character.transform.translation {
                 let transform = world.get_mut::<Transform>(character.entity);
                 let transform = transform.expect("linked this step: alive, with one");
@@ -475,7 +477,7 @@ fn platform(
     queries: &QueryPipeline<'_>,
     shape: &dyn Shape,
     at: &Pose,
-    gap: f32,
+    gap: f64,
 ) -> Option<RigidBodyHandle> {
     let down = ShapeCastOptions {
         // rapier's controller's reach for the ground, its `predict_ground`.
@@ -499,7 +501,7 @@ impl Character {
             .expect("found with one");
         let transform = *world.get::<Transform>(entity).expect("found with one");
         let capsule = *world.get::<CapsuleCollider3D>(entity).expect("not unmoved");
-        let at = Pose::from_parts(vector(transform.translation), rotation(transform.rotation));
+        let at = Pose::from_parts(at(transform.translation), rotation(transform.rotation));
         let built = RigidBodyBuilder::kinematic_position_based()
             .pose(at)
             .user_data(user_data(entity));
@@ -536,7 +538,7 @@ impl Character {
         let capsule = kept(capsule, self.capsule);
         let body = &mut rapier.bodies[self.body];
         if transform.translation != self.transform.translation {
-            body.set_translation(vector(transform.translation), true);
+            body.set_translation(at(transform.translation), true);
         }
         if transform.rotation != self.transform.rotation {
             body.set_rotation(rotation(transform.rotation), true);
@@ -570,7 +572,7 @@ pub(super) mod tests {
     /// at `at`.
     pub(in super::super) fn character(world: &mut World, at: Vec3) -> Entity {
         let at = Transform {
-            translation: at,
+            translation: at.as_dvec3(),
             ..Transform::IDENTITY
         };
         let moved = (at, CharacterController3D::default());
@@ -585,7 +587,7 @@ pub(super) mod tests {
         rotation: Quat,
     ) -> Entity {
         let at = Transform {
-            translation: at,
+            translation: at.as_dvec3(),
             rotation,
             ..Transform::IDENTITY
         };
@@ -638,11 +640,11 @@ pub(super) mod tests {
         assert!(landed.grounded, "{landed:?}");
         assert_eq!(landed.velocity, Vec3::ZERO);
         let at = transform(&world, walker).translation;
-        assert!((at.y - ON_FLOOR).abs() < 0.02, "{at}");
+        assert!((at.y - f64::from(ON_FLOOR)).abs() < 0.02, "{at}");
         set_velocity(&mut world, walker, Vec3::new(2.0, 0.0, -1.0));
         step(&mut world, 64);
         let walked = transform(&world, walker).translation;
-        let want = Vec3::new(at.x + 2.0, at.y, at.z - 1.0);
+        let want = DVec3::new(at.x + 2.0, at.y, at.z - 1.0);
         assert!(walked.distance(want) < 0.08, "{walked}, not {want}");
         assert!((walked.y - at.y).abs() < 0.005, "{walked}");
         assert!(controller(&world, walker).grounded);
@@ -720,7 +722,7 @@ pub(super) mod tests {
             .expect("alive")
             .filter = !2;
         step(&mut world, 4);
-        let ray = crate::Cast::new(Vec3::new(-4.9, 1.5, 0.0), Vec3::X).excluding(walker);
+        let ray = crate::Cast::new(DVec3::new(-4.9, 1.5, 0.0), Vec3::X).excluding(walker);
         assert_eq!(world.cast_ray(ray).map(|hit| hit.entity), Some(apart));
         set_velocity(&mut world, walker, Vec3::new(3.0, 0.0, 0.0));
         let mut found = Vec::new();
@@ -775,10 +777,13 @@ pub(super) mod tests {
         }
         step(&mut world, 96);
         let climbed = transform(&world, gentle).translation;
-        assert!(climbed.y > ON_FLOOR + 0.4, "up the gentle slope: {climbed}");
+        assert!(
+            climbed.y > f64::from(ON_FLOOR + 0.4),
+            "up the gentle slope: {climbed}"
+        );
         let stopped = transform(&world, steep).translation;
         assert!(
-            stopped.y < ON_FLOOR + 0.3,
+            stopped.y < f64::from(ON_FLOOR + 0.3),
             "at the steep slope's foot: {stopped}"
         );
         assert!(stopped.x < 0.5, "{stopped}");
@@ -814,12 +819,12 @@ pub(super) mod tests {
         step(&mut world, 96);
         let up = transform(&world, low).translation;
         assert!(
-            (up.y - (ON_FLOOR + 0.2)).abs() < 0.03 && up.x > 1.2,
+            (up.y - f64::from(ON_FLOOR + 0.2)).abs() < 0.03 && up.x > 1.2,
             "on the step: {up}"
         );
         let held = transform(&world, high).translation;
         assert!(
-            (held.y - ON_FLOOR).abs() < 0.03 && held.x < 0.6,
+            (held.y - f64::from(ON_FLOOR)).abs() < 0.03 && held.x < 0.6,
             "at its foot: {held}"
         );
         // Off the low step's far edge, at x 2.5, down to the floor: grounded throughout.
@@ -830,7 +835,7 @@ pub(super) mod tests {
         }
         let down = transform(&world, low).translation;
         assert!(
-            down.x > 3.0 && (down.y - ON_FLOOR).abs() < 0.03,
+            down.x > 3.0 && (down.y - f64::from(ON_FLOOR)).abs() < 0.03,
             "off the step: {down}"
         );
         assert_eq!(left, 0, "kept to the ground");
@@ -891,7 +896,7 @@ pub(super) mod tests {
         step(&mut world, 8);
         let rising = controller(&world, jumper);
         assert!(!rising.grounded && rising.velocity.y > 4.0 && rising.velocity.y < 6.0);
-        assert!(transform(&world, jumper).translation.y > ON_FLOOR + 0.4);
+        assert!(transform(&world, jumper).translation.y > f64::from(ON_FLOOR + 0.4));
         // About 1.2 s up and down at 6 units a second.
         step(&mut world, 96);
         let landed = controller(&world, jumper);
@@ -900,7 +905,10 @@ pub(super) mod tests {
             "{landed:?}"
         );
         let at = transform(&world, jumper).translation;
-        assert!((at.y - ON_FLOOR).abs() < 0.03 && at.x == -2.0, "{at}");
+        assert!(
+            (at.y - f64::from(ON_FLOOR)).abs() < 0.03 && (at.x + 2.0).abs() < 1e-9,
+            "{at}"
+        );
         let stopped = transform(&world, under).translation;
         // Its top, a unit above its middle, under the ceiling, the gap from it.
         assert!(stopped.y < 2.5, "{stopped}");
@@ -924,7 +932,7 @@ pub(super) mod tests {
     /// A kinematic box of `size` around `at`, going at `velocity`.
     fn platform(world: &mut World, at: Vec3, size: Vec3, velocity: Vec3) -> Entity {
         let at = Transform {
-            translation: at,
+            translation: at.as_dvec3(),
             ..Transform::IDENTITY
         };
         let body = RigidBody3D {
@@ -982,7 +990,7 @@ pub(super) mod tests {
         step(&mut world, 64);
         let walked = on(&world) - stood;
         assert!(
-            walked.abs_diff_eq(Vec3::new(0.0, 0.0, 1.0), 0.05),
+            walked.abs_diff_eq(DVec3::new(0.0, 0.0, 1.0), 0.05),
             "a unit along it: {walked}"
         );
     }
@@ -1013,12 +1021,12 @@ pub(super) mod tests {
         }
         assert_eq!(left, 0, "grounded on it");
         let at = transform(&world, rider);
-        let radius = Vec3::new(at.translation.x, 0.0, at.translation.z).length();
+        let radius = DVec3::new(at.translation.x, 0.0, at.translation.z).length();
         assert!((radius - 3.0).abs() < 0.05, "{radius}, not 3");
         assert!((at.translation.y - stood.y).abs() < 0.01, "{at:?}");
         let turned = transform(&world, carousel).rotation;
         assert!(at.rotation.angle_between(turned) < 0.01, "{at:?} {turned}");
-        let round = Quat::from_rotation_y(10.0) * stood;
+        let round = (Quat::from_rotation_y(10.0) * stood.as_vec3()).as_dvec3();
         assert!(
             at.translation.abs_diff_eq(round, 0.05),
             "{at:?}, not {round}"
@@ -1308,6 +1316,6 @@ pub(super) mod tests {
         let walkers = course(&mut world);
         walk(&mut world, &walkers, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0x869f_f714_d0cc_6e4d, "{content:#018x}");
+        assert_eq!(content, 0x8d47_481a_e07e_1062, "{content:#018x}");
     }
 }

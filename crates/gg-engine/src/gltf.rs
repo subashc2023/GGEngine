@@ -1273,7 +1273,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 None => Quat::IDENTITY,
             };
             return Ok(Transform {
-                translation: node.translation.map_or(Vec3::ZERO, Vec3::from_array),
+                translation: node
+                    .translation
+                    .map_or(Vec3::ZERO, Vec3::from_array)
+                    .as_dvec3(),
                 rotation,
                 scale: node.scale.map_or(Vec3::ONE, Vec3::from_array),
             });
@@ -1310,7 +1313,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             return Err(doesnt_decompose());
         }
         Ok(Transform {
-            translation,
+            translation: translation.as_dvec3(),
             rotation,
             scale,
         })
@@ -2551,6 +2554,8 @@ pub(crate) mod tests {
 
     use serde_json::{Value, json};
 
+    use gg_core::math::DVec3;
+
     use super::*;
 
     /// A BIN chunk as tests build it, and its buffer views, each starting at a multiple of 4 bytes.
@@ -2840,11 +2845,11 @@ pub(crate) mod tests {
             ..part(transform, parent, primitive)
         };
         let moved = |x, y, z| Transform {
-            translation: Vec3::new(x, y, z),
+            translation: DVec3::new(x, y, z),
             ..Transform::IDENTITY
         };
         let mirrored = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::new(-2.0, 3.0, 4.0),
         };

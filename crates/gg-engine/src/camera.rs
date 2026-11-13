@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use gg_core::Error;
-use gg_core::math::{self, Quat, Vec2, Vec3};
+use gg_core::math::{self, DVec3, Quat, Vec2, Vec3};
 use gg_renderer::{Projection, Viewpoint};
 use tracing::warn;
 
@@ -330,7 +330,9 @@ pub(crate) fn seen(
         );
     }
     let (table, row, id, camera) = best?;
-    let (position, rotation) = Poses::new(world, past, placed, alpha)?.pose(table, row);
+    // Where it is alone, which no origin changes.
+    let poses = Poses::new(world, past, placed, alpha, DVec3::ZERO)?;
+    let (position, rotation) = poses.pose(table, row);
     let viewpoint = Viewpoint {
         position,
         rotation,
@@ -475,7 +477,8 @@ impl OrthographicCameraController {
         // diagonally as straight, since a pair of axes goes no further than 1.
         let along = self.actions.axis2(CameraAction::Move).extend(0.0);
         let height = *height(&mut self.viewpoint.projection);
-        self.viewpoint.position += self.viewpoint.rotation * along * height * SPEED * seconds;
+        let by = self.viewpoint.rotation * along * height * SPEED * seconds;
+        self.viewpoint.position += by.as_dvec3();
         cx.set_viewpoint(self.viewpoint);
     }
 
@@ -605,7 +608,7 @@ impl FlyCameraController {
         let along = self.actions.axis2(FlyAction::Move);
         let rise = self.actions.axis(FlyAction::Rise);
         let way = self.viewpoint.rotation * Vec3::new(along.x, 0.0, -along.y) + Vec3::Y * rise;
-        self.viewpoint.position += way.clamp_length_max(1.0) * self.speed * seconds;
+        self.viewpoint.position += (way.clamp_length_max(1.0) * self.speed * seconds).as_dvec3();
         cx.set_viewpoint(self.viewpoint);
     }
 
@@ -650,6 +653,8 @@ impl FlyCameraController {
 
 #[cfg(test)]
 mod tests {
+    use crate::transform::from_origin;
+
     use std::panic;
 
     use gg_renderer::{Draws, Shaders, Sprite, Textures};
@@ -671,7 +676,7 @@ mod tests {
     /// Spawns a camera at `x`, 2 tall, primary or not.
     fn camera_at(world: &mut World, x: f32, primary: bool) -> Entity {
         let at = Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(f64::from(x), 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let camera = Camera {
@@ -706,12 +711,12 @@ mod tests {
             primary: true,
         });
         let seen = seen_now(&world).expect("a camera");
-        assert_eq!(seen.position, Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(seen.position, DVec3::new(2.0, 0.0, 0.0));
         assert_eq!(seen.projection, orthographic(2.0));
         world.despawn(primary).expect("alive");
         assert_eq!(seen_now(&world), None);
         world.get_mut::<Camera>(other).expect("alive").primary = true;
-        assert_eq!(seen_now(&world).expect("a camera").position, Vec3::X);
+        assert_eq!(seen_now(&world).expect("a camera").position, DVec3::X);
     }
 
     #[test]
@@ -817,7 +822,7 @@ mod tests {
         };
         let parent = world.spawn(turned);
         let local = Transform {
-            translation: Vec3::new(1.0, 2.0, 0.5),
+            translation: DVec3::new(1.0, 2.0, 0.5),
             rotation: Quat::from_rotation_x(0.2),
             ..Transform::IDENTITY
         };
@@ -842,7 +847,7 @@ mod tests {
         // Where the parent at `x` along X carries its children.
         let carried = |x| {
             let parent = Transform {
-                translation: Vec3::new(x, 0.0, 0.0),
+                translation: DVec3::new(x, 0.0, 0.0),
                 ..turned
             };
             parent.matrix() * local.matrix()
@@ -850,14 +855,15 @@ mod tests {
         let mut want = Draws::default();
         want.draw_scene();
         let id = world.id(children[1]).expect("alive").get();
-        want.extend_sprites(std::iter::once((carried(1.0), Sprite::default(), id)));
+        let drawn = from_origin(carried(1.0), DVec3::ZERO);
+        want.extend_sprites(std::iter::once((drawn, Sprite::default(), id)));
         let mut draws = Draws::default();
         let shaders = &mut Shaders::default();
         draw_world(
             &world,
             &past,
             &Placed::of(&world, &past, 0.5),
-            0.5,
+            (0.5, DVec3::ZERO),
             0,
             &mut draws,
             shaders,
@@ -874,7 +880,7 @@ mod tests {
         )
         .expect("a camera")
         .1;
-        assert_eq!(halfway.position, carried(1.0).w_axis.truncate());
+        assert_eq!(halfway.position, carried(1.0).translation);
         let facing = turned.rotation * local.rotation;
         let rotation = halfway.rotation;
         assert!(rotation.abs_diff_eq(facing, 1e-6), "{rotation}");
@@ -887,7 +893,7 @@ mod tests {
         )
         .expect("a camera")
         .1;
-        assert_eq!(headless.position, carried(2.0).w_axis.truncate());
+        assert_eq!(headless.position, carried(2.0).translation);
     }
 
     #[test]
@@ -898,7 +904,7 @@ mod tests {
         let mut tick = |world: &mut World, x: f32, reset: bool| {
             past.capture(world);
             let moved = world.get_mut::<Transform>(camera).expect("alive");
-            moved.translation.x = x;
+            moved.translation.x = f64::from(x);
             if reset {
                 world.reset_interpolation(camera).expect("alive");
             }
@@ -920,7 +926,7 @@ mod tests {
         let mut world = World::seeded(1);
         let rotation = Quat::from_rotation_y(0.4);
         let scaled = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             rotation,
             scale: Vec3::new(2.0, 3.0, 4.0),
         };
@@ -935,13 +941,13 @@ mod tests {
         world.despawn(first).expect("alive");
 
         let mirrored = Transform {
-            translation: Vec3::Y,
+            translation: DVec3::Y,
             rotation: Quat::from_rotation_z(0.5),
             scale: Vec3::new(-2.0, 2.0, 2.0),
         };
         let parent = world.spawn(mirrored);
         let local = Transform {
-            translation: Vec3::X,
+            translation: DVec3::X,
             rotation,
             ..Transform::IDENTITY
         };
@@ -950,7 +956,7 @@ mod tests {
         let seen = seen_now(&world).expect("a camera");
         assert_eq!(
             seen.position,
-            (mirrored.matrix() * local.matrix()).w_axis.truncate()
+            (mirrored.matrix() * local.matrix()).translation
         );
         let facing = mirrored.rotation * rotation;
         assert!(seen.rotation.abs_diff_eq(facing, 1e-6), "{}", seen.rotation);
@@ -1235,7 +1241,7 @@ mod tests {
             controller.update(&mut cx, Duration::from_millis(500));
             let moved = controller.viewpoint.position;
             assert!(
-                moved.abs_diff_eq(expected, 1e-5),
+                moved.abs_diff_eq(expected.as_dvec3(), 1e-5),
                 "{keys:?} moved it to {moved}, not {expected}"
             );
             assert_eq!(cx.viewpoint(), Some(controller.viewpoint));
@@ -1271,12 +1277,12 @@ mod tests {
         bound.expect("the arrows are free");
         hold(&mut controller, &mut cx, &[Key::KeyW]);
         controller.update(&mut cx, Duration::from_secs(1));
-        assert_eq!(controller.viewpoint.position, Vec3::ZERO);
+        assert_eq!(controller.viewpoint.position, DVec3::ZERO);
         // Half the view's height in half a second.
         hold(&mut controller, &mut cx, &[Key::ArrowUp]);
         controller.update(&mut cx, Duration::from_millis(500));
         let moved = controller.viewpoint.position;
-        assert!(moved.abs_diff_eq(Vec3::Y, 1e-6), "{moved}");
+        assert!(moved.abs_diff_eq(DVec3::Y, 1e-6), "{moved}");
     }
 
     #[test]
@@ -1296,7 +1302,7 @@ mod tests {
         send(&mut controller, stick(Vec2::new(0.0, 0.5)));
         controller.update(&mut Context::new(None), Duration::from_secs(1));
         let moved = controller.viewpoint.position;
-        assert!(moved.abs_diff_eq(Vec3::Y, 1e-6), "{moved}");
+        assert!(moved.abs_diff_eq(DVec3::Y, 1e-6), "{moved}");
         // The left trigger half of the way for a second.
         send(&mut controller, stick(Vec2::ZERO));
         controller.rotation = true;
@@ -1447,25 +1453,25 @@ mod tests {
         send(&mut controller, &mut cx, &[key(Key::KeyW, true)]);
         controller.update(&mut cx, half);
         let moved = controller.viewpoint.position;
-        assert!(moved.abs_diff_eq(Vec3::NEG_Z, 1e-6), "{moved}");
+        assert!(moved.abs_diff_eq(DVec3::NEG_Z, 1e-6), "{moved}");
         assert_eq!(cx.viewpoint(), Some(controller.viewpoint));
         // A quarter turn to its left, and it goes along -X.
-        controller.viewpoint.position = Vec3::ZERO;
+        controller.viewpoint.position = DVec3::ZERO;
         controller.viewpoint.rotation = Quat::from_rotation_y(FRAC_PI_2);
         controller.update(&mut cx, half);
         let moved = controller.viewpoint.position;
-        assert!(moved.abs_diff_eq(Vec3::NEG_X, 1e-6), "{moved}");
+        assert!(moved.abs_diff_eq(DVec3::NEG_X, 1e-6), "{moved}");
         // Looking down an eighth of a turn, E raises it straight up, as fast as W moves it.
         send(&mut controller, &mut cx, &[key(Key::KeyW, false)]);
         send(&mut controller, &mut cx, &[key(Key::KeyE, true)]);
-        controller.viewpoint.position = Vec3::ZERO;
+        controller.viewpoint.position = DVec3::ZERO;
         controller.viewpoint.rotation = Quat::from_rotation_x(-FRAC_PI_2 / 2.0);
         controller.update(&mut cx, half);
         let moved = controller.viewpoint.position;
-        assert!(moved.abs_diff_eq(Vec3::Y, 1e-6), "{moved}");
+        assert!(moved.abs_diff_eq(DVec3::Y, 1e-6), "{moved}");
         // Both at once, unturned, no faster.
         send(&mut controller, &mut cx, &[key(Key::KeyW, true)]);
-        controller.viewpoint.position = Vec3::ZERO;
+        controller.viewpoint.position = DVec3::ZERO;
         controller.viewpoint.rotation = Quat::IDENTITY;
         controller.update(&mut cx, half);
         let moved = controller.viewpoint.position.length();

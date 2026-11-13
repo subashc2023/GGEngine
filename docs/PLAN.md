@@ -155,10 +155,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Loading ahead** (2026-11-12)
 - **A server's clients get their cells** (2026-11-12)
 - **Worlds in the editor and the tool API** (2026-11-13)
+- **Positions beyond f32** (2026-11-13)
 
 ## Now
 
-Phase 19's fifth milestone, positions beyond f32, as Next has it, once its plan is approved.
+Phase 19's sixth and last milestone, a world to cross, measured, as Next has it, once its plan is
+approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -494,7 +496,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Easing the editor's switch between projections, which jumps | It jars someone |
 | A rotating cursor for the editor's Orbit tool: egui has none, so it shows a hand | egui adds one, or someone misses it |
 | The lines across the editor's perspective grid reaching the horizon: they fade out some 65 to 200 camera heights away, since its f32 coordinates hold four decades of spacing; the lines toward the horizon go on | Someone misses them |
-| Cameras far from the origin: their matrices are f32, so 12,345 units out a view a tenth of a unit across moves in steps of about 1% | A game's world is that large |
 | Zooming from keys or a gamepad, as a rate beside the wheel's lines; the orthographic camera controller zooms by the wheel alone, in its own event handling. And zooming a camera with perspective, by its field of view or by moving it in, or changing the fly camera controller's speed by the wheel, which does nothing to it | A game binds zoom elsewhere, or zooms a camera with perspective |
 | Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
 | Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |

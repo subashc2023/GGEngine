@@ -146,7 +146,7 @@ mod tests {
         fn tick(&mut self, world: &mut World, _: Tick) {
             for Push(entity, by) in self.pushes.drain(..) {
                 if let Some(transform) = world.get_mut::<Transform>(entity) {
-                    transform.translation.x += by;
+                    transform.translation.x += f64::from(by);
                 }
                 world.play_sound(self.sound, Place::On(entity));
             }
@@ -231,7 +231,7 @@ mod tests {
                 .expect("alive")
                 .translation
                 .x;
-            assert_eq!(x, number as f32 + 1.0, "pushed once a tick");
+            assert_eq!(x, f64::from(number as f32 + 1.0), "pushed once a tick");
             assert_eq!(cx.world().serial(), serial);
             assert_eq!(cx.world().sounds_queued().count(), 0, "played");
             let copy = stack.sync_test_mut().expect("sync-tested").world_mut();

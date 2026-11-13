@@ -292,13 +292,13 @@ impl DepthOfFieldPass {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::{DVec3, Quat};
 
     use super::*;
 
     fn seen(fov: f32, near: f32) -> Viewpoint {
         Viewpoint {
-            position: Vec3::ZERO,
+            position: DVec3::ZERO,
             rotation: Quat::IDENTITY,
             projection: Projection::Perspective { fov, near },
         }

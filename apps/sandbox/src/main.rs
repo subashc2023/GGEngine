@@ -55,7 +55,7 @@ const FIELD: Vec2 = Vec2::new(8.0, 4.5);
 /// A camera, unturned, over `center`, seeing `height` units from the view's bottom to its top.
 fn overlooking(center: Vec2, height: f32) -> Viewpoint {
     Viewpoint {
-        position: center.extend(0.0),
+        position: center.extend(0.0).as_dvec3(),
         projection: Projection::Orthographic {
             height,
             near: -1.0,
@@ -118,7 +118,7 @@ impl Drifter {
             wrap(self.start.y, self.velocity.y, FIELD.y),
         ) - FIELD / 2.0;
         Transform {
-            translation: at.extend(SWARM_Z),
+            translation: at.extend(SWARM_Z).as_dvec3(),
             rotation: Quat::from_rotation_z(wrap(self.turn, self.spin, TAU)),
             scale: Vec3::splat(self.size),
         }
@@ -237,7 +237,10 @@ fn drift(world: &mut World, t: f64, wrapped: &mut Mutex<Vec<Entity>>) {
 /// Whether a drifter moved from `from` to `to` at a tick has wrapped across the field, or been
 /// moved across it otherwise: a tick moves it far less than half the field's width or height.
 fn wraps(from: &Transform, to: &Transform) -> bool {
-    let moved = (to.translation - from.translation).truncate().abs();
+    let moved = (to.translation - from.translation)
+        .truncate()
+        .abs()
+        .as_vec2();
     moved.cmpgt(FIELD / 2.0).any()
 }
 

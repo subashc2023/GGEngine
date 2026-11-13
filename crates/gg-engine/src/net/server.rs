@@ -845,7 +845,7 @@ mod tests {
             });
             for (player, x) in [(0, 5.0), (1, 35.0)] {
                 let at = crate::Transform {
-                    translation: gg_core::math::Vec3::new(x, 0.0, 0.0),
+                    translation: (gg_core::math::Vec3::new(x, 0.0, 0.0)).as_dvec3(),
                     ..crate::Transform::IDENTITY
                 };
                 let viewer = crate::Viewer { radius: 10.0 };
@@ -861,7 +861,7 @@ mod tests {
                     continue;
                 };
                 let at = world.get_mut::<crate::Transform>(viewer).expect("placed");
-                at.translation.x = x;
+                at.translation.x = f64::from(x);
             }
         }
 

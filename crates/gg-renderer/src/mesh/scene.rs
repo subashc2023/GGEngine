@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use gg_core::Result;
-use gg_core::math::{Mat3, Mat4};
+use gg_core::math::{Mat3, Mat4, Vec3};
 use gg_gpu::{Device, Faces, Frame, GpuBuffer};
 
 use crate::{MeshDraw, halves};
@@ -195,6 +195,28 @@ fn faces_of(faces: u8) -> Faces {
 }
 
 impl Kept {
+    /// Takes its records into the space of a frame whose origin is `by` further along than the
+    /// frame before's, before that frame's changes: each one's transform and the transform the
+    /// frame before drew it at moved by `-by`, so that a record set again from there, as the engine
+    /// sets every one again when the origin moves, moves from where it was, and one that isn't
+    /// stays put; each written again.
+    pub(crate) fn moved(&mut self, by: Vec3) {
+        let by = by.to_array();
+        for (slot, record) in self.records.iter_mut().enumerate() {
+            if self.slots[slot].is_none() {
+                continue;
+            }
+            for (axis, by) in by.into_iter().enumerate() {
+                record.transform[12 + axis] -= by;
+                record.previous[12 + axis] -= by;
+            }
+            if !self.dirty[slot] {
+                self.dirty[slot] = true;
+                self.changed.push(slot as u32);
+            }
+        }
+    }
+
     /// Takes `changes`, in order, into what it keeps, as frame `frame`'s, the next to begin, and
     /// orders its instances again if any came, went or moved to another batch or ID: in a merge of
     /// those that came, sorted, into those that stayed, so that ordering them again costs the

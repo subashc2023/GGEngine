@@ -104,7 +104,8 @@ pub(super) fn step(navigation: &mut Navigation, world: &mut World) {
         movers.push(Mover {
             entity,
             id,
-            position: transform.translation,
+            // Navigation is in `f32`, as precise as that within some 16 km of the origin.
+            position: transform.translation.as_vec3(),
             velocity: across(agent.velocity),
             radius: size_of(agent.radius),
             speed: size_of(agent.speed),
@@ -308,7 +309,7 @@ fn apply(world: &mut World, mesh: Option<&NavMesh>, mover: &Mover) {
     let walked = walk(mesh, at, chosen * Tick::DT.as_secs_f32());
     if walked != at {
         let transform = world.get_mut::<Transform>(entity).expect("found with one");
-        transform.translation = walked;
+        transform.translation = walked.as_dvec3();
     }
 }
 

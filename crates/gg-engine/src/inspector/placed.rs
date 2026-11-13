@@ -1,7 +1,7 @@
 //! Where a remote Inspector's pick is, which its link gives: in development builds, and in builds
 //! without `dev` too, whose link gives none, so that a layer that reads it builds in both.
 
-use gg_core::math::Vec3;
+use gg_core::math::DVec3;
 
 use crate::{EntityId, Pose, Transform};
 
@@ -22,7 +22,7 @@ pub struct Placed {
     /// The sphere round what it and every entity under it draw, in the world, as the game's last
     /// read of it gave it: for a tool to frame it by. `None` if nothing there draws, or the game
     /// doesn't say. Its center and its radius.
-    pub bounds: Option<(Vec3, f32)>,
+    pub bounds: Option<(DVec3, f32)>,
     /// Whether it's a model's node, which the world spawns from the model under its root, and
     /// tools' operations refuse to change, as [`ModelRoot`](crate::ModelRoot) says: no tool's
     /// handles move it.

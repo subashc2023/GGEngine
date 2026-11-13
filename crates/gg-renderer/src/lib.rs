@@ -64,7 +64,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result, label};
 use gg_gpu::{
     ColorImage, ComputePass, Device, Frames, Graph, ImageId, Instance, InstanceDesc, PassId,
@@ -394,6 +394,11 @@ pub struct RenderData<'a> {
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub viewpoint: Viewpoint,
+    /// What every position the frame draws is relative to, in `f32`, the viewpoint's among them,
+    /// which [`Viewpoint::relative_to`] takes from it: a point near the viewpoint, so that what's
+    /// near it draws as precisely far from the world's origin as at it. Fog's height and the
+    /// atmosphere's altitude are the world's, absolute.
+    pub origin: DVec3,
     /// Whether the view is cut to `viewpoint` from elsewhere since the frame before, rather than
     /// moved there, as a tool's look set or a camera switched: what takes the camera's motion from
     /// the frame before, motion blur, takes it as standing still.
@@ -500,6 +505,9 @@ pub struct Settings<'a> {
 pub struct Renderer {
     frames: Frames,
     output: Output,
+    /// The last frame's [`RenderData::origin`], which what's kept from frame to frame is in the
+    /// space of.
+    origin: DVec3,
     /// The keys of the other windows, in the order of their swapchains in `windows`.
     window_keys: Vec<u64>,
     windows: Vec<Swapchain>,
@@ -849,6 +857,7 @@ impl Renderer {
         Ok(Self {
             frames: Frames::new(device)?,
             output,
+            origin: DVec3::ZERO,
             window_keys: Vec::new(),
             windows: Vec::new(),
             meshes: MeshPass::new(device, settings.upload_budget)?,
@@ -1045,6 +1054,30 @@ impl Renderer {
     ) -> Result<bool> {
         let _zone = gg_core::zone!();
         let data = show::showing(data);
+        // From here on, the world is relative to the frame's origin, as its draws are, the
+        // viewpoint and fog's height too; the atmosphere alone reads the viewpoint's altitude, the
+        // world's.
+        let altitude = data.viewpoint;
+        // What's kept from the frame before, in its origin's space, taken into this one's, before
+        // this frame's changes to the scene; once, whether or not the frame renders.
+        let moved = (data.origin - self.origin).as_vec3();
+        self.origin = data.origin;
+        if moved != Vec3::ZERO {
+            self.meshes.moved(moved);
+            self.particles.moved(moved);
+            self.taa.moved(moved);
+            self.ao_history.moved(moved);
+            self.reflected.moved(moved);
+            self.motion_blur.moved(moved);
+        }
+        let data = RenderData {
+            viewpoint: data.viewpoint.relative_to(data.origin),
+            fog: (data.fog).map(|fog| Fog {
+                height: (f64::from(fog.height) - data.origin.y) as f32,
+                ..fog
+            }),
+            ..data
+        };
         // egui sends each texture change once, so changes wait for a frame that renders.
         for (_, window) in windows.iter_mut() {
             self.ui.queue(window.textures);
@@ -1115,7 +1148,7 @@ impl Renderer {
         // The atmosphere the view shows in place of an image sky, if any, under its sun, and the
         // lights the frame shades with: its sun's dimmed by the air between it and the viewer.
         let atmosphere = (data.atmosphere.filter(|_| renders_view))
-            .map(|atmosphere| atmosphere::Seen::new(atmosphere, data.lights, &data.viewpoint));
+            .map(|atmosphere| atmosphere::Seen::new(atmosphere, data.lights, &altitude));
         let shining = match &atmosphere {
             Some(seen) if seen.dims() => {
                 self.sunlit.clear();
@@ -1741,7 +1774,7 @@ impl Renderer {
                     frame.upload(bytemuck::cast_slice(gpu_lights))?.address()
                 };
                 let shared = FrameData {
-                    camera: data.viewpoint.position,
+                    camera: data.viewpoint.position.as_vec3(),
                     time: data.time,
                     exposure,
                     light_count: gpu_lights.len() as u32,
@@ -1827,7 +1860,7 @@ impl Renderer {
                 let clip_from_view = taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect);
                 let world_from_view = Mat4::from_rotation_translation(
                     data.viewpoint.rotation,
-                    data.viewpoint.position,
+                    data.viewpoint.position.as_vec3(),
                 );
                 let occlusion_seen = occluded.map(|settings| ao::Seen {
                     clip_from_view,

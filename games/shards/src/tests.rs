@@ -22,7 +22,12 @@ fn attached(seed: u64) -> (Context, Shards) {
 fn player_at(world: &World, index: u8) -> Vec2 {
     let mut players = world.query::<(&Player, &Transform)>();
     let found = players.find(|(player, _)| player.index == index);
-    found.expect("the player").1.translation.truncate()
+    found
+        .expect("the player")
+        .1
+        .translation
+        .truncate()
+        .as_vec2()
 }
 
 /// The path of the game's scene file `name`.
@@ -156,14 +161,17 @@ fn a_touched_shard_scores_and_turns_up_elsewhere() {
     let shard = world.query::<(Entity, &Shard)>().next().expect("a shard").0;
     let at = world.get::<Transform>(shard).expect("placed").translation;
     for player in [0, 1] {
-        assert!(at.truncate().distance(STARTS[player]) > 1.5, "{at}");
+        assert!(
+            at.truncate().distance((STARTS[player]).as_dvec2()) > 1.5,
+            "{at}"
+        );
     }
     // Player 0 onto the shard.
     let mut players = world.query_mut::<(&Player, &mut Transform)>();
     let (_, disc) = players
         .find(|(player, _)| player.index == 0)
         .expect("player 0");
-    disc.translation = at.truncate().extend(PLAYER_Z);
+    disc.translation = at.truncate().extend(f64::from(PLAYER_Z));
     shards.tick(world, Tick { number: 0 });
     let found = *world.query::<&Match>().next().expect("the match");
     assert_eq!(found.scores, [1, 0]);
@@ -179,7 +187,7 @@ fn a_touched_shard_scores_and_turns_up_elsewhere() {
     let (_, disc) = players
         .find(|(player, _)| player.index == 0)
         .expect("player 0");
-    disc.translation = moved.truncate().extend(PLAYER_Z);
+    disc.translation = moved.truncate().extend(f64::from(PLAYER_Z));
     shards.tick(world, Tick { number: 1 });
     let found = *world.query::<&Match>().next().expect("the match");
     assert_eq!((found.scores, found.wins), ([0, 0], [1, 0]));
@@ -209,7 +217,7 @@ fn the_ticks_queue_the_games_sounds() {
     let found = world.query_mut::<&mut Match>().next().expect("the match");
     found.scores = [WINS_AT - 1, 0];
     let disc = world.get_mut::<Transform>(disc).expect("player 0");
-    disc.translation = at.truncate().extend(PLAYER_Z);
+    disc.translation = at.truncate().extend(f64::from(PLAYER_Z));
     shards.tick(world, Tick { number: 2 });
     let queued: Vec<_> = world.sounds_queued().skip(1).collect();
     let won = [
@@ -432,12 +440,15 @@ fn script(shards: &mut Shards, world: &World, number: u64) {
     let shard = world
         .query::<(&Shard, &Transform)>()
         .map(|(_, at)| at.translation.truncate());
-    let nearest = shard.min_by(|a, b| a.distance(ours).total_cmp(&b.distance(ours)));
+    let nearest = shard.min_by(|a, b| {
+        a.distance(ours.as_dvec2())
+            .total_cmp(&b.distance(ours.as_dvec2()))
+    });
     let toward = |from: Vec2, to: Vec2| (to - from).normalize_or_zero();
     shards.commands.extend([
         Command::Steer {
             player: 0,
-            heading: toward(ours, nearest.unwrap_or(ours)),
+            heading: toward(ours, nearest.unwrap_or(ours.as_dvec2()).as_vec2()),
         },
         Command::Steer {
             player: 1,

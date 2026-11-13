@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 
 /// The error and result types reflection returns, `gg-core`'s.
 pub use gg_core::{Error, Result};
@@ -46,6 +46,9 @@ pub enum Value {
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
+    /// Kept apart from `Vec3`, as `F64` is from `F32`: an entity's translation, which keeps its
+    /// precision far from the origin.
+    DVec3(DVec3),
     /// A unit quaternion.
     Quat(Quat),
     /// The entity's handle in this process: scenes and recordings map it to its persistent ID
@@ -91,6 +94,7 @@ pub enum Type {
     Vec2,
     Vec3,
     Vec4,
+    DVec3,
     Quat,
     Entity,
     /// A texture, named by its path: it has no default, so a component that shows none, as a
@@ -433,6 +437,10 @@ impl Types {
             Type::Vec2 => Value::Vec2(Vec2::splat(component()?)),
             Type::Vec3 => Value::Vec3(Vec3::splat(component()?)),
             Type::Vec4 => Value::Vec4(Vec4::splat(component()?)),
+            Type::DVec3 => {
+                let x = nearest_zero(meta, Bound::as_f64, Bound::as_f64);
+                Value::DVec3(DVec3::splat(x.filter(|x| x.is_finite()).ok_or_else(none)?))
+            }
             Type::Quat => Value::Quat(Quat::IDENTITY),
             Type::Entity => {
                 return Err(Error::new(
@@ -984,6 +992,7 @@ pub(crate) fn kind(value: &Value) -> &'static str {
         Value::Vec2(_) => "Vec2",
         Value::Vec3(_) => "Vec3",
         Value::Vec4(_) => "Vec4",
+        Value::DVec3(_) => "DVec3",
         Value::Quat(_) => "Quat",
         Value::Entity(_) => "Entity",
         Value::Texture(_) => "Texture",
@@ -1040,9 +1049,18 @@ pub(crate) fn check(types: &Types, ty: &Type, meta: &Meta, value: &Value) -> Res
         (Type::Int { .. }, &Value::UInt(n)) => in_range(meta, Number::Int(n.into())),
         (Type::F32, &Value::F32(x)) => in_range(meta, Number::F32(x)),
         (Type::F64, &Value::F64(x)) => in_range(meta, Number::Float(x)),
-        (Type::Vec2, Value::Vec2(v)) => components(meta, v.as_ref()),
-        (Type::Vec3, Value::Vec3(v)) => components(meta, v.as_ref()),
-        (Type::Vec4, Value::Vec4(v)) => components(meta, v.as_ref()),
+        (Type::Vec2, Value::Vec2(v)) => {
+            components(meta, v.as_ref().iter().map(|&x| Number::F32(x)))
+        }
+        (Type::Vec3, Value::Vec3(v)) => {
+            components(meta, v.as_ref().iter().map(|&x| Number::F32(x)))
+        }
+        (Type::Vec4, Value::Vec4(v)) => {
+            components(meta, v.as_ref().iter().map(|&x| Number::F32(x)))
+        }
+        (Type::DVec3, Value::DVec3(v)) => {
+            components(meta, v.as_ref().iter().map(|&x| Number::Float(x)))
+        }
         _ => Ok(()),
     }
 }
@@ -1057,9 +1075,9 @@ fn check_fields(types: &Types, fields: &[Field], given: &[(Ident, Value)]) -> Re
 }
 
 /// Checks each of a vector's `components` against `meta`'s bounds.
-fn components(meta: &Meta, components: &[f32]) -> Result<()> {
-    for (&x, name) in components.iter().zip(COMPONENTS) {
-        in_range(meta, Number::F32(x)).map_err(|error| within(error, name))?;
+fn components(meta: &Meta, components: impl Iterator<Item = Number>) -> Result<()> {
+    for (x, name) in components.zip(COMPONENTS) {
+        in_range(meta, x).map_err(|error| within(error, name))?;
     }
     Ok(())
 }
@@ -1200,6 +1218,7 @@ fn what_is(types: &Types, ty: &Type) -> String {
         Type::Vec2 => "a Vec2".to_owned(),
         Type::Vec3 => "a Vec3".to_owned(),
         Type::Vec4 => "a Vec4".to_owned(),
+        Type::DVec3 => "a DVec3".to_owned(),
         Type::Quat => "a quaternion".to_owned(),
         Type::Entity => "an entity".to_owned(),
         Type::Texture => "a texture".to_owned(),

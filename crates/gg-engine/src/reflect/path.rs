@@ -104,11 +104,12 @@ impl Resolved {
             "" => what_is(types, ty),
             walked => format!("`{walked}` is {}", what_is(types, ty)),
         };
-        let components = match self.ty {
-            Type::Vec2 => 2,
-            Type::Vec3 => 3,
-            Type::Vec4 => 4,
-            _ => 0,
+        let (components, component) = match self.ty {
+            Type::Vec2 => (2, Type::F32),
+            Type::Vec3 => (3, Type::F32),
+            Type::Vec4 => (4, Type::F32),
+            Type::DVec3 => (3, Type::F64),
+            _ => (0, Type::F32),
         };
         match (&self.ty, step) {
             (Type::Named(index), Step::Field(name)) => {
@@ -137,7 +138,7 @@ impl Resolved {
                     ));
                 };
                 self.steps.push(i as u32);
-                self.ty = Type::F32;
+                self.ty = component;
                 self.meta.show = Show::Plain;
             }
             (Type::Array(_, len), Step::Index(index)) if index >= *len => {

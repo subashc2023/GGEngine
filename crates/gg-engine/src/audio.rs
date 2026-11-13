@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gg_core::math::libm::log10f;
-use gg_core::math::{Mat4, Vec3};
+use gg_core::math::{DVec3, Mat4};
 use gg_core::{Error, Result};
 use gg_renderer::{Projection, Viewpoint};
 use kira::backend::Backend;
@@ -126,7 +126,7 @@ pub enum Place {
     /// UI's sounds play.
     Nowhere,
     /// At a point in the world, where it stays.
-    At(Vec3),
+    At(DVec3),
     /// On an entity: where the latest tick left it as each frame is handed off, following it as it
     /// moves, and once it's despawned, where it was last, until the sound ends. One that's gone as
     /// the sound is queued or played plays from nowhere.
@@ -138,8 +138,8 @@ pub enum Place {
 #[derive(Clone, Copy, Debug)]
 enum Spot {
     Nowhere,
-    At(Vec3),
-    On(Entity, Vec3),
+    At(DVec3),
+    On(Entity, DVec3),
 }
 
 impl Spot {
@@ -156,7 +156,7 @@ impl Spot {
 
     /// Where it plays from now, `None` for nowhere: following its entity in `world` while it's
     /// alive, and once it's gone, where it was last, from then on.
-    fn follow(&mut self, world: &World) -> Option<Vec3> {
+    fn follow(&mut self, world: &World) -> Option<DVec3> {
         match *self {
             Self::Nowhere => None,
             Self::At(at) => Some(at),
@@ -183,10 +183,10 @@ impl Spot {
 }
 
 /// Where `entity` is in `world`, as the latest tick left it, if it's alive.
-fn position(world: &World, entity: Entity) -> Option<Vec3> {
+fn position(world: &World, entity: Entity) -> Option<DVec3> {
     // Checked first, as a pose of an entity that's gone makes an error, which allocates.
     let pose = world.contains(entity).then(|| world.pose(entity).ok())??;
-    Some(pose.matrix.w_axis.truncate())
+    Some(pose.matrix.translation)
 }
 
 /// The sounds a world's ticks queued, which the engine plays once each tick has run, as
@@ -580,13 +580,14 @@ impl<B: Backend> Default for Audio<B> {
     }
 }
 
-/// What hears the sounds, as [`Place`] says: a view without perspective, by its matrix from the
-/// world to its clip space; or a camera with perspective, by its matrix from the world to its own
-/// space, which looks along its -Z, its right +X.
+/// What hears the sounds, as [`Place`] says, from where it is, in `f64`, which a sound's place is
+/// taken from first, so that what's near is heard as precisely far from the origin as at it: a view
+/// without perspective, by its matrix from there to its clip space; or a camera with perspective,
+/// by its matrix from there to its own space, which looks along its -Z, its right +X.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Listener {
-    View(Mat4),
-    Ears(Mat4),
+    View(Mat4, DVec3),
+    Ears(Mat4, DVec3),
 }
 
 impl Listener {
@@ -599,12 +600,12 @@ impl Listener {
         }
         Some(match viewpoint.projection {
             Projection::Orthographic { .. } => {
-                Self::View(viewpoint.view_projection(width / height))
+                let near = viewpoint.relative_to(viewpoint.position);
+                Self::View(near.view_projection(width / height), viewpoint.position)
             }
             Projection::Perspective { .. } => {
-                let placed =
-                    Mat4::from_rotation_translation(viewpoint.rotation, viewpoint.position);
-                Self::Ears(placed.inverse())
+                let turned = Mat4::from_quat(viewpoint.rotation);
+                Self::Ears(turned.inverse(), viewpoint.position)
             }
         })
     }
@@ -1077,14 +1078,14 @@ fn decibels(amplitude: f32) -> Decibels {
 /// to it, and as loud as it is within [`HEARD`]'s nearer distance, fading to silence by its farther
 /// one, linearly in decibels. In the middle and as loud as it is from nowhere, or without a
 /// listener; silent at a point that isn't a number.
-fn heard(listener: Option<&Listener>, at: Option<Vec3>) -> (Panning, Decibels) {
+fn heard(listener: Option<&Listener>, at: Option<DVec3>) -> (Panning, Decibels) {
     let (Some(listener), Some(at)) = (listener, at) else {
         return (Panning::CENTER, Decibels::IDENTITY);
     };
     let silent = (Panning::CENTER, Decibels::SILENCE);
     match *listener {
-        Listener::View(listener) => {
-            let clip = listener * at.extend(1.0);
+        Listener::View(listener, from) => {
+            let clip = listener * (at - from).as_vec3().extend(1.0);
             let [x, y] = [clip.x / clip.w, clip.y / clip.w];
             if !(clip.w > 0.0 && x.is_finite() && y.is_finite()) {
                 return silent;
@@ -1094,8 +1095,8 @@ fn heard(listener: Option<&Listener>, at: Option<Vec3>) -> (Panning, Decibels) {
             let volume = decibels(1.0 - beyond / (2.0 * FADE));
             (Panning(x.clamp(-1.0, 1.0) * PAN), volume)
         }
-        Listener::Ears(listener) => {
-            let own = listener.transform_point3(at);
+        Listener::Ears(listener, from) => {
+            let own = listener.transform_point3((at - from).as_vec3());
             let distance = own.length();
             if !distance.is_finite() {
                 return silent;
@@ -1127,7 +1128,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::Transform;
-    use gg_core::math::Quat;
+    use gg_core::math::{Quat, Vec3};
 
     /// A WAV file of `samples`, 16-bit mono at 48 kHz.
     pub(crate) fn wav(samples: &[i16]) -> Vec<u8> {
@@ -1161,7 +1162,7 @@ pub(crate) mod tests {
     /// units from bottom to top of a view twice as wide, 20 across.
     fn heard_above(at: Vec3) -> (f32, f32) {
         let camera = Viewpoint {
-            position: Vec3::Z * 10.0,
+            position: DVec3::Z * 10.0,
             projection: Projection::Orthographic {
                 height: 10.0,
                 near: 0.1,
@@ -1170,7 +1171,7 @@ pub(crate) mod tests {
             ..Viewpoint::default()
         };
         let listener = Listener::new(&camera, [200, 100]).expect("a view that projects");
-        let (panning, volume) = heard(Some(&listener), Some(at));
+        let (panning, volume) = heard(Some(&listener), Some(at.as_dvec3()));
         (panning.0, volume.0)
     }
 
@@ -1200,8 +1201,9 @@ pub(crate) mod tests {
         near(heard_above(Vec3::new(-30.0, 0.0, 0.0)), (-PAN, silence));
         near(heard_above(Vec3::new(0.0, 0.0, f32::NAN)), (0.0, silence));
         let middle = (Panning::CENTER, Decibels::IDENTITY);
-        assert_eq!(heard(None, Some(Vec3::X)), middle);
-        assert_eq!(heard(Some(&Listener::View(Mat4::IDENTITY)), None), middle);
+        assert_eq!(heard(None, Some(DVec3::X)), middle);
+        let listener = Listener::View(Mat4::IDENTITY, DVec3::ZERO);
+        assert_eq!(heard(Some(&listener), None), middle);
     }
 
     /// A camera with perspective hears a sound by its direction and distance: as loud as it is
@@ -1214,7 +1216,7 @@ pub(crate) mod tests {
         // At (0, 2, 10), turned a quarter turn to its left, so that it looks along -X, its right
         // along -Z.
         let camera = Viewpoint {
-            position: Vec3::new(0.0, 2.0, 10.0),
+            position: DVec3::new(0.0, 2.0, 10.0),
             rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             projection: Projection::Perspective {
                 fov: std::f32::consts::FRAC_PI_2,
@@ -1223,7 +1225,7 @@ pub(crate) mod tests {
         };
         let listener = Listener::new(&camera, [160, 90]).expect("a camera that projects");
         let hear = |at: Vec3| {
-            let (panning, volume) = heard(Some(&listener), Some(at));
+            let (panning, volume) = heard(Some(&listener), Some(at.as_dvec3()));
             (panning.0, volume.0)
         };
         let silence = Decibels::SILENCE.0;
@@ -1242,8 +1244,51 @@ pub(crate) mod tests {
         near(hear(Vec3::new(4.0, 2.0, 6.0)), before);
         // Straight above it: in the middle.
         near(hear(Vec3::new(0.0, 12.0, 10.0)), (0.0, fading(10.0)));
-        let nan = heard(Some(&listener), Some(Vec3::new(f32::NAN, 0.0, 0.0)));
+        let nan = heard(
+            Some(&listener),
+            Some(DVec3::new(f64::from(f32::NAN), 0.0, 0.0)),
+        );
         assert_eq!(nan, (Panning::CENTER, Decibels::SILENCE));
+    }
+
+    /// 1,000 km from the origin, a view with perspective and one without hear what's near them as
+    /// they do at the origin, where `f32` would place each sound to the nearest 6 cm.
+    #[test]
+    fn far_from_the_origin_what_hears_hears_as_at_it() {
+        let far = DVec3::new(1.0e6 + 0.3, -2.0e6, 1.0e6 - 0.3);
+        let perspective = Projection::Perspective {
+            fov: std::f32::consts::FRAC_PI_2,
+            near: 0.1,
+        };
+        let flat = Projection::Orthographic {
+            height: 10.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        for projection in [perspective, flat] {
+            let camera = Viewpoint {
+                position: DVec3::new(0.0, 2.0, 10.0),
+                rotation: Quat::from_rotation_y(0.4),
+                projection,
+            };
+            let moved = Viewpoint {
+                position: camera.position + far,
+                ..camera
+            };
+            let listener = |camera| Listener::new(&camera, [160, 90]).expect("it projects");
+            let [here, there] = [camera, moved].map(listener);
+            // Apart from the camera by other than whole sixteenths, so that `f32`'s rounding of
+            // each far position wouldn't cancel in their difference.
+            for at in [
+                DVec3::new(-4.03, 2.0, 6.01),
+                DVec3::new(0.27, 2.51, -24.11),
+                DVec3::new(3.07, 1.0, 10.53),
+            ] {
+                let (pan, volume) = heard(Some(&there), Some(at + far));
+                let (want_pan, want_volume) = heard(Some(&here), Some(at));
+                near((pan.0, volume.0), (want_pan.0, want_volume.0));
+            }
+        }
     }
 
     /// A sound on an entity follows it as it moves, and once it's despawned, plays from where it
@@ -1252,17 +1297,17 @@ pub(crate) mod tests {
     fn a_sound_on_an_entity_follows_it_and_plays_out_where_it_was_last() {
         let mut world = World::default();
         let at = |x| Transform {
-            translation: Vec3::new(x, 2.0, 0.0),
+            translation: DVec3::new(x, 2.0, 0.0),
             ..Transform::IDENTITY
         };
         let entity = world.spawn(at(1.0));
         let mut spot = Spot::new(Place::On(entity), &world);
-        assert_eq!(spot.follow(&world), Some(Vec3::new(1.0, 2.0, 0.0)));
+        assert_eq!(spot.follow(&world), Some(DVec3::new(1.0, 2.0, 0.0)));
         *world.get_mut::<Transform>(entity).expect("alive") = at(3.0);
-        assert_eq!(spot.follow(&world), Some(Vec3::new(3.0, 2.0, 0.0)));
+        assert_eq!(spot.follow(&world), Some(DVec3::new(3.0, 2.0, 0.0)));
         world.despawn(entity).expect("alive");
-        assert_eq!(spot.follow(&world), Some(Vec3::new(3.0, 2.0, 0.0)));
-        assert_eq!(spot.place(), Place::At(Vec3::new(3.0, 2.0, 0.0)));
+        assert_eq!(spot.follow(&world), Some(DVec3::new(3.0, 2.0, 0.0)));
+        assert_eq!(spot.place(), Place::At(DVec3::new(3.0, 2.0, 0.0)));
         let gone = Spot::new(Place::On(entity), &world);
         assert_eq!(gone.place(), Place::Nowhere);
     }
@@ -1279,9 +1324,9 @@ pub(crate) mod tests {
         audio.play_queued(&mut world);
         for _ in 0..2 {
             world.play_sound(sound, Place::Nowhere);
-            world.play_sound(sound, Place::At(Vec3::X));
+            world.play_sound(sound, Place::At(DVec3::X));
             let queued: Vec<_> = world.sounds_queued().collect();
-            let places = [Place::Nowhere, Place::At(Vec3::X)];
+            let places = [Place::Nowhere, Place::At(DVec3::X)];
             assert_eq!(queued, places.map(|place| (sound, place)));
             audio.play_queued(&mut world);
             assert_eq!(world.sounds_queued().count(), 0);
@@ -1515,7 +1560,7 @@ pub(crate) mod tests {
         let world = World::default();
         let sounds = |audio: &mut Audio<MockBackend>| {
             audio.play(sound, Place::Nowhere, &world);
-            audio.play(sound, Place::At(Vec3::X), &world);
+            audio.play(sound, Place::At(DVec3::X), &world);
         };
         audio.follow(Playback::Stopped);
         audio.play_music(Some(music), Duration::from_secs(1));

@@ -861,7 +861,7 @@ impl World {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Vec3, Vec4};
+    use gg_core::math::{DVec3, Vec3, Vec4};
 
     use super::*;
     use crate::ecs::id::linked;
@@ -971,7 +971,7 @@ mod tests {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
         let world = cx.world_mut();
         let at = Transform {
-            translation: Vec3::new(-2.0, 0.0, 0.0),
+            translation: DVec3::new(-2.0, 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let first = lamp.spawn(world, at).expect("spawned");
@@ -991,7 +991,7 @@ mod tests {
             .set_field(second, "Lamp", "color", &blue)
             .expect("set");
         let other = of(world, second, 0xb2);
-        let up = Value::Vec3(Vec3::new(0.0, 3.0, 0.0));
+        let up = Value::DVec3(DVec3::new(0.0, 3.0, 0.0));
         world
             .set_field(other, "Transform", "translation", &up)
             .expect("set");
@@ -1100,7 +1100,7 @@ mod tests {
         );
         let other = world.load_scene(&placed).expect("loaded")[0];
         let at = world.get::<Transform>(other).expect("its own");
-        assert_eq!(at.translation, Vec3::ZERO, "its default, not the prefab's");
+        assert_eq!(at.translation, DVec3::ZERO, "its default, not the prefab's");
         assert_eq!(at.scale, Vec3::splat(2.0));
 
         world.remove::<Name>(bulb).expect("code may");
@@ -1135,7 +1135,7 @@ mod tests {
             .get::<Transform>(bulb)
             .expect("the lamp's")
             .translation;
-        assert_eq!(place, Vec3::new(0.0, 9.0, 0.0), "where the post moved it");
+        assert_eq!(place, DVec3::new(0.0, 9.0, 0.0), "where the post moved it");
         let root_id = world.id(root).expect("alive");
         let text = world.save_scene(&[root]).expect("saved");
         let expected = format!(
@@ -1182,7 +1182,7 @@ mod tests {
             fields: Vec::new(),
             added: Vec::new(),
         };
-        let at = Value::Vec3(Vec3::new(4.0, 0.0, 0.0));
+        let at = Value::DVec3(DVec3::new(4.0, 0.0, 0.0));
         world
             .set_field(root, "Transform", "translation", &at)
             .expect("set");
@@ -1647,7 +1647,7 @@ mod tests {
         log.undo(world).expect("given back");
 
         // A field set, and set back to the prefab's.
-        let up = Value::Vec3(Vec3::new(0.0, 5.0, 0.0));
+        let up = Value::DVec3(DVec3::new(0.0, 5.0, 0.0));
         let place = |world: &World| world.get::<Transform>(bulb).expect("alive").translation;
         let set = Operation::Set {
             entity: bulb_id,
@@ -1662,9 +1662,9 @@ mod tests {
             path: "translation".to_owned(),
         };
         log.apply(world, revert).expect("reverted");
-        assert_eq!(place(world), Vec3::new(0.0, 1.0, 0.0), "the prefab's");
+        assert_eq!(place(world), DVec3::new(0.0, 1.0, 0.0), "the prefab's");
         log.undo(world).expect("undone");
-        assert_eq!(place(world), Vec3::new(0.0, 5.0, 0.0));
+        assert_eq!(place(world), DVec3::new(0.0, 5.0, 0.0));
 
         // Another prefab, and back, its own entity and its field as they were.
         let content = world.hash().content;
@@ -1731,7 +1731,7 @@ mod tests {
         assert_eq!(copies.len(), 1, "the root alone: {copies:?}");
         let copied = of(world, copy, 0xb2);
         let at = world.get::<Transform>(copied).expect("alive").translation;
-        assert_eq!(at, Vec3::new(0.0, 5.0, 0.0));
+        assert_eq!(at, DVec3::new(0.0, 5.0, 0.0));
         log.undo(world).expect("uncopied");
         assert_eq!(world.entity(copies[0]), None);
         check_ids(world);
@@ -1859,7 +1859,7 @@ mod tests {
         let old = world.save_scene(&[root]).expect("saved");
         let mut edited = world.clone();
         let bulb = of(&edited, root, 0xb2);
-        let up = Value::Vec3(Vec3::new(0.0, 7.0, 0.0));
+        let up = Value::DVec3(DVec3::new(0.0, 7.0, 0.0));
         edited
             .set_field(bulb, "Transform", "translation", &up)
             .expect("set");

@@ -154,7 +154,7 @@ impl Joint3D {
             .contacts_enabled(self.bodies_collide);
         // Compared, so that one that isn't a number drives with none either.
         let max_force = if self.max_force > 0.0 {
-            self.max_force
+            f64::from(self.max_force)
         } else {
             0.0
         };
@@ -170,17 +170,17 @@ impl Joint3D {
             let axis = vector(self.axis.try_normalize().unwrap_or(Vec3::X));
             built = built.local_axis1(axis).local_axis2(axis);
             if self.limited {
-                built = built.limits(free, [self.lower, self.upper]);
+                built = built.limits(free, [self.lower.into(), self.upper.into()]);
             }
             // rapier's motor with neither drives as hard as it can toward nothing, which none means.
             if self.stiffness > 0.0 || self.damping > 0.0 {
                 built = built
                     .set_motor(
                         free,
-                        self.target_position,
-                        self.target_velocity,
-                        self.stiffness,
-                        self.damping,
+                        self.target_position.into(),
+                        self.target_velocity.into(),
+                        self.stiffness.into(),
+                        self.damping.into(),
                     )
                     .motor_max_force(free, max_force);
             }
@@ -192,13 +192,14 @@ impl Joint3D {
             JointKind3D::Rope => {
                 built = built
                     .coupled_axes(JointAxesMask::LIN_AXES)
-                    .limits(JointAxis::LinX, [0.0, self.length]);
+                    .limits(JointAxis::LinX, [0.0, self.length.into()]);
             }
             JointKind3D::Spring => {
                 built = built.coupled_axes(JointAxesMask::LIN_AXES);
                 if self.stiffness > 0.0 || self.damping > 0.0 {
+                    let (length, stiffness) = (self.length.into(), self.stiffness.into());
                     built = built
-                        .motor_position(JointAxis::LinX, self.length, self.stiffness, self.damping)
+                        .motor_position(JointAxis::LinX, length, stiffness, self.damping.into())
                         .motor_model(JointAxis::LinX, MotorModel::ForceBased)
                         .motor_max_force(JointAxis::LinX, max_force);
                 }
@@ -368,7 +369,7 @@ pub(in crate::physics) fn joint_lines(
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Quat, libm};
+    use gg_core::math::{DVec3, Quat, libm};
 
     use super::super::tests::{crate_at, step, transform};
     use super::*;
@@ -379,7 +380,7 @@ mod tests {
     /// A static unit box at `at`.
     fn post(world: &mut World, at: Vec3) -> Entity {
         let at = Transform {
-            translation: at,
+            translation: at.as_dvec3(),
             ..Transform::IDENTITY
         };
         let body = RigidBody3D {
@@ -400,7 +401,10 @@ mod tests {
 
     /// Where `anchor`, in `entity`'s space, is in the world's.
     fn anchored(world: &World, entity: Entity, anchor: Vec3) -> Vec3 {
-        transform(world, entity).matrix().transform_point3(anchor)
+        transform(world, entity)
+            .matrix()
+            .transform_point3(anchor.as_dvec3())
+            .as_vec3()
     }
 
     /// How far `entity` is turned about Y, counterclockwise as seen from above.
@@ -446,13 +450,13 @@ mod tests {
             let off = at.distance(Vec3::new(0.0, 4.0, 3.0));
             assert!(off < 0.02, "the ball joint's anchors together: {off}");
             let apart = transform(&world, roped).translation;
-            furthest = furthest.max(apart.distance(Vec3::new(0.0, 4.0, -3.0)));
+            furthest = furthest.max(apart.distance(DVec3::new(0.0, 4.0, -3.0)) as f32);
         }
         let weld_at = transform(&world, welded);
         assert!(
             weld_at
                 .translation
-                .abs_diff_eq(Vec3::new(1.5, 4.0, 0.0), 0.02),
+                .abs_diff_eq(DVec3::new(1.5, 4.0, 0.0), 0.02),
             "{weld_at:?}"
         );
         assert!(weld_at.rotation.angle_between(Quat::IDENTITY) < 0.01);
@@ -554,7 +558,7 @@ mod tests {
         };
         world.insert(joint, given).expect("alive");
         let placed = Transform {
-            translation: Vec3::new(0.0, 2.5, 0.0),
+            translation: DVec3::new(0.0, 2.5, 0.0),
             ..Transform::IDENTITY
         };
         world.insert(hung, placed).expect("alive");
@@ -971,13 +975,13 @@ mod tests {
         }
         physics.clone_from(&snapshot);
         let mut copy = snapshot.clone();
-        let bits = |physics: &Physics3D| -> Vec<u32> {
+        let bits = |physics: &Physics3D| -> Vec<u64> {
             let bodies = physics.rapier.bodies.iter();
             let poses = bodies.flat_map(|(_, body)| {
                 let (at, turned) = (body.translation(), body.rotation());
                 [at.x, at.y, at.z, turned.x, turned.y, turned.z, turned.w]
             });
-            poses.map(f32::to_bits).collect()
+            poses.map(f64::to_bits).collect()
         };
         for tick in 0..20 {
             physics.step_rapier();
@@ -1009,7 +1013,7 @@ mod tests {
         world.despawn(gone).expect("alive");
         let past = Past::default();
         let placed = Placed::of(&world, &past, 1.0);
-        let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
+        let poses = Poses::new(&world, &past, &placed, 1.0, DVec3::ZERO).expect("transforms");
         let mut found = Vec::new();
         joint_lines(&world, &poses, &mut |from, to, id| {
             found.push((from, to, id))
@@ -1038,7 +1042,7 @@ mod tests {
         super::super::tests::floor(&mut world);
         rig(&mut world);
         let wall = Transform {
-            translation: Vec3::new(0.0, 1.5, 4.0),
+            translation: DVec3::new(0.0, 1.5, 4.0),
             scale: Vec3::new(4.0, 2.0, 0.05),
             ..Transform::IDENTITY
         };
@@ -1048,7 +1052,7 @@ mod tests {
         };
         world.spawn((wall, fixed, BoxCollider3D::default()));
         let at = Transform {
-            translation: Vec3::new(0.0, 1.5, -4.0),
+            translation: DVec3::new(0.0, 1.5, -4.0),
             ..Transform::IDENTITY
         };
         let fired = RigidBody3D {
@@ -1063,6 +1067,6 @@ mod tests {
         world.spawn((at, fired, ball));
         step(&mut world, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0xd442_bfba_3900_f1d2, "{content:#018x}");
+        assert_eq!(content, 0xa721_426b_9615_ba06, "{content:#018x}");
     }
 }

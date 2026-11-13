@@ -3,7 +3,7 @@
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
-use gg_core::math::Vec3;
+use gg_core::math::{DVec3, Vec3};
 
 use crate::draw::Poses;
 use crate::interpolation::Past;
@@ -86,7 +86,8 @@ impl Default for Light {
 }
 
 impl Light {
-    /// It as the renderer shades with it, from `position`, shining along `direction`.
+    /// It as the renderer shades with it, from `position`, from the frame's origin, shining along
+    /// `direction`.
     fn lit(&self, position: Vec3, direction: Vec3) -> gg_renderer::Light {
         // KHR_lights_punctual keeps a spot's angles to 0 <= inner < outer <= a quarter turn; the
         // renderer keeps them apart, past an inner that's caught up with its outer.
@@ -115,8 +116,9 @@ impl Light {
 #[derive(Default)]
 pub(crate) struct Lit {
     lights: Vec<gg_renderer::Light>,
-    /// The world they were found in, by its serial, and its version and change tick then.
-    seen: Option<(u64, u64, u64)>,
+    /// The world they were found in, by its serial, and its version and change tick then, and the
+    /// frame's origin they're from.
+    seen: Option<(u64, u64, u64, DVec3)>,
     /// Whether one was on its way between ticks then, which the next frame finds again.
     moving: bool,
 }
@@ -131,17 +133,17 @@ impl Lit {
     /// having started at change tick `started`, placed as `placed` has it, as [`lights`] does:
     /// again, if it's another world, or the same with rows changed, a light, a light's transform
     /// or its parent changed, `placed` placed one again, one is on its way between ticks, or was
-    /// last frame; or else as they were.
+    /// last frame, or the frame's origin, `origin`, moved; or else as they were.
     pub(crate) fn find(
         &mut self,
         world: &World,
         past: &Past,
         placed: &Placed,
-        alpha: f32,
+        (alpha, origin): (f32, DVec3),
         started: u64,
     ) {
         let (serial, version) = world.version();
-        let seen = self.seen.replace((serial, version, world.change_tick()));
+        let seen = (self.seen).replace((serial, version, world.change_tick(), origin));
         let (Some(light), Some(transform)) =
             (world.component::<Light>(), world.component::<Transform>())
         else {
@@ -160,13 +162,13 @@ impl Lit {
             !past.instead_of(index).is_empty() || blends && marks.since(started.saturating_sub(1))
         };
         let moving = tables().any(moved) || placed.moving().iter().any(|&entity| lit(entity));
-        let same = seen.is_some_and(|(was, then, tick)| {
+        let same = seen.is_some_and(|(was, then, tick, from)| {
             let changed = |table: &crate::ecs::Table| {
                 let ids = [Some(light), Some(transform), parent].into_iter().flatten();
                 ids.filter_map(|id| table.changed(id))
                     .any(|marks| marks.since(tick))
             };
-            (was, then) == (serial, version)
+            (was, then, from) == (serial, version, origin)
                 && !self.moving
                 && !moving
                 && !tables().any(|(_, table)| changed(table))
@@ -174,19 +176,19 @@ impl Lit {
         });
         self.moving = moving;
         if !same {
-            lights(world, past, placed, alpha, &mut self.lights);
+            lights(world, past, placed, (alpha, origin), &mut self.lights);
         }
     }
 }
 
 /// Puts in `lit`, in place of what it held, the lights of `world` as it draws `alpha` of the way on
-/// from `past`, placed as `placed` has it: each from where its entity draws, shining along the
-/// entity's -Z as it faces then.
+/// from `past`, placed as `placed` has it: each from where its entity draws, from `origin`, the
+/// frame's, shining along the entity's -Z as it faces then.
 pub(crate) fn lights(
     world: &World,
     past: &Past,
     placed: &Placed,
-    alpha: f32,
+    (alpha, origin): (f32, DVec3),
     lit: &mut Vec<gg_renderer::Light>,
 ) {
     lit.clear();
@@ -195,7 +197,7 @@ pub(crate) fn lights(
     else {
         return;
     };
-    let Some(poses) = Poses::new(world, past, placed, alpha) else {
+    let Some(poses) = Poses::new(world, past, placed, alpha, origin) else {
         return;
     };
     for (index, table) in world.tables().iter().enumerate() {
@@ -205,7 +207,7 @@ pub(crate) fn lights(
         let lights = table.column::<Light>(light).unwrap_or_default();
         for (row, light) in lights.iter().enumerate() {
             let (position, rotation) = poses.pose(index, row);
-            lit.push(light.lit(position, rotation * Vec3::NEG_Z));
+            lit.push(light.lit((position - origin).as_vec3(), rotation * Vec3::NEG_Z));
         }
     }
 }
@@ -226,7 +228,7 @@ mod tests {
         world.register::<Transform>().expect("registered");
         world.register::<Light>().expect("described");
         let turned = Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            translation: DVec3::new(1.0, 2.0, 3.0),
             rotation: Quat::from_rotation_y(FRAC_PI_2),
             ..Transform::default()
         };
@@ -240,7 +242,7 @@ mod tests {
             ..Light::default()
         };
         let ahead = Transform {
-            translation: Vec3::new(0.0, 0.0, -1.0),
+            translation: DVec3::new(0.0, 0.0, -1.0),
             ..Transform::default()
         };
         let child = world.spawn((ahead, spot));
@@ -251,7 +253,7 @@ mod tests {
             &world,
             &Past::default(),
             &Placed::of(&world, &Past::default(), 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             &mut lit,
         );
         let [light] = lit[..] else {
@@ -343,9 +345,9 @@ mod tests {
             past.resolve(&world);
             placed.place(&world);
             placed.draw(&world, &past, alpha, started, None);
-            kept.find(&world, &past, &placed, alpha, started);
+            kept.find(&world, &past, &placed, (alpha, DVec3::ZERO), started);
             let mut fresh = Vec::new();
-            lights(&world, &past, &placed, alpha, &mut fresh);
+            lights(&world, &past, &placed, (alpha, DVec3::ZERO), &mut fresh);
             assert_eq!(kept.lights(), fresh, "after {what}");
             world.advance();
         }

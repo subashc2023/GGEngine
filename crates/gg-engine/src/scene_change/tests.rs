@@ -421,7 +421,7 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
             entity: one,
             component: "Transform".into(),
             path: "translation.x".to_owned(),
-            value: Value::F32(x),
+            value: Value::F64(f64::from(x)),
         }],
     };
     let x = |cx: &Context| {

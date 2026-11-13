@@ -117,7 +117,7 @@ use gg_engine::egui::{
     ViewportId,
 };
 use gg_engine::grid::{self, Plane};
-use gg_engine::math::{Quat, Vec2, Vec3};
+use gg_engine::math::{DVec3, Quat, Vec2};
 use gg_engine::reflect::{self, Reflect};
 use gg_engine::{
     App, Context, Docked, EntityId, Event, FileDialog, Inspector, InspectorLink, Key, Layer,
@@ -1715,7 +1715,7 @@ impl Game {
     /// runs along the plane, or meets it behind the camera, under `at` on the plane through the
     /// editor's camera's pivot facing the view, which sees as the game's camera does while that
     /// drives the view. `None` until a frame that projects has come.
-    fn landing(&self, at: [f64; 2], view: Option<Viewport>, scale: f32) -> Option<Vec3> {
+    fn landing(&self, at: [f64; 2], view: Option<Viewport>, scale: f32) -> Option<DVec3> {
         let (seen, screen) = self.seen.zip(self.screen(view))?;
         let plane = grid::shown(&seen, self.view.toolbar.plane);
         let sight = Sight::new(seen, screen, scale)?;
@@ -2147,7 +2147,7 @@ fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
         gg_api::Projection::Perspective { fov, near } => Projection::Perspective { fov, near },
     };
     Viewpoint {
-        position: Vec3::from_array(given.position),
+        position: DVec3::from_array(given.position),
         rotation: Quat::from_array(given.rotation),
         projection,
     }
@@ -2397,7 +2397,7 @@ impl Layer for Game {
             Some(scenes::Chosen::Open(path)) => self.open(path),
             Some(scenes::Chosen::New) => self.act(Action::New),
             Some(scenes::Chosen::Frame(center, radius)) => {
-                (self.view.camera).frame_sphere(Vec3::from_array(center), radius);
+                (self.view.camera).frame_sphere(DVec3::from_array(center), radius);
             }
             None => {}
         }
@@ -2908,6 +2908,7 @@ mod tests {
     use gg_api::view::Writer;
     use gg_api::{By, Look, Outline};
     use gg_engine::Key;
+    use gg_engine::math::DVec2;
 
     use super::*;
     use crate::assets::tests::{Scratch, find, texts};
@@ -3931,7 +3932,7 @@ mod tests {
         update(&mut game);
         assert!(!game.view.toolbar.world_camera, "the editor's camera");
         let seen = game.view.camera.viewpoint();
-        assert_eq!(seen.position.truncate(), Vec2::new(1.0, 2.0), "as it saw");
+        assert_eq!(seen.position.truncate(), DVec2::new(1.0, 2.0), "as it saw");
         update(&mut game);
         let mine = Parts {
             viewpoint: Some(api_viewpoint(&game.view.camera.viewpoint())),
@@ -3965,7 +3966,7 @@ mod tests {
         update(&mut game);
         assert!(!game.view.toolbar.world_camera, "the editor's camera");
         let seen = game.view.camera.viewpoint();
-        assert_eq!(seen.position.truncate(), Vec2::new(-3.0, 1.0), "as it saw");
+        assert_eq!(seen.position.truncate(), DVec2::new(-3.0, 1.0), "as it saw");
         update(&mut game);
         assert_eq!(looks(&ends).len(), 1, "its viewpoint and the grid");
         answer(mine, 3);
@@ -4156,7 +4157,7 @@ mod tests {
         let seen = game.view.camera.viewpoint();
         assert_eq!(
             seen.position.truncate(),
-            Vec2::new(1.0, 2.0),
+            DVec2::new(1.0, 2.0),
             "from the frames'"
         );
         let mine = Parts {
@@ -4196,7 +4197,7 @@ mod tests {
             update(&mut game);
         }
         let seen = game.view.camera.viewpoint();
-        assert_eq!(seen.position.truncate(), Vec2::new(-3.0, 1.0), "taken");
+        assert_eq!(seen.position.truncate(), DVec2::new(-3.0, 1.0), "taken");
         assert_eq!(looks(&ends), [], "taken, and settled");
         // Back to the game's camera, with the toolbar's switch, for which a test sets the field.
         game.view.toolbar.world_camera = true;
@@ -4276,7 +4277,11 @@ mod tests {
         game.view.toolbar.world_camera = false;
         game.update(&mut cx, Duration::ZERO);
         let seen = game.view.camera.viewpoint();
-        assert_eq!(seen.position.truncate(), Vec2::new(1.0, 2.0), "the frame's");
+        assert_eq!(
+            seen.position.truncate(),
+            DVec2::new(1.0, 2.0),
+            "the frame's"
+        );
         let sent = Look {
             viewpoint: Some(Some(api_viewpoint(&seen))),
             grid: Some(Some(gg_api::Plane::Xy)),
@@ -5108,10 +5113,10 @@ mod tests {
         game.size = Some(VIEW.size);
         game.let_go(&rock, [560.0, 290.0], Some(VIEW), SCALE);
         let at = landed(&game);
-        assert!(at.abs_diff_eq(Vec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
+        assert!(at.abs_diff_eq(DVec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
         // Looking along the ground, 1 unit above it.
         let along = Viewpoint {
-            position: Vec3::new(0.0, 1.0, 10.0),
+            position: DVec3::new(0.0, 1.0, 10.0),
             rotation: Quat::IDENTITY,
             projection: Projection::Perspective {
                 fov: 1.0,
@@ -5177,6 +5182,6 @@ mod tests {
         let at = Transform::from_value(placed)
             .expect("a transform")
             .translation;
-        assert!(at.abs_diff_eq(Vec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
+        assert!(at.abs_diff_eq(DVec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
     }
 }

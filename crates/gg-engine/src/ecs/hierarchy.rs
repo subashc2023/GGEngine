@@ -8,7 +8,7 @@
 
 use std::iter;
 
-use gg_core::math::{Mat4, Quat};
+use gg_core::math::{DAffine3, Quat};
 use gg_core::{Error, Result};
 
 use super::{Component, Entity, EntityId, Operation, World};
@@ -83,12 +83,12 @@ impl Component for Parent {}
 /// frames draw it once they've drawn up to the tick, rather than where they draw it on the way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
-    /// The matrix from its own space to the world's: its root's [`Transform`]'s times each of its
-    /// descendants' in turn down to its own, as drawing places it, bit for bit. An ancestor without
-    /// a transform carries its children as though its transform were the identity, at its parent's
-    /// origin, unturned and unscaled, and an entity without one is placed so too. Its last column
-    /// is where its origin is.
-    pub matrix: Mat4,
+    /// The matrix from its own space to the world's, in `f64`: its root's [`Transform`]'s times
+    /// each of its descendants' in turn down to its own, as drawing places it, bit for bit. An
+    /// ancestor without a transform carries its children as though its transform were the identity,
+    /// at its parent's origin, unturned and unscaled, and an entity without one is placed so too.
+    /// Its last column is where its origin is.
+    pub matrix: DAffine3,
     /// Which way it faces: its own rotation turned by each of its ancestors' in turn, their scales
     /// aside, as the world's camera faces from it, so that a mirrored ancestor mirrors where it is
     /// but not which way it faces; multiplied from its root down, as the matrix is. A root's is
@@ -100,7 +100,7 @@ pub struct Pose {
 impl Pose {
     /// The world's origin, unturned, at its own size: where a root's parent would be.
     pub const IDENTITY: Self = Self {
-        matrix: Mat4::IDENTITY,
+        matrix: DAffine3::IDENTITY,
         rotation: Quat::IDENTITY,
     };
 }
@@ -290,18 +290,18 @@ impl World {
         let space = match to.map(|to| self.pose(to)) {
             Some(Ok(pose)) => pose.matrix,
             Some(Err(_)) => return vec![reparent],
-            None => Mat4::IDENTITY,
+            None => DAffine3::IDENTITY,
         };
         let (scale, rotation, translation) =
             (space.inverse() * placed.matrix).to_scale_rotation_translation();
         let finite = scale.is_finite() && rotation.is_finite() && translation.is_finite();
-        if space.determinant() == 0.0 || !finite {
+        if space.matrix3.determinant() == 0.0 || !finite {
             return vec![reparent];
         }
         let local = Transform {
             translation,
-            rotation: rotation.normalize(),
-            scale,
+            rotation: rotation.as_quat().normalize(),
+            scale: scale.as_vec3(),
         };
         let set = Operation::Set {
             entity,
@@ -319,7 +319,7 @@ impl World {
     /// chain some thousands deep would overflow the stack with: kept on the stack to the depths
     /// games nest to, so that it allocates nothing, as a sound that follows an entity reads it each
     /// frame, and in a list past them.
-    fn placed(&self, entity: Entity) -> Option<(Mat4, Quat)> {
+    fn placed(&self, entity: Entity) -> Option<(DAffine3, Quat)> {
         const NEAR: usize = 32;
         let (mut near, mut far) = ([NONE; NEAR], Vec::new());
         let lineage = iter::successors(Some(entity.index), |&at| {
@@ -459,10 +459,13 @@ impl World {
 pub(super) mod tests {
     use std::num::NonZeroU32;
 
+    use gg_core::math::DVec3;
+
     use super::*;
     use crate::placed::Placed;
     use crate::reflect::Value;
     use crate::reflect::tests::{same_snapshots, snapshot};
+    use crate::transform::from_origin;
     use crate::{EntityId, Transform};
 
     #[derive(Clone, Copy, Debug, PartialEq, crate::Component)]
@@ -771,7 +774,7 @@ pub(super) mod tests {
         use crate::interpolation::Past;
 
         let placed = |x: f32, turn: f32, scale: [f32; 3]| Transform {
-            translation: Vec3::new(x, 0.25 * x, -0.5 * x),
+            translation: Vec3::new(x, 0.25 * x, -0.5 * x).as_dvec3(),
             rotation: Quat::from_rotation_z(turn) * Quat::from_rotation_x(0.5 * turn),
             scale: Vec3::from(scale),
         };
@@ -794,7 +797,7 @@ pub(super) mod tests {
             &world,
             &past,
             &Placed::of(&world, &past, 1.0),
-            1.0,
+            (1.0, DVec3::ZERO),
             0,
             &mut draws,
             shaders,
@@ -803,16 +806,19 @@ pub(super) mod tests {
         );
         // Its one sprite's transform, which `Debug` shows to the bit, a zero's sign too.
         let drawn = format!("{draws:?}");
-        let matrix = format!("transforms: [{:?}]", pose.matrix);
+        let matrix = format!("transforms: [{:?}]", from_origin(pose.matrix, DVec3::ZERO));
         assert!(drawn.contains(&matrix), "{matrix} in {drawn}");
         let at = world.location(child).expect("alive");
         let placed = Placed::of(&world, &past, 1.0);
-        let poses = Poses::new(&world, &past, &placed, 1.0).expect("transforms");
+        let poses = Poses::new(&world, &past, &placed, 1.0, DVec3::ZERO).expect("transforms");
         let (position, rotation) = poses.pose(at.table as usize, at.row as usize);
-        let bits = |floats: &[f32]| floats.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        let origin = pose.matrix.w_axis.truncate();
+        let bits = |floats: &[f64]| floats.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let origin = pose.matrix.translation;
         assert_eq!(bits(&origin.to_array()), bits(&position.to_array()));
-        assert_eq!(bits(&pose.rotation.to_array()), bits(&rotation.to_array()));
+        assert_eq!(
+            pose.rotation.to_array().map(f32::to_bits),
+            rotation.to_array().map(f32::to_bits)
+        );
         let root_pose = Pose {
             matrix: root_at.matrix(),
             rotation: root_at.rotation,
@@ -831,11 +837,9 @@ pub(super) mod tests {
     /// some thousands deep would overflow the stack with.
     #[test]
     fn a_pose_is_found_however_deep_its_entity_is() {
-        use gg_core::math::Vec3;
-
         let mut world = World::default();
         let step = Transform {
-            translation: Vec3::X,
+            translation: DVec3::X,
             ..Transform::IDENTITY
         };
         // Each made the parent of the root before, so that no reparent walks the chain.
@@ -847,10 +851,7 @@ pub(super) mod tests {
             root = parent;
         }
         let pose = world.pose(deepest).expect("alive");
-        assert_eq!(
-            pose.matrix.w_axis.truncate(),
-            Vec3::new(100_000.0, 0.0, 0.0)
-        );
+        assert_eq!(pose.matrix.translation, DVec3::new(100_000.0, 0.0, 0.0));
         world.despawn(root).expect("alive");
         assert!(!world.contains(deepest));
     }
@@ -870,10 +871,10 @@ pub(super) mod tests {
             rotation: Quat::from_rotation_y(turn),
             scale,
         };
-        let from = world.spawn(placed(Vec3::new(1.0, 2.0, 3.0), 0.7, Vec3::splat(2.0)));
-        let to = world.spawn(placed(Vec3::new(-4.0, 0.5, 2.0), -1.2, Vec3::splat(0.5)));
-        let flat = world.spawn(placed(Vec3::ZERO, 0.0, Vec3::new(1.0, 0.0, 1.0)));
-        let child = placed(Vec3::new(0.5, -1.0, 0.25), 0.3, Vec3::new(1.0, 2.0, 1.0));
+        let from = world.spawn(placed(DVec3::new(1.0, 2.0, 3.0), 0.7, Vec3::splat(2.0)));
+        let to = world.spawn(placed(DVec3::new(-4.0, 0.5, 2.0), -1.2, Vec3::splat(0.5)));
+        let flat = world.spawn(placed(DVec3::ZERO, 0.0, Vec3::new(1.0, 0.0, 1.0)));
+        let child = placed(DVec3::new(0.5, -1.0, 0.25), 0.3, Vec3::new(1.0, 2.0, 1.0));
         let child = world.spawn(child);
         world.set_parent(child, Some(from)).expect("no cycle");
         let bare = world.spawn(Mark(0));

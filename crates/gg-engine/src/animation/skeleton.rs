@@ -2,7 +2,7 @@
 //! skinned mesh's vertices, and the keys that move a model's parts over time; and the poses they
 //! make, which bound where a skinned mesh's vertices reach.
 
-use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+use gg_core::math::{DVec3, Mat4, Quat, Vec3, Vec4};
 
 use crate::Transform;
 
@@ -127,7 +127,7 @@ impl Channel {
     /// Sets what it moves of `transform` to `value`, as [`sample`](Self::sample) gives it.
     pub(crate) fn apply(&self, transform: &mut Transform, value: Vec4) {
         match self.path {
-            Path::Translation => transform.translation = value.truncate(),
+            Path::Translation => transform.translation = value.truncate().as_dvec3(),
             Path::Rotation => transform.rotation = Quat::from_vec4(value),
             Path::Scale => transform.scale = value.truncate(),
         }
@@ -182,7 +182,8 @@ pub(crate) fn place(
     placed: &mut [Mat4],
 ) {
     for &part in needed {
-        let own = locals[part].matrix();
+        // A model's parts are near its root, where `f32` holds.
+        let own = locals[part].matrix_from(DVec3::ZERO);
         placed[part] = parents[part].map_or(own, |parent| placed[parent] * own);
     }
 }

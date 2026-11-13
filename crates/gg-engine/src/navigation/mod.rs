@@ -311,7 +311,7 @@ impl Navigation {
         let shape = world.get::<NavMeshVolume>(volume).expect("found with one");
         let placed = world
             .pose(volume)
-            .map_or(Mat4::IDENTITY, |pose| pose.matrix);
+            .map_or(Mat4::IDENTITY, |pose| Mat4::from(pose.matrix.as_affine3a()));
         let mut volume_hash = floats(mix64(id(volume)), &placed.to_cols_array());
         volume_hash = floats(volume_hash, &shape.size.to_array());
         volume_hash = floats(
@@ -335,7 +335,7 @@ impl Navigation {
                 rotation,
                 scale,
             } = *transform;
-            let mut hash = floats(mix64(id(entity)), &translation.to_array());
+            let mut hash = floats(mix64(id(entity)), &translation.as_vec3().to_array());
             hash = floats(floats(hash, &rotation.to_array()), &scale.to_array());
             if let Some(boxed) = world.get::<BoxCollider3D>(entity) {
                 hash = floats(mix64(hash ^ 1), &boxed.offset.to_array());
@@ -406,9 +406,10 @@ fn bake_from(world: &World, volume: Entity) -> Option<NavMesh> {
     let started = Instant::now();
     let id = world.id(volume).expect("found alive");
     let shape = *world.get::<NavMeshVolume>(volume).expect("found with one");
+    // Navigation is in `f32`, as precise as that within some 16 km of the origin.
     let placed = world
         .pose(volume)
-        .map_or(Mat4::IDENTITY, |pose| pose.matrix);
+        .map_or(Mat4::IDENTITY, |pose| Mat4::from(pose.matrix.as_affine3a()));
     let half = shape.size.abs() * 0.5;
     let corners = (0..8).map(|bits: u32| {
         let sign = |bit: u32| if bits & bit == 0 { -1.0 } else { 1.0 };
@@ -473,7 +474,7 @@ fn bake_from(world: &World, volume: Entity) -> Option<NavMesh> {
 fn shapes_of(world: &World, entity: Entity) -> Vec<Shape> {
     let transform = *world.get::<Transform>(entity).expect("found with one");
     let (rotation, scale) = (unit(transform.rotation), transform.scale);
-    let place = |at: Vec3| transform.translation + rotation * at;
+    let place = |at: Vec3| transform.translation.as_vec3() + rotation * at;
     let mut shapes = Vec::new();
     if let Some(boxed) = world.get::<BoxCollider3D>(entity) {
         let half = (boxed.size * scale).abs() * 0.5;
@@ -579,6 +580,7 @@ pub(crate) fn draw_navigation(
         return;
     };
     let width = WIDTH * scale;
+    let from_origin = Mat4::from_translation(-poses.origin().as_vec3());
     let mut line = |from: Vec3, to: Vec3, color: Vec4, id: u64| {
         let line = Line {
             from: from + LIFT,
@@ -586,7 +588,8 @@ pub(crate) fn draw_navigation(
             color,
             width,
         };
-        draws.push_line(shaders, Mat4::IDENTITY, line, id);
+        // The navmesh is the world's, in `f32`, drawn from the frame's origin.
+        draws.push_line(shaders, from_origin, line, id);
     };
     let Some(mesh) = navigation.mesh.as_deref() else {
         return;
@@ -618,6 +621,7 @@ pub(crate) fn draw_navigation(
             };
             let id = world.id(entity).expect("a table's rows are alive").get();
             let (at, _) = poses.pose(index, row);
+            let at = at.as_vec3();
             let floor = mesh.floor_under(at).unwrap_or(first.y);
             let mut from = Vec3::new(at.x, floor, at.z);
             for &corner in left {

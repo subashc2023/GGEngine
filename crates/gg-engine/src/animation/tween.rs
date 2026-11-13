@@ -3,7 +3,7 @@
 use std::f32::consts::PI;
 use std::mem;
 
-use gg_core::math::{Quat, Vec2, Vec3, Vec4, libm};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
 use tracing::warn;
 
@@ -129,7 +129,9 @@ pub enum TweenValue {
     /// For a field of an `f32` or an `f64`, as a script's numbers are, or a vector's component.
     Number(f64),
     Vec2(Vec2),
-    Vec3(Vec3),
+    /// For an `f32` vector or an `f64` one, as an entity's translation is: in `f64`s, so that a
+    /// tween far from the origin ends where it's told.
+    Vec3(DVec3),
     Vec4(Vec4),
     /// For a rotation, a unit quaternion.
     Quat(Quat),
@@ -155,6 +157,12 @@ impl From<Vec2> for TweenValue {
 
 impl From<Vec3> for TweenValue {
     fn from(v: Vec3) -> Self {
+        Self::Vec3(v.as_dvec3())
+    }
+}
+
+impl From<DVec3> for TweenValue {
+    fn from(v: DVec3) -> Self {
         Self::Vec3(v)
     }
 }
@@ -178,7 +186,8 @@ impl TweenValue {
             Value::F32(x) => Self::Number(x.into()),
             Value::F64(x) => Self::Number(x),
             Value::Vec2(v) => Self::Vec2(v),
-            Value::Vec3(v) => Self::Vec3(v),
+            Value::Vec3(v) => Self::Vec3(v.as_dvec3()),
+            Value::DVec3(v) => Self::Vec3(v),
             Value::Vec4(v) => Self::Vec4(v),
             Value::Quat(q) => Self::Quat(q),
             _ => return None,
@@ -325,7 +334,7 @@ impl Target {
             Some(part) => {
                 let size = match fields[index].ty {
                     reflect::Type::Vec2 => 2,
-                    reflect::Type::Vec3 => 3,
+                    reflect::Type::Vec3 | reflect::Type::DVec3 => 3,
                     reflect::Type::Vec4 => 4,
                     _ => 0,
                 };
@@ -401,6 +410,10 @@ fn eased_value(
                     v[i] = x as f32;
                     Value::Vec4(v)
                 }
+                (&Value::DVec3(mut v), Some(i)) => {
+                    v[i] = x;
+                    Value::DVec3(v)
+                }
                 _ => return Err(unlike(held, part, from, to)),
             }
         }
@@ -408,7 +421,10 @@ fn eased_value(
             Value::Vec2(a * (1.0 - t) + b * t)
         }
         (TweenValue::Vec3(a), TweenValue::Vec3(b), Value::Vec3(_), None) => {
-            Value::Vec3(a * (1.0 - t) + b * t)
+            Value::Vec3((a * (1.0 - t64) + b * t64).as_vec3())
+        }
+        (TweenValue::Vec3(a), TweenValue::Vec3(b), Value::DVec3(_), None) => {
+            Value::DVec3(a * (1.0 - t64) + b * t64)
         }
         (TweenValue::Vec4(a), TweenValue::Vec4(b), Value::Vec4(_), None) => {
             Value::Vec4(a * (1.0 - t) + b * t)
@@ -426,7 +442,7 @@ fn eased_value(
 /// if it's a vector's component that the tween eases.
 fn unlike(held: &Value, part: Option<usize>, from: &TweenValue, to: &TweenValue) -> Error {
     let holds = match part {
-        Some(_) => "F32, one of a vector's components",
+        Some(_) => "a number, one of a vector's components",
         None => reflect::kind(held),
     };
     Error::new(
@@ -540,11 +556,11 @@ mod tests {
         world.tween(entity, tween).expect("a field of a vector");
         run(&mut world, 32);
         let half = transform(&world, entity).translation;
-        assert_eq!(half, Vec3::new(2.0, 1.0, 0.0));
+        assert_eq!(half, DVec3::new(2.0, 1.0, 0.0));
         run(&mut world, 32);
         assert_eq!(
             transform(&world, entity).translation,
-            Vec3::new(4.0, 2.0, 0.0)
+            DVec3::new(4.0, 2.0, 0.0)
         );
         assert_eq!(world.get::<Tweens>(entity), Some(&Tweens(Vec::new())));
         let waiting = Tween {
@@ -556,7 +572,22 @@ mod tests {
         assert_eq!(transform(&world, entity).translation.y, 2.0, "waiting");
         run(&mut world, 17);
         let moved = transform(&world, entity).translation;
-        assert_eq!(moved, Vec3::new(4.0, 0.5, 0.0), "the rest left as it was");
+        assert_eq!(moved, DVec3::new(4.0, 0.5, 0.0), "the rest left as it was");
+    }
+
+    /// A tween of a translation 1,000 km out moves it in `f64`: halfway between two points 20 cm
+    /// apart, to the micrometer, where `f32` would be 6 mm off.
+    #[test]
+    fn a_far_translation_tweens_in_f64() {
+        let mut world = World::default();
+        let entity = world.spawn(Transform::IDENTITY);
+        let [from, to] = [0.3, 0.5].map(|x| DVec3::new(1.0e6 + x, -1.0e6, 0.0));
+        let tween = Tween::new("Transform", "translation", from, to, 1.0);
+        world.tween(entity, tween).expect("a field of a vector");
+        run(&mut world, 32);
+        let half = transform(&world, entity).translation;
+        let want = DVec3::new(1.0e6 + 0.4, -1.0e6, 0.0);
+        assert!(half.abs_diff_eq(want, 1e-6), "{half}");
     }
 
     /// A loop starts again at its end, a ping-pong comes back, and both stay within a round; a

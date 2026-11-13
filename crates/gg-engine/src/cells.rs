@@ -12,7 +12,7 @@ use std::mem;
 use std::path::Path;
 use std::sync::Arc;
 
-use gg_core::math::{IVec3, Vec3};
+use gg_core::math::{DVec3, IVec3};
 use gg_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -99,10 +99,11 @@ impl fmt::Display for Cell {
 }
 
 impl Cell {
-    /// The cell `point` is in, of cells `size` on a side: each axis's `floor(point / size)`, held
-    /// to an `i32`'s range, a NaN at 0.
-    pub(crate) fn at(point: Vec3, size: f32) -> Self {
-        let axis = |x: f32| (x / size).floor() as i32;
+    /// The cell `point` is in, of cells `size` on a side: each axis's `floor(point / size)`, in
+    /// `f64`, as positions are, held to an `i32`'s range, a NaN at 0.
+    pub(crate) fn at(point: DVec3, size: f32) -> Self {
+        let size = f64::from(size);
+        let axis = |x: f64| (x / size).floor() as i32;
         Self(IVec3::new(axis(point.x), axis(point.y), axis(point.z)))
     }
 
@@ -333,7 +334,7 @@ impl World {
 
     /// The cell `point` is in, under the world's [`Cells`]: `None` in a world without one, or
     /// whose size isn't finite and positive.
-    pub fn cell_at(&self, point: Vec3) -> Option<Cell> {
+    pub fn cell_at(&self, point: DVec3) -> Option<Cell> {
         let (_, cells, _) = self.world_cells()?;
         let size = cells.size;
         (size.is_finite() && size > 0.0).then(|| Cell::at(point, size))
@@ -412,8 +413,12 @@ impl World {
         *full = false;
         viewers.clear();
         for (entity, viewer) in self.query::<(Entity, &Viewer)>() {
-            let at = self.pose(entity).expect("alive").matrix.w_axis;
-            let at = [at.x, at.y, at.z].map(f64::from);
+            let at = self
+                .pose(entity)
+                .expect("alive")
+                .matrix
+                .translation
+                .to_array();
             viewers.push((at, f64::from(viewer.radius)));
         }
         viewers.extend(extra);
@@ -501,7 +506,7 @@ impl World {
             }
             let at = self
                 .get::<Transform>(entity)
-                .map_or(Vec3::ZERO, |at| at.translation);
+                .map_or(DVec3::ZERO, |at| at.translation);
             let id = self.id(entity).expect("alive");
             roots.push((Cell::at(at, size), id, entity));
         }
@@ -534,8 +539,13 @@ impl World {
                 }
             }
             if owner == Some(player) {
-                let at = self.pose(entity).expect("alive").matrix.w_axis;
-                viewers.push(([at.x, at.y, at.z].map(f64::from), f64::from(viewer.radius)));
+                let at = self
+                    .pose(entity)
+                    .expect("alive")
+                    .matrix
+                    .translation
+                    .to_array();
+                viewers.push((at, f64::from(viewer.radius)));
                 own.push(root);
             }
         }
@@ -551,7 +561,7 @@ impl World {
         for (root, _) in self.query::<(Entity, &Streamed)>() {
             let at = self
                 .get::<Transform>(root)
-                .map_or(Vec3::ZERO, |at| at.translation);
+                .map_or(DVec3::ZERO, |at| at.translation);
             if self.parent(root).expect("alive").is_some()
                 || own.contains(&root)
                 || seen.cells.cells_in.contains(&Cell::at(at, size))

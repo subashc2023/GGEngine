@@ -501,6 +501,14 @@ fn changes(
             }
         }
     };
+    let float64s = |a: &[f64], b: &[f64], out: &mut Vec<(String, Value)>| {
+        let parts = reflect::COMPONENTS.into_iter().zip(a.iter().zip(b));
+        for (name, (&x, &y)) in parts {
+            if !same_f64(x, y) {
+                out.push((reflect::join(&path, name), Value::F64(y)));
+            }
+        }
+    };
     match (a, b) {
         (Value::Struct(x), Value::Struct(y)) if same_names(x, y) => {
             for ((name, x), (_, y)) in x.iter().zip(y) {
@@ -515,6 +523,7 @@ fn changes(
         (Value::Vec2(x), Value::Vec2(y)) => floats(x.as_ref(), y.as_ref(), out),
         (Value::Vec3(x), Value::Vec3(y)) => floats(x.as_ref(), y.as_ref(), out),
         (Value::Vec4(x), Value::Vec4(y)) => floats(x.as_ref(), y.as_ref(), out),
+        (Value::DVec3(x), Value::DVec3(y)) => float64s(x.as_ref(), y.as_ref(), out),
         _ => {
             if !same(a, ours, b, theirs) {
                 out.push((path, b.clone()));
@@ -599,6 +608,11 @@ fn first(
         let (name, (&x, &y)) = parts.find(|(_, (x, y))| !same_f32(**x, **y))?;
         Some((reflect::join(&path, name), Value::F32(x), Value::F32(y)))
     };
+    let float64s = |a: &[f64], b: &[f64]| {
+        let mut parts = reflect::COMPONENTS.into_iter().zip(a.iter().zip(b));
+        let (name, (&x, &y)) = parts.find(|(_, (x, y))| !same_f64(**x, **y))?;
+        Some((reflect::join(&path, name), Value::F64(x), Value::F64(y)))
+    };
     match (a, b) {
         (Value::Struct(x), Value::Struct(y)) if same_names(x, y) => {
             let mut fields = x.iter().zip(y);
@@ -613,6 +627,7 @@ fn first(
         (Value::Vec2(x), Value::Vec2(y)) => floats(x.as_ref(), y.as_ref()),
         (Value::Vec3(x), Value::Vec3(y)) => floats(x.as_ref(), y.as_ref()),
         (Value::Vec4(x), Value::Vec4(y)) => floats(x.as_ref(), y.as_ref()),
+        (Value::DVec3(x), Value::DVec3(y)) => float64s(x.as_ref(), y.as_ref()),
         _ => (!same(a, ours, b, theirs)).then(|| (path, a.clone(), b.clone())),
     }
 }
@@ -627,10 +642,15 @@ pub(super) fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
     };
     match (a, b) {
         (&Value::F32(x), &Value::F32(y)) => same_f32(x, y),
-        (&Value::F64(x), &Value::F64(y)) => x.to_bits() == y.to_bits() || x.is_nan() && y.is_nan(),
+        (&Value::F64(x), &Value::F64(y)) => same_f64(x, y),
         (Value::Vec2(x), Value::Vec2(y)) => floats(x.as_ref(), y.as_ref()),
         (Value::Vec3(x), Value::Vec3(y)) => floats(x.as_ref(), y.as_ref()),
         (Value::Vec4(x), Value::Vec4(y)) => floats(x.as_ref(), y.as_ref()),
+        (Value::DVec3(x), Value::DVec3(y)) => x
+            .to_array()
+            .into_iter()
+            .zip(y.to_array())
+            .all(|(x, y)| same_f64(x, y)),
         (Value::Quat(x), Value::Quat(y)) => floats(&x.to_array(), &y.to_array()),
         (&Value::Entity(x), &Value::Entity(y)) => ours.id(x) == theirs.id(y),
         (&Value::Texture(x), &Value::Texture(y)) => {
@@ -664,6 +684,11 @@ fn same_f32(x: f32, y: f32) -> bool {
     x.to_bits() == y.to_bits() || x.is_nan() && y.is_nan()
 }
 
+/// As [`same_f32`].
+fn same_f64(x: f64, y: f64) -> bool {
+    x.to_bits() == y.to_bits() || x.is_nan() && y.is_nan()
+}
+
 /// Whether two structs' or variants' fields are the same fields, in the same order.
 fn same_names(x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]) -> bool {
     x.len() == y.len() && x.iter().zip(y).all(|((m, _), (n, _))| m == n)
@@ -674,6 +699,11 @@ fn leaves(out: &mut String, world: &World, at: &str, value: &Value) {
     let floats = |out: &mut String, xs: &[f32]| {
         for (name, &x) in reflect::COMPONENTS.into_iter().zip(xs) {
             leaves(out, world, &reflect::join(at, name), &Value::F32(x));
+        }
+    };
+    let float64s = |out: &mut String, xs: &[f64]| {
+        for (name, &x) in reflect::COMPONENTS.into_iter().zip(xs) {
+            leaves(out, world, &reflect::join(at, name), &Value::F64(x));
         }
     };
     match value {
@@ -690,6 +720,7 @@ fn leaves(out: &mut String, world: &World, at: &str, value: &Value) {
         Value::Vec2(v) => floats(out, v.as_ref()),
         Value::Vec3(v) => floats(out, v.as_ref()),
         Value::Vec4(v) => floats(out, v.as_ref()),
+        Value::DVec3(v) => float64s(out, v.as_ref()),
         _ => {
             out.push_str(at);
             out.push(' ');
@@ -701,9 +732,11 @@ fn leaves(out: &mut String, world: &World, at: &str, value: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::Vec2;
     #[cfg(feature = "dev")]
-    use gg_core::math::{Quat, Vec3};
+    use gg_core::math::DVec3;
+    #[cfg(feature = "dev")]
+    use gg_core::math::Quat;
+    use gg_core::math::Vec2;
 
     use super::*;
     use crate::Transform;
@@ -915,7 +948,7 @@ mod tests {
         // The file saved again: a moved and counted on, b gone, c moved, d under a without its
         // count, and two entities more, one under the other, which holds a, and the other it.
         let moved = |x| Transform {
-            translation: Vec3::new(x, 0.0, 0.0),
+            translation: DVec3::new(x, 0.0, 0.0),
             ..Transform::IDENTITY
         };
         file.insert(a, moved(2.0)).expect("alive");
@@ -1042,7 +1075,7 @@ mod tests {
         file.insert(
             x,
             Transform {
-                translation: Vec3::X,
+                translation: DVec3::X,
                 ..Transform::IDENTITY
             },
         )
