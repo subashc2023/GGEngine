@@ -272,10 +272,13 @@ impl AnyColumn for Column {
         to.len = self.len;
     }
 
-    fn digest(&self, rows: &[Entity], key: u64, world: &World) -> u64 {
+    fn digest(&self, rows: &[Entity], key: u64, world: &World, hidden: &[bool]) -> u64 {
         // As a Rust struct's derived digest: each field's, in their order.
         (0..self.len).zip(rows).fold(0, |sum, (row, &entity)| {
-            let term = hash::term(entity, key, world, |to| {
+            if hash::hidden(hidden, entity) {
+                return sum;
+            }
+            let term = hash::term(entity, key, world, hidden, |to| {
                 for slot in self.row(row) {
                     slot.reflect().digest(to);
                 }

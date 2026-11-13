@@ -6,7 +6,7 @@ use std::fmt;
 
 use super::id::mix64;
 use super::{Entity, EntityId, World};
-use crate::cells::{Cell, CellState};
+use crate::cells::{Cell, CellState, Seen};
 use crate::reflect::Reflect;
 use crate::{Font, Model, Prefab, Texture};
 
@@ -59,6 +59,9 @@ pub struct Digest<'w> {
     state: u64,
     /// Whose IDs an entity a value holds is written by.
     world: &'w World,
+    /// The slots whose entities read as dead, as a client's view leaves them out, as `hidden`
+    /// reads them.
+    hidden: &'w [bool],
 }
 
 impl Digest<'_> {
@@ -90,9 +93,14 @@ impl Digest<'_> {
         self.state = absorb_bytes(self.state, bytes);
     }
 
-    /// By its ID, the world's handle being its own, or 0 if it isn't alive.
+    /// By its ID, the world's handle being its own, or 0 if it isn't alive or is hidden, as a
+    /// client's load of a view without it finds it dead.
     pub(crate) fn entity(&mut self, entity: Entity) {
-        self.word(self.world.id(entity).map_or(0, EntityId::get));
+        let id = self
+            .world
+            .id(entity)
+            .filter(|_| !hidden(self.hidden, entity));
+        self.word(id.map_or(0, EntityId::get));
     }
 
     /// By its name, its ID or else its path, the renderer's handle being its own, or 0 if it has
@@ -178,25 +186,46 @@ fn cells(cells: &CellState) -> u64 {
     cells.refused.iter().fold(state, cell)
 }
 
-/// The sum of the terms of `values`, components of the type keyed `key`, which are `rows`'s: each
-/// from its entity's ID, the key and what the value writes.
-pub(super) fn terms<T: Reflect>(values: &[T], rows: &[Entity], key: u64, world: &World) -> u64 {
+/// Whether `entity` is hidden, as `hidden`, by slot, has it, a client's view's [`Seen::hidden`];
+/// none past its end.
+pub(super) fn hidden(hidden: &[bool], entity: Entity) -> bool {
+    hidden.get(entity.slot()).copied().unwrap_or(false)
+}
+
+/// The sum of the terms of `values`, components of the type keyed `key`, which are `rows`'s, but
+/// for those `hidden` has, as [`hidden()`] reads it: each from its entity's ID, the key and what the
+/// value writes.
+pub(super) fn terms<T: Reflect>(
+    values: &[T],
+    rows: &[Entity],
+    key: u64,
+    world: &World,
+    hidden: &[bool],
+) -> u64 {
     values.iter().zip(rows).fold(0, |sum, (value, &entity)| {
-        sum.wrapping_add(term(entity, key, world, |to| value.digest(to)))
+        if self::hidden(hidden, entity) {
+            return sum;
+        }
+        sum.wrapping_add(term(entity, key, world, hidden, |to| value.digest(to)))
     })
 }
 
 /// The term of the world's hash of `entity`'s component of the type whose key is `key`, whose
-/// value `digest` writes, as [`Reflect::digest`] does.
+/// value `digest` writes, as [`Reflect::digest`] does, the entities `hidden` has reading as dead.
 pub(super) fn term(
     entity: Entity,
     key: u64,
     world: &World,
+    hidden: &[bool],
     digest: impl FnOnce(&mut Digest<'_>),
 ) -> u64 {
     let id = world.id(entity).expect("a table's rows are alive");
     let state = absorb(absorb(TERM, id.get()), key);
-    let mut to = Digest { state, world };
+    let mut to = Digest {
+        state,
+        world,
+        hidden,
+    };
     digest(&mut to);
     to.state
 }
@@ -205,7 +234,17 @@ impl World {
     /// The world's hash, which a run that must go as another did compares at each tick: reading
     /// every component, without allocating.
     pub fn hash(&self) -> WorldHash {
+        self.hash_seen(None)
+    }
+
+    /// The hash of the world that [`save_seen`](Self::save_seen) writes of what `seen` sees, as
+    /// its load gives it, without allocating: as [`hash`](Self::hash), but for the entities it
+    /// hides, whose rows it skips and which a value naming one reads as dead, and with its cells'
+    /// state in place of the world's, in a world that has one. `None` is the world whole.
+    pub(crate) fn hash_seen(&self, seen: Option<&Seen>) -> WorldHash {
         let _zone = gg_core::zone!();
+        let hidden = seen.map_or(&[][..], |seen| &seen.hidden[..]);
+        let shown = |entity: &&Entity| !self::hidden(hidden, **entity);
         let id = |entity| self.id(entity).map_or(0, EntityId::get);
         let mut content = 0u64;
         let mut layout = absorb(LAYOUT, self.tables.len() as u64);
@@ -216,15 +255,19 @@ impl World {
             for (&component, column) in table.components().iter().zip(table.columns()) {
                 let key = self.components.key(component);
                 types = types.wrapping_add(key);
-                content = content.wrapping_add(column.digest(table.entities(), key, self));
+                let sum = column.digest(table.entities(), key, self, hidden);
+                content = content.wrapping_add(sum);
             }
             layout = absorb(layout, types);
-            layout = absorb(layout, table.entities().len() as u64);
-            for &entity in table.entities() {
+            let rows = table.entities().iter().filter(shown);
+            layout = absorb(layout, rows.clone().count() as u64);
+            for &entity in rows {
                 layout = absorb(layout, id(entity));
             }
         }
-        for &entity in self.tables.iter().flat_map(|table| table.entities()) {
+        // A view hides an entity with what's under it, so that a parent shown has its children.
+        let entities = self.tables.iter().flat_map(|table| table.entities());
+        for &entity in entities.filter(shown) {
             let children = self.children(entity).expect("a table's rows are alive");
             let mut children = children.peekable();
             if children.peek().is_none() {
@@ -239,11 +282,13 @@ impl World {
             layout = absorb(layout, count);
         }
         layout = absorb(layout, self.stream.state());
+        let state = self.resource::<CellState>();
+        let state = match seen {
+            Some(seen) => state.map(|_| &seen.cells),
+            None => state,
+        };
         // So that a world whose cells never came in hashes as it did before worlds had cells.
-        let streamed = self
-            .resource::<CellState>()
-            .filter(|state| !state.is_empty());
-        if let Some(state) = streamed {
+        if let Some(state) = state.filter(|state| !state.is_empty()) {
             layout = absorb(layout, cells(state));
         }
         WorldHash { content, layout }

@@ -52,6 +52,7 @@ use gg_core::{Error, Result};
 use tracing::{info, warn};
 
 use crate::assets::Asset;
+use crate::cells::Seen;
 use crate::luau::ModText;
 use crate::recording::text::{Text, read_mod, read_named};
 use crate::reflect::Value;
@@ -92,6 +93,10 @@ pub(crate) struct Of<'r> {
     pub(crate) open: &'r Open,
     pub(crate) scripts: &'r [(String, String)],
     pub(crate) mods: &'r [ModText],
+    /// What a server's client sees of the world, as its snapshot holds it: the world written and
+    /// hashed as [`World::save_seen`] and [`World::hash_seen`] say, and the texts of the world's
+    /// cells' files, which a client never reads, left out. `None` for the world whole.
+    pub(crate) seen: Option<&'r Seen>,
 }
 
 /// The text of the snapshot file of what `of` says, app `app`'s, whose layers are `layers`, from
@@ -127,6 +132,7 @@ pub(crate) fn write_paused(
         open,
         scripts,
         mods,
+        seen,
     } = *of;
     let mut out = String::new();
     let written = "a string takes any text";
@@ -135,7 +141,7 @@ pub(crate) fn write_paused(
     writeln!(out, "engine {}", engine()).expect(written);
     writeln!(out, "layers {}", layers.join(" ")).expect(written);
     writeln!(out, "ticks {ticks}").expect(written);
-    writeln!(out, "hash {}", world.hash()).expect(written);
+    writeln!(out, "hash {}", world.hash_seen(seen)).expect(written);
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
     }
@@ -155,7 +161,15 @@ pub(crate) fn write_paused(
         crate::recording::text::write_mod(&mut out, text);
         out.push('\n');
     }
-    for scene in cached {
+    let folder = seen
+        .and(world.world_cells())
+        .map(|(_, cells, _)| &cells.folder);
+    let cell_file = |scene: &SceneFile| {
+        let name = folder.and_then(|folder| scene.author.strip_prefix(folder.as_str()));
+        let name = name.and_then(|name| name.strip_prefix('/'));
+        name.and_then(crate::cells::Cell::of_file).is_some()
+    };
+    for scene in cached.iter().filter(|scene| !cell_file(scene)) {
         if let Some(path) = scene.path.to_str() {
             let strings = [path, &scene.author, &scene.text];
             let strings = strings.map(|string| Value::String(string.to_owned()));
@@ -165,7 +179,7 @@ pub(crate) fn write_paused(
         }
     }
     write_scenes(&mut out, scenes, open, world);
-    world.save_whole(&mut out)?;
+    world.save_seen(&mut out, seen)?;
     match run {
         Run::Playing => {}
         #[cfg(feature = "dev")]
@@ -832,6 +846,7 @@ mod tests {
             open,
             scripts: &[],
             mods: &[],
+            seen: None,
         };
         super::write(&of, run, app, layers, ticks)
     }
@@ -930,6 +945,7 @@ mod tests {
             open: &open,
             scripts: &scripts,
             mods: &mods,
+            seen: None,
         };
         let text = super::write(&of, &Run::Playing, "Tested", &["Tester"], 77);
         let text = text.expect("written");
@@ -1124,6 +1140,7 @@ mod tests {
             open: &none,
             scripts: &[],
             mods: &[],
+            seen: None,
         };
         let held = Run::Held {
             world: Box::new(world.clone()),

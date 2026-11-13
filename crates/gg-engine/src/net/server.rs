@@ -2,9 +2,10 @@
 //! describes, and serves it to clients, [`Client`](super::Client)s (`--connect`): it runs its ticks
 //! in real time on its own layers' commands and on each client's inputs, which apply in the order
 //! their ticks have them, each tick's at the first the server runs that's its tick or past it, once
-//! those before have; and after each tick it sends each client the world's text, compressed
-//! against the text it sent after the latest tick the client has said it has, with the world's
-//! hash, as the client's state.
+//! those before have; and after each tick it sends each client the text of what it sees of the
+//! world, the world but for the cells near no viewer of its own, as `World::seen_by` says,
+//! compressed against the text it sent after the latest tick the client has said it has, with the
+//! hash of what it sees, as the client's state.
 //!
 //! A client's stream is lines as a lockstep session's are, as [the session's](super) say, but for
 //! these:
@@ -48,12 +49,13 @@
 //!
 //! A server's ticks allocate, for their states.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::mem;
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
@@ -64,10 +66,11 @@ use super::{
     AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Queued, Turn, engine, listen, port_of, read_batches,
     tick_of,
 };
-use crate::World;
 use crate::args::Conditions;
+use crate::cells::{Cell, Seen};
 use crate::layer::Commands;
 use crate::recording::text;
+use crate::{World, WorldHash};
 
 /// The hello's first part, the protocol and its version, which a client's must be: a change to the
 /// lines or the packets takes it to the next.
@@ -98,9 +101,6 @@ pub(crate) struct Server {
     clients: Vec<Remote>,
     /// The server's own layers' commands for the tick about to run, each with its layer's index.
     ours: Vec<(usize, String)>,
-    /// The world's text after each of the latest [`KEPT`] ticks, by tick, which a client's state is
-    /// compressed against; none while no client has joined.
-    texts: BTreeMap<u64, String>,
     /// What a packet is read into.
     buffer: Vec<u8>,
     /// How many times the server sent a client its world, how many states it sent, and their bytes.
@@ -127,6 +127,11 @@ struct Remote {
     lead: i64,
     /// The latest tick it has said it has the state after.
     have: Option<u64>,
+    /// The cells it saw as its last state was written, as [`World::seen_by`] has them; and the
+    /// text of each of its latest [`KEPT`] states, by tick, which its next is compressed against,
+    /// shared with the clients that saw the world alike.
+    cells: BTreeSet<Cell>,
+    texts: BTreeMap<u64, Arc<str>>,
 }
 
 impl Server {
@@ -147,7 +152,6 @@ impl Server {
             random: 0,
             clients: Vec::new(),
             ours: Vec::new(),
-            texts: BTreeMap::new(),
             buffer: vec![0; 1 << 16],
             served: [0; 3],
             unsaved: false,
@@ -173,6 +177,8 @@ impl Server {
                     newest: None,
                     lead: 0,
                     have: None,
+                    cells: BTreeSet::new(),
+                    texts: BTreeMap::new(),
                 }),
                 Err(error) => warn!(code = "net.link", "Can't take a client: {error}"),
             }
@@ -237,22 +243,35 @@ impl Server {
     }
 
     /// Between ticks, the next to run being `next`: sends each client the server owes its world
-    /// `world`, a snapshot file's text, with its player and where the server's packets come from,
-    /// after which its inputs are needed from `next` on.
-    pub(crate) fn send_world(&mut self, world: &str, next: u64) {
+    /// what `write` gives of `world`, a snapshot file's text of what the client sees, as
+    /// [`World::seen_by`] has it, with its player and where the server's packets come from, after
+    /// which its inputs are needed from `next` on. A client whose world `write` doesn't give stays
+    /// owed it.
+    pub(crate) fn send_world(
+        &mut self,
+        world: &World,
+        write: &mut dyn FnMut(Option<&Seen>) -> Option<String>,
+        next: u64,
+    ) {
         for client in &mut self.clients {
             let Some(player) = client.player.filter(|_| client.owed) else {
+                continue;
+            };
+            let seen = world.seen_by(player, &BTreeSet::new());
+            let Some(text) = write(Some(&seen)) else {
                 continue;
             };
             client.owed = false;
             client.link.joined = false;
             client.inputs.clear();
             client.stream.clear();
+            client.texts.clear();
+            client.cells = seen.cells.cells_in;
             (client.next, client.newest, client.lead, client.have) = (next, None, 0, None);
             let port = client.link.port();
             match client
                 .link
-                .send(&format!("world {next} {player} {port}\n{world}"))
+                .send(&format!("world {next} {player} {port}\n{text}"))
             {
                 Ok(()) => {
                     info!(player, tick = next, "Sent a client the world");
@@ -312,33 +331,46 @@ impl Server {
         merged
     }
 
-    /// Once tick `tick` has run, leaving `world`: sends each joined client its state, the world's
-    /// text and hash, against the text after the latest tick the client has said it has, if the
-    /// server still keeps it, and whole otherwise, with the first tick of its inputs not applied
-    /// and how early its latest came; and keeps the text.
+    /// Once tick `tick` has run, leaving `world`: sends each joined client its state, the text and
+    /// hash of what it sees of the world, as [`World::seen_by`] has it, each view written and
+    /// hashed once for the clients that see alike, against the text it was sent after the latest
+    /// tick it has said it has, if it still keeps it, and whole otherwise, with the first tick of
+    /// its inputs not applied and how early its latest came; and keeps the text.
     pub(crate) fn end_tick(&mut self, tick: u64, world: &World) {
-        if !self.clients.iter().any(|client| client.link.joined) {
-            self.texts.clear();
-            return;
-        }
-        let mut text = String::new();
-        if let Err(error) = world.save_whole(&mut text) {
-            if !mem::replace(&mut self.unsaved, true) {
-                warn!(
-                    code = error.code(),
-                    "Can't send the clients the world, which they don't correct to: {error:#}"
-                );
-            }
-            return;
-        }
-        let hash = world.hash();
         let Self {
             clients,
-            texts,
             served,
+            unsaved,
             ..
         } = self;
+        let mut views: Vec<(Seen, Arc<str>, WorldHash)> = Vec::new();
         for client in clients.iter_mut().filter(|client| client.link.joined) {
+            let Some(player) = client.player else {
+                continue;
+            };
+            let seen = world.seen_by(player, &client.cells);
+            let at = match views.iter().position(|(view, ..)| *view == seen) {
+                Some(at) => at,
+                None => {
+                    let mut text = String::new();
+                    if let Err(error) = world.save_seen(&mut text, Some(&seen)) {
+                        if !mem::replace(unsaved, true) {
+                            warn!(
+                                code = error.code(),
+                                "Can't send the clients the world, which they don't correct to: \
+                                 {error:#}"
+                            );
+                        }
+                        return;
+                    }
+                    let hash = world.hash_seen(Some(&seen));
+                    views.push((seen, text.into(), hash));
+                    views.len() - 1
+                }
+            };
+            let (seen, text, hash) = &views[at];
+            client.cells.clone_from(&seen.cells.cells_in);
+            let texts = &client.texts;
             let base = client.have.and_then(|have| Some((have, texts.get(&have)?)));
             let compressed = match base {
                 Some((_, base)) => zstd::bulk::Compressor::with_dictionary(LEVEL, base.as_bytes())
@@ -371,10 +403,10 @@ impl Server {
             }
             served[1] += 1;
             served[2] += bytes.len() as u64;
-        }
-        texts.insert(tick, text);
-        while texts.len() > KEPT {
-            texts.pop_first();
+            client.texts.insert(tick, Arc::clone(text));
+            while client.texts.len() > KEPT {
+                client.texts.pop_first();
+            }
         }
     }
 
@@ -637,6 +669,8 @@ mod tests {
             newest: None,
             lead: 0,
             have: None,
+            cells: BTreeSet::new(),
+            texts: BTreeMap::new(),
         };
         let next = 10;
         let packet = |text: &str| text.as_bytes().to_vec();
@@ -789,13 +823,63 @@ mod tests {
         );
     }
 
-    /// A server brings cells in and takes them out around the viewers its clients' commands move,
-    /// and its states carry them, and what they keep, to each client, which comes to the server's
-    /// world, hashing alike, though its own ticks bring none in.
+    /// A command of [`Players`]': puts player `player`'s viewer at x `x`.
+    #[derive(Clone, Copy, Debug, Reflect)]
+    struct Move {
+        player: u8,
+        x: f32,
+    }
+
+    /// Builds a world of cells as it attaches, of the cells
+    /// [`project`](crate::cells::tests::project) makes, 10 units on a side, with a viewer of a
+    /// radius of 10 for each of players 0 and 1, at x 5 and 35, and moves each as its commands say.
+    #[derive(Default)]
+    struct Players(Vec<Move>);
+
+    impl crate::Layer for Players {
+        fn attach(&mut self, cx: &mut Context) {
+            let world = cx.world_mut();
+            world.spawn(crate::Cells {
+                folder: "cells".to_owned(),
+                size: 10.0,
+            });
+            for (player, x) in [(0, 5.0), (1, 35.0)] {
+                let at = crate::Transform {
+                    translation: gg_core::math::Vec3::new(x, 0.0, 0.0),
+                    ..crate::Transform::IDENTITY
+                };
+                let viewer = crate::Viewer { radius: 10.0 };
+                world.spawn((at, viewer, crate::Owner { player }));
+            }
+        }
+
+        fn tick(&mut self, world: &mut World, _: crate::Tick) {
+            for Move { player, x } in self.0.drain(..) {
+                let mut owned = world.query::<(crate::Entity, &crate::Owner)>();
+                let viewer = owned.find(|(_, owner)| owner.player == player);
+                let Some(viewer) = viewer.map(|(viewer, _)| viewer) else {
+                    continue;
+                };
+                let at = world.get_mut::<crate::Transform>(viewer).expect("placed");
+                at.translation.x = x;
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.0)
+        }
+    }
+
+    /// A server brings cells in and takes them out around its clients' viewers, as their commands
+    /// move them, and sends each client only what it sees: the world but for the cells near no
+    /// viewer of its own, the cells it sees its cells' state, what the cells out keep staying on
+    /// the server; each client comes to its view of the server's world, hashing as the server's
+    /// view for it, though its own ticks bring no cell in; and a client joining late starts from
+    /// its view, without a cell's entities or file while it has no viewer.
     #[test]
-    fn a_server_s_clients_take_its_cells_with_its_states() {
+    fn a_server_s_clients_get_their_own_cells() {
         use crate::cells::CellState;
-        use crate::cells::tests::{Walk, Walker, id_of, project, xs};
+        use crate::cells::tests::{id_of, project, xs};
         use crate::dirs::tests::Scratch;
 
         let (codes, logged) = mpsc::channel();
@@ -804,37 +888,109 @@ mod tests {
         let dir = Scratch::new("server-cells");
         let root = project(&dir.0);
         let serve = Net::Serve("127.0.0.1:0".to_owned());
-        let mut server = Node::of(&serve, Context::seeded(1).root(&root), Walker::default());
+        let mut server = Node::of(&serve, Context::seeded(1).root(&root), Players::default());
         let address = match server.stack.session_mut() {
             Some(Session::Server(server)) => server.listening.to_string(),
             _ => panic!("a server"),
         };
         let connect = Net::Connect(address);
-        let client = Node::of(&connect, Context::seeded(2).root(&root), Walker::default());
-        let mut clients = [client];
-        until(&mut server, &mut clients, |_, clients| clients[0].joined());
-        assert!(clients[0].cx.client);
-        for (step, cells) in [
-            (Walk::Viewer(25.0), vec![0, 1, 2, 3]),
-            (Walk::Crate(12.0), vec![0, 1, 2, 3]),
-            (Walk::Viewer(100.0), vec![]),
-            (Walk::Viewer(5.0), vec![0, 1]),
-        ] {
-            let queue = clients[0].stack.commands_of(0).expect("a queue");
-            queue.push(&step.to_value()).expect("queued");
-            until(&mut server, &mut clients, |server, clients| {
-                let (ours, theirs) = (server.cx.world(), clients[0].cx.world());
-                xs(ours) == cells && ours.hash() == theirs.hash()
+        let node = |seed| {
+            Node::of(
+                &connect,
+                Context::seeded(seed).root(&root),
+                Players::default(),
+            )
+        };
+        let mut clients = vec![node(2), node(3)];
+        until(&mut server, &mut clients, |_, clients| {
+            clients.iter().all(Node::joined)
+        });
+        clients.sort_by_key(|client| client.cx.player());
+        assert_eq!(clients[1].cx.player(), Some(1));
+        // Whether each client holds what it sees, each player's cells, hashing as the server's view
+        // of the world for it.
+        let viewing = |server: &Node, clients: &[Node], cells: &[&[i32]]| {
+            let world = server.cx.world();
+            clients.iter().zip(cells).all(|(client, &cells)| {
+                let theirs = client.cx.world();
+                let had = theirs.cells_in().collect();
+                let player = client.cx.player().expect("a player");
+                let seen = world.seen_by(player, &had);
+                xs(theirs) == cells && theirs.hash() == world.hash_seen(Some(&seen))
+            })
+        };
+        // Each step's move, the server's cells in, and the cells each of players 0 and 1 sees:
+        // player 1's viewer, at x 35, keeps cell 1 in on the server, within its radius and half a
+        // cell, but doesn't see it, as it didn't; and player 0's, at x 24, sees cell 0 still,
+        // within its radius and half a cell, as it did.
+        type Step = (Option<Move>, &'static [i32], [&'static [i32]; 2]);
+        let walk: [Step; 4] = [
+            (None, &[0, 1, 2, 3], [&[0, 1], &[2, 3]]),
+            (
+                Some(Move {
+                    player: 0,
+                    x: 100.0,
+                }),
+                &[1, 2, 3],
+                [&[], &[2, 3]],
+            ),
+            (
+                Some(Move { player: 0, x: 5.0 }),
+                &[0, 1, 2, 3],
+                [&[0, 1], &[2, 3]],
+            ),
+            (
+                Some(Move { player: 0, x: 24.0 }),
+                &[0, 1, 2, 3],
+                [&[0, 1, 2, 3], &[2, 3]],
+            ),
+        ];
+        let mut walk = walk.into_iter();
+        let mut step = |server: &mut Node, clients: &mut [Node]| {
+            let (moved, all, cells) = walk.next().expect("a step");
+            if let Some(moved) = moved {
+                let queue = clients[0].stack.commands_of(0).expect("a queue");
+                queue.push(&moved.to_value()).expect("queued");
+            }
+            until(server, clients, |server, clients| {
+                xs(server.cx.world()) == all && viewing(server, clients, &cells)
             });
-            let state = |node: &Node| node.cx.world().resource::<CellState>().cloned();
-            assert_eq!(state(&clients[0]), state(&server), "{step:?}");
-        }
-        let world = clients[0].cx.world();
-        let entity = world.entity(id_of(1)).expect("in");
-        let at = world.get::<crate::Transform>(entity).expect("placed");
-        assert_eq!(at.translation.x, 12.0, "as the server left it");
+            for client in &*clients {
+                let world = client.cx.world();
+                let state = world.resource::<CellState>().expect("streamed");
+                assert!(state.kept.is_empty() && state.files.is_empty(), "{state:?}");
+                for cell in 0..4 {
+                    let shown = world.entity(id_of(cell)).is_some();
+                    assert_eq!(shown, xs(world).contains(&cell), "cell {cell}'s entity");
+                }
+            }
+        };
+        step(&mut server, &mut clients[..]);
+        step(&mut server, &mut clients[..]);
+        let state = server.cx.world().resource::<CellState>().expect("streamed");
+        assert_eq!(state.kept.len(), 1, "cell 0's, kept on the server");
+
+        // A third client, without a viewer.
+        clients.push(node(4));
+        until(&mut server, &mut clients, |_, clients| clients[2].joined());
+        let late = &clients[2];
+        assert_eq!(late.cx.player(), Some(2));
+        assert!((0..4).all(|cell| late.cx.world().entity(id_of(cell)).is_none()));
+        let cell_file = |file: &crate::scene_files::SceneFile| file.author.starts_with("cells/");
+        assert!(server.cx.scenes.cached.iter().any(cell_file));
+        assert!(!late.cx.scenes.cached.iter().any(cell_file));
+        let state = late.cx.world().resource::<CellState>();
+        assert_eq!(state, Some(&CellState::default()));
+        step(&mut server, &mut clients[..]);
+        step(&mut server, &mut clients[..]);
         let codes: Vec<String> = logged.try_iter().collect();
-        let parted = ["net.desync", "net.bad_command", "net.bad_state", "net.lost"];
+        let parted = [
+            "net.desync",
+            "net.bad_command",
+            "net.bad_state",
+            "net.lost",
+            "snapshot.hash",
+        ];
         assert!(
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"

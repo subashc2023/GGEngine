@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::ecs::Parsed;
 use crate::package::{self, Files};
-use crate::{Component, Entity, EntityId, Saved, Transform, World};
+use crate::{Component, Entity, EntityId, Owner, Saved, Transform, World};
 
 /// The most cells in a world at once: past it the nearest come in, and the run warns
 /// (`cells.full`), so that a radius set too wide can't load a world into memory.
@@ -248,6 +248,29 @@ impl Saved for CellState {
     }
 }
 
+/// What a server's client sees of the world, as [`World::seen_by`] finds it, which its states hold,
+/// as [`World::save_seen`] writes them and [`World::hash_seen`] hashes them: by slot, whether the
+/// entity there is hidden, a streamed root of a cell it doesn't see or what's under one, so that no
+/// entity shown has a child hidden, none past its end; and the cells' state its world holds in
+/// place of the server's, the cells it sees in and nothing else, what the cells out keep staying
+/// on the server.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Seen {
+    pub(crate) hidden: Vec<bool>,
+    pub(crate) cells: CellState,
+}
+
+/// The square of the distance from `cell`, of cells `size` on a side, to the nearest of `viewers`,
+/// each where it is and its radius, whose radius and `reach` reach it, if one does.
+fn nearest_viewer(viewers: &[([f64; 3], f64)], cell: Cell, reach: f64, size: f64) -> Option<f64> {
+    let near = viewers.iter().filter_map(|&(at, radius)| {
+        let distance = cell.distance_squared(at, size);
+        let reach = radius + reach;
+        (reach >= 0.0 && distance <= reach * reach).then_some(distance)
+    });
+    near.min_by(f64::total_cmp)
+}
+
 /// What a cell brings in as it comes in, each text parsed as [`World::parse_scene`] parses it: its
 /// file's, with the file's digest, while its file is yet to come in, as what the cell keeps then
 /// stands for it; and each text it keeps, in turn.
@@ -398,16 +421,7 @@ impl World {
         }
         roots.sort_unstable_by_key(|&(cell, id, _)| (cell, id));
         let size = f64::from(size);
-        // The square of the distance from `cell` to the nearest viewer whose radius and `reach`
-        // reach it, if one does.
-        let nearest = |cell: Cell, reach: f64| {
-            let near = viewers.iter().filter_map(|&(at, radius)| {
-                let distance = cell.distance_squared(at, size);
-                let reach = radius + reach;
-                (reach >= 0.0 && distance <= reach * reach).then_some(distance)
-            });
-            near.min_by(f64::total_cmp)
-        };
+        let nearest = |cell: Cell, reach: f64| nearest_viewer(viewers, cell, reach, size);
         let empty = CellState::default();
         let state = self.resource::<CellState>().unwrap_or(&empty);
         for &cell in &state.cells_in {
@@ -477,6 +491,69 @@ impl World {
                 false => strays.push((cell, root)),
             }
         }
+    }
+
+    /// What player `player`'s client sees of the world, as a server's states send it, `had` the
+    /// cells it saw: of the cells in, each within the radius of a [`Viewer`] of its own, one that
+    /// it or an ancestor's [`Owner`] says is the player's, and each it saw within the radius and
+    /// half a cell, as the cells' own step has them; and every entity but the streamed roots of
+    /// the cells it doesn't see, but one that is or holds a viewer of its own, with what's under
+    /// them. A viewer no player owns is no client's. Nothing hidden and no cell seen in a world
+    /// without [`Cells`], or whose size isn't finite and positive.
+    pub(crate) fn seen_by(&self, player: u8, had: &BTreeSet<Cell>) -> Seen {
+        let _zone = gg_core::zone!();
+        let mut seen = Seen::default();
+        let size = self.world_cells().map(|(_, cells, _)| cells.size);
+        let Some(size) = size.filter(|size| size.is_finite() && *size > 0.0) else {
+            return seen;
+        };
+        let (mut viewers, mut own) = (Vec::new(), Vec::new());
+        for (entity, viewer) in self.query::<(Entity, &Viewer)>() {
+            let mut root = entity;
+            let mut owner = None;
+            loop {
+                owner = owner.or(self.get::<Owner>(root).map(|owner| owner.player));
+                match self.parent(root).expect("alive") {
+                    Some(parent) => root = parent,
+                    None => break,
+                }
+            }
+            if owner == Some(player) {
+                let at = self.pose(entity).expect("alive").matrix.w_axis;
+                viewers.push(([at.x, at.y, at.z].map(f64::from), f64::from(viewer.radius)));
+                own.push(root);
+            }
+        }
+        let wide = f64::from(size);
+        let state = self.resource::<CellState>();
+        for &cell in state.iter().flat_map(|state| &state.cells_in) {
+            let reach = if had.contains(&cell) { wide / 2.0 } else { 0.0 };
+            if nearest_viewer(&viewers, cell, reach, wide).is_some() {
+                seen.cells.cells_in.insert(cell);
+            }
+        }
+        let mut walk = Vec::new();
+        for (root, _) in self.query::<(Entity, &Streamed)>() {
+            let at = self
+                .get::<Transform>(root)
+                .map_or(Vec3::ZERO, |at| at.translation);
+            if self.parent(root).expect("alive").is_some()
+                || own.contains(&root)
+                || seen.cells.cells_in.contains(&Cell::at(at, size))
+            {
+                continue;
+            }
+            walk.push(root);
+            while let Some(entity) = walk.pop() {
+                let slot = entity.slot();
+                if seen.hidden.len() <= slot {
+                    seen.hidden.resize(slot + 1, false);
+                }
+                seen.hidden[slot] = true;
+                walk.extend(self.children(entity).expect("alive"));
+            }
+        }
+        seen
     }
 
     /// Whether `root` is a [`Viewer`], or holds one under it.

@@ -24,6 +24,7 @@ use super::id::IdStream;
 use super::scene::NO_HINTS;
 use super::table::ComponentId;
 use super::{Component, Entity, EntityId, Meta, Parent, World, next_serial};
+use crate::cells::Seen;
 use crate::recording::text::Text;
 use crate::reflect::{Field, Ident, Meta as Hints, Shape, Type, Value};
 
@@ -76,16 +77,31 @@ impl World {
     /// as no load reads; and with `snapshot.line_break` for opaque state or a resource's text that
     /// breaks its line.
     pub(crate) fn save_whole(&self, out: &mut String) -> Result<()> {
+        self.save_seen(out, None)
+    }
+
+    /// Writes what `seen` sees of the world after `out`, as [`save_whole`](Self::save_whole)
+    /// writes the world, as a server's client's state: the entities it hides left out, each
+    /// slot of theirs written as retired, at the highest generation, so that a load spawns no
+    /// entity there and the entities spawned after take the slots this world's would; and its
+    /// cells' state in place of the world's, in a world that has one. `None` is the world whole.
+    ///
+    /// Fails as `save_whole` does.
+    pub(crate) fn save_seen(&self, out: &mut String, seen: Option<&Seen>) -> Result<()> {
         use std::fmt::Write as _;
 
         use crate::recording::text;
 
         let _zone = gg_core::zone!();
+        let hidden = seen.map_or(&[][..], |seen| &seen.hidden[..]);
+        let hides = |entity: Entity| super::hash::hidden(hidden, entity);
         let text = "a string takes any text";
         writeln!(out, "stream {:016x}", self.stream.state()).expect(text);
         writeln!(out, "slots {}", self.meta.len()).expect(text);
         for (index, meta) in self.meta.iter().enumerate() {
-            if meta.generation != NonZeroU32::MIN {
+            if hidden.get(index) == Some(&true) {
+                writeln!(out, "generation {index} {}", NonZeroU32::MAX).expect(text);
+            } else if meta.generation != NonZeroU32::MIN {
                 writeln!(out, "generation {index} {}", meta.generation).expect(text);
             }
         }
@@ -94,8 +110,8 @@ impl World {
             write!(out, " {index}").expect(text);
         }
         out.push('\n');
-        let mut vacant: Vec<bool> = (self.meta.iter())
-            .map(|meta| meta.location.is_none())
+        let mut vacant: Vec<bool> = (self.meta.iter().enumerate())
+            .map(|(index, meta)| meta.location.is_none() || hidden.get(index) == Some(&true))
             .collect();
         for &index in &self.free {
             vacant[index as usize] = false;
@@ -115,6 +131,9 @@ impl World {
             }
             out.push('\n');
             for (row, &entity) in table.entities().iter().enumerate() {
+                if hides(entity) {
+                    continue;
+                }
                 write!(out, "row {} {} ", entity.index, id(entity)).expect(text);
                 let values: Vec<Value> = (table.columns().iter())
                     .map(|column| column.value(row))
@@ -142,8 +161,9 @@ impl World {
                 }
             }
         }
+        // A view hides an entity with what's under it, so that a parent shown has its children.
         for table in &self.tables {
-            for &entity in table.entities() {
+            for &entity in table.entities().iter().filter(|&&entity| !hides(entity)) {
                 let mut children = self.children(entity).expect("a row's entity is alive");
                 let Some(first) = children.next() else {
                     continue;
@@ -155,7 +175,7 @@ impl World {
                 out.push('\n');
             }
         }
-        self.resources.save(self, out)
+        self.resources.save(self, out, seen.map(|seen| &seen.cells))
     }
 
     /// Puts the world that `lines` give, as [`save_whole`](Self::save_whole) wrote them, each with

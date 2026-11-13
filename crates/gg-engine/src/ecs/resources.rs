@@ -7,6 +7,7 @@ use std::any::{Any, TypeId};
 use gg_core::{Error, Result};
 
 use super::World;
+use crate::cells::CellState;
 
 /// What a world holds beside its entities, one of each type: the rest of the simulation, such as
 /// [`Physics2D`](crate::Physics2D)'s bodies and contacts, so that a snapshot restored goes on as
@@ -156,11 +157,17 @@ impl Resources {
     }
 
     /// Writes each resource that saves itself after `out`, a line each, `resource`, its name and
-    /// its text, in `world`, in the order their types first came.
+    /// its text, in `world`, in the order their types first came: `cells` in place of the world's
+    /// cells' state, if it's given, as a client's view has its own.
     ///
     /// Fails as a resource's [`Saved::save`] does, with `snapshot.bad_name` for a name that isn't a
     /// word, and with `snapshot.line_break` for text with a line break.
-    pub(super) fn save(&self, world: &World, out: &mut String) -> Result<()> {
+    pub(super) fn save(
+        &self,
+        world: &World,
+        out: &mut String,
+        cells: Option<&CellState>,
+    ) -> Result<()> {
         use std::fmt::Write as _;
 
         use super::file::{one_line, one_word};
@@ -174,7 +181,10 @@ impl Resources {
                 continue;
             };
             one_word(saved.name)?;
-            let text = (saved.save)(&**resource, world)?;
+            let text = match cells.filter(|_| slot.type_id == TypeId::of::<CellState>()) {
+                Some(cells) => cells.save(world)?,
+                None => (saved.save)(&**resource, world)?,
+            };
             one_line(&text, &format!("resource `{}`", saved.name))?;
             writeln!(out, "resource {} {text}", saved.name).expect("a string takes any text");
         }

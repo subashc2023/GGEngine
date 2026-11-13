@@ -2837,6 +2837,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
             open: &open,
             scripts: &scripts,
             mods: &mods,
+            seen: None,
         };
         let written = snapshot::write_paused(&of, &run, paused, app, &layers, ticks);
         let written = written.and_then(|text| {

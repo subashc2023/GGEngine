@@ -565,6 +565,138 @@ fn a_world_s_text_holds_what_its_cells_keep() {
     assert_eq!(read.world().hash(), cx.world().hash());
 }
 
+/// What a component that aims at an entity holds.
+#[derive(Clone, Component)]
+struct Aim(Entity);
+
+/// A server's client's view of a world, written as its states are and read as its copy reads them,
+/// hashes as `hash_seen` says: the streamed roots of the cells it doesn't see gone, with what's
+/// under them, a reference to one dead, and their slots retired, so that the next entity spawned
+/// takes the slot the server's would; its cells' state its own, the cells it sees in and nothing
+/// kept. A view of a world without cells is the world whole.
+#[test]
+fn a_client_s_view_loads_as_it_hashes() {
+    let dir = Scratch::new("cells-seen");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    let world = cx.world_mut();
+    world.insert(viewer, Owner { player: 0 }).expect("alive");
+    // A viewer no player owns, keeping cells 2 and 3 in, which is no client's.
+    world.spawn((at(35.0), Viewer { radius: 10.0 }));
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [0, 1, 2, 3]);
+    let world = cx.world_mut();
+    let child = world.spawn(at(0.0));
+    let far = world.entity(id_of(3)).expect("in");
+    world.set_parent(child, Some(far)).expect("no cycle");
+    let aimed = world.entity(id_of(2)).expect("in");
+    let aimer = world.spawn(Aim(aimed));
+    // A slot freed, which the server's next spawn takes, as the client's must.
+    let freed = world.spawn(at(0.0));
+    world.despawn(freed).expect("alive");
+
+    let world = cx.world();
+    let seen = world.seen_by(0, &BTreeSet::new());
+    let mine = BTreeSet::from([0, 1].map(|x| Cell(IVec3::new(x, 0, 0))));
+    let cells = CellState {
+        cells_in: mine,
+        ..CellState::default()
+    };
+    assert_eq!(seen.cells, cells);
+    let mut text = String::new();
+    world.save_seen(&mut text, Some(&seen)).expect("saved");
+    let mut client = world.clone();
+    let lines = (1..).zip(text.lines());
+    client.load_whole(lines, true).expect("read");
+    assert_eq!(client.hash(), world.hash_seen(Some(&seen)));
+    assert_ne!(client.hash(), world.hash());
+    let shown = [0, 1, 2, 3].map(|cell| client.entity(id_of(cell)).is_some());
+    assert_eq!(shown, [true, true, false, false]);
+    let id = |entity: Entity| world.id(entity).expect("alive");
+    assert_eq!(client.entity(id(child)), None, "under a root hidden");
+    let aimer = client.entity(id(aimer)).expect("shown");
+    let aim = client.get::<Aim>(aimer).map(|aim| aim.0);
+    assert_eq!(aim, Some(Entity::DEAD));
+    assert_eq!(client.resource::<CellState>(), Some(&cells));
+    let mut server = world.clone();
+    let spawned = [&mut client, &mut server].map(|world| world.spawn(at(0.0)).slot());
+    assert_eq!(spawned, [freed.slot(); 2]);
+    let spawned = [&mut client, &mut server].map(|world| world.spawn(at(0.0)).slot());
+    assert_eq!(
+        spawned[0], spawned[1],
+        "a new slot, the hidden ones retired"
+    );
+
+    let mut plain = Context::seeded(3);
+    plain.world_mut().spawn(at(1.0));
+    let world = plain.world();
+    let seen = world.seen_by(0, &BTreeSet::new());
+    assert_eq!(seen, Seen::default());
+    let (mut whole, mut viewed) = (String::new(), String::new());
+    world.save_whole(&mut whole).expect("saved");
+    world.save_seen(&mut viewed, Some(&seen)).expect("saved");
+    assert_eq!(viewed, whole);
+    assert_eq!(world.hash_seen(Some(&seen)), world.hash());
+}
+
+/// A server's client sees the cells in within its own viewers' radius, a viewer being its own where
+/// it or an ancestor is its player's, as `Owner` says, and keeps one it saw to the radius and half a
+/// cell, as the cells' step does; it sees none of a viewer no player owns, and none without a
+/// viewer; and no view hides a streamed root holding a viewer of the client's own.
+#[test]
+fn a_client_sees_the_cells_near_its_own_viewers() {
+    let dir = Scratch::new("cells-seen-by");
+    let root = project(&dir.0);
+    // A viewer no player owns, at x 5, keeping cells 0 and 1 in.
+    let (mut cx, _) = streaming(&root, "cells");
+    step(&mut cx);
+    // The cells player `player` sees, `had` those it saw, and the cells in whose roots it hides.
+    let seen = |cx: &Context, player: u8, had: &[i32]| {
+        let world = cx.world();
+        let had = had.iter().map(|&x| Cell(IVec3::new(x, 0, 0))).collect();
+        let seen = world.seen_by(player, &had);
+        let cells: Vec<i32> = seen.cells.cells_in.iter().map(|cell| cell.0.x).collect();
+        let hidden = (0..4).filter(|&cell| {
+            let entity = world.entity(id_of(cell));
+            entity.is_some_and(|entity| seen.hidden.get(entity.slot()) == Some(&true))
+        });
+        (cells, hidden.collect::<Vec<i32>>())
+    };
+    assert_eq!(
+        seen(&cx, 0, &[]),
+        (vec![], vec![0, 1]),
+        "no player's viewer"
+    );
+
+    let world = cx.world_mut();
+    let body = world.spawn((at(24.0), Owner { player: 0 }));
+    let eye = world.spawn((Transform::IDENTITY, Viewer { radius: 10.0 }));
+    world.set_parent(eye, Some(body)).expect("no cycle");
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [0, 1, 2, 3]);
+    assert_eq!(seen(&cx, 0, &[]), (vec![1, 2, 3], vec![0]));
+    assert_eq!(seen(&cx, 0, &[0]), (vec![0, 1, 2, 3], vec![]), "kept");
+    assert_eq!(seen(&cx, 1, &[0]), (vec![], vec![0, 1, 2, 3]), "no viewer");
+    move_to(&mut cx, body, 26.0);
+    assert_eq!(
+        seen(&cx, 0, &[0]),
+        (vec![1, 2, 3], vec![0]),
+        "past half a cell"
+    );
+
+    // In cell -1, which isn't in.
+    cx.world_mut().insert(body, Streamed).expect("alive");
+    move_to(&mut cx, body, -5.0);
+    let world = cx.world();
+    let view = world.seen_by(0, &BTreeSet::new());
+    assert_eq!(seen(&cx, 0, &[]), (vec![0], vec![1, 2, 3]));
+    assert_ne!(
+        view.hidden.get(body.slot()),
+        Some(&true),
+        "its own viewer's root"
+    );
+}
+
 /// Past [`MOST_CELLS`], the nearest come in, and the plan says it's full.
 #[test]
 fn past_the_most_cells_the_nearest_come_in() {

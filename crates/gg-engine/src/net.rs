@@ -93,6 +93,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::args::{Conditions, Net};
 use crate::assets::{Asset, Counts};
+use crate::cells::Seen;
 use crate::edits::{Done, Edit};
 use crate::layer::Commands;
 use crate::recording::text::{self, Text};
@@ -1896,13 +1897,23 @@ impl Session {
         }
     }
 
-    /// Sends the world, a snapshot file's text, which names `assets` of them as the run does, to
-    /// the joiner or the clients owed it, at tick `next`, as [`Lockstep::send_world`] and
-    /// [`Server::send_world`] say.
-    pub(crate) fn send_world(&mut self, world: &str, assets: Counts, next: u64) {
+    /// Sends `world` to the joiner or the clients owed it, at tick `next`, as `write` writes it, a
+    /// snapshot file's text: whole for a joiner, as [`Lockstep::send_world`] says, and of what each
+    /// client sees, as [`Server::send_world`] says. `write` gives nothing for a world that can't
+    /// be written, which stays owed.
+    pub(crate) fn send_world(
+        &mut self,
+        world: &World,
+        write: &mut dyn FnMut(Option<&Seen>) -> Option<String>,
+        next: u64,
+    ) {
         match self {
-            Self::Peer(net) => net.send_world(world, assets, next),
-            Self::Server(server) => server.send_world(world, next),
+            Self::Peer(net) => {
+                if let Some(text) = write(None) {
+                    net.send_world(&text, world.assets().counts(), next);
+                }
+            }
+            Self::Server(server) => server.send_world(world, write, next),
             Self::Client(_) => {}
         }
     }
@@ -3242,6 +3253,7 @@ mod tests {
             open: &host.cx.scenes.open,
             scripts: &[],
             mods: &[],
+            seen: None,
         };
         let playing = &crate::snapshot::Run::Playing;
         let text = crate::snapshot::write(&of, playing, "Tested", host.stack.names(), host.next);

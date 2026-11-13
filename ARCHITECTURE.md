@@ -1008,10 +1008,10 @@ A project's state is text that people and agents edit, diff and merge with ordin
     it walked. What is or holds a viewer stays, as does what doesn't stream, as the world scene's
     own entities; what refers to a streamed entity from outside finds it gone once it's out.
   - What the world keeps of its cells, those in, those coming, the digest of each file that came
-    in, those refused and each one's texts, is a saved resource, which snapshots, a lockstep joiner
-    and a server's clients take with the world, and which the hash reads, in its layout, only in a
-    world whose cells have come in, so that every other world hashes as before. A scene change
-    empties it.
+    in, those refused and each one's texts, is a saved resource, which snapshots and a lockstep
+    joiner take with the world, and which the hash reads, in its layout, only in a world whose
+    cells have come in, so that every other world hashes as before. A scene change empties it. A
+    server's client holds only the cells it sees, as [Networking](#networking) says.
   - A run lists a folder of cells once, from its package or the disk, and reads each cell's file
     once, as it reads a scene change's, loading what the file names first, as a scene change does,
     a server's session nothing; at most 4,096 cells are in at once, the nearest first
@@ -1342,9 +1342,10 @@ alone, as Foxball's bot, a session's runs leave out.
   A client starts from its world, as a joiner from its host's, and sends its inputs, its layers'
   commands, each tick's tagged with the tick; the server applies them in their order, each tick's
   at the first tick it runs that's theirs or past it, its own layers' first and then each client's
-  by its player. After each tick it sends each client its state: the world's text, as a snapshot
-  writes it, compressed by zstd against the text of the latest state the client has said it has,
-  which is its dictionary, about 600 bytes in the demo against 34 KB whole, with the world's hash.
+  by its player. After each tick it sends each client its state: the text of what it sees of the
+  world, as a snapshot writes the world, compressed by zstd against the text of the latest state
+  the client has said it has, which is its dictionary, about 600 bytes in the demo against 34 KB
+  whole, with the hash of what it sees.
   The server's own world is the only one edited: a client refuses the tool API's edits
   (`net.no_edit`), as the server's next state would take them away.
 - **Clients predict their own player, and correct.** A client runs as far ahead of the server as
@@ -1360,10 +1361,20 @@ alone, as Foxball's bot, a session's runs leave out.
   server would, the sounds played before not played again. A queue that edits, as the Inspector's,
   goes to the server alone. A scene a tick changes to, as [Project state](#project-state) says,
   goes in on the server and on each client predicting it at the same tick, from the assets the
-  layers loaded alone. A server's cells come in around every client's viewers, and its states carry
-  every cell in, and what each out keeps, to each client, which brings none in itself, its
-  predictions corrected as a cell comes or goes. As the run ends a client logs how often it
-  corrected (`net.corrected`), and the server what it sent (`net.served`).
+  layers loaded alone. As the run ends a client logs how often it corrected (`net.corrected`), and
+  the server what it sent (`net.served`).
+- **Each client gets the cells near its own viewers.** A server's cells come in around every
+  viewer, and a client sees, of the cells in, those within the radius of a viewer of its own, one
+  whose `Owner`, or an ancestor's, names its player, and those it saw within the radius and half a
+  cell; a viewer no player owns keeps its cells in on the server, simulated, and is no client's.
+  Its states, and the world it starts from, hold the world but for the streamed roots of the cells
+  it doesn't see, with what's under them, those that hold a viewer of its own aside; their slots
+  come as retired, so that its spawns take the slots the server's would, and a value naming one
+  finds it dead. Its world's cells' state holds the cells it sees alone, what the cells out keep
+  staying on the server; the hash is of that view, as its load gives it (`World::hash_seen`); and
+  a client starts without the cell files' texts, which it never reads. The server writes each
+  view once a tick, for the clients that see alike. A client brings no cell in itself, its
+  predictions corrected as a cell comes into its view or leaves it. Physics' state goes whole.
 - **The other players draw between the server's states.** An entity whose `Owner` component names
   another player, and its descendants, draw on a client between the two states about three ticks
   behind the latest, where the time since the latest came puts it, eased so that the states'

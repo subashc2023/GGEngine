@@ -790,8 +790,9 @@ pub trait AnyColumn: Any + Send + Sync {
     fn copy_to(&self, to: &mut dyn AnyColumn);
 
     /// The sum of its values' terms of the world's hash, its type's being `key`, and the entity
-    /// each is `rows`'s at its row.
-    fn digest(&self, rows: &[Entity], key: u64, world: &World) -> u64;
+    /// each is `rows`'s at its row, but for the entities a client's view hides, by slot, which
+    /// read as dead where a value names them, as `World::hash_seen` says.
+    fn digest(&self, rows: &[Entity], key: u64, world: &World, hidden: &[bool]) -> u64;
 }
 
 impl<T: Component> AnyColumn for Vec<T> {
@@ -858,8 +859,8 @@ impl<T: Component> AnyColumn for Vec<T> {
         to.vec_mut::<T>().clone_from(self);
     }
 
-    fn digest(&self, rows: &[Entity], key: u64, world: &World) -> u64 {
-        hash::terms(self, rows, key, world)
+    fn digest(&self, rows: &[Entity], key: u64, world: &World, hidden: &[bool]) -> u64 {
+        hash::terms(self, rows, key, world, hidden)
     }
 }
 

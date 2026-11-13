@@ -347,6 +347,7 @@ fn a_run_restored_from_a_snapshot_comes_back_in_the_scene() {
         open: &cx.scenes.open,
         scripts: &[],
         mods: &[],
+        seen: None,
     };
     let text = crate::snapshot::write(&of, &Run::Playing, "Tested", &[], 1).expect("written");
     let snapshot = Snapshot::parse(text, "a test".to_owned(), "Tested").expect("read");

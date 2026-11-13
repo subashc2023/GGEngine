@@ -5439,24 +5439,28 @@ impl Stack {
                 }
                 let scripts = cx.hosts.applied();
                 let mods = cx.mods.applied();
-                let of = crate::snapshot::Of {
-                    world: &cx.world,
-                    scenes: &cx.scenes.files,
-                    cached: &cx.scenes.cached,
-                    open: &cx.scenes.open,
-                    scripts: &scripts,
-                    mods: &mods,
-                };
-                let text = crate::snapshot::write(&of, &Run::Playing, net.app(), &self.names, next);
-                match text {
-                    Ok(text) => net.send_world(&text, cx.world.assets().counts(), next),
-                    Err(error) => {
+                let (app, names) = (net.app(), &self.names);
+                // The world whole for a joiner, and what each client sees for it.
+                let mut write = |seen: Option<&crate::cells::Seen>| {
+                    let of = crate::snapshot::Of {
+                        world: &cx.world,
+                        scenes: &cx.scenes.files,
+                        cached: &cx.scenes.cached,
+                        open: &cx.scenes.open,
+                        scripts: &scripts,
+                        mods: &mods,
+                        seen,
+                    };
+                    let text = crate::snapshot::write(&of, &Run::Playing, app, names, next);
+                    let unsent = |error: Error| {
                         error!(
                             code = error.code(),
                             "Can't send the joiner or a client the world: {error:#}"
                         );
-                    }
-                }
+                    };
+                    text.map_err(unsent).ok()
+                };
+                net.send_world(&cx.world, &mut write, next);
             }
             Turn::Restore((tick, text)) => {
                 let from = format!("the host's or the server's world at tick {tick}");

@@ -1813,6 +1813,7 @@ pub(crate) mod tests {
             open: &played,
             scripts: &[],
             mods: &[],
+            seen: None,
         };
         let text = snapshot::write(&of, &run, "Tested", &[], 3).expect("written");
         assert_eq!(stack.stop(&mut cx), Some(0));
