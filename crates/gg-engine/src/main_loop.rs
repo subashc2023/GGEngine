@@ -382,15 +382,15 @@ pub(crate) type Passed = std::convert::Infallible;
 
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
 /// the frame's measure, takes what the session sent, as [`Stack::net_turn`] says, runs the ticks of
-/// the simulation that the time owes, as `stepper` steps it, a client's a little more or less, as
-/// [`Stack::paced`] says, those a lockstep peer's inputs have come for, copying where the world's
-/// entities are as each starts, updates the layers, draws the world after what they drew, as far
-/// on from where the last tick found it to where it left it as the frame is past the tick, a
-/// client's other players as [`Stack::interpolate`] says, and, given egui, the dock and egui's
-/// input in `ui`, adds the engine's settings, as [`frame_rate::settings`] does, and has the layers
-/// draw their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
-/// UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands what egui made
-/// of it to the render thread.
+/// the simulation that the time owes, as `stepper` steps it, a peer's a little less and a client's a
+/// little more or less, as [`Stack::paced`] says, those a lockstep peer's inputs have come for,
+/// copying where the world's entities are as each starts, updates the layers, draws the world after
+/// what they drew, as far on from where the last tick found it to where it left it as the frame is
+/// past the tick, a client's other players as [`Stack::interpolate`] says, and, given egui, the
+/// dock and egui's input in `ui`, adds the engine's settings, as [`frame_rate::settings`] does, and
+/// has the layers draw their UI, in the dock and with egui. Returns that pass's output, and whether
+/// any layer draws UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands
+/// what egui made of it to the render thread.
 ///
 /// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that run its
 /// pass allocate; the UI is a development overlay, and an app that draws none stops running it,

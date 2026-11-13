@@ -5843,13 +5843,10 @@ impl Stack {
         self.net.as_ref().is_some_and(|net| !net.ready(next))
     }
 
-    /// The time a frame `dt` after the last owes the simulation: a client's a little more or less,
-    /// as [`Client::pace`](crate::net::Client::pace) says, and any other run's `dt`.
+    /// The time a frame `dt` after the last owes the simulation: a networked run's as
+    /// [`Session::pace`] says, and any other run's `dt`.
     pub(crate) fn paced(&self, dt: Duration) -> Duration {
-        match &self.net {
-            Some(Session::Client(client)) => client.pace(dt),
-            _ => dt,
-        }
+        self.net.as_ref().map_or(dt, |net| net.pace(dt))
     }
 
     /// Has a client's frame, `dt` after the last, draw the other players' entities as the server's
@@ -6070,16 +6067,15 @@ impl Stack {
     }
 
     /// Offers the patch `table` names, as
-    /// [`Lockstep::offer_patch`](crate::net::Lockstep::offer_patch) does, the next tick to run
-    /// being `next`; `None` outside a lockstep session, where it applies now.
+    /// [`Lockstep::offer_patch`](crate::net::Lockstep::offer_patch) does; `None` outside a
+    /// lockstep session, where it applies now.
     #[cfg(feature = "dev")]
     pub(crate) fn offer_patch(
         &mut self,
         table: subsecond::JumpTable,
-        next: u64,
     ) -> std::result::Result<Ticket, subsecond::JumpTable> {
         match &mut self.net {
-            Some(Session::Peer(net)) => Ok(net.offer_patch(table, next)),
+            Some(Session::Peer(net)) => Ok(net.offer_patch(table)),
             _ => Err(table),
         }
     }
@@ -6436,6 +6432,7 @@ impl Stack {
         } = self;
         if let Some(net) = net.as_mut() {
             if !net.ready(tick.number) {
+                net.waited(tick.number);
                 return false;
             }
             let queues = layers.iter_mut().enumerate();

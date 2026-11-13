@@ -1319,32 +1319,50 @@ alone, as Foxball's bot, a session's runs leave out.
   the joiner's, and the edits from outside the layers that apply before it, as a recording keeps
   them: so a lockstep peer runs a tick only once it has the other's inputs for it, and frames go on
   drawing while it waits. Each tick, a peer takes what its layers queued since the last and sends it
-  as its inputs for the tick its delay on, [`DELAY`](crates/gg-engine/src/net.rs) ticks in
-  lockstep, 62.5 ms, so that the inputs reach the other peer before it needs them, and
-  `ROLLBACK_DELAY`, 31.25 ms, in a rollback session; a frame takes what came first. Inputs travel
-  as text, the values written as recordings write them, entities by their IDs and textures by their
-  names, which the joiner takes from its host, as [Project state](#project-state) says, read into
-  values only at their tick, against the world then.
-- **Rollback predicts the other's inputs.** A rollback peer runs as far as `PREDICTED` ticks, 125
-  ms, past the first it hasn't the other's inputs for, on them predicted to hold nothing: since
-  commands set what lasts in the world, as a disc's heading, that predicts the other player goes on
-  as its last commands had it. It keeps a copy of the world as each such tick starts. As the
-  other's inputs come, between frames, a tick they held nothing for ran as it would have on them,
-  and ends as a tick run on them does, its hash sent; at the first they held something for, the
-  peer takes the world back to the copy, the very world still (`World::rewind`), its serial its
-  own, so that what's kept of it holds, and runs that tick and those after again, each layer's
-  queue as it was after, and the frames draw on from where the last started. The layers are told
-  nothing, as a tick goes by the world, its commands and what its layer set up alone, which a
-  SyncTest checks. A sound that a tick run again queues and its runs before played isn't played
-  again; one they played that it doesn't queue has played. Each peer logs how often it rolled back
-  as the run ends (`net.rollback`).
+  as its inputs for the tick its delay on: `ROLLBACK_DELAY` ticks, 31.25 ms, in a rollback session,
+  and in lockstep, so that the inputs reach the other peer before it needs them, the ticks the way
+  one way takes, half the link's way there and back, and four of its deviations, as TCP smooths
+  them (RFC 6298), and one more, from 2 to 16, 31.25 ms to 250 ms, and
+  [`DELAY`](crates/gg-engine/src/net.rs), 62.5 ms, until the way is timed. A delay rises at once,
+  the ticks it passes over going out holding none of the peer's inputs, and falls to the most the
+  link has needed in the last 2 s, once that's less, so that a jittery link doesn't have it fall at
+  each lull and rise again: a tick at a time, the tick it falls holding its inputs back for the
+  next's, as that tick's have gone, so that every tick's inputs go out once. Each peer's delay is
+  its own, as a tick needs each peer's inputs once, whenever they went out; a frame takes what came
+  first. Inputs travel as text, the values written as recordings write them, entities by their IDs
+  and textures by their names, which the joiner takes from its host, as [Project
+  state](#project-state) says, read into values only at their tick, against the world then.
+- **Rollback predicts the other's inputs.** A rollback peer runs as far as its window past the
+  first tick it hasn't the other's inputs for, the ticks the way one way takes and two more, from
+  `PREDICTED`, 125 ms, to 16 ticks, 250 ms, following the link as a lockstep delay does but
+  falling at once, on them predicted to hold nothing: since commands set what lasts in the world,
+  as a disc's heading, that predicts the other player goes on as its last commands had it. It
+  keeps a copy of the world as each such tick starts. As the other's inputs come, between frames, a
+  tick they held nothing for ran as it would have on them, and ends as a tick run on them does, its
+  hash sent; at the first they held something for, the peer takes the world back to the copy, the
+  very world still (`World::rewind`), its serial its own, so that what's kept of it holds, and runs
+  that tick and those after again, each layer's queue as it was after, and the frames draw on from
+  where the last started. The layers are told nothing, as a tick goes by the world, its commands
+  and what its layer set up alone, which a SyncTest checks. A sound that a tick run again queues
+  and its runs before played isn't played again; one they played that it doesn't queue has played.
+  Each peer logs how often it rolled back as the run ends (`net.rollback`).
+- **Peers keep alike in time.** Each packet names the tick its peer runs next and how far that was
+  past the other's as the other's latest packet came; a peer's own count less the other's, halved,
+  is how far it's ahead, the way's length, even an uneven one, cancelling out, as GGPO's time sync
+  has it. A peer more than a tick ahead runs its ticks slower, 2% for each tick past the first, a
+  tenth at most, until it isn't, as a client paces its ticks: so that a rollback peer doesn't
+  predict far while the other predicts little, as a host ahead of its joiner by the time its world
+  took to come and be restored would, and a lockstep peer ahead doesn't wait for the other's
+  inputs at the link's every jitter, as it would, taking the ticks owed meanwhile at once after.
+  Each peer logs the least and most its delay or window was, and how many ticks waited for the
+  other's inputs, as the run ends (`net.delay`).
 - **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
   peer's inputs for the tick its delay on, and apply on both before it, so that a request's answer
   comes once its edit has applied. A scene file's save is an edit of the file's text, which each
   peer turns into operations against its own world at that tick, as both worlds are the same, and
   a script's save is an edit of its text, which each peer reloads; the host alone watches scene
   files and scripts. `gg run` gives both peers each patch, in the same order, and the
-  host chooses the tick it applies before, its delay on from its next as it gets it, which neither
+  host chooses the tick it applies before, that of its next inputs, its delay on, which neither
   peer has run, among its inputs for it, which tell its joiner, which waits at that tick for its
   own patch if it hasn't it yet. These, and the commands of a queue that edits
   (`Commands::edits`), as the Inspector's, apply only at a tick run on both peers' inputs, once:
@@ -1354,13 +1372,13 @@ alone, as Foxball's bot, a session's runs leave out.
   world taken back as before.
 - **A joiner starts from the host's world.** As a joiner connects, the host sends its world as a
   snapshot file's text, as it stands between two ticks, with how many patches its code is on, the
-  scripts and mods it runs, and its inputs for the ticks after, up to the first the joiner can
-  reach; the joiner runs those in place of its own, restores the world in place of its own, as
-  a run restored from a snapshot does, applies the patches the host had, and
-  goes on from that tick, its own inputs empty until the first it can reach. So a restart of
-  either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
-  frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's
-  player still.
+  scripts and mods it runs, and its inputs for the ticks after, up to the first it needs the
+  joiner's for, its delay on, which the world names; the joiner runs those in place of its own,
+  restores the world in place of its own, as a run restored from a snapshot does, applies the
+  patches the host had, and goes on from that tick, its own inputs empty until that first, which
+  its delay reaches. So a restart of either peer, after a crash or a rebuild, rejoins: a joiner
+  that loses its host waits for it, frozen, and connects again, while a host that loses its joiner
+  plays on alone, the joiner's player still.
 - **A session takes runs of its own build, and loses those gone.** A joiner's or a client's hello
   names its app, engine, layers and build, the digest of its executable's bytes, read once as the
   session starts, which fails where it can't be (`net.build`); and a host or a server refuses one
@@ -1436,8 +1454,12 @@ world, the hashes, the writing thread's lines that say it's there, and a tick's 
 an edit or a patch, name a texture the host has just named, or are too long for a packet. A
 tick's other inputs go over UDP, in packets sent at each tick and again a tick's time after the
 last, each repeating this peer's inputs for every tick the other hasn't said it has, so that a
-packet lost loses none, and naming the tick the peers' worlds were last made the same at, so that
-one sent before a resync is dropped. A server's link to each client is the same: a client's inputs go over
+packet lost loses none, naming the tick the peers' worlds were last made the same at, so that
+one sent before a resync is dropped, and timing the way: each carries its sender's clock and
+echoes the other's latest, with how long it was held, so that the time from a packet's going to
+its echo's coming, less that, is the way there and back: each turn's shortest, as packets that
+waited while a peer's frames stopped time the wait too. A server's link to each client is the
+same: a client's inputs go over
 UDP, each packet repeating those the server hasn't said it applied, or on the stream if a tick's
 are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
 state lost being lost, as the next is sent against the latest the client has. `--link` has a
@@ -1446,6 +1468,12 @@ slow link would. [net.rs](crates/gg-engine/src/net.rs) and
 [server.rs](crates/gg-engine/src/net/server.rs) have their formats and the rest. `gg run --peers 2`
 runs a host and a joiner from one build, patching both and restarting both after a rebuild, its
 arguments after `--`, as `--rollback`, given both.
+
+Sessions' links are to be secured end to end, by Phase 20's third milestone: the Noise Protocol
+Framework through `snow`, `NNpsk0` keyed by the session's code, over the stream and the packets as
+they are, each packet sealed with an explicit counter and dropped if it comes again. QUIC would
+rewrite every link for congestion control and migration that the engine doesn't need yet, and a MAC
+alone would leave a server's states readable on the path.
 
 ## Diagnostics
 

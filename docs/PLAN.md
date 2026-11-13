@@ -159,10 +159,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A world to cross** (2026-11-13)
 - **Phase 19, world streaming** (2026-11-13)
 - **Sessions that hold** (2026-11-13)
+- **Delays that follow the link** (2026-11-13)
 
 ## Now
 
-Phase 20's second milestone, delays that follow the link, as Next has it, once its plan is
+Phase 20's third milestone, sessions their players alone join, as Next has it, once its plan is
 approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
@@ -201,7 +202,7 @@ Phases 11 to 19 are done, as Done has it, but for what Deferred holds.
     thread that writes its stream, a hello's deadline, a peer or client of another build refused,
     and a player's commands steering that player alone; delays that follow the link, each link's
     round trip measured, a lockstep session's delay and a rollback session's window following it,
-    and rollback peers kept alike in time; sessions their players alone join, a session's key from
+    and peers kept alike in time; sessions their players alone join, a session's key from
     a code, every line and packet authenticated and encrypted, replays dropped; through NATs, a
     relay both ends connect out to, which pairs them by the code and can't read what it forwards,
     direct where a hole punch works; states by what changed, a server's state of the tables changed
@@ -736,13 +737,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- How a session's lines and packets are secured, for Phase 20's third milestone, which adds the
-  workspace's first cryptography. Recommendation: the Noise Protocol Framework through `snow`,
-  `NNpsk0` keyed by the session's code, over the stream and packets as they are, each packet sealed
-  with an explicit counter and a window against replays; rather than QUIC through `quinn-proto`
-  and `rustls`, which would rewrite every link for congestion control and migration the engine
-  doesn't need yet, or a MAC alone, which leaves states readable on the path. Decide before the
-  third milestone starts.
 - Where uploads go on a device whose transfer queue copies whole images alone (a granularity of
   0, 0, 0): it's refused, so they go to the compute queue's family, and async compute, which needs
   a queue of its own, is off. Recommendation: upload on the graphics queue there instead, keeping

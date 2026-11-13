@@ -161,9 +161,10 @@ Options:
                     as the snapshot's run was
   --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
-  --rollback        With --host or --join, of both peers: predict the other peer's inputs, up to
-                    8 ticks on, and roll back where a prediction missed, its ticks run again, with
-                    an input delay of 2 ticks rather than lockstep's 4
+  --rollback        With --host or --join, of both peers: predict the other peer's inputs, 8 to 16
+                    ticks on, as far as the link needs, and roll back where a prediction missed,
+                    its ticks run again, with an input delay of 2 ticks rather than lockstep's 2 to
+                    16, which follows the link
   --serve <ADDRESS> Serve the world at ADDRESS, such as `0.0.0.0:7700`, to the clients that connect,
                     as the server that owns it: without a window or a GPU, in real time, until
                     Ctrl+C, or --frames frames of a tick's time

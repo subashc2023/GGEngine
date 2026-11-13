@@ -27,8 +27,8 @@ use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::{
-    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, Queued, REFUSED, Turn, build, connect, hello,
-    tick_of, write_inputs,
+    Inputs, Link, MAX_PACKET, MAX_WORLD, MOST_PACE, Merged, PACE, Queued, REFUSED, Turn, build,
+    connect, hello, tick_of, write_inputs,
 };
 use crate::args::Conditions;
 use crate::layer::Commands;
@@ -39,12 +39,6 @@ use crate::{Entity, EntityId, Owner, Sound, Tick, Transform, World, WorldHash, i
 /// that one lost, which the next packet carries again, or held by a link's jitter, still comes in
 /// time.
 pub(super) const LEAD: u64 = 2;
-
-/// How much faster or slower than real time the client's ticks run for each tick its inputs come
-/// later or earlier than [`LEAD`], on average, and the most, which takes it back within seconds
-/// without overshooting much.
-const PACE: f64 = 0.02;
-const MOST_PACE: f64 = 0.1;
 
 /// The most ticks a client runs past the latest it has the server's state after, half a second's,
 /// after which it waits for the next state, as over a link slower than that it would.

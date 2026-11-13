@@ -1065,7 +1065,7 @@ impl Api {
                         let _ = self.taken.send(taken);
                     }
                 }
-                Call::Patch(table) => match stack.offer_patch(table, stepper.ticks) {
+                Call::Patch(table) => match stack.offer_patch(table) {
                     Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
                     Err(table) => {
                         let patched = stack.patch(table, stepper.ticks);
