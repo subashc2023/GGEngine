@@ -3,6 +3,7 @@
 //! lockstep session; or headless for a set number of frames, as a check.
 
 use std::fs::{self, TryLockError};
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -343,7 +344,8 @@ fn closes() -> Arc<AtomicBool> {
 }
 
 /// The arguments each of `peers` peers is given beside the run's: none for a game alone; for two,
-/// the host's `--host` and the joiner's `--join`, at a port of the loopback free as the run starts.
+/// the host's `--host` and the joiner's `--join`, at a port of the loopback free as the run starts,
+/// and both the session's `--code`, as [`session_code`] makes it.
 ///
 /// Fails with `gg.run` if no port is.
 fn peers_args(peers: usize) -> Result<Vec<Vec<String>>, Failure> {
@@ -357,11 +359,32 @@ fn peers_args(peers: usize) -> Result<Vec<Vec<String>>, Failure> {
             format!("no port of the loopback is free for the peers: {error}"),
         )
     })?;
-    let address = address.to_string();
-    Ok(vec![
-        vec!["--host".to_owned(), address.clone()],
-        vec!["--join".to_owned(), address],
-    ])
+    let (address, code) = (address.to_string(), session_code());
+    let session = |flag: &str| {
+        [flag, &address, "--code", &code]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    Ok(vec![session("--host"), session("--join")])
+}
+
+/// A session's code, as gg-engine's `--code` reads one: 80 bits, from `RandomState`, whose keys
+/// std seeds from the OS's randomness, written as 16 of Crockford's base-32 symbols in fours, such
+/// as `7KQ2-9XMB-4TZD-P0WH`. The peers listen on the loopback alone, so that it keeps their
+/// session from this machine's other runs.
+fn session_code() -> String {
+    const SYMBOLS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    // std steps its hashers' keys for each `RandomState`, so that the two draws differ.
+    let draw = || RandomState::new().hash_one(());
+    let bits = u128::from(draw()) << 16 | u128::from(draw() as u16);
+    let mut code = String::new();
+    for at in 0..16 {
+        if at > 0 && at % 4 == 0 {
+            code.push('-');
+        }
+        code.push(char::from(SYMBOLS[(bits >> (75 - 5 * at)) as usize & 31]));
+    }
+    code
 }
 
 /// The name of the snapshot of peer `peer`, from 0, of `package`'s game under the `gg run` of
@@ -1367,6 +1390,26 @@ mod tests {
             embedded: false,
             args: args.iter().map(|&arg| arg.to_owned()).collect(),
         }
+    }
+
+    /// Two peers are given one session's address and one code, of 16 of the symbols gg-engine
+    /// reads in fours, each run its own.
+    #[test]
+    fn two_peers_are_given_their_session_s_code() {
+        assert_eq!(peers_args(1).expect("a game's"), [Vec::<String>::new()]);
+        let [host, join] = <[_; 2]>::try_from(peers_args(2).expect("the peers'")).expect("two");
+        assert_eq!((host[0].as_str(), join[0].as_str()), ("--host", "--join"));
+        assert_eq!((&host[1..], host[2].as_str()), (&join[1..], "--code"));
+        let code = &host[3];
+        let groups: Vec<&str> = code.split('-').collect();
+        assert!(groups.iter().all(|group| group.len() == 4), "{code}");
+        let symbols = |symbol: char| symbol.is_ascii_digit() || symbol.is_ascii_uppercase();
+        assert!(
+            groups.len() == 4 && groups.concat().chars().all(symbols),
+            "{code}"
+        );
+        assert!(!code.contains(['I', 'L', 'O', 'U']), "{code}");
+        assert_ne!(session_code(), session_code());
     }
 
     #[test]

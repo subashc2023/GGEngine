@@ -18,7 +18,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::mem;
-use std::net::TcpStream;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -27,8 +26,8 @@ use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::{
-    Inputs, Link, MAX_PACKET, MAX_WORLD, MOST_PACE, Merged, PACE, Queued, REFUSED, Turn, build,
-    connect, hello, tick_of, write_inputs,
+    Code, Handshaken, Inputs, Link, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE, Queued,
+    REFUSED, Turn, build, connect, hello, tick_of, write_inputs,
 };
 use crate::args::Conditions;
 use crate::layer::Commands;
@@ -56,8 +55,11 @@ const GATHERED: usize = 4;
 
 /// A client.
 pub(crate) struct Client {
+    /// The server's address and the session's code, which it connects by, again each time it
+    /// loses the server.
     address: String,
-    connecting: Option<Receiver<TcpStream>>,
+    code: Code,
+    connecting: Option<Receiver<Handshaken>>,
     pub(super) app: &'static str,
     /// The run's build, as [`build`] says, which the server's must be.
     build: &'static str,
@@ -146,13 +148,20 @@ struct Sample {
 }
 
 impl Client {
-    /// A client of the server at `address`, for app `app`, whose layers are `layers`, from the
-    /// bottom up, which tries to connect to it in the background, until it does.
+    /// A client of the server at `address`, given the session's `code`, for app `app`, whose
+    /// layers are `layers`, from the bottom up, which tries to connect to it in the background,
+    /// until it does.
     ///
     /// Fails with `net.build` if the run's build can't be read, as [`build`] says.
-    pub(crate) fn start(address: &str, app: &'static str, layers: &[&str]) -> Result<Self> {
+    pub(crate) fn start(
+        address: &str,
+        code: Code,
+        app: &'static str,
+        layers: &[&str],
+    ) -> Result<Self> {
         Ok(Self {
             address: address.to_owned(),
+            code,
             connecting: None,
             app,
             build: build()?,
@@ -247,18 +256,36 @@ impl Client {
     }
 
     /// Connects to the server, in the background, if the client has no link, and says hello once
-    /// it has, at `now`.
+    /// it has, at `now`; logs a handshake that didn't hold, refused, trying again after
+    /// [`REFUSED`].
     fn find(&mut self, now: Instant) {
         if self.link.is_some() {
             return;
         }
-        let address = &self.address;
+        let (address, code) = (&self.address, self.code);
         let made = (self.connecting)
-            .get_or_insert_with(|| connect(address.clone(), "the server", Duration::ZERO));
-        let Ok(stream) = made.try_recv() else { return };
+            .get_or_insert_with(|| connect(address.clone(), "the server", Duration::ZERO, code));
+        let Ok(handshaken) = made.try_recv() else {
+            return;
+        };
         self.connecting = None;
+        let (stream, keys) = match handshaken {
+            Ok(made) => made,
+            Err(why) => {
+                let again = REFUSED.as_secs();
+                error!(
+                    code = "net.refused",
+                    "The server refused this client in the handshake: {why}; it tries again in \
+                     {again} s"
+                );
+                let address = self.address.clone();
+                self.connecting = Some(connect(address, "the server", REFUSED, self.code));
+                return;
+            }
+        };
         let hello = |link: &Link| hello(PROTOCOL, self.app, self.build, &self.layers, link.port());
-        match Link::new(stream, false).and_then(|mut link| link.send(hello(&link)).map(|()| link)) {
+        let link = Link::new(stream, keys, false);
+        match link.and_then(|mut link| link.send(hello(&link)).map(|()| link)) {
             Ok(link) => {
                 info!(address = %self.address, "Connected to the server");
                 self.link = Some(link);
@@ -294,7 +321,7 @@ impl Client {
                 );
                 self.lose("the server refused it");
                 let address = self.address.clone();
-                self.connecting = Some(connect(address, "the server", REFUSED));
+                self.connecting = Some(connect(address, "the server", REFUSED, self.code));
             }
             "world" => {
                 let mut words = rest.split(' ');
@@ -383,7 +410,7 @@ impl Client {
             .commands
             .iter()
             .map(|(_, command)| command.len() + 32);
-        inputs.streamed = 64 + lines.sum::<usize>() > MAX_PACKET;
+        inputs.streamed = 64 + lines.sum::<usize>() > MAX_PACKET_TEXT;
         if inputs.streamed
             && let Some(link) = &mut self.link
         {
@@ -662,7 +689,7 @@ impl Client {
 
     /// Sends the server the client's packets, once it has joined: the latest state it has, and its
     /// inputs for each tick the server hasn't said it applied that didn't go on the stream, oldest
-    /// first, as many to a packet as fit [`MAX_PACKET`], a tick's in one.
+    /// first, as many to a packet as fit [`MAX_PACKET_TEXT`], a tick's in one.
     fn send_packets(&mut self) {
         let joined = self.joined();
         let Some(link) = self.link.as_mut().filter(|_| joined) else {
@@ -679,7 +706,7 @@ impl Client {
         for (&tick, inputs) in self.ours.iter().filter(|(_, inputs)| !inputs.streamed) {
             lines.clear();
             write_inputs(&mut lines, tick, inputs);
-            if packet.len() + lines.len() > MAX_PACKET && packet.len() > header.len() {
+            if packet.len() + lines.len() > MAX_PACKET_TEXT && packet.len() > header.len() {
                 link.send_packet(packet.as_bytes());
                 packet.clone_from(&header);
             }
@@ -718,7 +745,7 @@ impl Client {
 
 /// The `size` bytes that `bytes`, as zstd compresses them, against the dictionary `base` if it's
 /// given, decompress to: read as they decompress, rather than into `size` bytes held at once, so
-/// that a state's line, which anyone at the server's address can forge, takes no more memory than
+/// that a state's line, which a hostile server may write as it likes, takes no more memory than
 /// its bytes decompress to.
 ///
 /// Fails as zstd does, and for bytes that decompress to more or fewer than `size`.
@@ -781,6 +808,7 @@ fn header(line: &str) -> Option<Header> {
 mod tests {
     use gg_core::math::{DVec3, Vec3};
 
+    use super::super::TESTED;
     use super::*;
 
     /// A transform at `x`.
@@ -801,7 +829,7 @@ mod tests {
     /// however far on, is dropped, and the server's own after it are taken.
     #[test]
     fn a_state_the_server_cant_have_run_yet_is_dropped() {
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
+        let mut client = Client::start("127.0.0.1:1", TESTED, "Tested", &[]).expect("started");
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let state = |tick: u64| {
@@ -825,7 +853,7 @@ mod tests {
     /// more or fewer than its line says dropped.
     #[test]
     fn a_forged_state_s_line_holds_no_memory_but_what_came() {
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
+        let mut client = Client::start("127.0.0.1:1", TESTED, "Tested", &[]).expect("started");
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let text = "gg-snapshot 2\n";
@@ -871,7 +899,7 @@ mod tests {
         ];
         // The latest came `ago` before now, once the client has started, which reads its build.
         let client = |ago: Duration| {
-            let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
+            let mut client = Client::start("127.0.0.1:1", TESTED, "Tested", &[]).expect("started");
             client.samples = samples.iter().map(|s| sample(s.tick, &s.poses)).collect();
             client.arrived = Some(Instant::now().checked_sub(ago).expect("an instant"));
             client
@@ -928,7 +956,7 @@ mod tests {
         }
         ours.load_whole((1..).zip(text.lines()), true)
             .expect("loaded");
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
+        let mut client = Client::start("127.0.0.1:1", TESTED, "Tested", &[]).expect("started");
         client.restored(0, &ours);
         step_navigation(&mut ours);
         client.texts.insert(1, text.clone());

@@ -97,13 +97,14 @@ Build and run:
       code. A headless game given `--real-time` among ARGS ticks in real time, rather than as fast
       as it can, for an agent to watch it play. With `--peers 2`, it runs the two peers of a
       lockstep session from one build, the host given `--host` and the joiner `--join` at a free
-      port of the loopback, each `started` naming its `player`: patched together, and stopped and
-      started again together as either ends or the game is rebuilt. With `--embedded`, for the tool
-      that started gg, such as the editor, the game is given `--embedded`, running offscreen for the
-      tool, which shows its view, and the run ends cleanly, stopping the game, once gg's stdin
-      closes (`closed`), as the tool ends, a build under way finishing first. Each game gets
-      `--supervised` and a stdin gg holds, so it ends as gg does, however gg ends. A second `run` of
-      PACKAGE while one runs is refused (`gg.running`).
+      port of the loopback, and both a `--code` it makes, each `started` naming its `player`:
+      patched together, and stopped and started again together as either ends or the game is
+      rebuilt. With `--embedded`, for the tool that started gg, such as the editor, the game is
+      given `--embedded`, running offscreen for the tool, which shows its view, and the run ends
+      cleanly, stopping the game, once gg's stdin closes (`closed`), as the tool ends, a build
+      under way finishing first. Each game gets `--supervised` and a stdin gg holds, so it ends as
+      gg does, however gg ends. A second `run` of PACKAGE while one runs is refused
+      (`gg.running`).
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
@@ -788,13 +789,13 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 )));
             }
             if run.peers > 1
-                && let Some(flag) = ["--host", "--join", "--record"]
+                && let Some(flag) = ["--host", "--join", "--code", "--record"]
                     .into_iter()
                     .find(|&flag| run.given(flag))
             {
                 return Err(bad(format!(
-                    "`--peers 2` gives the peers their `--host` and `--join` itself, and a joiner \
-                     records nothing, so the game's arguments take no `{flag}`"
+                    "`--peers 2` gives the peers their `--host`, `--join` and `--code` itself, and \
+                     a joiner records nothing, so the game's arguments take no `{flag}`"
                 )));
             }
             Command::Run(run)
@@ -1565,6 +1566,15 @@ mod tests {
             &["status", "--timeout", "0"],
             &["mcp", "--timeout=0"],
             &["run", "a", "--peers", "2", "--", "--host", "0.0.0.0:7700"],
+            &[
+                "run",
+                "a",
+                "--peers",
+                "2",
+                "--",
+                "--code",
+                "7KQ2-9XMB-4TZD-P0WH",
+            ],
             &["run", "a", "--peers", "2", "--", "--record=run.recording"],
             &["snapshot", "a", "b"],
             &["snapshot", "--own"],

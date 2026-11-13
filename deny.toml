@@ -43,6 +43,7 @@ deny = [
     { crate = "meshopt", wrappers = ["cook"], reason = "the cooker optimizes games' meshes, which runs draw as cooked" },
     { crate = "ktx2", wrappers = ["gg-engine", "ctt"], reason = "gg-engine's image module reads the KTX2 that ctt writes for the cooker" },
     { crate = "zstd", wrappers = ["gg-engine", "ctt"], reason = "gg-engine's image module decompresses the KTX2 that ctt supercompresses for the cooker, and its net module compresses a server's states" },
+    { crate = "snow", wrappers = ["gg-engine"], reason = "gg-engine's net module keys and seals sessions' links" },
     { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
     { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

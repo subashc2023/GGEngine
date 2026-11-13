@@ -13,14 +13,20 @@
 //! the field where its own differs; and, in development builds, the patches of the game's code,
 //! which the host has apply at a tick of its choosing.
 //!
-//! The session's stream is lines of text over TCP, which a thread of the connection's reads, and
-//! another writes, as the main thread sends them, so that a slow link never holds the main thread:
+//! A session is kept to the runs given its code (`--code`): each connection opens with a handshake
+//! keyed by it, which the end that took it refuses a run of another code at, as [`secure`] says,
+//! and which makes the keys the stream's frames and the packets are sealed under, so that what
+//! goes between the session's runs can't be read, forged or played again on the way.
+//!
+//! The session's stream is lines of text over TCP, sealed in frames, which a thread of the
+//! connection's reads, and another writes, as the main thread sends them, so that a slow link
+//! never holds the main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 7\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//! hello\tgg-lockstep 8\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
 //!                                                    the joiner, as it connects: its app, engine,
 //!                                                      build and layers, and the port its packets
-//!                                                      come from, as `gg-rollback 7` for a
+//!                                                      come from, as `gg-rollback 8` for a
 //!                                                      rollback session's
 //! refused <why>                                      the host, refusing it, before it closes
 //! k                                                  either, after a second with nothing else to
@@ -48,9 +54,10 @@
 //!
 //! A tick's inputs come whole one way: on the stream, if they hold an edit or a patch, name a
 //! texture the host has just named, or are too many bytes for a packet; otherwise in the packets,
-//! UDP's, sent at each tick and again a tick's time after the last, which carry this peer's inputs
-//! for each tick from the first the other hasn't said it has, as many as fit [`MAX_PACKET`], so
-//! that a packet lost loses none, the ticks' lines as [`read_batches`] reads them:
+//! UDP's, each sealed, sent at each tick and again a tick's time after the last, which carry this
+//! peer's inputs for each tick from the first the other hasn't said it has, as many as fit
+//! [`MAX_PACKET_TEXT`], so that a packet lost loses none, the ticks' lines, as their text, as
+//! [`read_batches`] reads them:
 //!
 //! ```text
 //! a 1234 1236 1235 3 51234 50987 4                   the tick the peers' worlds were last made
@@ -85,9 +92,13 @@
 //! a session's peers have, a [`Session`] each as a peer's is.
 
 mod client;
+mod secure;
 mod server;
 
 pub(crate) use client::Client;
+pub(crate) use secure::Code;
+#[cfg(test)]
+pub(crate) use secure::TESTED;
 pub(crate) use server::Server;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -97,10 +108,8 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
-#[cfg(feature = "dev")]
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -115,6 +124,7 @@ use crate::layer::Commands;
 use crate::recording::text::{self, Text};
 use crate::reflect::Value;
 use crate::{Context, Sound, Tick, World, WorldHash};
+use secure::{Keys, Opened, Replays, Sealer};
 
 /// How many ticks ahead a lockstep peer sends its inputs until its link's round trip is measured:
 /// 62.5 ms, so that they reach the other peer before it needs them across a LAN, at the cost of as
@@ -148,12 +158,14 @@ const MOST_PACE: f64 = 0.1;
 
 /// The hello's first part: the protocol and its version, which a change to its lines or its packets
 /// takes to the next, a lockstep session's or a rollback session's, which both peers' must be.
-const LOCKSTEP: &str = "gg-lockstep 7";
-const ROLLBACK: &str = "gg-rollback 7";
+const LOCKSTEP: &str = "gg-lockstep 8";
+const ROLLBACK: &str = "gg-rollback 8";
 
 /// The most bytes a packet may have: what a path of the internet's least MTU carries whole, as
-/// QUIC's packets are kept to. A tick's inputs that wouldn't fit go on the stream.
+/// QUIC's packets are kept to; and so the most its text may have, sealed, as [`secure`] says. A
+/// tick's inputs that wouldn't fit go on the stream.
 const MAX_PACKET: usize = 1200;
+const MAX_PACKET_TEXT: usize = MAX_PACKET - secure::SEALED;
 
 /// The most bytes a line may have, its line break aside, past which the peer reading it drops the
 /// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
@@ -416,6 +428,16 @@ struct Link {
     /// from.
     udp: UdpSocket,
     other: Option<SocketAddr>,
+    /// The keys the link's handshake made, which its threads seal and open the stream's frames
+    /// under, and the main thread its packets; the nonce of this end's next packet, from
+    /// [`PACKETS`](secure::PACKETS); the nonces of those taken from the other end; what a packet is
+    /// sealed into; and whether one from the other end's address was dropped, as forged or come
+    /// before, which is warned of once a link.
+    keys: Arc<Keys>,
+    nonce: u64,
+    replays: Replays,
+    sealed: Vec<u8>,
+    forged: bool,
     /// What came, each held until it's due, as `--link` says, or at once.
     lines: VecDeque<(Instant, String)>,
     packets: Vec<(Instant, Vec<u8>)>,
@@ -442,13 +464,14 @@ struct Link {
 }
 
 impl Link {
-    /// Starts reading `stream`'s lines on a thread of their own, which ends at a line that isn't
-    /// one, as one past [`MAX_LINE`] isn't, as the connection does, and at twice [`LOST`] with
-    /// nothing come; starts writing what's sent on another, as [`write_from`] says; and binds the
-    /// link's socket, which the main thread reads as each frame starts, without waiting. A link
-    /// `accepted` is lost unless the other end's hello comes within [`HELLO`], as
-    /// [`hello_came`](Self::hello_came) says.
-    fn new(stream: TcpStream, accepted: bool) -> std::io::Result<Self> {
+    /// Starts reading `stream`'s lines, in the frames its handshake's `keys` open, on a thread of
+    /// their own, which ends at a line that isn't one, as one past [`MAX_LINE`] isn't, at a frame
+    /// that doesn't open, as the connection does, and at twice [`LOST`] with nothing come; starts
+    /// writing what's sent on another, as [`write_from`] says; and binds the link's socket, which
+    /// the main thread reads as each frame starts, without waiting. A link `accepted` is lost
+    /// unless the other end's hello comes within [`HELLO`], as [`hello_came`](Self::hello_came)
+    /// says.
+    fn new(stream: TcpStream, keys: Keys, accepted: bool) -> std::io::Result<Self> {
         let udp = UdpSocket::bind(SocketAddr::new(stream.local_addr()?.ip(), 0))?;
         udp.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
@@ -458,8 +481,9 @@ impl Link {
         // does.
         stream.set_read_timeout(Some(LOST * 2))?;
         let peer = stream.peer_addr().ok();
-        let (to, unwritten) = write_from(stream.try_clone()?)?;
-        let mut reader = BufReader::new(stream);
+        let keys = Arc::new(keys);
+        let (to, unwritten) = write_from(stream.try_clone()?, Arc::clone(&keys))?;
+        let mut reader = Opened::new(BufReader::new(stream), Arc::clone(&keys));
         let (lines, from) = mpsc::channel();
         thread::Builder::new()
             .name("gg-net".to_owned())
@@ -496,6 +520,11 @@ impl Link {
             joined: false,
             udp,
             other: None,
+            keys,
+            nonce: secure::PACKETS,
+            replays: Replays::default(),
+            sealed: Vec::with_capacity(MAX_PACKET),
+            forged: false,
             lines: VecDeque::new(),
             packets: Vec::new(),
             sent: None,
@@ -632,8 +661,9 @@ impl Link {
         (lines, packets, lost)
     }
 
-    /// Takes the packets that came from the other peer's socket, read through `buffer`, each held
-    /// from `now` as `conditions` say, or lost, drawing on `random`.
+    /// Takes the packets that came from the other peer's socket, read through `buffer`, each's
+    /// text, once it has opened and its nonce hasn't come before, as [`Replays`] says, held from
+    /// `now` as `conditions` say, or lost, drawing on `random`.
     fn receive(
         &mut self,
         buffer: &mut [u8],
@@ -647,6 +677,19 @@ impl Link {
                     if Some(from) != self.other {
                         continue;
                     }
+                    let opened = secure::open_packet(&self.keys, &buffer[..size]);
+                    let fresh = opened.filter(|(nonce, _)| self.replays.fresh(*nonce));
+                    let Some((_, text)) = fresh else {
+                        if !mem::replace(&mut self.forged, true) {
+                            warn!(
+                                code = "net.forged",
+                                "Dropped a packet from the other end's address that doesn't \
+                                 open under the link's keys, or came before: forged, changed on \
+                                 the way or played again; those after are dropped unsaid"
+                            );
+                        }
+                        continue;
+                    };
                     let mut due = now;
                     if let Some(conditions) = conditions {
                         if unit(random) < conditions.loss {
@@ -655,7 +698,7 @@ impl Link {
                         due += conditions.latency + conditions.jitter.mul_f64(unit(random));
                     }
                     self.heard = now;
-                    self.packets.push((due, buffer[..size].to_vec()));
+                    self.packets.push((due, text));
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 // Windows' answer to a packet sent to a port nothing listens at, as the other
@@ -669,11 +712,13 @@ impl Link {
         }
     }
 
-    /// Sends `packet` to the other peer's socket, warning once a link of one that can't be sent,
-    /// which is lost, as a packet may be.
+    /// Sends `packet`, its text, at most [`MAX_PACKET_TEXT`] bytes, sealed, to the other peer's
+    /// socket, warning once a link of one that can't be sent, which is lost, as a packet may be.
     fn send_packet(&mut self, packet: &[u8]) {
         let Some(other) = self.other else { return };
-        if let Err(error) = self.udp.send_to(packet, other)
+        secure::seal_packet(&self.keys, self.nonce, packet, &mut self.sealed);
+        self.nonce += 1;
+        if let Err(error) = self.udp.send_to(&self.sealed, other)
             && !mem::replace(&mut self.unsent, true)
         {
             warn!(
@@ -685,9 +730,10 @@ impl Link {
 }
 
 /// Starts the thread that writes to `stream` what's sent through the channel it returns, each text
-/// whole and in order, and `k` after [`KEEP`] with nothing else, so that the other end hears from
-/// this one while its main thread is busy, as restoring a world or stopped at a script's
-/// breakpoint; and returns, with the channel, where the error comes that stopped it, if one did.
+/// whole and in order, sealed under `keys` as [`Sealer`] seals it, and `k` after [`KEEP`] with
+/// nothing else, so that the other end hears from this one while its main thread is busy, as
+/// restoring a world or stopped at a script's breakpoint; and returns, with the channel, where the
+/// error comes that stopped it, if one did.
 ///
 /// Once the channel closes, as its link is dropped, and what was sent before is written, it shuts
 /// the connection's sending side: the other end reads what was sent, as a refusal's why, and then
@@ -695,16 +741,20 @@ impl Link {
 /// came. Shutting the receiving side too would have Windows reset the connection at what came that
 /// wasn't read, as a joiner's hello the host refuses unread, and the other end lose what was sent.
 /// At a write that fails, as one that can't go on for [`LOST`] does, it shuts both sides.
-fn write_from(mut stream: TcpStream) -> io::Result<(Sender<String>, Receiver<io::Error>)> {
+fn write_from(
+    mut stream: TcpStream,
+    keys: Arc<Keys>,
+) -> io::Result<(Sender<String>, Receiver<io::Error>)> {
     let (to, texts) = mpsc::channel::<String>();
     let (failed, unwritten) = mpsc::channel();
     thread::Builder::new()
         .name("gg-net-write".to_owned())
         .spawn(move || {
+            let mut sealer = Sealer::new(keys);
             loop {
                 let written = match texts.recv_timeout(KEEP) {
-                    Ok(text) => stream.write_all(text.as_bytes()),
-                    Err(RecvTimeoutError::Timeout) => stream.write_all(b"k\n"),
+                    Ok(text) => sealer.write(&mut stream, text.as_bytes()),
+                    Err(RecvTimeoutError::Timeout) => sealer.write(&mut stream, b"k\n"),
                     Err(RecvTimeoutError::Disconnected) => {
                         let _ = stream.shutdown(Shutdown::Write);
                         return;
@@ -752,13 +802,29 @@ impl Trip {
 }
 
 /// How a peer finds the other: the host by the connections its listener accepts, the joiner by
-/// connecting to its host's address, again each time it loses it.
+/// connecting to its host's address, again each time it loses it, by the session's code.
 enum Find {
-    Host(Receiver<TcpStream>),
+    Host(Accepted),
     Join {
         address: String,
-        connecting: Option<Receiver<TcpStream>>,
+        code: Code,
+        connecting: Option<Receiver<Handshaken>>,
     },
+}
+
+impl Find {
+    /// Has a joiner connect to its host again after [`REFUSED`], as after a refusal.
+    fn again(&mut self) {
+        if let Self::Join {
+            address,
+            code,
+            connecting,
+        } = self
+        {
+            let host = "the lockstep host";
+            *connecting = Some(connect(address.clone(), host, REFUSED, *code));
+        }
+    }
 }
 
 /// A peer of a lockstep session.
@@ -884,19 +950,19 @@ struct Patches {
 const UNSENT: u64 = u64::MAX;
 
 impl Lockstep {
-    /// Starts the session `net` says, for app `app`, whose layers are `layers`, from the bottom up:
-    /// the host listening at its address, the joiner trying to connect to its host's, in the
-    /// background, until it does.
+    /// Starts the session `net` says, keyed by `code`, for app `app`, whose layers are `layers`,
+    /// from the bottom up: the host listening at its address, the joiner trying to connect to its
+    /// host's, in the background, until it does.
     ///
     /// Fails with `net.start` if the host can't listen at its address, and with `net.build` if the
     /// run's build can't be read, as [`build`] says.
-    pub(crate) fn start(net: &Net, app: &'static str, layers: &[&str]) -> Result<Self> {
+    pub(crate) fn start(net: &Net, code: Code, app: &'static str, layers: &[&str]) -> Result<Self> {
         let build = build()?;
         #[cfg(test)]
         let mut listening = None;
         let find = match net {
             Net::Host(address) => {
-                let (find, at) = listen(address, "a lockstep peer")?;
+                let (find, at) = listen(address, "a lockstep peer", code)?;
                 #[cfg(test)]
                 {
                     listening = Some(at);
@@ -906,6 +972,7 @@ impl Lockstep {
             }
             Net::Join(address) => Find::Join {
                 address: address.clone(),
+                code,
                 connecting: None,
             },
             Net::Serve(_) | Net::Connect(_) => {
@@ -1055,12 +1122,20 @@ impl Lockstep {
         turn
     }
 
-    /// Takes a connection the host accepted, or the joiner made, if one has come.
+    /// Takes a connection the host accepted, or the joiner made, if one has come whose handshake
+    /// held, logging one whose didn't: refused, the joiner trying again after [`REFUSED`].
     fn find_peer(&mut self) {
         let made = match &mut self.find {
             Find::Host(accepted) => {
-                while let Ok(stream) = accepted.try_recv() {
-                    match Link::new(stream, true) {
+                while let Some(handshaken) = accepted.handshaken() {
+                    let (stream, keys) = match handshaken {
+                        Ok(made) => made,
+                        Err(why) => {
+                            warn!(code = "net.refused", "Refused a lockstep peer: {why}");
+                            continue;
+                        }
+                    };
+                    match Link::new(stream, keys, true) {
                         Ok(link) if self.link.is_none() => self.link = Some(link),
                         // A second joiner, refused before its hello.
                         Ok(mut link) => {
@@ -1075,21 +1150,36 @@ impl Lockstep {
             Find::Join { .. } if self.link.is_some() => return,
             Find::Join {
                 address,
+                code,
                 connecting,
             } => {
                 let made = connecting.get_or_insert_with(|| {
-                    connect(address.clone(), "the lockstep host", Duration::ZERO)
+                    connect(address.clone(), "the lockstep host", Duration::ZERO, *code)
                 });
-                let Ok(stream) = made.try_recv() else { return };
+                let Ok(handshaken) = made.try_recv() else {
+                    return;
+                };
                 *connecting = None;
-                (stream, address.clone())
+                match handshaken {
+                    Ok(made) => (made, address.clone()),
+                    Err(why) => {
+                        error!(
+                            code = "net.refused",
+                            "The lockstep host refused this peer in the handshake: {why}; it \
+                             tries again in {} s",
+                            REFUSED.as_secs()
+                        );
+                        self.find.again();
+                        return;
+                    }
+                }
             }
         };
-        let (stream, address) = made;
+        let ((stream, keys), address) = made;
         let protocol = self.protocol();
         let hello = |link: &Link| hello(protocol, self.app, self.build, &self.layers, link.port());
-        let link =
-            Link::new(stream, false).and_then(|mut link| link.send(hello(&link)).map(|()| link));
+        let link = Link::new(stream, keys, false)
+            .and_then(|mut link| link.send(hello(&link)).map(|()| link));
         match link {
             Ok(link) => {
                 info!(address = %address, "Connected to the lockstep host");
@@ -1138,13 +1228,7 @@ impl Lockstep {
                     REFUSED.as_secs()
                 );
                 self.lose("the host refused it");
-                if let Find::Join {
-                    address,
-                    connecting,
-                } = &mut self.find
-                {
-                    *connecting = Some(connect(address.clone(), "the lockstep host", REFUSED));
-                }
+                self.find.again();
             }
             "world" if !self.hosts() => {
                 let mut words = rest.split(' ');
@@ -1666,7 +1750,7 @@ impl Lockstep {
                 .iter()
                 .map(|(_, command)| command.len() + 32);
             let size = 64 + lines.sum::<usize>();
-            inputs.streamed = inputs.authored || !text.is_empty() || size > MAX_PACKET;
+            inputs.streamed = inputs.authored || !text.is_empty() || size > MAX_PACKET_TEXT;
             if inputs.streamed {
                 write_inputs(&mut text, ahead, &inputs);
                 self.send(text);
@@ -2001,13 +2085,7 @@ impl Lockstep {
                         REFUSED.as_secs()
                     );
                     self.lose(&format!("its cell file {file} isn't the host's"));
-                    if let Find::Join {
-                        address,
-                        connecting,
-                    } = &mut self.find
-                    {
-                        *connecting = Some(connect(address.clone(), "the lockstep host", REFUSED));
-                    }
+                    self.find.again();
                 }
             }
             Err(error) => warn!(
@@ -2117,8 +2195,8 @@ impl Lockstep {
     /// packets come from: how far this peer has its inputs, its next tick and how far it was past
     /// the other's as the other's latest packet came, and the times, as [`Link::write_times`]
     /// says; and this peer's inputs for each tick from the first the other hasn't said it has that
-    /// didn't go on the stream, oldest first, as many to a packet as fit [`MAX_PACKET`], a tick's
-    /// in one.
+    /// didn't go on the stream, oldest first, as many to a packet as fit [`MAX_PACKET_TEXT`], a
+    /// tick's in one.
     fn send_packets(&mut self) {
         if self.from.is_none() {
             return;
@@ -2137,7 +2215,7 @@ impl Lockstep {
         for (&tick, inputs) in sent {
             lines.clear();
             write_inputs(&mut lines, tick, inputs);
-            if packet.len() + lines.len() > MAX_PACKET && packet.len() > header.len() {
+            if packet.len() + lines.len() > MAX_PACKET_TEXT && packet.len() > header.len() {
                 link.send_packet(packet.as_bytes());
                 packet.clone_from(&header);
             }
@@ -2246,15 +2324,51 @@ pub(crate) enum Session {
 }
 
 impl Session {
-    /// Starts the session `net` says, for app `app`, whose layers are `layers`, from the bottom
-    /// up, as [`Lockstep::start`], [`Server::start`] and [`Client::start`] say.
+    /// Starts the session `net` says, keyed by `code`, for app `app`, whose layers are `layers`,
+    /// from the bottom up, as [`Lockstep::start`], [`Server::start`] and [`Client::start`] say. A
+    /// host or a server given no code makes one, which it prints to stdout, `code
+    /// 7KQ2-9XMB-4TZD-P0WH`, for the runs that join it, and not to the log, as it's the session's
+    /// key, which the log says only it made (`net.code`).
     ///
-    /// Fails with `net.start` if a host or a server can't listen at its address.
-    pub(crate) fn start(net: &Net, app: &'static str, layers: &[&str]) -> Result<Self> {
+    /// Fails with `net.start` if a host or a server can't listen at its address, or make or print
+    /// its code, or a joiner or a client is given none.
+    pub(crate) fn start(
+        net: &Net,
+        code: Option<Code>,
+        app: &'static str,
+        layers: &[&str],
+    ) -> Result<Self> {
+        let code = match code {
+            Some(code) => code,
+            None if matches!(net, Net::Host(_) | Net::Serve(_)) => {
+                let failed = |why: &str, error: io::Error| {
+                    Error::new("net.start", format!("can't {why} the session's code"))
+                        .with_source(error)
+                };
+                let code = Code::make().map_err(|error| failed("make", error))?;
+                writeln!(io::stdout(), "code {code}").map_err(|error| failed("print", error))?;
+                info!(
+                    code = "net.code",
+                    "Made the session's code, which this run printed to stdout, for the runs that \
+                     join it to be given"
+                );
+                code
+            }
+            None => {
+                let why = "a joiner or a client is given the session's code, as its host made it";
+                return Err(Error::new("net.start", why));
+            }
+        };
         Ok(match net {
-            Net::Host(_) | Net::Join(_) => Self::Peer(Box::new(Lockstep::start(net, app, layers)?)),
-            Net::Serve(address) => Self::Server(Box::new(Server::start(address, app, layers)?)),
-            Net::Connect(address) => Self::Client(Box::new(Client::start(address, app, layers)?)),
+            Net::Host(_) | Net::Join(_) => {
+                Self::Peer(Box::new(Lockstep::start(net, code, app, layers)?))
+            }
+            Net::Serve(address) => {
+                Self::Server(Box::new(Server::start(address, code, app, layers)?))
+            }
+            Net::Connect(address) => {
+                Self::Client(Box::new(Client::start(address, code, app, layers)?))
+            }
         })
     }
 
@@ -2561,23 +2675,38 @@ fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Result<u16, S
 }
 
 /// Listens at `address` for `what`, on a thread of its own that accepts each connection; returns
-/// where they come, and the address as the OS has it, which a test's port 0 picks.
+/// where they come, each through its handshake keyed by `code`, as [`Accepted`] says, and the
+/// address as the OS has it, which a test's port 0 picks.
 ///
 /// Fails with `net.start` if it can't listen there.
-fn listen(address: &str, what: &str) -> Result<(Receiver<TcpStream>, SocketAddr)> {
+fn listen(address: &str, what: &str, code: Code) -> Result<(Accepted, SocketAddr)> {
     let failed = |error: io::Error| {
         let message = format!("can't listen at {address} for {what}");
         Error::new("net.start", message).with_source(error)
     };
     let listener = TcpListener::bind(address).map_err(failed)?;
     let at = listener.local_addr().map_err(failed)?;
-    let (accepted, find) = mpsc::channel();
+    let (shaken, handshaken) = mpsc::channel();
+    let session = Arc::new(());
+    let kept = Arc::downgrade(&session);
     thread::Builder::new()
         .name("gg-net-accept".to_owned())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
-                if accepted.send(stream).is_err() {
+                if kept.strong_count() == 0 {
                     break;
+                }
+                let shaken = shaken.clone();
+                let spawned = thread::Builder::new()
+                    .name("gg-net-handshake".to_owned())
+                    .spawn(move || {
+                        let _ = shaken.send(shake(stream, &code, true));
+                    });
+                if let Err(error) = spawned {
+                    warn!(
+                        code = "net.link",
+                        "Can't start a connection's handshake: {error}"
+                    );
                 }
             }
         })
@@ -2585,7 +2714,49 @@ fn listen(address: &str, what: &str) -> Result<(Receiver<TcpStream>, SocketAddr)
             let message = format!("can't start the thread that accepts {what}");
             Error::new("net.start", message).with_source(error)
         })?;
-    Ok((find, at))
+    let accepted = Accepted {
+        handshaken,
+        _session: session,
+    };
+    Ok((accepted, at))
+}
+
+/// A connection with the keys its handshake made, or why its handshake failed.
+type Handshaken = io::Result<(TcpStream, Keys)>;
+
+/// The connections a host or a server accepts, as [`listen`] gives them, each once its handshake
+/// has ended, which a thread of the connection's own runs, as the thread that accepts it starts
+/// it: so that one slow to say its part holds neither the main thread, nor another, nor a
+/// joiner's place before it has shown it holds the code, and a main thread busy awhile holds no
+/// joiner's handshake. And what tells the thread that accepts them that the session is gone, which
+/// it ends at as the next connection comes.
+struct Accepted {
+    handshaken: Receiver<Handshaken>,
+    _session: Arc<()>,
+}
+
+impl Accepted {
+    /// The next connection whose handshake has ended, if one has.
+    fn handshaken(&self) -> Option<Handshaken> {
+        self.handshaken.try_recv().ok()
+    }
+}
+
+/// Runs the handshake on `stream`, keyed by `code`, as the end that made the connection or,
+/// `accepted`, the end that took it, as [`secure::handshake`] says, waiting at most [`HELLO`]
+/// for the other end's part; returns the stream with the keys it made.
+fn shake(mut stream: TcpStream, code: &Code, accepted: bool) -> Handshaken {
+    stream.set_read_timeout(Some(HELLO))?;
+    stream.set_write_timeout(Some(HELLO))?;
+    match secure::handshake(&mut stream, code, accepted) {
+        Ok(keys) => Ok((stream, keys)),
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            let secs = HELLO.as_secs();
+            let why = format!("its part of the handshake didn't come within {secs} s");
+            Err(io::Error::new(error.kind(), why))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The tick `text` names, as a line or a packet names one; `None` if it isn't a number fewer than
@@ -2641,8 +2812,14 @@ fn read_batches(
 }
 
 /// Connects to `address`, `what`'s, on a thread of its own, after `after`, trying again every
-/// [`RETRY`] until it does, and returns where the connection comes.
-fn connect(address: String, what: &'static str, after: Duration) -> Receiver<TcpStream> {
+/// [`RETRY`] until it does, then runs the handshake keyed by `code` on the connection, as
+/// [`shake`] does; returns where the connection comes, with its keys, or why its handshake failed.
+fn connect(
+    address: String,
+    what: &'static str,
+    after: Duration,
+    code: Code,
+) -> Receiver<Handshaken> {
     let (made, connection) = mpsc::channel();
     let spawned = thread::Builder::new()
         .name("gg-net-connect".to_owned())
@@ -2655,7 +2832,7 @@ fn connect(address: String, what: &'static str, after: Duration) -> Receiver<Tcp
                     .ok()
                     .and_then(|mut addresses| addresses.find_map(|at| TcpStream::connect(at).ok()));
                 if let Some(stream) = stream {
-                    let _ = made.send(stream);
+                    let _ = made.send(shake(stream, &code, false));
                     return;
                 }
                 if !warned {
@@ -2876,7 +3053,7 @@ mod tests {
             link: Option<Conditions>,
         ) -> Self {
             let names = stack.names().to_vec();
-            let mut lockstep = Lockstep::start(net, "Tested", &names).expect("started");
+            let mut lockstep = Lockstep::start(net, TESTED, "Tested", &names).expect("started");
             if rollback {
                 lockstep.predict();
             }
@@ -4131,7 +4308,7 @@ mod tests {
         stack.push_layer(game);
         let names = stack.names().to_vec();
         let net = Net::Host("127.0.0.1:0".to_owned());
-        stack.lockstep(Lockstep::start(&net, "Tested", &names).expect("started"));
+        stack.lockstep(Lockstep::start(&net, TESTED, "Tested", &names).expect("started"));
         let mut cx = Context::seeded(3);
         cx.world_mut().register::<Score>().expect("described");
         let restored = stack.restore(&mut cx, &snapshot.expect("read"), false);
@@ -4149,7 +4326,8 @@ mod tests {
         let _logging = tracing::subscriber::set_default(subscriber);
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let address = host.net().listening.expect("listening").to_string();
-        let mut other = Lockstep::start(&Net::Join(address), "Other", &["Game"]).expect("started");
+        let join = Net::Join(address);
+        let mut other = Lockstep::start(&join, TESTED, "Other", &["Game"]).expect("started");
         let start = Instant::now();
         let mut refused = 0;
         while start.elapsed() < Duration::from_millis(600) {
@@ -4166,6 +4344,114 @@ mod tests {
         assert!(other.link.is_none() && host.net().link.is_none());
     }
 
+    /// A joiner given another code than its host's is refused in its handshake, by the host and by
+    /// itself, which tries again only after [`REFUSED`], never taking the joiner's place; a joiner
+    /// given the host's then joins.
+    #[test]
+    fn a_joiner_given_another_code_is_refused() {
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let address = host.net().listening.expect("listening").to_string();
+        // Of the host's app and layers, so that its code alone differs.
+        let layers = host.net().layers.clone();
+        let layers: Vec<&str> = layers.split(' ').collect();
+        let code = "0000-0000-0000-0000".parse().expect("a code");
+        let net = Net::Join(address);
+        let mut other = Lockstep::start(&net, code, "Tested", &layers).expect("started");
+        let start = Instant::now();
+        let mut refused = 0;
+        while start.elapsed() < Duration::from_millis(600) {
+            host.turn();
+            assert!(matches!(other.turn(0), Turn::None));
+            assert!(other.link.is_none() && host.net().link.is_none());
+            let codes = logged.codes.try_iter();
+            refused += codes.filter(|code| code == "net.refused").count();
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Each side's.
+        assert_eq!(refused, 2);
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+    }
+
+    /// A link takes the packets the other end sealed, each once: one sent again, one sealed under
+    /// another link's keys, one under a nonce of the stream's and one in plain text, each from the
+    /// other end's socket, are dropped, and warned of once (`net.forged`).
+    #[test]
+    fn a_link_takes_the_other_end_s_packets_alone_each_once() {
+        let logged = crate::testing::logged();
+        let [(made, made_keys), (taken, taken_keys)] = secure::linked();
+        let mut ours = Link::new(taken, taken_keys, true).expect("a link");
+        let mut theirs = Link::new(made, made_keys, false).expect("a link");
+        ours.packets_from(theirs.port());
+        theirs.packets_from(ours.port());
+        let (socket, to) = (theirs.udp.try_clone().expect("a socket"), theirs.other);
+        let send = |packet: &[u8]| {
+            socket
+                .send_to(packet, to.expect("an address"))
+                .expect("sent");
+        };
+        let mut sealed = Vec::new();
+        secure::seal_packet(&theirs.keys, 0, b"a stream's nonce", &mut sealed);
+        send(&sealed);
+        theirs.send_packet(b"one");
+        send(&theirs.sealed);
+        let [(_, other), _] = secure::linked();
+        secure::seal_packet(&other, theirs.nonce, b"another link's", &mut sealed);
+        send(&sealed);
+        send(b"a 0 0 0 - 0 - -\n");
+        theirs.send_packet(b"two");
+        let (mut buffer, mut random) = (vec![0; 1 << 16], 0);
+        let mut taken = Vec::new();
+        let start = Instant::now();
+        while taken.len() < 2 {
+            assert!(start.elapsed() < Duration::from_secs(10), "{taken:?}");
+            taken.extend(ours.take(&mut buffer, None, &mut random, Instant::now()).1);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(taken, [b"one".to_vec(), b"two".to_vec()]);
+        let forged = logged.codes.try_iter().filter(|code| code == "net.forged");
+        assert_eq!(forged.count(), 1);
+    }
+
+    /// What a link writes on its stream is sealed: its bytes hold none of its lines, which the
+    /// other end's keys open.
+    #[test]
+    fn a_link_s_stream_holds_none_of_its_lines() {
+        let [(mut made, made_keys), (taken, taken_keys)] = secure::linked();
+        let mut link = Link::new(taken, taken_keys, true).expect("a link");
+        let text = "world 1234 1238 2 50124\ngg-snapshot 2\nend\n";
+        link.send(text.to_owned()).expect("sent");
+        let mut bytes = vec![0; 2 + text.len() + 16];
+        made.set_read_timeout(Some(LOST)).expect("a timeout");
+        made.read_exact(&mut bytes).expect("read");
+        for line in text.lines() {
+            let word = line.split(' ').next().expect("a word").as_bytes();
+            let shows = bytes.windows(word.len()).any(|bytes| bytes == word);
+            assert!(!shows, "{line}");
+        }
+        let mut opened = Opened::new(&bytes[..], Arc::new(made_keys));
+        let mut read = String::new();
+        opened.read_to_string(&mut read).expect("opened");
+        assert_eq!(read, text);
+    }
+
+    /// A connection to `host`'s session that isn't a peer's, given the session's code: its stream,
+    /// once its handshake is done, the host turning meanwhile, and what seals what it writes.
+    fn stranger(host: &mut Peer) -> (TcpStream, Sealer) {
+        let address = host.net().listening.expect("listening");
+        let made = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address)?;
+            secure::handshake(&mut stream, &TESTED, false).map(|keys| (stream, keys))
+        });
+        while !made.is_finished() {
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let (stream, keys) = made.join().expect("made").expect("a handshake");
+        (stream, Sealer::new(Arc::new(keys)))
+    }
+
     /// A line as long as [`MAX_LINE`] is read, and one longer, as a connection that never breaks
     /// its line sends, drops its connection before its hello, freeing the joiner's place.
     #[test]
@@ -4179,11 +4465,10 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
-        let address = host.net().listening.expect("listening");
-        let mut stranger = TcpStream::connect(address).expect("connected");
+        let (mut stranger, mut sealer) = stranger(&mut host);
         // Written as the host reads it, the connection held open after.
         let writer = thread::spawn(move || {
-            let _ = stranger.write_all(&vec![b'x'; MAX_LINE + 1]);
+            let _ = sealer.write(&mut stranger, &vec![b'x'; MAX_LINE + 1]);
             stranger
         });
         let start = Instant::now();
@@ -4206,8 +4491,7 @@ mod tests {
     fn a_connection_that_says_no_hello_is_lost() {
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
-        let address = host.net().listening.expect("listening");
-        let _stranger = TcpStream::connect(address).expect("connected");
+        let _stranger = stranger(&mut host);
         let start = Instant::now();
         while host.net().link.is_none() {
             assert!(start.elapsed() < Duration::from_secs(10), "never taken");
@@ -4235,11 +4519,12 @@ mod tests {
     fn a_peer_nothing_comes_from_is_lost() {
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
-        let address = host.net().listening.expect("listening");
-        let mut stranger = TcpStream::connect(address).expect("connected");
+        let (mut stranger, mut sealer) = stranger(&mut host);
         let net = host.net();
         let line = hello(net.protocol(), net.app, net.build, &net.layers, 9);
-        stranger.write_all(line.as_bytes()).expect("said hello");
+        sealer
+            .write(&mut stranger, line.as_bytes())
+            .expect("said hello");
         let start = Instant::now();
         while host.net().from.is_none() {
             assert!(start.elapsed() < Duration::from_secs(10), "never taken");
@@ -4316,7 +4601,8 @@ mod tests {
         let address = host.net().listening.expect("listening").to_string();
         let layers = host.net().layers.clone();
         let layers: Vec<&str> = layers.split(' ').collect();
-        let mut other = Lockstep::start(&Net::Join(address), "Tested", &layers).expect("started");
+        let join = Net::Join(address);
+        let mut other = Lockstep::start(&join, TESTED, "Tested", &layers).expect("started");
         other.build = "0000000000000000";
         let start = Instant::now();
         let mut refused = 0;
@@ -4736,7 +5022,7 @@ mod tests {
             let mut stack = Stack::default();
             stack.push_layer(Painter::default());
             let names = stack.names().to_vec();
-            stack.lockstep(Lockstep::start(net, "Tested", &names).expect("started"));
+            stack.lockstep(Lockstep::start(net, TESTED, "Tested", &names).expect("started"));
             stack.attach(&mut cx);
             Peer { stack, cx, next: 0 }
         };
@@ -4925,12 +5211,12 @@ mod tests {
     }
 
     /// A peer keeps the other's inputs within a second of ticks past the first it hasn't had whole:
-    /// a packet holding inputs past them, as one from elsewhere at the other's address may, or a
-    /// tick no run reaches, isn't one, which loses the other, those before taken.
+    /// a packet holding inputs past them, as a hostile peer's may, or a tick no run reaches, isn't
+    /// one, which loses the other, those before taken.
     #[test]
     fn a_peer_keeps_the_other_s_inputs_to_a_second() {
         let net = Net::Join("127.0.0.1:1".to_owned());
-        let mut peer = Lockstep::start(&net, "Tested", &[]).expect("started");
+        let mut peer = Lockstep::start(&net, TESTED, "Tested", &[]).expect("started");
         let now = Instant::now();
         assert!(
             peer.read_ticks(b"a 0 0 0 - 0 - -\nt 0\nt 63\n", now)

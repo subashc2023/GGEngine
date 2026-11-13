@@ -160,11 +160,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 19, world streaming** (2026-11-13)
 - **Sessions that hold** (2026-11-13)
 - **Delays that follow the link** (2026-11-13)
+- **Sessions their players alone join** (2026-11-13)
 
 ## Now
 
-Phase 20's third milestone, sessions their players alone join, as Next has it, once its plan is
-approved.
+Phase 20's fourth milestone, through NATs, as Next has it, once its plan is approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -734,6 +734,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Cells' kept states spilled to disk: a cell out keeps what it held as scene text in memory, which grows with the cells changed, as one that went out as it came keeps nothing | A world's changed cells' text is measured to matter |
 | An index of a world's cells for the cells' step, which tests each cell with a file or a kept state against each viewer as each tick ends, O(cells × viewers), allocating nothing where none comes or goes | The step is measured to cost a frame, as at 100,000 cells |
 | Terrain and heightfields, which a large world's ground would be: a world's cells hold meshes and colliders | A world's ground is more than its cells' models |
+| A game showing its session's code, and a join screen a player types one into: a host or a server not given `--code` prints the code it made to stdout, which a shipped windowed game shows no one | A game hosts and joins sessions from its own UI |
+| Short codes, a few words, stretched by a PAKE, as SPAKE2 or CPace, before Noise's handshake, each guess costing a connection: a code is 16 symbols, 80 bits, as a recorded first message lets one test codes against it offline | Players read codes out or type them by hand |
+| A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
+| `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
 
 ## Open questions
 

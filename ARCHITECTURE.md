@@ -1390,6 +1390,22 @@ alone, as Foxball's bot, a session's runs leave out.
   that a slow link never holds the main thread, and writes a line after each second with nothing
   else to write, so that a run whose frames stop, as while it restores a large world or waits at a
   script's breakpoint, is kept, while one stopped in a debugger, or cut off, is lost.
+- **A session is kept to the runs given its code.** Each session has a code, 80 random bits
+  written as 16 digits and letters, such as `7KQ2-9XMB-4TZD-P0WH`, which each of its runs is given
+  (`--code`): a host or a server given none makes one from the OS's randomness and prints it to
+  stdout, `code 7KQ2-9XMB-4TZD-P0WH`, for the runs that join it, and not to the log, as it's the
+  session's key; `gg run --peers 2` makes one for both peers. Each connection opens with the Noise
+  Protocol Framework's `NNpsk0` handshake, through `snow`, keyed by the code, on a thread of its
+  own: the end that took the connection can't read the first message of a run without the code,
+  and refuses it there (`net.refused`), as it does one whose part doesn't come within 5 s, before
+  the connection takes a joiner's place; the joiner or client, finding the connection closed,
+  tries again in 5 s. The keys the handshake makes, which keys each end made for it alone go
+  into, so that a code found later opens no link made before, seal the stream and each packet
+  (ChaCha20-Poly1305), so that what a session's runs send can't be read on the way, nor forged or
+  played again: a packet that doesn't open, or whose counter came before, is dropped
+  (`net.forged`, once a link), and a frame of the stream that doesn't open ends its link. QUIC
+  would rewrite every link for congestion control and migration that the engine doesn't need yet,
+  and a MAC alone would leave a server's states readable on the path.
 - **A player's commands steer that player alone.** A command whose variant or struct has a field
   `player`, an integer, as the demos' have, names the player whose inputs carry it, a peer's or a
   server's client's, or is refused, by every run of the session alike (`net.bad_command`), so that
@@ -1449,9 +1465,12 @@ alone, as Foxball's bot, a session's runs leave out.
   where it's drawn: over a 100 ms link, about 1.5 units at the demo's speed.
 
 The session's stream is lines of text over TCP, without Nagle's delay, which keeps them in order
-and whole, a thread of each end's reading them and another writing them: the hello, the host's
+and whole, sealed in frames, each its length and up to 64 KiB of its text sealed, their counters
+implicit, a thread of each end's reading them and another writing them: the hello, the host's
 world, the hashes, the writing thread's lines that say it's there, and a tick's inputs that hold
-an edit or a patch, name a texture the host has just named, or are too long for a packet. A
+an edit or a patch, name a texture the host has just named, or are too long for a packet, whose
+text is at most 1,176 bytes, as its counter and its seal take 24 more of the 1,200 a path of the
+internet's least MTU carries whole. A
 tick's other inputs go over UDP, in packets sent at each tick and again a tick's time after the
 last, each repeating this peer's inputs for every tick the other hasn't said it has, so that a
 packet lost loses none, naming the tick the peers' worlds were last made the same at, so that
@@ -1464,16 +1483,11 @@ UDP, each packet repeating those the server hasn't said it applied, or on the st
 are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
 state lost being lost, as the next is sent against the latest the client has. `--link` has a
 run's links hold each packet that comes, and up to more, losing some, and the stream's lines, as a
-slow link would. [net.rs](crates/gg-engine/src/net.rs) and
-[server.rs](crates/gg-engine/src/net/server.rs) have their formats and the rest. `gg run --peers 2`
-runs a host and a joiner from one build, patching both and restarting both after a rebuild, its
-arguments after `--`, as `--rollback`, given both.
-
-Sessions' links are to be secured end to end, by Phase 20's third milestone: the Noise Protocol
-Framework through `snow`, `NNpsk0` keyed by the session's code, over the stream and the packets as
-they are, each packet sealed with an explicit counter and dropped if it comes again. QUIC would
-rewrite every link for congestion control and migration that the engine doesn't need yet, and a MAC
-alone would leave a server's states readable on the path.
+slow link would. [net.rs](crates/gg-engine/src/net.rs),
+[server.rs](crates/gg-engine/src/net/server.rs) and [secure.rs](crates/gg-engine/src/net/secure.rs)
+have their formats and the rest. `gg run --peers 2` runs a host and a joiner from one build,
+patching both and restarting both after a rebuild, its arguments after `--`, as `--rollback`,
+given both.
 
 ## Diagnostics
 

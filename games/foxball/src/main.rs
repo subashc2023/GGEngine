@@ -4,7 +4,8 @@
 //! kicking it toward player 0's goal; or networked, both foxes their players', in lockstep, a run
 //! given `--host <address>` steering player 0 and one given `--join <address>` player 1, each with
 //! its own keys; or as clients of a run given `--serve <address>`, each given `--connect <address>`
-//! steering the player the server gives it, each fox its player's [`Owner`]. W, A, S and D, or a
+//! steering the player the server gives it, each fox its player's [`Owner`], a joiner and a client
+//! given the session's `--code` too, which its host or server prints. W, A, S and D, or a
 //! pad's left stick, walk a fox forward, back and to its sides; the mouse turns it, the cursor
 //! grabbed from a click in the view until Escape, as do Q and E and the right stick; and Space, a
 //! pad's South, or a click with the cursor grabbed kicks the ball, if it's in front of the fox.

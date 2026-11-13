@@ -32,6 +32,7 @@ scoped-tls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 skrifa.workspace = true
+snow.workspace = true
 subsecond = { workspace = true, optional = true }
 symphonia.workspace = true
 tracing.workspace = true

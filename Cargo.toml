@@ -137,6 +137,16 @@ skrifa = "0.44.0"
 # it would parse a model's transforms, which reach the world hash, to other bits than one where none
 # did.
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+# The Noise Protocol Framework, whose handshake keys a session's links by its code, and whose
+# ciphers seal what they carry. Without its defaults, whose `std` turns on ring, C and assembly:
+# RustCrypto's X25519, ChaCha20-Poly1305 and BLAKE2s alone, and the OS's randomness through
+# getrandom.
+snow = { version = "0.10.0", default-features = false, features = [
+    "use-blake2",
+    "use-chacha20poly1305",
+    "use-curve25519",
+    "use-getrandom",
+] }
 # Hot patching. The release of dx, Dioxus's tool, that builds the patches, which must be its own:
 # `gg run` checks the machine's dx against it.
 subsecond = "=0.7.2"

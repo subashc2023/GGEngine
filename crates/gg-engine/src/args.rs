@@ -8,6 +8,8 @@ use std::time::Duration;
 use gg_core::{Error, Result};
 use gg_renderer::MAX_TEXTURE_SIZE;
 
+use crate::net::Code;
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct Args {
     pub(crate) headless: bool,
@@ -48,8 +50,10 @@ pub(crate) struct Args {
     /// Whether a run that doesn't start from a snapshot starts stopped, its world the world as
     /// edited, until the tool API's `play`.
     pub(crate) stopped: bool,
-    /// The session the run hosts, joins, serves or connects to, if it's networked.
+    /// The session the run hosts, joins, serves or connects to, if it's networked, and its code,
+    /// which a host or a server not given one makes.
     pub(crate) net: Option<Net>,
+    pub(crate) code: Option<Code>,
     /// Whether the session's peers predict each other's inputs, rolling back where a prediction
     /// missed, rather than waiting for them.
     pub(crate) rollback: bool,
@@ -90,7 +94,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 22] = [
+const NOT_REPLAYED: [&str; 23] = [
     "--record",
     "--restore",
     "--headless",
@@ -110,6 +114,7 @@ const NOT_REPLAYED: [&str; 22] = [
     "--join",
     "--serve",
     "--connect",
+    "--code",
     "--rollback",
     "--link",
     "--mods",
@@ -172,6 +177,11 @@ Options:
                     Play as a client of the server at ADDRESS, from its world, as the player it
                     gives this run, predicting the world, the other players drawn as it last had
                     them
+  --code <CODE>     With --host, --join, --serve or --connect, the session's code, 16 digits and
+                    letters such as `7KQ2-9XMB-4TZD-P0WH`, which keeps the session to the runs
+                    given it and what they send to them alone: --join and --connect need their
+                    host's or server's, which a host or a server not given one makes, printing
+                    `code <CODE>` to stdout
   --link <MS,MS,%>  With --host, --join, --serve or --connect, have each link hold each packet this
                     run receives the first MS, and up to the second more, losing the percent of
                     them, such as `--link 100,20,5`, and hold what comes on its stream the first MS
@@ -218,6 +228,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         restore: None,
         stopped: false,
         net: None,
+        code: None,
         rollback: false,
         link: None,
         mods: None,
@@ -326,6 +337,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
             "--serve" => parsed.net = Some(Net::Serve(value_of(flag)?)),
             "--connect" => parsed.net = Some(Net::Connect(value_of(flag)?)),
+            // Not echoed in its error, as it's a session's key, or nearly.
+            "--code" => {
+                parsed.code = Some(value_of(flag)?.parse().map_err(|why| {
+                    bad(format!(
+                        "`--code` takes the session's code, 16 digits and letters such as \
+                         `7KQ2-9XMB-4TZD-P0WH`: {why}"
+                    ))
+                })?);
+            }
             "--mods" => parsed.mods = Some(value_of(flag)?.into()),
             "--package" => parsed.package = Some(value_of(flag)?.into()),
             "--dump" => {
@@ -494,6 +514,26 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
              `--frames {frames}`"
         )));
     }
+    if parsed.code.is_some() && parsed.net.is_none() {
+        return Err(bad(
+            "`--code` is a networked session's, so it needs `--host`, `--join`, `--serve` or \
+             `--connect`"
+                .to_owned(),
+        ));
+    }
+    let joins = match parsed.net {
+        Some(Net::Join(_)) => Some("--join"),
+        Some(Net::Connect(_)) => Some("--connect"),
+        _ => None,
+    };
+    if let Some(flag) = joins
+        && parsed.code.is_none()
+    {
+        return Err(bad(format!(
+            "`{flag}` takes part in a session kept to the runs given its code, which its host or \
+             server was given or printed, so it needs `--code`"
+        )));
+    }
     Ok(Some(parsed))
 }
 
@@ -632,13 +672,25 @@ mod tests {
         }
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
         assert_eq!(host.net, Some(Net::Host("0.0.0.0:7700".to_owned())));
-        let join = parse_strs(&["--join=127.0.0.1:7700", "--restore", "a.snapshot"]);
-        let join = join.unwrap().unwrap().net;
-        assert_eq!(join, Some(Net::Join("127.0.0.1:7700".to_owned())));
+        // Which makes its code, unless it's given one, as a joiner is, read as written.
+        assert_eq!(host.code, None);
+        let code = "7KQ2-9XMB-4TZD-P0WH".parse::<Code>().unwrap();
+        let join = ["--join=127.0.0.1:7700", "--restore", "a.snapshot", "--code"];
+        for given in ["7KQ2-9XMB-4TZD-P0WH", "7kq2 9xmb 4tzd p0wh"] {
+            let join = parse_strs(&[&join[..], &[given]].concat())
+                .unwrap()
+                .unwrap();
+            assert_eq!(join.net, Some(Net::Join("127.0.0.1:7700".to_owned())));
+            assert_eq!(join.code, Some(code));
+        }
+        let host = parse_strs(&["--host", "0.0.0.0:7700", "--code=7KQ2-9XMB-4TZD-P0WH"]);
+        assert_eq!(host.unwrap().unwrap().code, Some(code));
         // Either peer predicts, over a link that holds and loses its packets.
         let args = [
             "--join",
             "127.0.0.1:7700",
+            "--code",
+            "7KQ2-9XMB-4TZD-P0WH",
             "--rollback",
             "--link=100,20,2.5",
         ];
@@ -657,7 +709,12 @@ mod tests {
         let serve = serve.unwrap().unwrap();
         assert_eq!(serve.net, Some(Net::Serve("0.0.0.0:7700".to_owned())));
         assert!(serve.link.is_some());
-        let connect = parse_strs(&["--connect=127.0.0.1:7700", "--headless", "--link=100,20,5"]);
+        let connect = parse_strs(&[
+            "--connect=127.0.0.1:7700",
+            "--code=7KQ2-9XMB-4TZD-P0WH",
+            "--headless",
+            "--link=100,20,5",
+        ]);
         let connect = connect.unwrap().unwrap();
         assert_eq!(connect.net, Some(Net::Connect("127.0.0.1:7700".to_owned())));
         assert!(connect.headless && connect.link.is_some());
@@ -694,6 +751,7 @@ mod tests {
                 "--join",
                 "--serve",
                 "--connect",
+                "--code",
                 "--mods",
             ]
             .contains(&flag);
@@ -787,6 +845,14 @@ mod tests {
             &["--serve", "0.0.0.0:7700", "--headless", "--size", "320x180"],
             &["--stopped", "--serve", "0.0.0.0:7700"],
             &["--stopped", "--connect", "127.0.0.1:7700"],
+            // A joiner or a client needs its session's code, a code is a session's, and it's 16
+            // of its symbols.
+            &["--join", "127.0.0.1:7700"],
+            &["--connect", "127.0.0.1:7700"],
+            &["--code", "7KQ2-9XMB-4TZD-P0WH"],
+            &["--host", "0.0.0.0:7700", "--code"],
+            &["--host", "0.0.0.0:7700", "--code", "7KQ2-9XMB-4TZD-P0W"],
+            &["--join", "127.0.0.1:7700", "--code", "7KQ2-9XMB-4TZD-P0WU"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

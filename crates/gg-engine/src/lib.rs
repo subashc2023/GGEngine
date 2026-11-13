@@ -691,7 +691,7 @@ fn run_args(
             app.stack.record(recorder);
         }
         if let Some(net) = &args.net {
-            let mut session = net::Session::start(net, app.name, app.stack.names())?;
+            let mut session = net::Session::start(net, args.code, app.name, app.stack.names())?;
             if args.rollback {
                 session.predict();
             }

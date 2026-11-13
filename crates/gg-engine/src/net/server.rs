@@ -11,7 +11,7 @@
 //! these:
 //!
 //! ```text
-//! hello\tgg-server 2\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//! hello\tgg-server 3\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
 //!                                                    the client, as it connects: its app, engine,
 //!                                                      build and layers, and the port its packets
 //!                                                      come from
@@ -25,7 +25,7 @@
 //!
 //! A client's packets, sent at each tick it runs and again a tick's time after the last, carry its
 //! inputs for each tick from the first the server hasn't said it applied, as many as fit
-//! [`MAX_PACKET`], so that a packet lost loses none:
+//! [`MAX_PACKET_TEXT`], so that a packet lost loses none:
 //!
 //! ```text
 //! i 1238 1240                                        the latest tick the client has the state
@@ -55,17 +55,15 @@ use std::fmt::Write as _;
 use std::mem;
 #[cfg(test)]
 use std::net::SocketAddr;
-use std::net::TcpStream;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use gg_core::Result;
 use tracing::{info, warn};
 
 use super::{
-    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Queued, Turn, build, engine, listen, port_of,
-    read_batches, tick_of,
+    AHEAD, Accepted, Code, Link, MAX_LINE, MAX_PACKET_TEXT, Merged, Queued, Turn, build, engine,
+    listen, port_of, read_batches, tick_of,
 };
 use crate::args::Conditions;
 use crate::cells::{Cell, Seen};
@@ -75,21 +73,21 @@ use crate::{World, WorldHash};
 
 /// The hello's first part, the protocol and its version, which a client's must be: a change to the
 /// lines or the packets takes it to the next.
-pub(super) const PROTOCOL: &str = "gg-server 2";
+pub(super) const PROTOCOL: &str = "gg-server 3";
 
 /// How many of the latest ticks the server keeps the world's text after, and a client its states,
 /// half a second's, past which a client's state is sent whole.
 pub(super) const KEPT: usize = 32;
 
 /// The most bytes of a state's a packet carries, past its line.
-pub(super) const PART: usize = MAX_PACKET - 128;
+pub(super) const PART: usize = MAX_PACKET_TEXT - 128;
 
 /// The level zstd compresses states at: its default, quick, as states go out each tick.
 const LEVEL: i32 = 3;
 
 /// A server: where its clients' connections come, and each client.
 pub(crate) struct Server {
-    accepted: Receiver<TcpStream>,
+    accepted: Accepted,
     /// Where the server listens, as the OS has it: for tests, which listen where it picks.
     #[cfg(test)]
     pub(super) listening: SocketAddr,
@@ -139,13 +137,18 @@ struct Remote {
 
 impl Server {
     /// Starts listening at `address` for clients of app `app`, whose layers are `layers`, from the
-    /// bottom up.
+    /// bottom up, given the session's `code`.
     ///
     /// Fails with `net.start` if it can't listen there, and with `net.build` if the run's build
     /// can't be read, as [`build`] says.
-    pub(crate) fn start(address: &str, app: &'static str, layers: &[&str]) -> Result<Self> {
+    pub(crate) fn start(
+        address: &str,
+        code: Code,
+        app: &'static str,
+        layers: &[&str],
+    ) -> Result<Self> {
         let build = build()?;
-        let (accepted, at) = listen(address, "clients")?;
+        let (accepted, at) = listen(address, "clients", code)?;
         info!(address = %at, "Serving the world");
         Ok(Self {
             accepted,
@@ -165,15 +168,22 @@ impl Server {
     }
 
     /// Between ticks, as a frame starts, the next tick to run being `next`: takes the connections
-    /// made, and the lines and packets each client's link has, as `--link` holds them; refuses a
-    /// hello of another protocol, app, engine, build or layers, giving one taken the least player
-    /// no other client has; and returns whether the server owes a client its world. Logs a client
-    /// lost: its connection closed, nothing came from it for [`LOST`](super::LOST), or no hello
-    /// within [`HELLO`](super::HELLO).
+    /// made whose handshakes held, refusing those whose didn't, and the lines and packets each
+    /// client's link has, as `--link` holds them; refuses a hello of another protocol, app,
+    /// engine, build or layers, giving one taken the least player no other client has; and returns
+    /// whether the server owes a client its world. Logs a client lost: its connection closed,
+    /// nothing came from it for [`LOST`](super::LOST), or no hello within [`HELLO`](super::HELLO).
     pub(crate) fn turn(&mut self, next: u64) -> Turn {
         let now = Instant::now();
-        while let Ok(stream) = self.accepted.try_recv() {
-            match Link::new(stream, true) {
+        while let Some(handshaken) = self.accepted.handshaken() {
+            let (stream, keys) = match handshaken {
+                Ok(made) => made,
+                Err(why) => {
+                    warn!(code = "net.refused", "Refused a client: {why}");
+                    continue;
+                }
+            };
+            match Link::new(stream, keys, true) {
                 Ok(link) => self.clients.push(Remote {
                     link,
                     hello: false,
@@ -553,9 +563,9 @@ mod tests {
 
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::super::Session;
     use super::super::client::LEAD;
     use super::super::tests::{Command, Game, SLOW, Score};
+    use super::super::{Client, Session, TESTED, secure};
     use super::*;
     use crate::Context;
     use crate::args::Net;
@@ -582,7 +592,8 @@ mod tests {
         fn of(net: &Net, mut cx: Context, layer: impl crate::Layer + 'static) -> Self {
             let mut stack = Stack::default();
             stack.push_layer(layer);
-            let mut session = Session::start(net, "Tested", stack.names()).expect("started");
+            let names = stack.names();
+            let mut session = Session::start(net, Some(TESTED), "Tested", names).expect("started");
             session.condition(SLOW);
             stack.session(session);
             stack.attach(&mut cx);
@@ -659,15 +670,12 @@ mod tests {
 
     /// A client's inputs are kept within a second of ticks past the server's next, and a tick's
     /// lines on the stream within a line's bytes: the client is lost at inputs past them, as from a
-    /// client that sends inputs for ticks however far on, or the lines of a tick without end, or a
-    /// packet from elsewhere at the client's address, and at a tick no run reaches.
+    /// client that sends inputs for ticks however far on, or the lines of a tick without end, and
+    /// at a tick no run reaches.
     #[test]
     fn a_client_s_inputs_are_kept_to_a_second_and_a_line() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listening");
-        let at = listener.local_addr().expect("an address");
-        let _other = TcpStream::connect(at).expect("connected");
-        let (stream, _) = listener.accept().expect("accepted");
-        let mut link = Link::new(stream, true).expect("a link");
+        let [_other, (stream, keys)] = secure::linked();
+        let mut link = Link::new(stream, keys, true).expect("a link");
         link.joined = true;
         let mut client = Remote {
             link,
@@ -875,6 +883,36 @@ mod tests {
             "{codes:?}"
         );
         assert!(!codes.iter().any(|code| code == "net.lost"), "{codes:?}");
+    }
+
+    /// A client given another code than the server's is refused in its handshake, by the server
+    /// and by itself, which tries again only after [`REFUSED`](super::super::REFUSED), never
+    /// joining; a client given the server's joins.
+    #[test]
+    fn a_client_given_another_code_is_refused() {
+        let logged = crate::testing::logged();
+        let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.to_string(),
+            _ => panic!("a server"),
+        };
+        // Of the server's app and layers, so that its code alone differs.
+        let (other, layers) = ("0000-0000-0000-0000".parse(), server.stack.names().to_vec());
+        let other = other.expect("a code");
+        let mut stranger = Client::start(&address, other, "Tested", &layers).expect("started");
+        let start = Instant::now();
+        let mut refused = 0;
+        while start.elapsed() < Duration::from_millis(600) {
+            server.turn();
+            assert!(matches!(stranger.turn(), Turn::None));
+            let codes = logged.codes.try_iter();
+            refused += codes.filter(|code| code == "net.refused").count();
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Each side's.
+        assert_eq!(refused, 2);
+        let mut clients = [Node::new(&Net::Connect(address), Context::seeded(2))];
+        until(&mut server, &mut clients, |_, clients| clients[0].joined());
     }
 
     /// A command of [`Players`]': puts player `player`'s viewer at x `x`.

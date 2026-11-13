@@ -140,14 +140,15 @@ jobs:
           cargo run -p sandbox --locked -- --replay target/run.recording --threads 1
       # The demo's two peers in lockstep on the loopback, each exiting 0: the joiner starts from the
       # host's world, and their worlds hash alike at every tick, as no `net.desync` in either log
-      # says; the host plays on alone once the joiner has gone.
+      # says; the host plays on alone once the joiner has gone. Each session's runs here are given
+      # a code of their own, which a host or a server not given one makes and prints.
       - name: Run the demo as two lockstep peers
         if: matrix.part == 'runs'
         run: |
           cargo build -p shards --locked
-          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7700 &
+          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7700 --code 0000-0000-0000-7700 &
           host=$!
-          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7700
+          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7700 --code 0000-0000-0000-7700
           wait $host
           grep -q '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
@@ -157,9 +158,9 @@ jobs:
       - name: Run the demo as two rollback peers over a slow link
         if: matrix.part == 'runs'
         run: |
-          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7701 --rollback --link 100,20,5 &
+          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7701 --code 0000-0000-0000-7701 --rollback --link 100,20,5 &
           host=$!
-          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7701 --rollback --link 100,20,5
+          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7701 --code 0000-0000-0000-7701 --rollback --link 100,20,5
           wait $host
           test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
           grep -q '"code":"net.rollback","rollbacks":[1-9]' target/debug/logs/shards-*.jsonl
@@ -171,11 +172,11 @@ jobs:
       - name: Run the demo as a server and two clients over a slow link
         if: matrix.part == 'runs'
         run: |
-          target/debug/gg-shards --serve 127.0.0.1:7702 --link 100,20,5 &
+          target/debug/gg-shards --serve 127.0.0.1:7702 --code 0000-0000-0000-7702 --link 100,20,5 &
           server=$!
-          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --link 100,20,5 &
+          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --code 0000-0000-0000-7702 --link 100,20,5 &
           client=$!
-          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --link 100,20,5
+          target/debug/gg-shards --headless --frames 300 --connect 127.0.0.1:7702 --code 0000-0000-0000-7702 --link 100,20,5
           wait $client
           kill -INT $server
           wait $server
@@ -208,19 +209,19 @@ jobs:
           fox=target/debug/gg-foxball
           headless="$fox --headless --size 320x180"
           logs="target/debug/logs/foxball-*.jsonl"
-          $headless --frames 600 --host 127.0.0.1:7710 &
+          $headless --frames 600 --host 127.0.0.1:7710 --code 0000-0000-0000-7710 &
           host=$!
-          $headless --frames 300 --join 127.0.0.1:7710
+          $headless --frames 300 --join 127.0.0.1:7710 --code 0000-0000-0000-7710
           wait $host
-          $headless --frames 600 --host 127.0.0.1:7711 --rollback --link 100,20,5 &
+          $headless --frames 600 --host 127.0.0.1:7711 --code 0000-0000-0000-7711 --rollback --link 100,20,5 &
           host=$!
-          $headless --frames 300 --join 127.0.0.1:7711 --rollback --link 100,20,5
+          $headless --frames 300 --join 127.0.0.1:7711 --code 0000-0000-0000-7711 --rollback --link 100,20,5
           wait $host
-          $fox --serve 127.0.0.1:7712 --link 100,20,5 &
+          $fox --serve 127.0.0.1:7712 --code 0000-0000-0000-7712 --link 100,20,5 &
           server=$!
-          $headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5 &
+          $headless --frames 300 --connect 127.0.0.1:7712 --code 0000-0000-0000-7712 --link 100,20,5 &
           client=$!
-          $headless --frames 300 --connect 127.0.0.1:7712 --link 100,20,5
+          $headless --frames 300 --connect 127.0.0.1:7712 --code 0000-0000-0000-7712 --link 100,20,5
           wait $client
           kill -INT $server
           wait $server

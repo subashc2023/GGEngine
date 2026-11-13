@@ -5081,7 +5081,8 @@ mod tests {
         recorded.record(recorder.expect("created"));
         let mut peer = Stack::default();
         let net = Net::Host("127.0.0.1:0".to_owned());
-        peer.lockstep(Lockstep::start(&net, "Tested", &[]).expect("hosting"));
+        let code = crate::net::TESTED;
+        peer.lockstep(Lockstep::start(&net, code, "Tested", &[]).expect("hosting"));
         let no_scene = Some("api.no_scene".to_owned());
         let no_project = Some("engine.no_project".to_owned());
         for (stack, project, codes) in [
