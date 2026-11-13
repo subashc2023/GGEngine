@@ -832,7 +832,8 @@ mod tests {
 
     /// Builds a world of cells as it attaches, of the cells
     /// [`project`](crate::cells::tests::project) makes, 10 units on a side, with a viewer of a
-    /// radius of 10 for each of players 0 and 1, at x 5 and 35, and moves each as its commands say.
+    /// radius of 10 for each of players 0 and 1, at x 5 and 35, and moves each as its commands say,
+    /// and cell 0's entity, if it's in, a unit up, so that cell 0 keeps it as it goes out.
     #[derive(Default)]
     struct Players(Vec<Move>);
 
@@ -862,6 +863,10 @@ mod tests {
                 };
                 let at = world.get_mut::<crate::Transform>(viewer).expect("placed");
                 at.translation.x = f64::from(x);
+                if let Some(zero) = world.entity(crate::cells::tests::id_of(0)) {
+                    let at = world.get_mut::<crate::Transform>(zero).expect("placed");
+                    at.translation.y += 1.0;
+                }
             }
         }
 

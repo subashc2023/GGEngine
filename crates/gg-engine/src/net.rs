@@ -3073,7 +3073,8 @@ mod tests {
             world.resource::<crate::cells::CellState>().cloned()
         };
         let held = kept(&host).expect("the host's cells came in");
-        assert_eq!((held.cells_in.len(), held.kept.len()), (0, 4));
+        // Cell 1 alone changed; the others went out as they came.
+        assert_eq!((held.cells_in.len(), held.kept.len()), (0, 1));
         let address = host.net().listening.expect("listening").to_string();
         let mut joiner = walker(&Net::Join(address), &root, 2, false);
         join(&mut host, &mut joiner);

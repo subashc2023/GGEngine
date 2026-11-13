@@ -1,0 +1,178 @@
+(
+    entities: {
+        "5ce2f00000000001": (
+            Cells: (
+                folder: "scenes/world",
+                size: 1024.0,
+            ),
+            Name: ("Cells"),
+        ),
+        "5ce2f00000000002": (
+            Environment: (
+                exposure: 14.0,
+                adaptation: None,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Image("93955ed372497870"),
+                sky_luminance: 30000.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: None,
+                depth_of_field: None,
+                motion_blur: None,
+                lens: (
+                    vignette: 0.0,
+                    chromatic_aberration: 0.0,
+                    grain: 0.0,
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "5ce2f00000000003": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 1.0, 0.92),
+                intensity: 126000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 400.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 12.0, 0.0),
+                rotation: (-0.44687283, 0.33397424, 0.0, 0.8299192),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5ce2f00000000004": (
+            Name: ("East"),
+            Owner: (
+                player: 0,
+            ),
+            Transform: (
+                translation: (512.0, 200.0, 512.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(512.0),
+                    to: Number(1000512.0),
+                    seconds: 32.0,
+                    curve: Linear,
+                    ease: InOut,
+                    playback: Once,
+                    time: 0.0,
+                ),
+            ]),
+            Viewer: (
+                radius: 2048.0,
+            ),
+        ),
+        "5ce2f00000000005": (
+            Camera: (
+                projection: Perspective(
+                    fov: 1.0471976,
+                    near: 0.5,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Parent: ("5ce2f00000000004"),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (-0.06162842, -0.70441604, -0.06162842, 0.70441604),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5ce2f00000000006": (
+            Name: ("West"),
+            Owner: (
+                player: 1,
+            ),
+            Transform: (
+                translation: (999936.0, 200.0, 999936.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Tweens: ([
+                (
+                    component: "Transform",
+                    field: "translation.x",
+                    from: Number(999936.0),
+                    to: Number(-64.0),
+                    seconds: 32.0,
+                    curve: Linear,
+                    ease: InOut,
+                    playback: Once,
+                    time: 0.0,
+                ),
+            ]),
+            Viewer: (
+                radius: 2048.0,
+            ),
+        ),
+        "5ce2f00000000007": (
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Gate: Box"),
+            Transform: (
+                translation: (192.0, 5.5, 704.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+        ),
+        "5ce2f00000000008": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Gate: Crate"),
+            Transform: (
+                translation: (320.0, 5.5, 704.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+        ),
+        "5ce2f00000000009": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Gate: Torus"),
+            Transform: (
+                translation: (448.0, 10.5, 704.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+        ),
+        "5ce2f0000000000a": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Gate: Ball"),
+            Transform: (
+                translation: (576.0, 5.5, 704.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+        ),
+        "5ce2f0000000000b": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Gate: Crystal"),
+            Transform: (
+                translation: (704.0, 5.5, 704.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+        ),
+    },
+)

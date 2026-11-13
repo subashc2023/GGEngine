@@ -84,7 +84,12 @@
 //! the navmesh and their paths in lines (`navigation.ron`); a world of cells 64 m on a side, an 8
 //! by 8 grid of scene files, each a crate, a torus, a ball and a lamp, which come in around a
 //! character the keys walk, its camera following, and go out as it walks away, kept as they were
-//! (`cells.ron`, its cells in `scenes/cells`); and, once `cargo
+//! (`cells.ron`, its cells in `scenes/cells`); a world of cells 1,024 m on a side reaching 1,000 km
+//! from the origin, which no file holds, the game making each, a tile of ground and four props,
+//! crossed in 32 s by two fliers 1,000 km apart, each a viewer, one east, the camera riding it,
+//! one west, a gate of the models the cells name at the east one's start, which the world loads,
+//! as a server's session loads nothing as it plays (`world.ron`, its cells as [`world_cell`] makes
+//! them); and, once `cargo
 //! gg fetch` has fetched them, Sponza under a sky made from its sun, its arches darkened by ambient
 //! occlusion, what's bright blooming, graded and in a low fog, its gilding mirroring the arcades in
 //! place of the sky, exposed as it adapts to the sunlit atrium and the shaded arcades, through a
@@ -111,7 +116,7 @@
 //! player, which runs the game's package without its code, and so without the keys' walking and
 //! its own components: the chimes, the bursters, the jukebox, the HUD, the menu, the widgets, the
 //! plasma, the look, the state labels, the tether and the launches, which its code registers and
-//! runs.
+//! runs, and the world's cells, which its code makes.
 
 // A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
 // run, and output piped to another process still arrives.
@@ -124,10 +129,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{IVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Value;
 use gg_engine::{
-    Actions, Align, AnimationStates, App, Binding, Blend, Bus, Change, Commands, Component,
+    Actions, Align, AnimationStates, App, Binding, Blend, Bus, Cell, Change, Commands, Component,
     Context, Curve, Ease, Entity, Error, Event, Font, GameUi, Joint3D, Key, Layer, Mesh, MeshDraw,
     MouseButton, Music, PadButton, ParamValue, ParticleEmitter, Place, Reflect, RigidBody3D,
     Scripts, Shader, Sound, Source, Sprite, Stick, Text, TextStyle, Tick, Transform, Tween,
@@ -393,6 +398,106 @@ const BUTTON: (Vec2, Vec2) = (Vec2::new(0.0, -40.0), Vec2::new(190.0, 56.0));
 
 /// The scene the game starts in, as its project's manifest names it.
 const START: &str = "scenes/welcome.ron";
+
+/// The folder of the cells of the world, `world.ron`'s, which holds no file: the game makes each,
+/// as [`world_cell`] does.
+const WORLD_FOLDER: &str = "scenes/world";
+
+/// The first and the last of the world's cells, 1,024 m on a side, on each axis: 977 along x and
+/// z, reaching 1,000 km from the origin, at y 0.
+const WORLD_CELLS: [[i32; 3]; 2] = [[0, 0, 0], [976, 0, 976]];
+
+/// The props a cell of the world holds, by kind: its name, its model, and its middle's height over
+/// the ground by its size.
+const PROPS: [(&str, &str, f64); 4] = [
+    ("Crate", "11d32c53785146e8", 0.5),
+    ("Torus", "25ea9ac40f5d8623", 1.0),
+    ("Ball", "fbca002a5a685a47", 0.5),
+    ("Crystal", "48899f3b379ae447", 0.5),
+];
+
+/// Cell `cell` of the world, of those [`WORLD_CELLS`] spans, as a scene file would hold it: a
+/// tile of ground covering it, a static body to stand on, and four props on it, each of a kind, a
+/// place and a size of a hash of the cell and its number; each entity's ID the cell's place and
+/// its number, so that every run, peer and platform makes the cell the same, and no other entity
+/// has one of its IDs; and each where the cell is, as a streamed root belongs to the cell it
+/// stands in, so that a cell goes out as it came, keeping nothing. Canonical, as a save of it
+/// would write it.
+fn world_cell(cell: Cell) -> String {
+    let [x, _, z] = cell.0.to_array();
+    let place = u64::from(x.unsigned_abs()) << 28 | u64::from(z.unsigned_abs()) << 8;
+    let id = |n: u64| format!("{:016x}", 0x5ce2_0000_0000_0000 | place | n);
+    let [x, z] = [x, z].map(|n| f64::from(n) * 1024.0);
+    let mut text = String::from("(\n    entities: {\n");
+    write!(
+        text,
+        r#"        "{id}": (
+            BoxCollider3D: (
+                offset: (0.0, 0.0, 0.0),
+                size: (1.0, 1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
+            ),
+            ModelRoot: ("f1335e6995be98d7"),
+            Name: ("Ground"),
+            RigidBody3D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0, 0.0),
+                angular_velocity: (0.0, 0.0, 0.0),
+            ),
+            Transform: (
+                translation: ({x:?}, 0.0, {z:?}),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1024.0, 1.0, 1024.0),
+            ),
+        ),
+"#,
+        id = id(0),
+        x = x + 512.0,
+        z = z + 512.0,
+    )
+    .expect("a string takes any text");
+    for n in 1..=4 {
+        let hash = mix(place | n);
+        let (name, model, up) = PROPS[(hash % 4) as usize];
+        let [east, south] = [8, 24].map(|at| ((hash >> at) % 896 + 64) as f64);
+        let size = ((hash >> 40) % 17 + 8) as f64;
+        write!(
+            text,
+            r#"        "{id}": (
+            ModelRoot: ("{model}"),
+            Name: ("{name}"),
+            Transform: (
+                translation: ({x:?}, {y:?}, {z:?}),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: ({size:?}, {size:?}, {size:?}),
+            ),
+        ),
+"#,
+            id = id(n),
+            x = x + east,
+            // On the ground, whose top is half a unit up.
+            y = 0.5 + size * up,
+            z = z + south,
+        )
+        .expect("a string takes any text");
+    }
+    text + "    },\n)\n"
+}
+
+/// SplitMix64's step of `seed`, a hash of it, alike on every platform.
+fn mix(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
 
 /// The game's scenes, by their paths from its directory, `root`, `/` between their parts, in order:
 /// those its package holds, in a run from one, as a build without `dev` runs, and else those in its
@@ -769,6 +874,8 @@ impl Layer for Showcase {
             }
         }
         register(cx.world_mut());
+        let [from, to] = WORLD_CELLS.map(|cell| Cell(IVec3::from_array(cell)));
+        cx.make_cells(WORLD_FOLDER, from, to, world_cell);
         self.scenes = scenes(cx, root);
         // Only a scene with a navmesh volume, `navigation.ron`, has any to show.
         cx.set_navmesh_shown(true);

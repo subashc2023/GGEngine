@@ -158,8 +158,9 @@ pub(crate) fn text_digest(text: &str) -> u64 {
 }
 
 /// What a world of cells keeps of them, as [`CellState`] holds it, absorbed: the cells in, those
-/// coming, those whose files came, each with its file's digest, those out that keep something,
-/// each with its texts' digests, and those refused, each in order, after its count.
+/// coming, those whose files came, each with its file's digest, those that came as their files
+/// have them, each with the digest of what they came as, those out that keep something, each with
+/// its texts' digests, and those refused, each in order, after its count.
 fn cells(cells: &CellState) -> u64 {
     let cell = |state: u64, cell: &Cell| {
         let [x, y, z] = cell.0.to_array().map(|axis| u64::from(axis as u32));
@@ -169,9 +170,11 @@ fn cells(cells: &CellState) -> u64 {
     state = cells.cells_in.iter().fold(state, cell);
     state = absorb(state, cells.coming.len() as u64);
     state = cells.coming.iter().fold(state, cell);
-    state = absorb(state, cells.files.len() as u64);
-    for (at, &digest) in &cells.files {
-        state = absorb(cell(state, at), digest);
+    for digests in [&cells.files, &cells.came_as] {
+        state = absorb(state, digests.len() as u64);
+        for (at, &digest) in digests {
+            state = absorb(cell(state, at), digest);
+        }
     }
     state = absorb(state, cells.kept.len() as u64);
     for (at, kept) in &cells.kept {

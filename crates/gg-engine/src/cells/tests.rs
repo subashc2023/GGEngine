@@ -210,8 +210,9 @@ fn a_point_is_in_the_cell_of_its_floor_over_the_size() {
 /// Cells come in as a viewer comes within its radius, with their files' entities, which stream,
 /// and go out past its radius and half a cell, keeping their entities as they were: one a tick
 /// moved within its cell comes back where it was left, not where the file has it; one moved into a
-/// cell that's out goes out at once, and comes back with that cell; and what doesn't stream, or
-/// holds a viewer, stays. A file whose name isn't a cell's counts for nothing.
+/// cell that's out goes out at once, and comes back with that cell; a cell that goes out as it
+/// came keeps nothing, and comes back from its file; and what doesn't stream, or holds a viewer,
+/// stays. A file whose name isn't a cell's counts for nothing.
 #[test]
 fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     let logged = crate::testing::logged();
@@ -268,9 +269,13 @@ fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     assert!(world.get::<Transform>(unmarked).is_some(), "doesn't stream");
     assert!(world.get::<Transform>(holder).is_some(), "holds a viewer");
     let kept: Vec<i32> = state(&cx).kept.keys().map(|cell| cell.0.x).collect();
-    assert_eq!(kept, [-1, 0, 1, 2], "cell 3 went out holding nothing");
+    assert_eq!(
+        kept,
+        [-1, 1],
+        "cells 0 and 2 went out as they came, and cell 3 holding nothing"
+    );
     let files: Vec<i32> = state(&cx).files.keys().map(|cell| cell.0.x).collect();
-    assert_eq!(files, [0, 1, 2, 3], "so its file doesn't come again");
+    assert_eq!(files, [1, 3], "so their files don't come again");
 
     move_to(&mut cx, viewer, 5.0);
     step(&mut cx);
@@ -278,7 +283,7 @@ fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     assert_eq!(
         found(&cx, id_of(0)),
         Some((5.0, true)),
-        "kept, not loaded again"
+        "from its file again"
     );
     assert_eq!(
         found(&cx, id_of(1)),
@@ -295,6 +300,156 @@ fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     assert_eq!(count("cells.entered"), 7, "{cells:?}");
     assert_eq!(count("cells.left"), 4, "{cells:?}");
     assert_eq!(cells.len(), 11, "nothing else: {cells:?}");
+}
+
+/// A cell that goes out as it came from its file keeps nothing, its file no longer noted as come
+/// in, so that what the world holds of its cells follows the cells in and those changed, not those
+/// a viewer crossed, and it comes back from its file; one changed keeps what it holds, and keeps it
+/// again as it goes out as it came back, which its file no longer stands for.
+#[test]
+fn a_cell_going_out_as_it_came_keeps_nothing() {
+    let dir = Scratch::new("cells-as-they-came");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    let keys = |cells: &mut dyn Iterator<Item = &Cell>| cells.map(|cell| cell.0.x).collect();
+    for x in [5.0, 15.0, 25.0, 35.0, 100.0] {
+        move_to(&mut cx, viewer, x);
+        step(&mut cx);
+    }
+    assert_eq!(
+        state(&cx),
+        &CellState::default(),
+        "crossed, holding nothing"
+    );
+
+    move_to(&mut cx, viewer, 5.0);
+    step(&mut cx);
+    let came: Vec<i32> = keys(&mut state(&cx).came_as.keys());
+    assert_eq!(came, [0, 1]);
+    let zero = cx.world().entity(id_of(0)).expect("in from its file");
+    move_to(&mut cx, zero, 6.0);
+    move_to(&mut cx, viewer, 100.0);
+    step(&mut cx);
+    let kept: Vec<i32> = keys(&mut state(&cx).kept.keys());
+    assert_eq!(kept, [0]);
+    let files: Vec<i32> = keys(&mut state(&cx).files.keys());
+    assert_eq!(files, [0], "so its file doesn't come again");
+
+    move_to(&mut cx, viewer, 5.0);
+    step(&mut cx);
+    assert_eq!(found(&cx, id_of(0)), Some((6.0, true)));
+    let came: Vec<i32> = keys(&mut state(&cx).came_as.keys());
+    assert_eq!(came, [1], "cell 0 came as it kept");
+    move_to(&mut cx, viewer, 100.0);
+    step(&mut cx);
+    let kept: Vec<i32> = keys(&mut state(&cx).kept.keys());
+    assert_eq!(kept, [0], "kept again");
+}
+
+/// A cell whose file's text the run takes again while it's in, as a save of the file applies, no
+/// longer goes out as it came, keeping what it holds, so that an edit since, as one undoing what
+/// the save applied, stays; another cell's goes out as it came.
+#[test]
+fn a_cell_whose_file_changed_since_it_came_keeps_what_it_holds() {
+    let dir = Scratch::new("cells-file-changed");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    step(&mut cx);
+    let path = "cells/0_0_0.ron".to_owned();
+    let text = scene(&[(id_of(0).get(), 6.0)]);
+    let edit = crate::edits::Edit::Scene { path, text };
+    cx.apply_edit(edit).expect("kept");
+    let came: Vec<i32> = state(&cx).came_as.keys().map(|cell| cell.0.x).collect();
+    assert_eq!(came, [1]);
+    move_to(&mut cx, viewer, 100.0);
+    step(&mut cx);
+    let kept: Vec<i32> = state(&cx).kept.keys().map(|cell| cell.0.x).collect();
+    assert_eq!(kept, [0]);
+    move_to(&mut cx, viewer, 5.0);
+    step(&mut cx);
+    assert_eq!(
+        found(&cx, id_of(0)),
+        Some((5.0, true)),
+        "as it was, not as its file is now"
+    );
+}
+
+/// Makes the cells of folder `cells` that have no file, from -2 to 5 along x, as it loads, as
+/// [`make`] does.
+struct Maker;
+
+impl Layer for Maker {
+    fn load(&mut self, cx: &mut Context) {
+        make(cx);
+    }
+}
+
+/// Makes the cells of folder `cells` that have no file, from -2 to 5 along x: each an entity at
+/// its middle, of the ID [`made_id`] gives.
+fn make(cx: &mut Context) {
+    let [from, to] = [-2, 5].map(|x| Cell(IVec3::new(x, 0, 0)));
+    cx.make_cells("cells", from, to, |cell| {
+        let x = cell.0.x;
+        scene(&[(made_id(x).get(), x as f32 * 10.0 + 5.0)])
+    });
+}
+
+/// The ID of the entity the game makes cell `x` of.
+fn made_id(x: i32) -> EntityId {
+    EntityId::new((0x100 + x) as u64).expect("an ID")
+}
+
+/// The cells a game makes come in around a viewer as those of files do, from what it makes of
+/// each, a file standing for its cell in place of the game's making, none outside what it makes;
+/// the run keeps none of their texts; and each goes out as it came, keeping nothing, so that a
+/// viewer that crossed them leaves nothing behind.
+#[test]
+fn the_cells_a_game_makes_come_in_as_those_of_files_do() {
+    let dir = Scratch::new("cells-made");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    make(&mut cx);
+    // As a run's ticks do, taking what preparing finished.
+    let step = |cx: &mut Context| {
+        cx.stream_cells();
+        assert!(cx.cells_ready());
+        cx.enter_coming();
+    };
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [-1, 0, 1]);
+    assert_eq!(found(&cx, made_id(-1)), Some((-5.0, true)), "made");
+    assert_eq!(found(&cx, id_of(0)), Some((5.0, true)), "its file's");
+    assert_eq!(found(&cx, made_id(0)), None, "its file stands for it");
+
+    move_to(&mut cx, viewer, 45.0);
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [3, 4, 5]);
+    assert_eq!(found(&cx, made_id(5)), Some((55.0, true)));
+    move_to(&mut cx, viewer, 80.0);
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [0; 0], "cells 7 and 8 aren't made");
+    assert_eq!(
+        state(&cx),
+        &CellState::default(),
+        "crossed, holding nothing"
+    );
+    let made = |file: &crate::scene_files::SceneFile| {
+        ["cells/-1_0_0.ron", "cells/4_0_0.ron", "cells/5_0_0.ron"].contains(&&*file.author)
+    };
+    assert!(!cx.scenes.cached.iter().any(made), "made again, not kept");
+
+    // One changed keeps what it holds, as a file's does.
+    move_to(&mut cx, viewer, 55.0);
+    step(&mut cx);
+    let five = cx.world().entity(made_id(5)).expect("in");
+    move_to(&mut cx, five, 56.0);
+    move_to(&mut cx, viewer, 100.0);
+    step(&mut cx);
+    let kept: Vec<i32> = state(&cx).kept.keys().map(|cell| cell.0.x).collect();
+    assert_eq!(kept, [5]);
+    move_to(&mut cx, viewer, 55.0);
+    step(&mut cx);
+    assert_eq!(found(&cx, made_id(5)), Some((56.0, true)), "as it was left");
 }
 
 /// The cells within a viewer's radius and a cell more are prepared ahead, as a tick ends, and come
@@ -519,22 +674,31 @@ fn a_scene_change_empties_the_cells_and_what_cells_keep_is_hashed() {
         step(&mut cx);
         cx
     };
-    let (one, other) = (kept(5.0), kept(6.0));
+    let (one, other) = (kept(7.0), kept(6.0));
     let (one, other) = (one.world().hash(), other.world().hash());
     assert_eq!(one.content, other.content, "neither holds the entity");
     assert_ne!(one.layout, other.layout, "the texts kept differ");
-    // Alike but for a cell coming, or for the digest of a file that came.
-    let [mut coming, mut filed] = [kept(5.0), kept(5.0)];
+    // Alike but for a cell coming, for the digest of a file that came, or for what a cell in came
+    // as.
+    let [mut coming, mut filed, mut came] = [kept(6.0), kept(6.0), kept(6.0)];
     let alike = coming.world().hash();
     let two = Cell(IVec3::new(2, 0, 0));
     coming.world_mut().note_coming(&[two]);
-    let files = &mut filed
-        .world_mut()
-        .resource_mut::<CellState>()
-        .expect("streamed")
-        .files;
-    *files.get_mut(&Cell(IVec3::ZERO)).expect("came") ^= 1;
-    for (changed, what) in [(&coming, "a cell coming"), (&filed, "a file's digest")] {
+    fn state_mut(cx: &mut Context) -> &mut CellState {
+        let state = cx.world_mut().resource_mut::<CellState>();
+        state.expect("streamed")
+    }
+    *state_mut(&mut filed)
+        .files
+        .get_mut(&Cell(IVec3::ZERO))
+        .expect("came") ^= 1;
+    state_mut(&mut came).came_as.insert(two, 1);
+    let changed = [
+        (&coming, "a cell coming"),
+        (&filed, "a file's digest"),
+        (&came, "what a cell came as"),
+    ];
+    for (changed, what) in changed {
         let hash = changed.world().hash();
         assert_eq!(hash.content, alike.content, "{what}");
         assert_ne!(hash.layout, alike.layout, "{what}");
@@ -556,11 +720,14 @@ fn a_world_s_text_holds_what_its_cells_keep() {
     let root = project(&dir.0);
     let (mut cx, viewer) = streaming(&root, "cells");
     step(&mut cx);
+    let zero = cx.world().entity(id_of(0)).expect("in");
+    move_to(&mut cx, zero, 6.0);
     move_to(&mut cx, viewer, 25.0);
     step(&mut cx);
     move_to(&mut cx, viewer, 26.0);
     step(&mut cx);
     assert_eq!(state(&cx).kept.len(), 1);
+    assert_eq!(state(&cx).came_as.len(), 3, "cells 1 to 3, in as they came");
     let mut text = String::new();
     cx.world().save_whole(&mut text).expect("saved");
     let mut read = Context::seeded(2);
@@ -568,6 +735,11 @@ fn a_world_s_text_holds_what_its_cells_keep() {
     read.world_mut().load_whole(lines, false).expect("read");
     assert_eq!(state(&read), state(&cx));
     assert_eq!(read.world().hash(), cx.world().hash());
+    // Of a snapshot from before what cells came as was saved, none came as their files have them.
+    let old = r#"{"cells_in":[[1,0,0]],"coming":[],"files":[],"kept":[],"refused":[]}"#;
+    let old = CellState::load(old, read.world()).expect("read");
+    assert_eq!(old.came_as.len(), 0);
+    assert_eq!(old.cells_in.len(), 1);
 }
 
 /// What a component that aims at an entity holds.
@@ -702,7 +874,9 @@ fn a_client_sees_the_cells_near_its_own_viewers() {
     );
 }
 
-/// Past [`MOST_CELLS`], the nearest come in, and the plan says it's full.
+/// Past [`MOST_CELLS`], the nearest come in, and the plan says it's full; of cells a game makes
+/// everywhere, a radius of thousands of cells looks within a bounded box, of which the nearest
+/// come in, as far as a flat world's reach.
 #[test]
 fn past_the_most_cells_the_nearest_come_in() {
     let mut cx = Context::seeded(1);
@@ -710,11 +884,36 @@ fn past_the_most_cells_the_nearest_come_in() {
     world.spawn((at(2500.5), Viewer { radius: 5000.0 }));
     let listed: Vec<Cell> = (0..5000).map(|x| Cell(IVec3::new(x, 0, 0))).collect();
     let mut plan = Plan::default();
-    cx.world().plan_cells(1.0, &listed, None, &mut plan);
+    cx.world().plan_cells(1.0, &listed, None, None, &mut plan);
     assert!(plan.full);
     assert_eq!(plan.entering.len(), MOST_CELLS);
     let xs = |at: usize| plan.entering[at].0.x;
     assert_eq!((xs(0), xs(MOST_CELLS - 1)), (2500 - 2048, 2500 + 2047));
+
+    let everywhere = (Cell(IVec3::splat(i32::MIN)), Cell(IVec3::splat(i32::MAX)));
+    cx.world()
+        .plan_cells(1.0, &[], Some(everywhere), None, &mut plan);
+    assert!(plan.full);
+    assert_eq!(plan.entering.len(), MOST_CELLS);
+    let middle = IVec3::new(2500, 0, 0);
+    let away = |plan: &Plan| {
+        let away = plan.entering.iter();
+        away.map(|cell| (cell.0 - middle).abs().max_element()).max()
+    };
+    assert!(away(&plan) <= Some(10), "the nearest");
+    // Of a world one cell deep, a disc, the 4,096 nearest reach some 36 cells away.
+    let flat = (
+        Cell(IVec3::new(i32::MIN, 0, i32::MIN)),
+        Cell(IVec3::new(i32::MAX, 0, i32::MAX)),
+    );
+    cx.world().plan_cells(1.0, &[], Some(flat), None, &mut plan);
+    assert!(plan.full);
+    assert_eq!(plan.entering.len(), MOST_CELLS);
+    assert!(
+        (30..=37).contains(&away(&plan).expect("in")),
+        "{:?}",
+        away(&plan)
+    );
 }
 
 /// `Cells` of a size that isn't finite and positive bring nothing in, warning once; of several,
@@ -834,11 +1033,11 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
     }
     assert_eq!((ran, replay.world().hash()), (WALK.len() as u64, ended));
     assert_eq!(xs(replay.world()), [0, 1]);
-    // Each cell's file as it first came in.
+    // Each cell's file as it came in: cell 0's again, as it went out as it came.
     let files: Vec<&str> = (text.lines())
         .filter_map(|line| Some(line.strip_prefix("cell ")?.split_once(' ')?.0))
         .collect();
-    assert_eq!(files, ["0_0_0", "1_0_0", "2_0_0", "3_0_0"]);
+    assert_eq!(files, ["0_0_0", "1_0_0", "2_0_0", "3_0_0", "0_0_0"]);
 
     // Cell 2's file changed since: the replay, as `--replay` runs it, stops as it comes in, naming
     // it.
@@ -854,6 +1053,94 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
     assert!(
         message.contains("tick 2 brought cell 2_0_0 in from the file cells/2_0_0.ron"),
         "{message}"
+    );
+}
+
+/// A world whose cells the game makes needs no folder: one that isn't there warns of nothing, and
+/// its cells come in.
+#[test]
+fn a_made_world_needs_no_folder() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("cells-made-unfiled");
+    let (mut cx, _) = streaming(&dir.0, "cells");
+    make(&mut cx);
+    step(&mut cx);
+    assert_eq!(cells_in(&cx), [-1, 0, 1]);
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    assert!(
+        !codes.iter().any(|code| code == "cells.listing"),
+        "{codes:?}"
+    );
+}
+
+/// A run whose game makes cells runs again alike in a SyncTest, and its recording replays to its
+/// hashes, naming the cells whose files came in, as they came, cells 2 and 3 going out again, as
+/// they came, at the end of the tick they came in at, and no cell the game made.
+#[test]
+fn a_run_of_made_cells_replays_naming_no_made_cell() {
+    const WALK: [Option<Walk>; 6] = [
+        None,
+        Some(Walk::Viewer(25.0)),
+        Some(Walk::Viewer(100.0)),
+        None,
+        Some(Walk::Viewer(5.0)),
+        None,
+    ];
+    use crate::App;
+    use crate::recording::{Recorder, Replay};
+
+    let dir = Scratch::new("cells-made-replay");
+    let root = project(&dir.0);
+    let app = || {
+        let app = App::new("Making").root(&root);
+        app.layer(Walker::default()).layer(Maker)
+    };
+    let path = dir.0.join("run.recording");
+    let mut run = app();
+    run.stack
+        .record(Recorder::create(&path, run.name).expect("created"));
+    run.stack.sync_test();
+    let mut cx = Context::seeded(1).root(root.clone());
+    run.stack.attach(&mut cx);
+    let mut made = BTreeSet::new();
+    for (number, walk) in (0..).zip(WALK) {
+        if let Some(walk) = walk {
+            let queue = run.stack.commands_of(0).expect("a queue");
+            queue.push(&walk.to_value()).expect("queued");
+        }
+        assert!(run.stack.tick(&mut cx, Tick { number }));
+        made.extend(
+            cx.world()
+                .cells_in()
+                .map(|cell| cell.0.x)
+                .filter(|x| *x < 0),
+        );
+    }
+    assert_eq!(
+        made,
+        BTreeSet::from([-1]),
+        "made, as the walk starts and ends"
+    );
+    let matched = run.stack.sync_test_mut().map(|sync| sync.matched());
+    assert_eq!(matched, Some(WALK.len() as u64));
+    let ended = cx.world().hash();
+    run.stack.detach(&mut cx);
+    run.stack.recorded().expect("written");
+
+    let text = fs::read_to_string(&path).expect("written");
+    let mut replay = Replay::new(app(), &text).unwrap_or_else(|error| panic!("{error:#}"));
+    while replay
+        .step()
+        .unwrap_or_else(|error| panic!("{error:#}"))
+        .is_some()
+    {}
+    assert_eq!(replay.world().hash(), ended);
+    let files: Vec<&str> = (text.lines())
+        .filter_map(|line| Some(line.strip_prefix("cell ")?.split_once(' ')?.0))
+        .collect();
+    assert_eq!(
+        files,
+        ["0_0_0", "1_0_0", "2_0_0", "3_0_0", "0_0_0", "1_0_0"]
     );
 }
 

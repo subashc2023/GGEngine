@@ -632,14 +632,16 @@ pub struct ViewerAt {
 }
 
 /// A cell, as [`WorldCells`] lists it: its place on the grid, as its file's name has it, `3_0_-2`
-/// for `[3, 0, -2]`; whether the folder holds its `file`, as the game last listed it; whether it's
-/// `in`, `coming` in as the next tick starts, or `refused` while a viewer is near; how many scene
-/// texts it keeps, out, of what it held as it went (`kept`); how many streamed `roots` stand in it;
-/// and whether `scene`'s `save` would write its file, or is refused it (`unsaved`).
+/// for `[3, 0, -2]`; whether the folder holds its `file`, as the game last listed it, or else the
+/// game's code `made` it; whether it's `in`, `coming` in as the next tick starts, or `refused`
+/// while a viewer is near; how many scene texts it keeps, out, of what it held as it went
+/// (`kept`); how many streamed `roots` stand in it; and whether `scene`'s `save` would write its
+/// file, or is refused it (`unsaved`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellAt {
     pub cell: [i32; 3],
     pub file: bool,
+    pub made: bool,
     #[serde(rename = "in")]
     pub is_in: bool,
     pub coming: bool,
@@ -2737,13 +2739,14 @@ mod tests {
     fn cell_lists_read_as_their_docs_say() {
         let json = r#"{"world": {"entity": "00000000000000a0", "folder": "scenes/cells",
             "size": 64, "viewers": [{"entity": null, "position": [0, 10, 0], "radius": 512}],
-            "cells": [{"cell": [3, 0, -2], "file": true, "in": true, "coming": false,
+            "cells": [{"cell": [3, 0, -2], "file": true, "made": false, "in": true, "coming": false,
             "refused": false, "kept": 0, "roots": 2, "unsaved": true}]}}"#;
         let list: CellList = serde_json::from_str(json).unwrap();
         let world = list.world.as_ref().unwrap();
         let cell = CellAt {
             cell: [3, 0, -2],
             file: true,
+            made: false,
             is_in: true,
             coming: false,
             refused: false,

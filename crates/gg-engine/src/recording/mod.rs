@@ -51,7 +51,7 @@ use tracing::{error, info, warn};
 
 use crate::args::Dump;
 use crate::assets::Counts;
-use crate::cells::{Cell, CellState};
+use crate::cells::Cell;
 use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::luau::ModText;
@@ -639,13 +639,15 @@ impl Replay {
     /// Fails with `replay.cell_file`, naming the line, the tick and the file, where a cell whose
     /// file came in as `tick` started in the run came in from a file of another digest here, or
     /// didn't come in: as the replay reads the cells' files as they are now, which an edit since
-    /// changes.
+    /// changes. What came is what the tick noted as it started, as the run's recording wrote it,
+    /// since a cell that came may go out again, as it came, as the tick ends.
     fn check_cells(&self, tick: Tick) -> Result<()> {
         let ticked = &self.recording.ticks[tick.number as usize];
         let world = self.cx.world();
-        let files = world.resource::<CellState>().map(|state| &state.files);
+        let came = &self.cx.cells.came;
         for &(cell, digest, line) in &ticked.cells {
-            let here = files.and_then(|files| files.get(&cell)).copied();
+            let here = came.iter().find(|&&(came, _)| came == cell);
+            let here = here.map(|&(_, digest)| digest);
             if here == Some(digest) {
                 continue;
             }

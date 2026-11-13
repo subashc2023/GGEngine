@@ -493,6 +493,7 @@ pub(crate) use watch::{apply_save, look};
 
 #[cfg(feature = "dev")]
 mod open_scene {
+    use std::borrow::Cow;
     use std::collections::HashSet;
     use std::fs;
     use std::mem;
@@ -504,7 +505,7 @@ mod open_scene {
     use gg_core::{Error, Result};
 
     use super::{Open, SceneFile, same_file};
-    use crate::cells::{Cell, CellState};
+    use crate::cells::{Cell, CellState, MadeCells};
     use crate::ecs::{SceneEdit, text_digest};
     use crate::layer::Stack;
     use crate::{Context, Entity, EntityId, Operation, World};
@@ -666,7 +667,7 @@ mod open_scene {
     fn held(
         world: &World,
         files: &[SceneFile],
-        cached: &[SceneFile],
+        (cached, made): (&[SceneFile], Option<&MadeCells>),
         open: &Open,
     ) -> (Vec<Entity>, HashSet<Entity>) {
         let mut held = owned(world, files, open);
@@ -680,12 +681,11 @@ mod open_scene {
             .iter()
             .filter(|cell| state.files.contains_key(cell))
         {
-            let author = format!("{folder}/{cell}.ron");
-            let Some(file) = cached.iter().find(|file| file.author == author) else {
+            let Some(text) = applied(folder, cell, cached, made) else {
                 continue;
             };
             // A text as last applied loaded then, so it reads as a scene's RON.
-            let ids = World::scene_ids(&file.text).unwrap_or_default();
+            let ids = World::scene_ids(&text).unwrap_or_default();
             held.extend(ids.into_iter().filter_map(|id| world.entity(id)));
         }
         let under = under(world, &roots);
@@ -695,11 +695,35 @@ mod open_scene {
         (held, under)
     }
 
+    /// The text cell `cell`'s file held as last applied, of folder `folder`, as it came in: its text
+    /// among `cached`, the texts kept for scene changes, or, for a cell without, what the game
+    /// makes of it, `made`, if it makes it.
+    fn applied<'a>(
+        folder: &str,
+        cell: Cell,
+        cached: &'a [SceneFile],
+        made: Option<&MadeCells>,
+    ) -> Option<Cow<'a, str>> {
+        let author = format!("{folder}/{cell}.ron");
+        match cached.iter().find(|file| file.author == author) {
+            Some(file) => Some(Cow::Borrowed(file.text.as_str())),
+            None => (made.filter(|made| made.makes(cell))).map(|made| (made.text)(cell).into()),
+        }
+    }
+
+    /// What the game makes of the cells of `world`, `cx`'s or the one it holds as edited, if it
+    /// makes some.
+    fn made_for<'a>(cx: &'a Context, world: &World) -> Option<&'a MadeCells> {
+        let (_, cells, _) = world.world_cells()?;
+        cx.cells.made(&cells.folder)
+    }
+
     /// What a save of the world as edited writes to its cells' files, in a world whose cells
     /// stream, as [`streaming`] says, and else nothing: of each cell in, and each that a streamed
     /// root is in, whose file would change, as [`World::cell_written`] finds it, the cell, and its
     /// file, under the asset root `root`, as written, or why the save is refused it. A cell's file
-    /// as last applied is its text among `cached`, the texts kept for scene changes.
+    /// as last applied is as [`applied`] gives it: so a cell the game made gets a file once it
+    /// changes, which stands for the game's making of it from then on.
     ///
     /// Refuses a cell whose file would change with `scene.changed`, naming the file, while it holds
     /// another text than the one last applied, as the open scene's file is refused; and with
@@ -709,7 +733,7 @@ mod open_scene {
     /// Fails with `scene.no_root` in a run without an asset root, and as `cell_written` fails.
     fn cell_saves(
         world: &World,
-        cached: &[SceneFile],
+        (cached, made): (&[SceneFile], Option<&MadeCells>),
         root: Option<&Path>,
     ) -> Result<Vec<(Cell, Result<SceneFile>)>> {
         let Some((folder, roots)) = streaming(world) else {
@@ -734,12 +758,13 @@ mod open_scene {
                 .map(|&(.., root)| root)
                 .collect();
             let came = state.files.contains_key(&cell);
-            let file = cached.iter().find(|file| came && file.author == author);
-            let file = file.map(|file| file.text.as_str());
-            let Some(text) = world.cell_written(file, &ours)? else {
+            let file = came.then(|| applied(folder, cell, cached, made)).flatten();
+            let Some(text) = world.cell_written(file.as_deref(), &ours)? else {
                 continue;
             };
-            let refused = match file {
+            // What the game made of a cell has no file to compare.
+            let file = file.filter(|_| cached.iter().any(|file| file.author == author));
+            let refused = match file.as_deref() {
                 Some(file) => crate::read_scene(&path)
                     .ok()
                     .filter(|now| now != file)
@@ -751,15 +776,24 @@ mod open_scene {
                         );
                         Error::new("scene.changed", message)
                     }),
-                None => fs::metadata(&path).is_ok().then(|| {
+                None if fs::metadata(&path).is_ok() => {
                     let message = format!(
                         "{} is the file of cell {cell}, which a streamed root is in, but it hasn't \
                          come in, as when it was refused, or a root was just moved into it; \
                          saving would lose what it holds: save again once it's in",
                         path.display()
                     );
-                    Error::new("scene.cell_out", message)
-                }),
+                    Some(Error::new("scene.cell_out", message))
+                }
+                None if !came && made.is_some_and(|made| made.makes(cell)) => {
+                    let message = format!(
+                        "the game makes cell {cell}, which a streamed root is in, but it hasn't \
+                         come in, as when it was refused, or a root was just moved into it; \
+                         saving would lose what the game makes of it: save again once it's in"
+                    );
+                    Some(Error::new("scene.cell_out", message))
+                }
+                None => None,
             };
             let save = match refused {
                 Some(refused) => Err(refused),
@@ -823,9 +857,10 @@ mod open_scene {
             );
             return Err(Error::new("scene.changed", message));
         }
-        let (mut owned, under) = held(world, files, cached, open);
+        let made = made_for(cx, world);
+        let (mut owned, under) = held(world, files, (cached, made), open);
         owned.retain(|entity| !under.contains(entity));
-        let cells = cell_saves(world, cached, cx.root.as_deref())?.into_iter();
+        let cells = cell_saves(world, (cached, made), cx.root.as_deref())?.into_iter();
         let cells = cells.map(|(cell, save)| save.map(|file| (cell, file)));
         let cells: Vec<(Cell, SceneFile)> = cells.collect::<Result<_>>()?;
         let text = world.save_entities(&owned)?;
@@ -929,9 +964,9 @@ mod open_scene {
     /// Fails, changing nothing, as the deletes do.
     pub(crate) fn new(cx: &mut Context, stack: &mut Stack) -> Result<()> {
         let _zone = gg_core::zone!();
-        let scenes = &cx.scenes;
-        let (emptying, entities) =
-            emptying(cx.world(), &scenes.files, &scenes.cached, &scenes.open);
+        let (scenes, world) = (&cx.scenes, cx.world());
+        let cached = (scenes.cached.as_slice(), made_for(cx, world));
+        let (emptying, entities) = emptying(world, &scenes.files, cached, &scenes.open);
         stack.rewrite(cx, |world, log| log.apply_all(world, emptying))?;
         cx.empty_cells();
         let closed = close(cx);
@@ -989,6 +1024,7 @@ mod open_scene {
             let message = format!("{}:{error}", path.display());
             error.with_message(message)
         })?;
+        let cached = (cached, made_for(cx, world));
         let owned: HashSet<Entity> = held(world, files, cached, open).0.into_iter().collect();
         let theirs =
             |id: &EntityId| (world.entity(*id)).is_some_and(|e| !owned.contains(&world.owner(e)));
@@ -1027,8 +1063,9 @@ mod open_scene {
             text,
             started,
         } = opening;
-        let scenes = &cx.scenes;
-        let (emptying, _) = emptying(cx.world(), &scenes.files, &scenes.cached, &scenes.open);
+        let (scenes, world) = (&cx.scenes, cx.world());
+        let cached = (scenes.cached.as_slice(), made_for(cx, world));
+        let (emptying, _) = emptying(world, &scenes.files, cached, &scenes.open);
         stack.rewrite(cx, |world, log| {
             log.apply_all(world, emptying)?;
             // The entities first, then the rest, which may hold them, as a save applies.
@@ -1072,7 +1109,7 @@ mod open_scene {
     fn emptying(
         world: &World,
         files: &[SceneFile],
-        cached: &[SceneFile],
+        cached: (&[SceneFile], Option<&MadeCells>),
         open: &Open,
     ) -> (Vec<Operation>, usize) {
         let (owned, _) = held(world, files, cached, open);
@@ -1141,6 +1178,7 @@ mod open_scene {
         let mut canonical = mem::take(&mut cx.scenes.canonical);
         let cached = cached_as_edited(cx);
         let (world, files, open) = as_edited(cx);
+        let cached = (cached, made_for(cx, world));
         let (mut owned, under) = held(world, files, cached, open);
         owned.retain(|entity| !under.contains(entity));
         let cells = cell_saves(world, cached, cx.root.as_deref());
@@ -2313,6 +2351,75 @@ pub(crate) mod tests {
         assert_eq!(file_ids(&cell(3)), [one]);
         assert!(!open_scene::unsaved(&mut cx, 0), "its file's");
         open_scene::save(&mut cx, None).expect("saved again");
+    }
+
+    /// The cells the game makes come in around the look's viewpoint while the run is stopped and go
+    /// out as they came; a world's save writes no file of a made cell but of one that changed,
+    /// whose file stands for it from then on, and is refused a root moved into a made cell that
+    /// hasn't come in, until it has.
+    #[test]
+    fn a_world_s_save_writes_a_made_cell_s_file_once_it_changes() {
+        use crate::cells::Cell;
+        use gg_core::math::IVec3;
+
+        let dir = Scratch::new("open-scene-world-made");
+        let scenes = world_project(&dir.0);
+        let mut cx = started(&dir.0);
+        let [from, to] = [3, 100].map(|x| Cell(IVec3::new(x, 0, 0)));
+        cx.make_cells("scenes/cells", from, to, |cell| {
+            let x = cell.0.x;
+            cells_scene(&[(0x100 + x as u64, x as f32 * 10.0 + 5.0)])
+        });
+        let mut stack = Stack::default();
+        stack.attach(&mut cx);
+        let look = |cx: &mut Context, x: f32| {
+            look_at(cx, x);
+            cx.stream_stopped();
+            cx.stream_stopped();
+        };
+        look(&mut cx, 15.0);
+        // Within the look's radius of 512.
+        assert_eq!(xs(cx.world()), (0..=52).collect::<Vec<_>>());
+        assert!(!open_scene::unsaved(&mut cx, 0), "as made");
+        let cell = |x: i32| scenes.join(format!("cells/{x}_0_0.ron"));
+        let four = EntityId::new(0x104).expect("an ID");
+        apply(&mut cx, &mut stack, "agent", vec![set_x(four, 46.0)]);
+        assert!(open_scene::unsaved(&mut cx, 0));
+        open_scene::save(&mut cx, None).expect("saved");
+        assert!(!open_scene::unsaved(&mut cx, 0), "saved");
+        assert_eq!(file_ids(&cell(4)), [0x104]);
+        assert!(!cell(3).exists() && !cell(5).exists(), "as made");
+        let state = cx.world().resource::<CellState>().expect("streamed");
+        let saved = Cell(IVec3::new(4, 0, 0));
+        assert!(
+            !state.came_as.contains_key(&saved),
+            "it came as the file no longer has it"
+        );
+        assert!(state.came_as.contains_key(&Cell(IVec3::new(5, 0, 0))));
+        let list = cx.cells_read(true, 0).world.expect("a world of cells");
+        let five = list.cells.iter().find(|at| at.cell == [5, 0, 0]);
+        let five = five.expect("listed, as it's in");
+        assert!(five.made && !five.file, "{five:?}");
+
+        look(&mut cx, 5000.0);
+        assert_eq!(xs(cx.world()), [0; 0], "each as it came, or as saved");
+        look(&mut cx, 15.0);
+        let at = |cx: &Context| {
+            let world = cx.world();
+            let four = world.entity(four).expect("in");
+            world.get::<Transform>(four).expect("placed").translation.x
+        };
+        assert_eq!(at(&cx), 46.0, "as its file has it");
+
+        // Into cell 80, made, which hasn't come in.
+        apply(&mut cx, &mut stack, "agent", vec![set_x(id_of(0), 805.0)]);
+        let refused = open_scene::save(&mut cx, None).expect_err("refused");
+        assert_eq!(refused.code(), "scene.cell_out", "{refused:#}");
+        assert!(!cell(80).exists());
+        cx.stream_stopped();
+        cx.stream_stopped();
+        open_scene::save(&mut cx, None).expect("saved once it's in");
+        assert_eq!(file_ids(&cell(80)), [id_of(0).get(), 0x150]);
     }
 
     /// A world's save is refused, writing nothing, for a cell's file saved since it last applied,

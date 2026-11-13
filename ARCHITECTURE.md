@@ -998,7 +998,11 @@ A project's state is text that people and agents edit, diff and merge with ordin
 - **Worlds of cells.** A world larger than memory or a frame should hold at once is a scene whose
   `Cells` cuts space into cubes, `size` units on a side from the origin, each a cell whose entities
   are in a scene file of the folder `Cells` names, called by its place on the grid, as
-  `cells/3_0_-2.ron`; a cell without a file is empty. As each tick ends, after the layers' ticks,
+  `cells/3_0_-2.ron`; a cell without a file is empty, unless the game makes it: a layer's `load`
+  gives `Context::make_cells` the cells of a folder it makes, from one cell to another, and what
+  makes each one's scene text, on any thread, the same each time, so that a world reaches as far as
+  its game makes it without a file a cell, and a cell's file, as a save of a made cell that changed
+  writes, stands for the game's making of it. As each tick ends, after the layers' ticks,
   the cells farther than a `Viewer`'s radius and half a cell from every viewer go out, and those
   within a radius are noted coming, which come in as the next tick starts, before its layers: from
   the world alone, so that a replay, a tick run again by rollback or a SyncTest, and each lockstep
@@ -1007,29 +1011,40 @@ A project's state is text that people and agents edit, diff and merge with ordin
     it stands, and goes out with that cell, or at once if a tick leaves it in a cell that's out,
     with everything under it. A cell keeps what went out as scene text, under its IDs, and comes
     back from that rather than its file, so that a door opened stays open and an enemy stays where
-    it walked. What is or holds a viewer stays, as does what doesn't stream, as the world scene's
-    own entities; what refers to a streamed entity from outside finds it gone once it's out.
+    it walked. A cell that goes out as it came from its file or the game's making alone keeps
+    nothing, and comes back from them: as it's prepared, its text is loaded in a scratch world too
+    and its roots' save digested, which the world notes while it's in, and the text it goes out as
+    is compared with that. So what the world holds of its cells follows the cells in and those
+    changed, not those a viewer crossed. What is or holds a viewer stays, as does what doesn't
+    stream, as the world scene's own entities; what refers to a streamed entity from outside finds
+    it gone once it's out.
   - What the world keeps of its cells, those in, those coming, the digest of each file that came
-    in, those refused and each one's texts, is a saved resource, which snapshots and a lockstep
-    joiner take with the world, and which the hash reads, in its layout, only in a world whose
-    cells have come in, so that every other world hashes as before. A scene change empties it. A
-    server's client holds only the cells it sees, as [Networking](#networking) says.
+    in, what each cell in came as, those refused and each one's texts, is a saved resource, which
+    snapshots and a lockstep joiner take with the world, and which the hash reads, in its layout,
+    only in a world whose cells have come in, so that every other world hashes as before. A scene
+    change empties it. A server's client holds only the cells it sees, as
+    [Networking](#networking) says.
   - A run lists a folder of cells once, from its package or the disk, and reads each cell's file
     once, as it reads a scene change's, loading what the file names first, as a scene change does,
-    a server's session nothing; at most 4,096 cells are in at once, the nearest first
-    (`cells.full`). The cells within a radius and a cell more are prepared ahead, on threads of
-    their own, `gg-cells`: each file read, what it and what the cell keeps name that isn't loaded
-    found, those models' files read, and the texts parsed in a scratch world of the world's types
-    and assets; the main thread adds the models read, loads the rest, and, as the cell comes in,
-    spawns what was parsed, its handles the world's. A tick whose cells aren't prepared waits for
-    them, frames drawing on, as for a peer's inputs (`cells.waited`); where a tick can't wait, as in
-    a replay or a tick run again, its cells are prepared then and there, alike.
+    a server's session nothing; a made cell's text it makes again each time, keeping none. It
+    looks for the cells with files among those listed, and for made ones among those within each
+    viewer's reach, in a box of at most 32,768 cells round it, which holds the 4,096 nearest; at
+    most 4,096 cells are in at once, the nearest first (`cells.full`). The cells within a radius and a cell more are prepared ahead, on threads
+    of their own, `gg-cells`: each file read or made, what it and what the cell keeps name that
+    isn't loaded found, those models' files read, and the texts parsed in a scratch world of the
+    world's types and assets; the main thread adds the models read, loads the rest, and, as the
+    cell comes in, spawns what was parsed, its handles the world's. A tick whose cells aren't
+    prepared waits for them, frames drawing on, as for a peer's inputs (`cells.waited`); where a
+    tick can't wait, as in a replay or a tick run again, its cells are prepared then and there,
+    alike.
   - One whose load is refused, as for an ID already alive, stays out until every viewer has gone
     (`cells.refused`); one whose entities can't be kept as text, as for a reference to an entity
     going with neither them nor their cell, stays in (`cells.held`). A recording notes each cell
     file's digest as it comes in, and a replay that reads another file there stops
-    (`replay.cell_file`); a lockstep joiner whose world parts from its host's at a cell file that
-    isn't the host's names it and leaves, to try again later (`net.cell_file`).
+    (`replay.cell_file`); a made cell isn't a file, so a recording names none, and the hash finds
+    a game that makes it otherwise. A lockstep joiner whose world parts from its host's at a cell
+    file, or a made cell's text, that isn't the host's names it and leaves, to try again later
+    (`net.cell_file`).
     [cells.rs](crates/gg-engine/src/cells.rs) has the rest.
   - **Edited, a world's cells are files, never kept text.** While a development build's run is
     stopped, as the editor edits it, the cells' step runs each frame, the look's viewpoint, the
@@ -1042,7 +1057,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
     rest to the world's file; `new` and `open` take the cells out with the rest. A cell's file saved
     on disk applies to its cell in as the open scene's does, an edit of the file's own, and a cell
     out takes it as it next comes in, unless what it keeps stands for its file, as in play; the
-    folder is listed again at each look while the run can stop. The look's grid draws the cells in, and the tool API's `cells` reads them.
+    folder is listed again at each look while the run can stop. A made cell's text stands for its
+    file as last applied, so that a save writes a made cell's file only once it changed. The look's
+    grid draws the cells in, and the tool API's `cells` reads them, each one's file or making.
     [scene_files.rs](crates/gg-engine/src/scene_files.rs) has the save and the watch.
 
 ## ECS

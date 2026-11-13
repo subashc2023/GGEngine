@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 43, "{scenes:?}");
+    assert_eq!(scenes.len(), 44, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -156,6 +156,90 @@ fn every_cell_of_the_world_loads_and_saves_as_it_is() {
         let saved = cx.world().save_scene(&roots).expect("saved");
         assert_eq!(saved, text, "{name}");
     }
+}
+
+/// The world's scene names the folder of its cells, which holds no file, and the game makes each
+/// cell as a scene file would hold it: each loads, with what it names, and saves to its own bytes,
+/// each entity's ID its own, at the world's corners and between them.
+#[test]
+fn the_world_s_made_cells_load_and_save_as_they_are() {
+    let world = fs::read_to_string(dir().join("scenes/world.ron")).expect("the world");
+    assert!(
+        world.contains(&format!("folder: \"{WORLD_FOLDER}\"")),
+        "{world}"
+    );
+    assert!(!dir().join(WORLD_FOLDER).exists(), "made, not filed");
+    let (mut cx, _showcase) = loaded();
+    // Which names what they name, as a server's session loads nothing as it plays.
+    cx.load_scene_file(dir().join("scenes/world.ron"))
+        .expect("loaded");
+    let mut ids = HashSet::new();
+    for [x, z] in [[0, 0], [1, 0], [0, 1], [488, 311], [976, 976]] {
+        let text = world_cell(Cell(IVec3::new(x, 0, z)));
+        let roots = cx.world_mut().load_scene(&text);
+        let roots = roots.unwrap_or_else(|error| panic!("{x}_0_{z}: {error:#}"));
+        assert_eq!(roots.len(), 5, "{text}");
+        ids.extend(
+            roots
+                .iter()
+                .map(|&root| cx.world().id(root).expect("alive")),
+        );
+        let saved = cx.world().save_scene(&roots).expect("saved");
+        assert_eq!(saved, text, "{x}_0_{z}");
+    }
+    assert_eq!(ids.len(), 25, "each its own");
+}
+
+/// The crossing's recording, `tests/references/crossing.recording`, of a run of the world, its
+/// fliers crossing 1,000 km of cells the game makes as they come near, replays without a GPU to
+/// the hashes it recorded, in a debug build as in a release one and on every platform.
+/// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the
+/// simulation or what the hash reads; a change to a command's type that its lines no longer read
+/// as, or to how the game makes its cells, needs a new recording: a run under `cargo gg run
+/// --release -- --headless --real-time --record tests/references/crossing.recording`, taken from
+/// the welcome to the world by Page Down twice, through `cargo gg input`, and quit through `cargo
+/// gg quit` some 2,160 ticks after the world's cells came in, both fliers across.
+#[test]
+fn the_crossing_replays_to_its_hashes() {
+    let path = dir().join("tests/references/crossing.recording");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()));
+    if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
+        let rewritten = gg_engine::Replay::rewrite(app(), &text);
+        fs::write(&path, rewritten.unwrap_or_else(|error| panic!("{error:#}"))).expect("written");
+        println!("wrote {}", path.display());
+        return;
+    }
+    assert!(text.ends_with("\nend\n"), "the recording has its end");
+    let mut replay = gg_engine::Replay::new(app(), &text);
+    let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
+    let mut ticks = 0;
+    // Each flier's cells, at the ends of its way: the east one's starting near the origin and
+    // ending 976 cells east, the west one's the other way round, 976 cells south of it.
+    let near = |world: &World, x: i32, z: i32| {
+        let mut cells = world.cells_in();
+        cells.any(|cell| (cell.0.x - x).abs() <= 2 && (cell.0.z - z).abs() <= 2)
+    };
+    let ends = |world: &World| {
+        let [started, ended] =
+            [[0, 976], [976, 0]].map(|[east, west]| near(world, east, 0) && near(world, west, 976));
+        (started, ended)
+    };
+    let (mut started, mut ended) = (false, false);
+    while let Some(tick) = replay.step().unwrap_or_else(|error| panic!("{error:#}")) {
+        ticks = tick.number + 1;
+        let (start, end) = ends(replay.world());
+        started |= start;
+        ended |= started && end;
+    }
+    let hashes = text
+        .lines()
+        .filter(|line| line.starts_with(|c: char| c.is_ascii_digit()));
+    assert_eq!(ticks, hashes.count() as u64);
+    assert!(
+        started && ended,
+        "the fliers crossed the world, each its way"
+    );
 }
 
 /// Each prefab under the game's asset root loads, as the scene of one subtree it is, and saves to

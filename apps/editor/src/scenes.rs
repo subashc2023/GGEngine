@@ -430,6 +430,7 @@ mod tests {
         let cell = |x: i32, is_in: bool| gg_api::CellAt {
             cell: [x, 0, 0],
             file: true,
+            made: false,
             is_in,
             coming: false,
             refused: false,

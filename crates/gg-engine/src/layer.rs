@@ -37,8 +37,8 @@ use crate::audio::{self, Audio, Bus, Music, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
 use crate::cells::{
-    self, Cell, CellRun, CellState, Entering, Finished, Kept, ModelRead, Prep, Prepared, Preparing,
-    Stage, Texts,
+    self, Cell, CellRun, CellSource, CellState, Entering, Finished, Kept, MadeCells, ModelRead,
+    Prep, Prepared, Preparing, Stage, Texts,
 };
 use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
@@ -4088,6 +4088,42 @@ impl Context {
         Ok(())
     }
 
+    /// Makes the cells of a world whose [`Cells`](crate::Cells) are of folder `folder` that have no
+    /// file, from `from` to `to` on each axis, as `text` gives each: a cell's scene text, as its
+    /// file would hold it. So a world reaches as far as the game makes it, without a file for each
+    /// cell; a cell's file stands for the game's making of it, as a development build's save writes
+    /// one for a made cell that changed. A layer makes them in its
+    /// [`load`](crate::Layer::load), which a restart and a replay run too; again, for the same
+    /// folder, in place of what it made before.
+    ///
+    /// `text` runs on a thread that prepares cells, as a viewer comes near, and again whenever the
+    /// cell comes in from it, so it reads nothing but its cell, and gives each cell the same text
+    /// each time and on every platform, as the world's ticks must; and the IDs its entities have
+    /// are theirs alone. A made cell comes in, and goes out keeping nothing as it came, as one of a
+    /// file does, its text's digest noted in the world, but neither kept by the run nor written to
+    /// a recording, which the world's hash checks in its place. The cells within each viewer's
+    /// radius and a cell and a half are looked for, each tick, in a box of at most 32,768 cells
+    /// round the viewer: so a world one cell deep reaches some 90 cells either way, and the 4,096
+    /// nearest, a world's most at once, are always among them.
+    pub fn make_cells(
+        &mut self,
+        folder: &str,
+        from: Cell,
+        to: Cell,
+        text: impl Fn(Cell) -> String + Send + Sync + 'static,
+    ) {
+        let made = MadeCells {
+            from,
+            to,
+            text: Arc::new(text),
+        };
+        let run = &mut self.cells.made;
+        match run.iter_mut().find(|(was, _)| was == folder) {
+            Some((_, was)) => *was = made,
+            None => run.push((folder.to_owned(), made)),
+        }
+    }
+
     /// Takes the world's cells out and finds those coming in, as [`Cells`](crate::Cells),
     /// [`Viewer`](crate::Viewer) and [`Streamed`](crate::Streamed) say, as each tick ends, after
     /// its layers', wherever a tick runs, again in a rollback or a SyncTest too: from the world
@@ -4134,7 +4170,9 @@ impl Context {
         }
         let run = &mut self.cells;
         let listed = run.listed(self.root.as_deref(), &self.files, &cells.folder);
-        self.world.plan_cells(size, &listed, None, &mut run.plan);
+        let made = run.made(&cells.folder).map(|made| (made.from, made.to));
+        self.world
+            .plan_cells(size, &listed, made, None, &mut run.plan);
         let plan = mem::take(&mut run.plan);
         // Those no viewer is near any more.
         (run.preparing.cells).retain(|cell, _| plan.nearby.binary_search(cell).is_ok());
@@ -4192,7 +4230,8 @@ impl Context {
             .filter(|ahead| unprepared(prepared, ahead));
         let prepare: Vec<Cell> = prepare.map(|&(_, cell)| cell).collect();
         for cell in prepare {
-            self.start_preparing(&folder, cell, listed.binary_search(&cell).is_ok());
+            let source = self.cells.source(&folder, &listed, cell);
+            self.start_preparing(&folder, cell, source);
         }
         self.cells.plan = plan;
     }
@@ -4237,8 +4276,10 @@ impl Context {
             (at, f64::from(radius))
         });
         let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
+        let made = self.cells.made(&folder).map(|made| (made.from, made.to));
         let mut plan = mem::take(&mut self.cells.plan);
-        self.world.plan_cells(size, &listed, viewer, &mut plan);
+        self.world
+            .plan_cells(size, &listed, made, viewer, &mut plan);
         // The cells that streamed roots are in, out and neither coming nor refused, come in with
         // those near a viewer.
         let mut entering = plan.entering.clone();
@@ -4265,7 +4306,8 @@ impl Context {
             let roots = roots_of(&plan.leavers, cell);
             let state = self.world.resource::<CellState>();
             let came = state.is_some_and(|state| state.files.contains_key(&cell));
-            let file = came.then(|| self.scene_text(&format!("{folder}/{cell}.ron")));
+            let source = self.cells.source(&folder, &listed, cell);
+            let file = came.then(|| self.source_text(&folder, cell, source));
             let same = match file.transpose() {
                 Ok(file) => matches!(self.world.cell_written(file.as_deref(), &roots), Ok(None)),
                 Err(_) => false,
@@ -4296,7 +4338,8 @@ impl Context {
             .map(|&(_, cell)| cell);
         let prepare: Vec<Cell> = prepare.collect();
         for cell in prepare {
-            self.start_preparing(&folder, cell, listed.binary_search(&cell).is_ok());
+            let source = self.cells.source(&folder, &listed, cell);
+            self.start_preparing(&folder, cell, source);
         }
         self.cells.plan = plan;
         if changed {
@@ -4352,12 +4395,15 @@ impl Context {
             .collect();
         all.sort_unstable();
         all.dedup();
+        let made = self.cells.made(&folder);
         let cells = all.into_iter().map(|cell| {
             let from = roots.partition_point(|&(other, ..)| other < cell);
             let to = roots.partition_point(|&(other, ..)| other <= cell);
+            let file = listed.binary_search(&cell).is_ok();
             gg_api::CellAt {
                 cell: cell.0.to_array(),
-                file: listed.binary_search(&cell).is_ok(),
+                file,
+                made: !file && made.is_some_and(|made| made.makes(cell)),
                 is_in: state.cells_in.contains(&cell),
                 coming: state.coming.contains(&cell),
                 refused: state.refused.contains(&cell),
@@ -4449,9 +4495,12 @@ impl Context {
         let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
         for cell in coming {
             let started = Instant::now();
-            let filed = listed.binary_search(&cell).is_ok();
-            match self.enter_cell(&folder, cell, filed) {
+            let source = self.cells.source(&folder, &listed, cell);
+            let filed = matches!(source, Some(CellSource::File));
+            match self.enter_cell(&folder, cell, source) {
                 Ok((roots, file, prepared)) => {
+                    // A text the game made isn't a file's, which a recording would name.
+                    let file = file.filter(|_| filed);
                     self.cells.came.extend(file.map(|digest| (cell, digest)));
                     debug!(
                         code = "cells.entered",
@@ -4478,11 +4527,11 @@ impl Context {
     }
 
     /// Brings cell `cell`, of the cells of `folder`, in, as
-    /// [`enter_coming`](Self::enter_coming) says: its file, if `filed`, read and what it names
-    /// loaded, unless what the cell keeps stands for it, and what each text it keeps names; or as
-    /// prepared ahead, if what was prepared stands for its texts still, as
-    /// [`stands_for`](Self::stands_for) says. Returns how many roots came, the digest of its file,
-    /// if its file came, and whether it came as prepared.
+    /// [`enter_coming`](Self::enter_coming) says: its file read, or the game's making of it, as
+    /// `source` says, and what it names loaded, unless what the cell keeps stands for it, and what
+    /// each text it keeps names; or as prepared ahead, if what was prepared stands for its texts
+    /// still, as [`stands_for`](Self::stands_for) says. Returns how many roots came, the digest of
+    /// its file's text, if it came, and whether it came as prepared.
     ///
     /// Fails, bringing nothing in, as [`scene_text`](Self::scene_text) does, as
     /// [`load_assets_of`](Self::load_assets_of) does, and as [`World::parse_scene`] and
@@ -4491,7 +4540,7 @@ impl Context {
         &mut self,
         folder: &str,
         cell: Cell,
-        filed: bool,
+        source: Option<CellSource>,
     ) -> Result<(usize, Option<u64>, bool)> {
         let path = format!("{folder}/{cell}.ron");
         let prepared = match self.cells.preparing.cells.remove(&cell) {
@@ -4509,8 +4558,9 @@ impl Context {
             let message = format!("{path}:{error}");
             error.with_message(message)
         };
+        let source = source.filter(|_| !came);
         if let Some(prepared) = prepared
-            && self.stands_for(&prepared, &path, filed && !came, &kept)
+            && self.stands_for(&prepared, &path, source.as_ref(), &kept)
         {
             let file = prepared.file;
             let roots = self
@@ -4519,15 +4569,19 @@ impl Context {
                 .map_err(named)?;
             return Ok((roots, file, true));
         }
-        let file = match filed && !came {
-            true => Some(self.scene_text(&path)?),
-            false => None,
+        let file = match source {
+            Some(source) => Some(self.source_text(folder, cell, Some(source))?),
+            None => None,
         };
         let texts = file.iter().map(String::as_str);
         for text in texts.chain(kept.texts.iter().map(|kept| &*kept.text)) {
             self.load_assets_of(&path, text)?;
         }
         let parse = |text: &str| self.world.parse_scene(text).map_err(named);
+        let came_as = match &file {
+            Some(text) if kept.texts.is_empty() => cells::came_as(&self.world, text),
+            _ => None,
+        };
         let file = file
             .as_deref()
             .map(|text| Ok((text_digest(text), parse(text)?)));
@@ -4538,31 +4592,70 @@ impl Context {
                 .iter()
                 .map(|kept| parse(&kept.text))
                 .collect::<Result<_>>()?,
+            came_as,
         };
         let file = entering.file.as_ref().map(|&(digest, _)| digest);
         let roots = self.world.enter_cell(cell, entering).map_err(named)?;
         Ok((roots, file, false))
     }
 
-    /// Whether `prepared`, cell `path`'s, was parsed from the texts the cell would bring in now: its
-    /// file's, as [`scene_text`](Self::scene_text) gives it, if `file`, its file being yet to come
-    /// in; and those it keeps, `kept`. A development build's save of the file since, or a root left
-    /// in the cell since, makes it stand for them no more.
-    fn stands_for(&mut self, prepared: &Prepared, path: &str, file: bool, kept: &Kept) -> bool {
+    /// Whether `prepared`, cell `path`'s, was parsed from the texts the cell would bring in now:
+    /// what its `source` gives, its file's, as [`scene_text`](Self::scene_text) gives it, or the
+    /// game's making of it, for a cell whose file is yet to come in; and those it keeps, `kept`. A
+    /// development build's save of the file since, a file made for a made cell, or a root left in
+    /// the cell since, makes it stand for them no more.
+    fn stands_for(
+        &mut self,
+        prepared: &Prepared,
+        path: &str,
+        source: Option<&CellSource>,
+        kept: &Kept,
+    ) -> bool {
         let kept = kept.texts.iter().map(|kept| kept.digest);
-        if !prepared.kept.iter().copied().eq(kept) || prepared.file.is_some() != file {
+        if !prepared.kept.iter().copied().eq(kept)
+            || prepared.file.is_some() != source.is_some()
+            || prepared.made != matches!(source, Some(CellSource::Made(_)))
+        {
             return false;
         }
-        match prepared.file {
-            Some(digest) => (self.scene_text(path)).is_ok_and(|text| text_digest(&text) == digest),
-            None => true,
+        match (prepared.file, source) {
+            (Some(digest), Some(CellSource::File)) => {
+                (self.scene_text(path)).is_ok_and(|text| text_digest(&text) == digest)
+            }
+            // The game makes a cell the same each time.
+            _ => true,
+        }
+    }
+
+    /// The text cell `cell` of the cells of `folder` comes in from, as `source` says: its file's, as
+    /// [`scene_text`](Self::scene_text) gives it, or what the game makes of it, unless the run
+    /// keeps a file of it, as a development build's save of a made cell that changed writes one.
+    ///
+    /// Fails as `scene_text` does, and with `scene.not_found` for a cell of neither.
+    pub(crate) fn source_text(
+        &mut self,
+        folder: &str,
+        cell: Cell,
+        source: Option<CellSource>,
+    ) -> Result<String> {
+        let path = format!("{folder}/{cell}.ron");
+        let cached = self.scenes.cached.iter().find(|file| file.author == path);
+        match source {
+            Some(CellSource::File) => self.scene_text(&path),
+            Some(CellSource::Made(_)) if let Some(file) = cached => Ok(file.text.clone()),
+            Some(CellSource::Made(made)) => Ok((made.text)(cell)),
+            None => {
+                let message = format!("there's no scene {path}, nor does the game make the cell");
+                Err(Error::new("scene.not_found", message))
+            }
         }
     }
 
     /// Starts preparing cell `cell`, of the cells of `folder`, as [`Preparing`] says: on a thread,
-    /// its file read, if `filed` and its file is yet to come in, as the run keeps it or from the
-    /// disk or the game's package, and the texts it keeps taken with it.
-    fn start_preparing(&mut self, folder: &str, cell: Cell, filed: bool) {
+    /// its file read, as the run keeps it or from the disk or the game's package, or the game's
+    /// making of it, as `source` says, if it's yet to come in, and the texts it keeps taken with
+    /// it.
+    fn start_preparing(&mut self, folder: &str, cell: Cell, source: Option<CellSource>) {
         let path = format!("{folder}/{cell}.ron");
         let state = self.world.resource::<CellState>();
         let came = state.is_some_and(|state| state.files.contains_key(&cell));
@@ -4574,13 +4667,18 @@ impl Context {
                     .collect()
             })
             .unwrap_or_default();
-        let read = (filed && !came).then(|| {
+        let source = source.filter(|_| !came);
+        let made = matches!(source, Some(CellSource::Made(_)));
+        let read = source.map(|source| {
             let cached = self.scenes.cached.iter().find(|file| file.author == path);
             let cached: Option<Arc<str>> = cached.map(|file| file.text.as_str().into());
             let (root, files, scene) = (self.root.clone(), self.files.clone(), path.clone());
             move || {
                 if let Some(text) = cached {
                     return Ok(text);
+                }
+                if let CellSource::Made(made) = source {
+                    return Ok((made.text)(cell).into());
                 }
                 let root = root.ok_or_else(|| no_root(&scene))?;
                 let at = package::under(&root, &scene);
@@ -4589,7 +4687,7 @@ impl Context {
         });
         let world = self.world.scratch();
         let number = self.cells.preparing.begin(cell);
-        (self.cells.preparing).read((cell, number), path, read, kept, world);
+        (self.cells.preparing).read((cell, number), (path, made), read, kept, world);
     }
 
     /// Takes what the threads preparing cells have finished, and starts the next stage of each:
@@ -4613,9 +4711,11 @@ impl Context {
                     if self.cells.preparing.prep(cell, number).is_none() {
                         continue;
                     }
+                    // A text the game made it makes again.
                     if let Ok(Texts {
                         path,
                         file: Some((text, _)),
+                        made: false,
                         ..
                     }) = &texts
                         && let Some(root) = &self.root
@@ -4775,8 +4875,8 @@ impl Context {
             let folder = cells.folder.clone();
             let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
             for cell in unprepared {
-                let filed = listed.binary_search(&cell).is_ok();
-                self.start_preparing(&folder, cell, filed);
+                let source = self.cells.source(&folder, &listed, cell);
+                self.start_preparing(&folder, cell, source);
             }
             self.prepare_cells();
         }
@@ -5099,6 +5199,10 @@ impl Context {
                 Ok(Done::Applied(Vec::new()))
             }
             Edit::Scene { path, text } => {
+                // A cell in came from another text, which it no longer goes out as it came from.
+                if let Some(cell) = self.world.cell_of_file(&path) {
+                    self.world.forget_came_as(cell);
+                }
                 let root = self.root.clone().unwrap_or_default();
                 let file = SceneFile::new(package::under(&root, &path), path, text);
                 self.scenes.cache(file);

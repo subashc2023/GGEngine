@@ -156,11 +156,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A server's clients get their cells** (2026-11-12)
 - **Worlds in the editor and the tool API** (2026-11-13)
 - **Positions beyond f32** (2026-11-13)
+- **A world to cross** (2026-11-13)
+- **Phase 19, world streaming** (2026-11-13)
 
 ## Now
 
-Phase 19's sixth and last milestone, a world to cross, measured, as Next has it, once its plan is
-approved.
+No milestone, until Open questions' first, which phase comes after Phase 19, is decided.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -186,22 +187,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 18 are done, as Done has it, but for what Deferred holds.
-
-19. **World streaming**: a world of cells, each a scene, loaded and unloaded around its viewers as
-    they move, off the main thread, with a world far larger than f32's reach from its origin, and in
-    step for lockstep and rollback peers and a server's clients. *Done when* the showcase's world,
-    its cells reaching 1,000 km from its origin, is crossed by two viewers far apart, in a run
-    alone, as lockstep and as rollback peers, and as a server's two clients each sent only the cells
-    near it; loading never holds a frame up, frame time p99 while crossing within 10% of standing
-    still; memory follows the cells in, not the world's size; and a recording of the crossing
-    replays to the same hashes on every platform. Its milestones, in order: cells around viewers;
-    loading ahead, cells read and parsed on threads with the models and textures they name, a peer
-    whose cell isn't ready waiting at its tick, and cell files' digests checked between peers and
-    in recordings; a server's clients each sent the cells near its own viewers, its kept states
-    staying on the server; worlds in the editor and the tool API, the editor's camera a viewer and
-    entities saved into the cell file they're in; positions beyond f32, translations in f64 and the
-    GPU's camera-relative, with rapier's f64 builds; and a world to cross, measured.
+Phases 11 to 19 are done, as Done has it, but for what Deferred holds.
 
 Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
 macOS driver does today); and the built-in coding agent for v1.
@@ -726,12 +712,15 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `logs` reading at most so many events, and `gg logs` and the editor's Logs saying how many the game dropped before they were read: a read gives up to 8 MiB of them, and neither says what `missed` does, which `gg mcp` gives | An agent follows a busy game's logs through MCP, or misses events unseen |
 | The last of a run's events through the API: `Exited cleanly` is logged once the API has stopped, so its file alone has it | A tool needs to know through the API how a run ended |
 | Proxies for cells past the viewers, as Unreal's HLOD: a cell out shows nothing, so a world's edge shows at its viewers' radius | A world's horizon shows where its cells end |
-| Cells' kept states spilled to disk: a cell out keeps what it held as scene text in memory, which grows with the cells visited | A world's visited cells' text is measured to matter |
+| Cells' kept states spilled to disk: a cell out keeps what it held as scene text in memory, which grows with the cells changed, as one that went out as it came keeps nothing | A world's changed cells' text is measured to matter |
 | An index of a world's cells for the cells' step, which tests each cell with a file or a kept state against each viewer as each tick ends, O(cells × viewers), allocating nothing where none comes or goes | The step is measured to cost a frame, as at 100,000 cells |
 | Terrain and heightfields, which a large world's ground would be: a world's cells hold meshes and colliders | A world's ground is more than its cells' models |
 
 ## Open questions
 
+- Which phase comes after Phase 19? Recommendation: the built-in coding agent, v1's headline, in
+  the editor: it edits a project's files and works on the running game through the tool API, as
+  Claude Code does now. Decide before the next phase starts.
 - Where uploads go on a device whose transfer queue copies whole images alone (a granularity of
   0, 0, 0): it's refused, so they go to the compute queue's family, and async compute, which needs
   a queue of its own, is off. Recommendation: upload on the graphics queue there instead, keeping

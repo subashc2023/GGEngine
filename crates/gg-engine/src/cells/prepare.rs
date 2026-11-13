@@ -52,11 +52,13 @@ impl ModelRead {
 }
 
 /// A cell's texts as its preparing read them, with their digests: its file's at `path`, if its file
-/// is to come in, and those it keeps, in turn.
+/// is to come in, or the text the game made of it, if `made`, for one without; and those it keeps,
+/// in turn.
 #[derive(Clone)]
 pub(crate) struct Texts {
     pub(crate) path: String,
     pub(crate) file: Option<(Arc<str>, u64)>,
+    pub(crate) made: bool,
     pub(crate) kept: Vec<(Arc<str>, u64)>,
 }
 
@@ -81,9 +83,11 @@ impl Texts {
 }
 
 /// A cell prepared to come in: its texts parsed, and the digests of those texts, which the cell
-/// must still have as it comes in for these to stand for them.
+/// must still have as it comes in for these to stand for them, its file's text the game's making
+/// if `made`.
 pub(crate) struct Prepared {
     pub(crate) file: Option<u64>,
+    pub(crate) made: bool,
     pub(crate) kept: Vec<u64>,
     pub(crate) entering: Entering,
 }
@@ -222,14 +226,14 @@ impl Preparing {
         }
     }
 
-    /// Reads cell `cell`'s file through `read`, if its file is to come in, its texts' path `path`,
-    /// and those it keeps, `kept`; finds what they name that `world`, a scratch world of the world's
-    /// types and assets, hasn't loaded; and parses them in it, if nothing is missing: on a thread,
-    /// for its preparing numbered `number`.
+    /// Reads cell `cell`'s file through `read`, if its file is to come in, or makes its text through
+    /// it, if `made`, its texts' path `path`, and those it keeps, `kept`; finds what they name that
+    /// `world`, a scratch world of the world's types and assets, hasn't loaded; and parses them in
+    /// it, if nothing is missing: on a thread, for its preparing numbered `number`.
     pub(crate) fn read(
         &mut self,
         (cell, number): (Cell, u64),
-        path: String,
+        (path, made): (String, bool),
         read: Option<impl FnOnce() -> Result<Arc<str>> + Send + 'static>,
         kept: Vec<(Arc<str>, u64)>,
         world: World,
@@ -240,6 +244,7 @@ impl Preparing {
             let texts = file.transpose().map(|file| Texts {
                 path,
                 file: file.map(|(digest, text)| (text, digest)),
+                made,
                 kept,
             });
             let texts = match texts {
@@ -405,7 +410,8 @@ fn missing(world: &World, texts: &Texts) -> Result<Vec<Asset<String>>> {
     Ok(missing)
 }
 
-/// `texts` parsed in `world`, as [`World::parse_scene`] parses each.
+/// `texts` parsed in `world`, as [`World::parse_scene`] parses each, with what the cell's roots
+/// come as, as [`came_as`](super::came_as) finds it, if it brings its file's text alone.
 ///
 /// Fails as `parse_scene` does, the cell's path beginning the message.
 pub(crate) fn parse(world: &World, texts: &Texts) -> Result<Prepared> {
@@ -414,12 +420,18 @@ pub(crate) fn parse(world: &World, texts: &Texts) -> Result<Prepared> {
         .map(|(text, digest)| Ok((*digest, parse(text)?)))
         .transpose()?;
     let kept = texts.kept.iter().map(|(text, _)| parse(text));
+    let came_as = match &texts.file {
+        Some((text, _)) if texts.kept.is_empty() => super::came_as(world, text),
+        _ => None,
+    };
     Ok(Prepared {
         file: texts.file.as_ref().map(|&(_, digest)| digest),
+        made: texts.made,
         kept: texts.kept.iter().map(|&(_, digest)| digest).collect(),
         entering: Entering {
             file,
             kept: kept.collect::<Result<_>>()?,
+            came_as,
         },
     })
 }
