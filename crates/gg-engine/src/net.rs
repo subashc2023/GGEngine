@@ -11,15 +11,18 @@
 //! its own differs; and, in development builds, the patches of the game's code, which the host has
 //! apply at a tick of its choosing.
 //!
-//! The session's stream is lines of text over TCP, each a thread of the connection's reads,
-//! written by the main thread:
+//! The session's stream is lines of text over TCP, which a thread of the connection's reads, and
+//! another writes, as the main thread sends them, so that a slow link never holds the main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 5\tShards\t0.1.0 debug dev\tShards Inspector\t50123
-//!                                                    the joiner, as it connects, and the port its
-//!                                                      packets come from, as `gg-rollback 5` for
-//!                                                      a rollback session's
+//! hello\tgg-lockstep 6\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//!                                                    the joiner, as it connects: its app, engine,
+//!                                                      build and layers, and the port its packets
+//!                                                      come from, as `gg-rollback 6` for a
+//!                                                      rollback session's
 //! refused <why>                                      the host, refusing it, before it closes
+//! k                                                  either, after a second with nothing else to
+//!                                                      write, to say it's there
 //! world 1234 2 50124                                 the host's world, at tick 1234, its code
 //! gg-snapshot 2                                        2 patches on, and the port its packets
 //! ...                                                  come from, as a snapshot file's text, to
@@ -59,7 +62,10 @@
 //! A tick's inputs that come again, as those the world gave and the packets sent before it, are
 //! the same, and the first whole is kept. A line or a packet that names a tick no run reaches,
 //! [`TICKS`] or past, or the other's inputs for a tick [`AHEAD`] or more past the first it hasn't
-//! had whole, loses the other, as inputs that far past a server's next tick lose their client.
+//! had whole, loses the other, as inputs that far past a server's next tick lose their client; as
+//! does a link nothing has come by for [`LOST`], and one the host took whose hello hasn't come
+//! within [`HELLO`]. A hello of another protocol, app, engine, build or layers is refused, and a
+//! command naming another player than the one whose inputs carry it, as [`steers_its_own`] says.
 //! Values are written as recordings write them, entities by their IDs and textures by their names,
 //! and read into values only at their tick, against the world then. The joiner names its textures
 //! as its host does, whatever ID files its own disk holds: as its host's world gives them, and as
@@ -82,9 +88,11 @@ use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::path::PathBuf;
 #[cfg(feature = "dev")]
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -114,8 +122,8 @@ pub(crate) const PREDICTED: u64 = 8;
 
 /// The hello's first part: the protocol and its version, which a change to its lines or its packets
 /// takes to the next, a lockstep session's or a rollback session's, which both peers' must be.
-const LOCKSTEP: &str = "gg-lockstep 5";
-const ROLLBACK: &str = "gg-rollback 5";
+const LOCKSTEP: &str = "gg-lockstep 6";
+const ROLLBACK: &str = "gg-rollback 6";
 
 /// The most bytes a packet may have: what a path of the internet's least MTU carries whole, as
 /// QUIC's packets are kept to. A tick's inputs that wouldn't fit go on the stream.
@@ -146,6 +154,19 @@ const RETRY: Duration = Duration::from_millis(250);
 /// How long a joiner its host refused waits before trying it again, as a host of another build
 /// refuses it until one of them is rebuilt.
 const REFUSED: Duration = Duration::from_secs(5);
+
+/// How long a link's writing thread goes with nothing to write before it writes `k`, a line that
+/// says only that this end is there.
+const KEEP: Duration = Duration::from_secs(1);
+
+/// How long a link goes with nothing coming by it, line or packet, before it's lost, as the other
+/// end has gone without closing, as one cut off from the network or stopped in a debugger has; and
+/// how long a write to it may wait, as on one that has stopped reading.
+const LOST: Duration = Duration::from_secs(10);
+
+/// How long a link accepted, by a host or a server, waits for the other end's hello, before it's
+/// lost, so that a connection that never says one doesn't hold a joiner's place.
+const HELLO: Duration = Duration::from_secs(5);
 
 /// A ticket for an edit or a patch a peer offered, which its result comes back with, as
 /// [`Lockstep::done`] gives it.
@@ -264,7 +285,11 @@ impl Merged {
                 } else {
                     cx.load_followed(&text);
                 }
-                queue.push(&text.value(cx.world()))
+                let command = text.value(cx.world());
+                if let Some(player) = queued.player {
+                    steers_its_own(&command, player)?;
+                }
+                queue.push(&command)
             });
             if let Err(error) = pushed {
                 refused += 1;
@@ -285,6 +310,31 @@ impl Merged {
             );
         }
     }
+}
+
+/// Fails with `net.bad_command` if `command`, of player `player`'s inputs, names another player:
+/// a variant or a struct whose field `player` holds an integer, as the demos' commands name the
+/// player they steer, and a run's layers queue commands for its own player alone. So no client of a
+/// server, nor either peer of a session, steers another's player; peers refuse alike, as each knows
+/// whose inputs are whose. A server's own commands, which steer any player, aren't checked.
+fn steers_its_own(command: &Value, player: u8) -> Result<()> {
+    let (Value::Variant(_, fields) | Value::Struct(fields)) = command else {
+        return Ok(());
+    };
+    let named = fields.iter().find(|(name, _)| name == "player");
+    let named = match named.map(|(_, value)| value) {
+        Some(&Value::UInt(named)) => i128::from(named),
+        Some(&Value::Int(named)) => i128::from(named),
+        _ => return Ok(()),
+    };
+    if named == i128::from(player) {
+        return Ok(());
+    }
+    let message = format!(
+        "it names player {named}, and came in player {player}'s inputs: a player's commands steer \
+         that player alone"
+    );
+    Err(Error::new("net.bad_command", message))
 }
 
 /// Fails with `net.bad_command` if `text`, a command a server's client sent, or its own as it
@@ -314,11 +364,22 @@ fn unloaded(text: &Text, world: &World) -> Result<()> {
     Err(Error::new("net.bad_command", message))
 }
 
-/// A connection to the other peer: what writes to it, and the lines its thread reads; and the
-/// socket its packets come and go by.
+/// A connection to the other peer: what its threads write to it and read from it, each a thread of
+/// its own, so that a slow link never holds the main thread; and the socket its packets come and go
+/// by.
 struct Link {
-    to: TcpStream,
+    /// What the writing thread writes, in order, each text whole; and why it stopped, if it did.
+    to: Sender<String>,
+    unwritten: Receiver<io::Error>,
     from: Receiver<String>,
+    /// Where the connection comes from.
+    peer: Option<SocketAddr>,
+    /// When something last came by the link, a line or a packet, past [`Link::silence`] after
+    /// which it's lost; and, while the other end's hello hasn't come on a link accepted, when the
+    /// link was made, past [`HELLO`] after which it's lost.
+    heard: Instant,
+    unhello: Option<Instant>,
+    silence: Duration,
     /// Set once the link counts: for the host, once the joiner has said it joined, before which
     /// what it sends was sent against a world it no longer has; for the joiner, once it has the
     /// host's world.
@@ -339,13 +400,23 @@ struct Link {
 
 impl Link {
     /// Starts reading `stream`'s lines on a thread of their own, which ends at a line that isn't
-    /// one, as one past [`MAX_LINE`] isn't, as the connection does; and binds the link's socket,
-    /// which the main thread reads as each frame starts, without waiting.
-    fn new(stream: TcpStream) -> std::io::Result<Self> {
+    /// one, as one past [`MAX_LINE`] isn't, as the connection does, and at twice [`LOST`] with
+    /// nothing come; starts writing what's sent on another, as [`write_from`] says; and binds the
+    /// link's socket, which the main thread reads as each frame starts, without waiting. A link
+    /// `accepted` is lost unless the other end's hello comes within [`HELLO`], as
+    /// [`hello_came`](Self::hello_came) says.
+    fn new(stream: TcpStream, accepted: bool) -> std::io::Result<Self> {
         let udp = UdpSocket::bind(SocketAddr::new(stream.local_addr()?.ip(), 0))?;
         udp.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
-        let mut reader = BufReader::new(stream.try_clone()?);
+        stream.set_write_timeout(Some(LOST))?;
+        // Past the link's silence, so that the link is lost for that first; and so that the thread
+        // reading a link dropped, which reads on until the other end closes, ends though it never
+        // does.
+        stream.set_read_timeout(Some(LOST * 2))?;
+        let peer = stream.peer_addr().ok();
+        let (to, unwritten) = write_from(stream.try_clone()?)?;
+        let mut reader = BufReader::new(stream);
         let (lines, from) = mpsc::channel();
         thread::Builder::new()
             .name("gg-net".to_owned())
@@ -370,9 +441,15 @@ impl Link {
                     }
                 }
             })?;
+        let now = Instant::now();
         Ok(Self {
-            to: stream,
+            to,
+            unwritten,
             from,
+            peer,
+            heard: now,
+            unhello: accepted.then_some(now),
+            silence: LOST,
             joined: false,
             udp,
             other: None,
@@ -383,15 +460,23 @@ impl Link {
         })
     }
 
-    /// Sends `text`, whole lines, failing as the connection does.
-    fn send(&mut self, text: &str) -> std::io::Result<()> {
-        self.to.write_all(text.as_bytes())
+    /// Sends `text`, whole lines, which the writing thread writes after what was sent before it,
+    /// failing once that thread has stopped, as the connection has closed or a write failed.
+    fn send(&mut self, text: String) -> std::io::Result<()> {
+        self.to
+            .send(text)
+            .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "the link no longer writes to it"))
     }
 
     /// Has the other peer's packets be taken from its socket's `port`, at the address the
     /// connection comes from.
     fn packets_from(&mut self, port: u16) {
-        self.other = (self.to.peer_addr().ok()).map(|at| SocketAddr::new(at.ip(), port));
+        self.other = self.peer.map(|at| SocketAddr::new(at.ip(), port));
+    }
+
+    /// Notes that the other end's hello has come, after which the link isn't lost for want of one.
+    fn hello_came(&mut self) {
+        self.unhello = None;
     }
 
     /// The port this peer's packets come from.
@@ -400,24 +485,29 @@ impl Link {
     }
 
     /// Takes the lines read and the packets come since the last take, once what `conditions` hold
-    /// is due from `now`, as [`receive`](Self::receive) holds them, and whether the connection has
-    /// closed, once what came before the close has been taken.
+    /// is due from `now`, as [`receive`](Self::receive) holds them, the writing thread's `k`s among
+    /// the lines, and why the link is lost, if it is, once what came before has been taken: its
+    /// connection closed, or a write to it failed; nothing came by it for [`Link::silence`]; or
+    /// the other end's hello hasn't come within [`HELLO`] of a link accepted.
     fn take(
         &mut self,
         buffer: &mut [u8],
         conditions: Option<Conditions>,
         random: &mut u64,
         now: Instant,
-    ) -> (Vec<String>, Vec<Vec<u8>>, bool) {
+    ) -> (Vec<String>, Vec<Vec<u8>>, Option<String>) {
         let (mut lines, mut packets) = (Vec::new(), Vec::new());
-        let mut lost = false;
+        let mut closed = false;
         let latency = conditions.map_or(Duration::ZERO, |link| link.latency);
         loop {
             match self.from.try_recv() {
-                Ok(line) => self.lines.push_back((now + latency, line)),
+                Ok(line) => {
+                    self.heard = now;
+                    self.lines.push_back((now + latency, line));
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    lost = true;
+                    closed = true;
                     break;
                 }
             }
@@ -425,12 +515,28 @@ impl Link {
         while self.lines.front().is_some_and(|(due, _)| *due <= now) {
             lines.extend(self.lines.pop_front().map(|(_, line)| line));
         }
-        // Closed once what came before the close has been read.
-        lost &= self.lines.is_empty();
         self.receive(buffer, conditions, random, now);
         self.packets.sort_by_key(|(due, _)| *due);
         let due = self.packets.partition_point(|(due, _)| *due <= now);
         packets.extend(self.packets.drain(..due).map(|(_, packet)| packet));
+        // Lost once what came before has been read.
+        let lost = if !self.lines.is_empty() {
+            None
+        } else if let Ok(error) = self.unwritten.try_recv() {
+            Some(format!("can't write to it: {error}"))
+        } else if closed {
+            Some("the connection closed".to_owned())
+        } else if now.saturating_duration_since(self.heard) >= self.silence {
+            let silence = self.silence.as_secs_f64();
+            Some(format!("nothing came from it for {silence} s"))
+        } else if self
+            .unhello
+            .is_some_and(|made| now.saturating_duration_since(made) >= HELLO)
+        {
+            Some(format!("it said no hello within {} s", HELLO.as_secs()))
+        } else {
+            None
+        };
         (lines, packets, lost)
     }
 
@@ -456,6 +562,7 @@ impl Link {
                         }
                         due += conditions.latency + conditions.jitter.mul_f64(unit(random));
                     }
+                    self.heard = now;
                     self.packets.push((due, buffer[..size].to_vec()));
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -485,12 +592,40 @@ impl Link {
     }
 }
 
-impl Drop for Link {
-    /// Closes the connection, which the thread reading it holds too: the other peer reads its end,
-    /// after what was sent, and closes its side, which ends the thread.
-    fn drop(&mut self) {
-        let _ = self.to.shutdown(Shutdown::Both);
-    }
+/// Starts the thread that writes to `stream` what's sent through the channel it returns, each text
+/// whole and in order, and `k` after [`KEEP`] with nothing else, so that the other end hears from
+/// this one while its main thread is busy, as restoring a world or stopped at a script's
+/// breakpoint; and returns, with the channel, where the error comes that stopped it, if one did.
+///
+/// Once the channel closes, as its link is dropped, and what was sent before is written, it shuts
+/// the connection's sending side: the other end reads what was sent, as a refusal's why, and then
+/// its end, and closes its side, which ends the thread reading this one, which has read all that
+/// came. Shutting the receiving side too would have Windows reset the connection at what came that
+/// wasn't read, as a joiner's hello the host refuses unread, and the other end lose what was sent.
+/// At a write that fails, as one that can't go on for [`LOST`] does, it shuts both sides.
+fn write_from(mut stream: TcpStream) -> io::Result<(Sender<String>, Receiver<io::Error>)> {
+    let (to, texts) = mpsc::channel::<String>();
+    let (failed, unwritten) = mpsc::channel();
+    thread::Builder::new()
+        .name("gg-net-write".to_owned())
+        .spawn(move || {
+            loop {
+                let written = match texts.recv_timeout(KEEP) {
+                    Ok(text) => stream.write_all(text.as_bytes()),
+                    Err(RecvTimeoutError::Timeout) => stream.write_all(b"k\n"),
+                    Err(RecvTimeoutError::Disconnected) => {
+                        let _ = stream.shutdown(Shutdown::Write);
+                        return;
+                    }
+                };
+                if let Err(error) = written {
+                    let _ = failed.send(error);
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return;
+                }
+            }
+        })?;
+    Ok((to, unwritten))
 }
 
 /// How a peer finds the other: the host by the connections its listener accepts, the joiner by
@@ -510,6 +645,9 @@ pub(crate) struct Lockstep {
     #[cfg(test)]
     listening: Option<SocketAddr>,
     app: &'static str,
+    /// The run's build, as [`build`] says, which both peers' must be: a test's own, to stand for
+    /// another's.
+    build: &'static str,
     /// The layers' names, from the bottom up, which both peers' must be.
     layers: String,
     link: Option<Link>,
@@ -603,8 +741,10 @@ impl Lockstep {
     /// the host listening at its address, the joiner trying to connect to its host's, in the
     /// background, until it does.
     ///
-    /// Fails with `net.start` if the host can't listen at its address.
+    /// Fails with `net.start` if the host can't listen at its address, and with `net.build` if the
+    /// run's build can't be read, as [`build`] says.
     pub(crate) fn start(net: &Net, app: &'static str, layers: &[&str]) -> Result<Self> {
+        let build = build()?;
         #[cfg(test)]
         let mut listening = None;
         let find = match net {
@@ -633,6 +773,7 @@ impl Lockstep {
             #[cfg(test)]
             listening,
             app,
+            build,
             layers: layers.join(" "),
             link: None,
             coming: None,
@@ -738,8 +879,10 @@ impl Lockstep {
             }
             self.read_packet(&packet);
         }
-        if lost && self.link.is_some() {
-            self.lose("the connection closed");
+        if let Some(why) = lost
+            && self.link.is_some()
+        {
+            self.lose(&why);
         }
         // After the link's lines, so that a joiner that closed its link and connects again finds
         // the host's place free, as the host has seen the close.
@@ -759,11 +902,12 @@ impl Lockstep {
         let made = match &mut self.find {
             Find::Host(accepted) => {
                 while let Ok(stream) = accepted.try_recv() {
-                    match Link::new(stream) {
+                    match Link::new(stream, true) {
                         Ok(link) if self.link.is_none() => self.link = Some(link),
                         // A second joiner, refused before its hello.
                         Ok(mut link) => {
-                            let _ = link.send("refused the session has its two players\n");
+                            let why = "refused the session has its two players\n";
+                            let _ = link.send(why.to_owned());
                         }
                         Err(error) => warn!(code = "net.link", "Can't take a peer: {error}"),
                     }
@@ -785,8 +929,9 @@ impl Lockstep {
         };
         let (stream, address) = made;
         let protocol = self.protocol();
-        let hello = |link: &Link| hello(protocol, self.app, &self.layers, link.port());
-        let link = Link::new(stream).and_then(|mut link| link.send(&hello(&link)).map(|()| link));
+        let hello = |link: &Link| hello(protocol, self.app, self.build, &self.layers, link.port());
+        let link =
+            Link::new(stream, false).and_then(|mut link| link.send(hello(&link)).map(|()| link));
         match link {
             Ok(link) => {
                 info!(address = %address, "Connected to the lockstep host");
@@ -825,6 +970,8 @@ impl Lockstep {
         let (kind, rest) = line.split_once([' ', '\t']).unwrap_or((line, ""));
         let joined = self.link.as_ref().is_some_and(|link| link.joined);
         match kind {
+            // The other end's writing thread, saying it's there.
+            "k" => {}
             "hello" if self.hosts() => self.hello(line),
             "refused" if !self.hosts() => {
                 error!(
@@ -952,22 +1099,30 @@ impl Lockstep {
         None
     }
 
-    /// Takes the joiner's hello, `line`, refusing it unless it's of this protocol, app, engine
-    /// and layers, and says where its packets come from; once taken, the host owes it its world.
+    /// Takes the joiner's hello, `line`, refusing it unless it's of this protocol, app, engine,
+    /// build and layers, and says where its packets come from; once taken, the host owes it its
+    /// world.
     fn hello(&mut self, line: &str) {
         let engine = engine();
-        let ours = [self.protocol(), self.app, &engine, self.layers.as_str()];
+        let ours = [
+            self.protocol(),
+            self.app,
+            &engine,
+            self.build,
+            self.layers.as_str(),
+        ];
         match port_of(line, ours, "the host") {
             Ok(port) => {
                 self.owed = true;
                 if let Some(link) = &mut self.link {
+                    link.hello_came();
                     link.packets_from(port);
                 }
             }
             Err(why) => {
                 warn!(code = "net.refused", "Refused a lockstep peer: {why}");
                 if let Some(link) = &mut self.link {
-                    let _ = link.send(&format!("refused {why}\n"));
+                    let _ = link.send(format!("refused {why}\n"));
                 }
                 self.drop_link();
             }
@@ -1009,7 +1164,7 @@ impl Lockstep {
         (self.from, self.whole, self.acked, self.since) = (Some(from), from, from, next);
         if let Some(link) = &mut self.link {
             link.joined = false;
-            if let Err(error) = link.send(&text) {
+            if let Err(error) = link.send(text) {
                 self.lose(&format!("can't send the joiner the world: {error}"));
             } else {
                 info!(tick = next, "Sent the joiner the world");
@@ -1066,7 +1221,7 @@ impl Lockstep {
     /// The joiner, once it has restored its host's world at tick `tick`: says it has joined.
     pub(crate) fn restored(&mut self, tick: u64) {
         let Some(link) = &mut self.link else { return };
-        if let Err(error) = link.send(&format!("joined {tick}\n")) {
+        if let Err(error) = link.send(format!("joined {tick}\n")) {
             self.lose(&format!("can't tell the host it joined: {error}"));
         }
     }
@@ -1221,7 +1376,7 @@ impl Lockstep {
             inputs.streamed = inputs.authored || !text.is_empty() || size > MAX_PACKET;
             if inputs.streamed {
                 write_inputs(&mut text, ahead, &inputs);
-                self.send(&text);
+                self.send(text);
             }
         }
         self.ours.insert(ahead, inputs);
@@ -1424,7 +1579,7 @@ impl Lockstep {
             self.worlds.insert(tick, kept);
         }
         let hash = world.hash();
-        self.send(&format!("h {tick} {hash}\n"));
+        self.send(format!("h {tick} {hash}\n"));
         self.hashes[0].insert(tick, hash);
         self.compare();
     }
@@ -1500,7 +1655,7 @@ impl Lockstep {
         match world.save_whole(&mut text) {
             Ok(()) => {
                 text.push_str("end\n");
-                self.send(&text);
+                self.send(text);
             }
             Err(error) => warn!(
                 code = error.code(),
@@ -1657,7 +1812,7 @@ impl Lockstep {
     }
 
     /// Sends `text` to the other peer, losing it if that fails.
-    fn send(&mut self, text: &str) {
+    fn send(&mut self, text: String) {
         let Some(link) = &mut self.link else { return };
         if let Err(error) = link.send(text) {
             self.lose(&format!("can't send to the peer: {error}"));
@@ -1764,7 +1919,7 @@ impl Session {
         Ok(match net {
             Net::Host(_) | Net::Join(_) => Self::Peer(Box::new(Lockstep::start(net, app, layers)?)),
             Net::Serve(address) => Self::Server(Box::new(Server::start(address, app, layers)?)),
-            Net::Connect(address) => Self::Client(Box::new(Client::start(address, app, layers))),
+            Net::Connect(address) => Self::Client(Box::new(Client::start(address, app, layers)?)),
         })
     }
 
@@ -1981,6 +2136,36 @@ impl Session {
     }
 }
 
+/// What the hello says the run's build is: the digest of its executable's bytes, as 16 hex digits,
+/// read once a process, so that a host or a server refuses a peer or a client of another build,
+/// whose simulation may go otherwise, as one rebuilt with an edit's would. Builds of one source on
+/// two machines differ too, as rustc writes the paths of the sources and the debug info's into the
+/// executable: peers share one build, as a game's players do.
+///
+/// Fails with `net.build` if the executable can't be read.
+fn build() -> Result<&'static str> {
+    static BUILD: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    let build = BUILD.get_or_init(|| {
+        let _zone = gg_core::zone!();
+        // Linux's link to the executable, which reads even once its file is deleted, as a run's
+        // can be while it runs.
+        let path = if cfg!(target_os = "linux") {
+            PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe().map_err(|error| error.to_string())?
+        };
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("can't read {}: {error}", path.display()))?;
+        Ok(format!("{:016x}", crate::ecs::bytes_digest(&bytes)))
+    });
+    build.as_deref().map_err(|why| {
+        Error::new(
+            "net.build",
+            format!("can't digest the run's executable, which the hello names its build by: {why}"),
+        )
+    })
+}
+
 /// What the hello says the engine is: its version and profile, and whether it's a development
 /// build, which applies patches and scene files' saves, as other builds don't.
 fn engine() -> String {
@@ -1992,26 +2177,30 @@ fn engine() -> String {
     }
 }
 
-/// The hello of a peer or a client that speaks `protocol`, of app `app` and layers `layers`, whose
-/// packets come from its socket's `port`: as the stream's lines name it.
-fn hello(protocol: &str, app: &str, layers: &str, port: u16) -> String {
-    format!("hello\t{protocol}\t{app}\t{}\t{layers}\t{port}\n", engine())
+/// The hello of a peer or a client that speaks `protocol`, of app `app`, build `build` and layers
+/// `layers`, whose packets come from its socket's `port`: as the stream's lines name it.
+fn hello(protocol: &str, app: &str, build: &str, layers: &str, port: u16) -> String {
+    format!(
+        "hello\t{protocol}\t{app}\t{}\t{build}\t{layers}\t{port}\n",
+        engine()
+    )
 }
 
 /// Takes a hello, `line`, which [`hello`] writes: the port its packets come from, if it's of the
-/// protocol, app, engine and layers `ours` are, which `who` speaks for; or else why it's refused.
-fn port_of(line: &str, ours: [&str; 4], who: &str) -> std::result::Result<u16, String> {
+/// protocol, app, engine, build and layers `ours` are, which `who` speaks for; or else why it's
+/// refused.
+fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Result<u16, String> {
     let parts: Vec<&str> = line.split('\t').collect();
-    let port = parts.get(5).and_then(|port| port.parse::<u16>().ok());
-    match (parts.get(1..5), port) {
-        (Some(theirs), Some(port)) if parts.len() == 6 && theirs == &ours[..] => Ok(port),
+    let port = parts.get(6).and_then(|port| port.parse::<u16>().ok());
+    match (parts.get(1..6), port) {
+        (Some(theirs), Some(port)) if parts.len() == 7 && theirs == &ours[..] => Ok(port),
         (Some([protocol, ..]), _) if *protocol != ours[0] => {
             Err(format!("it speaks {protocol}, and {who} {}", ours[0]))
         }
-        (Some([_, app, engine, layers]), Some(_)) if parts.len() == 6 => Err(format!(
-            "it's app {app}, engine {engine}, layers `{layers}`, and {who} app {}, engine {}, \
-             layers `{}`",
-            ours[1], ours[2], ours[3]
+        (Some([_, app, engine, build, layers]), Some(_)) if parts.len() == 7 => Err(format!(
+            "it's app {app}, engine {engine}, build {build}, layers `{layers}`, and {who} app {}, \
+             engine {}, build {}, layers `{}`",
+            ours[1], ours[2], ours[3], ours[4]
         )),
         _ => Err("its hello isn't one".to_owned()),
     }
@@ -3336,6 +3525,166 @@ mod tests {
         let _stranger = writer.join().expect("written");
         let mut joiner = Peer::joiner(&mut host);
         join(&mut host, &mut joiner);
+    }
+
+    /// A connection that says no hello within [`HELLO`] of the host's taking it is lost, freeing the
+    /// joiner's place, which a joiner then takes.
+    #[test]
+    fn a_connection_that_says_no_hello_is_lost() {
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let address = host.net().listening.expect("listening");
+        let _stranger = TcpStream::connect(address).expect("connected");
+        let start = Instant::now();
+        while host.net().link.is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never taken");
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..10 {
+            host.turn();
+        }
+        assert!(host.net().link.is_some(), "kept until its hello's time");
+        // As though that time had gone by since the host took it.
+        let link = host.net().link.as_mut().expect("a link");
+        link.unhello = Instant::now().checked_sub(HELLO);
+        host.turn();
+        assert!(host.net().link.is_none());
+        assert!(logged.codes.try_iter().any(|code| code == "net.lost"));
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+    }
+
+    /// A peer that says hello and then nothing, as one cut off from the network or stopped in a
+    /// debugger, is lost once nothing has come by its link for the link's silence, the host playing
+    /// on alone; until then it's kept.
+    #[test]
+    fn a_peer_nothing_comes_from_is_lost() {
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let address = host.net().listening.expect("listening");
+        let mut stranger = TcpStream::connect(address).expect("connected");
+        let net = host.net();
+        let line = hello(net.protocol(), net.app, net.build, &net.layers, 9);
+        stranger.write_all(line.as_bytes()).expect("said hello");
+        let start = Instant::now();
+        while host.net().from.is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never taken");
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Its hello came a few turns ago.
+        host.net().link.as_mut().expect("a link").silence = Duration::from_millis(300);
+        host.turn();
+        assert!(host.net().link.is_some(), "kept until its silence");
+        let start = Instant::now();
+        while host.net().link.is_some() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never lost");
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(logged.codes.try_iter().any(|code| code == "net.lost"));
+        let at = host.next;
+        for _ in 0..10 {
+            host.turn();
+        }
+        assert!(host.next > at, "the host plays on alone");
+    }
+
+    /// A peer whose frames stop for longer than its link's silence, as one busy restoring a large
+    /// world, or stopped at a script's breakpoint, is kept, as its link's writing thread says it's
+    /// there; and the peers go on in step once its frames go on.
+    #[test]
+    fn a_peer_whose_frames_stop_is_kept_by_its_link_s_thread() {
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+        play(&mut host, &mut joiner, 10);
+        // Past `KEEP`, after which the joiner's thread writes `k`.
+        let silence = KEEP * 5 / 2;
+        host.net().link.as_mut().expect("a link").silence = silence;
+        let stopped = Instant::now();
+        while stopped.elapsed() < silence + KEEP {
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(host.net().link.is_some(), "the joiner was lost");
+        play(&mut host, &mut joiner, 10);
+        let at = host.next.max(joiner.next) + DELAY + 1;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.score(), joiner.score());
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        assert!(!codes.iter().any(|code| code == "net.lost"), "{codes:?}");
+    }
+
+    /// A joiner of another build, whose simulation may go otherwise, is refused, its hello naming
+    /// both builds.
+    #[test]
+    fn a_joiner_of_another_build_is_refused() {
+        let ours = [
+            "gg-lockstep 6",
+            "Tested",
+            "0.1.0 debug",
+            "0123456789abcdef",
+            "Game",
+        ];
+        let theirs = hello(ours[0], ours[1], "fedcba9876543210", ours[4], 9);
+        let theirs = theirs.trim_end().replace(&engine(), ours[2]);
+        let why = port_of(&theirs, ours, "the host").expect_err("refused");
+        assert!(
+            why.contains("build fedcba9876543210") && why.contains("build 0123456789abcdef"),
+            "{why}"
+        );
+
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let address = host.net().listening.expect("listening").to_string();
+        let layers = host.net().layers.clone();
+        let layers: Vec<&str> = layers.split(' ').collect();
+        let mut other = Lockstep::start(&Net::Join(address), "Tested", &layers).expect("started");
+        other.build = "0000000000000000";
+        let start = Instant::now();
+        let mut refused = 0;
+        while refused < 2 {
+            assert!(start.elapsed() < Duration::from_secs(10), "never refused");
+            host.turn();
+            other.turn();
+            refused += logged
+                .codes
+                .try_iter()
+                .filter(|code| code == "net.refused")
+                .count();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(other.link.is_none() && host.net().link.is_none());
+    }
+
+    /// A peer's command that names the other's player is refused by both peers, which go on in
+    /// step, its command for its own player applying: neither player steers the other's.
+    #[test]
+    fn a_peer_s_command_for_the_other_s_player_is_refused_by_both() {
+        let logged = crate::testing::logged();
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+        joiner.stack_commands(Command::Add {
+            player: 0,
+            points: 100,
+        });
+        joiner.stack_commands(Command::Add {
+            player: 1,
+            points: 10,
+        });
+        let at = host.next.max(joiner.next) + DELAY + 2;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!((host.score(), joiner.score()), ([0, 10], [0, 10]));
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let refused = codes.iter().filter(|code| *code == "net.bad_command");
+        assert_eq!(refused.count(), 2, "one by each peer: {codes:?}");
+        assert!(!codes.iter().any(|code| code == "net.desync"), "{codes:?}");
     }
 
     /// An edit the joiner offers, and a save of a scene file the host's game loaded, apply on both

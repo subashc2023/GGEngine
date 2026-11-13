@@ -13,8 +13,8 @@ are in [AGENTS.md](AGENTS.md).
 - **v0.1: change a running game by asking.** The user sees something they don't like in the
   running game and tells a coding agent; the agent edits the game's code or works on the game
   through the [tool API](#agents-and-tools), and the game picks up each change with its state
-  intact. The agent is Claude Code at first; v1 builds one into the editor, modeled on the pi
-  coding agent.
+  intact. The agent is Claude Code, through the user's own subscription; one built into the
+  editor waits, as [PLAN.md](docs/PLAN.md)'s Deferred says.
 - **People and agents build together.** Many developers and agents work on one project at
   once: project state is text that diffs and merges, every authoring action is an operation an
   agent can perform, and every result is machine-readable.
@@ -1361,6 +1361,22 @@ alone, as Foxball's bot, a session's runs leave out.
   either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
   frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's
   player still.
+- **A session takes runs of its own build, and loses those gone.** A joiner's or a client's hello
+  names its app, engine, layers and build, the digest of its executable's bytes, read once as the
+  session starts, which fails where it can't be (`net.build`); and a host or a server refuses one
+  where any differs (`net.refused`), as builds that simulate otherwise would part at every tick:
+  builds of one source on two machines differ too, by the paths rustc writes into them, so a
+  session's runs share one build, as a game's players do. A link nothing has come
+  by for 10 s, line or packet, is lost (`net.lost`), as is a connection taken that says no hello
+  within 5 s, which would hold a joiner's place. A thread of each link's writes its stream, so
+  that a slow link never holds the main thread, and writes a line after each second with nothing
+  else to write, so that a run whose frames stop, as while it restores a large world or waits at a
+  script's breakpoint, is kept, while one stopped in a debugger, or cut off, is lost.
+- **A player's commands steer that player alone.** A command whose variant or struct has a field
+  `player`, an integer, as the demos' have, names the player whose inputs carry it, a peer's or a
+  server's client's, or is refused, by every run of the session alike (`net.bad_command`), so that
+  no peer or client steers another's player; a server's own commands, which may steer any, aren't
+  checked.
 - **Desyncs name their field.** Each peer sends the world's hash after each tick run on both peers'
   inputs, and keeps a copy of its world after the tick until the other's hash of it has come; a
   hash that isn't the other's logs `net.desync` with the tick, the host sends its joiner its world
@@ -1415,12 +1431,13 @@ alone, as Foxball's bot, a session's runs leave out.
   where it's drawn: over a 100 ms link, about 1.5 units at the demo's speed.
 
 The session's stream is lines of text over TCP, without Nagle's delay, which keeps them in order
-and whole: the hello, the host's world, the hashes, and a tick's inputs that hold an edit or a
-patch, name a texture the host has just named, or are too long for a packet. A tick's other
-inputs go over UDP, in packets sent at each tick and again a tick's time after the last, each
-repeating this peer's inputs for every tick the other hasn't said it has, so that a packet lost
-loses none, and naming the tick the peers' worlds were last made the same at, so that one sent
-before a resync is dropped. A server's link to each client is the same: a client's inputs go over
+and whole, a thread of each end's reading them and another writing them: the hello, the host's
+world, the hashes, the writing thread's lines that say it's there, and a tick's inputs that hold
+an edit or a patch, name a texture the host has just named, or are too long for a packet. A
+tick's other inputs go over UDP, in packets sent at each tick and again a tick's time after the
+last, each repeating this peer's inputs for every tick the other hasn't said it has, so that a
+packet lost loses none, and naming the tick the peers' worlds were last made the same at, so that
+one sent before a resync is dropped. A server's link to each client is the same: a client's inputs go over
 UDP, each packet repeating those the server hasn't said it applied, or on the stream if a tick's
 are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
 state lost being lost, as the next is sent against the latest the client has. `--link` has a

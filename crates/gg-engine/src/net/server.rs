@@ -11,9 +11,10 @@
 //! these:
 //!
 //! ```text
-//! hello\tgg-server 1\tShards\t0.1.0 debug dev\tShards Inspector\t50123
-//!                                                    the client, as it connects, and the port its
-//!                                                      packets come from
+//! hello\tgg-server 2\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//!                                                    the client, as it connects: its app, engine,
+//!                                                      build and layers, and the port its packets
+//!                                                      come from
 //! refused <why>                                      the server, refusing it, before it closes
 //! world 1234 1 50124                                 the server's world, at tick 1234, as a
 //! gg-snapshot 2                                        snapshot file's text, with the client's
@@ -63,8 +64,8 @@ use gg_core::Result;
 use tracing::{info, warn};
 
 use super::{
-    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Queued, Turn, engine, listen, port_of, read_batches,
-    tick_of,
+    AHEAD, Link, MAX_LINE, MAX_PACKET, Merged, Queued, Turn, build, engine, listen, port_of,
+    read_batches, tick_of,
 };
 use crate::args::Conditions;
 use crate::cells::{Cell, Seen};
@@ -74,7 +75,7 @@ use crate::{World, WorldHash};
 
 /// The hello's first part, the protocol and its version, which a client's must be: a change to the
 /// lines or the packets takes it to the next.
-pub(super) const PROTOCOL: &str = "gg-server 1";
+pub(super) const PROTOCOL: &str = "gg-server 2";
 
 /// How many of the latest ticks the server keeps the world's text after, and a client its states,
 /// half a second's, past which a client's state is sent whole.
@@ -93,6 +94,8 @@ pub(crate) struct Server {
     #[cfg(test)]
     pub(super) listening: SocketAddr,
     pub(super) app: &'static str,
+    /// The run's build, as [`build`] says, which a client's must be.
+    build: &'static str,
     /// The layers' names, from the bottom up, which a client's must be.
     layers: String,
     /// What `--link` has the links do to what comes, and the state of the random numbers it draws.
@@ -138,8 +141,10 @@ impl Server {
     /// Starts listening at `address` for clients of app `app`, whose layers are `layers`, from the
     /// bottom up.
     ///
-    /// Fails with `net.start` if it can't listen there.
+    /// Fails with `net.start` if it can't listen there, and with `net.build` if the run's build
+    /// can't be read, as [`build`] says.
     pub(crate) fn start(address: &str, app: &'static str, layers: &[&str]) -> Result<Self> {
+        let build = build()?;
         let (accepted, at) = listen(address, "clients")?;
         info!(address = %at, "Serving the world");
         Ok(Self {
@@ -147,6 +152,7 @@ impl Server {
             #[cfg(test)]
             listening: at,
             app,
+            build,
             layers: layers.join(" "),
             conditions: None,
             random: 0,
@@ -160,12 +166,14 @@ impl Server {
 
     /// Between ticks, as a frame starts, the next tick to run being `next`: takes the connections
     /// made, and the lines and packets each client's link has, as `--link` holds them; refuses a
-    /// hello of another protocol, app, engine or layers, giving one taken the least player no other
-    /// client has; and returns whether the server owes a client its world. Logs a client lost.
+    /// hello of another protocol, app, engine, build or layers, giving one taken the least player
+    /// no other client has; and returns whether the server owes a client its world. Logs a client
+    /// lost: its connection closed, nothing came from it for [`LOST`](super::LOST), or no hello
+    /// within [`HELLO`](super::HELLO).
     pub(crate) fn turn(&mut self, next: u64) -> Turn {
         let now = Instant::now();
         while let Ok(stream) = self.accepted.try_recv() {
-            match Link::new(stream) {
+            match Link::new(stream, true) {
                 Ok(link) => self.clients.push(Remote {
                     link,
                     hello: false,
@@ -184,7 +192,7 @@ impl Server {
             }
         }
         let engine = engine();
-        let ours = [PROTOCOL, self.app, &engine, &self.layers];
+        let ours = [PROTOCOL, self.app, &engine, self.build, &self.layers];
         let Self {
             clients,
             buffer,
@@ -193,7 +201,7 @@ impl Server {
             ..
         } = self;
         clients.retain_mut(|client| {
-            let (lines, packets, closed) = client.link.take(buffer, *conditions, random, now);
+            let (lines, packets, gone) = client.link.take(buffer, *conditions, random, now);
             let mut lost = Ok(());
             for line in &lines {
                 lost = lost.and_then(|()| client.read(line, ours, next));
@@ -204,8 +212,8 @@ impl Server {
                     lost = Err(Some("the client sent a packet that isn't one".to_owned()));
                 }
             }
-            if lost.is_ok() && closed {
-                lost = Err(Some("the connection closed".to_owned()));
+            if let (Ok(()), Some(why)) = (&lost, gone) {
+                lost = Err(Some(why));
             }
             match lost {
                 Ok(()) => true,
@@ -228,7 +236,7 @@ impl Server {
                     None => {
                         let why = "the server has as many players as it can";
                         warn!(code = "net.refused", "Refused a client: {why}");
-                        let _ = clients[at].link.send(&format!("refused {why}\n"));
+                        let _ = clients[at].link.send(format!("refused {why}\n"));
                         clients[at].owed = false;
                     }
                 }
@@ -271,19 +279,19 @@ impl Server {
             let port = client.link.port();
             match client
                 .link
-                .send(&format!("world {next} {player} {port}\n{text}"))
+                .send(format!("world {next} {player} {port}\n{text}"))
             {
                 Ok(()) => {
                     info!(player, tick = next, "Sent a client the world");
                     self.served[0] += 1;
                 }
-                // Lost at the next turn, which finds the connection closed.
+                // Lost at the next turn, which finds the connection closed, as the link's writing
+                // thread, which has stopped, closed it.
                 Err(error) => {
                     warn!(
                         code = "net.link",
                         player, "Can't send a client the world: {error}"
                     );
-                    let _ = client.link.to.shutdown(std::net::Shutdown::Both);
                 }
             }
         }
@@ -428,7 +436,7 @@ impl Server {
 }
 
 impl Remote {
-    /// Takes `line`, from the client, of the protocol, app, engine and layers `ours` are: its
+    /// Takes `line`, from the client, of the protocol, app, engine, build and layers `ours` are: its
     /// hello, that it has joined, or a line of a tick's inputs, the next tick to run being `next`.
     /// Fails with `None` for a hello refused, which it logs, and with why for any other line, and
     /// for a tick's lines past [`MAX_LINE`] bytes together, or inputs past those it may send, as
@@ -436,13 +444,16 @@ impl Remote {
     fn read(
         &mut self,
         line: &str,
-        ours: [&str; 4],
+        ours: [&str; 5],
         next: u64,
     ) -> std::result::Result<(), Option<String>> {
         let (kind, rest) = line.split_once([' ', '\t']).unwrap_or((line, ""));
         match kind {
+            // The client's writing thread, saying it's there.
+            "k" => Ok(()),
             "hello" if !self.hello => match port_of(line, ours, "the server") {
                 Ok(port) => {
+                    self.link.hello_came();
                     self.link.packets_from(port);
                     self.hello = true;
                     self.owed = true;
@@ -450,7 +461,7 @@ impl Remote {
                 }
                 Err(why) => {
                     warn!(code = "net.refused", "Refused a client: {why}");
-                    let _ = self.link.send(&format!("refused {why}\n"));
+                    let _ = self.link.send(format!("refused {why}\n"));
                     Err(None)
                 }
             },
@@ -656,7 +667,7 @@ mod tests {
         let at = listener.local_addr().expect("an address");
         let _other = TcpStream::connect(at).expect("connected");
         let (stream, _) = listener.accept().expect("accepted");
-        let mut link = Link::new(stream).expect("a link");
+        let mut link = Link::new(stream, true).expect("a link");
         link.joined = true;
         let mut client = Remote {
             link,
@@ -688,7 +699,7 @@ mod tests {
             assert!(client.read_packet(&packet(far), next).is_none(), "{far}");
         }
         assert_eq!(client.inputs.len(), 2);
-        let ours = [""; 4];
+        let ours = [""; 5];
         assert!(client.read("t 11", ours, next).is_ok());
         assert!(client.read("t 74", ours, next).is_err());
         client.stream.clear();
@@ -821,6 +832,49 @@ mod tests {
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"
         );
+    }
+
+    /// A client's command that names another client's player is refused, by the server and by the
+    /// client as it predicts it, and its command for its own player applies: no client steers
+    /// another's player.
+    #[test]
+    fn a_client_s_command_for_another_s_player_is_refused() {
+        let logged = crate::testing::logged();
+        let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.to_string(),
+            _ => panic!("a server"),
+        };
+        let connect = |seed| Node::new(&Net::Connect(address.clone()), Context::seeded(seed));
+        let mut clients: Vec<Node> = (2..4).map(connect).collect();
+        until(&mut server, &mut clients, |_, clients| {
+            clients.iter().all(Node::joined)
+        });
+        let second = clients
+            .iter()
+            .position(|client| client.cx.player() == Some(1));
+        let second = &mut clients[second.expect("player 1's")];
+        second.queue(Command::Add {
+            player: 0,
+            points: 100,
+        });
+        second.queue(Command::Add {
+            player: 1,
+            points: 10,
+        });
+        until(&mut server, &mut clients, |server, clients| {
+            let hash = server.cx.world().hash();
+            server.score() == [0, 10]
+                && clients
+                    .iter()
+                    .all(|client| client.cx.world().hash() == hash)
+        });
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        assert!(
+            codes.iter().any(|code| code == "net.bad_command"),
+            "{codes:?}"
+        );
+        assert!(!codes.iter().any(|code| code == "net.lost"), "{codes:?}");
     }
 
     /// A command of [`Players`]': puts player `player`'s viewer at x `x`.

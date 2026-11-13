@@ -854,7 +854,9 @@ impl Context {
     /// The player this run plays, in a lockstep session, which the run hosts (`--host`), as player
     /// 0, or joins (`--join`), as player 1; `None` outside one. Each peer runs every player's world,
     /// and its layers queue commands for their own player alone, naming it in them, as the other
-    /// peer's queue for theirs.
+    /// peer's queue for theirs: a command whose variant or struct has a field `player`, an
+    /// integer, that names another player than the one whose inputs it came in, is refused there
+    /// (`net.bad_command`), by every run of the session alike.
     pub fn player(&self) -> Option<u8> {
         self.player
     }

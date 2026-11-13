@@ -154,7 +154,13 @@ pub(super) fn type_key(name: &str) -> u64 {
 /// The digest of `text`, as of a scene text a cell keeps, which the world's hash reads in its place,
 /// as [`WorldHash::layout`] says: the same of the same bytes on every platform.
 pub(crate) fn text_digest(text: &str) -> u64 {
-    absorb_bytes(TEXT, text.as_bytes())
+    bytes_digest(text.as_bytes())
+}
+
+/// The digest of `bytes`, as [`text_digest`]'s of a text's: a session's hello carries the running
+/// executable's, so that peers of other builds don't join.
+pub(crate) fn bytes_digest(bytes: &[u8]) -> u64 {
+    absorb_bytes(TEXT, bytes)
 }
 
 /// What a world of cells keeps of them, as [`CellState`] holds it, absorbed: the cells in, those

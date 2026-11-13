@@ -158,10 +158,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Positions beyond f32** (2026-11-13)
 - **A world to cross** (2026-11-13)
 - **Phase 19, world streaming** (2026-11-13)
+- **Sessions that hold** (2026-11-13)
 
 ## Now
 
-No milestone, until Open questions' first, which phase comes after Phase 19, is decided.
+Phase 20's second milestone, delays that follow the link, as Next has it, once its plan is
+approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -189,8 +191,25 @@ Each phase ends in something you can run and check.
 
 Phases 11 to 19 are done, as Done has it, but for what Deferred holds.
 
-Later: upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
-macOS driver does today); and the built-in coding agent for v1.
+20. **Play across the internet**: sessions robust and safe on a network others share, through
+    NATs, at the internet's latencies, with states that grow with what changed rather than with the
+    world. *Done when* Foxball's server and two clients, and Shards' lockstep and rollback peers,
+    play through a relay over a link of 150 ms there and back, with jitter and 2% lost (`--link`),
+    each session joined by its code alone; a stranger's connection and forged packets are refused;
+    a silent peer is lost and rejoins; and each client's bandwidth and each peer's stalls are
+    measured. Its milestones, in order: sessions that hold, a link silent for 10 s lost, kept by a
+    thread that writes its stream, a hello's deadline, a peer or client of another build refused,
+    and a player's commands steering that player alone; delays that follow the link, each link's
+    round trip measured, a lockstep session's delay and a rollback session's window following it,
+    and rollback peers kept alike in time; sessions their players alone join, a session's key from
+    a code, every line and packet authenticated and encrypted, replays dropped; through NATs, a
+    relay both ends connect out to, which pairs them by the code and can't read what it forwards,
+    direct where a hole punch works; states by what changed, a server's state of the tables changed
+    since the client's latest, written on a thread, and physics' of the bodies a client sees; and
+    Foxball across the internet, measured.
+
+Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
+(no macOS driver does today).
 
 ## Deferred
 
@@ -198,6 +217,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 | Skipped | Add when |
 |---|---|
+| A coding agent built into the editor, modeled on the pi coding agent, which edits a project's files and works on its running game through the tool API: the agent is Claude Code, through the user's subscription | One built in serves the user better than Claude Code does |
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
 | Compiling debug events out of shipping builds as well as trace events: `release_max_level_debug` keeps them in every optimized build, as agents read them of `gg run --release`'s runs, and Cargo can't give one profile features of its own | A shipped game's debug events cost it measurably |
@@ -686,12 +706,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 | Patching an edit to a constant, which rebuilds the game: `gg run` patches edits inside function bodies alone, though one to a constant that no type, static or `const fn` reads would patch as well | Agents tune constants as the game runs, and the rebuilds' restarts slow them |
 | Removing the patches' libraries a `gg run` that's killed leaves; a run removes those its game loaded as it ends | They pile up enough to matter |
-| Lockstep and rollback sessions beyond two peers on a LAN, as a server takes any number of clients: more players, spectators, a delay and a window of ticks predicted that follow the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, or rollback's 31.25 ms and 8 ticks; and play across the internet, through NATs, a server's too | A peer-to-peer game for more than two, or one played across the internet |
-| Rollback peers kept alike ahead of each other's inputs, the one ahead slowing a little, as GGPO's peers do: a peer ahead, as a host is of a joiner by the time its world took to come and the link's latency, predicts as far as `PREDICTED` and waits there, its corrections the other's moves late, while the other predicts little | A rollback session's corrections show on one peer |
+| Lockstep and rollback sessions beyond two peers, as a server takes any number of clients: more players, and spectators | A peer-to-peer game for more than two, or one watched |
 | Smoothing what a rollback, or a client's correction, corrects, which the frames draw where the ticks run again left it, at once: a client's own player seldom moves, as it predicts it exactly, and the other players draw between the server's states, but entities no player owns, as the demo's shards, jump where another's player moved them | Players find corrections jarring |
 | A server's session under `gg run`, and the tool API's edits, scene files' and scripts' saves and patches there: a server serves no tool API and watches no files, and a client refuses the API's edits (`net.no_edit`), as the server's next state would take them away, and applies a patch to itself alone | Agents build a game played through a server |
 | Recording a server, which `--serve` refuses with `--record`, though its ticks run once each, on its clients' inputs as they applied | A server session is worth replaying |
-| A server that checks that a client's commands name the client's own player: it applies whatever commands a client sends, and a game's commands name their player, so a client can steer another's | A game is played among people who'd cheat |
 | Naming the field where a client's world, read from a state's text, differs from the server's: `net.desync` names the tick and both hashes, as the client has the server's text alone; a server could read its own text back as it writes it, where a client says so | A client's world reads otherwise than the server's |
 | `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
@@ -718,9 +736,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- Which phase comes after Phase 19? Recommendation: the built-in coding agent, v1's headline, in
-  the editor: it edits a project's files and works on the running game through the tool API, as
-  Claude Code does now. Decide before the next phase starts.
+- How a session's lines and packets are secured, for Phase 20's third milestone, which adds the
+  workspace's first cryptography. Recommendation: the Noise Protocol Framework through `snow`,
+  `NNpsk0` keyed by the session's code, over the stream and packets as they are, each packet sealed
+  with an explicit counter and a window against replays; rather than QUIC through `quinn-proto`
+  and `rustls`, which would rewrite every link for congestion control and migration the engine
+  doesn't need yet, or a MAC alone, which leaves states readable on the path. Decide before the
+  third milestone starts.
 - Where uploads go on a device whose transfer queue copies whole images alone (a granularity of
   0, 0, 0): it's refused, so they go to the compute queue's family, and async compute, which needs
   a queue of its own, is off. Recommendation: upload on the graphics queue there instead, keeping

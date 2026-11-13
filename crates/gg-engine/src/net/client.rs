@@ -22,12 +22,13 @@ use std::net::TcpStream;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use gg_core::Result;
 use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::{
-    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, Queued, REFUSED, Turn, connect, hello, tick_of,
-    write_inputs,
+    Inputs, Link, MAX_PACKET, MAX_WORLD, Merged, Queued, REFUSED, Turn, build, connect, hello,
+    tick_of, write_inputs,
 };
 use crate::args::Conditions;
 use crate::layer::Commands;
@@ -64,6 +65,8 @@ pub(crate) struct Client {
     address: String,
     connecting: Option<Receiver<TcpStream>>,
     pub(super) app: &'static str,
+    /// The run's build, as [`build`] says, which the server's must be.
+    build: &'static str,
     /// The layers' names, from the bottom up, which the server's must be.
     layers: String,
     /// What `--link` has the link do to what comes, and the state of the random numbers it draws.
@@ -151,11 +154,14 @@ struct Sample {
 impl Client {
     /// A client of the server at `address`, for app `app`, whose layers are `layers`, from the
     /// bottom up, which tries to connect to it in the background, until it does.
-    pub(crate) fn start(address: &str, app: &'static str, layers: &[&str]) -> Self {
-        Self {
+    ///
+    /// Fails with `net.build` if the run's build can't be read, as [`build`] says.
+    pub(crate) fn start(address: &str, app: &'static str, layers: &[&str]) -> Result<Self> {
+        Ok(Self {
             address: address.to_owned(),
             connecting: None,
             app,
+            build: build()?,
             layers: layers.join(" "),
             conditions: None,
             random: 0,
@@ -185,7 +191,7 @@ impl Client {
             desynced: false,
             sent: None,
             buffer: vec![0; 1 << 16],
-        }
+        })
     }
 
     /// Whether the client has joined: it has the server's world, which it said it restored.
@@ -232,8 +238,10 @@ impl Client {
                 self.lose("the server sent a packet that isn't one");
             }
         }
-        if lost && self.link.is_some() {
-            self.lose("the connection closed");
+        if let Some(why) = lost
+            && self.link.is_some()
+        {
+            self.lose(&why);
         }
         if self
             .sent
@@ -255,8 +263,8 @@ impl Client {
             .get_or_insert_with(|| connect(address.clone(), "the server", Duration::ZERO));
         let Ok(stream) = made.try_recv() else { return };
         self.connecting = None;
-        let hello = |link: &Link| hello(PROTOCOL, self.app, &self.layers, link.port());
-        match Link::new(stream).and_then(|mut link| link.send(&hello(&link)).map(|()| link)) {
+        let hello = |link: &Link| hello(PROTOCOL, self.app, self.build, &self.layers, link.port());
+        match Link::new(stream, false).and_then(|mut link| link.send(hello(&link)).map(|()| link)) {
             Ok(link) => {
                 info!(address = %self.address, "Connected to the server");
                 self.link = Some(link);
@@ -282,6 +290,8 @@ impl Client {
         }
         let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
         match kind {
+            // The server's writing thread, saying it's there.
+            "k" => {}
             "refused" => {
                 error!(
                     code = "net.refused",
@@ -343,7 +353,7 @@ impl Client {
         (self.local, self.tagged) = (tick, tick + ahead);
         if let Some(link) = &mut self.link {
             link.joined = true;
-            if let Err(error) = link.send(&format!("joined {tick}\n")) {
+            if let Err(error) = link.send(format!("joined {tick}\n")) {
                 self.lose(&format!("can't tell the server it joined: {error}"));
             }
         }
@@ -385,7 +395,7 @@ impl Client {
         {
             let mut text = String::new();
             write_inputs(&mut text, tick, &inputs);
-            if let Err(error) = link.send(&text) {
+            if let Err(error) = link.send(text) {
                 self.lose(&format!("can't send to the server: {error}"));
             }
         }
@@ -797,7 +807,7 @@ mod tests {
     /// however far on, is dropped, and the server's own after it are taken.
     #[test]
     fn a_state_the_server_cant_have_run_yet_is_dropped() {
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let state = |tick: u64| {
@@ -821,7 +831,7 @@ mod tests {
     /// more or fewer than its line says dropped.
     #[test]
     fn a_forged_state_s_line_holds_no_memory_but_what_came() {
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let text = "gg-snapshot 2\n";
@@ -865,23 +875,21 @@ mod tests {
             sample(12, &[(a, at(2.0)), (b, at(7.0))]),
             sample(14, &[(a, at(4.0)), (b, at(9.0))]),
         ];
-        let client = |arrived: Instant| {
-            let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        // The latest came `ago` before now, once the client has started, which reads its build.
+        let client = |ago: Duration| {
+            let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
             client.samples = samples.iter().map(|s| sample(s.tick, &s.poses)).collect();
-            client.arrived = Some(arrived);
+            client.arrived = Some(Instant::now().checked_sub(ago).expect("an instant"));
             client
         };
         // 11 ticks on, halfway from the state after tick 10 to the one after 12, and as far past as
         // the time since the latest came, under 3 ms.
-        let mut between = client(Instant::now());
+        let mut between = client(Duration::ZERO);
         let drawn = between.interpolate(Tick::DT);
         assert!((1.0..1.1).contains(&x_of(drawn, a)), "{drawn:?}");
         assert_eq!(x_of(drawn, b), 7.0);
         // The latest came 10 ticks ago, so that the time is past it.
-        let past = Instant::now()
-            .checked_sub(Tick::DT * 10)
-            .expect("an instant");
-        let mut held = client(past);
+        let mut held = client(Tick::DT * 10);
         let drawn = held.interpolate(Tick::DT);
         assert_eq!((x_of(drawn, a), x_of(drawn, b)), (4.0, 9.0));
     }
@@ -926,7 +934,7 @@ mod tests {
         }
         ours.load_whole((1..).zip(text.lines()), true)
             .expect("loaded");
-        let mut client = Client::start("127.0.0.1:1", "Tested", &[]);
+        let mut client = Client::start("127.0.0.1:1", "Tested", &[]).expect("started");
         client.restored(0, &ours);
         step_navigation(&mut ours);
         client.texts.insert(1, text.clone());
