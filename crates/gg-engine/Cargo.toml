@@ -15,6 +15,7 @@ gilrs.workspace = true
 gg-api = { workspace = true, optional = true }
 gg-core.workspace = true
 gg-macros.workspace = true
+gg-relay.workspace = true
 gg-renderer.workspace = true
 half.workspace = true
 harfrust.workspace = true

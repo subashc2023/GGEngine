@@ -15,6 +15,7 @@ use std::io::{self, BufRead, ErrorKind, Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use gg_relay::Room;
 use snow::params::HashChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::{Builder, StatelessTransportState};
@@ -28,8 +29,10 @@ const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 /// What both ends' handshakes are bound to, so that a later version of these formats changes it.
 const PROLOGUE: &[u8] = b"gg-engine session 1";
 
-/// The key the code's own is the HMAC of the code under, which no other use of the code shares.
+/// The key the code's own is the HMAC of the code under, which no other use of the code shares;
+/// and the key its room at a relay is, which the code's own isn't found from.
 const CODE_KEY: &[u8] = b"gg-engine session code";
+const ROOM_KEY: &[u8] = b"gg-engine relay room";
 
 /// The bytes Noise's tag takes, and the most a message of its may have, its tag among them.
 const TAG: usize = 16;
@@ -74,12 +77,25 @@ impl Code {
 
     /// The key the code makes, Noise's pre-shared key: its HMAC-BLAKE2s under [`CODE_KEY`].
     fn key(&self) -> [u8; 32] {
+        self.hmac(CODE_KEY)
+    }
+
+    /// The session's room at a relay, which its runs find each other by there: the first 16 bytes
+    /// of the code's HMAC-BLAKE2s under [`ROOM_KEY`]. A relay, and anyone on the path to it, sees
+    /// it, and can't find the code from it, nor the code's key, an HMAC under another key.
+    pub(crate) fn room(&self) -> Room {
+        let hmac = self.hmac(ROOM_KEY);
+        Room(hmac[..16].try_into().expect("32 bytes"))
+    }
+
+    /// The code's HMAC-BLAKE2s under `key`.
+    fn hmac(&self, key: &[u8]) -> [u8; 32] {
         let mut hash = DefaultResolver
             .resolve_hash(&HashChoice::Blake2s)
             .expect("snow's resolver has BLAKE2s, as its `use-blake2` feature is on");
-        let mut key = [0; 32];
-        hash.hmac(CODE_KEY, &self.0, &mut key);
-        key
+        let mut hmac = [0; 32];
+        hash.hmac(key, &self.0, &mut hmac);
+        hmac
     }
 }
 
@@ -453,6 +469,18 @@ mod tests {
 
     /// Each nonce is taken once, from [`PACKETS`] on: one 127 behind the newest is taken, not one
     /// 128 behind, and after a jump ahead the window moves with it.
+    /// A code's room at a relay is its own, the same each time, and another code's another; and
+    /// it's none of the code's key, which the relay, seeing the room, mustn't learn.
+    #[test]
+    fn a_code_s_room_is_its_own_and_not_its_key() {
+        let code = Code([0x39, 0xe8, 0x51, 0x37, 0x4b, 0x1f, 0xa6, 0x9b, 0x5d, 0x42]);
+        let other = Code([0; 10]);
+        assert_eq!(code.room(), code.room());
+        assert_ne!(code.room(), other.room());
+        let key = code.key();
+        assert!(key.windows(16).all(|part| part != code.room().0), "{key:?}");
+    }
+
     #[test]
     fn replays_take_each_packet_s_nonce_once() {
         let mut replays = Replays::default();

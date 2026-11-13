@@ -20,10 +20,12 @@ crates/           libraries
   gg-engine/      what games use: main loop, window, input, scene, assets, hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
   gg-api/         the tool API, a game's shared view, projects' manifests, assets' ID files
+  gg-relay/       the relay sessions meet through behind routers: its protocol's ends, and the relay
 apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
+  relay/          `gg-relay`, the relay's executable, which games don't run
 games/shards/     the first demo, a project: two players, alone, as peers or as a server's clients
 games/foxball/    the 3D demo, networked as Shards is: two foxes, a ball and two goals
 games/showcase/   a project of a scene for each feature: add one as a feature lands

@@ -65,14 +65,41 @@ pub(crate) struct Args {
     pub(crate) package: Option<PathBuf>,
 }
 
-/// A networked session's end a run takes, and the address it listens at or connects to, as given:
-/// a lockstep session's host or joiner, or a server or its client.
+/// A networked session's end a run takes, and where it finds the others, as given: a lockstep
+/// session's host or joiner, or a server or its client.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Net {
-    Host(String),
-    Join(String),
-    Serve(String),
-    Connect(String),
+    Host(Listen),
+    Join(Toward),
+    Serve(Listen),
+    Connect(Toward),
+}
+
+/// Where a host or a server takes its joiners or clients from: the address it listens at, the
+/// relay it registers its session's room at, as `--relay` says, or both; one at least.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Listen {
+    pub(crate) address: Option<String>,
+    pub(crate) relay: Option<String>,
+}
+
+impl Listen {
+    /// Listening at `address` alone.
+    #[cfg(test)]
+    pub(crate) fn at(address: &str) -> Self {
+        Self {
+            address: Some(address.to_owned()),
+            relay: None,
+        }
+    }
+}
+
+/// Where a joiner or a client finds its host or server: at its address, or through a relay, by
+/// the session's room there, which its code gives.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Toward {
+    Address(String),
+    Relay(String),
 }
 
 /// What `--link` has a peer's link do to what it receives, as a slow link would: hold each packet
@@ -85,6 +112,26 @@ pub(crate) struct Conditions {
     pub(crate) loss: f64,
 }
 
+/// The session flag a run was given, before `--relay`, which may come after it, is known.
+#[derive(Clone, Copy)]
+enum End {
+    Host,
+    Join,
+    Serve,
+    Connect,
+}
+
+impl End {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Host => "--host",
+            Self::Join => "--join",
+            Self::Serve => "--serve",
+            Self::Connect => "--connect",
+        }
+    }
+}
+
 /// Where a replay stops to write the world: once its layers have attached, or after a tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Dump {
@@ -94,7 +141,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 23] = [
+const NOT_REPLAYED: [&str; 24] = [
     "--record",
     "--restore",
     "--headless",
@@ -114,6 +161,7 @@ const NOT_REPLAYED: [&str; 23] = [
     "--join",
     "--serve",
     "--connect",
+    "--relay",
     "--code",
     "--rollback",
     "--link",
@@ -164,19 +212,28 @@ Options:
                     the tool API's edits, its `scene open` and `scene new`, and scene files' saves
                     change, until its `play`. A run given `--restore` goes on stopped or playing,
                     as the snapshot's run was
-  --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
-  --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
+  --host [ADDRESS]  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0; with
+                    --relay, at the relay too, or there alone without ADDRESS
+  --join [ADDRESS]  Join the lockstep session at ADDRESS as player 1, from the host's world; or
+                    without ADDRESS, through --relay, as its code finds it there
   --rollback        With --host or --join, of both peers: predict the other peer's inputs, 8 to 16
                     ticks on, as far as the link needs, and roll back where a prediction missed,
                     its ticks run again, with an input delay of 2 ticks rather than lockstep's 2 to
                     16, which follows the link
-  --serve <ADDRESS> Serve the world at ADDRESS, such as `0.0.0.0:7700`, to the clients that connect,
+  --serve [ADDRESS] Serve the world at ADDRESS, such as `0.0.0.0:7700`, to the clients that connect,
                     as the server that owns it: without a window or a GPU, in real time, until
-                    Ctrl+C, or --frames frames of a tick's time
-  --connect <ADDRESS>
+                    Ctrl+C, or --frames frames of a tick's time; with --relay, at the relay too, or
+                    there alone without ADDRESS
+  --connect [ADDRESS]
                     Play as a client of the server at ADDRESS, from its world, as the player it
                     gives this run, predicting the world, the other players drawn as it last had
-                    them
+                    them; or without ADDRESS, through --relay, as its code finds it there
+  --relay <ADDRESS> With --host, --join, --serve or --connect, meet the session's other runs
+                    through the relay at ADDRESS, such as `relay.example.com:7800`, which
+                    `gg-relay` runs: for runs that can't connect to each other, as two behind their
+                    own routers can't. The session's code finds its room there, and its packets go
+                    straight between its runs where their routers let them, and through the relay
+                    where they don't
   --code <CODE>     With --host, --join, --serve or --connect, the session's code, 16 digits and
                     letters such as `7KQ2-9XMB-4TZD-P0WH`, which keeps the session to the runs
                     given it and what they send to them alone: --join and --connect need their
@@ -236,7 +293,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
-    let mut args = args.into_iter();
+    // The session flag given, and its address, if it was given one; and the relay.
+    let mut session: Option<(End, Option<String>)> = None;
+    let mut relay = None;
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let arg = arg
             .into_string()
@@ -246,6 +306,35 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_owned())),
             _ => (arg.as_str(), None),
         };
+        // A session flag's address, which may be left out, as it is where the next argument is
+        // another flag.
+        let address = |value: &mut Option<String>, args: &mut std::iter::Peekable<_>| {
+            value.take().or_else(|| {
+                let next = args.peek().and_then(|next: &OsString| next.to_str());
+                next.filter(|next| !next.starts_with('-'))?;
+                args.next()
+                    .and_then(|next: OsString| next.into_string().ok())
+            })
+        };
+        let end = match flag {
+            "--host" => Some(End::Host),
+            "--join" => Some(End::Join),
+            "--serve" => Some(End::Serve),
+            "--connect" => Some(End::Connect),
+            _ => None,
+        };
+        if let Some(end) = end {
+            if session.is_some() {
+                return Err(bad(
+                    "a run takes part in one networked session, so it takes one `--host`, \
+                     `--join`, `--serve` or `--connect`"
+                        .to_owned(),
+                ));
+            }
+            session = Some((end, address(&mut value, &mut args)));
+            not_replayed.get_or_insert_with(|| flag.to_owned());
+            continue;
+        }
         let mut value_of = |flag: &str| {
             value
                 .take()
@@ -326,17 +415,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--replay" => parsed.replay = Some(value_of(flag)?.into()),
             // The last given, which `gg run` gives after the game's own.
             "--restore" => parsed.restore = Some(value_of(flag)?.into()),
-            "--host" | "--join" | "--serve" | "--connect" if parsed.net.is_some() => {
-                return Err(bad(
-                    "a run takes part in one networked session, so it takes one `--host`, \
-                     `--join`, `--serve` or `--connect`"
-                        .to_owned(),
-                ));
-            }
-            "--host" => parsed.net = Some(Net::Host(value_of(flag)?)),
-            "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
-            "--serve" => parsed.net = Some(Net::Serve(value_of(flag)?)),
-            "--connect" => parsed.net = Some(Net::Connect(value_of(flag)?)),
+            "--relay" => relay = Some(value_of(flag)?),
             // Not echoed in its error, as it's a session's key, or nearly.
             "--code" => {
                 parsed.code = Some(value_of(flag)?.parse().map_err(|why| {
@@ -374,6 +453,37 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
              takes no `{flag}`"
         )));
     }
+    parsed.net = match session {
+        None if relay.is_some() => {
+            return Err(bad(
+                "`--relay` is where a networked session's runs meet, so it needs `--host`, \
+                 `--join`, `--serve` or `--connect`"
+                    .to_owned(),
+            ));
+        }
+        None => None,
+        Some((end, address)) => Some(match (end, address, relay) {
+            (_, None, None) => {
+                return Err(bad(format!(
+                    "`{}` takes an address, or meets the session's other runs through `--relay`",
+                    end.flag()
+                )));
+            }
+            (End::Join | End::Connect, Some(_), Some(_)) => {
+                return Err(bad(format!(
+                    "`{}` finds its host or server at its address or through `--relay`, so it \
+                     takes one of them",
+                    end.flag()
+                )));
+            }
+            (End::Host, address, relay) => Net::Host(Listen { address, relay }),
+            (End::Serve, address, relay) => Net::Serve(Listen { address, relay }),
+            (End::Join, Some(address), None) => Net::Join(Toward::Address(address)),
+            (End::Join, None, Some(relay)) => Net::Join(Toward::Relay(relay)),
+            (End::Connect, Some(address), None) => Net::Connect(Toward::Address(address)),
+            (End::Connect, None, Some(relay)) => Net::Connect(Toward::Relay(relay)),
+        }),
+    };
     if parsed.restore.is_some() && parsed.record.is_some() {
         return Err(bad(
             "`--restore` starts the run from a snapshot, which a recording, whose replay starts \
@@ -671,7 +781,7 @@ mod tests {
             assert!(parse_strs(args).unwrap().unwrap().supervised, "{args:?}");
         }
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
-        assert_eq!(host.net, Some(Net::Host("0.0.0.0:7700".to_owned())));
+        assert_eq!(host.net, Some(Net::Host(Listen::at("0.0.0.0:7700"))));
         // Which makes its code, unless it's given one, as a joiner is, read as written.
         assert_eq!(host.code, None);
         let code = "7KQ2-9XMB-4TZD-P0WH".parse::<Code>().unwrap();
@@ -680,7 +790,8 @@ mod tests {
             let join = parse_strs(&[&join[..], &[given]].concat())
                 .unwrap()
                 .unwrap();
-            assert_eq!(join.net, Some(Net::Join("127.0.0.1:7700".to_owned())));
+            let toward = Toward::Address("127.0.0.1:7700".to_owned());
+            assert_eq!(join.net, Some(Net::Join(toward)));
             assert_eq!(join.code, Some(code));
         }
         let host = parse_strs(&["--host", "0.0.0.0:7700", "--code=7KQ2-9XMB-4TZD-P0WH"]);
@@ -707,7 +818,7 @@ mod tests {
         // A server and its client, each over a link of its own.
         let serve = parse_strs(&["--serve", "0.0.0.0:7700", "--link", "100,20,5"]);
         let serve = serve.unwrap().unwrap();
-        assert_eq!(serve.net, Some(Net::Serve("0.0.0.0:7700".to_owned())));
+        assert_eq!(serve.net, Some(Net::Serve(Listen::at("0.0.0.0:7700"))));
         assert!(serve.link.is_some());
         let connect = parse_strs(&[
             "--connect=127.0.0.1:7700",
@@ -716,7 +827,8 @@ mod tests {
             "--link=100,20,5",
         ]);
         let connect = connect.unwrap().unwrap();
-        assert_eq!(connect.net, Some(Net::Connect("127.0.0.1:7700".to_owned())));
+        let toward = Toward::Address("127.0.0.1:7700".to_owned());
+        assert_eq!(connect.net, Some(Net::Connect(toward)));
         assert!(connect.headless && connect.link.is_some());
         // A run's ticks run again, and a replay's.
         assert!(!parse_strs(&[]).unwrap().unwrap().sync_test);
@@ -751,6 +863,7 @@ mod tests {
                 "--join",
                 "--serve",
                 "--connect",
+                "--relay",
                 "--code",
                 "--mods",
             ]
@@ -759,6 +872,69 @@ mod tests {
             let error = parse_strs(refused).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{flag}: {error}");
             assert!(error.to_string().contains(&format!("`{flag}`")), "{error}");
+        }
+    }
+
+    /// `--relay` with each session flag: a host or a server at the relay alone, or at its address
+    /// too, the address left out where the next argument is another flag; a joiner or a client
+    /// through the relay alone.
+    #[test]
+    fn a_session_meets_through_a_relay() {
+        let relay = Some("relay.example.com:7800".to_owned());
+        let code = ["--code", "7KQ2-9XMB-4TZD-P0WH"];
+        for (args, net) in [
+            (
+                &["--host", "--relay", "relay.example.com:7800"][..],
+                Net::Host(Listen {
+                    address: None,
+                    relay: relay.clone(),
+                }),
+            ),
+            (
+                &["--relay=relay.example.com:7800", "--serve", "0.0.0.0:7700"],
+                Net::Serve(Listen {
+                    address: Some("0.0.0.0:7700".to_owned()),
+                    relay: relay.clone(),
+                }),
+            ),
+            (
+                &["--join", "--relay", "relay.example.com:7800", "--rollback"],
+                Net::Join(Toward::Relay("relay.example.com:7800".to_owned())),
+            ),
+            (
+                &[
+                    "--connect",
+                    "--relay",
+                    "relay.example.com:7800",
+                    "--headless",
+                ],
+                Net::Connect(Toward::Relay("relay.example.com:7800".to_owned())),
+            ),
+        ] {
+            let parsed = parse_strs(&[args, &code[..]].concat()).unwrap().unwrap();
+            assert_eq!(parsed.net, Some(net), "{args:?}");
+        }
+        for args in [
+            &["--relay", "relay.example.com:7800"][..],
+            &["--host", "--relay"],
+            &["--host", "--headless"],
+            &[
+                "--join",
+                "127.0.0.1:7700",
+                "--relay",
+                "relay.example.com:7800",
+            ],
+            &[
+                "--connect",
+                "127.0.0.1:7700",
+                "--relay",
+                "relay.example.com:7800",
+            ],
+            &["--join", "--code", "7KQ2-9XMB-4TZD-P0WH"],
+            &["--serve", "--headless"],
+        ] {
+            let error = parse_strs(&[args, &code[..]].concat()).unwrap_err();
+            assert_eq!(error.code(), "engine.args", "{args:?}: {error}");
         }
     }
 

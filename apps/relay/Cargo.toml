@@ -1,0 +1,19 @@
+[package]
+name = "relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Prefixed like `gg-sandbox`, as every executable here is. Its docs would be gg-relay's library's
+# path, `gg_relay`, so rustdoc leaves its thin main out.
+[[bin]]
+name = "gg-relay"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+gg-relay.workspace = true
+
+[lints]
+workspace = true

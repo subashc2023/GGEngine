@@ -11,7 +11,7 @@
 //! these:
 //!
 //! ```text
-//! hello\tgg-server 3\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//! hello\tgg-server 4\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
 //!                                                    the client, as it connects: its app, engine,
 //!                                                      build and layers, and the port its packets
 //!                                                      come from
@@ -65,7 +65,7 @@ use super::{
     AHEAD, Accepted, Code, Link, MAX_LINE, MAX_PACKET_TEXT, Merged, Queued, Turn, build, engine,
     listen, port_of, read_batches, tick_of,
 };
-use crate::args::Conditions;
+use crate::args::{Conditions, Listen};
 use crate::cells::{Cell, Seen};
 use crate::layer::Commands;
 use crate::recording::text;
@@ -73,7 +73,7 @@ use crate::{World, WorldHash};
 
 /// The hello's first part, the protocol and its version, which a client's must be: a change to the
 /// lines or the packets takes it to the next.
-pub(super) const PROTOCOL: &str = "gg-server 3";
+pub(super) const PROTOCOL: &str = "gg-server 4";
 
 /// How many of the latest ticks the server keeps the world's text after, and a client its states,
 /// half a second's, past which a client's state is sent whole.
@@ -88,9 +88,10 @@ const LEVEL: i32 = 3;
 /// A server: where its clients' connections come, and each client.
 pub(crate) struct Server {
     accepted: Accepted,
-    /// Where the server listens, as the OS has it: for tests, which listen where it picks.
+    /// Where the server listens, as the OS has it, if it does: for tests, which listen where it
+    /// picks.
     #[cfg(test)]
-    pub(super) listening: SocketAddr,
+    pub(super) listening: Option<SocketAddr>,
     pub(super) app: &'static str,
     /// The run's build, as [`build`] says, which a client's must be.
     build: &'static str,
@@ -136,20 +137,23 @@ struct Remote {
 }
 
 impl Server {
-    /// Starts listening at `address` for clients of app `app`, whose layers are `layers`, from the
-    /// bottom up, given the session's `code`.
+    /// Starts taking clients of app `app`, whose layers are `layers`, from the bottom up, where
+    /// `at` says, as [`listen`] takes them, given the session's `code`.
     ///
-    /// Fails with `net.start` if it can't listen there, and with `net.build` if the run's build
-    /// can't be read, as [`build`] says.
+    /// Fails with `net.start` if it can't listen at its address, and with `net.build` if the run's
+    /// build can't be read, as [`build`] says.
     pub(crate) fn start(
-        address: &str,
+        at: &Listen,
         code: Code,
         app: &'static str,
         layers: &[&str],
     ) -> Result<Self> {
         let build = build()?;
-        let (accepted, at) = listen(address, "clients", code)?;
-        info!(address = %at, "Serving the world");
+        let (accepted, at) = listen(at, "clients", code)?;
+        match at {
+            Some(at) => info!(address = %at, "Serving the world"),
+            None => info!("Serving the world at its relay alone"),
+        }
         Ok(Self {
             accepted,
             #[cfg(test)]
@@ -176,14 +180,14 @@ impl Server {
     pub(crate) fn turn(&mut self, next: u64) -> Turn {
         let now = Instant::now();
         while let Some(handshaken) = self.accepted.handshaken() {
-            let (stream, keys) = match handshaken {
-                Ok(made) => made,
+            let shaken = match handshaken {
+                Ok(shaken) => shaken,
                 Err(why) => {
                     warn!(code = "net.refused", "Refused a client: {why}");
                     continue;
                 }
             };
-            match Link::new(stream, keys, true) {
+            match Link::new(shaken.stream, shaken.keys, true, shaken.relayed) {
                 Ok(link) => self.clients.push(Remote {
                     link,
                     hello: false,
@@ -461,6 +465,7 @@ impl Remote {
         match kind {
             // The client's writing thread, saying it's there.
             "k" => Ok(()),
+            "at" => self.link.at(rest).map_err(Some),
             "hello" if !self.hello => match port_of(line, ours, "the server") {
                 Ok(port) => {
                     self.link.hello_came();
@@ -675,7 +680,7 @@ mod tests {
     #[test]
     fn a_client_s_inputs_are_kept_to_a_second_and_a_line() {
         let [_other, (stream, keys)] = secure::linked();
-        let mut link = Link::new(stream, keys, true).expect("a link");
+        let mut link = Link::new(stream, keys, true, None).expect("a link");
         link.joined = true;
         let mut client = Remote {
             link,
@@ -730,14 +735,22 @@ mod tests {
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
-        let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let mut server = Node::new(
+            &Net::Serve(crate::args::Listen::at("127.0.0.1:0")),
+            Context::seeded(1),
+        );
         // A server plays no player, as a run alone doesn't, but is networked, as its clients are.
         assert_eq!((server.cx.player(), server.cx.networked()), (None, true));
         let address = match server.stack.session_mut() {
-            Some(Session::Server(server)) => server.listening.to_string(),
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
             _ => panic!("a server"),
         };
-        let connect = |seed| Node::new(&Net::Connect(address.clone()), Context::seeded(seed));
+        let connect = |seed| {
+            Node::new(
+                &Net::Connect(crate::args::Toward::Address(address.clone())),
+                Context::seeded(seed),
+            )
+        };
         let mut clients: Vec<Node> = (2..5).map(connect).collect();
         until(&mut server, &mut clients, |_, clients| {
             clients.iter().all(Node::joined)
@@ -842,18 +855,82 @@ mod tests {
         );
     }
 
+    /// A server registered at a relay alone, and two clients given the relay and the code, meet
+    /// there, as players 0 and 1, and play: each client's command applies on the server and on
+    /// both clients, which come to the server's world, their packets through the relay until each
+    /// link's go direct.
+    #[test]
+    fn a_server_and_its_clients_meet_through_a_relay() {
+        let logged = crate::testing::logged();
+        let relay = gg_relay::serve("127.0.0.1:0", 64).expect("a relay");
+        let at = relay.address().to_string();
+        let listen = crate::args::Listen {
+            address: None,
+            relay: Some(at.clone()),
+        };
+        let mut server = Node::new(&Net::Serve(listen), Context::seeded(1));
+        let connect = |seed| {
+            let toward = crate::args::Toward::Relay(at.clone());
+            Node::new(&Net::Connect(toward), Context::seeded(seed))
+        };
+        let mut clients: Vec<Node> = (2..4).map(connect).collect();
+        until(&mut server, &mut clients, |_, clients| {
+            clients.iter().all(Node::joined)
+        });
+        let mut players: Vec<u8> = clients
+            .iter()
+            .filter_map(|client| client.cx.player())
+            .collect();
+        players.sort_unstable();
+        assert_eq!(players, [0, 1]);
+        for client in &mut clients {
+            let player = client.cx.player().expect("a player");
+            let points = if player == 0 { 1 } else { 10 };
+            client.queue(Command::Add { player, points });
+        }
+        until(&mut server, &mut clients, |server, clients| {
+            let hash = server.cx.world().hash();
+            server.score() == [1, 10]
+                && clients
+                    .iter()
+                    .all(|client| client.cx.world().hash() == hash)
+        });
+        assert!(relay.forwarded() > 0);
+        // Each link's packets go direct, the server's two and each client's, as on the loopback
+        // no router stands between them.
+        let mut direct = 0;
+        until(&mut server, &mut clients, |_, _| {
+            direct += logged
+                .codes
+                .try_iter()
+                .filter(|code| code == "net.direct")
+                .count();
+            direct >= 4
+        });
+        assert_eq!(direct, 4);
+        relay.stop();
+    }
+
     /// A client's command that names another client's player is refused, by the server and by the
     /// client as it predicts it, and its command for its own player applies: no client steers
     /// another's player.
     #[test]
     fn a_client_s_command_for_another_s_player_is_refused() {
         let logged = crate::testing::logged();
-        let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let mut server = Node::new(
+            &Net::Serve(crate::args::Listen::at("127.0.0.1:0")),
+            Context::seeded(1),
+        );
         let address = match server.stack.session_mut() {
-            Some(Session::Server(server)) => server.listening.to_string(),
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
             _ => panic!("a server"),
         };
-        let connect = |seed| Node::new(&Net::Connect(address.clone()), Context::seeded(seed));
+        let connect = |seed| {
+            Node::new(
+                &Net::Connect(crate::args::Toward::Address(address.clone())),
+                Context::seeded(seed),
+            )
+        };
         let mut clients: Vec<Node> = (2..4).map(connect).collect();
         until(&mut server, &mut clients, |_, clients| {
             clients.iter().all(Node::joined)
@@ -891,15 +968,19 @@ mod tests {
     #[test]
     fn a_client_given_another_code_is_refused() {
         let logged = crate::testing::logged();
-        let mut server = Node::new(&Net::Serve("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let mut server = Node::new(
+            &Net::Serve(crate::args::Listen::at("127.0.0.1:0")),
+            Context::seeded(1),
+        );
         let address = match server.stack.session_mut() {
-            Some(Session::Server(server)) => server.listening.to_string(),
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
             _ => panic!("a server"),
         };
         // Of the server's app and layers, so that its code alone differs.
         let (other, layers) = ("0000-0000-0000-0000".parse(), server.stack.names().to_vec());
         let other = other.expect("a code");
-        let mut stranger = Client::start(&address, other, "Tested", &layers).expect("started");
+        let toward = crate::args::Toward::Address(address.clone());
+        let mut stranger = Client::start(&toward, other, "Tested", &layers).expect("started");
         let start = Instant::now();
         let mut refused = 0;
         while start.elapsed() < Duration::from_millis(600) {
@@ -911,7 +992,10 @@ mod tests {
         }
         // Each side's.
         assert_eq!(refused, 2);
-        let mut clients = [Node::new(&Net::Connect(address), Context::seeded(2))];
+        let mut clients = [Node::new(
+            &Net::Connect(crate::args::Toward::Address(address)),
+            Context::seeded(2),
+        )];
         until(&mut server, &mut clients, |_, clients| clients[0].joined());
     }
 
@@ -984,13 +1068,13 @@ mod tests {
         let _logging = tracing::subscriber::set_default(subscriber);
         let dir = Scratch::new("server-cells");
         let root = project(&dir.0);
-        let serve = Net::Serve("127.0.0.1:0".to_owned());
+        let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
         let mut server = Node::of(&serve, Context::seeded(1).root(&root), Players::default());
         let address = match server.stack.session_mut() {
-            Some(Session::Server(server)) => server.listening.to_string(),
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
             _ => panic!("a server"),
         };
-        let connect = Net::Connect(address);
+        let connect = Net::Connect(crate::args::Toward::Address(address));
         let node = |seed| {
             Node::of(
                 &connect,

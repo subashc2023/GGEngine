@@ -17,6 +17,7 @@ deny = [
     { crate = "gg-gpu", wrappers = ["gg-renderer"], reason = "the engine reaches the GPU only through gg-renderer" },
     { crate = "gg-renderer", wrappers = ["gg-engine"], reason = "apps and games build on gg-engine" },
     { crate = "gg-macros", wrappers = ["gg-engine"], reason = "games derive through gg-engine's re-exports" },
+    { crate = "gg-relay", wrappers = ["gg-engine", "relay"], reason = "games meet through a relay as gg-engine's net module has them, and the relay app runs one" },
     # Each library only through the crate that owns it.
     { crate = "ash", wrappers = ["gg-gpu", "ash-window"], reason = "gg-gpu owns Vulkan" },
     { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },

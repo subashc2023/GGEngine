@@ -15,6 +15,7 @@ gg-gpu = { path = "crates/gg-gpu" }
 gg-renderer = { path = "crates/gg-renderer" }
 gg-engine = { path = "crates/gg-engine" }
 gg-macros = { path = "crates/gg-macros" }
+gg-relay = { path = "crates/gg-relay" }
 cook = { path = "tools/cook" }
 
 ash = "0.38.0"
@@ -47,6 +48,9 @@ epaint = { version = "0.37.0", features = ["bytemuck"] }
 # Fonts' multi-channel signed distance fields, in Rust alone: msdfgen's method, its error
 # correction among it, but not its handling of outlines that overlap themselves.
 fdsm = "0.8.0"
+# The OS's secure random numbers, for a relay's tickets and tokens, as std has no secure generator.
+# snow's version, through which gg-engine draws a session's code.
+getrandom = "0.3.4"
 # Gamepads. On Windows its default backend, Windows.Gaming.Input, delivers input only to a
 # focused window of the process; on Linux it builds against libudev through pkg-config, so a
 # build needs pkg-config and libudev's headers, and a run libudev1.

@@ -4,7 +4,9 @@
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
 //! keys; or as clients of a run given `--serve <address>`, each given `--connect <address>` steering
 //! the player the server gives it, each disc its player's [`Owner`], a joiner and a client given
-//! the session's `--code` too, which its host or server prints. The arena's walls are its
+//! the session's `--code` too, which its host or server prints; or each given `--relay <address>`,
+//! a relay that `gg-relay` runs, in place of the joiner's or client's address, for runs behind
+//! routers. The arena's walls are its
 //! scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its shards spin by a Luau script, `scripts/spin.luau`, which it reloads as
 //! it's saved, and the mods installed run, which may read the world and write sprites, as its

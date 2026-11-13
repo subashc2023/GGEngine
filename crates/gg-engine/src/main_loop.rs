@@ -1374,7 +1374,8 @@ pub(crate) mod tests {
             stack.push_layer(Looks(meta.clone(), Rc::clone(&found)));
             if joins {
                 // It connects as it first turns, which this run never does.
-                let join = crate::args::Net::Join("127.0.0.1:9".to_owned());
+                let join =
+                    crate::args::Net::Join(crate::args::Toward::Address("127.0.0.1:9".to_owned()));
                 let code = crate::net::TESTED;
                 let net = crate::net::Lockstep::start(&join, code, "Tested", &[]).expect("joining");
                 stack.lockstep(net);

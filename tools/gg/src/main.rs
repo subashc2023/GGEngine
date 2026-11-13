@@ -789,13 +789,14 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 )));
             }
             if run.peers > 1
-                && let Some(flag) = ["--host", "--join", "--code", "--record"]
+                && let Some(flag) = ["--host", "--join", "--relay", "--code", "--record"]
                     .into_iter()
                     .find(|&flag| run.given(flag))
             {
                 return Err(bad(format!(
-                    "`--peers 2` gives the peers their `--host`, `--join` and `--code` itself, and \
-                     a joiner records nothing, so the game's arguments take no `{flag}`"
+                    "`--peers 2` gives the peers their `--host`, `--join` and `--code` itself, on \
+                     this machine and without a relay, and a joiner records nothing, so the game's \
+                     arguments take no `{flag}`"
                 )));
             }
             Command::Run(run)
@@ -1576,6 +1577,15 @@ mod tests {
                 "7KQ2-9XMB-4TZD-P0WH",
             ],
             &["run", "a", "--peers", "2", "--", "--record=run.recording"],
+            &[
+                "run",
+                "a",
+                "--peers",
+                "2",
+                "--",
+                "--relay",
+                "127.0.0.1:7800",
+            ],
             &["snapshot", "a", "b"],
             &["snapshot", "--own"],
             &["scene"],

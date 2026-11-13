@@ -18,19 +18,29 @@
 //! and which makes the keys the stream's frames and the packets are sealed under, so that what
 //! goes between the session's runs can't be read, forged or played again on the way.
 //!
+//! Runs that can't connect to each other, as two behind their own routers can't, meet through a
+//! relay (`--relay`), which `gg-relay` runs: the host registers its session's room there, which
+//! the code gives, and its joiner comes for it, as [`listen`] and [`connect`] say; the relay copies
+//! their stream each way and forwards their packets, which it can't read or forge, and the packets
+//! go direct where the routers between them let them, as [`path`] says.
+//!
 //! The session's stream is lines of text over TCP, sealed in frames, which a thread of the
 //! connection's reads, and another writes, as the main thread sends them, so that a slow link
 //! never holds the main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 8\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//! hello\tgg-lockstep 9\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
 //!                                                    the joiner, as it connects: its app, engine,
 //!                                                      build and layers, and the port its packets
-//!                                                      come from, as `gg-rollback 8` for a
+//!                                                      come from, as `gg-rollback 9` for a
 //!                                                      rollback session's
 //! refused <why>                                      the host, refusing it, before it closes
 //! k                                                  either, after a second with nothing else to
 //!                                                      write, to say it's there
+//! at 203.0.113.7:40312 192.168.1.5:50123             either, on a link through a relay: where its
+//!                                                      packets' socket is, as the relay saw it
+//!                                                      and as it's bound, which the other probes,
+//!                                                      as [`path`] says
 //! world 1234 1238 2 50124                            the host's world, at tick 1234, the first
 //! gg-snapshot 2                                        tick it needs the joiner's inputs for, its
 //! ...                                                  code 2 patches on, and the port its packets
@@ -57,7 +67,8 @@
 //! UDP's, each sealed, sent at each tick and again a tick's time after the last, which carry this
 //! peer's inputs for each tick from the first the other hasn't said it has, as many as fit
 //! [`MAX_PACKET_TEXT`], so that a packet lost loses none, the ticks' lines, as their text, as
-//! [`read_batches`] reads them:
+//! [`read_batches`] reads them, after a byte, 1 or 0, that says whether the peer has had a packet
+//! direct from the other lately, on a link through a relay, as [`path`] says:
 //!
 //! ```text
 //! a 1234 1236 1235 3 51234 50987 4                   the tick the peers' worlds were last made
@@ -92,6 +103,7 @@
 //! a session's peers have, a [`Session`] each as a peer's is.
 
 mod client;
+mod path;
 mod secure;
 mod server;
 
@@ -109,14 +121,15 @@ use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
+use gg_relay::{Hosting, Joined, Token};
 use tracing::{debug, error, info, warn};
 
-use crate::args::{Conditions, Net};
+use crate::args::{Conditions, Listen, Net, Toward};
 use crate::assets::{Asset, Counts};
 use crate::cells::Seen;
 use crate::edits::{Done, Edit};
@@ -124,6 +137,7 @@ use crate::layer::Commands;
 use crate::recording::text::{self, Text};
 use crate::reflect::Value;
 use crate::{Context, Sound, Tick, World, WorldHash};
+use path::{Change, Path};
 use secure::{Keys, Opened, Replays, Sealer};
 
 /// How many ticks ahead a lockstep peer sends its inputs until its link's round trip is measured:
@@ -158,14 +172,15 @@ const MOST_PACE: f64 = 0.1;
 
 /// The hello's first part: the protocol and its version, which a change to its lines or its packets
 /// takes to the next, a lockstep session's or a rollback session's, which both peers' must be.
-const LOCKSTEP: &str = "gg-lockstep 8";
-const ROLLBACK: &str = "gg-rollback 8";
+const LOCKSTEP: &str = "gg-lockstep 9";
+const ROLLBACK: &str = "gg-rollback 9";
 
 /// The most bytes a packet may have: what a path of the internet's least MTU carries whole, as
-/// QUIC's packets are kept to; and so the most its text may have, sealed, as [`secure`] says. A
-/// tick's inputs that wouldn't fit go on the stream.
+/// QUIC's packets are kept to; and so the most its text may have, sealed, as [`secure`] says, after
+/// the byte that says whether its link hears the other end direct, as [`Link::send_packet`] says.
+/// A tick's inputs that wouldn't fit go on the stream.
 const MAX_PACKET: usize = 1200;
-const MAX_PACKET_TEXT: usize = MAX_PACKET - secure::SEALED;
+const MAX_PACKET_TEXT: usize = MAX_PACKET - secure::SEALED - 1;
 
 /// The most bytes a line may have, its line break aside, past which the peer reading it drops the
 /// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
@@ -193,6 +208,18 @@ const RETRY: Duration = Duration::from_millis(250);
 /// How long a joiner its host refused waits before trying it again, as a host of another build
 /// refuses it until one of them is rebuilt.
 const REFUSED: Duration = Duration::from_secs(5);
+
+/// How long a joiner through a relay waits between tries at finding its host there, as one that
+/// hasn't registered yet isn't; and how long a host waits before registering again at a relay it
+/// couldn't register at, or lost.
+const UNHOSTED: Duration = Duration::from_secs(1);
+const REGISTER: Duration = Duration::from_secs(5);
+
+/// How long a link through a relay waits for the relay to answer its socket's bind before it binds
+/// again; and, once answered, how long before it binds again anyway, as its router's mapping of
+/// the socket may change, and as that keeps the mapping while the link sends nothing else.
+const BIND: Duration = Duration::from_millis(250);
+const BOUND: Duration = Duration::from_secs(1);
 
 /// How long a link's writing thread goes with nothing to write before it writes `k`, a line that
 /// says only that this end is there.
@@ -425,17 +452,33 @@ struct Link {
     joined: bool,
     /// The socket, of the address the connection is from, at a port the OS picks; and where the
     /// other peer's is, once its hello or its world has said, which alone its packets are taken
-    /// from.
+    /// from: on a link through a relay, the relay's, from the start.
     udp: UdpSocket,
     other: Option<SocketAddr>,
+    /// A link's through a relay: the relay and the token its socket binds there by; where the
+    /// relay last said the bind came from, the socket as its router maps it, and where this end
+    /// last told the other its socket is, on the stream (`at`); when this end last sent a bind;
+    /// and what one is written into.
+    relayed: Option<Relayed>,
+    reflexive: Option<SocketAddr>,
+    said: Option<SocketAddr>,
+    bind_sent: Option<Instant>,
+    bind: Vec<u8>,
+    /// A link's through a relay: which way its packets go, as [`Path`] chooses it; and the packets
+    /// it has sent and taken each way, through the relay and direct, which its changes of way log.
+    path: Path,
+    sent_by: [u64; 2],
+    came_by: [u64; 2],
     /// The keys the link's handshake made, which its threads seal and open the stream's frames
     /// under, and the main thread its packets; the nonce of this end's next packet, from
-    /// [`PACKETS`](secure::PACKETS); the nonces of those taken from the other end; what a packet is
-    /// sealed into; and whether one from the other end's address was dropped, as forged or come
-    /// before, which is warned of once a link.
+    /// [`PACKETS`](secure::PACKETS); the nonces of those taken from the other end; what a packet's
+    /// text goes into, after the byte that says whether this end hears the other direct, and what
+    /// it's sealed into; and whether one from the other end's address was dropped, as forged or
+    /// come before, which is warned of once a link.
     keys: Arc<Keys>,
     nonce: u64,
     replays: Replays,
+    plain: Vec<u8>,
     sealed: Vec<u8>,
     forged: bool,
     /// What came, each held until it's due, as `--link` says, or at once.
@@ -470,8 +513,14 @@ impl Link {
     /// writing what's sent on another, as [`write_from`] says; and binds the link's socket, which
     /// the main thread reads as each frame starts, without waiting. A link `accepted` is lost
     /// unless the other end's hello comes within [`HELLO`], as [`hello_came`](Self::hello_came)
-    /// says.
-    fn new(stream: TcpStream, keys: Keys, accepted: bool) -> std::io::Result<Self> {
+    /// says. A link `relayed` sends its packets through the relay, its socket bound there, as
+    /// [`take`](Self::take) binds it.
+    fn new(
+        stream: TcpStream,
+        keys: Keys,
+        accepted: bool,
+        relayed: Option<Relayed>,
+    ) -> std::io::Result<Self> {
         let udp = UdpSocket::bind(SocketAddr::new(stream.local_addr()?.ip(), 0))?;
         udp.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
@@ -519,10 +568,19 @@ impl Link {
             silence: LOST,
             joined: false,
             udp,
-            other: None,
+            other: relayed.map(|relayed| relayed.relay),
+            relayed,
+            reflexive: None,
+            said: None,
+            bind_sent: None,
+            bind: Vec::new(),
+            path: Path::default(),
+            sent_by: [0; 2],
+            came_by: [0; 2],
             keys,
             nonce: secure::PACKETS,
             replays: Replays::default(),
+            plain: Vec::with_capacity(MAX_PACKET),
             sealed: Vec::with_capacity(MAX_PACKET),
             forged: false,
             lines: VecDeque::new(),
@@ -547,9 +605,115 @@ impl Link {
     }
 
     /// Has the other peer's packets be taken from its socket's `port`, at the address the
-    /// connection comes from.
+    /// connection comes from; on a link through a relay, from where they come from there, as they
+    /// already are.
     fn packets_from(&mut self, port: u16) {
-        self.other = self.peer.map(|at| SocketAddr::new(at.ip(), port));
+        if self.relayed.is_none() {
+            self.other = self.peer.map(|at| SocketAddr::new(at.ip(), port));
+        }
+    }
+
+    /// On a link through a relay, at `now`: binds its socket there, as [`gg_relay::bind`] says,
+    /// every [`BIND`] until the relay answers, and every [`BOUND`] after.
+    fn bind(&mut self, now: Instant) {
+        let Some(relayed) = self.relayed else { return };
+        let every = if self.reflexive.is_some() {
+            BOUND
+        } else {
+            BIND
+        };
+        if self
+            .bind_sent
+            .is_some_and(|sent| now.saturating_duration_since(sent) < every)
+        {
+            return;
+        }
+        self.bind_sent = Some(now);
+        gg_relay::bind(&relayed.token, &mut self.bind);
+        if let Err(error) = self.udp.send_to(&self.bind, relayed.relay)
+            && !mem::replace(&mut self.unsent, true)
+        {
+            warn!(
+                code = "net.link",
+                "Can't bind the link's socket at the relay, as its packets go: {error}"
+            );
+        }
+    }
+
+    /// On a link through a relay: tells the other end where its socket is, `at <reflexive>
+    /// <local>`, as the relay last said it saw it, and as it's bound, each time the relay's answer
+    /// changes, so that the other can send it packets direct, as [`Path`] says.
+    fn say_where(&mut self) {
+        let Some(reflexive) = self.reflexive.filter(|&at| self.said != Some(at)) else {
+            return;
+        };
+        let Ok(local) = self.udp.local_addr() else {
+            return;
+        };
+        self.said = Some(reflexive);
+        // A failure loses the link at its next take, as the writing thread has stopped.
+        let _ = self.send(format!("at {reflexive} {local}\n"));
+    }
+
+    /// Takes the other end's `at` line's words, `rest`: where its socket is, which a link through
+    /// a relay then probes, as [`Path::at`] says.
+    ///
+    /// Fails, saying why, if it isn't one.
+    fn at(&mut self, rest: &str) -> std::result::Result<(), String> {
+        let mut words = rest.split(' ').map(str::parse::<SocketAddr>);
+        let (Some(Ok(reflexive)), Some(Ok(local)), None) =
+            (words.next(), words.next(), words.next())
+        else {
+            return Err(format!("the other end's `at` isn't one: at {rest}"));
+        };
+        #[cfg(test)]
+        if tests::UNPUNCHED.get() {
+            return Ok(());
+        }
+        if self.relayed.is_some()
+            && let Ok(ours) = self.udp.local_addr()
+        {
+            self.path.at([reflexive, local], ours);
+        }
+        Ok(())
+    }
+
+    /// Logs `change`, a link's way changing, as [`Path::step`] gives it.
+    fn log_way(&self, change: &Change) {
+        let [relayed_sent, direct_sent] = self.sent_by;
+        let [relayed_came, direct_came] = self.came_by;
+        match change {
+            Change::Direct(at) => info!(
+                code = "net.direct",
+                address = %at,
+                relayed_sent,
+                direct_sent,
+                relayed_came,
+                direct_came,
+                "The link's packets go direct to the other end, at {at}, past the relay"
+            ),
+            Change::Stopped => info!(
+                code = "net.relayed",
+                relayed_sent,
+                direct_sent,
+                relayed_came,
+                direct_came,
+                "The link's packets go through the relay again: none came direct for {} ms, or the \
+                 other end had none; probing again for {} s",
+                path::QUIET.as_millis(),
+                path::PUNCH.as_secs()
+            ),
+            Change::Unpunched => info!(
+                code = "net.relayed",
+                relayed_sent,
+                direct_sent,
+                relayed_came,
+                direct_came,
+                "The link's packets go through the relay: no way direct to the other end worked \
+                 both ways within {} s, as routers that map each destination their own way have it",
+                path::PUNCH.as_secs()
+            ),
+        }
     }
 
     /// Notes that the other end's hello has come, after which the link isn't lost for want of one.
@@ -636,7 +800,9 @@ impl Link {
         while self.lines.front().is_some_and(|(due, _)| *due <= now) {
             lines.extend(self.lines.pop_front().map(|(_, line)| line));
         }
+        self.bind(now);
         self.receive(buffer, conditions, random, now);
+        self.say_where();
         self.packets.sort_by_key(|(due, _)| *due);
         let due = self.packets.partition_point(|(due, _)| *due <= now);
         packets.extend(self.packets.drain(..due).map(|(_, packet)| packet));
@@ -663,7 +829,10 @@ impl Link {
 
     /// Takes the packets that came from the other peer's socket, read through `buffer`, each's
     /// text, once it has opened and its nonce hasn't come before, as [`Replays`] says, held from
-    /// `now` as `conditions` say, or lost, drawing on `random`.
+    /// `now` as `conditions` say, or lost, drawing on `random`. On a link through a relay, takes
+    /// the relay's answers to its binds, and the other's packets that came direct, from wherever
+    /// they came, as only the other end seals them so: those that don't open dropped unsaid, as
+    /// anyone can send the socket anything; and has its [`Path`] take each.
     fn receive(
         &mut self,
         buffer: &mut [u8],
@@ -674,13 +843,23 @@ impl Link {
         loop {
             match self.udp.recv_from(buffer) {
                 Ok((size, from)) => {
-                    if Some(from) != self.other {
+                    let relayed = self.relayed.is_some();
+                    let usual = Some(from) == self.other;
+                    if !usual && !relayed {
+                        continue;
+                    }
+                    if relayed
+                        && usual
+                        && let Some(at) = gg_relay::bound(&buffer[..size])
+                    {
+                        self.reflexive = Some(at);
                         continue;
                     }
                     let opened = secure::open_packet(&self.keys, &buffer[..size]);
                     let fresh = opened.filter(|(nonce, _)| self.replays.fresh(*nonce));
-                    let Some((_, text)) = fresh else {
-                        if !mem::replace(&mut self.forged, true) {
+                    // Each packet's text follows its byte.
+                    let Some((_, mut text)) = fresh.filter(|(_, text)| !text.is_empty()) else {
+                        if usual && !mem::replace(&mut self.forged, true) {
                             warn!(
                                 code = "net.forged",
                                 "Dropped a packet from the other end's address that doesn't \
@@ -690,12 +869,18 @@ impl Link {
                         }
                         continue;
                     };
+                    let hears_direct = text.remove(0) == 1;
                     let mut due = now;
                     if let Some(conditions) = conditions {
                         if unit(random) < conditions.loss {
                             continue;
                         }
                         due += conditions.latency + conditions.jitter.mul_f64(unit(random));
+                    }
+                    if relayed {
+                        let direct = (!usual).then_some(from);
+                        self.path.came(direct, hears_direct, now);
+                        self.came_by[usize::from(!usual)] += 1;
                     }
                     self.heard = now;
                     self.packets.push((due, text));
@@ -712,13 +897,43 @@ impl Link {
         }
     }
 
-    /// Sends `packet`, its text, at most [`MAX_PACKET_TEXT`] bytes, sealed, to the other peer's
-    /// socket, warning once a link of one that can't be sent, which is lost, as a packet may be.
+    /// Sends `packet`, its text, at most [`MAX_PACKET_TEXT`] bytes, after a byte that says whether
+    /// this end hears the other direct, sealed, to the other peer's socket, warning once a link of
+    /// one that can't be sent, which is lost, as a packet may be. On a link through a relay, it goes
+    /// the ways [`Path::step`] gives, each copy sealed under a nonce of its own, a change of way
+    /// logged.
     fn send_packet(&mut self, packet: &[u8]) {
         let Some(other) = self.other else { return };
-        secure::seal_packet(&self.keys, self.nonce, packet, &mut self.sealed);
+        let now = Instant::now();
+        self.plain.clear();
+        self.plain.push(u8::from(self.path.hears_direct(now)));
+        self.plain.extend_from_slice(packet);
+        if self.relayed.is_none() {
+            self.send_sealed(other, true);
+            return;
+        }
+        let (ways, change) = self.path.step(now);
+        if let Some(change) = change {
+            self.log_way(&change);
+        }
+        if ways.relay {
+            self.send_sealed(other, true);
+            self.sent_by[0] += 1;
+        }
+        for to in ways.direct {
+            // A probe to an address that turns out not to reach the other is unsaid.
+            self.send_sealed(to, !ways.relay);
+            self.sent_by[1] += 1;
+        }
+    }
+
+    /// Seals what [`send_packet`](Self::send_packet) wrote under the next nonce and sends it to
+    /// `to`, warning once a link of one that can't be sent if `warned`.
+    fn send_sealed(&mut self, to: SocketAddr, warned: bool) {
+        secure::seal_packet(&self.keys, self.nonce, &self.plain, &mut self.sealed);
         self.nonce += 1;
-        if let Err(error) = self.udp.send_to(&self.sealed, other)
+        if let Err(error) = self.udp.send_to(&self.sealed, to)
+            && warned
             && !mem::replace(&mut self.unsent, true)
         {
             warn!(
@@ -801,12 +1016,13 @@ impl Trip {
     }
 }
 
-/// How a peer finds the other: the host by the connections its listener accepts, the joiner by
-/// connecting to its host's address, again each time it loses it, by the session's code.
+/// How a peer finds the other: the host by the connections its listener accepts and its relay
+/// pairs it with, the joiner by connecting to its host's address or coming for its room at its
+/// relay, again each time it loses it, by the session's code.
 enum Find {
     Host(Accepted),
     Join {
-        address: String,
+        toward: Toward,
         code: Code,
         connecting: Option<Receiver<Handshaken>>,
     },
@@ -816,13 +1032,13 @@ impl Find {
     /// Has a joiner connect to its host again after [`REFUSED`], as after a refusal.
     fn again(&mut self) {
         if let Self::Join {
-            address,
+            toward,
             code,
             connecting,
         } = self
         {
             let host = "the lockstep host";
-            *connecting = Some(connect(address.clone(), host, REFUSED, *code));
+            *connecting = Some(connect(toward.clone(), host, REFUSED, *code));
         }
     }
 }
@@ -961,17 +1177,20 @@ impl Lockstep {
         #[cfg(test)]
         let mut listening = None;
         let find = match net {
-            Net::Host(address) => {
-                let (find, at) = listen(address, "a lockstep peer", code)?;
+            Net::Host(at) => {
+                let (find, at) = listen(at, "a lockstep peer", code)?;
                 #[cfg(test)]
                 {
-                    listening = Some(at);
+                    listening = at;
                 }
-                info!(address = %at, "Hosting a lockstep session");
+                match at {
+                    Some(at) => info!(address = %at, "Hosting a lockstep session"),
+                    None => info!("Hosting a lockstep session at its relay alone"),
+                }
                 Find::Host(find)
             }
-            Net::Join(address) => Find::Join {
-                address: address.clone(),
+            Net::Join(toward) => Find::Join {
+                toward: toward.clone(),
                 code,
                 connecting: None,
             },
@@ -1128,14 +1347,14 @@ impl Lockstep {
         let made = match &mut self.find {
             Find::Host(accepted) => {
                 while let Some(handshaken) = accepted.handshaken() {
-                    let (stream, keys) = match handshaken {
-                        Ok(made) => made,
+                    let shaken = match handshaken {
+                        Ok(shaken) => shaken,
                         Err(why) => {
                             warn!(code = "net.refused", "Refused a lockstep peer: {why}");
                             continue;
                         }
                     };
-                    match Link::new(stream, keys, true) {
+                    match Link::new(shaken.stream, shaken.keys, true, shaken.relayed) {
                         Ok(link) if self.link.is_none() => self.link = Some(link),
                         // A second joiner, refused before its hello.
                         Ok(mut link) => {
@@ -1149,19 +1368,19 @@ impl Lockstep {
             }
             Find::Join { .. } if self.link.is_some() => return,
             Find::Join {
-                address,
+                toward,
                 code,
                 connecting,
             } => {
                 let made = connecting.get_or_insert_with(|| {
-                    connect(address.clone(), "the lockstep host", Duration::ZERO, *code)
+                    connect(toward.clone(), "the lockstep host", Duration::ZERO, *code)
                 });
                 let Ok(handshaken) = made.try_recv() else {
                     return;
                 };
                 *connecting = None;
                 match handshaken {
-                    Ok(made) => (made, address.clone()),
+                    Ok(shaken) => (shaken, toward.clone()),
                     Err(why) => {
                         error!(
                             code = "net.refused",
@@ -1175,14 +1394,21 @@ impl Lockstep {
                 }
             }
         };
-        let ((stream, keys), address) = made;
+        let (shaken, toward) = made;
         let protocol = self.protocol();
         let hello = |link: &Link| hello(protocol, self.app, self.build, &self.layers, link.port());
-        let link = Link::new(stream, keys, false)
+        let link = Link::new(shaken.stream, shaken.keys, false, shaken.relayed)
             .and_then(|mut link| link.send(hello(&link)).map(|()| link));
         match link {
             Ok(link) => {
-                info!(address = %address, "Connected to the lockstep host");
+                match toward {
+                    Toward::Address(address) => {
+                        info!(address = %address, "Connected to the lockstep host");
+                    }
+                    Toward::Relay(relay) => {
+                        info!(relay = %relay, "Connected to the lockstep host through its relay");
+                    }
+                }
                 self.link = Some(link);
             }
             Err(error) => warn!(code = "net.link", "Can't reach the host: {error}"),
@@ -1220,6 +1446,12 @@ impl Lockstep {
         match kind {
             // The other end's writing thread, saying it's there.
             "k" => {}
+            "at" => {
+                let at = self.link.as_mut().map(|link| link.at(rest));
+                if let Some(Err(why)) = at {
+                    self.lose(&why);
+                }
+            }
             "hello" if self.hosts() => self.hello(line),
             "refused" if !self.hosts() => {
                 error!(
@@ -2331,7 +2563,9 @@ impl Session {
     /// key, which the log says only it made (`net.code`).
     ///
     /// Fails with `net.start` if a host or a server can't listen at its address, or make or print
-    /// its code, or a joiner or a client is given none.
+    /// its code, or a joiner or a client is given none. A relay that can't be reached isn't a
+    /// failure: a host or a server registers at it once it can, and a joiner or a client comes
+    /// for its room once it can, as [`listen`] and [`connect`] say.
     pub(crate) fn start(
         net: &Net,
         code: Option<Code>,
@@ -2363,11 +2597,9 @@ impl Session {
             Net::Host(_) | Net::Join(_) => {
                 Self::Peer(Box::new(Lockstep::start(net, code, app, layers)?))
             }
-            Net::Serve(address) => {
-                Self::Server(Box::new(Server::start(address, code, app, layers)?))
-            }
-            Net::Connect(address) => {
-                Self::Client(Box::new(Client::start(address, code, app, layers)?))
+            Net::Serve(at) => Self::Server(Box::new(Server::start(at, code, app, layers)?)),
+            Net::Connect(toward) => {
+                Self::Client(Box::new(Client::start(toward, code, app, layers)?))
             }
         })
     }
@@ -2674,55 +2906,152 @@ fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Result<u16, S
     }
 }
 
-/// Listens at `address` for `what`, on a thread of its own that accepts each connection; returns
-/// where they come, each through its handshake keyed by `code`, as [`Accepted`] says, and the
-/// address as the OS has it, which a test's port 0 picks.
+/// Takes `what` where `at` says: listening at its address, on a thread of its own that accepts
+/// each connection, and registering at its relay, on another, as [`register`] says; returns where
+/// they come, each through its handshake keyed by `code`, as [`Accepted`] says, and the address
+/// listened at as the OS has it, which a test's port 0 picks.
 ///
-/// Fails with `net.start` if it can't listen there.
-fn listen(address: &str, what: &str, code: Code) -> Result<(Accepted, SocketAddr)> {
-    let failed = |error: io::Error| {
-        let message = format!("can't listen at {address} for {what}");
-        Error::new("net.start", message).with_source(error)
-    };
-    let listener = TcpListener::bind(address).map_err(failed)?;
-    let at = listener.local_addr().map_err(failed)?;
+/// Fails with `net.start` if it can't listen there, or start either thread.
+fn listen(at: &Listen, what: &'static str, code: Code) -> Result<(Accepted, Option<SocketAddr>)> {
     let (shaken, handshaken) = mpsc::channel();
     let session = Arc::new(());
-    let kept = Arc::downgrade(&session);
-    thread::Builder::new()
-        .name("gg-net-accept".to_owned())
-        .spawn(move || {
-            for stream in listener.incoming().flatten() {
-                if kept.strong_count() == 0 {
-                    break;
-                }
-                let shaken = shaken.clone();
-                let spawned = thread::Builder::new()
-                    .name("gg-net-handshake".to_owned())
-                    .spawn(move || {
-                        let _ = shaken.send(shake(stream, &code, true));
-                    });
-                if let Err(error) = spawned {
-                    warn!(
-                        code = "net.link",
-                        "Can't start a connection's handshake: {error}"
-                    );
-                }
-            }
-        })
-        .map_err(|error| {
-            let message = format!("can't start the thread that accepts {what}");
+    let started = |error: io::Error| {
+        let message = format!("can't start the thread that takes {what}");
+        Error::new("net.start", message).with_source(error)
+    };
+    let mut listening = None;
+    if let Some(address) = &at.address {
+        let failed = |error: io::Error| {
+            let message = format!("can't listen at {address} for {what}");
             Error::new("net.start", message).with_source(error)
-        })?;
+        };
+        let listener = TcpListener::bind(address).map_err(failed)?;
+        listening = Some(listener.local_addr().map_err(failed)?);
+        let (shaken, kept) = (shaken.clone(), Arc::downgrade(&session));
+        thread::Builder::new()
+            .name("gg-net-accept".to_owned())
+            .spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    if kept.strong_count() == 0 {
+                        break;
+                    }
+                    let shaken = shaken.clone();
+                    handshake_on_its_own(move || {
+                        let _ = shaken.send(shake(stream, &code, true, None));
+                    });
+                }
+            })
+            .map_err(started)?;
+    }
+    if let Some(relay) = &at.relay {
+        let (relay, kept) = (relay.clone(), Arc::downgrade(&session));
+        thread::Builder::new()
+            .name("gg-net-relay".to_owned())
+            .spawn(move || register(&relay, what, code, &shaken, &kept))
+            .map_err(started)?;
+    }
     let accepted = Accepted {
         handshaken,
         _session: session,
     };
-    Ok((accepted, at))
+    Ok((accepted, listening))
 }
 
-/// A connection with the keys its handshake made, or why its handshake failed.
-type Handshaken = io::Result<(TcpStream, Keys)>;
+/// Runs `handshake` on a thread of its own, so that a connection slow to say its part holds no
+/// other.
+fn handshake_on_its_own(handshake: impl FnOnce() + Send + 'static) {
+    let spawned = thread::Builder::new()
+        .name("gg-net-handshake".to_owned())
+        .spawn(handshake);
+    if let Err(error) = spawned {
+        warn!(
+            code = "net.link",
+            "Can't start a connection's handshake: {error}"
+        );
+    }
+}
+
+/// Registers the session's room, which `code` gives, at the relay at `relay`, for `what`, and takes
+/// each that comes for it, each through its handshake on a thread of its own, into `shaken`, until
+/// the session, which `kept` holds, is gone. Registers again [`REGISTER`] after the relay can't be
+/// reached, refuses it, as it does while a host it lost holds the room, or is lost: logged once
+/// each time, `net.relay`, until it's registered again.
+fn register(relay: &str, what: &str, code: Code, shaken: &Sender<Handshaken>, kept: &Weak<()>) {
+    let room = code.room();
+    let mut warned = false;
+    while kept.strong_count() > 0 {
+        let registered = resolve(relay).and_then(|at| Ok((at, Hosting::start(at, room)?)));
+        let lost = match registered {
+            Ok((at, mut hosting)) => {
+                info!(relay, "Registered the session at its relay, for {what}");
+                warned = false;
+                loop {
+                    if kept.strong_count() == 0 {
+                        return;
+                    }
+                    match hosting.joiner() {
+                        Ok(None) => {}
+                        Ok(Some(ticket)) => {
+                            let shaken = shaken.clone();
+                            handshake_on_its_own(move || {
+                                let made = gg_relay::take(at, &ticket).and_then(|paired| {
+                                    let relayed = Relayed {
+                                        relay: at,
+                                        token: paired.token,
+                                    };
+                                    shake(paired.stream, &code, true, Some(relayed))
+                                });
+                                let _ = shaken.send(made);
+                            });
+                        }
+                        Err(error) => break format!("lost it: {error}"),
+                    }
+                }
+            }
+            Err(error) => format!("can't register there: {error}"),
+        };
+        if !mem::replace(&mut warned, true) {
+            let again = REGISTER.as_secs();
+            warn!(
+                code = "net.relay",
+                relay, "The session's relay {relay}: {lost}; registering again every {again} s"
+            );
+        }
+        let wake = Instant::now() + REGISTER;
+        while kept.strong_count() > 0 && Instant::now() < wake {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// The first of the addresses `address` names, as `host:port` or `ip:port`.
+///
+/// Fails if it names none.
+fn resolve(address: &str) -> io::Result<SocketAddr> {
+    let mut addresses = address.to_socket_addrs()?;
+    addresses.next().ok_or_else(|| {
+        let why = format!("{address} names no address");
+        io::Error::new(ErrorKind::NotFound, why)
+    })
+}
+
+/// A connection whose handshake held: its stream, the keys it made, and, for one made through a
+/// relay, where the link's socket binds there; or why its handshake failed.
+type Handshaken = io::Result<Shaken>;
+
+struct Shaken {
+    stream: TcpStream,
+    keys: Keys,
+    relayed: Option<Relayed>,
+}
+
+/// Where a link through a relay binds its socket: the relay's address, and the token the relay
+/// gave its end of the pair.
+#[derive(Clone, Copy)]
+struct Relayed {
+    relay: SocketAddr,
+    token: Token,
+}
 
 /// The connections a host or a server accepts, as [`listen`] gives them, each once its handshake
 /// has ended, which a thread of the connection's own runs, as the thread that accepts it starts
@@ -2744,12 +3073,21 @@ impl Accepted {
 
 /// Runs the handshake on `stream`, keyed by `code`, as the end that made the connection or,
 /// `accepted`, the end that took it, as [`secure::handshake`] says, waiting at most [`HELLO`]
-/// for the other end's part; returns the stream with the keys it made.
-fn shake(mut stream: TcpStream, code: &Code, accepted: bool) -> Handshaken {
+/// for the other end's part; returns the stream with the keys it made, and where it's `relayed`.
+fn shake(
+    mut stream: TcpStream,
+    code: &Code,
+    accepted: bool,
+    relayed: Option<Relayed>,
+) -> Handshaken {
     stream.set_read_timeout(Some(HELLO))?;
     stream.set_write_timeout(Some(HELLO))?;
     match secure::handshake(&mut stream, code, accepted) {
-        Ok(keys) => Ok((stream, keys)),
+        Ok(keys) => Ok(Shaken {
+            stream,
+            keys,
+            relayed,
+        }),
         Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
             let secs = HELLO.as_secs();
             let why = format!("its part of the handshake didn't come within {secs} s");
@@ -2811,11 +3149,13 @@ fn read_batches(
     Some(())
 }
 
-/// Connects to `address`, `what`'s, on a thread of its own, after `after`, trying again every
-/// [`RETRY`] until it does, then runs the handshake keyed by `code` on the connection, as
-/// [`shake`] does; returns where the connection comes, with its keys, or why its handshake failed.
+/// Connects to `what` where `toward` says, on a thread of its own, after `after`: to its address,
+/// trying again every [`RETRY`] until it does, or through its relay, coming for the room `code`
+/// gives there, again every [`UNHOSTED`] until its host takes it, as [`gg_relay::join`] says. Then
+/// runs the handshake keyed by `code` on the connection, as [`shake`] does; returns where the
+/// connection comes, with its keys, or why its handshake failed.
 fn connect(
-    address: String,
+    toward: Toward,
     what: &'static str,
     after: Duration,
     code: Code,
@@ -2827,19 +3167,55 @@ fn connect(
             thread::sleep(after);
             let mut warned = false;
             loop {
-                let stream = address
-                    .to_socket_addrs()
-                    .ok()
-                    .and_then(|mut addresses| addresses.find_map(|at| TcpStream::connect(at).ok()));
-                if let Some(stream) = stream {
-                    let _ = made.send(shake(stream, &code, false));
+                let (shaken, wait) = match &toward {
+                    Toward::Address(address) => {
+                        let stream = address.to_socket_addrs().ok().and_then(|mut addresses| {
+                            addresses.find_map(|at| TcpStream::connect(at).ok())
+                        });
+                        let shaken = stream.map(|stream| shake(stream, &code, false, None));
+                        if shaken.is_none() && !mem::replace(&mut warned, true) {
+                            info!(address = %address, "Waiting for {what}");
+                        }
+                        (shaken, RETRY)
+                    }
+                    Toward::Relay(relay) => {
+                        let joined = resolve(relay)
+                            .and_then(|at| Ok((at, gg_relay::join(at, code.room())?)));
+                        let shaken = match joined {
+                            Ok((at, Joined::Paired(paired))) => {
+                                let relayed = Relayed {
+                                    relay: at,
+                                    token: paired.token,
+                                };
+                                Some(shake(paired.stream, &code, false, Some(relayed)))
+                            }
+                            Ok((_, Joined::Unhosted)) => {
+                                if !mem::replace(&mut warned, true) {
+                                    info!(relay = %relay, "Waiting for {what} at the relay");
+                                }
+                                None
+                            }
+                            Err(error) => {
+                                if !mem::replace(&mut warned, true) {
+                                    warn!(
+                                        code = "net.relay",
+                                        relay = %relay,
+                                        "Can't find {what} at the relay {relay}: {error}; trying \
+                                         again every {} s",
+                                        UNHOSTED.as_secs()
+                                    );
+                                }
+                                None
+                            }
+                        };
+                        (shaken, UNHOSTED)
+                    }
+                };
+                if let Some(shaken) = shaken {
+                    let _ = made.send(shaken);
                     return;
                 }
-                if !warned {
-                    info!(address = %address, "Waiting for {what}");
-                    warned = true;
-                }
-                thread::sleep(RETRY);
+                thread::sleep(wait);
             }
         });
     if let Err(error) = spawned {
@@ -3067,7 +3443,7 @@ mod tests {
 
         /// A host, its game attached in `cx`, which plays alone for `alone` ticks.
         fn host(cx: Context, game: Game, alone: u64) -> Self {
-            let mut host = Self::new(&Net::Host("127.0.0.1:0".to_owned()), cx, game);
+            let mut host = Self::new(&Net::Host(crate::args::Listen::at("127.0.0.1:0")), cx, game);
             for _ in 0..alone {
                 host.turn();
             }
@@ -3084,7 +3460,11 @@ mod tests {
                 link: net.conditions,
                 ..Game::default()
             };
-            let joiner = Self::new(&Net::Join(address), Context::seeded(2), game);
+            let joiner = Self::new(
+                &Net::Join(crate::args::Toward::Address(address)),
+                Context::seeded(2),
+                game,
+            );
             assert_eq!(joiner.cx.player(), Some(1));
             joiner
         }
@@ -3657,10 +4037,16 @@ mod tests {
             });
             (Peer::of(stack, net, cx, true, Some(SLOW)), applied)
         };
-        let (mut host, by_host) = peer(&Net::Host("127.0.0.1:0".to_owned()), Context::seeded(1));
+        let (mut host, by_host) = peer(
+            &Net::Host(crate::args::Listen::at("127.0.0.1:0")),
+            Context::seeded(1),
+        );
         host.turn();
         let address = host.net().listening.expect("listening").to_string();
-        let (mut joiner, by_joiner) = peer(&Net::Join(address), Context::seeded(2));
+        let (mut joiner, by_joiner) = peer(
+            &Net::Join(crate::args::Toward::Address(address)),
+            Context::seeded(2),
+        );
         join(&mut host, &mut joiner);
         let edit = |peer: &mut Peer, player: u8| {
             let queue = peer
@@ -3759,10 +4145,10 @@ mod tests {
                 link,
             )
         };
-        let mut host = peer(&Net::Host("127.0.0.1:0".to_owned()), 1);
+        let mut host = peer(&Net::Host(crate::args::Listen::at("127.0.0.1:0")), 1);
         host.turn();
         let address = host.net().listening.expect("listening").to_string();
-        let mut joiner = peer(&Net::Join(address), 2);
+        let mut joiner = peer(&Net::Join(crate::args::Toward::Address(address)), 2);
         join(&mut host, &mut joiner);
         let stage = |peer: &mut Peer, scene: &str| {
             let queue = peer
@@ -3906,10 +4292,10 @@ mod tests {
                 Some(link),
             )
         };
-        let mut host = peer(&Net::Host("127.0.0.1:0".to_owned()), 1);
+        let mut host = peer(&Net::Host(crate::args::Listen::at("127.0.0.1:0")), 1);
         host.turn();
         let address = host.net().listening.expect("listening").to_string();
-        let mut joiner = peer(&Net::Join(address), 2);
+        let mut joiner = peer(&Net::Join(crate::args::Toward::Address(address)), 2);
         join(&mut host, &mut joiner);
         let at = host.next.max(joiner.next) + 1;
         meet(&mut host, &mut joiner, at);
@@ -3999,10 +4385,20 @@ mod tests {
         let _logging = tracing::subscriber::set_default(subscriber);
         let dir = Scratch::new(&format!("net-cells-{rollback}"));
         let root = project(&dir.0);
-        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &root, 1, rollback);
+        let mut host = walker(
+            &Net::Host(crate::args::Listen::at("127.0.0.1:0")),
+            &root,
+            1,
+            rollback,
+        );
         host.turn();
         let address = host.net().listening.expect("listening").to_string();
-        let mut joiner = walker(&Net::Join(address), &root, 2, rollback);
+        let mut joiner = walker(
+            &Net::Join(crate::args::Toward::Address(address)),
+            &root,
+            2,
+            rollback,
+        );
         join(&mut host, &mut joiner);
         for (by_joiner, step, cells) in [
             (true, Walk::Viewer(25.0), vec![0, 1, 2, 3]),
@@ -4070,10 +4466,20 @@ mod tests {
         let two = joiner_root.join("cells/2_0_0.ron");
         let other = std::fs::read_to_string(&two).expect("a cell");
         std::fs::write(&two, other.replace("25.0", "26.0")).expect("written");
-        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &host_root, 1, false);
+        let mut host = walker(
+            &Net::Host(crate::args::Listen::at("127.0.0.1:0")),
+            &host_root,
+            1,
+            false,
+        );
         host.turn();
         let address = host.net().listening.expect("listening").to_string();
-        let mut joiner = walker(&Net::Join(address), &joiner_root, 2, false);
+        let mut joiner = walker(
+            &Net::Join(crate::args::Toward::Address(address)),
+            &joiner_root,
+            2,
+            false,
+        );
         join(&mut host, &mut joiner);
         walk(&mut joiner, Walk::Viewer(25.0));
         let started = Instant::now();
@@ -4099,7 +4505,12 @@ mod tests {
 
         let dir = Scratch::new("net-cells-joiner");
         let root = project(&dir.0);
-        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &root, 1, false);
+        let mut host = walker(
+            &Net::Host(crate::args::Listen::at("127.0.0.1:0")),
+            &root,
+            1,
+            false,
+        );
         for step in [Walk::Viewer(25.0), Walk::Crate(12.0), Walk::Viewer(100.0)] {
             walk(&mut host, step);
             // Past the tick its commands go out for, `DELAY` on, as a peer's do alone too.
@@ -4115,7 +4526,12 @@ mod tests {
         // Cell 1 alone changed; the others went out as they came.
         assert_eq!((held.cells_in.len(), held.kept.len()), (0, 1));
         let address = host.net().listening.expect("listening").to_string();
-        let mut joiner = walker(&Net::Join(address), &root, 2, false);
+        let mut joiner = walker(
+            &Net::Join(crate::args::Toward::Address(address)),
+            &root,
+            2,
+            false,
+        );
         join(&mut host, &mut joiner);
         assert_eq!(kept(&joiner), Some(held), "the host's");
         walk(&mut joiner, Walk::Viewer(5.0));
@@ -4284,7 +4700,11 @@ mod tests {
         let address = host.net().listening.expect("listening").to_string();
         let game = Game::default();
         let joiner_saw = seen(&game);
-        let mut joiner = Peer::new(&Net::Join(address), Context::seeded(2), game);
+        let mut joiner = Peer::new(
+            &Net::Join(crate::args::Toward::Address(address)),
+            Context::seeded(2),
+            game,
+        );
         join(&mut host, &mut joiner);
         assert_eq!(*host_saw.borrow(), [("attach", true)]);
         assert_eq!(*joiner_saw.borrow(), [("attach", true), ("restored", true)]);
@@ -4307,7 +4727,7 @@ mod tests {
         let mut stack = Stack::default();
         stack.push_layer(game);
         let names = stack.names().to_vec();
-        let net = Net::Host("127.0.0.1:0".to_owned());
+        let net = Net::Host(crate::args::Listen::at("127.0.0.1:0"));
         stack.lockstep(Lockstep::start(&net, TESTED, "Tested", &names).expect("started"));
         let mut cx = Context::seeded(3);
         cx.world_mut().register::<Score>().expect("described");
@@ -4326,7 +4746,7 @@ mod tests {
         let _logging = tracing::subscriber::set_default(subscriber);
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let address = host.net().listening.expect("listening").to_string();
-        let join = Net::Join(address);
+        let join = Net::Join(crate::args::Toward::Address(address));
         let mut other = Lockstep::start(&join, TESTED, "Other", &["Game"]).expect("started");
         let start = Instant::now();
         let mut refused = 0;
@@ -4356,7 +4776,7 @@ mod tests {
         let layers = host.net().layers.clone();
         let layers: Vec<&str> = layers.split(' ').collect();
         let code = "0000-0000-0000-0000".parse().expect("a code");
-        let net = Net::Join(address);
+        let net = Net::Join(crate::args::Toward::Address(address));
         let mut other = Lockstep::start(&net, code, "Tested", &layers).expect("started");
         let start = Instant::now();
         let mut refused = 0;
@@ -4374,6 +4794,188 @@ mod tests {
         join(&mut host, &mut joiner);
     }
 
+    thread_local! {
+        /// Whether the links of this thread's test ignore the other end's `at`, so that their
+        /// packets stay on the relay, as behind routers that hole punching doesn't get through.
+        pub(super) static UNPUNCHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Has the links made on this thread ignore the other end's `at` while it's kept.
+    struct Unpunched;
+
+    impl Unpunched {
+        fn new() -> Self {
+            UNPUNCHED.set(true);
+            Self
+        }
+    }
+
+    impl Drop for Unpunched {
+        fn drop(&mut self) {
+            UNPUNCHED.set(false);
+        }
+    }
+
+    /// A relay of the tests' own, on the loopback, and where it is, as `--relay` names it.
+    fn relay() -> (gg_relay::Relay, String) {
+        let relay = gg_relay::serve("127.0.0.1:0", 64).expect("a relay");
+        let at = relay.address().to_string();
+        (relay, at)
+    }
+
+    /// A host at the relay `at` alone and a joiner given that relay, each of `game()`.
+    fn relayed(at: &str, game: impl Fn() -> Game) -> (Peer, Peer) {
+        let listen = Listen {
+            address: None,
+            relay: Some(at.to_owned()),
+        };
+        let mut host = Peer::new(&Net::Host(listen), Context::seeded(1), game());
+        assert_eq!(host.net().listening, None);
+        let toward = Toward::Relay(at.to_owned());
+        let joiner = Peer::new(&Net::Join(toward), Context::seeded(2), game());
+        (host, joiner)
+    }
+
+    /// Plays `host` and `joiner` until both have said their packets go direct, `net.direct`, as
+    /// `logged` has their codes, failing after 10 s.
+    fn until_direct(host: &mut Peer, joiner: &mut Peer, logged: &crate::testing::Logged) {
+        let start = Instant::now();
+        let mut direct = 0;
+        while direct < 2 {
+            assert!(start.elapsed() < Duration::from_secs(10), "never direct");
+            play(host, joiner, 1);
+            direct += logged
+                .codes
+                .try_iter()
+                .filter(|code| code == "net.direct")
+                .count();
+        }
+        assert_eq!(direct, 2);
+    }
+
+    /// A host registered at a relay alone and a joiner given the relay and the code meet there, by
+    /// the room their code gives, and play in step, their worlds hashing alike: their stream through
+    /// the relay, each link's socket bound there, and their packets going direct once both see the
+    /// way direct works, the relay forwarding none after; or, `unpunched`, as behind routers hole
+    /// punching doesn't get through, through the relay all along.
+    fn peers_meet_through_a_relay(rollback: bool, unpunched: bool) {
+        let logged = crate::testing::logged();
+        let _unpunched = unpunched.then(Unpunched::new);
+        let (relay, at) = relay();
+        let (mut host, mut joiner) = relayed(&at, || Game {
+            rollback,
+            ..Game::default()
+        });
+        join(&mut host, &mut joiner);
+        play(&mut host, &mut joiner, 50);
+        if !unpunched {
+            until_direct(&mut host, &mut joiner, &logged);
+            // Those sent through the relay before forwarded.
+            play(&mut host, &mut joiner, 10);
+        }
+        let forwarded = relay.forwarded();
+        play(&mut host, &mut joiner, 50);
+        let at = sent(&mut host, &mut joiner) + 1;
+        settle(&mut host, &mut joiner, at);
+        assert_eq!(host.score(), joiner.score());
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let [ours, theirs] = host.score();
+        assert!(ours > 0 && theirs > 0, "{ours} {theirs}");
+        for peer in [&mut host, &mut joiner] {
+            let link = peer.net().link.as_ref().expect("a link");
+            assert!(link.relayed.is_some() && link.reflexive.is_some());
+        }
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let count = |code: &str| codes.iter().filter(|logged| *logged == code).count();
+        if unpunched {
+            assert!(relay.forwarded() > forwarded);
+            assert_eq!(count("net.direct"), 0, "{codes:?}");
+        } else {
+            assert_eq!(relay.forwarded(), forwarded);
+            assert_eq!(count("net.relayed"), 0, "{codes:?}");
+        }
+        relay.stop();
+    }
+
+    #[test]
+    fn lockstep_peers_meet_through_a_relay() {
+        peers_meet_through_a_relay(false, false);
+    }
+
+    #[test]
+    fn rollback_peers_meet_through_a_relay() {
+        peers_meet_through_a_relay(true, false);
+    }
+
+    #[test]
+    fn peers_whose_routers_let_no_packet_through_play_through_the_relay() {
+        peers_meet_through_a_relay(false, true);
+    }
+
+    /// A joiner given another code comes for another room at the relay, which no host holds; one
+    /// given the room alone, as one on the way to the relay sees it, is paired with the host and
+    /// refused at the handshake, never taking the joiner's place; and a joiner given the code then
+    /// joins.
+    #[test]
+    fn a_stranger_who_has_the_room_but_not_the_code_is_refused_at_the_handshake() {
+        let logged = crate::testing::logged();
+        let (relay, at) = relay();
+        let (mut host, mut joiner) = relayed(&at, Game::default);
+        let other: Code = "0000-0000-0000-0000".parse().expect("a code");
+        let address = relay.address();
+        let stranger = thread::spawn(move || {
+            assert!(matches!(
+                gg_relay::join(address, other.room()),
+                Ok(Joined::Unhosted)
+            ));
+            let mut paired = loop {
+                match gg_relay::join(address, TESTED.room()).expect("joined") {
+                    Joined::Paired(paired) => break paired,
+                    Joined::Unhosted => thread::sleep(Duration::from_millis(20)),
+                }
+            };
+            paired
+                .stream
+                .set_read_timeout(Some(LOST))
+                .expect("a timeout");
+            secure::handshake(&mut paired.stream, &other, false).err()
+        });
+        let start = Instant::now();
+        let mut refused = 0;
+        while refused == 0 {
+            assert!(start.elapsed() < Duration::from_secs(10), "never refused");
+            host.turn();
+            assert!(host.net().link.is_none());
+            let codes = logged.codes.try_iter();
+            refused += codes.filter(|code| code == "net.refused").count();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let error = stranger.join().expect("the stranger's").expect("refused");
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof, "{error}");
+        join(&mut host, &mut joiner);
+        relay.stop();
+    }
+
+    /// A session whose relay is replaced at its address goes on through the new one: both peers
+    /// lose their link, the host registers again within [`REGISTER`], and the joiner joins again.
+    #[test]
+    fn peers_meet_again_through_a_relay_replaced() {
+        let (relay, at) = relay();
+        let (mut host, mut joiner) = relayed(&at, Game::default);
+        join(&mut host, &mut joiner);
+        relay.stop();
+        let again = gg_relay::serve(&at, 64).expect("the same address");
+        let start = Instant::now();
+        while host.net().link.is_some() || joiner.net().link.is_some() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never lost");
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        join(&mut host, &mut joiner);
+        again.stop();
+    }
+
     /// A link takes the packets the other end sealed, each once: one sent again, one sealed under
     /// another link's keys, one under a nonce of the stream's and one in plain text, each from the
     /// other end's socket, are dropped, and warned of once (`net.forged`).
@@ -4381,8 +4983,8 @@ mod tests {
     fn a_link_takes_the_other_end_s_packets_alone_each_once() {
         let logged = crate::testing::logged();
         let [(made, made_keys), (taken, taken_keys)] = secure::linked();
-        let mut ours = Link::new(taken, taken_keys, true).expect("a link");
-        let mut theirs = Link::new(made, made_keys, false).expect("a link");
+        let mut ours = Link::new(taken, taken_keys, true, None).expect("a link");
+        let mut theirs = Link::new(made, made_keys, false, None).expect("a link");
         ours.packets_from(theirs.port());
         theirs.packets_from(ours.port());
         let (socket, to) = (theirs.udp.try_clone().expect("a socket"), theirs.other);
@@ -4419,7 +5021,7 @@ mod tests {
     #[test]
     fn a_link_s_stream_holds_none_of_its_lines() {
         let [(mut made, made_keys), (taken, taken_keys)] = secure::linked();
-        let mut link = Link::new(taken, taken_keys, true).expect("a link");
+        let mut link = Link::new(taken, taken_keys, true, None).expect("a link");
         let text = "world 1234 1238 2 50124\ngg-snapshot 2\nend\n";
         link.send(text.to_owned()).expect("sent");
         let mut bytes = vec![0; 2 + text.len() + 16];
@@ -4601,7 +5203,7 @@ mod tests {
         let address = host.net().listening.expect("listening").to_string();
         let layers = host.net().layers.clone();
         let layers: Vec<&str> = layers.split(' ').collect();
-        let join = Net::Join(address);
+        let join = Net::Join(crate::args::Toward::Address(address));
         let mut other = Lockstep::start(&join, TESTED, "Tested", &layers).expect("started");
         other.build = "0000000000000000";
         let start = Instant::now();
@@ -4750,7 +5352,11 @@ mod tests {
         let (joiner_dir, _, theirs) = game("net-script-joiner", &spin("", 100));
         let address = host.net().listening.expect("listening").to_string();
         let cx = Context::seeded(2).root(&joiner_dir.0);
-        let mut joiner = Peer::new(&Net::Join(address), cx, theirs);
+        let mut joiner = Peer::new(
+            &Net::Join(crate::args::Toward::Address(address)),
+            cx,
+            theirs,
+        );
         join(&mut host, &mut joiner);
         assert_eq!(joiner.cx.hosts.applied(), host.cx.hosts.applied());
         let at = host.next.max(joiner.next) + 5;
@@ -4817,7 +5423,7 @@ mod tests {
         let mut host = Peer::host(cx, game, 10);
         let address = host.net().listening.expect("listening").to_string();
         let (cx, game) = modded(&none, 2);
-        let mut joiner = Peer::new(&Net::Join(address), cx, game);
+        let mut joiner = Peer::new(&Net::Join(crate::args::Toward::Address(address)), cx, game);
         assert!(joiner.cx.mods.applied().is_empty());
         join(&mut host, &mut joiner);
         assert_eq!(joiner.cx.mods.applied(), host.cx.mods.applied());
@@ -5027,7 +5633,7 @@ mod tests {
             Peer { stack, cx, next: 0 }
         };
         let mut host = peer(
-            &Net::Host("127.0.0.1:0".to_owned()),
+            &Net::Host(crate::args::Listen::at("127.0.0.1:0")),
             Context::seeded(1).root(&ours),
         );
         host.turn();
@@ -5035,7 +5641,7 @@ mod tests {
         // As a joiner's run starts, its textures by their paths until its host's world comes.
         let mut cx = Context::seeded(2).root(&theirs);
         cx.name_as([]);
-        let mut joiner = peer(&Net::Join(address), cx);
+        let mut joiner = peer(&Net::Join(crate::args::Toward::Address(address)), cx);
         join(&mut host, &mut joiner);
         // The name of the texture a peer loaded from `path`.
         let textured = |peer: &Peer, path: &str| {
@@ -5151,7 +5757,11 @@ mod tests {
         let address = host.net().listening.expect("listening").to_string();
         let mut cx = Context::seeded(2).root(&theirs);
         cx.name_as([]);
-        let mut joiner = Peer::new(&Net::Join(address), cx, Game::default());
+        let mut joiner = Peer::new(
+            &Net::Join(crate::args::Toward::Address(address)),
+            cx,
+            Game::default(),
+        );
         join(&mut host, &mut joiner);
 
         save(&path, &scene(&["assets/none.png"]), 1);
@@ -5215,7 +5825,7 @@ mod tests {
     /// one, which loses the other, those before taken.
     #[test]
     fn a_peer_keeps_the_other_s_inputs_to_a_second() {
-        let net = Net::Join("127.0.0.1:1".to_owned());
+        let net = Net::Join(crate::args::Toward::Address("127.0.0.1:1".to_owned()));
         let mut peer = Lockstep::start(&net, TESTED, "Tested", &[]).expect("started");
         let now = Instant::now();
         assert!(

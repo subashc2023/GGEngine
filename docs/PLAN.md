@@ -161,10 +161,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sessions that hold** (2026-11-13)
 - **Delays that follow the link** (2026-11-13)
 - **Sessions their players alone join** (2026-11-13)
+- **Runs that meet through a relay** (2026-11-13)
 
 ## Now
 
-Phase 20's fourth milestone, through NATs, as Next has it, once its plan is approved.
+Phase 20's fifth milestone, states by what changed, as Next has it, once its plan is written and
+approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -735,7 +737,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An index of a world's cells for the cells' step, which tests each cell with a file or a kept state against each viewer as each tick ends, O(cells × viewers), allocating nothing where none comes or goes | The step is measured to cost a frame, as at 100,000 cells |
 | Terrain and heightfields, which a large world's ground would be: a world's cells hold meshes and colliders | A world's ground is more than its cells' models |
 | A game showing its session's code, and a join screen a player types one into: a host or a server not given `--code` prints the code it made to stdout, which a shipped windowed game shows no one | A game hosts and joins sessions from its own UI |
-| Short codes, a few words, stretched by a PAKE, as SPAKE2 or CPace, before Noise's handshake, each guess costing a connection: a code is 16 symbols, 80 bits, as a recorded first message lets one test codes against it offline | Players read codes out or type them by hand |
+| Short codes, a few words, stretched by a PAKE, as SPAKE2 or CPace, before Noise's handshake, each guess costing a connection: a code is 16 symbols, 80 bits, as a recorded first message lets one test codes against it offline; and with them a room at a relay that the code doesn't give, as a relay could test short codes against the rooms it sees | Players read codes out or type them by hand |
+| A relay run for players, and a project naming its relay, so that its players give none: each run is given `--relay`, and none runs for players | A game's players meet through a relay |
+| `gg run --peers 2` through a relay, as two machines' peers would: it refuses `--relay` | Peers on two machines run under `gg run` |
+| TURN and other standard relays, beside the engine's own: a relay is `gg-relay` | A game is hosted where a TURN service already runs |
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
 | `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
 

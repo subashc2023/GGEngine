@@ -37,7 +37,8 @@ are in [AGENTS.md](AGENTS.md).
 sandbox  editor   player       apps/: executables          gg  tools/: tools
        \    |    /                                         |
         gg-engine - gg-macros  crates/: libraries          |
-            |     \_______________________________________ gg-api
+            |  \  \_______________________________________ gg-api
+            |   \_____________ gg-relay - relay
        gg-renderer
             |
           gg-gpu
@@ -73,6 +74,13 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   under an asset root: files that tools and development builds share. It depends on no `gg-*`
   crate, so that tools build without the engine, and `gg-engine` uses it in development builds
   alone, so that only they read a manifest or an ID file: shipping builds start from cooked data.
+- **`gg-relay`:** the relay that a session's runs meet through when they can't connect to each
+  other, as [Networking](#networking) says: both ends of its protocol, which `gg-engine`'s sessions
+  speak, and the relay itself, which the `relay` app runs. It depends on `gg-core` alone of the
+  `gg-*` crates, so that a relay builds and runs on a server without Vulkan, sound or input
+  libraries.
+- **`relay`:** the relay's executable, `gg-relay`, whose `main` hands control to `gg-relay` rather
+  than `gg-engine`, as it runs no game.
 - **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
@@ -1406,6 +1414,29 @@ alone, as Foxball's bot, a session's runs leave out.
   (`net.forged`, once a link), and a frame of the stream that doesn't open ends its link. QUIC
   would rewrite every link for congestion control and migration that the engine doesn't need yet,
   and a MAC alone would leave a server's states readable on the path.
+- **Runs behind routers meet through a relay.** Runs that can't connect to each other, as two
+  behind their own home routers can't, meet through a relay that each connects out to
+  (`--relay <ADDRESS>`, with any of the four session flags), which `gg-relay` runs: a host or a
+  server registers its session's room there, the first 16 bytes of an HMAC of the code under a key
+  of its own, as well as or in place of listening at an address, and a joiner or a client given the
+  relay and the code alone comes for the room. The relay sees the room, but can't find the code
+  from it, nor read or forge what it carries, which the code's handshake seals end to end; a joiner
+  given another code comes for another room, which no host holds, and one who has the room but not
+  the code is refused at the handshake, as directly. For each joiner, the relay tells the host a
+  ticket, on the connection that holds the room, and the host opens a connection to the relay with
+  it, through the handshake as a connection it accepts; the relay copies the pair's bytes each way,
+  and each link's socket binds there by a token of the relay's, 256 random bits, after which the
+  relay forwards each datagram from one end's socket to the other's. A host registers again 5 s
+  after losing its relay (`net.relay`). Then each end tells the other on the stream where its socket
+  is, as the relay saw it, its router's mapping, and as it's bound (`at`), and sends each packet
+  through the relay and to those addresses, for 5 s, which opens each router for the other's: UDP
+  hole punching. A packet's first byte, sealed, says whether its link has had one direct within
+  250 ms, and a link sends direct alone while it has and the other's latest says it has too, so
+  that a way that works one way alone is never taken; one that stops falls back to the relay within
+  250 ms and probes again (`net.direct`, `net.relayed`). Routers that map each destination their own
+  way leave a session's packets on the relay; the stream always stays there, as TCP's hole punching
+  gets through fewer routers than UDP's. TURN relays UDP alone, and iroh would rewrite the links on
+  QUIC; the engine's own relay carries both, and builds on gg-core alone of the engine's crates.
 - **A player's commands steer that player alone.** A command whose variant or struct has a field
   `player`, an integer, as the demos' have, names the player whose inputs carry it, a peer's or a
   server's client's, or is refused, by every run of the session alike (`net.bad_command`), so that
@@ -1469,8 +1500,9 @@ and whole, sealed in frames, each its length and up to 64 KiB of its text sealed
 implicit, a thread of each end's reading them and another writing them: the hello, the host's
 world, the hashes, the writing thread's lines that say it's there, and a tick's inputs that hold
 an edit or a patch, name a texture the host has just named, or are too long for a packet, whose
-text is at most 1,176 bytes, as its counter and its seal take 24 more of the 1,200 a path of the
-internet's least MTU carries whole. A
+text is at most 1,175 bytes, as its counter and its seal take 24 more of the 1,200 a path of the
+internet's least MTU carries whole, and the byte that says whether its link hears the other direct
+one more. A
 tick's other inputs go over UDP, in packets sent at each tick and again a tick's time after the
 last, each repeating this peer's inputs for every tick the other hasn't said it has, so that a
 packet lost loses none, naming the tick the peers' worlds were last made the same at, so that
@@ -1484,8 +1516,9 @@ are too long for a packet; and the server's states over UDP, in as many packets 
 state lost being lost, as the next is sent against the latest the client has. `--link` has a
 run's links hold each packet that comes, and up to more, losing some, and the stream's lines, as a
 slow link would. [net.rs](crates/gg-engine/src/net.rs),
-[server.rs](crates/gg-engine/src/net/server.rs) and [secure.rs](crates/gg-engine/src/net/secure.rs)
-have their formats and the rest. `gg run --peers 2` runs a host and a joiner from one build,
+[server.rs](crates/gg-engine/src/net/server.rs), [secure.rs](crates/gg-engine/src/net/secure.rs),
+[path.rs](crates/gg-engine/src/net/path.rs) and [gg-relay's root](crates/gg-relay/src/lib.rs) have
+their formats and the rest. `gg run --peers 2` runs a host and a joiner from one build,
 patching both and restarting both after a rebuild, its arguments after `--`, as `--rollback`,
 given both.
 

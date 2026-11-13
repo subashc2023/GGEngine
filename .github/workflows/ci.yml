@@ -184,6 +184,26 @@ jobs:
           test "$(grep -h '"code":"net.corrected","corrections":[1-9]' target/debug/logs/shards-*.jsonl | wc -l)" = 2
           grep -q '"message":"Ending the run, as Ctrl+C asks"' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
+      # The demo's host and joiner meeting through a relay, `gg-relay`, the host registered there
+      # alone and the joiner given the relay and the code alone: the joiner joins, the third to in
+      # these steps, both links' packets go direct once each end sees that way work, as no router
+      # stands between them here, their worlds hash alike, and the relay logs the pair.
+      - name: Run the demo's peers through a relay
+        if: matrix.part == 'runs'
+        run: |
+          cargo build -p relay --locked
+          target/debug/gg-relay --listen 127.0.0.1:7800 &
+          relay=$!
+          target/debug/gg-shards --headless --frames 600 --host --relay 127.0.0.1:7800 --code 0000-0000-0000-7800 &
+          host=$!
+          target/debug/gg-shards --headless --frames 300 --join --relay 127.0.0.1:7800 --code 0000-0000-0000-7800
+          wait $host
+          kill $relay
+          wait $relay || true
+          test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 3
+          test "$(grep -h '"code":"net.direct"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
+          grep -q '"code":"relay.paired"' target/debug/logs/relay-*.jsonl
+          ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
       # Each tick, run again on a copy of the world taken as it started, with the commands it
       # applied, leaves the copy as it left the world, as rollback needs: the sandbox's and the
       # demo's headless, and the demo's live recording replayed, which steers, dashes, collects and
@@ -232,6 +252,30 @@ jobs:
           test "$(grep -h '"message":"Joined the server"' $logs | wc -l)" = 2
           test "$(grep -h '"code":"net.corrected","corrections":[1-9]' $logs | wc -l)" = 2
           test "$(grep -h '"code":"sync_test.matched"' $logs | wc -l)" = 2
+          ! grep -q '"code":"net.desync"' $logs
+      # The 3D demo's server registered at a relay alone, and two clients given the relay and the
+      # code alone: each joins as a player of its own, the third and fourth to in these steps, and
+      # each of the four links' packets go direct; the server, sent Ctrl+C, ends cleanly.
+      - name: Run the 3D demo's server and clients through a relay
+        if: matrix.part == 'runs'
+        run: |
+          target/debug/gg-relay --listen 127.0.0.1:7801 &
+          relay=$!
+          fox=target/debug/gg-foxball
+          headless="$fox --headless --size 320x180"
+          logs="target/debug/logs/foxball-*.jsonl"
+          $fox --serve --relay 127.0.0.1:7801 --code 0000-0000-0000-7801 &
+          server=$!
+          $headless --frames 300 --connect --relay 127.0.0.1:7801 --code 0000-0000-0000-7801 &
+          client=$!
+          $headless --frames 300 --connect --relay 127.0.0.1:7801 --code 0000-0000-0000-7801
+          wait $client
+          kill -INT $server
+          wait $server
+          kill $relay
+          wait $relay || true
+          test "$(grep -h '"message":"Joined the server"' $logs | wc -l)" = 4
+          test "$(grep -h '"code":"net.direct"' $logs | wc -l)" = 4
           ! grep -q '"code":"net.desync"' $logs
       # Whether the editor runs, its view a panel that the UI draws among its own, exiting 0.
       - name: Run the editor headless
