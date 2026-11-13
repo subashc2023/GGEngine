@@ -419,7 +419,9 @@ in the editor is out of an agent's reach.
   tick left it, so that a capture shows what a query reads. A game plays or is stopped, as `play`
   and `stop` set it, any client's request the last word, and a pause lasts across both. Stopped,
   frames run no ticks, and draw the world as edits leave it: the world as edited, which only edits,
-  scene files' saves and the open scene's New and Open change. `play` has a copy of it play in its
+  scene files' saves, the open scene's New and Open, and a world's cells coming and going around
+  the look's viewpoint, as [Project state](#project-state)'s worlds of cells says, change; `cells`
+  reads them. `play` has a copy of it play in its
   place, from its ticks, the engine holding the world as edited aside, with its scene files as last
   applied and the authors' logs, until `stop` brings them back, the copy and all done to it going
   but a scene file's save, which applies to the world as edited too as it comes back; and the ticks
@@ -1029,6 +1031,19 @@ A project's state is text that people and agents edit, diff and merge with ordin
     (`replay.cell_file`); a lockstep joiner whose world parts from its host's at a cell file that
     isn't the host's names it and leaves, to try again later (`net.cell_file`).
     [cells.rs](crates/gg-engine/src/cells.rs) has the rest.
+  - **Edited, a world's cells are files, never kept text.** While a development build's run is
+    stopped, as the editor edits it, the cells' step runs each frame, the look's viewpoint, the
+    editor's camera, a viewer too, of the largest viewer's radius or 512: cells come in as they're
+    prepared, no frame waiting; a cell a streamed root is in comes in wherever it is, so that a root
+    dragged into a cell brings the cell's file in; and a cell goes out only as its file has it,
+    keeping nothing, an edited one staying in until it's saved. The open scene holds the cells'
+    entities too: a save writes each streamed root, with what's under it, to the file of the cell it
+    stands in, `Streamed` left off as the load gives it, each cell's file that would change, and the
+    rest to the world's file; `new` and `open` take the cells out with the rest. A cell's file saved
+    on disk applies to its cell in as the open scene's does, an edit of the file's own, and a cell
+    out takes it as it next comes in, unless what it keeps stands for its file, as in play; the
+    folder is listed again at each look while the run can stop. The look's grid draws the cells in, and the tool API's `cells` reads them.
+    [scene_files.rs](crates/gg-engine/src/scene_files.rs) has the save and the watch.
 
 ## ECS
 

@@ -47,6 +47,12 @@
 //!   then on. `new` deletes the open scene's entities and leaves it untitled. `save` writes them to
 //!   its file, or to `path`, which becomes its file, and the game's watch applies nothing for it.
 //!
+//!   In a world of cells, the cells' entities are the open scene's too: `save` writes each streamed
+//!   root, with what's under it, to the file of the cell it stands in, each cell's file that would
+//!   change, and the rest to the world's file; `new` and `open` delete them, and empty the cells.
+//!   While the game is stopped, cells come in around the look's viewpoint, and one edited stays in
+//!   until it's saved; a cell's file saved on disk applies to its cell as the open scene's does.
+//!
 //!   Each acts on the world as edited: `save` writes it while a copy plays, and `open` and `new`
 //!   stop the copy first. Neither `open` nor `new` can be undone: every author's edits start
 //!   afresh, as after a restore.
@@ -61,8 +67,10 @@
 //!     `discard`;
 //!   - `scene.untitled`, for `save` of an untitled scene without a path;
 //!   - `scene.watched`, for a path another scene file the game loaded has;
-//!   - `scene.changed`, for `save` while the file differs from what the game last applied, so that
-//!     an edit to it isn't lost;
+//!   - `scene.changed`, for `save` while the file, or a cell's file it would write, differs from
+//!     what the game last applied, so that an edit to it isn't lost;
+//!   - `scene.cell_out`, for `save` while a streamed root stands in a cell whose file hasn't come
+//!     in, as one refused, or a root just moved into it, whose entities the save would lose;
 //!   - `api.no_scene`, in a lockstep peer, and for `open` and `new` in a recorded run;
 //!   - and as loading or saving a scene fails, such as with `scene.file` or `scene.outside`.
 //! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
@@ -130,6 +138,10 @@
 //!   otherwise; the revision changes with each change to the types, so that a client reads them
 //!   again as the revision `entities` answers moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
+//! - `cells`: answers [`CellList`], the world's cells, in a world whose `Cells` cut it into scene
+//!   files that come in around its viewers, as ARCHITECTURE.md's worlds of cells describes: which
+//!   are in, coming, kept, refused or filed, the viewers they come in around, the look's viewpoint
+//!   among them while the game is stopped, and which a `scene` `save` would write.
 //! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts, prefabs
 //!   and UIs under the game's asset root, in the order of their paths, each with its ID, which its
 //!   ID file beside it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and
@@ -588,6 +600,53 @@ pub struct CellCounts {
     #[serde(rename = "in")]
     pub cells_in: usize,
     pub kept: usize,
+}
+
+/// What `cells` answers: the world's cells, `None` in a world without `Cells`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CellList {
+    pub world: Option<WorldCells>,
+}
+
+/// A world of cells, as `cells` reads it: `entity`, the ID of the entity whose `Cells` it streams
+/// by; the cells' `folder`, from the asset root, and `size`, a cell's side; its `viewers`, each
+/// entity's with a `Viewer`, and, while the game is stopped, the look's viewpoint, which cells come
+/// in around then; and each cell that's in, coming in, keeping what it held, refused, holding a
+/// streamed root or whose file the folder holds, in order, by x, then y, then z.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldCells {
+    pub entity: String,
+    pub folder: String,
+    pub size: f32,
+    pub viewers: Vec<ViewerAt>,
+    pub cells: Vec<CellAt>,
+}
+
+/// A viewer, as [`WorldCells`] lists it: its entity's ID, `None` for the look's viewpoint; where it
+/// is in the world, as the last tick left it; and how far from it cells come in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ViewerAt {
+    pub entity: Option<String>,
+    pub position: [f32; 3],
+    pub radius: f32,
+}
+
+/// A cell, as [`WorldCells`] lists it: its place on the grid, as its file's name has it, `3_0_-2`
+/// for `[3, 0, -2]`; whether the folder holds its `file`, as the game last listed it; whether it's
+/// `in`, `coming` in as the next tick starts, or `refused` while a viewer is near; how many scene
+/// texts it keeps, out, of what it held as it went (`kept`); how many streamed `roots` stand in it;
+/// and whether `scene`'s `save` would write its file, or is refused it (`unsaved`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellAt {
+    pub cell: [i32; 3],
+    pub file: bool,
+    #[serde(rename = "in")]
+    pub is_in: bool,
+    pub coming: bool,
+    pub refused: bool,
+    pub kept: usize,
+    pub roots: usize,
+    pub unsaved: bool,
 }
 
 /// What `scene` takes: what to do to the open scene; the file to open, or to save it as, absolute
@@ -1534,9 +1593,9 @@ pub enum UiValue {
 
 /// The methods that change nothing of the game but what they're asked to read, which a client may
 /// send again whether or not the first was taken.
-const READS: [&str; 13] = [
+const READS: [&str; 14] = [
     "hello", "ping", "status", "entities", "entity", "get", "types", "hash", "assets", "ui",
-    "edits", "logs", "pick",
+    "edits", "logs", "pick", "cells",
 ];
 
 /// Whether `method` may change the game, its world, its run or its files, as every method but those
@@ -2665,6 +2724,37 @@ mod tests {
         assert_eq!(status.cells, Some(cells));
         let written = serde_json::to_value(cells).unwrap();
         assert_eq!(written, serde_json::json!({"in": 4, "kept": 2}));
+    }
+
+    /// A world's cells read as `cells` writes them, each cell's being in named `in`, the look's
+    /// viewpoint a viewer of no entity; a world without cells as `null`.
+    #[test]
+    fn cell_lists_read_as_their_docs_say() {
+        let json = r#"{"world": {"entity": "00000000000000a0", "folder": "scenes/cells",
+            "size": 64, "viewers": [{"entity": null, "position": [0, 10, 0], "radius": 512}],
+            "cells": [{"cell": [3, 0, -2], "file": true, "in": true, "coming": false,
+            "refused": false, "kept": 0, "roots": 2, "unsaved": true}]}}"#;
+        let list: CellList = serde_json::from_str(json).unwrap();
+        let world = list.world.as_ref().unwrap();
+        let cell = CellAt {
+            cell: [3, 0, -2],
+            file: true,
+            is_in: true,
+            coming: false,
+            refused: false,
+            kept: 0,
+            roots: 2,
+            unsaved: true,
+        };
+        assert_eq!(world.cells, [cell]);
+        assert_eq!(
+            (world.viewers[0].entity.as_deref(), world.size),
+            (None, 64.0)
+        );
+        let written = serde_json::to_value(&list).unwrap();
+        assert_eq!(serde_json::from_value::<CellList>(written).unwrap(), list);
+        let none: CellList = serde_json::from_str(r#"{"world": null}"#).unwrap();
+        assert_eq!(none, CellList::default());
     }
 
     /// `assets` takes a kind there is, or none, and a page, defaulting each; and its answer gives

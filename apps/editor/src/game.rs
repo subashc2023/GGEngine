@@ -306,6 +306,10 @@ struct Game {
     /// restarts it.
     scene: Option<String>,
     unsaved: bool,
+    /// Whether the game's world has cells, as its last status said, which a `cells` asked with
+    /// each status reads; and its cells, as the last `cells` answered, for the Scenes panel.
+    streams: bool,
+    cells: Option<gg_api::WorldCells>,
     /// The File menu's `scene` request, until the game answers it.
     request: Option<Request>,
     /// What the prompt asks whether to save the open scene's unsaved edits before, while it shows;
@@ -540,6 +544,8 @@ impl Game {
             served: false,
             scene: None,
             unsaved: false,
+            streams: false,
+            cells: None,
             request: None,
             prompt: None,
             then: None,
@@ -822,6 +828,13 @@ impl Game {
                         }
                     }
                 }
+                ("cells", Ok(listed)) => match serde_json::from_value::<gg_api::CellList>(listed) {
+                    Ok(listed) => self.cells = listed.world,
+                    Err(error) => {
+                        let message = format!("`cells`: an answer that isn't one: {error}");
+                        self.log(Level::Error, message);
+                    }
+                },
                 ("images", Ok(listed)) => match serde_json::from_value::<ImageList>(listed) {
                     Ok(listed) => {
                         self.view.toolbar.images = listed.images;
@@ -900,6 +913,10 @@ impl Game {
         self.paused = status.paused;
         self.scene.clone_from(&status.scene);
         self.unsaved = status.unsaved;
+        self.streams = status.cells.is_some();
+        if !self.streams {
+            self.cells = None;
+        }
         if status.stopped && !self.stopped && self.playing == 0 {
             self.drop_unsent();
             let toolbar = &mut self.view.toolbar;
@@ -2260,6 +2277,10 @@ impl Layer for Game {
                     .is_none_or(|asked| asked.elapsed() >= STATUS_EVERY))
         {
             talker.ask("status", Value::Null);
+            // With the status, a world's cells, for the Scenes panel.
+            if self.streams {
+                talker.ask("cells", Value::Null);
+            }
             self.statusing = true;
             self.polled = Some(Instant::now());
             if checking {
@@ -2364,10 +2385,10 @@ impl Layer for Game {
         }
         // A click on a scene, once the menus' choices are done, as a New of the File menu.
         let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());
-        let scenes = &mut self.scenes;
+        let (scenes, cells) = (&mut self.scenes, self.cells.as_ref());
         let mut chosen = None;
         ui.panel("Scenes", |ui| match scenes {
-            Some(scenes) => chosen = scenes.show(ui, open.as_deref(), unsaved, enabled),
+            Some(scenes) => chosen = scenes.show(ui, open.as_deref(), unsaved, enabled, cells),
             None => {
                 ui.weak("Not in a game's project");
             }
@@ -2375,6 +2396,9 @@ impl Layer for Game {
         match chosen {
             Some(scenes::Chosen::Open(path)) => self.open(path),
             Some(scenes::Chosen::New) => self.act(Action::New),
+            Some(scenes::Chosen::Frame(center, radius)) => {
+                (self.view.camera).frame_sphere(Vec3::from_array(center), radius);
+            }
             None => {}
         }
         let assets = &mut self.assets;
@@ -3572,6 +3596,53 @@ mod tests {
         ends.answer.send(untitled()).expect("sent");
         game.update(&mut cx, Duration::ZERO);
         assert_eq!(game.due, Some(Item::SaveAs), "the prompt's own Save");
+    }
+
+    /// A status saying the world has cells has each poll ask for them with the status, the answer
+    /// kept for the Scenes panel; one saying it has none stops it, and forgets them.
+    #[test]
+    fn a_worlds_cells_are_asked_with_each_status() {
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"], "a poll");
+        let mut world = scene_status(Some("scenes/world.ron"), false).expect("a status");
+        world["cells"] = json!({"in": 1, "kept": 0});
+        ends.answer
+            .send(("status".to_owned(), Ok(world)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        game.polled = None;
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status", "cells"]);
+        let cells = json!({"world": {"entity": "00000000000000a0", "folder": "scenes/cells",
+            "size": 64, "viewers": [], "cells": []}});
+        ends.answer
+            .send(("cells".to_owned(), Ok(cells)))
+            .expect("sent");
+        let plain = scene_status(Some("scenes/arena.ron"), false);
+        ends.answer
+            .send(("status".to_owned(), plain))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let folder = |game: &Game| game.cells.as_ref().map(|cells| cells.folder.clone());
+        assert_eq!(folder(&game), None, "forgotten");
+        game.polled = None;
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"]);
+        let mut world = scene_status(Some("scenes/world.ron"), false).expect("a status");
+        world["cells"] = json!({"in": 1, "kept": 0});
+        ends.answer
+            .send(("status".to_owned(), Ok(world)))
+            .expect("sent");
+        let cells = json!({"world": {"entity": "00000000000000a0", "folder": "scenes/cells",
+            "size": 64, "viewers": [], "cells": []}});
+        ends.answer
+            .send(("cells".to_owned(), Ok(cells)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(folder(&game).as_deref(), Some("scenes/cells"), "kept");
     }
 
     /// A close is vetoed while a game serves, until the answer to a status asked after it says

@@ -563,13 +563,15 @@ pub struct Context {
 }
 
 /// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its
-/// place, and `stop` brings back: with the ticks it's at, its scene files as last applied, its open
-/// scene and the authors' edits of it.
+/// place, and `stop` brings back: with the ticks it's at, its scene files as last applied and the
+/// texts kept for scene changes, its cells' files among them, so that a file saved while the copy
+/// plays applies to it after, its open scene and the authors' edits of it.
 #[cfg(feature = "dev")]
 pub(crate) struct Edited {
     pub(crate) world: World,
     pub(crate) ticks: u64,
     pub(crate) scenes: Vec<SceneFile>,
+    pub(crate) cached: Vec<SceneFile>,
     pub(crate) open: scene_files::Open,
     pub(crate) authors: Authors,
 }
@@ -4101,7 +4103,7 @@ impl Context {
         }
         let run = &mut self.cells;
         let listed = run.listed(self.root.as_deref(), &self.files, &cells.folder);
-        self.world.plan_cells(size, &listed, &mut run.plan);
+        self.world.plan_cells(size, &listed, None, &mut run.plan);
         let plan = mem::take(&mut run.plan);
         // Those no viewer is near any more.
         (run.preparing.cells).retain(|cell, _| plan.nearby.binary_search(cell).is_ok());
@@ -4115,12 +4117,7 @@ impl Context {
             return;
         }
         let folder = cells.folder.clone();
-        // Those of `roots`, sorted by cell, that are in `cell`.
-        let of = |roots: &[(Cell, Entity)], cell: Cell| -> Vec<Entity> {
-            let from = roots.partition_point(|&(other, _)| other < cell);
-            let to = roots.partition_point(|&(other, _)| other <= cell);
-            roots[from..to].iter().map(|&(_, root)| root).collect()
-        };
+        let of = roots_of;
         for &cell in &plan.leaving {
             let started = Instant::now();
             let roots = of(&plan.leavers, cell);
@@ -4167,6 +4164,228 @@ impl Context {
             self.start_preparing(&folder, cell, listed.binary_search(&cell).is_ok());
         }
         self.cells.plan = plan;
+    }
+
+    /// The cells' step while the run is stopped, as a world is edited, each frame, since no tick
+    /// runs: as [`stream_cells`](Self::stream_cells) does as a tick ends, the look's viewpoint a
+    /// viewer too, its radius the largest of the world's viewers' and [`VIEWED_RADIUS`]; but the
+    /// cells coming in come once all of them are prepared, as [`cells_ready`](Self::cells_ready)
+    /// prepares them, no frame waiting; a cell that a streamed root is in comes in wherever it is,
+    /// so that a root moved into a cell brings the cell's file in with it, rather than going out
+    /// into what the cell keeps; and a cell no viewer is near goes out only as its file has it, its
+    /// roots written as a world's save would write its file the same as the file as last applied,
+    /// as [`World::cell_written`] says, keeping nothing, as [`World::forget_cell`] says, logging
+    /// `cells.left` at the debug level. So what's edited stays in until it's saved, and nothing
+    /// edited is kept as text, which a save would have to write. A server's client streams none.
+    #[cfg(feature = "dev")]
+    pub(crate) fn stream_stopped(&mut self) {
+        if self.client {
+            return;
+        }
+        let Some((_, cells, _)) = self.world.world_cells() else {
+            return;
+        };
+        let size = cells.size;
+        // The tick's step warns of it, as the copy plays.
+        if !(size.is_finite() && size > 0.0) {
+            return;
+        }
+        let folder = cells.folder.clone();
+        // Every frame, as every tick, so that what's prepared ahead goes on from stage to stage.
+        self.prepare_cells();
+        let state = self.world.resource::<CellState>();
+        let mut changed = false;
+        if state.is_some_and(|state| !state.coming.is_empty()) && self.cells_ready() {
+            self.enter_coming();
+            changed = true;
+        }
+        let viewers = self.world.query::<(Entity, &cells::Viewer)>();
+        let radius = viewers.fold(VIEWED_RADIUS, |most, (_, viewer)| most.max(viewer.radius));
+        let viewer = (self.look.viewpoint).map(|seen| {
+            let at = seen.position.to_array().map(f64::from);
+            (at, f64::from(radius))
+        });
+        let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
+        let mut plan = mem::take(&mut self.cells.plan);
+        self.world.plan_cells(size, &listed, viewer, &mut plan);
+        // The cells that streamed roots are in, out and neither coming nor refused, come in with
+        // those near a viewer.
+        let mut entering = plan.entering.clone();
+        let state = self.world.resource::<CellState>();
+        let waiting = |cell: &Cell| {
+            state.is_some_and(|state| state.coming.contains(cell) || state.refused.contains(cell))
+        };
+        let strays = plan.strays.iter().map(|&(cell, _)| cell);
+        entering.extend(strays.filter(|cell| !waiting(cell)));
+        entering.sort_unstable();
+        entering.dedup();
+        self.world.note_coming(&entering);
+        self.world.forget_refused(&plan.forgotten);
+        changed |= !entering.is_empty() || !plan.forgotten.is_empty();
+        let changes = self.scenes.changes;
+        if self.cells.held.1 != changes {
+            self.cells.held = (Vec::new(), changes);
+        }
+        for &cell in &plan.leaving {
+            if self.cells.held.0.contains(&cell) {
+                continue;
+            }
+            let started = Instant::now();
+            let roots = roots_of(&plan.leavers, cell);
+            let state = self.world.resource::<CellState>();
+            let came = state.is_some_and(|state| state.files.contains_key(&cell));
+            let file = came.then(|| self.scene_text(&format!("{folder}/{cell}.ron")));
+            let same = match file.transpose() {
+                Ok(file) => matches!(self.world.cell_written(file.as_deref(), &roots), Ok(None)),
+                Err(_) => false,
+            };
+            if !same {
+                self.cells.held.0.push(cell);
+                continue;
+            }
+            self.world.forget_cell(cell, &roots);
+            changed = true;
+            debug!(
+                code = "cells.left",
+                cell = %cell,
+                roots = roots.len(),
+                ms = perf::millis(started.elapsed()),
+                "A cell went out as its file has it"
+            );
+        }
+        let coming = |cell: &Cell, world: &World| {
+            let state = world.resource::<CellState>();
+            state.is_some_and(|state| state.coming.contains(cell))
+        };
+        let (preparing, world) = (&mut self.cells.preparing.cells, &self.world);
+        preparing.retain(|cell, _| plan.nearby.binary_search(cell).is_ok() || coming(cell, world));
+        let size = f64::from(size);
+        let prepare = (plan.ahead.iter())
+            .filter(|&&(past, cell)| past <= size && !preparing.contains_key(&cell))
+            .map(|&(_, cell)| cell);
+        let prepare: Vec<Cell> = prepare.collect();
+        for cell in prepare {
+            self.start_preparing(&folder, cell, listed.binary_search(&cell).is_ok());
+        }
+        self.cells.plan = plan;
+        if changed {
+            self.scenes.changed();
+        }
+    }
+
+    /// The world's cells, as the tool API's `cells` reads them, the world as edited at `ticks`, as
+    /// [`scene_files::unsaved_cells`] finds those a save would write; `stopped` whether the run is,
+    /// as the look's viewpoint is a viewer then, as [`stream_stopped`](Self::stream_stopped) says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn cells_read(&mut self, stopped: bool, ticks: u64) -> gg_api::CellList {
+        let Some((id, cells, _)) = self.world.world_cells() else {
+            return gg_api::CellList::default();
+        };
+        let (entity, folder, size) = (id.to_string(), cells.folder.clone(), cells.size);
+        let mut viewers = Vec::new();
+        let mut radius = VIEWED_RADIUS;
+        for (entity, viewer) in self.world.query::<(Entity, &cells::Viewer)>() {
+            radius = radius.max(viewer.radius);
+            let at = self.world.pose(entity).expect("alive").matrix.w_axis;
+            viewers.push(gg_api::ViewerAt {
+                entity: self.world.id(entity).map(|id| id.to_string()),
+                position: at.truncate().to_array(),
+                radius: viewer.radius,
+            });
+        }
+        if stopped
+            && !self.client
+            && let Some(seen) = self.look.viewpoint
+        {
+            viewers.push(gg_api::ViewerAt {
+                entity: None,
+                position: seen.position.to_array(),
+                radius,
+            });
+        }
+        let unsaved = scene_files::unsaved_cells(self, ticks).to_vec();
+        let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
+        let mut roots = Vec::new();
+        if size.is_finite() && size > 0.0 {
+            self.world.streamed_roots(size, &mut roots);
+        }
+        let empty = CellState::default();
+        let state = self.world.resource::<CellState>().unwrap_or(&empty);
+        let mut all: Vec<Cell> = (listed.iter())
+            .chain(&state.cells_in)
+            .chain(&state.coming)
+            .chain(state.kept.keys())
+            .chain(&state.refused)
+            .copied()
+            .chain(roots.iter().map(|&(cell, ..)| cell))
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        let cells = all.into_iter().map(|cell| {
+            let from = roots.partition_point(|&(other, ..)| other < cell);
+            let to = roots.partition_point(|&(other, ..)| other <= cell);
+            gg_api::CellAt {
+                cell: cell.0.to_array(),
+                file: listed.binary_search(&cell).is_ok(),
+                is_in: state.cells_in.contains(&cell),
+                coming: state.coming.contains(&cell),
+                refused: state.refused.contains(&cell),
+                kept: state.kept.get(&cell).map_or(0, |kept| kept.texts.len()),
+                roots: to - from,
+                unsaved: unsaved.binary_search(&cell).is_ok(),
+            }
+        });
+        let world = gg_api::WorldCells {
+            entity,
+            folder,
+            size,
+            viewers,
+            cells: cells.collect(),
+        };
+        gg_api::CellList { world: Some(world) }
+    }
+
+    /// Lists the world's cells' folder again, as a development build's look at its scene files
+    /// does while the run can stop, so that a cell's file made since brings its cell in, and one
+    /// taken away no longer does. A folder that can't be listed keeps the cells it had, its first
+    /// listing having warned (`cells.listing`).
+    #[cfg(feature = "dev")]
+    pub(crate) fn list_cells_again(&mut self) {
+        let Some((_, cells, _)) = self.world.world_cells() else {
+            return;
+        };
+        let folder = cells.folder.as_str();
+        let Ok(listed) = cells::list_cells(self.root.as_deref(), &self.files, folder) else {
+            return;
+        };
+        match (self.cells.listed.iter_mut()).find(|(listed, _)| listed == folder) {
+            Some((_, was)) => *was = listed,
+            None => self.cells.listed.push((folder.to_owned(), listed)),
+        }
+    }
+
+    /// Notes that each of `cells`' files, of its digest, holds what the world as edited holds of
+    /// its cell, as a world's save leaves them, as [`World::note_filed`] says: of the world held
+    /// aside while a copy plays, and else of the context's own, between ticks.
+    #[cfg(feature = "dev")]
+    pub(crate) fn note_filed(&mut self, cells: impl IntoIterator<Item = (Cell, u64)>) {
+        let world = match &mut self.edited {
+            Some(edited) => &mut edited.world,
+            None => &mut self.world,
+        };
+        for (cell, digest) in cells {
+            world.note_filed(cell, digest);
+        }
+    }
+
+    /// Empties what the world holds of its cells and what the run prepared of them, as the tool
+    /// API's `scene new` and `open` put another scene in a world's place, so that the next world's
+    /// cells come in from their files.
+    #[cfg(feature = "dev")]
+    pub(crate) fn empty_cells(&mut self) {
+        self.world.empty_cells();
+        self.cells.preparing.cells.clear();
+        self.cells.held = Default::default();
     }
 
     /// Brings in the cells the last tick's end found coming, as
@@ -4942,6 +5161,7 @@ impl Context {
             let seen = self.seen.map(|(_, seen)| seen);
             let viewpoint = self.look.viewpoint.or(self.viewpoint).or(seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
+            self.draw_cells();
         }
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
@@ -4964,6 +5184,45 @@ impl Context {
         }
         // What changes after, until the next frame draws, is marked past what this one saw.
         self.world.advance();
+    }
+
+    /// Draws the cubes of the world's cells in, each its twelve edges, as lines are drawn, in
+    /// [`CELL_IN`], and of those refused in [`CELL_REFUSED`], as the look's grid draws, so that the
+    /// editor's view shows where the cells are.
+    #[cfg(feature = "dev")]
+    fn draw_cells(&mut self) {
+        let Some((_, cells, _)) = self.world.world_cells() else {
+            return;
+        };
+        let size = cells.size;
+        let state = self.world.resource::<CellState>();
+        let Some(state) = state.filter(|_| size.is_finite() && size > 0.0) else {
+            return;
+        };
+        let cells_in = state.cells_in.iter().map(|&cell| (cell, CELL_IN));
+        let refused = state.refused.iter().map(|&cell| (cell, CELL_REFUSED));
+        for (cell, color) in cells_in.chain(refused) {
+            let low = cell.0.as_vec3() * size;
+            // Along each axis, the four edges from the corners low on it.
+            for (axis, corner) in (0..3).flat_map(|axis| (0..4).map(move |corner| (axis, corner))) {
+                let mut from = low;
+                let across = [(axis + 1) % 3, (axis + 2) % 3];
+                for (bit, across) in across.into_iter().enumerate() {
+                    if corner & (1 << bit) != 0 {
+                        from[across] += size;
+                    }
+                }
+                let mut to = from;
+                to[axis] += size;
+                let line = Line {
+                    from,
+                    to,
+                    color,
+                    width: 1.5,
+                };
+                (self.over).push_line(&mut self.shaders, Mat4::IDENTITY, line, 0);
+            }
+        }
     }
 
     /// Whether the frame draws the colliders' outlines: as the look shows them, where it says, in
@@ -5157,6 +5416,27 @@ fn no_root(scene: &str) -> Error {
          gives the game one"
     );
     Error::new("scene.no_root", message)
+}
+
+/// The color of a cell in's edges, as [`Context::draw_cells`] draws them: a light blue, apart from
+/// the grid's axes' colors.
+#[cfg(feature = "dev")]
+const CELL_IN: Vec4 = Vec4::new(0.3, 0.7, 1.0, 0.6);
+
+/// The color of a cell refused's edges, as [`Context::draw_cells`] draws them.
+#[cfg(feature = "dev")]
+const CELL_REFUSED: Vec4 = Vec4::new(1.0, 0.25, 0.2, 0.9);
+
+/// The radius of the look's viewpoint as a viewer while the run is stopped, at least, as
+/// [`Context::stream_stopped`] says: a [`Viewer`](cells::Viewer)'s default.
+#[cfg(feature = "dev")]
+const VIEWED_RADIUS: f32 = 512.0;
+
+/// Those of `roots`, sorted by cell, that are in `cell`.
+fn roots_of(roots: &[(Cell, Entity)], cell: Cell) -> Vec<Entity> {
+    let from = roots.partition_point(|&(other, _)| other < cell);
+    let to = roots.partition_point(|&(other, _)| other <= cell);
+    roots[from..to].iter().map(|&(_, root)| root).collect()
 }
 
 /// Logs `asset.texture_loaded` at the debug level, as a game may add many: texture `named`, `size`
@@ -5737,6 +6017,7 @@ impl Stack {
                     world,
                     ticks: held.ticks,
                     scenes: held.scenes.clone(),
+                    cached: cx.scenes.cached.clone(),
                     open,
                     authors: Authors::default(),
                 });
@@ -5796,6 +6077,7 @@ impl Stack {
             world,
             ticks,
             scenes: cx.scenes.files.clone(),
+            cached: cx.scenes.cached.clone(),
             open: cx.scenes.open.clone(),
             authors: mem::take(&mut cx.authors),
         });
@@ -5818,6 +6100,7 @@ impl Stack {
         cx.share_assets();
         cx.authors = edited.authors;
         cx.scenes.files = edited.scenes;
+        cx.scenes.cached = edited.cached;
         cx.scenes.open = edited.open;
         // Of the world as edited, as its scene files and open scene are.
         cx.seen_scene();
@@ -6409,6 +6692,34 @@ mod tests {
     /// A frame of `cx`'s world, as [`handed_off`] has it: whether it's cut to its viewpoint.
     fn cut(cx: &mut Context) -> bool {
         handed_off(cx).cut
+    }
+
+    /// Where the look's grid draws, each cell in draws its cube's twelve edges, and each cell
+    /// refused; without the grid, none.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_cells_draw_where_the_look_s_grid_does() {
+        use gg_core::math::IVec3;
+
+        let mut cx = Context::seeded(1);
+        let world = cx.world_mut();
+        world.spawn(crate::Cells {
+            folder: "cells".to_owned(),
+            size: 10.0,
+        });
+        world.insert_resource(CellState {
+            cells_in: [Cell(IVec3::ZERO), Cell(IVec3::X)].into(),
+            refused: [Cell(IVec3::Y)].into(),
+            ..CellState::default()
+        });
+        let lines = |cx: &mut Context| {
+            let before = cx.over.len();
+            cx.draw_world(1.0, 0.0, 0);
+            cx.over.len() - before
+        };
+        assert_eq!(lines(&mut cx), 0, "no grid");
+        cx.look.grid = Some(Plane::XZ);
+        assert_eq!(lines(&mut cx), 3 * 12);
     }
 
     /// The view is antialiased as a layer sets, in place of its world's environment's, and of none
@@ -8626,6 +8937,7 @@ mod tests {
             world: cx.world.clone(),
             ticks: 0,
             scenes: Vec::new(),
+            cached: Vec::new(),
             open: scene_files::Open::default(),
             authors: Authors::default(),
         });

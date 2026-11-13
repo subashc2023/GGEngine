@@ -67,7 +67,7 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 34] = [
+const METHODS: [&str; 35] = [
     "hello",
     "ping",
     "status",
@@ -89,6 +89,7 @@ const METHODS: [&str; 34] = [
     "get",
     "types",
     "hash",
+    "cells",
     "assets",
     "ui",
     "snapshot",
@@ -391,6 +392,7 @@ enum Call {
     },
     Types,
     Hash,
+    Cells,
     Assets {
         kind: Option<AssetKind>,
         skip: usize,
@@ -994,6 +996,7 @@ impl Api {
                     }
                 }
                 Call::Ui => reply.result(&cx.ui_list()),
+                Call::Cells => reply.result(&cx.cells_read(stepper.stopped(), stepper.ticks)),
                 // A run stopped, or playing a copy, is snapshotted before its first tick too, so
                 // that a restart keeps the world as edited; what the layers queued as they attached
                 // goes, as it does at a `stop` that brings that world back. One restored from a
@@ -2386,6 +2389,7 @@ fn needs(call: &Call) -> Vec<Capability> {
         | Call::Entity(_)
         | Call::Types
         | Call::Hash
+        | Call::Cells
         | Call::Assets { .. }
         | Call::Ui
         | Call::Edits(_) => {
@@ -3050,6 +3054,7 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "stop" => none(method, params).map(|()| Call::Stop)?,
         "types" => none(method, params).map(|()| Call::Types)?,
         "hash" => none(method, params).map(|()| Call::Hash)?,
+        "cells" => none(method, params).map(|()| Call::Cells)?,
         "ui" => none(method, params).map(|()| Call::Ui)?,
         "snapshot" => {
             let gg_api::Snapshot { path, quit } = take(method, params)?;
@@ -4950,6 +4955,107 @@ mod tests {
         assert!(scenes_dir.join("copy.ron").is_file());
     }
 
+    /// `cells` reads a world's cells, those whose files the folder holds, those in and the streamed
+    /// roots in each, and its viewers, the look's viewpoint among them while the game is stopped,
+    /// which cells come in around then; and a world without `Cells` as none.
+    #[test]
+    fn a_client_reads_the_worlds_cells() {
+        let (mut api, session) = started("Api Cells");
+        let dir = Scratch::new("api-cells");
+        let root = crate::cells::tests::project(&dir.0);
+        let mut cx = Context::seeded(1).root(root);
+        let mut stack = Stack::default();
+        let mut stepper = Stepper::default();
+        stepper.stop();
+        let read = |client: &mut Client| {
+            let list = client.call_as::<gg_api::CellList>("cells", ());
+            list.expect("the cells")
+        };
+        let none = serving(
+            &mut api,
+            &mut cx,
+            &mut stack,
+            &mut stepper,
+            session.clone(),
+            move |mut client| read(&mut client),
+            |_, _, _| {},
+        );
+        assert_eq!(none, gg_api::CellList::default());
+        let world = cx.world_mut();
+        let cells = world.spawn(crate::Cells {
+            folder: "cells".to_owned(),
+            size: 10.0,
+        });
+        let at = Transform {
+            translation: Vec3::new(5.0, 0.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let viewer = world.spawn((at, crate::Viewer { radius: 10.0 }));
+        let ids = [cells, viewer].map(|entity| world.id(entity).expect("alive").to_string());
+        let viewpoint = json!({"position": [35, 0, 0], "rotation": [0, 0, 0, 1],
+            "projection": {"Orthographic": {"height": 2, "near": -1, "far": 1}}});
+        let client = move |mut client: Client| {
+            let cells_in = |list: &gg_api::CellList| {
+                let world = list.world.as_ref().expect("a world of cells");
+                world.cells.iter().filter(|cell| cell.is_in).count()
+            };
+            let near = loop {
+                let list = read(&mut client);
+                if cells_in(&list) == 2 {
+                    break list;
+                }
+            };
+            let look = json!({"viewpoint": viewpoint});
+            client.call_as::<Value>("look", look).expect("looked");
+            let all = loop {
+                let list = read(&mut client);
+                if cells_in(&list) == 4 {
+                    break list;
+                }
+            };
+            (near, all)
+        };
+        let (near, all) = serving(
+            &mut api,
+            &mut cx,
+            &mut stack,
+            &mut stepper,
+            session,
+            client,
+            |_, cx, _| cx.stream_stopped(),
+        );
+        let near = near.world.expect("a world of cells");
+        assert_eq!(
+            (near.entity.as_str(), near.folder.as_str(), near.size),
+            (ids[0].as_str(), "cells", 10.0)
+        );
+        let viewer = gg_api::ViewerAt {
+            entity: Some(ids[1].clone()),
+            position: [5.0, 0.0, 0.0],
+            radius: 10.0,
+        };
+        assert_eq!(near.viewers, std::slice::from_ref(&viewer));
+        let cell = |x: i32, is_in: bool| gg_api::CellAt {
+            cell: [x, 0, 0],
+            file: true,
+            is_in,
+            coming: false,
+            refused: false,
+            kept: 0,
+            roots: usize::from(is_in),
+            unsaved: false,
+        };
+        let expected = [cell(0, true), cell(1, true), cell(2, false), cell(3, false)];
+        assert_eq!(near.cells, expected);
+        let all = all.world.expect("a world of cells");
+        let looked = gg_api::ViewerAt {
+            entity: None,
+            position: [35.0, 0.0, 0.0],
+            radius: 512.0,
+        };
+        assert_eq!(all.viewers, [viewer, looked]);
+    }
+
     /// `scene` is refused with `api.no_scene` where it can't be: `open` and `new` in a recorded
     /// run, which saves, and all of it in a lockstep peer; and with `engine.no_project` in a game
     /// that isn't a project's.
@@ -6515,6 +6621,7 @@ mod tests {
         let given = json!({"kind": "model", "skip": 2});
         assert_eq!(parse(&request("assets", given)), Ok(assets));
         assert_eq!(parse(&request("ui", Value::Null)), Ok(Call::Ui));
+        assert_eq!(parse(&request("cells", json!({}))), Ok(Call::Cells));
         // As `dx tools hotpatch` prints it, the map's keys as strings, its library a path from the
         // root.
         let lib = std::env::temp_dir().join("patch.dll");

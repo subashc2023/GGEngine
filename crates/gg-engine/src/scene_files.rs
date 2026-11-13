@@ -74,10 +74,20 @@ pub(crate) struct SceneFiles {
     /// ticks that world was at; `None` once that world or its open scene may have changed since.
     #[cfg(feature = "dev")]
     unsaved: Option<(u64, bool)>,
+    /// The cells of the world as edited whose files a save would write, as last found with
+    /// `unsaved`.
+    #[cfg(feature = "dev")]
+    unsaved_cells: Vec<crate::cells::Cell>,
     /// A text the open scene's file held as last applied, and that text in canonical form, which
     /// the scene as it would be saved is compared with; `None` for a text that no longer loads.
     #[cfg(feature = "dev")]
     canonical: Option<(String, Option<String>)>,
+    /// How many times the world as edited, or its open scene, may have changed, as [`changed`]
+    /// counts them.
+    ///
+    /// [`changed`]: Self::changed
+    #[cfg(feature = "dev")]
+    pub(crate) changes: u64,
 }
 
 impl SceneFiles {
@@ -90,20 +100,7 @@ impl SceneFiles {
     /// Keeps `file`'s text for the scene changes to come, in place of one of the same author's, as
     /// last read for the watch's next look, which the file's next save is compared with.
     pub(crate) fn cache(&mut self, file: SceneFile) {
-        match self
-            .cached
-            .iter_mut()
-            .find(|kept| kept.author == file.author)
-        {
-            #[cfg(feature = "dev")]
-            Some(kept) => {
-                kept.read.clone_from(&file.text);
-                kept.text = file.text;
-            }
-            #[cfg(not(feature = "dev"))]
-            Some(kept) => kept.text = file.text,
-            None => self.cached.push(file),
-        }
+        cache(&mut self.cached, file);
     }
 
     /// Forgets whether the open scene of the world as edited differs from its file, as
@@ -112,6 +109,21 @@ impl SceneFiles {
     #[cfg(feature = "dev")]
     pub(crate) fn changed(&mut self) {
         self.unsaved = None;
+        self.changes += 1;
+    }
+}
+
+/// Keeps `file` among `cached`, texts kept for scene changes, as [`SceneFiles::cache`] says.
+fn cache(cached: &mut Vec<SceneFile>, file: SceneFile) {
+    match cached.iter_mut().find(|kept| kept.author == file.author) {
+        #[cfg(feature = "dev")]
+        Some(kept) => {
+            kept.read.clone_from(&file.text);
+            kept.text = file.text;
+        }
+        #[cfg(not(feature = "dev"))]
+        Some(kept) => kept.text = file.text,
+        None => cached.push(file),
     }
 }
 
@@ -294,13 +306,20 @@ mod watch {
         for (author, text) in saves {
             stack.offer_save(cx, author, text);
         }
+        // A cell's file made or taken away since: its cell comes in from it, or no longer does.
+        // Not in a run that can't stop, whose recording or session lists it once.
+        if stack.refuses_stop().is_none() {
+            cx.list_cells_again();
+        }
     }
 
     /// Applies the save of the scene file whose author is `author`, its text now `text`, through
     /// `edit`, which applies an edit to `cx`'s world and records it, as [`look`] says; and keeps
     /// the text for the scene changes to come, through an edit too, [`Edit::Scene`], so that a
     /// replay and each lockstep peer keep it at the same tick: of a file in the world once it has
-    /// applied, and of one kept for them alone, as it's saved.
+    /// applied, and of one kept for them alone, as it's saved. A kept file that's a cell's, whose
+    /// cell is in and whose file came in, as [`World::filed_cell_in`] says, applies to the world as
+    /// a file in it does, its roots in both texts given `Streamed`, as the cell's load gives them.
     ///
     /// Fails with `scene.not_watched` for an author no scene file has, and as [`apply`] does.
     pub(crate) fn apply_save(
@@ -317,9 +336,13 @@ mod watch {
             path: author.to_owned(),
             text: text.clone(),
         };
-        let cached = cx.scenes.cached.iter().any(|file| file.author == author);
+        let cached = cx.scenes.cached.iter().find(|file| file.author == author);
+        let cell = cached.filter(|_| cx.world().filed_cell_in(author).is_some());
+        let mut cell = cell.cloned();
+        let cached = cached.is_some();
         let applied = match files.iter_mut().find(|file| file.author == author) {
-            Some(file) => apply(cx, edit, file, text),
+            Some(file) => apply(cx, edit, file, text, false),
+            None if let Some(file) = &mut cell => apply(cx, edit, file, text, true),
             None if cached => Ok(()),
             None => Err(Error::new(
                 "scene.not_watched",
@@ -339,8 +362,9 @@ mod watch {
     }
 
     /// Applies the edit that takes `cx`'s world from `file`'s text to `text`, its text now, through
-    /// `edit`, as [`look`] says; of the open scene's file, the scene owning, from then on, the
-    /// entities it takes out of the text, deleted or gone already.
+    /// `edit`, as [`look`] says, each text's roots given `Streamed` first for a cell's file,
+    /// `cell`; of the open scene's file, the scene owning, from then on, the entities it takes out
+    /// of the text, deleted or gone already.
     ///
     /// Fails, having warned, as the text's load or the edit does.
     fn apply(
@@ -348,6 +372,7 @@ mod watch {
         edit: &mut dyn FnMut(&mut Context, Edit) -> Result<Done>,
         file: &mut SceneFile,
         text: String,
+        cell: bool,
     ) -> Result<()> {
         let _zone = gg_core::zone!();
         // What it names that isn't loaded is loaded first, as a scene's load loads it; a text that
@@ -386,11 +411,19 @@ mod watch {
             let held = World::scene_ids(old).unwrap_or_default().into_iter();
             deleted.extend(held.filter(|id| !now.contains(id)));
         }
+        // A cell's roots stream in the world, as its load gave them `Streamed`.
+        let (old, new) = match cell {
+            true => {
+                let world = cx.world();
+                let old = old.and_then(|old| world.streamed_text(&old).ok());
+                (old, world.streamed_text(&text))
+            }
+            false => (old, Ok(text.clone())),
+        };
         let mut operations = 0;
-        let applied = cx
-            .world()
-            .scene_edit(old.as_deref(), &text)
-            .and_then(|found| match found {
+        let applied = new.and_then(|new| {
+            let found = cx.world().scene_edit(old.as_deref(), &new)?;
+            match found {
                 SceneEdit::Changes(changes) => {
                     operations = changes.len();
                     if changes.is_empty() {
@@ -411,7 +444,7 @@ mod watch {
                     edit(cx, apply)?;
                     // With the entities made, the rest, which may hold them; refused, the append
                     // undoes the creates too.
-                    let rest = match cx.world().scene_edit(old.as_deref(), &text) {
+                    let rest = match cx.world().scene_edit(old.as_deref(), &new) {
                         Ok(SceneEdit::Changes(rest)) => rest,
                         Ok(SceneEdit::Creates(_)) => unreachable!("every entity is made"),
                         Err(error) => {
@@ -426,7 +459,8 @@ mod watch {
                     };
                     edit(cx, append).map(drop)
                 }
-            });
+            }
+        });
         match &applied {
             Ok(()) => {
                 info!(
@@ -470,10 +504,11 @@ mod open_scene {
     use gg_core::{Error, Result};
 
     use super::{Open, SceneFile, same_file};
-    use crate::ecs::SceneEdit;
+    use crate::cells::{Cell, CellState};
+    use crate::ecs::{SceneEdit, text_digest};
     use crate::layer::Stack;
-    use crate::perf;
     use crate::{Context, Entity, EntityId, Operation, World};
+    use crate::{package, perf};
 
     /// The scene file that `path`, absolute or relative to the asset root, names for the tool
     /// API's `scene`: its path rebuilt from the asset root, and its author, its path from the asset
@@ -556,6 +591,15 @@ mod open_scene {
         }
     }
 
+    /// The texts kept for scene changes of the world as edited, as [`as_edited`] says: those held
+    /// aside while a copy plays, and else the context's own.
+    fn cached_as_edited(cx: &Context) -> &[SceneFile] {
+        match &cx.edited {
+            Some(edited) => &edited.cached,
+            None => &cx.scenes.cached,
+        }
+    }
+
     /// The file of open scene `open` among `files`, if it's titled.
     fn file_of<'f>(files: &'f [SceneFile], open: &Open) -> Option<&'f SceneFile> {
         let author = open.author.as_deref()?;
@@ -583,24 +627,173 @@ mod open_scene {
         ids.filter_map(|id| world.entity(id)).collect()
     }
 
+    /// A world's streamed roots, each with its cell and ID, in order, as
+    /// [`World::streamed_roots`] gives them.
+    type Roots = Vec<(Cell, EntityId, Entity)>;
+
+    /// Of `world`, if its cells stream, as [`Cells`](crate::Cells) says: their folder, and the
+    /// streamed roots. `None` for a world without, or whose cells' size isn't finite and positive,
+    /// whose streamed roots stream nowhere, and are saved as the rest are.
+    fn streaming(world: &World) -> Option<(&str, Roots)> {
+        let (_, cells, _) = world.world_cells()?;
+        let size = cells.size;
+        if !(size.is_finite() && size > 0.0) {
+            return None;
+        }
+        let mut roots = Vec::new();
+        world.streamed_roots(size, &mut roots);
+        Some((cells.folder.as_str(), roots))
+    }
+
+    /// `roots`, streamed roots of `world`, and everything under them.
+    fn under(world: &World, roots: &[(Cell, EntityId, Entity)]) -> HashSet<Entity> {
+        let mut walk: Vec<Entity> = roots.iter().map(|&(.., root)| root).collect();
+        let mut under = HashSet::new();
+        while let Some(entity) = walk.pop() {
+            under.insert(entity);
+            walk.extend(world.children(entity).expect("alive"));
+        }
+        under
+    }
+
+    /// The entities of `world` that open scene `open`, of scene files `files`, and its world's
+    /// cells hold, so that a save writes them and `scene new` and `open` delete them: those it owns,
+    /// as [`owned`] says; and, in a world whose cells stream, as [`streaming`] says, the streamed
+    /// roots and everything under them, which the cells' files hold, and the entities alive that
+    /// the files of the cells in held as last applied, of `cached`, the texts kept for scene
+    /// changes, as one whose `Streamed` was taken away, which the world's file holds from its next
+    /// save on. Returns them, in ID order, and those the cells' files hold.
+    fn held(
+        world: &World,
+        files: &[SceneFile],
+        cached: &[SceneFile],
+        open: &Open,
+    ) -> (Vec<Entity>, HashSet<Entity>) {
+        let mut held = owned(world, files, open);
+        let Some((folder, roots)) = streaming(world) else {
+            return (held, HashSet::new());
+        };
+        let empty = CellState::default();
+        let state = world.resource::<CellState>().unwrap_or(&empty);
+        for &cell in state
+            .cells_in
+            .iter()
+            .filter(|cell| state.files.contains_key(cell))
+        {
+            let author = format!("{folder}/{cell}.ron");
+            let Some(file) = cached.iter().find(|file| file.author == author) else {
+                continue;
+            };
+            // A text as last applied loaded then, so it reads as a scene's RON.
+            let ids = World::scene_ids(&file.text).unwrap_or_default();
+            held.extend(ids.into_iter().filter_map(|id| world.entity(id)));
+        }
+        let under = under(world, &roots);
+        held.extend(&under);
+        held.sort_unstable_by_key(|&entity| world.id(entity).expect("alive"));
+        held.dedup();
+        (held, under)
+    }
+
+    /// What a save of the world as edited writes to its cells' files, in a world whose cells
+    /// stream, as [`streaming`] says, and else nothing: of each cell in, and each that a streamed
+    /// root is in, whose file would change, as [`World::cell_written`] finds it, the cell, and its
+    /// file, under the asset root `root`, as written, or why the save is refused it. A cell's file
+    /// as last applied is its text among `cached`, the texts kept for scene changes.
+    ///
+    /// Refuses a cell whose file would change with `scene.changed`, naming the file, while it holds
+    /// another text than the one last applied, as the open scene's file is refused; and with
+    /// `scene.cell_out`, naming the file, for a file that's there but hasn't come in, as a cell
+    /// refused, or not yet in, that a root was moved into, whose entities a save would lose.
+    ///
+    /// Fails with `scene.no_root` in a run without an asset root, and as `cell_written` fails.
+    fn cell_saves(
+        world: &World,
+        cached: &[SceneFile],
+        root: Option<&Path>,
+    ) -> Result<Vec<(Cell, Result<SceneFile>)>> {
+        let Some((folder, roots)) = streaming(world) else {
+            return Ok(Vec::new());
+        };
+        let Some(root) = root else {
+            let message = "there's no asset root to save the world's cells' files under";
+            return Err(Error::new("scene.no_root", message));
+        };
+        let empty = CellState::default();
+        let state = world.resource::<CellState>().unwrap_or(&empty);
+        let rooted = roots.iter().map(|&(cell, ..)| cell);
+        let mut cells: Vec<Cell> = state.cells_in.iter().copied().chain(rooted).collect();
+        cells.sort_unstable();
+        cells.dedup();
+        let mut saves = Vec::new();
+        for cell in cells {
+            let author = format!("{folder}/{cell}.ron");
+            let path = package::under(root, &author);
+            let ours: Vec<Entity> = (roots.iter())
+                .filter(|&&(at, ..)| at == cell)
+                .map(|&(.., root)| root)
+                .collect();
+            let came = state.files.contains_key(&cell);
+            let file = cached.iter().find(|file| came && file.author == author);
+            let file = file.map(|file| file.text.as_str());
+            let Some(text) = world.cell_written(file, &ours)? else {
+                continue;
+            };
+            let refused = match file {
+                Some(file) => crate::read_scene(&path)
+                    .ok()
+                    .filter(|now| now != file)
+                    .map(|_| {
+                        let message = format!(
+                            "{} holds another text than the one the game last applied, as after an \
+                         edit the game hasn't applied yet, or refused; saving would lose it",
+                            path.display()
+                        );
+                        Error::new("scene.changed", message)
+                    }),
+                None => fs::metadata(&path).is_ok().then(|| {
+                    let message = format!(
+                        "{} is the file of cell {cell}, which a streamed root is in, but it hasn't \
+                         come in, as when it was refused, or a root was just moved into it; \
+                         saving would lose what it holds: save again once it's in",
+                        path.display()
+                    );
+                    Error::new("scene.cell_out", message)
+                }),
+            };
+            let save = match refused {
+                Some(refused) => Err(refused),
+                None => Ok(SceneFile::new(path, author, text)),
+            };
+            saves.push((cell, save));
+        }
+        Ok(saves)
+    }
+
     /// Saves the open scene of the world as edited, as the tool API's `scene save` asks: to `to`,
     /// a path and its author as [`resolve`] gives them, which becomes its file in place of the one
     /// it had, no longer watched; or to its own file. It writes exactly the entities the scene
     /// owns, as [`owned`] says, whole or not at all, and keeps the text written as its file's as
     /// last applied and as read, so that the watch's next look finds the file as read and applies
     /// nothing; and those it owns that are gone it keeps owning, as an undo may bring them back.
-    /// While a copy plays, it saves the world as edited, held aside, the copy's scene files
-    /// following, and neither world applies the save. It changes no world and records nothing.
-    /// Logs `scene.saved`.
+    /// In a world whose cells stream, the streamed roots and what's under them go to their cells'
+    /// files in place of its own, and those the cells in held as last applied that no longer
+    /// stream go to its own, as [`held`] says; and each cell's file that would change is written,
+    /// as [`cell_saves`] says, kept as the open scene's is, the cell's file noted as come in. While
+    /// a copy plays, it saves the world as edited, held aside, the copy's scene files following,
+    /// and neither world applies the save. It changes no world but the cells' files' digests, and
+    /// records nothing. Logs `scene.saved`, with how many cells' files it wrote.
     ///
     /// Fails, changing nothing, with `scene.untitled` for a save without `to` of an untitled scene;
     /// with `scene.watched` for a path another scene file the game loaded has; with
     /// `scene.changed`, naming the file, for a save to the open scene's file while the file holds
     /// another text than the one last applied, as after an edit the watch hasn't applied yet, or
-    /// refused, so that the edit isn't lost; and as [`World::save_entities`] and
-    /// [`write_scene`](crate::write_scene) fail.
+    /// refused, so that the edit isn't lost; as `cell_saves` fails; and as
+    /// [`World::save_entities`] fails; and having written the files before, as
+    /// [`write_scene`](crate::write_scene) fails.
     pub(crate) fn save(cx: &mut Context, to: Option<(PathBuf, String)>) -> Result<()> {
         let _zone = gg_core::zone!();
+        let cached = cached_as_edited(cx);
         let (world, files, open) = as_edited(cx);
         let file = file_of(files, open);
         let (path, author, own) = match (to, file) {
@@ -630,20 +823,35 @@ mod open_scene {
             );
             return Err(Error::new("scene.changed", message));
         }
-        let owned = owned(world, files, open);
+        let (mut owned, under) = held(world, files, cached, open);
+        owned.retain(|entity| !under.contains(entity));
+        let cells = cell_saves(world, cached, cx.root.as_deref())?.into_iter();
+        let cells = cells.map(|(cell, save)| save.map(|file| (cell, file)));
+        let cells: Vec<(Cell, SceneFile)> = cells.collect::<Result<_>>()?;
         let text = world.save_entities(&owned)?;
+        // The cells' files first, so that a write that fails leaves an entity moved between the
+        // world's file and a cell's in both, which a load refuses, rather than in neither.
+        for (_, file) in &cells {
+            crate::write_scene(&file.path, &file.text)?;
+        }
         crate::write_scene(&path, &text)?;
         let gone = claimed(files, open).into_iter();
         let made: Vec<EntityId> = gone.filter(|&id| world.entity(id).is_none()).collect();
         let (entities, old) = (owned.len(), open.author.clone());
         let (saved, old) = (SceneFile::new(path, author, text), old.as_deref());
         let scenes = &mut cx.scenes;
+        // Its text for the scene changes to come, as read, which the watch applies nothing of;
+        // and its cells' files'.
+        let written = || std::iter::once(&saved).chain(cells.iter().map(|(_, file)| file));
         match &mut cx.edited {
             Some(edited) => {
                 follow(&mut edited.scenes, &mut edited.open, old, &saved);
                 edited.open.made = made;
                 edited.open.edited = false;
                 follow(&mut scenes.files, &mut scenes.open, old, &saved);
+                for file in written() {
+                    super::cache(&mut edited.cached, file.clone());
+                }
             }
             None => {
                 follow(&mut scenes.files, &mut scenes.open, old, &saved);
@@ -651,13 +859,20 @@ mod open_scene {
                 scenes.open.edited = false;
             }
         }
-        // Its text for the scene changes to come, as read, which the watch applies nothing of.
-        scenes.cache(saved.clone());
+        for file in written() {
+            scenes.cache(file.clone());
+        }
         scenes.changed();
+        cx.note_filed(
+            cells
+                .iter()
+                .map(|(cell, file)| (*cell, text_digest(&file.text))),
+        );
         info!(
             code = "scene.saved",
             path = %saved.path.display(),
             entities,
+            cells = cells.len(),
             "Saved the open scene to its file"
         );
         Ok(())
@@ -704,17 +919,21 @@ mod open_scene {
     }
 
     /// Empties the open scene, as the tool API's `scene new` asks, once a copy that played has
-    /// stopped: deletes the entities it owns, as [`owned`] says, keeping the game's own, a child of
-    /// theirs made a root first, but what's under a model's node, which goes with the model's root,
-    /// as [`emptying`] says; starts every author's edits afresh, as [`Stack::rewrite`] says,
-    /// since none of them would undo it; and leaves it untitled, its file no longer watched, and on
-    /// disk as it was. Logs `scene.new`.
+    /// stopped: deletes the entities it and its world's cells hold, as [`held`] says, keeping the
+    /// game's own, a child of theirs made a root first, but what's under a model's node, which goes
+    /// with the model's root, as [`emptying`] says; empties the world's cells, as
+    /// [`Context::empty_cells`] says; starts every author's edits afresh, as [`Stack::rewrite`]
+    /// says, since none of them would undo it; and leaves it untitled, its file no longer watched,
+    /// and on disk as it was. Logs `scene.new`.
     ///
     /// Fails, changing nothing, as the deletes do.
     pub(crate) fn new(cx: &mut Context, stack: &mut Stack) -> Result<()> {
         let _zone = gg_core::zone!();
-        let (emptying, entities) = emptying(cx.world(), &cx.scenes.files, &cx.scenes.open);
+        let scenes = &cx.scenes;
+        let (emptying, entities) =
+            emptying(cx.world(), &scenes.files, &scenes.cached, &scenes.open);
         stack.rewrite(cx, |world, log| log.apply_all(world, emptying))?;
+        cx.empty_cells();
         let closed = close(cx);
         info!(
             code = "scene.new",
@@ -742,8 +961,8 @@ mod open_scene {
     /// Fails with `scene.unsaved` as [`check_unsaved`] does, unless `discard`; with
     /// `scene.watched` for a file that another scene file the game loaded has, but the open one;
     /// as [`read_scene`](crate::read_scene) fails; as the text's load would, the path beginning its
-    /// message; and with `ecs.id_taken` for an ID it gives that an entity the open scene doesn't
-    /// own has, a model's node going with its root.
+    /// message; and with `ecs.id_taken` for an ID it gives that an entity neither the open scene
+    /// nor its world's cells hold has, as [`held`] says, a model's node going with its root.
     pub(crate) fn check_open(
         cx: &mut Context,
         file: (PathBuf, String),
@@ -764,12 +983,13 @@ mod open_scene {
         let text = crate::read_scene(&path)?;
         // What it names that isn't loaded is loaded first, as a scene's load loads it.
         let _ = cx.load_scene_assets(&text);
+        let cached = cached_as_edited(cx);
         let (world, files, open) = as_edited(cx);
         world.scene_loads(&text).map_err(|error| {
             let message = format!("{}:{error}", path.display());
             error.with_message(message)
         })?;
-        let owned: HashSet<Entity> = owned(world, files, open).into_iter().collect();
+        let owned: HashSet<Entity> = held(world, files, cached, open).0.into_iter().collect();
         let theirs =
             |id: &EntityId| (world.entity(*id)).is_some_and(|e| !owned.contains(&world.owner(e)));
         if let Some(id) = World::scene_ids(&text)?.into_iter().find(theirs) {
@@ -791,11 +1011,12 @@ mod open_scene {
     /// Opens `opening` in place of the open scene, as the tool API's `scene open` asks, once a copy
     /// that played has stopped: in one change of no author's, deletes what [`new`] deletes and
     /// makes the file's entities, as [`World::scene_edit`] finds them once those are gone, all of
-    /// it or none; starts every author's edits afresh, as [`Stack::rewrite`] says; and has the file
-    /// be the open scene's, watched from the watch's next look, in place of the file it had, no
-    /// longer watched. The open scene's own file opens again as it is on disk, the scene reverting
-    /// to it. Logs `scene.opened`, with how long it took from the check, the loads of what the
-    /// file names among it.
+    /// it or none; empties the world's cells as `new` does; starts every author's edits afresh, as
+    /// [`Stack::rewrite`] says; and has the file be the open scene's, watched from the watch's next
+    /// look, in place of the file it had, no longer watched. The open scene's own file opens again
+    /// as it is on disk, the scene reverting to it. A world's cells come in from their files as
+    /// [`Context::stream_stopped`] brings them in. Logs `scene.opened`, with how long it took from
+    /// the check, the loads of what the file names among it.
     ///
     /// Fails, changing nothing, as the change does.
     pub(crate) fn open(cx: &mut Context, stack: &mut Stack, opening: Opening) -> Result<()> {
@@ -806,7 +1027,8 @@ mod open_scene {
             text,
             started,
         } = opening;
-        let (emptying, _) = emptying(cx.world(), &cx.scenes.files, &cx.scenes.open);
+        let scenes = &cx.scenes;
+        let (emptying, _) = emptying(cx.world(), &scenes.files, &scenes.cached, &scenes.open);
         stack.rewrite(cx, |world, log| {
             log.apply_all(world, emptying)?;
             // The entities first, then the rest, which may hold them, as a save applies.
@@ -822,6 +1044,7 @@ mod open_scene {
             };
             log.append(world, rest)
         })?;
+        cx.empty_cells();
         close(cx);
         let entities = World::scene_ids(&text).map_or(0, |ids| ids.len());
         let file = SceneFile::new(path.clone(), author.clone(), text);
@@ -839,14 +1062,20 @@ mod open_scene {
     }
 
     /// The operations that delete the entities of `world` that open scene `open`, of scene files
-    /// `files`, owns, and how many it owns: each child of theirs it doesn't own made a root first,
-    /// so that it stays, but a model's node or an entity an instance's prefab gives, which goes
-    /// with its root, with whatever is under it, as when its model or its prefab changes; and then
-    /// each deleted whose parent it doesn't own, nor the root that a parent goes with, with its
-    /// descendants, which it owns once those children are roots, but models' nodes, the entities
-    /// prefabs give, and what's under them.
-    fn emptying(world: &World, files: &[SceneFile], open: &Open) -> (Vec<Operation>, usize) {
-        let owned = owned(world, files, open);
+    /// `files`, and its world's cells hold, as [`held`] says of them and `cached`, and how many
+    /// they hold: each child of theirs they don't hold made a root first, so that it stays, but a
+    /// model's node or an entity an instance's prefab gives, which goes with its root, with
+    /// whatever is under it, as when its model or its prefab changes; and then each deleted whose
+    /// parent they don't hold, nor the root that a parent goes with, with its descendants, which
+    /// they hold once those children are roots, but models' nodes, the entities prefabs give, and
+    /// what's under them.
+    fn emptying(
+        world: &World,
+        files: &[SceneFile],
+        cached: &[SceneFile],
+        open: &Open,
+    ) -> (Vec<Operation>, usize) {
+        let (owned, _) = held(world, files, cached, open);
         let owns: HashSet<Entity> = owned.iter().copied().collect();
         let id = |entity| world.id(entity).expect("alive");
         let mut operations = Vec::new();
@@ -892,7 +1121,8 @@ mod open_scene {
     /// a project's, never; untitled, while it owns an entity; with a file whose text as last
     /// applied no longer loads, always; and else while what [`save`] would write differs from that
     /// text, compared in canonical form, as [`World::scene_canonical`] gives it, so that a file
-    /// written by hand isn't unsaved as loaded, or while the save would be refused. Kept until the
+    /// written by hand isn't unsaved as loaded, or while the save would be refused; and while a
+    /// save would write a cell's file, or be refused one, as [`cell_saves`] says. Kept until the
     /// world as edited, at its ticks, or its open scene changes, as [`SceneFiles::changed`] says,
     /// since clients ask often, and a large scene saves slowly.
     ///
@@ -909,30 +1139,47 @@ mod open_scene {
         }
         let _zone = gg_core::zone!();
         let mut canonical = mem::take(&mut cx.scenes.canonical);
+        let cached = cached_as_edited(cx);
         let (world, files, open) = as_edited(cx);
-        let owned = owned(world, files, open);
-        let unsaved = match file_of(files, open) {
-            None => !owned.is_empty(),
-            Some(file) => {
-                // Made again only as the text changes.
-                if (canonical.as_ref()).is_none_or(|(text, _)| *text != file.text) {
-                    let loaded = world.scene_canonical(&file.text).ok();
-                    canonical = Some((file.text.clone(), loaded));
+        let (mut owned, under) = held(world, files, cached, open);
+        owned.retain(|entity| !under.contains(entity));
+        let cells = cell_saves(world, cached, cx.root.as_deref());
+        let cells_unsaved = cells.as_ref().map_or(true, |saves| !saves.is_empty());
+        // Those it would write, or is refused; none where it fails, as a root it can't save.
+        let cells = cells.map(|saves| saves.into_iter().map(|(cell, _)| cell).collect());
+        let cells: Vec<Cell> = cells.unwrap_or_default();
+        let unsaved = cells_unsaved
+            || match file_of(files, open) {
+                None => !owned.is_empty(),
+                Some(file) => {
+                    // Made again only as the text changes.
+                    if (canonical.as_ref()).is_none_or(|(text, _)| *text != file.text) {
+                        let loaded = world.scene_canonical(&file.text).ok();
+                        canonical = Some((file.text.clone(), loaded));
+                    }
+                    let loaded = canonical.as_ref().and_then(|(_, loaded)| loaded.as_ref());
+                    let saved = world.save_entities(&owned).ok();
+                    loaded.is_none() || saved.as_ref() != loaded
                 }
-                let loaded = canonical.as_ref().and_then(|(_, loaded)| loaded.as_ref());
-                let saved = world.save_entities(&owned).ok();
-                loaded.is_none() || saved.as_ref() != loaded
-            }
-        };
+            };
         cx.scenes.canonical = canonical;
         cx.scenes.unsaved = Some((ticks, unsaved));
+        cx.scenes.unsaved_cells = cells;
         unsaved
+    }
+
+    /// The cells of the world as edited whose files a save would write, or is refused, in order,
+    /// as [`unsaved`] finds them, and keeps them; none where the save fails for all, as for a root
+    /// it can't save, which `unsaved` is true for.
+    pub(crate) fn unsaved_cells(cx: &mut Context, ticks: u64) -> &[Cell] {
+        unsaved(cx, ticks);
+        &cx.scenes.unsaved_cells
     }
 }
 
 #[cfg(feature = "dev")]
 pub(crate) use open_scene::{
-    check_open, check_unsaved, new, no_project, open, resolve, save, title, unsaved,
+    check_open, check_unsaved, new, no_project, open, resolve, save, title, unsaved, unsaved_cells,
 };
 
 #[cfg(all(test, feature = "dev"))]
@@ -944,6 +1191,8 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::args::Net;
+    use crate::cells::CellState;
+    use crate::cells::tests::{id_of, look_at, scene as cells_scene, xs};
     use crate::dirs::tests::Scratch;
     use crate::edits::Edit;
     use crate::layer::{Offered, Stack};
@@ -1959,5 +2208,223 @@ pub(crate) mod tests {
         apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 8.0)]);
         open_scene::new(&mut cx, &mut stack).expect("emptied");
         assert!(!cx.scenes.open.edited, "New clears it");
+    }
+
+    /// The entity of the world's own in [`world_project`]'s start scene, beside its `Cells`.
+    const OWN: u64 = 0xb0;
+
+    /// Writes a project's manifest in `dir`, as [`project`] does, whose start scene is a world of
+    /// cells, `scenes/cells`, 10 units on a side, of an entity of its own, [`OWN`], at x 100 beside
+    /// its `Cells`; its cells 0 to 2 along x each hold an entity at its middle, and cell 100 one at
+    /// x 1005, as [`id_of`] names them. Returns the scenes folder.
+    fn world_project(dir: &Path) -> PathBuf {
+        project(dir, 0);
+        let scenes = dir.join("scenes");
+        fs::create_dir_all(scenes.join("cells")).expect("a directory");
+        let main = format!(
+            "(\n    entities: {{\n        \"00000000000000a0\": (\n            Cells: (\n                \
+             folder: \"scenes/cells\",\n                size: 10.0,\n            ),\n        ),\n{}",
+            &cells_scene(&[(OWN, 100.0)])["(\n    entities: {\n".len()..]
+        );
+        save(&scenes.join("main.ron"), &main, 0);
+        for cell in [0, 1, 2, 100] {
+            let x = match cell {
+                100 => 1005.0,
+                cell => cell as f32 * 10.0 + 5.0,
+            };
+            let text = cells_scene(&[(id_of(cell).get(), x)]);
+            save(&scenes.join(format!("cells/{cell}_0_0.ron")), &text, 0);
+        }
+        scenes
+    }
+
+    /// `cx`'s world's cells near x 15, as the look's viewpoint brings them in while the run is
+    /// stopped: cells 0 to 2.
+    fn bring_cells_in(cx: &mut Context) {
+        look_at(cx, 15.0);
+        cx.stream_stopped();
+        cx.stream_stopped();
+        assert_eq!(xs(cx.world()), [0, 1, 2]);
+    }
+
+    /// The IDs scene file `path` holds.
+    fn file_ids(path: &Path) -> Vec<u64> {
+        let text = crate::read_scene(path).expect("read");
+        let ids = World::scene_ids(&text).expect("a scene");
+        ids.into_iter().map(EntityId::get).collect()
+    }
+
+    /// A world's save writes each cell's file whose entities changed, as they stand, each streamed
+    /// root in the file of the cell it's in, without `Streamed`, a duplicate of one too, and the
+    /// world's file without them, but for one whose `Streamed` was taken away; a cell's file that
+    /// didn't change isn't written. Unsaved follows.
+    #[test]
+    fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
+        let dir = Scratch::new("open-scene-world-save");
+        let scenes = world_project(&dir.0);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        // Attached, as a run's is, whose world changes between ticks through the engine alone.
+        stack.attach(&mut cx);
+        bring_cells_in(&mut cx);
+        assert!(!open_scene::unsaved(&mut cx, 0), "as loaded");
+        let cell = |x: i32| scenes.join(format!("cells/{x}_0_0.ron"));
+        let far = crate::read_scene(&cell(100)).expect("read");
+        let operations = vec![set_x(id_of(1), 16.0), set_x(id_of(0), 25.0)];
+        apply(&mut cx, &mut stack, "agent", operations);
+        assert!(open_scene::unsaved(&mut cx, 0));
+        open_scene::save(&mut cx, None).expect("saved");
+        assert!(!open_scene::unsaved(&mut cx, 0), "saved");
+        let [zero, one, two] = [0, 1, 2].map(|x| id_of(x).get());
+        assert_eq!(file_ids(&cell(0)), [0; 0], "emptied");
+        assert_eq!(file_ids(&cell(1)), [one]);
+        assert_eq!(file_ids(&cell(2)), [zero, two], "moved in");
+        assert_eq!(file_ids(&scenes.join("main.ron")), [0xa0, OWN]);
+        let text = crate::read_scene(&cell(1)).expect("read");
+        assert!(
+            text.contains("16.0") && !text.contains("Streamed"),
+            "{text}"
+        );
+        assert_eq!(crate::read_scene(&cell(100)).expect("read"), far, "out");
+        let duplicate = Operation::Duplicate {
+            entity: id_of(1),
+            copies: Vec::new(),
+        };
+        let copy = apply(&mut cx, &mut stack, "agent", vec![duplicate])[0].get();
+        let unstreamed = Operation::Remove {
+            entity: id_of(2),
+            component: "Streamed".into(),
+        };
+        apply(&mut cx, &mut stack, "agent", vec![unstreamed]);
+        open_scene::save(&mut cx, None).expect("saved");
+        let mut held = vec![one, copy];
+        held.sort_unstable();
+        assert_eq!(file_ids(&cell(1)), held, "the duplicate in its cell's");
+        assert_eq!(file_ids(&cell(2)), [zero]);
+        assert_eq!(file_ids(&scenes.join("main.ron")), [two, 0xa0, OWN]);
+        assert!(!open_scene::unsaved(&mut cx, 0));
+        // Into cell 3, which has no file: it comes in, and the save makes its file, which holds
+        // what the cell does from then on.
+        apply(&mut cx, &mut stack, "agent", vec![set_x(id_of(1), 35.0)]);
+        cx.stream_stopped();
+        cx.stream_stopped();
+        assert_eq!(xs(cx.world()), [0, 1, 2, 3]);
+        open_scene::save(&mut cx, None).expect("saved");
+        assert_eq!(file_ids(&cell(3)), [one]);
+        assert!(!open_scene::unsaved(&mut cx, 0), "its file's");
+        open_scene::save(&mut cx, None).expect("saved again");
+    }
+
+    /// A world's save is refused, writing nothing, for a cell's file saved since it last applied,
+    /// and for a root moved into a cell whose file hasn't come in, until it has; unsaved meanwhile.
+    #[test]
+    fn a_world_s_save_is_refused_what_would_lose_a_cell_s_file() {
+        let dir = Scratch::new("open-scene-world-refused");
+        let scenes = world_project(&dir.0);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        bring_cells_in(&mut cx);
+        let main = scenes.join("main.ron");
+        let text = crate::read_scene(&main).expect("read");
+        let one = scenes.join("cells/1_0_0.ron");
+        let theirs = cells_scene(&[(id_of(1).get(), 17.0)]);
+        save(&one, &theirs, 2);
+        apply(&mut cx, &mut stack, "agent", vec![set_x(id_of(1), 16.0)]);
+        let refused = open_scene::save(&mut cx, None).expect_err("refused");
+        assert_eq!(refused.code(), "scene.changed", "{refused:#}");
+        assert_eq!(crate::read_scene(&one).expect("read"), theirs);
+        assert_eq!(
+            crate::read_scene(&main).expect("read"),
+            text,
+            "nothing written"
+        );
+        save(&one, &cells_scene(&[(id_of(1).get(), 15.0)]), 4);
+        apply(&mut cx, &mut stack, "agent", vec![set_x(id_of(0), 1004.0)]);
+        let refused = open_scene::save(&mut cx, None).expect_err("refused");
+        assert_eq!(refused.code(), "scene.cell_out", "{refused:#}");
+        assert!(open_scene::unsaved(&mut cx, 0));
+        // One frame notes it coming, the next brings it in.
+        cx.stream_stopped();
+        cx.stream_stopped();
+        assert_eq!(xs(cx.world()), [0, 1, 2, 100], "the root's cell came in");
+        open_scene::save(&mut cx, None).expect("saved");
+        let held = [id_of(0).get(), id_of(100).get()];
+        assert_eq!(file_ids(&scenes.join("cells/100_0_0.ron")), held);
+    }
+
+    /// New and open from a world leave none of its cells' entities, and its cells' state empty.
+    #[test]
+    fn new_and_open_from_a_world_leave_none_of_its_cells() {
+        let dir = Scratch::new("open-scene-world-new");
+        world_project(&dir.0);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        bring_cells_in(&mut cx);
+        let streamed = |cx: &Context| cx.world().query::<&crate::Streamed>().count();
+        assert_eq!(streamed(&cx), 3);
+        open_scene::new(&mut cx, &mut stack).expect("emptied");
+        assert_eq!(streamed(&cx), 0);
+        let state = cx.world().resource::<CellState>();
+        assert!(state.is_none_or(CellState::is_empty));
+        let main = open_scene::resolve(&cx, Path::new("scenes/main.ron"), true).expect("found");
+        let opening = open_scene::check_open(&mut cx, main, 0, true).expect("opens");
+        open_scene::open(&mut cx, &mut stack, opening).expect("opened");
+        bring_cells_in(&mut cx);
+        let main = open_scene::resolve(&cx, Path::new("scenes/main.ron"), true).expect("found");
+        let opening = open_scene::check_open(&mut cx, main, 0, true).expect("opens again");
+        open_scene::open(&mut cx, &mut stack, opening).expect("opened again");
+        assert_eq!(streamed(&cx), 0, "until they come in");
+        assert!(xs(cx.world()).is_empty());
+    }
+
+    /// A cell's file saved on disk applies to its cell in as the open scene's file does, an edit
+    /// of the file's own, which an undo takes back, a root it adds streaming; a cell's file made
+    /// since brings its cell in; and one saved while a copy plays applies to the world as edited
+    /// after it stops.
+    #[test]
+    fn a_cell_s_file_saved_applies_to_its_cell_in() {
+        let dir = Scratch::new("open-scene-world-watch");
+        let scenes = world_project(&dir.0);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        bring_cells_in(&mut cx);
+        look_now(&mut cx, &mut stack);
+        let one = scenes.join("cells/1_0_0.ron");
+        let added = 0x20;
+        save(
+            &one,
+            &cells_scene(&[(id_of(1).get(), 17.0), (added, 12.0)]),
+            2,
+        );
+        look_now(&mut cx, &mut stack);
+        assert_eq!(x(cx.world(), id_of(1)), 17.0);
+        let added = EntityId::new(added).expect("an ID");
+        let entity = cx.world().entity(added).expect("added");
+        assert!(cx.world().get::<crate::Streamed>(entity).is_some());
+        assert!(!open_scene::unsaved(&mut cx, 0), "as its file has it");
+        let undo = Edit::Undo {
+            author: "scenes/cells/1_0_0.ron".to_owned(),
+        };
+        client(&mut cx, &mut stack, undo);
+        assert_eq!(x(cx.world(), id_of(1)), 15.0, "taken back");
+        assert!(cx.world().entity(added).is_none());
+        let three = scenes.join("cells/3_0_0.ron");
+        save(&three, &cells_scene(&[(id_of(3).get(), 35.0)]), 2);
+        look_now(&mut cx, &mut stack);
+        cx.stream_stopped();
+        cx.stream_stopped();
+        assert_eq!(xs(cx.world()), [0, 1, 2, 3], "its file made since");
+        stack.play(&mut cx, 0);
+        save(&one, &cells_scene(&[(id_of(1).get(), 18.0)]), 4);
+        look_now(&mut cx, &mut stack);
+        assert_eq!(x(cx.world(), id_of(1)), 18.0, "the copy");
+        assert_eq!(stack.stop(&mut cx), Some(0));
+        assert_eq!(
+            x(cx.world(), id_of(1)),
+            15.0,
+            "the world as edited, as it was"
+        );
+        look_now(&mut cx, &mut stack);
+        assert_eq!(x(cx.world(), id_of(1)), 18.0, "the world as edited");
     }
 }

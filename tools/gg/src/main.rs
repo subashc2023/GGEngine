@@ -256,6 +256,10 @@ Talk to a running game, through its tool API:
                                  without one, and the descriptions of the types they hold, which
                                  values are read and written by
   hash                           Its world's hash
+  cells                          Its world's cells, in a world of cells: those in, coming, kept,
+                                 refused or filed, the streamed roots in each, which a scene save
+                                 would write, and the viewers they come in around, the look's
+                                 viewpoint among them while it's stopped
   assets [--kind <KIND>] [--skip <N>] [--take <N>]
                                  List its textures, models, fonts, prefabs and UIs, those of KIND,
                                  `texture`, `model`, `font`, `prefab` or `ui`, N at a time (100), by
@@ -859,8 +863,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             let timeout = parsed.seconds("--timeout", 300)?;
             Command::Wait(parsed.pick()?, timeout)
         }
-        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui"
-        | "images" | "quit") => {
+        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells"
+        | "ui" | "images" | "quit") => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
         }
@@ -1430,6 +1434,7 @@ mod tests {
                 json!({"at": [3.0, 4.0], "within": "00000000000000ff"}),
             ),
             (&["types"], Value::Null),
+            (&["cells"], Value::Null),
             (&["images"], Value::Null),
             (
                 &[
@@ -1619,6 +1624,7 @@ mod tests {
             &["entities", "--take"],
             &["assets", "x"],
             &["ui", "menu"],
+            &["cells", "0_0_0"],
             &["images", "bloom"],
             &["logs", "--level", "loud"],
             &["debug", "break"],

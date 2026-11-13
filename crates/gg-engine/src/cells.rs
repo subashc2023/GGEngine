@@ -378,7 +378,15 @@ impl World {
     /// keep something and those a streamed root is in, but a cell refused, the nearest first past
     /// [`MOST_CELLS`]; each streamed root in a cell out that doesn't come in goes out at once; and
     /// each cell refused farther than a radius and half a cell from every viewer is forgotten.
-    pub(crate) fn plan_cells(&self, size: f32, listed: &[Cell], plan: &mut Plan) {
+    /// `extra`, where it is and its radius, is a viewer too, as a development build's look's
+    /// viewpoint is while the run is stopped, as `Context::stream_stopped` says.
+    pub(crate) fn plan_cells(
+        &self,
+        size: f32,
+        listed: &[Cell],
+        extra: Option<([f64; 3], f64)>,
+        plan: &mut Plan,
+    ) {
         let _zone = gg_core::zone!();
         let Plan {
             leaving,
@@ -408,18 +416,8 @@ impl World {
             let at = [at.x, at.y, at.z].map(f64::from);
             viewers.push((at, f64::from(viewer.radius)));
         }
-        roots.clear();
-        for (entity, _) in self.query::<(Entity, &Streamed)>() {
-            if self.parent(entity).expect("alive").is_some() {
-                continue;
-            }
-            let at = self
-                .get::<Transform>(entity)
-                .map_or(Vec3::ZERO, |at| at.translation);
-            let id = self.id(entity).expect("alive");
-            roots.push((Cell::at(at, size), id, entity));
-        }
-        roots.sort_unstable_by_key(|&(cell, id, _)| (cell, id));
+        viewers.extend(extra);
+        self.streamed_roots(size, roots);
         let size = f64::from(size);
         let nearest = |cell: Cell, reach: f64| nearest_viewer(viewers, cell, reach, size);
         let empty = CellState::default();
@@ -491,6 +489,23 @@ impl World {
                 false => strays.push((cell, root)),
             }
         }
+    }
+
+    /// Fills `roots` with the streamed roots, each with the cell it's in, of cells `size` on a side,
+    /// as its [`Transform`] has it, the origin without one, and its ID, by cell, then ID.
+    pub(crate) fn streamed_roots(&self, size: f32, roots: &mut Vec<(Cell, EntityId, Entity)>) {
+        roots.clear();
+        for (entity, _) in self.query::<(Entity, &Streamed)>() {
+            if self.parent(entity).expect("alive").is_some() {
+                continue;
+            }
+            let at = self
+                .get::<Transform>(entity)
+                .map_or(Vec3::ZERO, |at| at.translation);
+            let id = self.id(entity).expect("alive");
+            roots.push((Cell::at(at, size), id, entity));
+        }
+        roots.sort_unstable_by_key(|&(cell, id, _)| (cell, id));
     }
 
     /// What player `player`'s client sees of the world, as a server's states send it, `had` the
@@ -598,6 +613,91 @@ impl World {
         Ok(roots.len())
     }
 
+    /// Takes cell `cell` out as its file has it, while the run is stopped, as
+    /// [`Context::stream_stopped`](crate::Context::stream_stopped) says: `roots`, its streamed
+    /// roots, go with everything under them, keeping nothing, and its file is no longer noted as
+    /// having come in, so that the cell comes in from its file again.
+    #[cfg(feature = "dev")]
+    pub(crate) fn forget_cell(&mut self, cell: Cell, roots: &[Entity]) {
+        for &root in roots {
+            self.despawn(root).expect("a streamed root is alive");
+        }
+        let state = self.cell_state_mut();
+        state.cells_in.remove(&cell);
+        state.files.remove(&cell);
+    }
+
+    /// Notes that cell `cell`'s file, of digest `digest`, holds what the world holds of the cell,
+    /// as a world's save leaves it, so that it doesn't come in from the file.
+    #[cfg(feature = "dev")]
+    pub(crate) fn note_filed(&mut self, cell: Cell, digest: u64) {
+        self.cell_state_mut().files.insert(cell, digest);
+    }
+
+    /// The cell whose file's path from the asset root is `author`, under the world's [`Cells`], if
+    /// it's in and its file has come in, so that a save of the file applies to it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn filed_cell_in(&self, author: &str) -> Option<Cell> {
+        let (_, cells, _) = self.world_cells()?;
+        let name = author
+            .strip_prefix(cells.folder.as_str())?
+            .strip_prefix('/')?;
+        let cell = Cell::of_file(name)?;
+        let state = self.resource::<CellState>()?;
+        (state.cells_in.contains(&cell) && state.files.contains_key(&cell)).then_some(cell)
+    }
+
+    /// What a cell's file is written as, as a world's save writes it, of `roots`, the streamed
+    /// roots in it, with everything under them, if that differs from `file`, the text its file held
+    /// as last applied, `None` for a cell whose file hasn't come in: nothing for a cell without
+    /// roots whose file hasn't come in. A file is compared, and written, canonical, its roots
+    /// without [`Streamed`], as [`cell_canonical`](Self::cell_canonical) gives it; one whose text
+    /// no longer loads differs.
+    ///
+    /// Fails as [`save_scene`](Self::save_scene) does for `roots`.
+    #[cfg(feature = "dev")]
+    pub(crate) fn cell_written(
+        &self,
+        file: Option<&str>,
+        roots: &[Entity],
+    ) -> Result<Option<String>> {
+        if roots.is_empty() && file.is_none() {
+            return Ok(None);
+        }
+        let now = self.cell_canonical(&self.save_scene(roots)?)?;
+        let was = file.map(|file| self.cell_canonical(file));
+        Ok((!matches!(was, Some(Ok(was)) if was == now)).then_some(now))
+    }
+
+    /// Scene `text` as a cell's file holds it: canonical, as
+    /// [`scene_canonical`](Self::scene_canonical) gives it, but with its roots without
+    /// [`Streamed`], which a cell's load gives them.
+    ///
+    /// Fails as `scene_canonical` does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn cell_canonical(&self, text: &str) -> Result<String> {
+        let mut loaded = self.scratch();
+        let roots = loaded.load_scene(text)?;
+        for &root in &roots {
+            loaded.remove::<Streamed>(root).expect("loaded");
+        }
+        loaded.save_scene(&roots)
+    }
+
+    /// Scene `text` with its roots given [`Streamed`], as a cell brings them in, canonical, so
+    /// that a cell file's save is compared with the cell in as the world holds it.
+    ///
+    /// Fails as [`scene_canonical`](Self::scene_canonical) does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn streamed_text(&self, text: &str) -> Result<String> {
+        let mut loaded = self.scratch();
+        let roots = loaded.load_scene(text)?;
+        for &root in &roots {
+            loaded.insert(root, Streamed).expect("loaded");
+        }
+        loaded.save_scene(&roots)
+    }
+
     /// Notes that `cells` come in as the next tick starts, as [`enter_cell`](Self::enter_cell)
     /// brings each in.
     pub(crate) fn note_coming(&mut self, cells: &[Cell]) {
@@ -702,6 +802,12 @@ pub(crate) struct CellRun {
     pub(crate) preparing: Preparing,
     /// The cells whose files came in as the tick started, with their digests, for a recording.
     pub(crate) came: Vec<(Cell, u64)>,
+    /// While the run is stopped, the cells found unlike their files as no viewer was near, which
+    /// stay in, and the count of the scene files' changes they were found at, as
+    /// [`SceneFiles::changes`](crate::scene_files::SceneFiles::changes) counts them, after which
+    /// they're looked at again.
+    #[cfg(feature = "dev")]
+    pub(crate) held: (Vec<Cell>, u64),
 }
 
 impl CellRun {

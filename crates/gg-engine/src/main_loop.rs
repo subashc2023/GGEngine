@@ -425,6 +425,11 @@ pub(crate) fn run_frame(
         stack.tick(cx, tick)
     };
     stepper.step(owed, tick, || start.elapsed());
+    // A world edited while no tick runs has its cells come and go around the look's viewpoint.
+    #[cfg(feature = "dev")]
+    if stepper.stopped() {
+        cx.stream_stopped();
+    }
     // A script that stopped in a tick paused the frames while it waited.
     #[cfg(feature = "dev")]
     if cx.hosts.took_stop() {
@@ -1408,6 +1413,35 @@ pub(crate) mod tests {
             assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
         }
         assert_eq!(*calls.borrow(), ["tick 0", "update", "tick 1", "update"]);
+    }
+
+    /// A stopped run's frames, which run no tick, bring a world's cells in around the look's
+    /// viewpoint, as the editor's camera is.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_stopped_runs_frames_bring_cells_in_around_the_look() {
+        use crate::cells::tests::{look_at, project, xs};
+
+        let dir = crate::dirs::tests::Scratch::new("main-loop-stopped-cells");
+        let mut stack = Stack::default();
+        let mut cx = Context::seeded(1).root(project(&dir.0));
+        cx.world_mut().spawn(crate::Cells {
+            folder: "cells".to_owned(),
+            size: 10.0,
+        });
+        stack.attach(&mut cx);
+        look_at(&mut cx, 15.0);
+        let mut clock = Clock::default();
+        let mut stepper = Stepper::default();
+        stepper.stop();
+        // One frame notes the cells coming and prepares them, the next brings them in.
+        for _ in 0..2 {
+            let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
+            let dt = clock.start_frame();
+            assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
+        }
+        assert_eq!(xs(cx.world()), [0, 1, 2, 3]);
+        assert_eq!(stepper.ticks, 0);
     }
 
     #[test]

@@ -1,14 +1,20 @@
 //! The Scenes panel: the scene files in the project's scenes folders, a row each, a click on which
 //! has the game open it in place of the open scene, as the File menu's Open does, the Entities
 //! panel then showing its entities: the open scene's row lit, and marked while it has unsaved
-//! edits, and the start scene's tagged; with New, as the File menu's.
+//! edits, and the start scene's tagged; with New, as the File menu's. An open world of cells, as
+//! the tool API's `cells` reads it, is tagged, its cells listed under it, folded, each marked while
+//! it's in and while a save would write its file, and nowhere else, a click on one framing it in the
+//! editor's camera.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gg_engine::egui::{self, Align, Atom, Button, Layout, ScrollArea, Shape, Stroke, Vec2, vec2};
+use gg_api::WorldCells;
+use gg_engine::egui::{
+    self, Align, Atom, Button, CollapsingHeader, Layout, ScrollArea, Shape, Stroke, Vec2, vec2,
+};
 use tracing::warn;
 
 /// How long a listing of the scenes lasts, after which they're listed again, so that what else
@@ -25,6 +31,9 @@ pub enum Chosen {
     Open(PathBuf),
     /// Empty the open scene, as the File menu's New does.
     New,
+    /// Frame the sphere round a cell, its center in the world and its radius, in the editor's
+    /// camera.
+    Frame([f32; 3], f32),
 }
 
 /// The Scenes panel, as the module says: the scenes folders, the asset root, which names a scene as
@@ -70,14 +79,17 @@ impl Scenes {
 
     /// Draws the panel into `ui`: how many scenes there are and New, then a row for each scene,
     /// `open` naming the open scene, as the asset root names it, which has unsaved edits if
-    /// `unsaved`; and returns what a click chose, which only the open scene's row and none while
-    /// not `enabled` does. Lists the scenes first, unless that was less than a second ago.
+    /// `unsaved`, and is a world of `cells`, as the game last read them, if they're given, whose
+    /// folder's scenes go under its row, as [`show_cells`] shows them; and returns what a click
+    /// chose, which only the open scene's row and none while not `enabled` does, but a cell's. Lists
+    /// the scenes first, unless that was less than a second ago.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         open: Option<&str>,
         unsaved: bool,
         enabled: bool,
+        cells: Option<&WorldCells>,
     ) -> Option<Chosen> {
         let now = Instant::now();
         if !(self.listed.as_ref()).is_some_and(|listed| now.duration_since(listed.at) < RELIST) {
@@ -85,8 +97,12 @@ impl Scenes {
         }
         let listed = self.listed.as_ref()?;
         let mut chosen = None;
+        // A world's cells' files are its cells, listed under it.
+        let folder = cells.map(|cells| format!("{}/", cells.folder));
+        let in_folder = |scene: &Scene| folder.as_ref().is_some_and(|f| scene.name.starts_with(f));
+        let scenes = || listed.scenes.iter().filter(|scene| !in_folder(scene));
         ui.horizontal(|ui| {
-            match listed.scenes.len() {
+            match scenes().count() {
                 1 => ui.weak("1 scene"),
                 n => ui.weak(format!("{n} scenes")),
             };
@@ -108,7 +124,7 @@ impl Scenes {
             ui.weak("No scenes yet: Save As saves one here");
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for scene in &listed.scenes {
+            for scene in scenes() {
                 let is_open = open == Some(scene.name.as_str());
                 let label = if is_open && unsaved {
                     format!("{} *", scene.label)
@@ -118,8 +134,13 @@ impl Scenes {
                 let width = ui.available_width();
                 let mut row =
                     Button::selectable(is_open, (icon(), label)).min_size(vec2(width, ROW));
-                if self.start.as_deref() == Some(scene.name.as_str()) {
-                    row = row.shortcut_text("Start");
+                let start = self.start.as_deref() == Some(scene.name.as_str());
+                let world = is_open && cells.is_some();
+                match (start, world) {
+                    (true, true) => row = row.shortcut_text("Start, world"),
+                    (true, false) => row = row.shortcut_text("Start"),
+                    (false, true) => row = row.shortcut_text("World"),
+                    (false, false) => {}
                 }
                 let tip = if is_open {
                     format!("{}, the open scene", scene.name)
@@ -131,6 +152,11 @@ impl Scenes {
                     .on_disabled_hover_text("No game serves to open it in, or the last ask waits");
                 if row.clicked() && !is_open {
                     chosen = Some(Chosen::Open(scene.path.clone()));
+                }
+                if let Some(cells) = cells.filter(|_| is_open)
+                    && let Some(framed) = show_cells(ui, cells)
+                {
+                    chosen = Some(framed);
                 }
             }
         });
@@ -173,6 +199,37 @@ impl Scenes {
             unlisted,
         });
     }
+}
+
+/// Draws a world's `cells` into `ui`, folded under a header saying how many are in of how many
+/// there are: a row each, named as its file is, marked `in` while it's in, and with `*` while a save
+/// would write its file; and returns a click on one, which frames it.
+fn show_cells(ui: &mut egui::Ui, cells: &WorldCells) -> Option<Chosen> {
+    let cells_in = cells.cells.iter().filter(|cell| cell.is_in).count();
+    let header = format!("{cells_in} of {} cells in", cells.cells.len());
+    let shown = CollapsingHeader::new(header)
+        .id_salt("cells")
+        .show(ui, |ui| {
+            let mut chosen = None;
+            for cell in &cells.cells {
+                let [x, y, z] = cell.cell;
+                let unsaved = if cell.unsaved { " *" } else { "" };
+                let width = ui.available_width();
+                let mut row =
+                    Button::new(format!("{x}_{y}_{z}{unsaved}")).min_size(vec2(width, ROW));
+                if cell.is_in {
+                    row = row.shortcut_text("in");
+                }
+                let tip = format!("Frame cell {x}_{y}_{z} of {} in the camera", cells.folder);
+                if ui.add(row).on_hover_text(tip).clicked() {
+                    let size = cells.size;
+                    let center = cell.cell.map(|n| (n as f32 + 0.5) * size);
+                    chosen = Some(Chosen::Frame(center, size * 3f32.sqrt() / 2.0));
+                }
+            }
+            chosen
+        });
+    shown.body_returned.flatten()
 }
 
 /// The scene files in `folder` and the folders inside it: the regular files whose names end in
@@ -292,12 +349,12 @@ mod tests {
         );
     }
 
-    /// A frame of `panel` filling a window 300 points across, `b.ron` open, while `enabled`, with
-    /// `events`; what it chose, and the text it drew.
+    /// A frame of `panel` filling a window 300 points across, `b.ron` open, a world of `cells` if
+    /// they're given, while `enabled`, with `events`; what it chose, and the text it drew.
     fn frame(
         ctx: &egui::Context,
         panel: &mut Scenes,
-        enabled: bool,
+        (enabled, cells): (bool, Option<&WorldCells>),
         events: Vec<Event>,
     ) -> (Option<Chosen>, Vec<(String, Rect)>) {
         let input = RawInput {
@@ -307,10 +364,28 @@ mod tests {
         };
         let mut chosen = None;
         let mut output = ctx.run_ui(input, |ui| {
-            chosen = panel.show(ui, Some("scenes/b.ron"), true, enabled);
+            chosen = panel.show(ui, Some("scenes/b.ron"), true, enabled, cells);
         });
         output.textures_delta.clear();
         (chosen, texts(&output.shapes))
+    }
+
+    /// A click at `at` in frames of `panel`, as [`frame`] draws them with `given`: what it chose.
+    fn click(
+        ctx: &egui::Context,
+        panel: &mut Scenes,
+        given: (bool, Option<&WorldCells>),
+        at: Pos2,
+    ) -> Option<Chosen> {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(ctx, panel, given, vec![Event::PointerMoved(at)]);
+        frame(ctx, panel, given, vec![button(true)]);
+        frame(ctx, panel, given, vec![button(false)]).0
     }
 
     /// A click on a scene's row opens it, but on the open scene's, marked unsaved, and none while
@@ -322,18 +397,8 @@ mod tests {
         let start = scratch.0.join("scenes/levels/one.ron");
         let mut panel = Scenes::new(scratch.0.clone(), folders, Some(&start));
         let ctx = egui::Context::default();
-        let click = |panel: &mut Scenes, enabled, at: Pos2| {
-            let button = |pressed| Event::PointerButton {
-                pos: at,
-                button: PointerButton::Primary,
-                pressed,
-                modifiers: Modifiers::NONE,
-            };
-            frame(&ctx, panel, enabled, vec![Event::PointerMoved(at)]);
-            frame(&ctx, panel, enabled, vec![button(true)]);
-            frame(&ctx, panel, enabled, vec![button(false)]).0
-        };
-        let (_, shown) = frame(&ctx, &mut panel, true, Vec::new());
+        let click = |panel: &mut Scenes, enabled, at: Pos2| click(&ctx, panel, (enabled, None), at);
+        let (_, shown) = frame(&ctx, &mut panel, (true, None), Vec::new());
         find(&shown, "Start");
         let title = find(&shown, "title").center();
         assert_eq!(click(&mut panel, false, title), None, "not enabled");
@@ -346,6 +411,62 @@ mod tests {
         assert_eq!(
             click(&mut panel, true, find(&shown, "New").center()),
             Some(Chosen::New)
+        );
+    }
+
+    /// The open world's row is tagged, its cells' files listed under it and nowhere else, folded
+    /// until its header's clicked, each marked while it's in and while it's unsaved; a click on one
+    /// frames it, while the panel isn't enabled too.
+    #[test]
+    fn a_worlds_cells_are_listed_under_it() {
+        let scratch = Scratch::new("scenes-cells");
+        let folders = root(&scratch);
+        fs::create_dir_all(scratch.0.join("scenes/cells")).expect("made");
+        for cell in ["0_0_0", "1_0_0"] {
+            let path = scratch.0.join(format!("scenes/cells/{cell}.ron"));
+            fs::write(path, "(\n    entities: {},\n)\n").expect("written");
+        }
+        let mut panel = Scenes::new(scratch.0.clone(), folders, None);
+        let cell = |x: i32, is_in: bool| gg_api::CellAt {
+            cell: [x, 0, 0],
+            file: true,
+            is_in,
+            coming: false,
+            refused: false,
+            kept: 0,
+            roots: 1,
+            unsaved: is_in,
+        };
+        let cells = WorldCells {
+            entity: "00000000000000a0".to_owned(),
+            folder: "scenes/cells".to_owned(),
+            size: 10.0,
+            viewers: Vec::new(),
+            cells: vec![cell(0, true), cell(1, false)],
+        };
+        let ctx = egui::Context::default();
+        let given = (false, Some(&cells));
+        let (_, shown) = frame(&ctx, &mut panel, given, Vec::new());
+        find(&shown, "World");
+        let header = find(&shown, "1 of 2 cells in").center();
+        assert!(
+            !shown.iter().any(|(text, _)| text.contains("0_0_0")),
+            "folded, and not at the top: {shown:?}"
+        );
+        assert_eq!(click(&ctx, &mut panel, given, header), None);
+        // As it unfolds, over frames.
+        let unfolded = (0..60).map(|_| frame(&ctx, &mut panel, given, Vec::new()).1);
+        let mut unfolded =
+            unfolded.skip_while(|shown| !shown.iter().any(|(text, _)| text == "1_0_0"));
+        let shown = unfolded.next().expect("unfolded");
+        find(&shown, "4 scenes");
+        find(&shown, "0_0_0 *");
+        find(&shown, "in");
+        let one = find(&shown, "1_0_0").center();
+        let framed = click(&ctx, &mut panel, given, one);
+        assert_eq!(
+            framed,
+            Some(Chosen::Frame([15.0, 5.0, 5.0], 5.0 * 3f32.sqrt()))
         );
     }
 }

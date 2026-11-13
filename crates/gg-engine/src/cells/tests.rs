@@ -62,7 +62,7 @@ pub(crate) const WALK: [Option<Walk>; 7] = [
 ];
 
 /// A scene of an entity of each of `entities`' IDs, at its x, as a cell's file holds them.
-fn scene(entities: &[(u64, f32)]) -> String {
+pub(crate) fn scene(entities: &[(u64, f32)]) -> String {
     let mut text = "(\n    entities: {\n".to_owned();
     for (id, x) in entities {
         text += &format!(
@@ -705,7 +705,7 @@ fn past_the_most_cells_the_nearest_come_in() {
     world.spawn((at(2500.5), Viewer { radius: 5000.0 }));
     let listed: Vec<Cell> = (0..5000).map(|x| Cell(IVec3::new(x, 0, 0))).collect();
     let mut plan = Plan::default();
-    cx.world().plan_cells(1.0, &listed, &mut plan);
+    cx.world().plan_cells(1.0, &listed, None, &mut plan);
     assert!(plan.full);
     assert_eq!(plan.entering.len(), MOST_CELLS);
     let xs = |at: usize| plan.entering[at].0.x;
@@ -850,4 +850,76 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
         message.contains("tick 2 brought cell 2_0_0 in from the file cells/2_0_0.ron"),
         "{message}"
     );
+}
+
+/// Has the look's viewpoint at x `x`, as the editor's camera is.
+#[cfg(feature = "dev")]
+pub(crate) fn look_at(cx: &mut Context, x: f32) {
+    cx.look.viewpoint = Some(gg_renderer::Viewpoint {
+        position: Vec3::new(x, 0.0, 0.0),
+        ..Default::default()
+    });
+}
+
+/// While the run is stopped, as a world is edited, cells come in around the look's viewpoint, 512
+/// across without a viewer of a larger radius, as they're prepared; as it goes, a cell edited stays
+/// in, and those as their files have them go, keeping nothing, and come back from their files; and
+/// a root moved into a cell out brings the cell's file in with it.
+#[cfg(feature = "dev")]
+#[test]
+fn stopped_cells_come_and_go_around_the_look_s_viewpoint() {
+    let dir = Scratch::new("cells-stopped");
+    let root = project(&dir.0);
+    let mut cx = Context::seeded(1).root(root);
+    cx.world_mut().spawn(Cells {
+        folder: "cells".to_owned(),
+        size: 10.0,
+    });
+    // One frame notes the cells coming and prepares them, the next brings them in.
+    let frames = |cx: &mut Context| {
+        cx.stream_stopped();
+        cx.stream_stopped();
+    };
+    frames(&mut cx);
+    assert!(cells_in(&cx).is_empty(), "no viewer");
+    // Cell 0 is 507 away, cell 1 517.
+    look_at(&mut cx, -507.0);
+    frames(&mut cx);
+    assert_eq!(cells_in(&cx), [0]);
+    look_at(&mut cx, 15.0);
+    frames(&mut cx);
+    assert_eq!(cells_in(&cx), [0, 1, 2, 3]);
+    let one = cx.world().entity(id_of(1)).expect("in");
+    move_to(&mut cx, one, 16.0);
+    cx.scenes.changed();
+    look_at(&mut cx, 2000.0);
+    cx.stream_stopped();
+    assert_eq!(cells_in(&cx), [1], "the edited one stays");
+    assert_eq!(found(&cx, id_of(0)), None);
+    assert_eq!(found(&cx, id_of(1)), Some((16.0, true)));
+    let state = state(&cx);
+    assert!(state.kept.is_empty(), "nothing kept");
+    assert_eq!(state.files.keys().collect::<Vec<_>>(), [&Cell(IVec3::X)]);
+    cx.stream_stopped();
+    assert_eq!(cells_in(&cx), [1], "still");
+    look_at(&mut cx, 15.0);
+    frames(&mut cx);
+    assert_eq!(cells_in(&cx), [0, 1, 2, 3]);
+    assert_eq!(found(&cx, id_of(0)), Some((5.0, true)), "from its file");
+    look_at(&mut cx, -507.0);
+    cx.stream_stopped();
+    assert_eq!(
+        cells_in(&cx),
+        [0, 1],
+        "cell 1 within the radius and half a cell"
+    );
+    let one = cx.world().entity(id_of(1)).expect("in");
+    move_to(&mut cx, one, 35.0);
+    cx.scenes.changed();
+    frames(&mut cx);
+    assert_eq!(cells_in(&cx), [0, 1, 3], "cell 3 with the root moved in");
+    assert_eq!(found(&cx, id_of(3)), Some((35.0, true)));
+    assert_eq!(found(&cx, id_of(1)), Some((35.0, true)));
+    cx.stream_stopped();
+    assert_eq!(cells_in(&cx), [0, 1, 3], "both unlike their files");
 }

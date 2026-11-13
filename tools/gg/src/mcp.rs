@@ -642,6 +642,17 @@ fn tools() -> Value {
             &[]
         ),
         tool(
+            "cells",
+            "The world's cells, in a world whose `Cells` cut it into scene files that come in \
+             around its viewers: its `Cells` entity, folder and cell size; its viewers, each where \
+             it is and its radius, the look's viewpoint among them while the game is stopped, as \
+             the editor's camera is; and each cell in, coming, keeping what it held, refused, \
+             holding a streamed root or filed, with how many streamed roots stand in it and \
+             whether a scene save would write its file. `world` is null in a world without cells.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "assets",
             "The game's textures, models, fonts and prefabs, a page of them by their paths from its \
              asset root, as `scene` names files: each one's ID, 16 hex digits, or null while it \
@@ -872,8 +883,8 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "ui" | "images"
-        | "snapshot" => call(name, Value::Null),
+        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells" | "ui"
+        | "images" | "snapshot" => call(name, Value::Null),
         // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
         // names scene files.
         "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
@@ -1323,6 +1334,7 @@ mod tests {
         };
         let nothing = json!({"type": "object", "properties": {}, "required": []});
         assert_eq!(schema("types"), nothing);
+        assert_eq!(schema("cells"), nothing);
         let input = schema("input");
         assert_eq!(input["required"], json!(["events"]));
         let events = &input["properties"]["events"];
