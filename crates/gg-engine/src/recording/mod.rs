@@ -6,7 +6,7 @@
 //! A recording is text, a line at a time:
 //!
 //! ```text
-//! gg-recording 6
+//! gg-recording 7
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
@@ -27,6 +27,9 @@
 //! [`text`] writes it, before the tick's number and the world's hash after it; and `end`, once the
 //! run ended. A patch of the run's code applied between ticks, through the tool API, has a `patch`
 //! line, the name of the patch's library, before the tick after, where a replay, which can't apply it, stops.
+//! A cell of a world of [cells](crate::Cells) whose file came in as a tick started has a `cell`
+//! line in that tick, the cell and its file's digest, `cell 3_0_-2 9c1e5a07b2d84f36`, which a replay
+//! checks the file it read against, stopping where another file came in.
 //! Before the first line that may
 //! name it, each texture the run named otherwise than by its path, as by its ID, has a `named` line,
 //! its name and the path it names, which a replay names it by, scanning no ID file, so that it goes
@@ -48,6 +51,7 @@ use tracing::{error, info, warn};
 
 use crate::args::Dump;
 use crate::assets::Counts;
+use crate::cells::{Cell, CellState};
 use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::luau::ModText;
@@ -56,7 +60,10 @@ use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 6";
+const FORMAT: &str = "gg-recording 7";
+
+/// The format of the recordings before cells, `cell` lines, which this engine reads too.
+const BEFORE_CELLS: &str = "gg-recording 6";
 
 /// The format of the recordings before an `Amend` held several operations, whose `Amend` has one
 /// `operation`, and before the Inspector's `Delete` and `Duplicate` held several entities, whose
@@ -235,6 +242,14 @@ impl Recorder {
         self.flush();
     }
 
+    /// Writes that cell `cell`'s file, of digest `digest`, came in as the tick started: it belongs
+    /// to that tick, as its commands do.
+    pub(crate) fn cell_came(&mut self, cell: Cell, digest: u64) {
+        self.line.clear();
+        writeln!(self.line, "cell {cell} {digest:016x}").expect("a string takes any text");
+        self.flush();
+    }
+
     /// Writes the world's hash after `tick`.
     pub(crate) fn ticked(&mut self, tick: Tick, world: &World) {
         self.names(world);
@@ -312,6 +327,9 @@ struct Ticked {
     patch: Option<(String, usize)>,
     /// The edits from outside the layers applied before it, each a value and the line that gives it.
     edits: Vec<(Text, usize)>,
+    /// The cells whose files came in as it started, each with its file's digest and the line that
+    /// gives it.
+    cells: Vec<(Cell, u64, usize)>,
     commands: Vec<Recorded>,
     hash: Option<(WorldHash, usize)>,
 }
@@ -371,8 +389,8 @@ impl Recording {
         match lines.next() {
             Some((
                 _,
-                FORMAT | BEFORE_GESTURES | BEFORE_PATCHES | BEFORE_MODS | BEFORE_NAMES
-                | BEFORE_EDITS,
+                FORMAT | BEFORE_CELLS | BEFORE_GESTURES | BEFORE_PATCHES | BEFORE_MODS
+                | BEFORE_NAMES | BEFORE_EDITS,
             )) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
@@ -450,6 +468,13 @@ impl Recording {
                 let library = text::read_patch(library, "patch ".len() + 1);
                 let library = library.ok_or_else(|| syntax(number, "a patch's is its library"))?;
                 ticked.patch.get_or_insert((library, number));
+            } else if let Some(came) = line.strip_prefix("cell ") {
+                let came = came.split_once(' ').and_then(|(cell, digest)| {
+                    Some((Cell::of_file(&format!("{cell}.ron"))?, hex16(digest)?))
+                });
+                let what = "a cell's is its place on the grid, as `3_0_-2`, and 16 hex digits";
+                let (cell, digest) = came.ok_or_else(|| syntax(number, what))?;
+                ticked.cells.push((cell, digest, number));
             } else if let Some(command) = line.strip_prefix("> ") {
                 ticked.commands.push(recording.command(number, command)?);
             } else if let Some(edit) = line.strip_prefix("@ ") {
@@ -468,7 +493,8 @@ impl Recording {
                         format!(
                             "expected a command, `> <layer> <value>`, an edit, `@ <value>`, a tick's hash, \
                              `<tick> <content> <layout>`, a texture's name, `named <value>`, a \
-                             patch, `patch <library>`, or `end`; found `{line}`"
+                             patch, `patch <library>`, a cell's file, `cell <cell> <digest>`, or \
+                             `end`; found `{line}`"
                         ),
                     ));
                 };
@@ -598,7 +624,8 @@ impl Replay {
     /// Fails, saying at which line, with `replay.bad_command` for a command recorded for a layer
     /// that queues none, or that its layer refuses; with `replay.patched`, running nothing, at a
     /// tick that the run's code was patched before, as the replay runs its own code, which can't
-    /// follow; and with `replay.diverged` if the world's hash
+    /// follow; with `replay.cell_file` where a cell came in from another file than the run's, as
+    /// [`check_cells`](Self::check_cells) says; and with `replay.diverged` if the world's hash
     /// isn't the one recorded, saying which part of it differs, with both hashes, and both engines'
     /// builds where another build recorded it, with the world as the tick left it.
     pub fn step(&mut self) -> Result<Option<Tick>> {
@@ -607,6 +634,35 @@ impl Replay {
         };
         self.check(Some(tick))?;
         Ok(Some(tick))
+    }
+
+    /// Fails with `replay.cell_file`, naming the line, the tick and the file, where a cell whose
+    /// file came in as `tick` started in the run came in from a file of another digest here, or
+    /// didn't come in: as the replay reads the cells' files as they are now, which an edit since
+    /// changes.
+    fn check_cells(&self, tick: Tick) -> Result<()> {
+        let ticked = &self.recording.ticks[tick.number as usize];
+        let world = self.cx.world();
+        let files = world.resource::<CellState>().map(|state| &state.files);
+        for &(cell, digest, line) in &ticked.cells {
+            let here = files.and_then(|files| files.get(&cell)).copied();
+            if here == Some(digest) {
+                continue;
+            }
+            let here = here.map_or_else(
+                || "none, as it didn't come in".to_owned(),
+                |here| format!("one of digest {here:016x}"),
+            );
+            let message = format!(
+                "line {line}: tick {} brought cell {cell} in from the file {}, of digest \
+                 {digest:016x} in the run, and here from {here}: the replay reads the cells' files as \
+                 they are now, and this one isn't the run's",
+                tick.number,
+                world.cell_file(cell)
+            );
+            return Err(Error::new("replay.cell_file", message));
+        }
+        Ok(())
     }
 
     /// As [`step`](Self::step), without checking the world's hash.
@@ -674,8 +730,12 @@ impl Replay {
     }
 
     /// Checks the world's hash against the one recorded once the layers attached, for `None`, or
-    /// after `tick`, if one was.
+    /// after `tick`, if one was; and, first, the files of the cells that came in as `tick`
+    /// started, as [`check_cells`](Self::check_cells) does.
     fn check(&self, tick: Option<Tick>) -> Result<()> {
+        if let Some(tick) = tick {
+            self.check_cells(tick)?;
+        }
         let recorded = match tick {
             None => Some(self.recording.attach),
             Some(tick) => self.recording.ticks[tick.number as usize].hash,
@@ -1643,7 +1703,7 @@ mod tests {
         let after_end = format!("{text}0 {hash}\n");
         let named = |line: &str| changed(&text, 4, &format!("{}\n{line}", lines[4]));
         let cases = [
-            (changed(&text, 0, "gg-recording 7"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 8"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),

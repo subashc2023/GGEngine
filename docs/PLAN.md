@@ -152,10 +152,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Debug views** (2026-11-10)
 - **Ready for games** (2026-11-12)
 - **Cells around viewers** (2026-11-12)
+- **Loading ahead** (2026-11-12)
 
 ## Now
 
-Phase 19's second milestone, loading ahead, as Next has it, once its plan is approved.
+Phase 19's third milestone, a server's clients each sent the cells near its own viewers, as Next
+has it, once its plan is approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.

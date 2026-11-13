@@ -54,7 +54,7 @@ pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use resources::Resources;
 pub use resources::{Resource, Saved};
 pub(crate) use scene::read_scene_from;
-pub(crate) use scene::{MAX_DEPTH, float, quote};
+pub(crate) use scene::{MAX_DEPTH, Parsed, float, quote};
 pub use scene::{read_scene, write_scene};
 use table::{AnyColumn, Components, Row};
 pub(crate) use table::{ComponentId, Table};
@@ -965,8 +965,9 @@ impl World {
     }
 
     /// A world of no entities, of this one's component types and its assets, as a prefab's text
-    /// loads into to make its template: it costs neither this world's slots nor its tables.
-    fn scratch(&self) -> World {
+    /// loads into to make its template, and a scene parses in apart from this world, as
+    /// [parse_scene](Self::parse_scene) says: it costs neither this world's slots nor its tables.
+    pub(crate) fn scratch(&self) -> World {
         let mut world = World::seeded(0);
         world.components = self.components.clone();
         world.assets = Arc::clone(&self.assets);

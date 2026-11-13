@@ -997,26 +997,38 @@ A project's state is text that people and agents edit, diff and merge with ordin
   `Cells` cuts space into cubes, `size` units on a side from the origin, each a cell whose entities
   are in a scene file of the folder `Cells` names, called by its place on the grid, as
   `cells/3_0_-2.ron`; a cell without a file is empty. As each tick ends, after the layers' ticks,
-  the cells within a `Viewer`'s radius come into the world and those farther than the radius and
-  half a cell from every viewer go out: from the world alone, so that a replay, a tick run again by
-  rollback or a SyncTest, and each lockstep peer bring the same cells in at the same tick.
+  the cells farther than a `Viewer`'s radius and half a cell from every viewer go out, and those
+  within a radius are noted coming, which come in as the next tick starts, before its layers: from
+  the world alone, so that a replay, a tick run again by rollback or a SyncTest, and each lockstep
+  peer bring the same cells in at the same tick.
   - A cell's roots stream (`Streamed`), as does what a game marks so: each belongs to the cell where
     it stands, and goes out with that cell, or at once if a tick leaves it in a cell that's out,
     with everything under it. A cell keeps what went out as scene text, under its IDs, and comes
     back from that rather than its file, so that a door opened stays open and an enemy stays where
     it walked. What is or holds a viewer stays, as does what doesn't stream, as the world scene's
     own entities; what refers to a streamed entity from outside finds it gone once it's out.
-  - What the world keeps of its cells, those in, those refused and each one's texts, is a saved
-    resource, which snapshots, a lockstep joiner and a server's clients take with the world, and
-    which the hash reads, in its layout, only in a world whose cells have come in, so that every
-    other world hashes as before. A scene change empties it.
+  - What the world keeps of its cells, those in, those coming, the digest of each file that came
+    in, those refused and each one's texts, is a saved resource, which snapshots, a lockstep joiner
+    and a server's clients take with the world, and which the hash reads, in its layout, only in a
+    world whose cells have come in, so that every other world hashes as before. A scene change
+    empties it.
   - A run lists a folder of cells once, from its package or the disk, and reads each cell's file
     once, as it reads a scene change's, loading what the file names first, as a scene change does,
-    a server's session nothing. A cell loads on the main thread at the tick it comes in, at most
-    4,096 in at once, the nearest first (`cells.full`). One whose load is refused, as for an ID
-    already alive, stays out until every viewer has gone (`cells.refused`); one whose entities
-    can't be kept as text, as for a reference to an entity going with neither them nor their cell,
-    stays in (`cells.held`). [cells.rs](crates/gg-engine/src/cells.rs) has the rest.
+    a server's session nothing; at most 4,096 cells are in at once, the nearest first
+    (`cells.full`). The cells within a radius and a cell more are prepared ahead, on threads of
+    their own, `gg-cells`: each file read, what it and what the cell keeps name that isn't loaded
+    found, those models' files read, and the texts parsed in a scratch world of the world's types
+    and assets; the main thread adds the models read, loads the rest, and, as the cell comes in,
+    spawns what was parsed, its handles the world's. A tick whose cells aren't prepared waits for
+    them, frames drawing on, as for a peer's inputs (`cells.waited`); where a tick can't wait, as in
+    a replay or a tick run again, its cells are prepared then and there, alike.
+  - One whose load is refused, as for an ID already alive, stays out until every viewer has gone
+    (`cells.refused`); one whose entities can't be kept as text, as for a reference to an entity
+    going with neither them nor their cell, stays in (`cells.held`). A recording notes each cell
+    file's digest as it comes in, and a replay that reads another file there stops
+    (`replay.cell_file`); a lockstep joiner whose world parts from its host's at a cell file that
+    isn't the host's names it and leaves, to try again later (`net.cell_file`).
+    [cells.rs](crates/gg-engine/src/cells.rs) has the rest.
 
 ## ECS
 

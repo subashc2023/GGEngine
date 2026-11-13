@@ -1,6 +1,7 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::any::type_name;
+use std::collections::BTreeMap;
 #[cfg(feature = "dev")]
 use std::collections::HashMap;
 use std::fmt;
@@ -35,14 +36,18 @@ use crate::assets::{Catalog, Prints};
 use crate::audio::{self, Audio, Bus, Music, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
-use crate::cells::{self, Cell, CellRun, CellState};
-use crate::cooked;
+use crate::cells::{
+    self, Cell, CellRun, CellState, Entering, Finished, Kept, ModelRead, Prep, Prepared, Preparing,
+    Stage, Texts,
+};
 use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
+use crate::ecs::text_digest;
 use crate::edits::{Authors, Done, Edit};
 use crate::environment::{self, Environment};
 use crate::font::{self, Align, Font, Fonts, TextStyle};
 use crate::game_ui::{self, GameUi};
+#[cfg(any(test, feature = "dev"))]
 use crate::gltf;
 use crate::grid::{self, Plane};
 #[cfg(feature = "dev")]
@@ -548,8 +553,9 @@ pub struct Context {
     /// took them as final.
     refused_seen: u64,
     /// What the run keeps of its worlds' cells beside the world, as
-    /// [`stream_cells`](Self::stream_cells) says.
-    cells: CellRun,
+    /// [`stream_cells`](Self::stream_cells) says, and what it prepares of them, as
+    /// [`cells_ready`](Self::cells_ready) says.
+    pub(crate) cells: CellRun,
     /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
     /// from a restore.
     #[cfg(feature = "dev")]
@@ -587,6 +593,7 @@ impl Context {
         });
         let mut cx = Self::with_world(window, world);
         cx.loader = Loader::threaded();
+        cx.cells.preparing = Preparing::threaded();
         cx.mods.game = app.name.to_owned();
         cx.mods.dir = (app.mods.clone()).or_else(|| Some(state.as_ref()?.join("mods")));
         cx.state = state;
@@ -1404,14 +1411,12 @@ impl Context {
             }
             None => {
                 let started = Instant::now();
+                // As a cell's preparing read it on a thread, if it did.
+                let read = self.cells.preparing.models.remove(path);
+                let read = read.unwrap_or_else(|| ModelRead::now(name, path, &self.files));
                 #[cfg(feature = "dev")]
-                let read_at = SystemTime::now();
-                // A package's run watches nothing, so it lists no files.
-                let (imported, files) = if self.reads_package() {
-                    (cooked::read(name, path, &self.files)?, Vec::new())
-                } else {
-                    gltf::read_listing(name, path, &self.files)?
-                };
+                let read_at = read.at;
+                let (imported, files) = read.read?;
                 if !imported.ignored.is_empty() {
                     info!(
                         code = "engine.model_ignored",
@@ -4050,22 +4055,20 @@ impl Context {
         Ok(())
     }
 
-    /// Brings the world's cells in and takes them out, as [`Cells`](crate::Cells),
+    /// Takes the world's cells out and finds those coming in, as [`Cells`](crate::Cells),
     /// [`Viewer`](crate::Viewer) and [`Streamed`](crate::Streamed) say, as each tick ends, after
     /// its layers', wherever a tick runs, again in a rollback or a SyncTest too: from the world
     /// alone, as [`World::plan_cells`] finds it, so that every run of the tick does the same. Cells
-    /// go out first, in order, then the roots left in cells out, then cells come in, in order: each
-    /// cell's file read as [`scene_text`](Self::scene_text) keeps it, once a run, and what it and
-    /// the texts the cell keeps name loaded first, as [`load_assets_of`](Self::load_assets_of) does
-    /// for a scene change, in a server's session none.
+    /// go out first, in order, then the roots left in cells out; and the cells coming in are noted
+    /// in the world, which the next tick brings in as it starts, as
+    /// [`enter_coming`](Self::enter_coming) says, so that a tick whose cells aren't ready can wait
+    /// for them before it runs.
     ///
-    /// Logs, at the debug level, `cells.entered` and `cells.left`, with the cell, how many roots
-    /// came or went and how long it took. A cell that doesn't come in, as one whose file gives an
-    /// entity's ID that's alive (`ecs.id_taken`) or names a model that doesn't load, stays out,
-    /// warning `cells.refused`, with why, until every viewer has gone; one whose roots can't be
-    /// kept as text stays in, warning `cells.held`. A server's client brings none in: its cells
-    /// come in with its server's states. A world without `Cells` costs a query; one whose cells
-    /// stay as they are, the plan, whose room [`CellRun`] keeps from tick to tick.
+    /// Logs, at the debug level, `cells.left`, with the cell, how many roots went and how long it
+    /// took. A cell whose roots can't be kept as text stays in, warning `cells.held`. A server's
+    /// client takes none out: its cells come and go with its server's states. A world without
+    /// `Cells` costs a query; one whose cells stay as they are, the plan, whose room [`CellRun`]
+    /// keeps from tick to tick.
     pub(crate) fn stream_cells(&mut self) {
         if self.client {
             return;
@@ -4097,34 +4100,21 @@ impl Context {
             return;
         }
         let run = &mut self.cells;
-        let listed = match run
-            .listed
-            .iter()
-            .find(|(folder, _)| *folder == cells.folder)
-        {
-            Some((_, listed)) => Arc::clone(listed),
-            None => {
-                let folder = &cells.folder;
-                let listed = cells::list_cells(self.root.as_deref(), &self.files, folder);
-                let listed: Arc<[Cell]> = listed.unwrap_or_else(|error| {
-                    warn!(
-                        code = "cells.listing",
-                        folder = &**folder,
-                        "{error:#}, so no cell comes in from a file"
-                    );
-                    Arc::new([])
-                });
-                run.listed.push((folder.clone(), Arc::clone(&listed)));
-                listed
-            }
-        };
+        let listed = run.listed(self.root.as_deref(), &self.files, &cells.folder);
         self.world.plan_cells(size, &listed, &mut run.plan);
-        if run.plan.is_empty() {
+        let plan = mem::take(&mut run.plan);
+        // Those no viewer is near any more.
+        (run.preparing.cells).retain(|cell, _| plan.nearby.binary_search(cell).is_ok());
+        let size = f64::from(size);
+        let unprepared = |prepared: &BTreeMap<Cell, Prep>, &(past, cell): &(f64, Cell)| {
+            past <= size && !prepared.contains_key(&cell)
+        };
+        let prepared = &self.cells.preparing.cells;
+        if plan.is_empty() && !plan.ahead.iter().any(|ahead| unprepared(prepared, ahead)) {
+            self.cells.plan = plan;
             return;
         }
         let folder = cells.folder.clone();
-        let plan = mem::take(&mut self.cells.plan);
-        let filed = |cell: &Cell| listed.binary_search(cell).is_ok();
         // Those of `roots`, sorted by cell, that are in `cell`.
         let of = |roots: &[(Cell, Entity)], cell: Cell| -> Vec<Entity> {
             let from = roots.partition_point(|&(other, _)| other < cell);
@@ -4134,7 +4124,7 @@ impl Context {
         for &cell in &plan.leaving {
             let started = Instant::now();
             let roots = of(&plan.leavers, cell);
-            match self.world.keep_cell(cell, &roots, true, filed(&cell)) {
+            match self.world.keep_cell(cell, &roots, true) {
                 Ok(roots) => debug!(
                     code = "cells.left",
                     cell = %cell,
@@ -4149,20 +4139,79 @@ impl Context {
         while let Some(cell) = strays.next() {
             while strays.next_if_eq(&cell).is_some() {}
             let roots = of(&plan.strays, cell);
-            if let Err(error) = self.world.keep_cell(cell, &roots, false, filed(&cell)) {
-                self.held(cell, &error);
+            match self.world.keep_cell(cell, &roots, false) {
+                // What was prepared stands for what it kept before.
+                Ok(_) => drop(self.cells.preparing.cells.remove(&cell)),
+                Err(error) => self.held(cell, &error),
             }
         }
-        for &cell in &plan.entering {
+        self.world.note_coming(&plan.entering);
+        self.world.forget_refused(&plan.forgotten);
+        if plan.full && self.cells.first("cells.full", &folder) {
+            let most = cells::MOST_CELLS;
+            warn!(
+                code = "cells.full",
+                folder = &*folder,
+                most,
+                "More cells are near the viewers than the {most} a world holds at once: the \
+                 nearest come in"
+            );
+        }
+        let prepared = &self.cells.preparing.cells;
+        let prepare = plan
+            .ahead
+            .iter()
+            .filter(|ahead| unprepared(prepared, ahead));
+        let prepare: Vec<Cell> = prepare.map(|&(_, cell)| cell).collect();
+        for cell in prepare {
+            self.start_preparing(&folder, cell, listed.binary_search(&cell).is_ok());
+        }
+        self.cells.plan = plan;
+    }
+
+    /// Brings in the cells the last tick's end found coming, as
+    /// [`stream_cells`](Self::stream_cells) says, as a tick starts, before its layers', wherever a
+    /// tick runs: each in order, its file read, unless what the cell keeps stands for it, as
+    /// [`scene_text`](Self::scene_text) keeps it, once a run, and what it and the texts the cell
+    /// keeps name loaded first, as [`load_assets_of`](Self::load_assets_of) does for a scene
+    /// change, in a server's session none; each text parsed, and the cell's entities spawned. A
+    /// world whose `Cells` went meanwhile drops them. A server's client brings none in.
+    ///
+    /// Logs, at the debug level, `cells.entered`, with the cell, how many roots came, whether it
+    /// came as prepared ahead, as [`cells_ready`](Self::cells_ready) prepares it, and how long it
+    /// took; and notes, for a recording, the digest of each cell's file that came in. A cell that
+    /// doesn't come in, as one whose file gives an entity's ID that's alive (`ecs.id_taken`) or
+    /// names a model that doesn't load, stays out, warning `cells.refused`, with why, until every
+    /// viewer has gone.
+    pub(crate) fn enter_coming(&mut self) {
+        self.cells.came.clear();
+        if self.client {
+            return;
+        }
+        let coming = self.world.take_coming();
+        if coming.is_empty() {
+            return;
+        }
+        let Some((_, cells, _)) = self.world.world_cells() else {
+            return;
+        };
+        let folder = cells.folder.clone();
+        let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
+        for cell in coming {
             let started = Instant::now();
-            match self.enter_cell(&folder, cell, filed(&cell)) {
-                Ok(roots) => debug!(
-                    code = "cells.entered",
-                    cell = %cell,
-                    roots,
-                    ms = perf::millis(started.elapsed()),
-                    "A cell came in"
-                ),
+            let filed = listed.binary_search(&cell).is_ok();
+            match self.enter_cell(&folder, cell, filed) {
+                Ok((roots, file, prepared)) => {
+                    self.cells.came.extend(file.map(|digest| (cell, digest)));
+                    debug!(
+                        code = "cells.entered",
+                        cell = %cell,
+                        roots,
+                        prepared,
+                        ms = perf::millis(started.elapsed()),
+                        "A cell came in"
+                    );
+                }
                 Err(error) => {
                     if self.cells.first("cells.refused", cell) {
                         warn!(
@@ -4176,34 +4225,51 @@ impl Context {
                 }
             }
         }
-        self.world.forget_refused(&plan.forgotten);
-        if plan.full && self.cells.first("cells.full", &folder) {
-            let most = cells::MOST_CELLS;
-            warn!(
-                code = "cells.full",
-                folder = &*folder,
-                most,
-                "More cells are near the viewers than the {most} a world holds at once: the \
-                 nearest come in"
-            );
-        }
-        self.cells.plan = plan;
     }
 
     /// Brings cell `cell`, of the cells of `folder`, in, as
-    /// [`stream_cells`](Self::stream_cells) says: its file, if `filed`, read and what it names
-    /// loaded, unless what the cell keeps stands for it, and what each text it keeps names; and
-    /// returns how many roots came.
+    /// [`enter_coming`](Self::enter_coming) says: its file, if `filed`, read and what it names
+    /// loaded, unless what the cell keeps stands for it, and what each text it keeps names; or as
+    /// prepared ahead, if what was prepared stands for its texts still, as
+    /// [`stands_for`](Self::stands_for) says. Returns how many roots came, the digest of its file,
+    /// if its file came, and whether it came as prepared.
     ///
     /// Fails, bringing nothing in, as [`scene_text`](Self::scene_text) does, as
-    /// [`load_assets_of`](Self::load_assets_of) does, and as [`World::enter_cell`] does, the
-    /// cell's path beginning the message.
-    fn enter_cell(&mut self, folder: &str, cell: Cell, filed: bool) -> Result<usize> {
+    /// [`load_assets_of`](Self::load_assets_of) does, and as [`World::parse_scene`] and
+    /// [`World::enter_cell`] do, the cell's path beginning the message.
+    fn enter_cell(
+        &mut self,
+        folder: &str,
+        cell: Cell,
+        filed: bool,
+    ) -> Result<(usize, Option<u64>, bool)> {
         let path = format!("{folder}/{cell}.ron");
-        let kept = self.world.resource::<CellState>();
-        let kept = kept.and_then(|state| state.kept.get(&cell)).cloned();
+        let prepared = match self.cells.preparing.cells.remove(&cell) {
+            Some(Prep {
+                stage: Stage::Ready(Ok(prepared)),
+                ..
+            }) => Some(prepared),
+            _ => None,
+        };
+        let state = self.world.resource::<CellState>();
+        let came = state.is_some_and(|state| state.files.contains_key(&cell));
+        let kept = state.and_then(|state| state.kept.get(&cell)).cloned();
         let kept = kept.unwrap_or_default();
-        let file = match filed && !kept.visited {
+        let named = |error: Error| {
+            let message = format!("{path}:{error}");
+            error.with_message(message)
+        };
+        if let Some(prepared) = prepared
+            && self.stands_for(&prepared, &path, filed && !came, &kept)
+        {
+            let file = prepared.file;
+            let roots = self
+                .world
+                .enter_cell(cell, prepared.entering)
+                .map_err(named)?;
+            return Ok((roots, file, true));
+        }
+        let file = match filed && !came {
             true => Some(self.scene_text(&path)?),
             false => None,
         };
@@ -4211,11 +4277,278 @@ impl Context {
         for text in texts.chain(kept.texts.iter().map(|kept| &*kept.text)) {
             self.load_assets_of(&path, text)?;
         }
-        let entered = self.world.enter_cell(cell, file.as_deref());
-        entered.map_err(|error| {
-            let message = format!("{path}:{error}");
-            error.with_message(message)
-        })
+        let parse = |text: &str| self.world.parse_scene(text).map_err(named);
+        let file = file
+            .as_deref()
+            .map(|text| Ok((text_digest(text), parse(text)?)));
+        let entering = Entering {
+            file: file.transpose()?,
+            kept: kept
+                .texts
+                .iter()
+                .map(|kept| parse(&kept.text))
+                .collect::<Result<_>>()?,
+        };
+        let file = entering.file.as_ref().map(|&(digest, _)| digest);
+        let roots = self.world.enter_cell(cell, entering).map_err(named)?;
+        Ok((roots, file, false))
+    }
+
+    /// Whether `prepared`, cell `path`'s, was parsed from the texts the cell would bring in now: its
+    /// file's, as [`scene_text`](Self::scene_text) gives it, if `file`, its file being yet to come
+    /// in; and those it keeps, `kept`. A development build's save of the file since, or a root left
+    /// in the cell since, makes it stand for them no more.
+    fn stands_for(&mut self, prepared: &Prepared, path: &str, file: bool, kept: &Kept) -> bool {
+        let kept = kept.texts.iter().map(|kept| kept.digest);
+        if !prepared.kept.iter().copied().eq(kept) || prepared.file.is_some() != file {
+            return false;
+        }
+        match prepared.file {
+            Some(digest) => (self.scene_text(path)).is_ok_and(|text| text_digest(&text) == digest),
+            None => true,
+        }
+    }
+
+    /// Starts preparing cell `cell`, of the cells of `folder`, as [`Preparing`] says: on a thread,
+    /// its file read, if `filed` and its file is yet to come in, as the run keeps it or from the
+    /// disk or the game's package, and the texts it keeps taken with it.
+    fn start_preparing(&mut self, folder: &str, cell: Cell, filed: bool) {
+        let path = format!("{folder}/{cell}.ron");
+        let state = self.world.resource::<CellState>();
+        let came = state.is_some_and(|state| state.files.contains_key(&cell));
+        let kept = (state.and_then(|state| state.kept.get(&cell)))
+            .map(|kept| {
+                let texts = kept.texts.iter();
+                texts
+                    .map(|kept| (Arc::clone(&kept.text), kept.digest))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let read = (filed && !came).then(|| {
+            let cached = self.scenes.cached.iter().find(|file| file.author == path);
+            let cached: Option<Arc<str>> = cached.map(|file| file.text.as_str().into());
+            let (root, files, scene) = (self.root.clone(), self.files.clone(), path.clone());
+            move || {
+                if let Some(text) = cached {
+                    return Ok(text);
+                }
+                let root = root.ok_or_else(|| no_root(&scene))?;
+                let at = package::under(&root, &scene);
+                Self::read_scene_text(&files, &root, &scene, &at, true).map(Arc::from)
+            }
+        });
+        let world = self.world.scratch();
+        let number = self.cells.preparing.begin(cell);
+        (self.cells.preparing).read((cell, number), path, read, kept, world);
+    }
+
+    /// Takes what the threads preparing cells have finished, and starts the next stage of each:
+    /// for a cell whose texts name what isn't loaded, its models' files read on threads, then the
+    /// rest loaded here, as [`load_assets_of`](Self::load_assets_of) loads it for a scene change,
+    /// none in a server's session, and its texts parsed on a thread. A cell prepared, or that
+    /// couldn't be, logs `cells.prepared` at the debug level, with how long it took and how long
+    /// the main thread spent on it. A file read is kept as [`scene_text`](Self::scene_text) keeps
+    /// it, unless the run has it already.
+    pub(crate) fn prepare_cells(&mut self) {
+        while let Some(done) = self.cells.preparing.take() {
+            let started = Instant::now();
+            let ready = match done {
+                Finished::Read {
+                    cell,
+                    number,
+                    texts,
+                    missing,
+                    parsed,
+                } => {
+                    if self.cells.preparing.prep(cell, number).is_none() {
+                        continue;
+                    }
+                    if let Ok(Texts {
+                        path,
+                        file: Some((text, _)),
+                        ..
+                    }) = &texts
+                        && let Some(root) = &self.root
+                        && !self.scenes.cached.iter().any(|file| file.author == *path)
+                    {
+                        let at = package::under(root, path);
+                        let file = SceneFile::new(at, path.clone(), text.to_string());
+                        self.scenes.cache(file);
+                    }
+                    let stage = match (texts, parsed) {
+                        (Err(error), _) => Stage::Ready(Err(error)),
+                        (Ok(_), Some(parsed)) => Stage::Ready(parsed),
+                        (Ok(texts), None) => self.load_for((cell, number), texts, &missing),
+                    };
+                    vec![(cell, number, stage)]
+                }
+                Finished::Model { path, read } => {
+                    self.cells.preparing.model_read(path.clone(), read);
+                    let mut loaded = Vec::new();
+                    for (&cell, prep) in &mut self.cells.preparing.cells {
+                        if let Stage::Loading { models, .. } = &mut prep.stage {
+                            models.retain(|model| *model != path);
+                            if models.is_empty() {
+                                loaded.push(cell);
+                            }
+                        }
+                    }
+                    let mut stages = Vec::new();
+                    for cell in loaded {
+                        let prep = self.cells.preparing.cells.get_mut(&cell).expect("loading");
+                        let Stage::Loading { texts, .. } =
+                            mem::replace(&mut prep.stage, Stage::Parsing)
+                        else {
+                            unreachable!("loading, as found above");
+                        };
+                        let number = prep.number();
+                        let stage = self.finish_loading((cell, number), texts);
+                        stages.push((cell, number, stage));
+                    }
+                    stages
+                }
+                Finished::Parsed {
+                    cell,
+                    number,
+                    parsed,
+                } => vec![(cell, number, Stage::Ready(parsed))],
+            };
+            let took = started.elapsed();
+            for (cell, number, stage) in ready {
+                let Some(prep) = self.cells.preparing.prep(cell, number) else {
+                    continue;
+                };
+                prep.main += took;
+                prep.stage = stage;
+                if let Stage::Ready(prepared) = &prep.stage {
+                    debug!(
+                        code = "cells.prepared",
+                        cell = %cell,
+                        refused = prepared.as_ref().err().map(Error::code),
+                        ms = perf::millis(prep.started.elapsed()),
+                        main_ms = perf::millis(prep.main),
+                        "A cell was prepared to come in"
+                    );
+                }
+            }
+        }
+        self.cells.preparing.forget_models();
+    }
+
+    /// The stage after cell `cell`'s texts, `texts`, were found to name `missing`, which isn't
+    /// loaded, for its preparing numbered `number`: the files of the models among them read on
+    /// threads, which it waits for, unless none is to read, as in a server's session, which loads
+    /// none; then, as [`finish_loading`](Self::finish_loading) says.
+    fn load_for(
+        &mut self,
+        (cell, number): (Cell, u64),
+        texts: Texts,
+        missing: &[Asset<String>],
+    ) -> Stage {
+        let mut models = Vec::new();
+        for asset in missing {
+            let Asset::Model(name) = asset else {
+                continue;
+            };
+            // What fails here, `load_assets_of` says as it loads them.
+            let Ok(path) = self.asset_path(name, "model", false) else {
+                continue;
+            };
+            let file = match &self.root {
+                Some(root) => root.join(&*path),
+                None => PathBuf::from(&*path),
+            };
+            if self.served
+                || self.assets.has(&asset.as_deref())
+                || self.within_root(&path, &file).is_err()
+            {
+                continue;
+            }
+            (self.cells.preparing).read_model(path, file.clone(), self.files.clone());
+            if self.cells.preparing.reading(&file) {
+                models.push(file);
+            }
+        }
+        match models.is_empty() {
+            true => self.finish_loading((cell, number), texts),
+            false => Stage::Loading { texts, models },
+        }
+    }
+
+    /// The stage after what cell `cell`'s texts, `texts`, name has been read, for its preparing
+    /// numbered `number`: what they name loaded, as [`load_assets_of`](Self::load_assets_of) loads
+    /// it, the models' files read on threads taken; and then its texts parsed on a thread, in a
+    /// scratch world that has what was loaded; or, ready, why it couldn't be loaded.
+    fn finish_loading(&mut self, (cell, number): (Cell, u64), texts: Texts) -> Stage {
+        for text in texts.each() {
+            if let Err(error) = self.load_assets_of(&texts.path, text) {
+                return Stage::Ready(Err(error));
+            }
+        }
+        self.share_assets();
+        let world = self.world.scratch();
+        self.cells.preparing.parse((cell, number), texts, world);
+        Stage::Parsing
+    }
+
+    /// Whether the cells coming in as the next tick starts are prepared, as
+    /// [`enter_coming`](Self::enter_coming) brings them in: taking what the threads have finished,
+    /// as [`prepare_cells`](Self::prepare_cells) does, whatever's coming, and starting to prepare
+    /// those coming that aren't being prepared; true for a server's client, which
+    /// brings none in, and in a world with none coming. A tick that isn't run, as it waits for
+    /// them, starts a wait, which logs `cells.waited` at the debug level as it ends, with how long it
+    /// took; in a context without threads, as a test's, each is prepared then and there.
+    pub(crate) fn cells_ready(&mut self) -> bool {
+        if self.client {
+            return true;
+        }
+        // Every tick, so that what's prepared ahead goes on from stage to stage between entries.
+        self.prepare_cells();
+        let state = self.world.resource::<CellState>();
+        let Some(coming) = state.map(|state| &state.coming).filter(|c| !c.is_empty()) else {
+            return true;
+        };
+        let coming: Vec<Cell> = coming.iter().copied().collect();
+        let unprepared = |cx: &Self| {
+            let cells = &cx.cells.preparing.cells;
+            coming
+                .iter()
+                .copied()
+                .filter(|cell| !cells.contains_key(cell))
+                .collect::<Vec<_>>()
+        };
+        let unprepared = unprepared(self);
+        if !unprepared.is_empty() {
+            let Some((_, cells, _)) = self.world.world_cells() else {
+                return true;
+            };
+            let folder = cells.folder.clone();
+            let listed = (self.cells).listed(self.root.as_deref(), &self.files, &folder);
+            for cell in unprepared {
+                let filed = listed.binary_search(&cell).is_ok();
+                self.start_preparing(&folder, cell, filed);
+            }
+            self.prepare_cells();
+        }
+        let preparing = &mut self.cells.preparing;
+        let ready = (coming.iter()).all(|cell| {
+            let prep = preparing.cells.get(cell);
+            matches!(prep.map(|prep| &prep.stage), Some(Stage::Ready(_)))
+        });
+        match (ready, preparing.waiting) {
+            (true, Some(since)) => {
+                preparing.waiting = None;
+                debug!(
+                    code = "cells.waited",
+                    cells = coming.len(),
+                    ms = perf::millis(since.elapsed()),
+                    "A tick waited for the cells it brings in to be prepared"
+                );
+            }
+            (false, None) => preparing.waiting = Some(Instant::now()),
+            _ => {}
+        }
+        ready
     }
 
     /// Warns, once a run, that cell `cell`'s roots couldn't be kept as text, with `error`.
@@ -4282,24 +4615,20 @@ impl Context {
             return Ok(file.text.clone());
         }
         let Some(root) = self.root.clone() else {
-            let message = format!(
-                "there's no asset root to find the scene {scene} under: `App::root` or \
-                 `App::project` gives the game one"
-            );
-            return Err(Error::new("scene.no_root", message));
+            return Err(no_root(scene));
         };
         let path = package::under(&root, scene);
-        let text = self.read_scene_text(&root, scene, &path, true)?;
+        let text = Self::read_scene_text(&self.files, &root, scene, &path, true)?;
         self.scenes
             .cache(SceneFile::new(path, scene.to_owned(), text.clone()));
         Ok(text)
     }
 
-    /// Reads the scene file `scene` names, at `path` under `root`, as
-    /// [`scene_text`](Self::scene_text) does: checking its name against the disk's, part by part,
-    /// if `named`, for one the disk didn't give.
-    fn read_scene_text(
-        &self,
+    /// Reads the scene file `scene` names, at `path` under `root`, from `files`, as
+    /// [`scene_text`](Self::scene_text) does, on any thread: checking its name against the disk's,
+    /// part by part, if `named`, for one the disk didn't give.
+    pub(crate) fn read_scene_text(
+        files: &Files,
         root: &Path,
         scene: &str,
         path: &Path,
@@ -4307,7 +4636,7 @@ impl Context {
     ) -> Result<String> {
         /// The most a scene file holds, as the most a prefab's does.
         const MOST: u64 = 16 << 20;
-        let packaged = self.files.packaged().is_some();
+        let packaged = files.packaged().is_some();
         let not_found = |within: &str| {
             let message = format!("there's no scene {scene} in {within}");
             Error::new("scene.not_found", message)
@@ -4340,10 +4669,10 @@ impl Context {
                 return Err(Error::new("asset.outside_root", message));
             }
         }
-        let bytes = match self.files.read(path, MOST + 1) {
+        let bytes = match files.read(path, MOST + 1) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && packaged => {
-                let paths = self.files.paths();
+                let paths = files.paths();
                 let other = (paths.iter())
                     .filter_map(|other| other.strip_prefix(root).ok())
                     .map(|other| other.to_string_lossy().replace('\\', "/"))
@@ -4420,7 +4749,7 @@ impl Context {
             if cached || !package::inside(&scene) {
                 continue;
             }
-            if let Ok(text) = self.read_scene_text(&root, &scene, &path, false) {
+            if let Ok(text) = Self::read_scene_text(&self.files, &root, &scene, &path, false) {
                 self.scenes.cache(SceneFile::new(path, scene, text));
             }
         }
@@ -4818,6 +5147,16 @@ impl Context {
             self.picked.push((pick, None));
         }
     }
+}
+
+/// The refusal of the scene `scene` in a run without an asset root, as [`App::root`] gives one
+/// (`scene.no_root`).
+fn no_root(scene: &str) -> Error {
+    let message = format!(
+        "there's no asset root to find the scene {scene} under: `App::root` or `App::project` \
+         gives the game one"
+    );
+    Error::new("scene.no_root", message)
 }
 
 /// Logs `asset.texture_loaded` at the debug level, as a game may add many: texture `named`, `size`
@@ -5616,13 +5955,18 @@ impl Stack {
         cx.apply_edit(edit)
     }
 
-    /// Runs a tick of the simulation, as [`run`](Self::run) says. In a lockstep session, the tick
-    /// waits for the other peer's inputs, returning `false` without running until they've come, or,
-    /// in a rollback session, until it's near enough them, and a client's for the server's world,
-    /// and while it's too far past the latest state, as [`Session::ready`] says; once it can run,
-    /// the run's queued commands go out as its inputs, as [`Session::start_tick`] says.
+    /// Runs a tick of the simulation, as [`run`](Self::run) says. A tick waits for the cells it
+    /// brings in as it starts to be prepared, returning `false` without running until they are, as
+    /// [`Context::cells_ready`] says. In a lockstep session, the tick also waits for the other
+    /// peer's inputs, or, in a rollback session, until it's near enough them, and a client's for the
+    /// server's world, and while it's too far past the latest state, as [`Session::ready`] says;
+    /// once it can run, the run's queued commands go out as its inputs, as [`Session::start_tick`]
+    /// says.
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) -> bool {
         let _zone = gg_core::zone!();
+        if !cx.cells_ready() {
+            return false;
+        }
         let Self {
             layers,
             names,
@@ -5735,6 +6079,12 @@ impl Stack {
         if let Some(sync_test) = sync_test.as_mut() {
             sync_test.take(&cx.world);
         }
+        cx.enter_coming();
+        if let Some(recorder) = recorder.as_mut() {
+            for &(cell, digest) in &cx.cells.came {
+                recorder.cell_came(cell, digest);
+            }
+        }
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(merged) = &merged
                 && let Some(queue) = layer.commands()
@@ -5834,9 +6184,10 @@ impl Stack {
         net.rolled_back(from, next);
     }
 
-    /// Runs a tick as a replay does: as [`tick`](Self::tick) does, with each layer's queue emptied
-    /// and filled again by `fill`, which gets the layer's index, its queue, if it has one, and the
-    /// world as its tick finds it; and a SyncTest runs it again.
+    /// Runs a tick as a replay does: as [`tick`](Self::tick) does, but never waiting, the cells it
+    /// brings in prepared then and there unless the tick before prepared them, with each layer's
+    /// queue emptied and filled again by `fill`, which gets the layer's index, its queue, if it has
+    /// one, and the world as its tick finds it; and a SyncTest runs it again.
     ///
     /// Fails as `fill` does, and as [`run_again`](Self::run_again) does, which ends the SyncTest.
     pub(crate) fn replay_tick(
@@ -5854,9 +6205,12 @@ impl Stack {
         } = self;
         cx.drop_untimely_scene();
         cx.confirm_scene();
+        // What the tick before prepared ahead, on the replay's own thread.
+        cx.prepare_cells();
         if let Some(sync_test) = sync_test.as_mut() {
             sync_test.take(&cx.world);
         }
+        cx.enter_coming();
         for (index, layer) in layers.iter_mut().enumerate() {
             fill(index, layer.commands(), &cx.world)?;
             if let Some(sync_test) = sync_test.as_mut()
@@ -5901,6 +6255,7 @@ impl Stack {
         for layer in layers.iter_mut() {
             layer.swapped(cx);
         }
+        cx.enter_coming();
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(queue) = layer.commands() {
                 sync_test.give_back(index, queue);

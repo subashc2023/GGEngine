@@ -13,6 +13,7 @@ pub(super) mod tests;
 mod write;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
 
@@ -233,6 +234,61 @@ impl World {
         Ok(self.commit(entities, ids, None))
     }
 
+    /// The entities of scene `text`, parsed as [`load_scene`](Self::load_scene) parses them, but
+    /// spawning nothing: in this world, a [scratch](Self::scratch) one of the types and assets of
+    /// the world they'll spawn in, on any thread, for that world's
+    /// [`commit_scene`](Self::commit_scene).
+    ///
+    /// Fails as `load_scene` does, but for the IDs a world has, which `commit_scene` checks.
+    pub(crate) fn parse_scene(&self, text: &str) -> Result<Parsed> {
+        let _zone = gg_core::zone!();
+        let entities = read::parse(self, text, false, &mut Expanding::default())?;
+        Ok(Parsed { entities })
+    }
+
+    /// Spawns `parsed`, which [`parse_scene`](Self::parse_scene) parsed in a world of this one's
+    /// types and assets, as [`load_scene`](Self::load_scene) would have spawned its text, and
+    /// returns its roots: each entity under the handle this world gives it, the references between
+    /// them retargeted to those, so that the world is as the load would have left it.
+    ///
+    /// Fails, spawning nothing, with `ecs.id_taken` for an entity whose ID a living entity has.
+    pub(crate) fn commit_scene(&mut self, parsed: Parsed) -> Result<Vec<Entity>> {
+        let _zone = gg_core::zone!();
+        let Parsed { mut entities } = parsed;
+        if let Some(taken) = entities
+            .iter()
+            .find(|entity| self.entity(entity.id).is_some())
+        {
+            let message = format!(
+                "entity {} is in the world already, but a scene's entities are new: a load keeps \
+                 the IDs it gives",
+                taken.id
+            );
+            return Err(Error::new("ecs.id_taken", message));
+        }
+        // In the order the parse predicted the handles in, which `commit` spawns them in.
+        let handles: HashMap<Entity, Entity> = {
+            let mut slots = self.next_slots();
+            let mut next = || slots.next().expect("there's always another slot");
+            entities
+                .iter()
+                .map(|entity| (entity.handle, next()))
+                .collect()
+        };
+        for entity in &mut entities {
+            entity.handle = handles[&entity.handle];
+            for (_, column) in &mut entity.row {
+                column.entities_mut(0, &mut |held| {
+                    if let Some(&handle) = handles.get(held) {
+                        *held = handle;
+                    }
+                });
+            }
+        }
+        let ids = entities.iter().map(|entity| entity.id).collect();
+        Ok(self.commit(entities, ids, None))
+    }
+
     /// The textures, models, fonts and prefabs scene `text` names that none loaded has, each once,
     /// in the order it first names them, and those the loaded prefabs it names name, in turn: those
     /// [`load_scene`](Self::load_scene) would refuse it for, which the engine loads before it loads
@@ -348,6 +404,12 @@ impl World {
         roots.sort_unstable_by_key(|&(id, _)| id);
         roots.into_iter().map(|(_, root)| root).collect()
     }
+}
+
+/// A scene's entities parsed apart from the world they'll spawn in, as [`World::parse_scene`]
+/// parses them, under the handles of the world it parsed them in, for [`World::commit_scene`].
+pub(crate) struct Parsed {
+    entities: Vec<Loaded>,
 }
 
 /// The IDs of the copy of a prefab's `entities`, placed as `instance`, as

@@ -1510,7 +1510,9 @@ impl Lockstep {
 
     /// The joiner, as its host's world after tick `tick`, where their hashes parted, has come whole
     /// as `text`: logs the first entity, component and field where its own world after that tick
-    /// differs, as [`World::difference`] finds it (`net.desync_field`).
+    /// differs, as [`World::difference`] finds it (`net.desync_field`); and, where a cell's file
+    /// came in from another file than the host's, as [`World::cell_file_parted`] finds it, names
+    /// it (`net.cell_file`) and leaves the session, to try again later, as a refused hello does.
     fn name_parting(&mut self, tick: u64, text: &str) {
         // None after a tick the joiner hasn't kept a world after, as one it didn't part at.
         let Some(ours) = self.worlds.remove(&tick) else {
@@ -1522,7 +1524,30 @@ impl Lockstep {
         // Numbered as lines of the message, after its `parted`.
         let lines = (2..).zip(text.lines().take_while(|line| *line != "end"));
         match theirs.load_whole(lines, true) {
-            Ok(_) => log_parting(tick, &ours, &theirs),
+            Ok(_) => {
+                log_parting(tick, &ours, &theirs);
+                if let Some((file, joiner, host)) = ours.cell_file_parted(&theirs) {
+                    error!(
+                        code = "net.cell_file",
+                        tick,
+                        file = &*file,
+                        joiner = %format_args!("{joiner:016x}"),
+                        host = %format_args!("{host:016x}"),
+                        "The peers' worlds parted after tick {tick} as the cell file {file} came \
+                         in, which isn't the host's here: the joiner leaves, and tries again in {} \
+                         s; give both peers the same files",
+                        REFUSED.as_secs()
+                    );
+                    self.lose(&format!("its cell file {file} isn't the host's"));
+                    if let Find::Join {
+                        address,
+                        connecting,
+                    } = &mut self.find
+                    {
+                        *connecting = Some(connect(address.clone(), "the lockstep host", REFUSED));
+                    }
+                }
+            }
             Err(error) => warn!(
                 code = error.code(),
                 tick,
@@ -2974,6 +2999,41 @@ mod tests {
     #[test]
     fn rollback_peers_stream_cells_in_step() {
         peers_stream_cells_in_step(true);
+    }
+
+    /// A joiner whose cell file isn't its host's, which their worlds part at as the cell comes in,
+    /// names it and leaves the session, to try again later, rather than taking the host's world and
+    /// parting again at the next cell.
+    #[test]
+    fn a_joiner_whose_cell_file_differs_names_it_and_leaves() {
+        use crate::cells::tests::{Walk, project};
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dirs = ["net-cell-file-host", "net-cell-file-joiner"].map(Scratch::new);
+        let [host_root, joiner_root] = [&dirs[0], &dirs[1]].map(|dir| project(&dir.0));
+        let two = joiner_root.join("cells/2_0_0.ron");
+        let other = std::fs::read_to_string(&two).expect("a cell");
+        std::fs::write(&two, other.replace("25.0", "26.0")).expect("written");
+        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &host_root, 1, false);
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        let mut joiner = walker(&Net::Join(address), &joiner_root, 2, false);
+        join(&mut host, &mut joiner);
+        walk(&mut joiner, Walk::Viewer(25.0));
+        let started = Instant::now();
+        let mut seen: Vec<String> = Vec::new();
+        while !seen.iter().any(|code| code == "net.cell_file") {
+            assert!(started.elapsed() < Duration::from_secs(10), "{seen:?}");
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+            seen.extend(logged.try_iter());
+        }
+        assert!(seen.iter().any(|code| code == "net.desync"), "{seen:?}");
+        assert!(seen.iter().any(|code| code == "net.lost"), "{seen:?}");
     }
 
     /// A joiner that joins once its host's cells have come and gone starts from the host's world,

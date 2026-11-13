@@ -198,6 +198,73 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
     );
 }
 
+/// A scene parsed apart, in a scratch world on another thread, and committed, leaves the world as
+/// its load leaves a twin: its entities in the slots the load gives them, their references, parents
+/// and children, and a prefab's instance's entities, retargeted to them. Committed again, an ID the
+/// world has refuses it, spawning nothing.
+#[test]
+fn a_scene_parsed_apart_commits_as_it_loads() {
+    let (prefab, _) = prefab();
+    let instance = r#"        "0a1b2c3d4e5f6071": (
+            PrefabRoot: ("stand.prefab"),
+            Transform: (
+                translation: (2.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)
+"#;
+    let text = replace_last(GOLDEN, "    },\n)\n", instance);
+    let [mut loaded, mut committed] = [0, 1].map(|_| {
+        let mut world = golden_world(1);
+        world.register::<crate::PrefabRoot>().expect("registered");
+        let prefab = Some(prefab.as_str().into());
+        let stand = "stand.prefab";
+        world
+            .assets_mut()
+            .add_prefab(stand.into(), stand.into(), prefab);
+        world
+    });
+    let roots = loaded.load_scene(&text).unwrap_or_else(|e| panic!("{e}"));
+    let scratch = committed.scratch();
+    let parsed = std::thread::scope(|scope| {
+        let parsing = scope.spawn(|| scratch.parse_scene(&text));
+        parsing.join().expect("parsed without a panic")
+    });
+    let parsed = parsed.unwrap_or_else(|e| panic!("{e}"));
+    let committed_roots = committed.commit_scene(parsed).expect("committed");
+    assert_eq!(committed_roots, roots, "in the slots the load gives");
+    assert_eq!(committed.hash(), loaded.hash());
+    check_ids(&committed);
+    check_links(&committed);
+    let cell = committed.entity(id("2b7e151628aed2a6")).expect("in");
+    let mover = committed.entity(id("9f86d081884c7d65")).expect("in");
+    assert_eq!(committed.get::<Parent>(mover), Some(&Parent(cell)));
+    let patrols: Vec<(Entity, Option<Entity>)> = (committed.query::<(Entity, &Patrol)>())
+        .map(|(entity, patrol)| (entity, patrol.target))
+        .collect();
+    assert_eq!(patrols.len(), 2, "the mover's and the instance's");
+    for (entity, target) in patrols {
+        let target = target.expect("a target");
+        assert!(
+            committed.id(target).is_some(),
+            "{entity:?} patrols to {target:?}"
+        );
+        let up = |of| committed.get::<Parent>(of).map(|parent| parent.0);
+        let kin = up(entity) == Some(target) || up(entity) == up(target);
+        assert!(kin, "{entity:?} patrols to its parent or its sibling");
+    }
+    let again = committed.scratch().parse_scene(&text).expect("parsed");
+    let (hash, version) = (committed.hash(), committed.version());
+    let refused = committed
+        .commit_scene(again)
+        .expect_err("its IDs are taken");
+    assert_eq!(refused.code(), "ecs.id_taken");
+    assert_eq!((committed.hash(), committed.version()), (hash, version));
+}
+
 /// A scene file reads back as it was written, and a write over it replaces it, through a file of
 /// its own beside it, which it leaves behind neither then nor when it can't replace what's there;
 /// a file of the user's named as such a file might be is left as it was. A file that's read only
