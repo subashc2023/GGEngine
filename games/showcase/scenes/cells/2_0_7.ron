@@ -1,0 +1,66 @@
+(
+    entities: {
+        "5ce1020700000001": (
+            BoxCollider3D: (
+                offset: (0.0, 0.0, 0.0),
+                size: (1.0, 1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+                sensor: false,
+                membership: 4294967295,
+                filter: 4294967295,
+            ),
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate"),
+            RigidBody3D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0, 0.0),
+                angular_velocity: (0.0, 0.0, 0.0),
+            ),
+            Transform: (
+                translation: (140.0, 1.0, 476.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.0, 2.0, 2.0),
+            ),
+        ),
+        "5ce1020700000002": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Transform: (
+                translation: (176.0, 1.5, 460.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.5, 1.5),
+            ),
+        ),
+        "5ce1020700000003": (
+            ModelRoot: ("fbca002a5a685a47"),
+            Name: ("Ball"),
+            Transform: (
+                translation: (148.0, 0.5, 496.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5ce1020700000004": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.55, 0.2),
+                intensity: 2500.0,
+                range: Some(16.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Lamp"),
+            Transform: (
+                translation: (160.0, 4.0, 480.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

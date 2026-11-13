@@ -82,7 +82,8 @@ impl World {
     ///
     /// Every entity goes, the game's own as well as the scene's, as a despawn takes it, so that no
     /// handle from before names one, and the scene's are spawned under the IDs it gives them; the
-    /// [resources](crate::Resource) stay, as what a game carries from one scene to the next, and
+    /// [resources](crate::Resource) stay, as what a game carries from one scene to the next, but
+    /// what the world keeps of its [cells](crate::Cells), which goes with its entities; and
     /// the world stays the world, by its [serial](Self::serial). The authors' edits applied before
     /// the change, the tool API's clients' and the Inspector's, stay in their logs, but an undo or
     /// a redo of one is refused (`ops.scene_changed`), as the scene may have put another entity
@@ -162,7 +163,7 @@ impl World {
     /// Puts scene `text`'s entities, of the scene file `path` names, in place of every entity of
     /// the world's, as [`change_scene`](Self::change_scene) says, and returns the scene's roots:
     /// the world's despawned, roots first with what's under them, in the order a query finds them,
-    /// and
+    /// what the world keeps of its cells emptied with them, as [`Cells`](crate::Cells) says, and
     /// the scene loaded as [`load_scene`](Self::load_scene) loads it. All of it, or, if the scene
     /// is refused, none.
     ///
@@ -177,6 +178,7 @@ impl World {
         for root in roots {
             self.despawn(root).expect("a root is alive");
         }
+        self.empty_cells();
         let roots = self.load_scene(text).expect(
             "a scene that loads into the world without its entities loads once they've gone",
         );

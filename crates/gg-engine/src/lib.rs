@@ -11,8 +11,9 @@
 //! colliders, paths over it and agents that walk them round each other; animation, sprites'
 //! flipbooks and fields' tweens;
 //! particles' emitters, components whose particles the frames emit and own; scenes and prefabs, the world's entities as canonical
-//! text; operations, the authoring changes made to the world, each with its inverse, and their
-//! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
+//! text, and worlds of cells, each a scene file, which come in around viewers and go out as text,
+//! as each tick ends; operations, the authoring changes made to the world, each with its inverse,
+//! and their log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
 //! frame, for the log and the Performance panel; the grid a tool's view shows in an axis plane;
 //! loading what layers add, images as textures, glTF models, whose nodes spawn as entities, their
@@ -46,6 +47,7 @@ mod audio;
 mod bounds;
 mod camera;
 mod canvas;
+mod cells;
 // In development builds alone, as `dev` has the UI.
 #[cfg(feature = "dev")]
 mod chrome;
@@ -182,6 +184,7 @@ pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,
 };
 pub use canvas::{CANVAS_HEIGHT, Canvas};
+pub use cells::{Cell, Cells, Streamed, Viewer};
 #[cfg(feature = "dev")]
 pub use dialog::FileDialog;
 pub use dock::{Docked, Ui};

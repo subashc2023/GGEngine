@@ -311,7 +311,9 @@ fn tools() -> Value {
              entities, its view's size, its open scene's file, as `scene` names it, whether \
              the open scene is unsaved, which a game playing from its start is as soon as its \
              ticks move what the file holds, and whether authors have edited it, `edited`, since \
-             it was saved or opened, which ticks don't change.",
+             it was saved or opened, which ticks don't change; and in a world of cells, scene \
+             files that come in around its viewers, how many are in and how many out keep what \
+             they held, `cells`.",
             json!({}),
             &[],
         ),

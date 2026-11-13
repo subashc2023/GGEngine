@@ -105,7 +105,7 @@ fn fetched_files_stay_out_of_the_repository() {
 #[test]
 fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
-    assert_eq!(scenes.len(), 42, "{scenes:?}");
+    assert_eq!(scenes.len(), 43, "{scenes:?}");
     let unfetched = unfetched();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
@@ -127,6 +127,34 @@ fn every_scene_loads_and_saves_as_it_is() {
         );
         let saved = cx.world().save_scene(&roots).expect("saved");
         assert_eq!(saved, text, "{}", path.display());
+    }
+}
+
+/// The world of cells' scene names the folder its cells are in, each of which is a cell's file, on
+/// the 8 by 8 grid of cells from the origin along x and z, and loads, beside the others, as cells
+/// come in, and saves to its own bytes.
+#[test]
+fn every_cell_of_the_world_loads_and_saves_as_it_is() {
+    let world = fs::read_to_string(dir().join("scenes/cells.ron")).expect("the world");
+    assert!(world.contains("folder: \"scenes/cells\""), "{world}");
+    let listed = fs::read_dir(dir().join("scenes/cells")).expect("the cells' folder");
+    let mut names: Vec<String> = (listed.map(|entry| entry.expect("an entry").file_name()))
+        .map(|name| name.into_string().expect("a name"))
+        .collect();
+    names.sort();
+    let mut grid: Vec<String> = (0..8)
+        .flat_map(|x| (0..8).map(move |z| format!("{x}_0_{z}.ron")))
+        .collect();
+    grid.sort();
+    assert_eq!(names, grid);
+    let (mut cx, _showcase) = loaded();
+    for name in names {
+        let path = dir().join("scenes/cells").join(&name);
+        let text = fs::read_to_string(&path).expect("the cell");
+        let roots = cx.load_scene_file(&path);
+        let roots = roots.unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        let saved = cx.world().save_scene(&roots).expect("saved");
+        assert_eq!(saved, text, "{name}");
     }
 }
 

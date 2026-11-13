@@ -993,6 +993,30 @@ A project's state is text that people and agents edit, diff and merge with ordin
     level once the tick is final, as it logs a change that went in, with how many were refused
     since.
     [scene_change.rs](crates/gg-engine/src/scene_change.rs) has the rest.
+- **Worlds of cells.** A world larger than memory or a frame should hold at once is a scene whose
+  `Cells` cuts space into cubes, `size` units on a side from the origin, each a cell whose entities
+  are in a scene file of the folder `Cells` names, called by its place on the grid, as
+  `cells/3_0_-2.ron`; a cell without a file is empty. As each tick ends, after the layers' ticks,
+  the cells within a `Viewer`'s radius come into the world and those farther than the radius and
+  half a cell from every viewer go out: from the world alone, so that a replay, a tick run again by
+  rollback or a SyncTest, and each lockstep peer bring the same cells in at the same tick.
+  - A cell's roots stream (`Streamed`), as does what a game marks so: each belongs to the cell where
+    it stands, and goes out with that cell, or at once if a tick leaves it in a cell that's out,
+    with everything under it. A cell keeps what went out as scene text, under its IDs, and comes
+    back from that rather than its file, so that a door opened stays open and an enemy stays where
+    it walked. What is or holds a viewer stays, as does what doesn't stream, as the world scene's
+    own entities; what refers to a streamed entity from outside finds it gone once it's out.
+  - What the world keeps of its cells, those in, those refused and each one's texts, is a saved
+    resource, which snapshots, a lockstep joiner and a server's clients take with the world, and
+    which the hash reads, in its layout, only in a world whose cells have come in, so that every
+    other world hashes as before. A scene change empties it.
+  - A run lists a folder of cells once, from its package or the disk, and reads each cell's file
+    once, as it reads a scene change's, loading what the file names first, as a scene change does,
+    a server's session nothing. A cell loads on the main thread at the tick it comes in, at most
+    4,096 in at once, the nearest first (`cells.full`). One whose load is refused, as for an ID
+    already alive, stays out until every viewer has gone (`cells.refused`); one whose entities
+    can't be kept as text, as for a reference to an entity going with neither them nor their cell,
+    stays in (`cells.held`). [cells.rs](crates/gg-engine/src/cells.rs) has the rest.
 
 ## ECS
 
@@ -1324,8 +1348,10 @@ alone, as Foxball's bot, a session's runs leave out.
   server would, the sounds played before not played again. A queue that edits, as the Inspector's,
   goes to the server alone. A scene a tick changes to, as [Project state](#project-state) says,
   goes in on the server and on each client predicting it at the same tick, from the assets the
-  layers loaded alone. As the run ends a client logs how often it corrected
-  (`net.corrected`), and the server what it sent (`net.served`).
+  layers loaded alone. A server's cells come in around every client's viewers, and its states carry
+  every cell in, and what each out keeps, to each client, which brings none in itself, its
+  predictions corrected as a cell comes or goes. As the run ends a client logs how often it
+  corrected (`net.corrected`), and the server what it sent (`net.served`).
 - **The other players draw between the server's states.** An entity whose `Owner` component names
   another player, and its descendants, draw on a client between the two states about three ticks
   behind the latest, where the time since the latest came puts it, eased so that the states'

@@ -2888,6 +2888,140 @@ mod tests {
         peers_change_scenes_in_step(true);
     }
 
+    /// A peer of `net`'s session in the asset root `root`, of a [`Walker`](crate::cells::tests::Walker)
+    /// that builds a world of cells, which predicts the other's inputs and rolls back over a slow
+    /// link if `rollback` says so.
+    fn walker(net: &Net, root: &std::path::Path, seed: u64, rollback: bool) -> Peer {
+        let mut stack = Stack::default();
+        stack.push_layer(crate::cells::tests::Walker::default());
+        let cx = Context::seeded(seed).root(root);
+        Peer::of(stack, net, cx, rollback, rollback.then_some(SLOW))
+    }
+
+    /// Queues `walk` on `peer`'s walker.
+    fn walk(peer: &mut Peer, walk: crate::cells::tests::Walk) {
+        let queue = peer
+            .stack
+            .commands_of(0)
+            .expect("the walker queues commands");
+        queue.push(&walk.to_value()).expect("queued");
+    }
+
+    /// Lockstep peers, predicting each other's inputs and rolling back if `rollback`, bring the
+    /// same cells in and take the same out as each moves the viewer or an entity in turn, cell 1
+    /// coming back from what it keeps, their worlds hashing alike once both have run each tick on
+    /// both peers' inputs, without a desync: rolling back, each runs ticks again across cells'
+    /// entries and exits.
+    fn peers_stream_cells_in_step(rollback: bool) {
+        use crate::cells::tests::{Walk, id_of, project, xs};
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new(&format!("net-cells-{rollback}"));
+        let root = project(&dir.0);
+        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &root, 1, rollback);
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        let mut joiner = walker(&Net::Join(address), &root, 2, rollback);
+        join(&mut host, &mut joiner);
+        for (by_joiner, step, cells) in [
+            (true, Walk::Viewer(25.0), vec![0, 1, 2, 3]),
+            (false, Walk::Crate(12.0), vec![0, 1, 2, 3]),
+            (true, Walk::Viewer(100.0), vec![]),
+            (false, Walk::Viewer(5.0), vec![0, 1]),
+        ] {
+            walk(if by_joiner { &mut joiner } else { &mut host }, step);
+            for _ in 0..20 {
+                host.turn();
+                joiner.turn();
+                thread::sleep(Duration::from_millis(1));
+            }
+            let at = host.next.max(joiner.next) + DELAY.max(ROLLBACK_DELAY) + 1;
+            settle(&mut host, &mut joiner, at);
+            let (ours, theirs) = (host.cx.world(), joiner.cx.world());
+            assert_eq!((xs(ours), xs(theirs)), (cells.clone(), cells), "{step:?}");
+            assert_eq!(ours.hash(), theirs.hash(), "{step:?}");
+        }
+        for peer in [&host, &joiner] {
+            let world = peer.cx.world();
+            let entity = world.entity(id_of(1)).expect("in");
+            let at = world.get::<crate::Transform>(entity).expect("placed");
+            assert_eq!(at.translation.x, 12.0, "as it was left");
+        }
+        if rollback {
+            for peer in [&mut host, &mut joiner] {
+                let [rollbacks, ..] = peer.net().rolled;
+                assert!(rollbacks > 0, "rolled back");
+            }
+        }
+        let codes: Vec<String> = logged.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command", "net.lost", "cells.refused"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// As [`peers_stream_cells_in_step`] says, in lockstep.
+    #[test]
+    fn lockstep_peers_stream_cells_in_step() {
+        peers_stream_cells_in_step(false);
+    }
+
+    /// As [`peers_stream_cells_in_step`] says, rolling back over a slow link.
+    #[test]
+    fn rollback_peers_stream_cells_in_step() {
+        peers_stream_cells_in_step(true);
+    }
+
+    /// A joiner that joins once its host's cells have come and gone starts from the host's world,
+    /// what the cells keep among it, and brings them in again alike: cell 1's entity where the host
+    /// left it.
+    #[test]
+    fn a_joiner_takes_what_its_host_s_cells_keep() {
+        use crate::cells::tests::{Walk, id_of, project, xs};
+        use crate::dirs::tests::Scratch;
+
+        let dir = Scratch::new("net-cells-joiner");
+        let root = project(&dir.0);
+        let mut host = walker(&Net::Host("127.0.0.1:0".to_owned()), &root, 1, false);
+        for step in [Walk::Viewer(25.0), Walk::Crate(12.0), Walk::Viewer(100.0)] {
+            walk(&mut host, step);
+            // Past the tick its commands go out for, `DELAY` on, as a peer's do alone too.
+            for _ in 0..=DELAY {
+                host.turn();
+            }
+        }
+        let kept = |peer: &Peer| {
+            let world = peer.cx.world();
+            world.resource::<crate::cells::CellState>().cloned()
+        };
+        let held = kept(&host).expect("the host's cells came in");
+        assert_eq!((held.cells_in.len(), held.kept.len()), (0, 4));
+        let address = host.net().listening.expect("listening").to_string();
+        let mut joiner = walker(&Net::Join(address), &root, 2, false);
+        join(&mut host, &mut joiner);
+        assert_eq!(kept(&joiner), Some(held), "the host's");
+        walk(&mut joiner, Walk::Viewer(5.0));
+        for _ in 0..20 {
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let at = host.next.max(joiner.next) + DELAY + 1;
+        settle(&mut host, &mut joiner, at);
+        for peer in [&host, &joiner] {
+            let world = peer.cx.world();
+            assert_eq!(xs(world), [0, 1]);
+            let entity = world.entity(id_of(1)).expect("in");
+            let at = world.get::<crate::Transform>(entity).expect("placed");
+            assert_eq!(at.translation.x, 12.0, "where the host left it");
+        }
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+    }
+
     /// Queues a command for each player on its peer, and turns both, `turns` times.
     fn play(host: &mut Peer, joiner: &mut Peer, turns: usize) {
         for _ in 0..turns {

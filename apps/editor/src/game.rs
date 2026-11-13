@@ -2957,6 +2957,7 @@ mod tests {
             scene: None,
             unsaved: false,
             edited: false,
+            cells: None,
         };
         Ok(json!(status))
     }
@@ -2974,6 +2975,7 @@ mod tests {
             scene: scene.map(str::to_owned),
             unsaved,
             edited: unsaved,
+            cells: None,
         };
         Ok(json!(status))
     }

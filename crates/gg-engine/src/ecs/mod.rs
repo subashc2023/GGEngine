@@ -40,6 +40,7 @@ pub use declared::Kind;
 pub use diff::Difference;
 #[cfg(feature = "dev")]
 pub(crate) use diff::SceneEdit;
+pub(crate) use hash::text_digest;
 pub use hash::{Digest, WorldHash};
 use hierarchy::Links;
 pub use hierarchy::{Parent, Pose};

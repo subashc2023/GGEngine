@@ -531,9 +531,14 @@ mod tests {
     }
 
     impl Node {
-        fn new(net: &Net, mut cx: Context) -> Self {
+        fn new(net: &Net, cx: Context) -> Self {
+            Self::of(net, cx, Game::default())
+        }
+
+        /// A node of `layer` alone, in place of a [`Game`].
+        fn of(net: &Net, mut cx: Context, layer: impl crate::Layer + 'static) -> Self {
             let mut stack = Stack::default();
-            stack.push_layer(Game::default());
+            stack.push_layer(layer);
             let mut session = Session::start(net, "Tested", stack.names()).expect("started");
             session.condition(SLOW);
             stack.session(session);
@@ -776,6 +781,58 @@ mod tests {
             let near = |client: &mut Node| (client.client().lead - LEAD as f64).abs() < 1.0;
             clients.iter_mut().all(near)
         });
+        let codes: Vec<String> = logged.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command", "net.bad_state", "net.lost"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// A server brings cells in and takes them out around the viewers its clients' commands move,
+    /// and its states carry them, and what they keep, to each client, which comes to the server's
+    /// world, hashing alike, though its own ticks bring none in.
+    #[test]
+    fn a_server_s_clients_take_its_cells_with_its_states() {
+        use crate::cells::CellState;
+        use crate::cells::tests::{Walk, Walker, id_of, project, xs};
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new("server-cells");
+        let root = project(&dir.0);
+        let serve = Net::Serve("127.0.0.1:0".to_owned());
+        let mut server = Node::of(&serve, Context::seeded(1).root(&root), Walker::default());
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.to_string(),
+            _ => panic!("a server"),
+        };
+        let connect = Net::Connect(address);
+        let client = Node::of(&connect, Context::seeded(2).root(&root), Walker::default());
+        let mut clients = [client];
+        until(&mut server, &mut clients, |_, clients| clients[0].joined());
+        assert!(clients[0].cx.client);
+        for (step, cells) in [
+            (Walk::Viewer(25.0), vec![0, 1, 2, 3]),
+            (Walk::Crate(12.0), vec![0, 1, 2, 3]),
+            (Walk::Viewer(100.0), vec![]),
+            (Walk::Viewer(5.0), vec![0, 1]),
+        ] {
+            let queue = clients[0].stack.commands_of(0).expect("a queue");
+            queue.push(&step.to_value()).expect("queued");
+            until(&mut server, &mut clients, |server, clients| {
+                let (ours, theirs) = (server.cx.world(), clients[0].cx.world());
+                xs(ours) == cells && ours.hash() == theirs.hash()
+            });
+            let state = |node: &Node| node.cx.world().resource::<CellState>().cloned();
+            assert_eq!(state(&clients[0]), state(&server), "{step:?}");
+        }
+        let world = clients[0].cx.world();
+        let entity = world.entity(id_of(1)).expect("in");
+        let at = world.get::<crate::Transform>(entity).expect("placed");
+        assert_eq!(at.translation.x, 12.0, "as the server left it");
         let codes: Vec<String> = logged.try_iter().collect();
         let parted = ["net.desync", "net.bad_command", "net.bad_state", "net.lost"];
         assert!(

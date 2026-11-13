@@ -574,6 +574,20 @@ pub struct Status {
     /// leaves it true. False from an engine older than it.
     #[serde(default)]
     pub edited: bool,
+    /// The world's cells, in a world of cells, whose `Cells` cut it into scene files that come in
+    /// around its viewers and go out as they go away: how many are in, and how many out keep what
+    /// they held. `None` in a world whose cells never came in, and from an engine older than cells.
+    #[serde(default)]
+    pub cells: Option<CellCounts>,
+}
+
+/// How many of a world's cells are in, and how many out keep what they held, as [`Status::cells`]
+/// says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellCounts {
+    #[serde(rename = "in")]
+    pub cells_in: usize,
+    pub kept: usize,
 }
 
 /// What `scene` takes: what to do to the open scene; the file to open, or to save it as, absolute
@@ -2638,9 +2652,19 @@ mod tests {
         let older = r#"{"ticks": 1, "paused": false, "frames": 2, "entities": 3, "view": null}"#;
         let status: Status = serde_json::from_str(older).unwrap();
         assert_eq!(
-            (status.scene, status.unsaved, status.edited),
-            (None, false, false)
+            (status.scene, status.unsaved, status.edited, status.cells),
+            (None, false, false, None)
         );
+        let streaming = r#"{"ticks": 1, "paused": false, "frames": 2, "entities": 3, "view": null,
+            "cells": {"in": 4, "kept": 2}}"#;
+        let status: Status = serde_json::from_str(streaming).unwrap();
+        let cells = CellCounts {
+            cells_in: 4,
+            kept: 2,
+        };
+        assert_eq!(status.cells, Some(cells));
+        let written = serde_json::to_value(cells).unwrap();
+        assert_eq!(written, serde_json::json!({"in": 4, "kept": 2}));
     }
 
     /// `assets` takes a kind there is, or none, and a page, defaulting each; and its answer gives

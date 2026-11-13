@@ -140,7 +140,9 @@ Talk to a running game, through its tool API:
   status                         Its ticks, whether it's paused or stopped, its frames, entities and
                                  view, and its open scene's file, whether it differs from the file,
                                  `unsaved`, as a playing game's ticks make it, and whether authors
-                                 edited it since it was saved or opened, `edited`
+                                 edited it since it was saved or opened, `edited`; in a world of
+                                 cells, how many are in and how many out keep what they held,
+                                 `cells`
   wait [--timeout <SECONDS>]     Wait until the game under `gg run` runs the code of every edit to
                                  its sources saved before, patched or rebuilt, for at most SECONDS
                                  (300), and print what `run` is doing; fails with `gg.build_failed`

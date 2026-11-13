@@ -35,6 +35,7 @@ use crate::assets::{Catalog, Prints};
 use crate::audio::{self, Audio, Bus, Music, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
+use crate::cells::{self, Cell, CellRun, CellState};
 use crate::cooked;
 use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
@@ -536,12 +537,19 @@ pub struct Context {
     /// server's states, and a scene change loads none, as [`change_scene`](Self::change_scene)
     /// says.
     pub(crate) served: bool,
+    /// Whether the run is a server's client, as the layers attach or pick up from a restore, whose
+    /// world's cells come in with its server's states alone, as
+    /// [`stream_cells`](Self::stream_cells) says.
+    pub(crate) client: bool,
     /// How many scene changes the world had been through as a tick last took them as final, as
     /// [`confirm_scene`](Self::confirm_scene) says.
     scene_seen: u64,
     /// How many scene changes the world's ticks had asked for that were refused, as a tick last
     /// took them as final.
     refused_seen: u64,
+    /// What the run keeps of its worlds' cells beside the world, as
+    /// [`stream_cells`](Self::stream_cells) says.
+    cells: CellRun,
     /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
     /// from a restore.
     #[cfg(feature = "dev")]
@@ -708,9 +716,13 @@ impl Context {
             world.register::<font::Text>()?;
             world.register::<Owner>()?;
             world.register::<PrefabRoot>()?;
+            world.register::<crate::Cells>()?;
+            world.register::<crate::Viewer>()?;
+            world.register::<crate::Streamed>()?;
             world.register_saved::<Physics2D>()?;
             world.register_saved::<Physics3D>()?;
-            world.register_saved::<crate::scene_change::SceneIn>()
+            world.register_saved::<crate::scene_change::SceneIn>()?;
+            world.register_saved::<CellState>()
         });
         registered.expect("the engine's components describe themselves");
         let mut textures = Textures::default();
@@ -810,8 +822,10 @@ impl Context {
             player: None,
             networked: false,
             served: false,
+            client: false,
             scene_seen: 0,
             refused_seen: 0,
+            cells: CellRun::default(),
             #[cfg(feature = "dev")]
             sync_tested: false,
         }
@@ -3999,6 +4013,20 @@ impl Context {
             return Err(Error::new("scene.bad_path", message));
         }
         let text = self.scene_text(scene)?;
+        self.load_assets_of(scene, &text)?;
+        let roots = self.world.change_entities(scene, &text).map_err(|error| {
+            let message = format!("{scene}:{error}");
+            error.with_message(message)
+        })?;
+        Ok(roots.len())
+    }
+
+    /// Loads what scene `text`, of the scene file `scene` names, names that no layer has added, as
+    /// [`change_scene`](Self::change_scene) says, the world sharing what's loaded; in a server's
+    /// session none, refusing a scene that names what no layer loaded.
+    ///
+    /// Fails as `change_scene` does for what the scene names, the name beginning the message.
+    pub(crate) fn load_assets_of(&mut self, scene: &str, text: &str) -> Result<()> {
         // A world put in the world's place, as a SyncTest's copy, may share fewer assets than the
         // layers have added since it was taken, which the scene may name.
         self.share_assets();
@@ -4006,22 +4034,200 @@ impl Context {
             let message = format!("{scene}:{error}");
             error.with_message(message)
         };
-        if self.served {
-            let missing = self.world.scene_assets(&text).map_err(named)?;
-            if let Some(asset) = missing.first() {
-                let message = format!(
-                    "{scene} names {}, which no layer has loaded, and a server's session loads \
-                     none as it plays, so that its clients read its states: load what the game's \
-                     scenes name as its layers load",
-                    asset.name()
-                );
-                return Err(Error::new("net.no_scene_change", message));
-            }
-        } else {
-            self.load_change_assets(&text).map_err(named)?;
+        if !self.served {
+            return self.load_change_assets(text).map_err(named);
         }
-        let roots = self.world.change_entities(scene, &text).map_err(named)?;
-        Ok(roots.len())
+        let missing = self.world.scene_assets(text).map_err(named)?;
+        if let Some(asset) = missing.first() {
+            let message = format!(
+                "{scene} names {}, which no layer has loaded, and a server's session loads none as \
+                 it plays, so that its clients read its states: load what the game's scenes name as \
+                 its layers load",
+                asset.name()
+            );
+            return Err(Error::new("net.no_scene_change", message));
+        }
+        Ok(())
+    }
+
+    /// Brings the world's cells in and takes them out, as [`Cells`](crate::Cells),
+    /// [`Viewer`](crate::Viewer) and [`Streamed`](crate::Streamed) say, as each tick ends, after
+    /// its layers', wherever a tick runs, again in a rollback or a SyncTest too: from the world
+    /// alone, as [`World::plan_cells`] finds it, so that every run of the tick does the same. Cells
+    /// go out first, in order, then the roots left in cells out, then cells come in, in order: each
+    /// cell's file read as [`scene_text`](Self::scene_text) keeps it, once a run, and what it and
+    /// the texts the cell keeps name loaded first, as [`load_assets_of`](Self::load_assets_of) does
+    /// for a scene change, in a server's session none.
+    ///
+    /// Logs, at the debug level, `cells.entered` and `cells.left`, with the cell, how many roots
+    /// came or went and how long it took. A cell that doesn't come in, as one whose file gives an
+    /// entity's ID that's alive (`ecs.id_taken`) or names a model that doesn't load, stays out,
+    /// warning `cells.refused`, with why, until every viewer has gone; one whose roots can't be
+    /// kept as text stays in, warning `cells.held`. A server's client brings none in: its cells
+    /// come in with its server's states. A world without `Cells` costs a query; one whose cells
+    /// stay as they are, the plan, whose room [`CellRun`] keeps from tick to tick.
+    pub(crate) fn stream_cells(&mut self) {
+        if self.client {
+            return;
+        }
+        let Some((id, cells, count)) = self.world.world_cells() else {
+            return;
+        };
+        let tie = (count > 1).then_some((id, count));
+        if tie.is_some() && tie != self.cells.tie {
+            warn!(
+                code = "cells.tie",
+                seen = %id,
+                count,
+                "{count} entities have Cells: the world streams by the one of the lowest ID, {id}"
+            );
+        }
+        self.cells.tie = tie;
+        let size = cells.size;
+        if !(size.is_finite() && size > 0.0) {
+            if self.cells.first("cells.bad_size", id) {
+                warn!(
+                    code = "cells.bad_size",
+                    entity = %id,
+                    size,
+                    "The Cells of entity {id} are {size} units on a side, which isn't finite and \
+                     positive, so no cell comes in or goes out"
+                );
+            }
+            return;
+        }
+        let run = &mut self.cells;
+        let listed = match run
+            .listed
+            .iter()
+            .find(|(folder, _)| *folder == cells.folder)
+        {
+            Some((_, listed)) => Arc::clone(listed),
+            None => {
+                let folder = &cells.folder;
+                let listed = cells::list_cells(self.root.as_deref(), &self.files, folder);
+                let listed: Arc<[Cell]> = listed.unwrap_or_else(|error| {
+                    warn!(
+                        code = "cells.listing",
+                        folder = &**folder,
+                        "{error:#}, so no cell comes in from a file"
+                    );
+                    Arc::new([])
+                });
+                run.listed.push((folder.clone(), Arc::clone(&listed)));
+                listed
+            }
+        };
+        self.world.plan_cells(size, &listed, &mut run.plan);
+        if run.plan.is_empty() {
+            return;
+        }
+        let folder = cells.folder.clone();
+        let plan = mem::take(&mut self.cells.plan);
+        let filed = |cell: &Cell| listed.binary_search(cell).is_ok();
+        // Those of `roots`, sorted by cell, that are in `cell`.
+        let of = |roots: &[(Cell, Entity)], cell: Cell| -> Vec<Entity> {
+            let from = roots.partition_point(|&(other, _)| other < cell);
+            let to = roots.partition_point(|&(other, _)| other <= cell);
+            roots[from..to].iter().map(|&(_, root)| root).collect()
+        };
+        for &cell in &plan.leaving {
+            let started = Instant::now();
+            let roots = of(&plan.leavers, cell);
+            match self.world.keep_cell(cell, &roots, true, filed(&cell)) {
+                Ok(roots) => debug!(
+                    code = "cells.left",
+                    cell = %cell,
+                    roots,
+                    ms = perf::millis(started.elapsed()),
+                    "A cell went out"
+                ),
+                Err(error) => self.held(cell, &error),
+            }
+        }
+        let mut strays = plan.strays.iter().map(|&(cell, _)| cell).peekable();
+        while let Some(cell) = strays.next() {
+            while strays.next_if_eq(&cell).is_some() {}
+            let roots = of(&plan.strays, cell);
+            if let Err(error) = self.world.keep_cell(cell, &roots, false, filed(&cell)) {
+                self.held(cell, &error);
+            }
+        }
+        for &cell in &plan.entering {
+            let started = Instant::now();
+            match self.enter_cell(&folder, cell, filed(&cell)) {
+                Ok(roots) => debug!(
+                    code = "cells.entered",
+                    cell = %cell,
+                    roots,
+                    ms = perf::millis(started.elapsed()),
+                    "A cell came in"
+                ),
+                Err(error) => {
+                    if self.cells.first("cells.refused", cell) {
+                        warn!(
+                            code = "cells.refused",
+                            cell = %cell,
+                            refused = error.code(),
+                            "{error:#}; the cell stays out until every viewer has gone"
+                        );
+                    }
+                    self.world.refuse_cell(cell);
+                }
+            }
+        }
+        self.world.forget_refused(&plan.forgotten);
+        if plan.full && self.cells.first("cells.full", &folder) {
+            let most = cells::MOST_CELLS;
+            warn!(
+                code = "cells.full",
+                folder = &*folder,
+                most,
+                "More cells are near the viewers than the {most} a world holds at once: the \
+                 nearest come in"
+            );
+        }
+        self.cells.plan = plan;
+    }
+
+    /// Brings cell `cell`, of the cells of `folder`, in, as
+    /// [`stream_cells`](Self::stream_cells) says: its file, if `filed`, read and what it names
+    /// loaded, unless what the cell keeps stands for it, and what each text it keeps names; and
+    /// returns how many roots came.
+    ///
+    /// Fails, bringing nothing in, as [`scene_text`](Self::scene_text) does, as
+    /// [`load_assets_of`](Self::load_assets_of) does, and as [`World::enter_cell`] does, the
+    /// cell's path beginning the message.
+    fn enter_cell(&mut self, folder: &str, cell: Cell, filed: bool) -> Result<usize> {
+        let path = format!("{folder}/{cell}.ron");
+        let kept = self.world.resource::<CellState>();
+        let kept = kept.and_then(|state| state.kept.get(&cell)).cloned();
+        let kept = kept.unwrap_or_default();
+        let file = match filed && !kept.visited {
+            true => Some(self.scene_text(&path)?),
+            false => None,
+        };
+        let texts = file.iter().map(String::as_str);
+        for text in texts.chain(kept.texts.iter().map(|kept| &*kept.text)) {
+            self.load_assets_of(&path, text)?;
+        }
+        let entered = self.world.enter_cell(cell, file.as_deref());
+        entered.map_err(|error| {
+            let message = format!("{path}:{error}");
+            error.with_message(message)
+        })
+    }
+
+    /// Warns, once a run, that cell `cell`'s roots couldn't be kept as text, with `error`.
+    fn held(&mut self, cell: Cell, error: &Error) {
+        if self.cells.first("cells.held", cell) {
+            warn!(
+                code = "cells.held",
+                cell = %cell,
+                held = error.code(),
+                "{error:#}; the cell's streamed roots stay in the world"
+            );
+        }
     }
 
     /// Loads what scene `text` names that no layer has added, for a scene change, as
@@ -5123,6 +5329,7 @@ impl Stack {
         cx.player = self.net.as_ref().and_then(Session::player);
         cx.networked = self.net.is_some();
         cx.served = self.served();
+        cx.client = matches!(self.net, Some(Session::Client(_)));
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {
@@ -5162,6 +5369,7 @@ impl Stack {
         cx.player = self.net.as_ref().and_then(Session::player);
         cx.networked = self.net.is_some();
         cx.served = self.served();
+        cx.client = matches!(self.net, Some(Session::Client(_)));
         cx.follows |= self.joins();
         #[cfg(feature = "dev")]
         {
@@ -5436,20 +5644,21 @@ impl Stack {
     }
 
     /// Runs tick `tick`: each layer's, from the bottom up, after which the world shares the
-    /// context's assets again, as [`Context::share_assets`] says, and then the sounds the tick
-    /// queued play, as [`World::play_sound`] says. A recording gets each layer's commands just
-    /// before its tick applies them, so that a tick that panics leaves them, and the world's hash
-    /// after the last. In a networked session, the tick runs on the session's inputs for it, as
-    /// [`Session::inputs`] says: in a lockstep session, both peers', the edits among them applying
-    /// first, as a recording keeps them; or, in a rollback session, before the other's have come,
-    /// on them predicted, a copy of the world kept as it starts, which a rollback runs it again
-    /// from; a server's own and its clients'; and a client's own. Where the tick may run again, as
-    /// a rollback peer's or a client's, the sounds it plays are kept, which a run again doesn't
-    /// play again, as [`Context::play_queued_again`] says; and the session is told once it has
-    /// run, as [`Session::ran`] says. A SyncTest takes a copy of the world once the edits have
-    /// applied, keeps each layer's commands as its tick is about to apply them, and runs the tick
-    /// again once it has run, as [`run_again`](Self::run_again) says: one that fails ends the run
-    /// with its error, as [`Context::fail`] does, and the SyncTest with it.
+    /// context's assets again, as [`Context::share_assets`] says; then the world's cells come in and
+    /// go out, as [`Context::stream_cells`] says, as they do wherever a tick runs; and then the
+    /// sounds the tick queued play, as [`World::play_sound`] says. A recording gets each layer's
+    /// commands just before its tick applies them, so that a tick that panics leaves them, and the
+    /// world's hash after the last. In a networked session, the tick runs on the session's inputs
+    /// for it, as [`Session::inputs`] says: in a lockstep session, both peers', the edits among
+    /// them applying first, as a recording keeps them; or, in a rollback session, before the
+    /// other's have come, on them predicted, a copy of the world kept as it starts, which a
+    /// rollback runs it again from; a server's own and its clients'; and a client's own. Where the
+    /// tick may run again, as a rollback peer's or a client's, the sounds it plays are kept, which
+    /// a run again doesn't play again, as [`Context::play_queued_again`] says; and the session is
+    /// told once it has run, as [`Session::ran`] says. A SyncTest takes a copy of the world once
+    /// the edits have applied, keeps each layer's commands as its tick is about to apply them, and
+    /// runs the tick again once it has run, as [`run_again`](Self::run_again) says: one that fails
+    /// ends the run with its error, as [`Context::fail`] does, and the SyncTest with it.
     fn run(
         layers: &mut [Box<dyn Layer>],
         names: &[&'static str],
@@ -5546,6 +5755,7 @@ impl Stack {
             cx.change_asked_scene();
             cx.share_assets();
         }
+        cx.stream_cells();
         match net.as_deref_mut().and_then(|net| net.played(tick.number)) {
             Some(played) => cx.play_queued_again(played),
             None => cx.play_queued(),
@@ -5658,6 +5868,7 @@ impl Stack {
             cx.change_asked_scene();
             cx.share_assets();
         }
+        cx.stream_cells();
         cx.play_queued();
         if let Some(again) = sync_test.as_mut()
             && let Err(error) = Self::run_again(layers, again, cx, tick)
@@ -5698,6 +5909,7 @@ impl Stack {
             cx.change_asked_scene();
             cx.share_assets();
         }
+        cx.stream_cells();
         mem::swap(&mut cx.world, sync_test.world_mut());
         for layer in layers.iter_mut() {
             layer.swapped(cx);

@@ -6,6 +6,7 @@ use std::fmt;
 
 use super::id::mix64;
 use super::{Entity, EntityId, World};
+use crate::cells::{Cell, CellState};
 use crate::reflect::Reflect;
 use crate::{Font, Model, Prefab, Texture};
 
@@ -15,6 +16,8 @@ use crate::{Font, Model, Prefab, Texture};
 const TYPE: u64 = 0xa409_3822_299f_31d0;
 const LAYOUT: u64 = 0x082e_fa98_ec4e_6c89;
 const TERM: u64 = 0x4528_21e6_38d0_1377;
+const CELLS: u64 = 0xbe54_66cf_34e9_0c6c;
+const TEXT: u64 = 0xc0ac_29b7_c97c_50dd;
 
 // What every NaN hashes as, since arithmetic leaves a NaN's sign and payload to the platform, and
 // x86's and ARM's differ. Literals, since std doesn't promise `f32::NAN`'s bits.
@@ -33,10 +36,12 @@ pub struct WorldHash {
     pub content: u64,
     /// How the world holds its entities, which the order queries find them in follows from: its
     /// tables, in the order they were made, each with its types and its rows' IDs in order; each
-    /// parent's children's IDs, in their order; and the state of the stream it draws IDs from. It
-    /// leaves out slots and handles, and the order types registered in. An undo can change it, and
-    /// needn't give it back: what an undo puts back goes last in its table, and the IDs a create
-    /// drew stay drawn.
+    /// parent's children's IDs, in their order; the state of the stream it draws IDs from; and in
+    /// a world of [cells](crate::Cells), those in, those refused, and what each cell out keeps of
+    /// its entities as text, which a world whose cells never came in leaves out. It leaves out
+    /// slots and handles, and the order types registered in. An undo can change it, and needn't
+    /// give it back: what an undo puts back goes last in its table, and the IDs a create drew stay
+    /// drawn.
     pub layout: u64,
 }
 
@@ -138,6 +143,36 @@ pub(super) fn type_key(name: &str) -> u64 {
     absorb_bytes(TYPE, name.as_bytes())
 }
 
+/// The digest of `text`, as of a scene text a cell keeps, which the world's hash reads in its place,
+/// as [`WorldHash::layout`] says: the same of the same bytes on every platform.
+pub(crate) fn text_digest(text: &str) -> u64 {
+    absorb_bytes(TEXT, text.as_bytes())
+}
+
+/// What a world of cells keeps of them, as [`CellState`] holds it, absorbed: the cells in, those
+/// out that keep something, each with whether its file has come in and its texts' digests, and
+/// those refused, each set in order, after its count.
+fn cells(cells: &CellState) -> u64 {
+    let cell = |state: u64, cell: &Cell| {
+        let [x, y, z] = cell.0.to_array().map(|axis| u64::from(axis as u32));
+        absorb(absorb(absorb(state, x), y), z)
+    };
+    let mut state = absorb(CELLS, cells.cells_in.len() as u64);
+    state = cells.cells_in.iter().fold(state, cell);
+    state = absorb(state, cells.kept.len() as u64);
+    for (at, kept) in &cells.kept {
+        state = cell(state, at);
+        state = absorb(state, u64::from(kept.visited));
+        state = absorb(state, kept.texts.len() as u64);
+        state = kept
+            .texts
+            .iter()
+            .fold(state, |state, text| absorb(state, text.digest));
+    }
+    state = absorb(state, cells.refused.len() as u64);
+    cells.refused.iter().fold(state, cell)
+}
+
 /// The sum of the terms of `values`, components of the type keyed `key`, which are `rows`'s: each
 /// from its entity's ID, the key and what the value writes.
 pub(super) fn terms<T: Reflect>(values: &[T], rows: &[Entity], key: u64, world: &World) -> u64 {
@@ -199,6 +234,13 @@ impl World {
             layout = absorb(layout, count);
         }
         layout = absorb(layout, self.stream.state());
+        // So that a world whose cells never came in hashes as it did before worlds had cells.
+        let streamed = self
+            .resource::<CellState>()
+            .filter(|state| !state.is_empty());
+        if let Some(state) = streamed {
+            layout = absorb(layout, cells(state));
+        }
         WorldHash { content, layout }
     }
 }

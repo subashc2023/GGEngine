@@ -32,10 +32,10 @@ use std::time::{Duration, Instant};
 use gg_api::asset::AssetKind;
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, EntityList, Failure, Field,
-    FrameShot, Framed, Hash, Hello, History, ImageList, Input, InputEvent, Listed, ListedAsset,
-    ListedOrphan, Looked, Patched, Picked, Pulse, Request, SavePrefab, SavedPrefab, Scene,
-    SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
+    Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, CellCounts, EntityList,
+    Failure, Field, FrameShot, Framed, Hash, Hello, History, ImageList, Input, InputEvent, Listed,
+    ListedAsset, ListedOrphan, Looked, Patched, Picked, Pulse, Request, SavePrefab, SavedPrefab,
+    Scene, SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -1298,6 +1298,7 @@ impl Api {
                 .edited
                 .as_ref()
                 .map_or(cx.scenes.open.edited, |edited| edited.open.edited),
+            cells: (cx.world().cell_counts()).map(|(cells_in, kept)| CellCounts { cells_in, kept }),
         }
     }
 

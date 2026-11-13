@@ -1,0 +1,499 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use super::*;
+use crate::dirs::tests::Scratch;
+use crate::layer::Commands;
+use crate::reflect::Reflect;
+use crate::{Context, Layer, Tick};
+
+/// A command of [`Walker`]'s.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub(crate) enum Walk {
+    /// Puts the viewer at this x.
+    Viewer(f32),
+    /// Puts cell 1's entity at this x, if it's in.
+    Crate(f32),
+}
+
+/// Builds a world of cells as it attaches, as [`streaming`] builds one, of the folder `cells` of
+/// the asset root [`project`] makes, and moves what its commands say at each tick.
+#[derive(Default)]
+pub(crate) struct Walker(Vec<Walk>);
+
+impl Layer for Walker {
+    fn attach(&mut self, cx: &mut Context) {
+        let world = cx.world_mut();
+        world.spawn(Cells {
+            folder: "cells".to_owned(),
+            size: 10.0,
+        });
+        world.spawn((at(5.0), Viewer { radius: 10.0 }));
+    }
+
+    fn tick(&mut self, world: &mut World, _: Tick) {
+        for walk in self.0.drain(..) {
+            let (moved, x) = match walk {
+                Walk::Viewer(x) => (world.query::<(Entity, &Viewer)>().next().map(|(e, _)| e), x),
+                Walk::Crate(x) => (world.entity(id_of(1)), x),
+            };
+            if let Some(moved) = moved {
+                let transform = world.get_mut::<Transform>(moved).expect("placed");
+                transform.translation.x = x;
+            }
+        }
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        Some(&mut self.0)
+    }
+}
+
+/// A walk across [`project`]'s cells: out to cell 3, cell 1's entity moved, away from them all and
+/// back, so that cells come in and go out, and cell 1 comes back from what it keeps.
+pub(crate) const WALK: [Option<Walk>; 7] = [
+    None,
+    Some(Walk::Viewer(25.0)),
+    Some(Walk::Crate(12.0)),
+    Some(Walk::Viewer(100.0)),
+    None,
+    Some(Walk::Viewer(5.0)),
+    None,
+];
+
+/// A scene of an entity of each of `entities`' IDs, at its x, as a cell's file holds them.
+fn scene(entities: &[(u64, f32)]) -> String {
+    let mut text = "(\n    entities: {\n".to_owned();
+    for (id, x) in entities {
+        text += &format!(
+            "        \"{id:016x}\": (\n            Transform: (\n                translation: \
+             ({x:?}, 0.0, 0.0),\n            ),\n        ),\n"
+        );
+    }
+    text + "    },\n)\n"
+}
+
+/// The ID of the entity a cell's file gives: 0x10 for cell 0, and so on.
+pub(crate) fn id_of(cell: i32) -> EntityId {
+    EntityId::new(0x10 + cell as u64).expect("an ID")
+}
+
+/// A project's asset root in `dir`, whose folder `cells` holds four cells along x of 10 units, each
+/// of an entity at its middle, as [`id_of`] names it, and a file that isn't a cell's.
+pub(crate) fn project(dir: &Path) -> PathBuf {
+    let root = dir.join("game");
+    fs::create_dir_all(root.join("cells")).expect("a directory");
+    for cell in 0..4 {
+        let text = scene(&[(id_of(cell).get(), cell as f32 * 10.0 + 5.0)]);
+        fs::write(root.join(format!("cells/{cell}_0_0.ron")), text).expect("a cell");
+    }
+    fs::write(root.join("cells/notes.ron"), scene(&[(1, 0.0)])).expect("not a cell");
+    root
+}
+
+/// A context of the asset root `root`, whose world has `Cells` of `folder`, 10 units on a side, and
+/// a viewer of a radius of 10 at x 5, which it returns.
+fn streaming(root: &Path, folder: &str) -> (Context, Entity) {
+    let mut cx = Context::seeded(1).root(root.to_owned());
+    let world = cx.world_mut();
+    world.spawn(Cells {
+        folder: folder.to_owned(),
+        size: 10.0,
+    });
+    let viewer = world.spawn((at(5.0), Viewer { radius: 10.0 }));
+    (cx, viewer)
+}
+
+fn at(x: f32) -> Transform {
+    Transform {
+        translation: Vec3::new(x, 0.0, 0.0),
+        ..Transform::IDENTITY
+    }
+}
+
+/// Moves `entity` to x `x`.
+fn move_to(cx: &mut Context, entity: Entity, x: f32) {
+    let transform = cx.world_mut().get_mut::<Transform>(entity);
+    transform.expect("placed").translation.x = x;
+}
+
+/// The x of each cell in, in order.
+fn cells_in(cx: &Context) -> Vec<i32> {
+    xs(cx.world())
+}
+
+/// The x of each of `world`'s cells in, in order.
+pub(crate) fn xs(world: &World) -> Vec<i32> {
+    world.cells_in().map(|cell| cell.0.x).collect()
+}
+
+/// Where the entity of ID `id` is along x, if it's alive, and whether it streams.
+fn found(cx: &Context, id: EntityId) -> Option<(f32, bool)> {
+    let world = cx.world();
+    let entity = world.entity(id)?;
+    let x = world
+        .get::<Transform>(entity)
+        .expect("placed")
+        .translation
+        .x;
+    Some((x, world.get::<Streamed>(entity).is_some()))
+}
+
+fn state(cx: &Context) -> &CellState {
+    cx.world().resource::<CellState>().expect("streamed")
+}
+
+/// A cell's file names it by its place on the grid, each integer as Rust writes it, and nothing
+/// else names one.
+#[test]
+fn a_cell_s_file_names_it_by_its_place() {
+    let cell = Cell(IVec3::new(3, 0, -2));
+    assert_eq!(cell.to_string(), "3_0_-2");
+    assert_eq!(Cell::of_file("3_0_-2.ron"), Some(cell));
+    for name in [
+        "3_0_-2",
+        "3_0.ron",
+        "3_0_-2_1.ron",
+        "03_0_-2.ron",
+        "+3_0_-2.ron",
+        "a_b_c.ron",
+    ] {
+        assert_eq!(Cell::of_file(name), None, "{name}");
+    }
+}
+
+/// A point is in the cell of each axis's floor over the size, below the origin too; a world
+/// without `Cells`, or of a size that isn't finite and positive, has no cells.
+#[test]
+fn a_point_is_in_the_cell_of_its_floor_over_the_size() {
+    let cell = Cell::at(Vec3::new(25.0, -0.5, 0.0), 10.0);
+    assert_eq!(cell, Cell(IVec3::new(2, -1, 0)));
+    let mut cx = Context::seeded(1);
+    assert_eq!(cx.world().cell_at(Vec3::ZERO), None);
+    let world = cx.world_mut();
+    let cells = world.spawn(Cells {
+        folder: "cells".to_owned(),
+        size: 10.0,
+    });
+    assert_eq!(
+        world.cell_at(Vec3::new(-1.0, 0.0, 0.0)),
+        Some(Cell(IVec3::NEG_X))
+    );
+    world.get_mut::<Cells>(cells).expect("one").size = f32::NAN;
+    assert_eq!(world.cell_at(Vec3::ZERO), None);
+}
+
+/// Cells come in as a viewer comes within its radius, with their files' entities, which stream,
+/// and go out past its radius and half a cell, keeping their entities as they were: one a tick
+/// moved within its cell comes back where it was left, not where the file has it; one moved into a
+/// cell that's out goes out at once, and comes back with that cell; and what doesn't stream, or
+/// holds a viewer, stays. A file whose name isn't a cell's counts for nothing.
+#[test]
+fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("cells-come-and-go");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0, 1], "within 10 of x 5");
+    assert_eq!(found(&cx, id_of(0)), Some((5.0, true)));
+    assert_eq!(found(&cx, id_of(1)), Some((15.0, true)));
+    assert_eq!(found(&cx, id_of(2)), None);
+    assert!(
+        cx.world()
+            .entity(EntityId::new(1).expect("an ID"))
+            .is_none()
+    );
+
+    move_to(&mut cx, viewer, 25.0);
+    cx.stream_cells();
+    assert_eq!(
+        cells_in(&cx),
+        [0, 1, 2, 3],
+        "cell 0 is 15 away, its radius and half a cell"
+    );
+    let one = cx.world().entity(id_of(1)).expect("in");
+    move_to(&mut cx, one, 12.0);
+    // Into cell -1, which has no file, 25 away.
+    let three = cx.world().entity(id_of(3)).expect("in");
+    move_to(&mut cx, three, -5.0);
+    let world = cx.world_mut();
+    let unmarked = world.spawn(at(35.0));
+    let holder = world.spawn((at(35.0), Streamed));
+    let far = world.spawn((at(-135.0), Viewer { radius: 0.0 }));
+    world.set_parent(far, Some(holder)).expect("no cycle");
+    cx.stream_cells();
+    assert_eq!(found(&cx, id_of(3)), None, "gone out at once");
+    let kept = &state(&cx).kept[&Cell(IVec3::NEG_X)];
+    assert_eq!((kept.visited, kept.texts.len()), (false, 1));
+
+    move_to(&mut cx, viewer, 26.0);
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [1, 2, 3], "cell 0 is 16 away");
+    assert_eq!(found(&cx, id_of(0)), None);
+
+    move_to(&mut cx, viewer, 100.0);
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0; 0]);
+    assert_eq!(found(&cx, id_of(1)), None);
+    let world = cx.world();
+    assert!(world.get::<Transform>(unmarked).is_some(), "doesn't stream");
+    assert!(world.get::<Transform>(holder).is_some(), "holds a viewer");
+    let kept: Vec<i32> = state(&cx).kept.keys().map(|cell| cell.0.x).collect();
+    assert_eq!(kept, [-1, 0, 1, 2, 3]);
+
+    move_to(&mut cx, viewer, 5.0);
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [-1, 0, 1]);
+    assert_eq!(
+        found(&cx, id_of(0)),
+        Some((5.0, true)),
+        "kept, not loaded again"
+    );
+    assert_eq!(
+        found(&cx, id_of(1)),
+        Some((12.0, true)),
+        "where it was left"
+    );
+    assert_eq!(found(&cx, id_of(3)), Some((-5.0, true)), "with cell -1");
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    let cells: Vec<&str> = (codes.iter())
+        .filter(|code| code.starts_with("cells."))
+        .map(String::as_str)
+        .collect();
+    let count = |code: &str| cells.iter().filter(|logged| **logged == code).count();
+    assert_eq!(count("cells.entered"), 7, "{cells:?}");
+    assert_eq!(count("cells.left"), 4, "{cells:?}");
+    assert_eq!(cells.len(), 11, "nothing else: {cells:?}");
+}
+
+/// A server's client brings no cell in itself, nor takes one out: its cells come and go with its
+/// server's states.
+#[test]
+fn a_server_s_client_brings_no_cells_in() {
+    let dir = Scratch::new("cells-client");
+    let root = project(&dir.0);
+    let (mut cx, _) = streaming(&root, "cells");
+    cx.client = true;
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0; 0]);
+    assert!(cx.world().resource::<CellState>().is_none());
+}
+
+/// A cell whose file gives an entity's ID that's alive is refused, warning once, and stays out
+/// without trying again while a viewer stays near; once every viewer has gone, it tries again as
+/// one comes back.
+#[test]
+fn a_cell_refused_stays_out_until_its_viewers_go() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("cells-refused");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    let taken = cx
+        .world_mut()
+        .load_scene(&scene(&[(id_of(0).get(), 500.0)]));
+    let taken = taken.expect("loaded")[0];
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [1]);
+    assert_eq!(state(&cx).refused, BTreeSet::from([Cell(IVec3::ZERO)]));
+    cx.world_mut().despawn(taken).expect("alive");
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [1], "not again while the viewer is near");
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    let refused = codes.iter().filter(|code| *code == "cells.refused");
+    assert_eq!(refused.count(), 1, "{codes:?}");
+
+    move_to(&mut cx, viewer, 100.0);
+    cx.stream_cells();
+    assert!(state(&cx).refused.is_empty(), "forgotten");
+    move_to(&mut cx, viewer, 5.0);
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0, 1]);
+    assert_eq!(found(&cx, id_of(0)), Some((5.0, true)));
+}
+
+/// A scene change empties what the world keeps of its cells with its entities, and a world whose
+/// cells' state is empty hashes as one that never had cells; two worlds alike but for what a cell
+/// keeps hash apart, by their layout alone.
+#[test]
+fn a_scene_change_empties_the_cells_and_what_cells_keep_is_hashed() {
+    let dir = Scratch::new("cells-hashed");
+    let root = project(&dir.0);
+    fs::create_dir_all(root.join("scenes")).expect("a directory");
+    fs::write(root.join("scenes/plain.ron"), scene(&[(1, 0.0)])).expect("a scene");
+    let kept = |x: f32| {
+        let (mut cx, viewer) = streaming(&root, "cells");
+        cx.stream_cells();
+        let zero = cx.world().entity(id_of(0)).expect("in");
+        move_to(&mut cx, zero, x);
+        move_to(&mut cx, viewer, 100.0);
+        cx.stream_cells();
+        cx
+    };
+    let (one, other) = (kept(5.0), kept(6.0));
+    let (one, other) = (one.world().hash(), other.world().hash());
+    assert_eq!(one.content, other.content, "neither holds the entity");
+    assert_ne!(one.layout, other.layout, "the texts kept differ");
+
+    let mut cx = kept(5.0);
+    cx.change_scene("scenes/plain.ron").expect("in");
+    assert_eq!(state(&cx), &CellState::default());
+    let emptied = cx.world().hash();
+    cx.world_mut().remove_resource::<CellState>();
+    assert_eq!(cx.world().hash(), emptied);
+}
+
+/// A world's text, as a snapshot, a lockstep joiner's world and a server's state hold it, holds
+/// what its cells keep, which a world read from it has alike, hashing alike.
+#[test]
+fn a_world_s_text_holds_what_its_cells_keep() {
+    let dir = Scratch::new("cells-saved");
+    let root = project(&dir.0);
+    let (mut cx, viewer) = streaming(&root, "cells");
+    cx.stream_cells();
+    move_to(&mut cx, viewer, 25.0);
+    cx.stream_cells();
+    move_to(&mut cx, viewer, 26.0);
+    cx.stream_cells();
+    assert_eq!(state(&cx).kept.len(), 1);
+    let mut text = String::new();
+    cx.world().save_whole(&mut text).expect("saved");
+    let mut read = Context::seeded(2);
+    let lines = (1..).zip(text.lines());
+    read.world_mut().load_whole(lines, false).expect("read");
+    assert_eq!(state(&read), state(&cx));
+    assert_eq!(read.world().hash(), cx.world().hash());
+}
+
+/// Past [`MOST_CELLS`], the nearest come in, and the plan says it's full.
+#[test]
+fn past_the_most_cells_the_nearest_come_in() {
+    let mut cx = Context::seeded(1);
+    let world = cx.world_mut();
+    world.spawn((at(2500.5), Viewer { radius: 5000.0 }));
+    let listed: Vec<Cell> = (0..5000).map(|x| Cell(IVec3::new(x, 0, 0))).collect();
+    let mut plan = Plan::default();
+    cx.world().plan_cells(1.0, &listed, &mut plan);
+    assert!(plan.full);
+    assert_eq!(plan.entering.len(), MOST_CELLS);
+    let xs = |at: usize| plan.entering[at].0.x;
+    assert_eq!((xs(0), xs(MOST_CELLS - 1)), (2500 - 2048, 2500 + 2047));
+}
+
+/// `Cells` of a size that isn't finite and positive bring nothing in, warning once; of several,
+/// the world streams by the one of the lowest ID, warning as the tie comes to be; and a folder
+/// that can't be listed brings no cell in from a file, warning once.
+#[test]
+fn cells_that_can_t_stream_warn_once() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("cells-warned");
+    let root = project(&dir.0);
+    let (mut cx, _) = streaming(&root, "cells");
+    let world = cx.world_mut();
+    let first = world.query::<(Entity, &Cells)>().next().expect("one").0;
+    world.get_mut::<Cells>(first).expect("one").size = 0.0;
+    cx.stream_cells();
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0; 0]);
+    cx.world_mut().get_mut::<Cells>(first).expect("one").size = 10.0;
+    cx.world_mut().spawn(Cells {
+        folder: "cells".to_owned(),
+        size: 10.0,
+    });
+    cx.stream_cells();
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0, 1]);
+    let (mut gone, _) = streaming(&root, "gone");
+    gone.stream_cells();
+    gone.stream_cells();
+    assert_eq!(cells_in(&gone), [0; 0]);
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    let count = |code: &str| codes.iter().filter(|logged| *logged == code).count();
+    assert_eq!(count("cells.bad_size"), 1, "{codes:?}");
+    assert_eq!(count("cells.tie"), 1, "{codes:?}");
+    assert_eq!(count("cells.listing"), 1, "{codes:?}");
+}
+
+/// A run from a game's package, as a build without `dev` runs, lists the cells' folder there, and
+/// reads each cell's file from it, though none is on the disk.
+#[test]
+fn a_run_from_a_package_lists_and_reads_its_cells_there() {
+    use crate::package::{Kind, Package, Writer};
+
+    let dir = Scratch::new("cells-package");
+    let mut writer = Writer::new(".", None);
+    for cell in [0, 1] {
+        let text = scene(&[(id_of(cell).get(), cell as f32 * 10.0 + 5.0)]);
+        let path = format!("cells/{cell}_0_0.ron");
+        let added = writer.add(&path, None, Kind::File, text.into_bytes());
+        added.expect("added");
+    }
+    let path = dir.0.join("game.ggpk");
+    fs::create_dir_all(&dir.0).expect("a directory");
+    writer.write(&path).expect("written");
+    // Never made: what's read, is read from the package.
+    let root = dir.0.join("game");
+    let (mut cx, _) = streaming(&root, "cells");
+    let package = Arc::new(Package::open(&path).expect("opened"));
+    cx.files = Files::package(package, root);
+    cx.stream_cells();
+    assert_eq!(cells_in(&cx), [0, 1]);
+    assert_eq!(found(&cx, id_of(1)), Some((15.0, true)));
+}
+
+/// Cells come in and go out as each tick ends, which a SyncTest runs again on a copy of the world,
+/// alike, and a recording of the run replays to every hash, its cells coming and going at the
+/// ticks the run's did.
+#[test]
+fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
+    use crate::App;
+    use crate::recording::{Recorder, Replay};
+
+    let dir = Scratch::new("cells-replay");
+    let root = project(&dir.0);
+    let app = || App::new("Walking").root(&root).layer(Walker::default());
+    let path = dir.0.join("run.recording");
+    let mut run = app();
+    run.stack
+        .record(Recorder::create(&path, run.name).expect("created"));
+    run.stack.sync_test();
+    let mut cx = Context::seeded(1).root(root.clone());
+    run.stack.attach(&mut cx);
+    let mut seen = Vec::new();
+    for (number, walk) in (0..).zip(WALK) {
+        if let Some(walk) = walk {
+            let queue = run.stack.commands_of(0).expect("a queue");
+            queue.push(&walk.to_value()).expect("queued");
+        }
+        assert!(run.stack.tick(&mut cx, Tick { number }));
+        seen.push(cells_in(&cx));
+    }
+    let empty = Vec::new();
+    let expected = [
+        vec![0, 1],
+        vec![0, 1, 2, 3],
+        vec![0, 1, 2, 3],
+        empty.clone(),
+        empty,
+        vec![0, 1],
+        vec![0, 1],
+    ];
+    assert_eq!(seen, expected);
+    assert_eq!(found(&cx, id_of(1)), Some((12.0, true)), "as it was left");
+    assert!(!cx.exiting());
+    let matched = run.stack.sync_test_mut().map(|sync| sync.matched());
+    assert_eq!(matched, Some(WALK.len() as u64));
+    let ended = cx.world().hash();
+    run.stack.detach(&mut cx);
+    run.stack.recorded().expect("written");
+
+    let text = fs::read_to_string(&path).expect("written");
+    let mut replay = Replay::new(app(), &text).unwrap_or_else(|error| panic!("{error:#}"));
+    let mut ran = 0;
+    while let Some(tick) = replay.step().unwrap_or_else(|error| panic!("{error:#}")) {
+        assert_eq!(tick.number, ran);
+        ran += 1;
+    }
+    assert_eq!((ran, replay.world().hash()), (WALK.len() as u64, ended));
+    assert_eq!(xs(replay.world()), [0, 1]);
+}

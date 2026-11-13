@@ -81,7 +81,10 @@
 //! that turns, those that have it stopping at it where some of the others pass through
 //! (`joints.ron`); a navmesh baked from a small maze's colliders, a step and a ramp up to a
 //! platform among them, and a dozen agents walking its paths to stops in turn, round each other,
-//! the navmesh and their paths in lines (`navigation.ron`); and, once `cargo
+//! the navmesh and their paths in lines (`navigation.ron`); a world of cells 64 m on a side, an 8
+//! by 8 grid of scene files, each a crate, a torus, a ball and a lamp, which come in around a
+//! character the keys walk, its camera following, and go out as it walks away, kept as they were
+//! (`cells.ron`, its cells in `scenes/cells`); and, once `cargo
 //! gg fetch` has fetched them, Sponza under a sky made from its sun, its arches darkened by ambient
 //! occlusion, what's bright blooming, graded and in a low fog, its gilding mirroring the arcades in
 //! place of the sky, exposed as it adapts to the sunlit atrium and the shaded arcades, through a
