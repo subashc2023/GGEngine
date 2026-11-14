@@ -1142,6 +1142,90 @@ fn a_text_field_takes_typed_text_at_its_caret() {
     assert_eq!(state.caret.at, 8, "past its end");
 }
 
+/// A text field takes what's pasted at its caret, in place of what's selected, its first line
+/// without the characters no line holds, as many characters as it holds; Ctrl+C copies what's
+/// selected, and Ctrl+X cuts it too, Cmd for Ctrl on macOS, nothing for a selection that's empty;
+/// and Ctrl+V types nothing itself, as the paste follows it.
+#[test]
+fn a_text_field_pastes_at_its_caret_and_copies_its_selection() {
+    let mut state = laid(WIDGETS, 1920.0);
+    let mut input = Input::default();
+    let over = on(&state, "player", 0.9);
+    state.send(&click(true), over, &input);
+    state.send(&click(false), over, &input);
+    let typed = |text: &str| changed("player", UiValue::Text(text.to_owned()));
+    let paste = |text| Event::Paste(text);
+    assert_eq!(
+        state.send(&paste("ab\tc\r\nsecond"), None, &input),
+        typed("abc")
+    );
+    // Shift+Home selects it all, which the paste takes the place of, 8 at most.
+    input.record(&press(Key::ShiftLeft));
+    state.send(&press(Key::Home), None, &input);
+    let let_go = |key| Event::Key {
+        key,
+        pressed: false,
+        repeat: false,
+    };
+    input.record(&let_go(Key::ShiftLeft));
+    assert_eq!(
+        state.send(&paste("0123456789"), None, &input),
+        typed("01234567")
+    );
+    // 234 selected.
+    state.send(&press(Key::Home), None, &input);
+    state.send(&press(Key::ArrowRight), None, &input);
+    state.send(&press(Key::ArrowRight), None, &input);
+    input.record(&press(Key::ShiftLeft));
+    for _ in 0..3 {
+        state.send(&press(Key::ArrowRight), None, &input);
+    }
+    input.record(&let_go(Key::ShiftLeft));
+    let command = if cfg!(target_os = "macos") {
+        Key::SuperLeft
+    } else {
+        Key::ControlLeft
+    };
+    input.record(&press(command));
+    assert_eq!(state.send(&press(Key::KeyC), None, &input), None);
+    assert_eq!(state.copied.take().as_deref(), Some("234"));
+    assert_eq!(state.send(&press(Key::KeyX), None, &input), typed("01567"));
+    assert_eq!(state.copied.take().as_deref(), Some("234"));
+    assert_eq!(state.send(&press(Key::KeyC), None, &input), None);
+    assert_eq!(state.copied, None, "nothing selected");
+    assert_eq!(state.send(&press(Key::KeyV), None, &input), None);
+    assert_eq!(
+        state.nodes[state.named("player").expect("a node")].text,
+        "01567"
+    );
+}
+
+/// What a text field copies, through a UI a layer added, goes to the context, for the window to put
+/// on the OS's clipboard, and what's pasted reaches the field.
+#[test]
+fn a_ui_s_copies_go_to_the_context() {
+    let scratch = crate::dirs::tests::Scratch::new("ui-copies");
+    std::fs::create_dir_all(&scratch.0).expect("a directory");
+    let path = scratch.0.join("widgets.ui");
+    std::fs::write(&path, WIDGETS).expect("a UI");
+    let mut cx = Context::seeded(0).root(scratch.0.clone());
+    let ui = cx.add_ui("widgets", &path).expect("added");
+    ui.set_focus(&mut cx, "player").expect("focused");
+    let pasted = ui.event(&mut cx, &Event::Paste("code"));
+    assert_eq!(pasted, changed("player", UiValue::Text("code".to_owned())));
+    let command = if cfg!(target_os = "macos") {
+        Key::SuperLeft
+    } else {
+        Key::ControlLeft
+    };
+    for key in [command, Key::ShiftLeft] {
+        cx.record_input(&press(key));
+    }
+    assert_eq!(ui.event(&mut cx, &press(Key::Home)), None);
+    ui.event(&mut cx, &press(Key::KeyC));
+    assert_eq!(cx.copied.as_deref(), Some("code"));
+}
+
 /// A list's children lie down it from its top, clipped to it; the wheel over it scrolls them, no
 /// further than they reach, and laid out again they lie scrolled up; a child scrolled out of it
 /// takes no click; and the focus moving to a child by the keys scrolls it into view, while the

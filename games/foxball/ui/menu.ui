@@ -135,6 +135,55 @@
                             ),
                         ),
                         Button(
+                            name: "host",
+                            text: "HOST A GAME",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "join",
+                            text: "JOIN A GAME",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "online",
+                            visible: false,
+                            text: "ONLINE GAME",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
                             name: "options",
                             text: "OPTIONS",
                             font: "083349a64f1c0990",
@@ -165,6 +214,13 @@
                                     color: (0.55, 0.22, 0.04, 1.0),
                                 ),
                             ),
+                        ),
+                        Text(
+                            name: "menu_status",
+                            visible: false,
+                            text: "",
+                            size: 24.0,
+                            color: (1.0, 0.45, 0.1, 1.0),
                         ),
                         Stack(
                             height: Fixed(12.0),
@@ -371,6 +427,191 @@
                         Text(
                             name: "settings_hint",
                             text: "UP, DOWN: CHOOSE  ·  LEFT, RIGHT: SET  ·  ENTER: OPEN A LIST  ·  ESC: BACK",
+                            size: 22.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "session",
+            visible: false,
+            color: (0.01, 0.012, 0.02, 0.88),
+            radius: 32.0,
+            padding: (72.0, 56.0),
+            children: [
+                Column(
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "session_title",
+                            text: "ONLINE GAME",
+                            font: "083349a64f1c0990",
+                            size: 72.0,
+                        ),
+                        Text(
+                            name: "session_code_label",
+                            text: "THE GAME'S CODE",
+                            size: 24.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                        Text(
+                            name: "session_code",
+                            text: "",
+                            font: "083349a64f1c0990",
+                            size: 56.0,
+                            color: (0.15, 0.55, 1.0, 1.0),
+                        ),
+                        Text(
+                            name: "session_status",
+                            text: "",
+                            size: 26.0,
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Button(
+                            name: "copy",
+                            text: "COPY THE CODE",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "leave",
+                            text: "LEAVE THE GAME",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "session_back",
+                            text: "BACK",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Text(
+                            name: "session_hint",
+                            text: "UP, DOWN: CHOOSE  ·  ENTER, SPACE: PRESS  ·  ESC: BACK",
+                            size: 22.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "joining",
+            visible: false,
+            color: (0.01, 0.012, 0.02, 0.88),
+            radius: 32.0,
+            padding: (72.0, 56.0),
+            children: [
+                Column(
+                    gap: 18.0,
+                    children: [
+                        Text(
+                            name: "joining_title",
+                            text: "JOIN A GAME",
+                            font: "083349a64f1c0990",
+                            size: 72.0,
+                        ),
+                        Text(
+                            name: "code_label",
+                            text: "THE CODE THE HOST GAVE YOU",
+                            size: 24.0,
+                            color: (0.45, 0.5, 0.62, 1.0),
+                        ),
+                        Field(
+                            name: "code",
+                            hint: "XXXX-XXXX-XXXX-XXXX",
+                            most: 19,
+                            font: "083349a64f1c0990",
+                            size: 40.0,
+                            width: Fixed(620.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                        ),
+                        Text(
+                            name: "joining_status",
+                            visible: false,
+                            text: "",
+                            size: 24.0,
+                            color: (1.0, 0.45, 0.1, 1.0),
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Button(
+                            name: "join_code",
+                            text: "JOIN",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Button(
+                            name: "joining_back",
+                            text: "BACK",
+                            font: "083349a64f1c0990",
+                            width: Fixed(520.0),
+                            height: Fixed(84.0),
+                            radius: 14.0,
+                            looks: (
+                                focused: (
+                                    color: (1.0, 0.45, 0.1, 1.0),
+                                ),
+                                pressed: (
+                                    color: (0.55, 0.22, 0.04, 1.0),
+                                ),
+                            ),
+                        ),
+                        Stack(
+                            height: Fixed(12.0),
+                        ),
+                        Text(
+                            name: "joining_hint",
+                            text: "CTRL+V: PASTE  ·  ENTER: JOIN  ·  DOWN: CHOOSE  ·  ESC: BACK",
                             size: 22.0,
                             color: (0.45, 0.5, 0.62, 1.0),
                         ),

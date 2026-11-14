@@ -547,6 +547,120 @@ fn a_sessions_options_choose_no_difficulty() {
     assert!(takes_focus(&mut cx, &game), "alone");
 }
 
+/// The menu hosts a session through the run's relay, its page showing it; joins one by the code
+/// typed in its field, staying there for a code that isn't one; and follows the session as a run's
+/// frames take it up: a host's bot leaves its fox by the next tick, the first page offering Online
+/// game in place of Host and Join, and the menu following where the session stands; leaving puts
+/// the bot back, the run steering player 0 again. A run that names no relay stays on the first
+/// page.
+#[test]
+fn the_menu_hosts_and_joins_sessions_and_follows_them() {
+    let press = |game: &mut Foxball, cx: &mut Context, key| {
+        for pressed in [true, false] {
+            let event = Event::Key {
+                key,
+                pressed,
+                repeat: false,
+            };
+            let _ = game.event(cx, &event);
+        }
+    };
+    let dt = Duration::from_millis(16);
+    // No relay.
+    let (mut cx, mut game) = humans(0x5eed);
+    let ui = game.assets.as_ref().expect("loaded").ui;
+    game.update(&mut cx, dt);
+    for key in [Key::Escape, Key::ArrowDown, Key::ArrowDown] {
+        press(&mut game, &mut cx, key);
+    }
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("host"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::First, "no relay");
+    assert!(cx.session().is_none());
+
+    // A relay, where none listens, as no frame takes the session up.
+    let cx = Context::seeded(0x5eed).project(env!("CARGO_MANIFEST_DIR"));
+    let mut cx = cx.expect("the project reads").with_relay("127.0.0.1:1");
+    let mut game = Foxball::new();
+    game.load(&mut cx);
+    game.attach(&mut cx);
+    game.tick(cx.world_mut(), Tick { number: 0 });
+    assert_eq!(cx.world().query::<&Bot>().count(), 1, "alone");
+    let ui = game.assets.as_ref().expect("loaded").ui;
+    game.update(&mut cx, dt);
+    for key in [Key::Escape, Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+        press(&mut game, &mut cx, key);
+    }
+    assert_eq!(game.page, Page::Session);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("copy"));
+    assert_eq!(cx.host().expect_err("hosting").code(), "net.busy");
+    // The frame that takes it up.
+    let code = "7KQ2-9XMB-4TZD-P0WH";
+    cx.set_session(Some(SessionStatus::new(code, 0, SessionPhase::Waiting)));
+    game.commands.clear();
+    game.update(&mut cx, dt);
+    assert_eq!(game.commands, [Command::NoBot { fox: BOT_PLAYER }]);
+    assert_eq!(game.shown, Some(SessionPhase::Waiting));
+    game.tick(cx.world_mut(), Tick { number: 1 });
+    let bots = cx.world().query::<&Bot>().count() + cx.world().query::<&NavAgent>().count();
+    assert_eq!(bots, 0, "the bot's fox the joiner's");
+    cx.set_session(Some(SessionStatus::new(code, 0, SessionPhase::Playing)));
+    game.update(&mut cx, dt);
+    assert_eq!(game.shown, Some(SessionPhase::Playing));
+    // Back, Online game in place of Host and Join, and in again.
+    press(&mut game, &mut cx, Key::Escape);
+    assert_eq!(game.page, Page::First);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("online"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::Session);
+    // Leave, past Copy the code.
+    press(&mut game, &mut cx, Key::ArrowDown);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("leave"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::First);
+    cx.set_session(None);
+    game.commands.clear();
+    game.update(&mut cx, dt);
+    let player = BOT_PLAYER;
+    assert!(
+        game.commands.contains(&Command::Bot { player }),
+        "{:?}",
+        game.commands
+    );
+    game.tick(cx.world_mut(), Tick { number: 2 });
+    assert_eq!(cx.world().query::<&Bot>().count(), 1, "alone again");
+    assert_eq!(game.player, 0);
+
+    // Join: a code that isn't one stays, and one that is joins, as the field holds it.
+    let join = [
+        Key::Escape,
+        Key::Escape,
+        Key::ArrowDown,
+        Key::ArrowDown,
+        Key::ArrowDown,
+    ];
+    for key in join {
+        press(&mut game, &mut cx, key);
+    }
+    assert!(game.menu);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("join"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::Joining);
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("code"));
+    let _ = game.event(&mut cx, &Event::Text("7KQ2-9XMB"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::Joining, "not a code");
+    let _ = game.event(&mut cx, &Event::Paste("-4TZD-P0WH"));
+    press(&mut game, &mut cx, Key::Enter);
+    assert_eq!(game.page, Page::Session);
+    cx.set_session(Some(SessionStatus::new(code, 1, SessionPhase::Unhosted)));
+    game.commands.clear();
+    game.update(&mut cx, dt);
+    assert_eq!(game.player, 1);
+    assert_eq!(game.shown, Some(SessionPhase::Unhosted));
+    assert!(game.commands.is_empty(), "a joiner's world is its host's");
+}
+
 /// Escape with the cursor free, or a pad's Start, opens the menu, this run's own, and closes it,
 /// its fox standing while it's open, its walk and turn queued at rest as it opens and as the keys
 /// are held as it closes, the keys walking it no more until then; the arrows move the menu's focus
@@ -650,9 +764,11 @@ fn the_menu_opens_and_its_choices_queue_commands() {
     assert!(!game.menu, "resumed");
     assert!(!cx.exiting());
     press(&mut game, &mut cx, Key::Escape);
-    for key in [Key::ArrowDown, Key::ArrowDown, Key::ArrowDown, Key::Enter] {
-        press(&mut game, &mut cx, key);
+    // Past New match, Host a game, Join a game and Options.
+    for _ in 0..5 {
+        press(&mut game, &mut cx, Key::ArrowDown);
     }
+    press(&mut game, &mut cx, Key::Enter);
     assert!(cx.exiting(), "quit");
 }
 
@@ -679,10 +795,11 @@ fn the_options_set_the_bots_difficulty_and_the_volumes() {
     };
     press(&mut game, &mut cx, Key::Escape);
     game.commands.clear();
-    for key in [Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+    // Past New match, Host a game and Join a game.
+    for key in [Key::ArrowDown; 4].into_iter().chain([Key::Enter]) {
         press(&mut game, &mut cx, key);
     }
-    assert!(game.options && game.menu);
+    assert!(game.page == Page::Options && game.menu);
     assert_eq!(ui.focused(&mut cx).as_deref(), Some("difficulty"));
     press(&mut game, &mut cx, Key::ArrowRight);
     let player = 0;
@@ -715,7 +832,7 @@ fn the_options_set_the_bots_difficulty_and_the_volumes() {
     game.update(&mut cx, Duration::from_millis(16));
     // Back to the first page, and in again, the difficulty the world's.
     press(&mut game, &mut cx, Key::Escape);
-    assert!(game.menu && !game.options, "back");
+    assert!(game.menu && game.page == Page::First, "back");
     assert_eq!(ui.focused(&mut cx).as_deref(), Some("options"));
     if let Some(found) = cx.world_mut().query_mut::<&mut Match>().next() {
         found.difficulty = Difficulty::Easy;
@@ -750,10 +867,12 @@ fn the_options_antialiasing_is_the_runs_own() {
             let _ = game.event(cx, &event);
         }
     };
-    for key in [Key::Escape, Key::ArrowDown, Key::ArrowDown, Key::Enter] {
+    // Past New match, Host a game and Join a game.
+    let keys = [Key::Escape].into_iter().chain([Key::ArrowDown; 4]);
+    for key in keys.chain([Key::Enter]) {
         press(&mut game, &mut cx, key);
     }
-    assert!(game.options);
+    assert!(game.page == Page::Options);
     let shown = |cx: &mut Context| ui.value(cx, "antialiasing").ok();
     assert_eq!(shown(&mut cx), Some(UiValue::Choice(0)), "the arena's");
     assert_eq!(cx.antialiasing(), None);
@@ -782,7 +901,7 @@ fn the_options_antialiasing_is_the_runs_own() {
     }
     press(&mut game, &mut cx, Key::Escape);
     press(&mut game, &mut cx, Key::Enter);
-    assert!(game.options, "in again");
+    assert!(game.page == Page::Options, "in again");
     assert_eq!(shown(&mut cx), Some(UiValue::Choice(2)), "the run's");
 }
 

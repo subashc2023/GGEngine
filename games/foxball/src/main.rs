@@ -12,7 +12,11 @@
 //! grabbed from a click in the view until Escape, as do Q and E and the right stick; and Space, a
 //! pad's South, or a click with the cursor grabbed kicks the ball, if it's in front of the fox.
 //! Escape with the cursor free, or a pad's Start, opens the menu, `ui/menu.ui`, over the match,
-//! which goes on meanwhile, the run's fox standing: Resume, New match, Options and Quit, its
+//! which goes on meanwhile, the run's fox standing: Resume, New match, Host a game and Join a game,
+//! through the relay a run given `--relay` alone names, as predicting peers, the host's page
+//! showing the code to give, which Copy the code puts on the clipboard, and Join's a field to type
+//! or paste it into, and in a session Online game in their place, where the game is left; Options
+//! and Quit, its
 //! options choosing how well the bot plays, a command each player's runs and replays apply as
 //! they do New match, and the volumes of the main, music and sound buses and how the view is
 //! antialiased, by TAA, SMAA or neither, this run's own, which no world holds. The scores and the
@@ -50,9 +54,9 @@ use gg_engine::{
     BlendPoint, Bus, CapsuleCollider3D, Change, CharacterController3D, Commands, Component,
     Context, EmitterShape, Entity, Environment, Error, Event, GameUi, Key, Layer, Model,
     MouseButton, Name, NavAgent, Owner, PadButton, ParamCondition, ParamTest, ParamValue, Parent,
-    ParticleBlend, ParticleEmitter, Place, Play, Playback, Projection, Reflect, RigidBody3D, Sound,
-    Source, StateMotion, StateTransition, Stick, Tick, Toward, Transform, UiEvent, UiValue,
-    Viewpoint, World, step_animation, step_navigation, step_physics,
+    ParticleBlend, ParticleEmitter, Place, Play, Playback, Projection, Reflect, RigidBody3D,
+    SessionPhase, SessionStatus, Sound, Source, StateMotion, StateTransition, Stick, Tick, Toward,
+    Transform, UiEvent, UiValue, Viewpoint, World, step_animation, step_navigation, step_physics,
 };
 
 #[cfg(test)]
@@ -65,7 +69,11 @@ fn main() -> ExitCode {
 /// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
 /// recordings replay.
 fn app() -> App {
-    let app = App::new("Foxball").project(env!("CARGO_MANIFEST_DIR"));
+    // Its own sessions predict, so that a player's fox answers at once, as Phase 21's measures had
+    // lockstep's answer some 160 ms late over a link of 150 ms there and back.
+    let app = App::new("Foxball")
+        .project(env!("CARGO_MANIFEST_DIR"))
+        .predicting();
     let app = app.layer(Foxball::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }
@@ -318,6 +326,34 @@ enum Command {
     /// [`BOT_PLAYER`] as it attaches, so that its recording keeps it and a session's runs, whose
     /// players are all people, have none.
     Bot { player: u8 },
+    /// Takes the game's bot off fox `fox`, which stands, as a run that hosts a session from its
+    /// menu queues for [`BOT_PLAYER`]'s, so that the world a joiner takes has none. It names the fox
+    /// by a field other than `player`, which a session checks against whose inputs carry it.
+    NoBot { fox: u8 },
+}
+
+/// The menu's pages: its first, its options, the online game the run takes part in, and the code
+/// it joins one by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    First,
+    Options,
+    Session,
+    Joining,
+}
+
+impl Page {
+    const ALL: [Self; 4] = [Self::First, Self::Options, Self::Session, Self::Joining];
+
+    /// Its panel in `ui/menu.ui`.
+    fn panel(self) -> &'static str {
+        match self {
+            Self::First => "menu",
+            Self::Options => "settings",
+            Self::Session => "session",
+            Self::Joining => "joining",
+        }
+    }
 }
 
 /// What the keys and pads do.
@@ -366,10 +402,15 @@ struct Foxball {
     /// Whether this run wants the cursor grabbed, for the mouse to turn its fox: from a click in
     /// the view until Escape, or the menu opening.
     grab: bool,
-    /// Whether the menu is open: this run's own, as a lockstep peer's is its own; and whether it
-    /// shows its options, in place of its first page.
+    /// Whether the menu is open: this run's own, as a lockstep peer's is its own; and the page it
+    /// shows.
     menu: bool,
-    options: bool,
+    page: Page,
+    /// Whether the run took part in a session as the layer last looked, which tells it one the
+    /// menu started, or left, has started or ended; and where the session stood as the menu last
+    /// said, which it says again as that changes.
+    networked: bool,
+    shown: Option<SessionPhase>,
     /// How far this run's view looks down, which the mouse moves: this run's own, as it's no part
     /// of the world.
     pitch: f32,
@@ -421,7 +462,9 @@ impl Foxball {
             assets: None,
             grab: false,
             menu: false,
-            options: false,
+            page: Page::First,
+            networked: false,
+            shown: None,
             pitch: VIEW_PITCH,
             seen: None,
             text: String::new(),
@@ -467,7 +510,7 @@ impl Foxball {
     /// standing, its walk and turn queued at rest, then queued as the keys and sticks are held as it
     /// closes.
     fn open_menu(&mut self, cx: &mut Context, open: bool) {
-        self.show_options(cx, false);
+        self.show_page(cx, Page::First);
         self.menu = open;
         self.grab &= !open;
         let player = self.player;
@@ -490,17 +533,21 @@ impl Foxball {
         }
     }
 
-    /// Shows the menu's options in place of its first page, or its first page again, as `shown`
-    /// says, the focus on the bot's difficulty or on Options: the options taking what the bot plays
+    /// Shows the menu's `page` in place of the others, the focus moving to it, as
+    /// [`focus_on`](Self::focus_on) says, from the page shown: its options taking what the bot plays
     /// at, as the world has it, each bus's volume, as the run has it, and how the view is
-    /// antialiased, as the run chose, or else as the world's environment says. A node a file edited
-    /// to drop it goes without, as the scores do.
-    fn show_options(&mut self, cx: &mut Context, shown: bool) {
+    /// antialiased, as the run chose, or else as the world's environment says; the code to join by
+    /// shown empty. A node a file edited to drop it goes without, as the scores do.
+    fn show_page(&mut self, cx: &mut Context, page: Page) {
         let Some(assets) = &self.assets else {
             return;
         };
         let ui = assets.ui;
-        if shown {
+        if page == Page::Joining {
+            let _ = ui.set_text(cx, "code", "");
+            let _ = ui.set_visible(cx, "joining_status", false);
+        }
+        if page == Page::Options {
             let level = cx
                 .world()
                 .query::<&Match>()
@@ -519,12 +566,119 @@ impl Foxball {
             let choice = ANTIALIASING.iter().position(|&of| of == antialiasing);
             let _ = ui.set_value(cx, "antialiasing", UiValue::Choice(choice.unwrap_or(0)));
         }
-        let _ = ui.set_visible(cx, "menu", !shown);
-        let _ = ui.set_visible(cx, "settings", shown);
-        if shown != self.options {
-            let _ = ui.set_focus(cx, if shown { "difficulty" } else { "options" });
+        for each in Page::ALL {
+            let _ = ui.set_visible(cx, each.panel(), each == page);
         }
-        self.options = shown;
+        if page != self.page {
+            let _ = ui.set_focus(cx, Self::focus_on(page, self.page, cx.networked()));
+        }
+        self.page = page;
+    }
+
+    /// Where the focus goes as the menu shows `page`, from page `from`: a page's first choice, the
+    /// difficulty, Copy the code and the code to join by; and back on the first page, the choice
+    /// that went to the page it came from, Online game standing for Host and Join in a session, and
+    /// Host for Online game once it's left.
+    fn focus_on(page: Page, from: Page, networked: bool) -> &'static str {
+        match (page, from) {
+            (Page::Options, _) => "difficulty",
+            (Page::Session, _) => "copy",
+            (Page::Joining, _) => "code",
+            (Page::First, Page::Options) => "options",
+            (Page::First, Page::Session | Page::Joining) if networked => "online",
+            (Page::First, Page::Session) => "host",
+            (Page::First, Page::Joining | Page::First) => "join",
+        }
+    }
+
+    /// Hosts a session through the run's relay, as the menu's Host chooses, its page showing it;
+    /// or says why it can't, on the first page.
+    fn host(&mut self, cx: &mut Context) {
+        match cx.host() {
+            Ok(()) => self.show_page(cx, Page::Session),
+            Err(error) => self.say(cx, "menu_status", &error),
+        }
+    }
+
+    /// Joins the session whose code the menu's field holds, as its Join chooses, its page showing
+    /// it; or says why it can't, under the field.
+    fn join(&mut self, cx: &mut Context) {
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        let Ok(UiValue::Text(code)) = assets.ui.value(cx, "code") else {
+            return;
+        };
+        match cx.join(&code) {
+            Ok(()) => self.show_page(cx, Page::Session),
+            Err(error) => self.say(cx, "joining_status", &error),
+        }
+    }
+
+    /// Shows `error`'s message in the menu's text `name`, its first letter a capital, as a player
+    /// reads it.
+    fn say(&self, cx: &mut Context, name: &str, error: &Error) {
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        let _ = assets
+            .ui
+            .set_text(cx, name, &capitalized(&error.to_string()));
+        let _ = assets.ui.set_visible(cx, name, true);
+    }
+
+    /// Follows the run's session, as the menu starts and leaves one and as it goes: as one starts,
+    /// the run's player is the session's, and a host queues its bot's fox off, before anyone can
+    /// join; as one ends, the run steers player 0, the fox it steered standing, and queues the bot
+    /// again; the menu offers Host and Join alone, or else Online game, and says where the session
+    /// stands, with its code, as that changes.
+    fn follow_session(&mut self, cx: &mut Context) {
+        let networked = cx.networked();
+        if networked != self.networked {
+            self.networked = networked;
+            let left = self.player;
+            self.player = cx.player().unwrap_or(0);
+            self.offer_difficulty(cx);
+            if networked && self.player == 0 {
+                self.commands.push(Command::NoBot { fox: BOT_PLAYER });
+            } else if !networked {
+                self.commands.extend([
+                    Command::Walk {
+                        player: left,
+                        heading: Vec2::ZERO,
+                    },
+                    Command::Spin {
+                        player: left,
+                        rate: 0.0,
+                    },
+                ]);
+                if cx.world().query::<&Bot>().next().is_none() {
+                    let player = BOT_PLAYER;
+                    self.commands.push(Command::Bot { player });
+                }
+                if self.page == Page::Session {
+                    self.show_page(cx, Page::First);
+                }
+            }
+        }
+        let Some(assets) = &self.assets else {
+            return;
+        };
+        let ui = assets.ui;
+        let _ = ui.set_visible(cx, "host", !networked);
+        let _ = ui.set_visible(cx, "join", !networked);
+        let _ = ui.set_visible(cx, "online", networked);
+        let phase = cx.session().map(SessionStatus::phase);
+        if phase == self.shown.as_ref() {
+            return;
+        }
+        self.shown = phase.cloned();
+        let (code, said) = match cx.session() {
+            Some(status) => (status.code().to_owned(), phase_text(status.phase())),
+            None => (String::new(), String::new()),
+        };
+        let _ = ui.set_text(cx, "session_code", &code);
+        let _ = ui.set_text(cx, "session_status", &said);
     }
 
     /// Has the menu's options choose the bot's difficulty in a run alone, and disables it in a
@@ -578,6 +732,7 @@ impl Layer for Foxball {
             return;
         }
         self.player = cx.player().unwrap_or(0);
+        self.networked = cx.networked();
         // The arena, watched as the game runs, in development builds, which apply its saves.
         if let Err(error) = cx.load_start_scene() {
             cx.fail(error);
@@ -601,6 +756,7 @@ impl Layer for Foxball {
     fn restored(&mut self, cx: &mut Context) {
         self.offer_difficulty(cx);
         self.player = cx.player().unwrap_or(0);
+        self.networked = cx.networked();
         let player = self.player;
         self.commands.extend([
             Command::Walk {
@@ -638,6 +794,7 @@ impl Layer for Foxball {
     /// Grabs the cursor while this run wants it, has the view follow this run's fox, and draws the
     /// UI: the scores, the hint for the cursor as it's grabbed or not, and the menu while it's open.
     fn update(&mut self, cx: &mut Context, dt: Duration) {
+        self.follow_session(cx);
         cx.set_cursor_grabbed(self.grab);
         let turning = self.turning();
         let own = cx.world().query::<(&Player, &Transform)>();
@@ -661,7 +818,7 @@ impl Layer for Foxball {
         // Nodes a file edited to drop them goes without.
         let _ = ui.set_visible(cx, "hint", !self.grab && !self.menu);
         let _ = ui.set_visible(cx, "hint_grabbed", self.grab && !self.menu);
-        if self.options {
+        if self.page == Page::Options {
             write_volumes(cx, ui, &mut self.text);
         }
         ui.draw(cx);
@@ -670,13 +827,13 @@ impl Layer for Foxball {
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         let open = self.menu;
         // What the menu makes of the event while it's open: a button pressed, an option changed,
-        // or back, which goes back from the options to the menu's first page.
+        // or back, which goes back from another page to the menu's first.
         let (mut chosen, mut toggled, mut changed) = (None, false, None);
         if open && let Some(assets) = &self.assets {
             match assets.ui.event(cx, event) {
                 Some(UiEvent::Pressed(button)) => chosen = Some(button),
                 Some(UiEvent::Changed(name, value)) => changed = Some((name, value)),
-                Some(UiEvent::Back) if self.options => chosen = Some("back".into()),
+                Some(UiEvent::Back) if self.page != Page::First => chosen = Some("back".into()),
                 Some(UiEvent::Back) => toggled = true,
                 Some(UiEvent::Focused(_)) | None => {}
             }
@@ -749,8 +906,22 @@ impl Layer for Foxball {
                 self.commands.push(Command::NewMatch { player });
                 toggled = true;
             }
-            Some("options") => self.show_options(cx, true),
-            Some("back") => self.show_options(cx, false),
+            Some("options") => self.show_page(cx, Page::Options),
+            Some("host") => self.host(cx),
+            Some("join") => self.show_page(cx, Page::Joining),
+            Some("online") => self.show_page(cx, Page::Session),
+            // Enter in the code's field, or Join.
+            Some("code" | "join_code") => self.join(cx),
+            Some("copy") => {
+                if let Some(code) = cx.session().map(|status| status.code().to_owned()) {
+                    cx.copy(&code);
+                }
+            }
+            Some("leave") => {
+                cx.leave();
+                self.show_page(cx, Page::First);
+            }
+            Some("back" | "session_back" | "joining_back") => self.show_page(cx, Page::First),
             Some("quit") => cx.exit(),
             _ => {}
         }
@@ -891,6 +1062,7 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
         Command::Kick { player } => return kick(world, player, sounds),
         Command::NewMatch { .. } => return new_match(world),
         Command::Bot { player } => return give_bot(world, player),
+        Command::NoBot { fox } => return take_bot(world, fox),
         Command::Difficulty { level, .. } => {
             if let Some(found) = world.query_mut::<&mut Match>().next() {
                 found.difficulty = level;
@@ -913,6 +1085,7 @@ fn apply(world: &mut World, command: &Command, sounds: Option<Sounds>) {
             Command::Kick { .. }
             | Command::NewMatch { .. }
             | Command::Bot { .. }
+            | Command::NoBot { .. }
             | Command::Difficulty { .. } => {}
         }
     }
@@ -997,6 +1170,43 @@ fn give_bot(world: &mut World, player: u8) {
         .insert(fox, bot)
         .and_then(|()| world.insert(fox, agent));
     given.expect("the fox, just found");
+}
+
+/// Takes the game's bot off player `fox`'s fox, its [`Bot`] and its [`NavAgent`], the fox standing
+/// where it is, its walk and turn at rest, until its player's commands move it.
+fn take_bot(world: &mut World, fox: u8) {
+    let found = (world.query::<(Entity, &Player)>()).find(|(_, of)| of.index == fox);
+    let Some(entity) = found.map(|(entity, _)| entity) else {
+        return;
+    };
+    let taken = world
+        .remove::<Bot>(entity)
+        .and_then(|_| world.remove::<NavAgent>(entity));
+    taken.expect("the fox, just found");
+    if let Some(player) = world.get_mut::<Player>(entity) {
+        (player.heading, player.spin) = (Vec2::ZERO, 0.0);
+    }
+}
+
+/// `text` with its first letter a capital, as the menu's lines start.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// What the menu says of a session as it stands at `phase`.
+fn phase_text(phase: &SessionPhase) -> String {
+    match phase {
+        SessionPhase::Waiting => "Waiting for the other player: give them the code".to_owned(),
+        SessionPhase::Unhosted => "No game has this code yet: still looking".to_owned(),
+        SessionPhase::Joining => "Joining the game".to_owned(),
+        SessionPhase::Playing => "Playing online".to_owned(),
+        SessionPhase::Refused { why } => format!("The host refused this game: {why}"),
+        SessionPhase::Unreachable { why } => format!("Can't reach the relay: {why}"),
+        SessionPhase::Lost => "Lost the host: trying to reach it again".to_owned(),
+    }
 }
 
 /// `v` along the ground: its height dropped.

@@ -28,8 +28,8 @@ use tracing::{debug, error, info, warn};
 use super::server::{KEPT, PART, PROTOCOL};
 use super::states::rebuild;
 use super::{
-    Code, Handshaken, Inputs, Link, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE, Queued,
-    REFUSED, Stalls, Turn, build, connect, hello, tick_of, write_inputs,
+    Code, Handshaken, Inputs, Link, Looking, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE,
+    Queued, REFUSED, Stalls, Turn, build, connect, hello, tick_of, write_inputs,
 };
 use crate::args::{Conditions, Toward};
 use crate::layer::Commands;
@@ -74,6 +74,7 @@ pub(crate) struct Client {
     toward: Toward,
     code: Code,
     connecting: Option<Receiver<Handshaken>>,
+    looking: Looking,
     pub(super) app: &'static str,
     /// The run's build, as [`build`] says, which the server's must be.
     build: &'static str,
@@ -182,6 +183,7 @@ impl Client {
             toward: toward.clone(),
             code,
             connecting: None,
+            looking: Looking::default(),
             app,
             build: build()?,
             layers: layers.join(" "),
@@ -292,9 +294,10 @@ impl Client {
         if self.link.is_some() {
             return;
         }
-        let (toward, code) = (&self.toward, self.code);
-        let made = (self.connecting)
-            .get_or_insert_with(|| connect(toward.clone(), "the server", Duration::ZERO, code));
+        let (toward, code, looking) = (&self.toward, self.code, &self.looking);
+        let made = (self.connecting).get_or_insert_with(|| {
+            connect(toward.clone(), "the server", Duration::ZERO, code, looking)
+        });
         let Ok(handshaken) = made.try_recv() else {
             return;
         };
@@ -309,7 +312,8 @@ impl Client {
                      {again} s"
                 );
                 let toward = self.toward.clone();
-                self.connecting = Some(connect(toward, "the server", REFUSED, self.code));
+                let connecting = connect(toward, "the server", REFUSED, self.code, &self.looking);
+                self.connecting = Some(connecting);
                 return;
             }
         };
@@ -364,7 +368,8 @@ impl Client {
                 );
                 self.lose("the server refused it");
                 let toward = self.toward.clone();
-                self.connecting = Some(connect(toward, "the server", REFUSED, self.code));
+                let connecting = connect(toward, "the server", REFUSED, self.code, &self.looking);
+                self.connecting = Some(connecting);
             }
             "world" => {
                 let mut words = rest.split(' ');

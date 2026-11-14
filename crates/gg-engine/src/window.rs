@@ -127,6 +127,7 @@ pub(crate) fn run(
         #[cfg(feature = "dev")]
         viewports: None,
         gamepads: Gamepads::default(),
+        clipboard: Clipboard::default(),
         cx: Context::new(None),
         clock: Clock::default(),
         limiter: Limiter::default(),
@@ -197,6 +198,8 @@ struct Handler<'a> {
     viewports: Option<Viewports>,
     /// Opened with the window, since Windows gives a pad's input only to a focused window.
     gamepads: Gamepads,
+    /// What the layers paste from and copy to.
+    clipboard: Clipboard,
     #[cfg(feature = "dev")]
     dock: Dock,
     cx: Context,
@@ -392,6 +395,9 @@ impl Handler<'_> {
             );
             (MainUi::none(), Duration::ZERO)
         };
+        if let Some(copied) = self.cx.copied.take() {
+            self.clipboard.copy(copied);
+        }
         // egui shows the cursor as its widgets' hover asks, unless told it's hidden.
         #[cfg(feature = "dev")]
         if self.grabbed
@@ -667,11 +673,63 @@ impl Handler<'_> {
 }
 
 fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-    // Every event but the cursor's and the mouse's moves, which would drown the rest.
-    if !matches!(event, Event::CursorMoved { .. } | Event::MouseMotion { .. }) {
+    // Every event but the cursor's and the mouse's moves, which would drown the rest, and what's
+    // pasted, which may be a session's code.
+    if !matches!(
+        event,
+        Event::CursorMoved { .. } | Event::MouseMotion { .. } | Event::Paste(_)
+    ) {
         trace!(?event, "Event");
     }
     stack.event(cx, event)
+}
+
+/// The OS's clipboard, opened as a layer first pastes or copies, as on Linux that connects to the
+/// display's server: what [`Event::Paste`] carries and [`Context::copy`] puts there. Where it can't
+/// be opened, read or written, each paste or copy warns (`ui.clipboard`) and does nothing.
+#[derive(Default)]
+struct Clipboard(Option<arboard::Clipboard>);
+
+impl Clipboard {
+    fn opened(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.0.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.0 = Some(clipboard),
+                Err(error) => warn!(
+                    code = "ui.clipboard",
+                    "Can't open the OS's clipboard: {error}"
+                ),
+            }
+        }
+        self.0.as_mut()
+    }
+
+    /// The text it holds, if it holds any.
+    fn paste(&mut self) -> Option<String> {
+        match self.opened()?.get_text() {
+            Ok(text) => Some(text),
+            Err(arboard::Error::ContentNotAvailable) => None,
+            Err(error) => {
+                warn!(
+                    code = "ui.clipboard",
+                    "Can't read the OS's clipboard: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Puts `text` there.
+    fn copy(&mut self, text: String) {
+        if let Some(clipboard) = self.opened()
+            && let Err(error) = clipboard.set_text(text)
+        {
+            warn!(
+                code = "ui.clipboard",
+                "Can't write the OS's clipboard: {error}"
+            );
+        }
+    }
 }
 
 /// What's at the cursor in the main window, whose input egui reads through `input`, as `dock` drew
@@ -810,6 +868,17 @@ impl ApplicationHandler for Handler<'_> {
                     });
                 }
                 let _ = self.dispatch(&event);
+                // What's on the clipboard, after the key that pasted it.
+                if let Event::Key {
+                    key: crate::Key::KeyV,
+                    pressed: true,
+                    ..
+                } = event
+                    && self.cx.input().command_down()
+                    && let Some(pasted) = self.clipboard.paste()
+                {
+                    let _ = self.dispatch(&Event::Paste(&pasted));
+                }
             }),
         }
     }

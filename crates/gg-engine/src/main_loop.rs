@@ -153,6 +153,12 @@ pub(crate) fn run_headless(
             #[cfg(not(feature = "dev"))]
             let ui = None;
             let pass = run_frame(&mut app.stack, &mut cx, dt, &mut stepper, ui);
+            if cx.copied.take().is_some() {
+                warn!(
+                    code = "ui.clipboard",
+                    "A layer copied text, but a headless or embedded run has no clipboard"
+                );
+            }
             let (ui, tessellated, view) = match pass {
                 #[cfg(feature = "dev")]
                 Some((mut output, layers_draw)) => {
@@ -412,9 +418,11 @@ pub(crate) fn run_frame(
     {
         cx.started = std::time::SystemTime::now();
     }
+    stack.take_asked(cx);
     if let Some(ticks) = stack.net_turn(cx, stepper.ticks) {
         stepper.jump_to(ticks);
     }
+    cx.session = stack.session_status();
     let owed = stack.paced(dt);
     // As the requests served before the frame left the run, before its ticks queue sounds.
     #[cfg(feature = "dev")]

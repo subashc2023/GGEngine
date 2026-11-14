@@ -20,6 +20,11 @@ cook = { path = "tools/cook" }
 
 ash = "0.38.0"
 ash-window = "0.13.0"
+# The OS's clipboard, which a game's text fields paste from and copy to, in every build: the one
+# egui-winit's `clipboard` reaches it through, at its version. Without its default `image-data`,
+# which pulls in the image crate, as games copy text alone; on Linux through X11, which Wayland's
+# sessions serve through XWayland.
+arboard = { version = "3.7.0", default-features = false }
 # Decodes BC7 and BC5 on the CPU, as GPUs do, for the cooker's tests of what it compressed: bcdec's
 # port, in safe Rust alone.
 bcdec_rs = "0.2.1"

@@ -648,6 +648,9 @@ struct State {
     pushed: bool,
     /// The frame that last drew it, by the number of frames handed off before it.
     drawn: Option<u64>,
+    /// What a text field's selection copied or cut, as Ctrl+C and Ctrl+X do, for the event that did
+    /// to put on the OS's clipboard, as [`Context::copy`] does.
+    copied: Option<String>,
 }
 
 /// How far a pad's stick goes before it steps the focus, and how near rest it comes back before
@@ -680,6 +683,7 @@ impl State {
             input: true,
             pushed: false,
             drawn: None,
+            copied: None,
         };
         state.reset_caret();
         state
@@ -905,6 +909,14 @@ impl State {
                 ..
             } => self.release(Press::Key),
             Event::Text(typed) => self.type_in(self.typing()?, typed),
+            // Its first line, as a field holds one, without the characters no line holds, as a
+            // code copied from a chat may come with a tab or a line's end.
+            Event::Paste(pasted) => {
+                let field = self.typing()?;
+                let line = pasted.lines().next().unwrap_or_default();
+                let line: String = line.chars().filter(|c| !c.is_control()).collect();
+                self.type_in(field, &line)
+            }
             Event::PadButton {
                 button,
                 pressed: true,
@@ -1399,7 +1411,7 @@ impl State {
             Event::Scroll(_) => {
                 self.options_open() || cursor.is_some_and(|at| self.pointer_over(at))
             }
-            Event::Key { .. } | Event::Text(_) => self.typing().is_some(),
+            Event::Key { .. } | Event::Text(_) | Event::Paste(_) => self.typing().is_some(),
             _ => false,
         }
     }
@@ -1559,16 +1571,31 @@ impl State {
     /// field `i`, which has the focus, if it takes the key: the left and right arrows move its
     /// caret a character, past what's selected, Home and End to its start and end, each with
     /// Shift selecting as far, and Ctrl+A selects all of it; Backspace and Delete cut what's
-    /// selected, or the character before or after the caret; Enter presses it; and Space types,
-    /// as its text follows. `None` for a key it leaves to the rest, as Escape, Tab, and the up and
-    /// down arrows, which move the focus.
+    /// selected, or the character before or after the caret; Ctrl+C copies what's selected, and
+    /// Ctrl+X cuts it too, Cmd for Ctrl on macOS, as [`copied`](Self::copied) keeps it, and Ctrl+V
+    /// waits for the [`Event::Paste`] that follows; Enter presses it; and Space types, as its text
+    /// follows. `None` for a key it leaves to the rest, as Escape, Tab, and the up and down arrows,
+    /// which move the focus.
     fn edit(&mut self, i: usize, key: Key, repeat: bool, input: &Input) -> Option<Option<UiEvent>> {
         let shift = input.key_down(Key::ShiftLeft) || input.key_down(Key::ShiftRight);
         let control = input.key_down(Key::ControlLeft) || input.key_down(Key::ControlRight);
+        let command = input.command_down();
         let text = &self.nodes[i].text;
         let Caret { at, from, .. } = self.caret;
         let (low, high) = (at.min(from), at.max(from));
         match key {
+            Key::KeyC | Key::KeyX if command => {
+                if low == high {
+                    return Some(None);
+                }
+                self.copied = Some(text[low..high].to_owned());
+                Some(if key == Key::KeyX {
+                    self.splice(i, low..high, "")
+                } else {
+                    None
+                })
+            }
+            Key::KeyV if command => Some(None),
             Key::ArrowLeft | Key::ArrowRight => {
                 self.move_caret(i, if key == Key::ArrowLeft { -1 } else { 1 }, shift);
                 Some(None)
@@ -1904,7 +1931,11 @@ impl GameUi {
         let cursor = cursor_on(view, input.cursor());
         let takes = state.takes(event, cursor, frames);
         let done = state.event(event, cursor, input, fonts);
+        let copied = state.copied.take();
         uis.consumed |= takes;
+        if let Some(copied) = copied {
+            cx.copy(&copied);
+        }
         done
     }
 

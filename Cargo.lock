@@ -1287,6 +1287,7 @@ dependencies = [
 name = "gg-engine"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "bevy_mikktspace",
  "bytemuck",
  "egui",

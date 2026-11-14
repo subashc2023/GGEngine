@@ -24,6 +24,7 @@ deny = [
     { crate = "winit", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input" },
     { crate = "egui-winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
     { crate = "rfd", wrappers = ["gg-engine"], reason = "gg-engine owns the window, which dialogs belong to" },
+    { crate = "arboard", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input, whose clipboard it is" },
     { crate = "gilrs", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
     { crate = "gilrs-core", wrappers = ["gilrs"], reason = "gg-engine owns the window and input" },
     { crate = "rayon-core", wrappers = ["gg-engine"], reason = "gg-engine's jobs module is the way into the pool" },

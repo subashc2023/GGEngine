@@ -123,7 +123,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpS
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1231,6 +1231,7 @@ enum Find {
         toward: Toward,
         code: Code,
         connecting: Option<Receiver<Handshaken>>,
+        looking: Looking,
     },
 }
 
@@ -1241,10 +1242,19 @@ impl Find {
             toward,
             code,
             connecting,
+            looking,
         } = self
         {
             let host = "the lockstep host";
-            *connecting = Some(connect(toward.clone(), host, REFUSED, *code));
+            *connecting = Some(connect(toward.clone(), host, REFUSED, *code, looking));
+        }
+    }
+
+    /// What the session's relay last answered, as [`Heard`] says.
+    fn heard(&self) -> Answer {
+        match self {
+            Self::Host(accepted) => accepted.heard.get(),
+            Self::Join { looking, .. } => looking.heard.get(),
         }
     }
 }
@@ -1255,6 +1265,13 @@ pub(crate) struct Lockstep {
     /// Where the host listens, as the OS has it: for tests, which listen where it picks.
     #[cfg(test)]
     listening: Option<SocketAddr>,
+    /// The session's code, written as [`Code`]'s `Display` writes it, for [`SessionStatus`]: the
+    /// session's key, logged nowhere.
+    code: Arc<str>,
+    /// The joiner's: why its host last refused it, until the host's world comes.
+    refused: Option<Arc<str>>,
+    /// The joiner's: whether its host's world has come, so that a link lost after is its host lost.
+    played: bool,
     app: &'static str,
     /// The run's build, as [`build`] says, which both peers' must be: a test's own, to stand for
     /// another's.
@@ -1400,6 +1417,7 @@ impl Lockstep {
                 toward: toward.clone(),
                 code,
                 connecting: None,
+                looking: Looking::default(),
             },
             Net::Serve(_) | Net::Connect(_) => {
                 unreachable!(
@@ -1412,6 +1430,9 @@ impl Lockstep {
             find,
             #[cfg(test)]
             listening,
+            code: code.to_string().into(),
+            refused: None,
+            played: false,
             app,
             build,
             layers: layers.join(" "),
@@ -1491,6 +1512,35 @@ impl Lockstep {
     /// Whether this peer is the host.
     pub(crate) fn hosts(&self) -> bool {
         self.player() == 0
+    }
+
+    /// Where the session stands for this peer, as [`SessionPhase`] says.
+    fn phase(&self) -> SessionPhase {
+        let heard = self.find.heard();
+        if self.hosts() {
+            return match (&self.link, heard) {
+                (Some(_), _) => SessionPhase::Playing,
+                (None, Answer::Unreachable(why)) => SessionPhase::Unreachable { why },
+                (None, _) => SessionPhase::Waiting,
+            };
+        }
+        if self.link.is_some() && !self.waiting() {
+            return SessionPhase::Playing;
+        }
+        if let Some(why) = &self.refused {
+            return SessionPhase::Refused { why: why.clone() };
+        }
+        if self.link.is_some() {
+            return SessionPhase::Joining;
+        }
+        if self.played {
+            return SessionPhase::Lost;
+        }
+        match heard {
+            Answer::Unhosted => SessionPhase::Unhosted,
+            Answer::Unreachable(why) => SessionPhase::Unreachable { why },
+            Answer::Nothing | Answer::Hosted => SessionPhase::Joining,
+        }
     }
 
     /// Whether the peer has no world to run: a joiner that hasn't the host's yet, or whose host is
@@ -1579,9 +1629,11 @@ impl Lockstep {
                 toward,
                 code,
                 connecting,
+                looking,
             } => {
                 let made = connecting.get_or_insert_with(|| {
-                    connect(toward.clone(), "the lockstep host", Duration::ZERO, *code)
+                    let host = "the lockstep host";
+                    connect(toward.clone(), host, Duration::ZERO, *code, looking)
                 });
                 let Ok(handshaken) = made.try_recv() else {
                     return;
@@ -1596,6 +1648,7 @@ impl Lockstep {
                              tries again in {} s",
                             REFUSED.as_secs()
                         );
+                        self.refused = Some(why.to_string().into());
                         self.find.again();
                         return;
                     }
@@ -1667,6 +1720,7 @@ impl Lockstep {
                     "The lockstep host refused this peer: {rest}; it tries again in {} s",
                     REFUSED.as_secs()
                 );
+                self.refused = Some(rest.into());
                 self.lose("the host refused it");
                 self.find.again();
             }
@@ -1904,6 +1958,7 @@ impl Lockstep {
         if let Some(link) = &mut self.link {
             link.joined = true;
         }
+        (self.played, self.refused) = (true, None);
         // A joiner ahead of its host may have applied a patch at a tick after `tick`, which it runs
         // again on that code: their worlds may part until the host applies it too, and a resync
         // makes them the same.
@@ -2772,6 +2827,76 @@ pub(crate) enum Turn {
     Restore((u64, String)),
 }
 
+/// A run's session as a game's own UI shows it, as [`Context::session`] gives it: its code, the
+/// run's player and where it stands.
+#[derive(Clone)]
+pub struct SessionStatus {
+    code: Arc<str>,
+    player: u8,
+    phase: SessionPhase,
+}
+
+impl SessionStatus {
+    /// A session's status, as a run's would be: for tests, through
+    /// [`Context::set_session`].
+    #[doc(hidden)]
+    pub fn new(code: &str, player: u8, phase: SessionPhase) -> Self {
+        Self {
+            code: code.into(),
+            player,
+            phase,
+        }
+    }
+
+    /// The session's code, written in fours, as `7KQ2-9XMB-4TZD-P0WH`: for the host's UI to show,
+    /// for the player to give the one who joins. It's the session's key, which the engine logs
+    /// nowhere, nor writes in this type's `Debug`.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// The run's player: 0 for the host, 1 for the joiner.
+    pub fn player(&self) -> u8 {
+        self.player
+    }
+
+    /// Where the session stands for this run.
+    pub fn phase(&self) -> &SessionPhase {
+        &self.phase
+    }
+}
+
+impl std::fmt::Debug for SessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionStatus")
+            .field("player", &self.player)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a session stands for a run, as [`SessionStatus::phase`] says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionPhase {
+    /// The host's, with no one joined, or the one who joined lost: it plays on alone.
+    Waiting,
+    /// The joiner's, while no run hosts its code at the relay: it asks again each second.
+    Unhosted,
+    /// The joiner's, connected or connecting, until the host's world takes its own's place.
+    Joining,
+    /// Both runs play.
+    Playing,
+    /// The joiner's, refused by its host, as a run of another build is, saying why: it tries again
+    /// in 5 s.
+    Refused { why: Arc<str> },
+    /// The relay can't be reached, refused the session's room or lost it, saying why: the run
+    /// tries again, the host every 5 s and the joiner every second.
+    Unreachable { why: Arc<str> },
+    /// The joiner's, whose host is lost: frozen, it connects again, and the host's world takes its
+    /// place again once it does.
+    Lost,
+}
+
 /// The networked session a run takes part in, as `--host`, `--join`, `--serve` or `--connect` has
 /// it: a peer of a lockstep session, a server that owns the world, or a client of a server; each
 /// boxed, as their sizes are far apart, and a run has one.
@@ -2867,6 +2992,19 @@ impl Session {
             Self::Peer(net) => net.condition(conditions),
             Self::Server(server) => (server.conditions, server.random) = (Some(conditions), random),
             Self::Client(client) => (client.conditions, client.random) = (Some(conditions), random),
+        }
+    }
+
+    /// The session as a game's own UI shows it, as [`SessionStatus`] says: a peer's; `None` for a
+    /// server or a client, whose sessions a game's own UI doesn't start.
+    pub(crate) fn status(&self) -> Option<SessionStatus> {
+        match self {
+            Self::Peer(net) => Some(SessionStatus {
+                code: net.code.clone(),
+                player: net.player(),
+                phase: net.phase(),
+            }),
+            Self::Server(_) | Self::Client(_) => None,
         }
     }
 
@@ -3167,6 +3305,7 @@ fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Result<u16, S
 fn listen(at: &Listen, what: &'static str, code: Code) -> Result<(Accepted, Option<SocketAddr>)> {
     let (shaken, handshaken) = mpsc::channel();
     let session = Arc::new(());
+    let heard = Heard::default();
     let started = |error: io::Error| {
         let message = format!("can't start the thread that takes {what}");
         Error::new("net.start", message).with_source(error)
@@ -3196,14 +3335,15 @@ fn listen(at: &Listen, what: &'static str, code: Code) -> Result<(Accepted, Opti
             .map_err(started)?;
     }
     if let Some(relay) = &at.relay {
-        let (relay, kept) = (relay.clone(), Arc::downgrade(&session));
+        let (relay, kept, heard) = (relay.clone(), Arc::downgrade(&session), heard.clone());
         thread::Builder::new()
             .name("gg-net-relay".to_owned())
-            .spawn(move || register(&relay, what, code, &shaken, &kept))
+            .spawn(move || register(&relay, what, code, &shaken, &kept, &heard))
             .map_err(started)?;
     }
     let accepted = Accepted {
         handshaken,
+        heard,
         _session: session,
     };
     Ok((accepted, listening))
@@ -3227,8 +3367,16 @@ fn handshake_on_its_own(handshake: impl FnOnce() + Send + 'static) {
 /// each that comes for it, each through its handshake on a thread of its own, into `shaken`, until
 /// the session, which `kept` holds, is gone. Registers again [`REGISTER`] after the relay can't be
 /// reached, refuses it, as it does while a host it lost holds the room, or is lost: logged once
-/// each time, `net.relay`, until it's registered again.
-fn register(relay: &str, what: &str, code: Code, shaken: &Sender<Handshaken>, kept: &Weak<()>) {
+/// each time, `net.relay`, until it's registered again. Notes in `heard` whether the room is
+/// registered, or why not.
+fn register(
+    relay: &str,
+    what: &str,
+    code: Code,
+    shaken: &Sender<Handshaken>,
+    kept: &Weak<()>,
+    heard: &Heard,
+) {
     let room = code.room();
     let mut warned = false;
     while kept.strong_count() > 0 {
@@ -3236,6 +3384,7 @@ fn register(relay: &str, what: &str, code: Code, shaken: &Sender<Handshaken>, ke
         let lost = match registered {
             Ok((at, mut hosting)) => {
                 info!(relay, "Registered the session at its relay, for {what}");
+                heard.set(Answer::Hosted);
                 warned = false;
                 loop {
                     if kept.strong_count() == 0 {
@@ -3262,6 +3411,7 @@ fn register(relay: &str, what: &str, code: Code, shaken: &Sender<Handshaken>, ke
             }
             Err(error) => format!("can't register there: {error}"),
         };
+        heard.set(Answer::Unreachable(lost.as_str().into()));
         if !mem::replace(&mut warned, true) {
             let again = REGISTER.as_secs();
             warn!(
@@ -3269,11 +3419,59 @@ fn register(relay: &str, what: &str, code: Code, shaken: &Sender<Handshaken>, ke
                 relay, "The session's relay {relay}: {lost}; registering again every {again} s"
             );
         }
-        let wake = Instant::now() + REGISTER;
-        while kept.strong_count() > 0 && Instant::now() < wake {
-            thread::sleep(Duration::from_millis(100));
-        }
+        sleep_while_kept(REGISTER, kept);
     }
+}
+
+/// Sleeps `time`, in steps of 100 ms, while `kept`'s session lasts; returns whether it still does.
+fn sleep_while_kept(time: Duration, kept: &Weak<()>) -> bool {
+    let wake = Instant::now() + time;
+    while kept.strong_count() > 0 && Instant::now() < wake {
+        let left = wake.saturating_duration_since(Instant::now());
+        thread::sleep(left.min(Duration::from_millis(100)));
+    }
+    kept.strong_count() > 0
+}
+
+/// What a session's relay last answered the thread that registers its room there, or comes for
+/// it, shared with that thread, for the session's status to say, as [`SessionPhase`] does.
+#[derive(Clone, Default)]
+pub(crate) struct Heard(Arc<Mutex<Answer>>);
+
+impl Heard {
+    fn set(&self, answer: Answer) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = answer;
+    }
+
+    fn get(&self) -> Answer {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// What a relay answered, as [`Heard`] keeps it.
+#[derive(Clone, Default)]
+pub(crate) enum Answer {
+    /// Nothing yet, or the session has no relay.
+    #[default]
+    Nothing,
+    /// The host's room is registered; or the joiner's, which its host holds, paired it.
+    Hosted,
+    /// The joiner's room, which no host holds yet.
+    Unhosted,
+    /// The relay can't be reached, refused the room or lost it, saying why.
+    Unreachable(Arc<str>),
+}
+
+/// What a joiner or a client keeps while it looks for its host or server, as [`connect`] does:
+/// what tells the threads that connect it that the session is gone, which they end at, and what
+/// the relay last answered them.
+#[derive(Default)]
+pub(crate) struct Looking {
+    session: Arc<()>,
+    heard: Heard,
 }
 
 /// The first of the addresses `address` names, as `host:port` or `ip:port`.
@@ -3313,6 +3511,8 @@ struct Relayed {
 /// it ends at as the next connection comes.
 struct Accepted {
     handshaken: Receiver<Handshaken>,
+    /// What the relay last answered the thread that registers the session's room, if it has one.
+    heard: Heard,
     _session: Arc<()>,
 }
 
@@ -3403,20 +3603,26 @@ fn read_batches(
 
 /// Connects to `what` where `toward` says, on a thread of its own, after `after`: to its address,
 /// trying again every [`RETRY`] until it does, or through its relay, coming for the room `code`
-/// gives there, again every [`UNHOSTED`] until its host takes it, as [`gg_relay::join`] says. Then
-/// runs the handshake keyed by `code` on the connection, as [`shake`] does; returns where the
-/// connection comes, with its keys, or why its handshake failed.
+/// gives there, again every [`UNHOSTED`] until its host takes it, as [`gg_relay::join`] says,
+/// noting each answer in `looking`'s [`Heard`]. Then runs the handshake keyed by `code` on the
+/// connection, as [`shake`] does; returns where the connection comes, with its keys, or why its
+/// handshake failed. The thread ends, connecting no more, once `looking` is gone, as its session
+/// is.
 fn connect(
     toward: Toward,
     what: &'static str,
     after: Duration,
     code: Code,
+    looking: &Looking,
 ) -> Receiver<Handshaken> {
     let (made, connection) = mpsc::channel();
+    let (kept, heard) = (Arc::downgrade(&looking.session), looking.heard.clone());
     let spawned = thread::Builder::new()
         .name("gg-net-connect".to_owned())
         .spawn(move || {
-            thread::sleep(after);
+            if !sleep_while_kept(after, &kept) {
+                return;
+            }
             let mut warned = false;
             loop {
                 let (shaken, wait) = match &toward {
@@ -3435,6 +3641,7 @@ fn connect(
                             .and_then(|at| Ok((at, gg_relay::join(at, code.room())?)));
                         let shaken = match joined {
                             Ok((at, Joined::Paired(paired))) => {
+                                heard.set(Answer::Hosted);
                                 let relayed = Relayed {
                                     relay: at,
                                     token: paired.token,
@@ -3442,12 +3649,14 @@ fn connect(
                                 Some(shake(paired.stream, &code, false, Some(relayed)))
                             }
                             Ok((_, Joined::Unhosted)) => {
+                                heard.set(Answer::Unhosted);
                                 if !mem::replace(&mut warned, true) {
                                     info!(relay = %relay, "Waiting for {what} at the relay");
                                 }
                                 None
                             }
                             Err(error) => {
+                                heard.set(Answer::Unreachable(error.to_string().into()));
                                 if !mem::replace(&mut warned, true) {
                                     warn!(
                                         code = "net.relay",
@@ -3467,7 +3676,9 @@ fn connect(
                     let _ = made.send(shaken);
                     return;
                 }
-                thread::sleep(wait);
+                if !sleep_while_kept(wait, &kept) {
+                    return;
+                }
             }
         });
     if let Err(error) = spawned {
@@ -3729,11 +3940,39 @@ mod tests {
             }
         }
 
-        /// A frame's turn that runs no tick.
+        /// A run alone, `game` attached in a context seeded by `seed`, whose own sessions, as
+        /// [`Context::host`] starts them, go through the relay at `relay`, predicting if `game`'s
+        /// session would.
+        fn alone(seed: u64, game: Game, relay: &str) -> Self {
+            let mut stack = Stack::default();
+            let predicting = game.rollback;
+            stack.push_layer(game);
+            let mut cx = Context::seeded(seed);
+            cx.own = crate::layer::OwnSessions {
+                app: "Tested",
+                layers: stack.names().to_vec(),
+                relay: Some(relay.to_owned()),
+                link: None,
+                predicting,
+                recorded: false,
+            };
+            stack.attach(&mut cx);
+            Self { stack, cx, next: 0 }
+        }
+
+        /// A frame's turn that runs no tick, taking up what the game asked of its session first,
+        /// and its status after, as a run's frame does.
         fn wait(&mut self) {
+            self.stack.take_asked(&mut self.cx);
             if let Some(ticks) = self.stack.net_turn(&mut self.cx, self.next) {
                 self.next = ticks;
             }
+            self.cx.session = self.stack.session_status();
+        }
+
+        /// Where the run's session stands, as its game's UI would show it.
+        fn phase(&self) -> Option<SessionPhase> {
+            self.cx.session().map(|status| status.phase().clone())
         }
 
         fn net(&mut self) -> &mut Lockstep {
@@ -5266,6 +5505,156 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::UnexpectedEof, "{error}");
         join(&mut host, &mut joiner);
         relay.stop();
+    }
+
+    /// Turns `peer` alone until `done` holds of where its session stands, failing after 10 s.
+    fn until_phase(peer: &mut Peer, done: impl Fn(Option<SessionPhase>) -> bool) {
+        let start = Instant::now();
+        while !done(peer.phase()) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                peer.phase()
+            );
+            peer.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Runs alone, partway through, host a session through their relay and join it by the code the
+    /// host's session gives, as a game's own UI starts them: a joiner given a code no run hosts
+    /// waits, unhosted, until it leaves; then the peers play in step, their worlds hashing alike,
+    /// each phase as a game's UI would show it. The joiner leaving plays on alone, its host waiting
+    /// for another; and the host leaving has its joiner lose it.
+    fn runs_alone_host_and_join_by_the_code(rollback: bool) {
+        let (relay, at) = relay();
+        let networked = Rc::new(RefCell::new(Vec::new()));
+        let game = || Game {
+            rollback,
+            networked: networked.clone(),
+            ..Game::default()
+        };
+        let (mut host, mut joiner) = (Peer::alone(1, game(), &at), Peer::alone(2, game(), &at));
+        for _ in 0..5 {
+            host.turn();
+            joiner.turn();
+        }
+        assert_eq!((host.next, joiner.next), (5, 5));
+        assert!(host.phase().is_none() && !host.cx.networked());
+        host.cx.host().expect("it hosts");
+        let busy = host.cx.host().expect_err("one session at a time");
+        assert_eq!(busy.code(), "net.busy");
+        host.turn();
+        assert!(host.cx.networked());
+        assert_eq!(host.cx.player(), Some(0));
+        assert_eq!(host.phase(), Some(SessionPhase::Waiting));
+        // The host plays on alone meanwhile.
+        assert_eq!(host.next, 6);
+        let code = host.cx.session().expect("a session").code().to_owned();
+        // A code no run hosts, until the joiner leaves it.
+        joiner.cx.join("0000 0000 0000 0000").expect("a code");
+        until_phase(&mut joiner, |phase| phase == Some(SessionPhase::Unhosted));
+        assert_eq!(joiner.cx.player(), Some(1));
+        let waited = joiner.next;
+        joiner.cx.leave();
+        joiner.turn();
+        assert!(joiner.phase().is_none() && !joiner.cx.networked());
+        assert_eq!((joiner.cx.player(), joiner.next), (None, waited + 1));
+        // The code as a player might type it.
+        joiner
+            .cx
+            .join(&code.to_lowercase().replace('-', " "))
+            .expect("the code");
+        until(&mut host, &mut joiner, |host, joiner| {
+            let playing = Some(SessionPhase::Playing);
+            host.phase() == playing && joiner.phase() == playing
+        });
+        assert_eq!(
+            joiner.cx.session().map(SessionStatus::code),
+            Some(code.as_str())
+        );
+        assert_eq!(networked.borrow().last(), Some(&("restored", true)));
+        play(&mut host, &mut joiner, 30);
+        let at = sent(&mut host, &mut joiner) + 1;
+        settle(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let [ours, theirs] = host.score();
+        assert!(ours > 0 && theirs > 0, "{ours} {theirs}");
+        // The joiner leaves, and plays on alone from its host's world.
+        joiner.cx.leave();
+        joiner.turn();
+        assert!(joiner.phase().is_none() && joiner.cx.player().is_none());
+        let next = joiner.next;
+        joiner.turn();
+        assert_eq!(joiner.next, next + 1);
+        until_phase(&mut host, |phase| phase == Some(SessionPhase::Waiting));
+        // It joins again, and the host leaves.
+        joiner.cx.join(&code).expect("the code");
+        until(&mut host, &mut joiner, |_, joiner| {
+            joiner.phase() == Some(SessionPhase::Playing)
+        });
+        host.cx.leave();
+        host.turn();
+        assert!(host.phase().is_none() && !host.cx.networked());
+        until_phase(&mut joiner, |phase| phase == Some(SessionPhase::Lost));
+        relay.stop();
+    }
+
+    #[test]
+    fn runs_alone_host_and_join_by_the_code_in_lockstep() {
+        runs_alone_host_and_join_by_the_code(false);
+    }
+
+    #[test]
+    fn runs_alone_host_and_join_by_the_code_predicting() {
+        runs_alone_host_and_join_by_the_code(true);
+    }
+
+    /// A thread that connects through a relay notes that no host holds its room, and ends, coming
+    /// for it no more, once what it looks for is gone, as a joiner that leaves is: its channel
+    /// closes.
+    #[test]
+    fn a_thread_that_connects_ends_with_its_session() {
+        let (relay, at) = relay();
+        let looking = Looking::default();
+        let host = "the lockstep host";
+        let connecting = connect(Toward::Relay(at), host, Duration::ZERO, TESTED, &looking);
+        let start = Instant::now();
+        while !matches!(looking.heard.get(), Answer::Unhosted) {
+            assert!(start.elapsed() < Duration::from_secs(10), "never unhosted");
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(looking);
+        let ended = connecting.recv_timeout(Duration::from_secs(5));
+        assert!(matches!(ended, Err(RecvTimeoutError::Disconnected)));
+        relay.stop();
+    }
+
+    /// A run starts a session of its own only where it can, saying why not: not without a relay,
+    /// nor recorded, nor given a code that isn't one, which the error doesn't repeat; and a joiner
+    /// whose relay can't be reached says so as it tries.
+    #[test]
+    fn a_run_starts_a_session_of_its_own_only_where_it_can() {
+        let mut nowhere = Peer::alone(1, Game::default(), "127.0.0.1:1");
+        nowhere.cx.own.relay = None;
+        let no_relay = nowhere.cx.host().expect_err("no relay");
+        assert_eq!(no_relay.code(), "net.no_relay");
+        nowhere.cx.own.relay = Some("127.0.0.1:1".to_owned());
+        nowhere.cx.own.recorded = true;
+        assert_eq!(
+            nowhere.cx.host().expect_err("recorded").code(),
+            "net.recorded"
+        );
+        nowhere.cx.own.recorded = false;
+        let typed = "7KQ2-9XMB-4TZD-P0WU";
+        let bad = nowhere.cx.join(typed).expect_err("U isn't a symbol");
+        assert_eq!(bad.code(), "net.code");
+        assert!(!format!("{bad:#}").contains("7KQ2"), "{bad:#}");
+        assert!(nowhere.cx.join("7KQ2-9XMB").is_err());
+        nowhere.cx.join("7KQ2-9XMB-4TZD-P0WH").expect("a code");
+        until_phase(&mut nowhere, |phase| {
+            matches!(phase, Some(SessionPhase::Unreachable { .. }))
+        });
     }
 
     /// A session whose relay is replaced at its address goes on through the new one: both peers

@@ -236,6 +236,7 @@ use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};
 pub use name::Name;
 pub use navigation::{NavAgent, NavMeshVolume, Navigation, step_navigation};
+pub use net::{SessionPhase, SessionStatus};
 pub use owner::Owner;
 pub use particles::{EmitterShape, ParticleBlend, ParticleEmitter};
 pub use perf::PerfPanel;
@@ -298,6 +299,9 @@ pub struct App {
     mods: Option<PathBuf>,
     /// When the engine started, as [`run`] began, which the run's load is timed from.
     started: Option<Instant>,
+    /// How the sessions the layers host and join start, as [`Context::host`] says, which the run's
+    /// arguments fill in but for whether they predict, as [`predicting`](Self::predicting) says.
+    own_sessions: layer::OwnSessions,
 }
 
 impl App {
@@ -323,7 +327,18 @@ impl App {
             files: Files::default(),
             mods: None,
             started: None,
+            own_sessions: layer::OwnSessions::default(),
         }
+    }
+
+    /// Has the sessions the layers host and join, as [`Context::host`] and [`Context::join`] start
+    /// them, predict the other peer's inputs, rolling back where a prediction missed, as `--rollback`
+    /// has a session started by its flags do: both runs of one build agree, as a session's peers
+    /// must. They go in lockstep without it.
+    #[must_use]
+    pub fn predicting(mut self) -> Self {
+        self.own_sessions.predicting = true;
+        self
     }
 
     /// Names each asset the layers add from a file by its path relative to `root`, the game's
@@ -695,6 +710,10 @@ fn run_args(
             let session = net::Session::begin(net, code, app.name, names, rollback, args.link)?;
             app.stack.session(session);
         }
+        let own = &mut app.own_sessions;
+        (own.app, own.layers) = (app.name, app.stack.names().to_vec());
+        (own.relay, own.link) = (args.relay.clone(), args.link);
+        own.recorded = args.record.is_some();
         // A server renders nothing, and serves no tool API, whose tools look at a run's frames.
         if matches!(args.net, Some(args::Net::Serve(_))) {
             interrupt::watch();

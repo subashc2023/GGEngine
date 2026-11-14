@@ -1323,6 +1323,20 @@ world. `Context::networked` tells a layer whether its run takes part in a sessio
 server's too, whose player is none as a run alone's is, so that what a game sets up for a run
 alone, as Foxball's bot, a session's runs leave out.
 
+A game hosts and joins sessions from its own UI too, as Foxball's menu does, so that its players
+need no flags. `Context::host` starts a lockstep session through the relay `--relay` names, given
+without a session flag, from the next frame: the run plays on from its world as player 0, alone
+until someone joins. `Context::join` joins one by the code a player types or pastes, its host's
+world taking the run's place, as a joiner's does. `Context::leave` ends either, the run playing on
+alone from the world it has, a joiner's its host's. `Context::session` says where the session
+stands, with its code, for the game's UI to show: waiting, no host for the code yet, joining,
+playing, refused as another build, the relay out of reach, or the host lost. `networked` and
+`player` change as such a session starts or ends, which the layer follows, as Foxball takes its
+bot off and puts it back. `App::predicting` has a game's own sessions predict each other's inputs,
+so that both runs of a build agree: Foxball's do, as lockstep had a player's own fox answer some
+160 ms late over a link of 150 ms there and back, and predicting in 31 ms. A run that's recorded
+starts none, as a recording holds a run alone or a session from its start.
+
 - **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
   the joiner's, and the edits from outside the layers that apply before it, as a recording keeps
   them: so a lockstep peer runs a tick only once it has the other's inputs for it, and frames go on
@@ -1404,7 +1418,8 @@ alone, as Foxball's bot, a session's runs leave out.
   written as 16 digits and letters, such as `7KQ2-9XMB-4TZD-P0WH`, which each of its runs is given
   (`--code`): a host or a server given none makes one from the OS's randomness and prints it to
   stdout, `code 7KQ2-9XMB-4TZD-P0WH`, for the runs that join it, and not to the log, as it's the
-  session's key; `gg run --peers 2` makes one for both peers. Each connection opens with the Noise
+  session's key; `gg run --peers 2` makes one for both peers; and a game that hosts makes one,
+  which `Context::session` gives it to show. Each connection opens with the Noise
   Protocol Framework's `NNpsk0` handshake, through `snow`, keyed by the code, on a thread of its
   own: the end that took the connection can't read the first message of a run without the code,
   and refuses it there (`net.refused`), as it does one whose part doesn't come within 5 s, before
@@ -1418,7 +1433,8 @@ alone, as Foxball's bot, a session's runs leave out.
   and a MAC alone would leave a server's states readable on the path.
 - **Runs behind routers meet through a relay.** Runs that can't connect to each other, as two
   behind their own home routers can't, meet through a relay that each connects out to
-  (`--relay <ADDRESS>`, with any of the four session flags), which `gg-relay` runs: a host or a
+  (`--relay <ADDRESS>`, with any of the four session flags, or alone for the sessions a game
+  starts), which `gg-relay` runs: a host or a
   server registers its session's room there, the first 16 bytes of an HMAC of the code under a key
   of its own, as well as or in place of listening at an address, and a joiner or a client given the
   relay and the code alone comes for the room. The relay sees the room, but can't find the code

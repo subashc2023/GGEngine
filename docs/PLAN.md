@@ -165,10 +165,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **States by what changed** (2026-11-13)
 - **Sessions measured across the internet** (2026-11-13)
 - **Phase 20, play across the internet** (2026-11-13)
+- **Sessions from the game's menu** (2026-11-14)
 
 ## Now
 
-No milestone, until the phase after Phase 20 is chosen.
+Phase 21's second milestone, sessions across OSes, as Next has it, once its plan is written and
+approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -195,6 +197,20 @@ Each phase ends in something you can run and check.
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
 Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
+
+21. **A game shipped to players**: Foxball, as `gg ship` lays it out, played by two people on
+    different networks. *Done when* each downloads the shipped build; one hosts from the game's
+    menu and the other joins by the code it shows, typed or pasted; they meet through a relay the
+    project names, on a rented server, and play a match, its join time, paths, delay, stalls and
+    bandwidth measured from both ends' logs and the relay's; and the shipped folder holds its
+    dependencies' license notices and the game's own name and icon, its symbols kept beside it.
+    Its milestones, in order: sessions from the game's menu, hosted, joined and left as the game
+    asks, as predicting peers; sessions across OSes, a build named by its sources and package
+    rather than its executable's bytes; a relay for players, named by the project, with limits per
+    address and per pair, run on a rented server; what a shipped build owes, its name, icon and
+    version, its notices, its symbols, an older glibc on Linux, Foxball shipped in CI, and its
+    options kept between runs; and measured over the real internet, two machines on other
+    networks, a phone's among them, and what the numbers call for fixed.
 
 Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
 (no macOS driver does today).
@@ -721,7 +737,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Cells' kept states spilled to disk: a cell out keeps what it held as scene text in memory, which grows with the cells changed, as one that went out as it came keeps nothing | A world's changed cells' text is measured to matter |
 | An index of a world's cells for the cells' step, which tests each cell with a file or a kept state against each viewer as each tick ends, O(cells × viewers), allocating nothing where none comes or goes | The step is measured to cost a frame, as at 100,000 cells |
 | Terrain and heightfields, which a large world's ground would be: a world's cells hold meshes and colliders | A world's ground is more than its cells' models |
-| A game showing its session's code, and a join screen a player types one into: a host or a server not given `--code` prints the code it made to stdout, which a shipped windowed game shows no one | A game hosts and joins sessions from its own UI |
 | Short codes, a few words, stretched by a PAKE, as SPAKE2 or CPace, before Noise's handshake, each guess costing a connection: a code is 16 symbols, 80 bits, as a recorded first message lets one test codes against it offline; and with them a room at a relay that the code doesn't give, as a relay could test short codes against the rooms it sees | Players read codes out or type them by hand |
 | A relay run for players, and a project naming its relay, so that its players give none: each run is given `--relay`, and none runs for players | A game's players meet through a relay |
 | `gg run --peers 2` through a relay, as two machines' peers would: it refuses `--relay` | Peers on two machines run under `gg run` |

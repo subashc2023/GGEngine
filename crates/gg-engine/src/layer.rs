@@ -28,6 +28,7 @@ use gg_renderer::{
 use subsecond::HotFn;
 use tracing::{debug, error, info, warn};
 
+use crate::args::{Conditions, Listen, Net, Toward};
 #[cfg(feature = "dev")]
 use crate::asset_watch::AssetWatch;
 use crate::assets::{self, Asset, Assets, Loaded};
@@ -60,7 +61,7 @@ use crate::model::{self, Made, Nodes};
 use crate::navigation::{self, NavAgent, NavMeshVolume};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
-use crate::net::{Outside, Session, Turn};
+use crate::net::{Code, Outside, Session, SessionStatus, Turn};
 use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
 use crate::perf::{self, Perf};
@@ -537,8 +538,18 @@ pub struct Context {
     /// The local player, in a lockstep session.
     player: Option<u8>,
     /// Whether the run takes part in a networked session, as the layers attach or pick up from a
-    /// restore.
+    /// restore, or the session a layer asked for starts or ends.
     networked: bool,
+    /// How the sessions the layers host and join start, as [`host`](Self::host) says.
+    pub(crate) own: OwnSessions,
+    /// A session [`host`](Self::host) or [`join`](Self::join) started, or the end
+    /// [`leave`](Self::leave) asked for, which the stack takes up as the next frame starts.
+    pub(crate) asked: Option<Asked>,
+    /// The run's session as the frame's turn left it, as [`session`](Self::session) gives it.
+    pub(crate) session: Option<SessionStatus>,
+    /// What a layer asked put on the OS's clipboard since the window last took it, as
+    /// [`copy`](Self::copy) says.
+    pub(crate) copied: Option<String>,
     /// Whether the run is a server's or one of its clients, as the layers attach or pick up from a
     /// restore: their worlds name only the assets the layers loaded, so that a client reads its
     /// server's states, and a scene change loads none, as [`change_scene`](Self::change_scene)
@@ -562,6 +573,31 @@ pub struct Context {
     /// from a restore.
     #[cfg(feature = "dev")]
     sync_tested: bool,
+}
+
+/// How the sessions a game hosts and joins from its own UI start, as [`Context::host`] says.
+#[derive(Clone, Default)]
+pub(crate) struct OwnSessions {
+    /// The app, and its layers' names, from the bottom up, which a session's hello names.
+    pub(crate) app: &'static str,
+    pub(crate) layers: Vec<&'static str>,
+    /// The relay they meet through, as `--relay` given alone names it.
+    pub(crate) relay: Option<String>,
+    /// What `--link` has their links do to what comes.
+    pub(crate) link: Option<Conditions>,
+    /// Whether their peers predict each other's inputs, as [`App::predicting`] says.
+    pub(crate) predicting: bool,
+    /// Whether the run is recorded, which a session started partway can't be, as a recording holds
+    /// a run alone or a session from its start.
+    pub(crate) recorded: bool,
+}
+
+/// What a layer asked of the run's session, which the stack takes up as the next frame starts.
+pub(crate) enum Asked {
+    /// A session [`Context::host`] or [`Context::join`] started, to take part in.
+    Start(Box<Session>),
+    /// The end of the run's session, as [`Context::leave`] asks.
+    Leave,
 }
 
 /// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its
@@ -608,6 +644,7 @@ impl Context {
         cx.files = app.files.clone();
         cx.start.clone_from(&app.start);
         cx.load_started = app.started;
+        cx.own = app.own_sessions.clone();
         #[cfg(feature = "dev")]
         if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
@@ -691,6 +728,30 @@ impl Context {
         self.networked = true;
         self.player = player;
         self
+    }
+
+    /// Has the sessions the layers host and join go through the relay at `relay`, as `--relay`
+    /// given alone does for a run: for a [`seeded`](Self::seeded) context, so that a test's layer
+    /// starts one as a run's does. No frame takes it up, which [`set_session`](Self::set_session)
+    /// stands for.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_relay(mut self, relay: &str) -> Self {
+        self.own.relay = Some(relay.to_owned());
+        self.own.app = "Tested";
+        self
+    }
+
+    /// Has the context say its run's session stands as `status` says, or that it has none, as a
+    /// frame that takes up a session started or left does: [`session`](Self::session),
+    /// [`networked`](Self::networked) and [`player`](Self::player) from then on. For a
+    /// [`seeded`](Self::seeded) context, so that a test sees its layer follow a session as a run's
+    /// does.
+    #[doc(hidden)]
+    pub fn set_session(&mut self, status: Option<SessionStatus>) {
+        self.networked = status.is_some();
+        self.player = status.as_ref().map(SessionStatus::player);
+        self.session = status;
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
@@ -833,6 +894,10 @@ impl Context {
             edited: None,
             player: None,
             networked: false,
+            own: OwnSessions::default(),
+            asked: None,
+            session: None,
+            copied: None,
             served: false,
             client: false,
             scene_seen: 0,
@@ -851,9 +916,11 @@ impl Context {
         self.sync_tested
     }
 
-    /// The player this run plays, in a lockstep session, which the run hosts (`--host`), as player
-    /// 0, or joins (`--join`), as player 1; `None` outside one. Each peer runs every player's world,
-    /// and its layers queue commands for their own player alone, naming it in them, as the other
+    /// The player this run plays, in a lockstep session, which the run hosts (`--host`, or
+    /// [`host`](Self::host)), as player 0, or joins (`--join`, or [`join`](Self::join)), as player
+    /// 1; `None` outside one, as once a session the game started ends. Each peer runs every
+    /// player's world, and its layers queue commands for their own player alone, naming it in
+    /// them, as the other
     /// peer's queue for theirs: a command whose variant or struct has a field `player`, an
     /// integer, that names another player than the one whose inputs it came in, is refused there
     /// (`net.bad_command`), by every run of the session alike.
@@ -865,9 +932,110 @@ impl Context {
     /// (`--host`) or its joiner (`--join`), or a server's, as the server (`--serve`) or a client
     /// (`--connect`); not a run alone, a replay or a test's context. A game tells by it what only a
     /// run alone has, as a player the game plays itself, which a server's world, whose
-    /// [`player`](Self::player) is `None` as a run alone's is, mustn't have.
+    /// [`player`](Self::player) is `None` as a run alone's is, mustn't have. It changes as a
+    /// session the game hosts or joins starts, and as it leaves it, from the frame after, which a
+    /// layer that sets up such a player follows, as Foxball's does its bot.
     pub fn networked(&self) -> bool {
         self.networked
+    }
+
+    /// Hosts a lockstep session through the run's relay, as `--host` given `--relay` alone would,
+    /// from the next frame: the run its player 0, as [`player`](Self::player) says from then, and
+    /// [`networked`](Self::networked), playing on alone until a run joins by its code, which
+    /// [`session`](Self::session) gives, for the game's UI to show. Its peers predict each other's
+    /// inputs if the app's sessions do, as [`App::predicting`] says. The run's relay is the one
+    /// `--relay` names, given without a session flag; the sessions a game starts go through one,
+    /// as two players' runs behind their routers need.
+    ///
+    /// Fails if the run takes part in a session already, or has one started (`net.busy`); names no
+    /// relay (`net.no_relay`); is recorded (`net.recorded`), as a recording holds a run alone or a
+    /// session from its start; or can't start one, as when its build can't be read (`net.build`),
+    /// or its code can't be made (`net.start`). Reads the run's executable, to name its build, as a
+    /// session does as it starts: some milliseconds on the calling thread.
+    pub fn host(&mut self) -> Result<()> {
+        let relay = self.startable()?;
+        let code = Code::make().map_err(|error| {
+            Error::new("net.start", "can't make the session's code").with_source(error)
+        })?;
+        let net = Net::Host(Listen {
+            address: None,
+            relay: Some(relay),
+        });
+        self.start_session(&net, code)
+    }
+
+    /// Joins the lockstep session that `code` names through the run's relay, as `--join` given
+    /// `--relay` alone and `--code` would, from the next frame: the run its player 1, as
+    /// [`player`](Self::player) says from then, and [`networked`](Self::networked). It runs no tick
+    /// until the host's world comes, which takes its own's place, its layers picking up from it as
+    /// [`Layer::restored`] says; [`session`](Self::session) says how it goes meanwhile. `code` is
+    /// read as a player types it: whatever its case, hyphens and spaces skipped, `I` and `L` read as
+    /// `1` and `O` as `0`.
+    ///
+    /// Fails as [`host`](Self::host) does, and if `code` isn't a session's (`net.code`), saying
+    /// why without repeating it, as a code is a session's key.
+    pub fn join(&mut self, code: &str) -> Result<()> {
+        let relay = self.startable()?;
+        let code: Code = code.parse().map_err(|why: String| {
+            Error::new("net.code", format!("that isn't a session's code: {why}"))
+        })?;
+        self.start_session(&Net::Join(Toward::Relay(relay)), code)
+    }
+
+    /// The run's relay, for [`host`](Self::host) and [`join`](Self::join), if it can start a
+    /// session.
+    fn startable(&self) -> Result<String> {
+        if self.networked || matches!(self.asked, Some(Asked::Start(_))) {
+            let why = "the run takes part in a session already, which it leaves first";
+            return Err(Error::new("net.busy", why));
+        }
+        if self.own.recorded {
+            let why = "the run is recorded, and a recording holds a run alone, or a session from \
+                       its start";
+            return Err(Error::new("net.recorded", why));
+        }
+        self.own.relay.clone().ok_or_else(|| {
+            let why = "the run names no relay, which `--relay` gives, for the sessions it starts";
+            Error::new("net.no_relay", why)
+        })
+    }
+
+    /// Starts the session `net` says, keyed by `code`, as the run's own sessions start, for the
+    /// stack to take up as the next frame starts.
+    fn start_session(&mut self, net: &Net, code: Code) -> Result<()> {
+        let own = &self.own;
+        let (predicting, link) = (own.predicting, own.link);
+        let session = Session::begin(net, Some(code), own.app, &own.layers, predicting, link)?;
+        self.asked = Some(Asked::Start(Box::new(session)));
+        Ok(())
+    }
+
+    /// Leaves the run's session, if it takes part in one, from the next frame: the run plays on
+    /// alone from the world it has, a joiner's its host's, no longer [`networked`](Self::networked),
+    /// and its [`player`](Self::player) `None`; the other run loses it, as when a peer's connection
+    /// closes. A session started this frame ends before it takes part.
+    pub fn leave(&mut self) {
+        self.asked = match self.asked.take() {
+            // Not taken up yet: it ends as it drops, the threads that find the other run with it.
+            Some(Asked::Start(_)) => None,
+            _ if self.networked => Some(Asked::Leave),
+            asked => asked,
+        };
+    }
+
+    /// The run's session, as a game's own UI shows it, as [`SessionStatus`] says: as the frame's
+    /// turn left it, before its ticks. `None` alone, and for a server or a client, whose sessions a
+    /// game's own UI doesn't start.
+    pub fn session(&self) -> Option<&SessionStatus> {
+        self.session.as_ref()
+    }
+
+    /// Puts `text` on the OS's clipboard, as a button that copies does, once the frame ends: in a
+    /// windowed run; a headless or embedded run has none, and warns (`ui.clipboard`). A text field
+    /// with the focus copies and pastes through it itself, by Ctrl+C, Ctrl+X and Ctrl+V, or Cmd on
+    /// macOS.
+    pub fn copy(&mut self, text: &str) {
+        self.copied = Some(text.to_owned());
     }
 
     /// The app's window; `None` in a headless run.
@@ -943,6 +1111,13 @@ impl Context {
     /// follow events.
     pub fn input(&self) -> &Input {
         &self.input
+    }
+
+    /// Notes what `event` holds down or lets go, as the stack does of each event: for tests that
+    /// hand a game's UI its events without a stack.
+    #[cfg(test)]
+    pub(crate) fn record_input(&mut self, event: &Event<'_>) {
+        self.input.record(event);
     }
 
     /// Whether layers want the cursor grabbed, as [`set_cursor_grabbed`](Self::set_cursor_grabbed)
@@ -5828,6 +6003,39 @@ impl Stack {
     /// Has the run take part in `session`: as a lockstep session's peer, a server or a client.
     pub(crate) fn session(&mut self, session: Session) {
         self.net = Some(session);
+    }
+
+    /// Takes up what a layer asked of the run's session since the last frame, as
+    /// [`Context::host`], [`Context::join`] and [`Context::leave`] say: between ticks, as a frame
+    /// starts, before the session's turn. A session left logs what it carried and its delay, as one
+    /// does as the run ends.
+    pub(crate) fn take_asked(&mut self, cx: &mut Context) {
+        let Some(asked) = cx.asked.take() else {
+            return;
+        };
+        match asked {
+            Asked::Start(session) => {
+                if let Some(net) = self.net.take() {
+                    net.ended();
+                }
+                let player = session.player();
+                info!(player, "Started the session the game asked for");
+                self.net = Some(*session);
+            }
+            Asked::Leave => {
+                if let Some(net) = self.net.take() {
+                    net.ended();
+                    info!("Left the session, as the game asked");
+                }
+            }
+        }
+        self.tell_session(cx);
+    }
+
+    /// The run's session as a game's own UI shows it, as [`Session::status`] says: as a frame's
+    /// turn leaves it.
+    pub(crate) fn session_status(&self) -> Option<SessionStatus> {
+        self.net.as_ref().and_then(Session::status)
     }
 
     /// Has each tick run again once it has run, a replay's too, as a SyncTest (`--sync-test`) runs

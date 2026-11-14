@@ -23,6 +23,17 @@ impl Input {
         self.keys.contains(&key)
     }
 
+    /// Whether the key that shortcuts such as copy and paste hold is down: Cmd on macOS, either
+    /// [`Key::SuperLeft`] or [`Key::SuperRight`], and Ctrl elsewhere.
+    pub fn command_down(&self) -> bool {
+        let [left, right] = if cfg!(target_os = "macos") {
+            [Key::SuperLeft, Key::SuperRight]
+        } else {
+            [Key::ControlLeft, Key::ControlRight]
+        };
+        self.key_down(left) || self.key_down(right)
+    }
+
     /// Whether `button` is held.
     pub fn button_down(&self, button: MouseButton) -> bool {
         self.buttons.contains(&button)

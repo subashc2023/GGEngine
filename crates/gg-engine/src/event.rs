@@ -35,6 +35,10 @@ pub enum Event<'a> {
     /// Text that a key press typed, which follows its [`Event::Key`]. Keys such as Backspace,
     /// Enter and Tab type none.
     Text(&'a str),
+    /// The text on the OS's clipboard, which Ctrl+V, or Cmd+V on macOS, pasted: it follows the
+    /// key's [`Event::Key`], in a windowed run, where the clipboard holds text. A game's text field
+    /// with the focus takes its first line at its caret, as it takes what's typed.
+    Paste(&'a str),
     /// The cursor moved within the window, to `x` and `y` from its top left.
     CursorMoved { x: f64, y: f64 },
     /// The cursor came into the window.

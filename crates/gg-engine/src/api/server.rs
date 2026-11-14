@@ -223,6 +223,9 @@ pub(crate) struct Api {
     taken: Sender<Taken>,
     /// Edits and patches offered to a lockstep session, waiting for the tick they apply before.
     offered: Vec<(Reply, Ticket, Offer)>,
+    /// The session file as written, which is written again as the run's player changes, as a
+    /// session the game hosts or joins starts or ends.
+    written: Session,
 }
 
 /// An `assets` waiting for a look at the asset root, as `Context::ask_assets` numbered it, and the
@@ -648,7 +651,26 @@ impl Api {
             snapshotted: 0,
             taken,
             offered: Vec::new(),
+            written: session,
         })
+    }
+
+    /// Writes the session file again with `player`, if that's not the player it names, as a
+    /// session the game hosts or joins starts or ends, so that tools reach a session's peers as
+    /// they do those its flags started; warns where it can't (`api.session`).
+    fn follow_player(&mut self, player: Option<u8>) {
+        if self.written.player == player {
+            return;
+        }
+        self.written.player = player;
+        let text = serde_json::to_string_pretty(&self.written).expect("a session serializes");
+        if let Err(error) = crate::dirs::write_private(&self.session, text.as_bytes()) {
+            warn!(
+                code = "api.session",
+                session = %self.session.display(),
+                "Can't write the session file again with the run's player: {error}"
+            );
+        }
     }
 
     /// Has `wake` wake the main loop as each request comes.
@@ -686,6 +708,7 @@ impl Api {
         stepper: &mut Stepper,
     ) -> bool {
         self.shared.frames.fetch_add(1, Ordering::Relaxed);
+        self.follow_player(cx.player());
         let quit = self.answer(cx, stack, stepper, false);
         let film = (self.films.first()).filter(|film| film.handed.len() < film.count as usize);
         let kind = match (self.riding.first(), film, self.asked.first()) {

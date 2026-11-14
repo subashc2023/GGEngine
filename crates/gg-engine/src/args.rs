@@ -54,6 +54,9 @@ pub(crate) struct Args {
     /// which a host or a server not given one makes.
     pub(crate) net: Option<Net>,
     pub(crate) code: Option<Code>,
+    /// The relay the sessions the game hosts and joins from its own UI meet through, as
+    /// [`Context::host`](crate::Context::host) says: `--relay` given without a session flag.
+    pub(crate) relay: Option<String>,
     /// Whether the session's peers predict each other's inputs, rolling back where a prediction
     /// missed, rather than waiting for them.
     pub(crate) rollback: bool,
@@ -233,15 +236,17 @@ Options:
                     `gg-relay` runs: for runs that can't connect to each other, as two behind their
                     own routers can't. The session's code finds its room there, and its packets go
                     straight between its runs where their routers let them, and through the relay
-                    where they don't
+                    where they don't. Alone, the relay of the sessions the game hosts and joins
+                    from its own UI
   --code <CODE>     With --host, --join, --serve or --connect, the session's code, 16 digits and
                     letters such as `7KQ2-9XMB-4TZD-P0WH`, which keeps the session to the runs
                     given it and what they send to them alone: --join and --connect need their
                     host's or server's, which a host or a server not given one makes, printing
                     `code <CODE>` to stdout
-  --link <MS,MS,%>  With --host, --join, --serve or --connect, have each link hold each packet this
-                    run receives the first MS, and up to the second more, losing the percent of
-                    them, such as `--link 100,20,5`, and hold what comes on its stream the first MS
+  --link <MS,MS,%>  With --host, --join, --serve or --connect, or --relay alone, have each link hold
+                    each packet this run receives the first MS, and up to the second more, losing
+                    the percent of them, such as `--link 100,20,5`, and hold what comes on its
+                    stream the first MS
   --mods <DIR>     Run the mods in the folder DIR, in place of those installed in the game's
                     per-user folder, which a windowed run runs
   --package <PATH>  Read the files under the asset root from the game's package at PATH, which
@@ -286,6 +291,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         stopped: false,
         net: None,
         code: None,
+        relay: None,
         rollback: false,
         link: None,
         mods: None,
@@ -454,14 +460,11 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         )));
     }
     parsed.net = match session {
-        None if relay.is_some() => {
-            return Err(bad(
-                "`--relay` is where a networked session's runs meet, so it needs `--host`, \
-                 `--join`, `--serve` or `--connect`"
-                    .to_owned(),
-            ));
+        // The relay of the sessions the game hosts and joins from its own UI.
+        None => {
+            parsed.relay = relay;
+            None
         }
-        None => None,
         Some((end, address)) => Some(match (end, address, relay) {
             (_, None, None) => {
                 return Err(bad(format!(
@@ -590,10 +593,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
-    if parsed.link.is_some() && parsed.net.is_none() {
+    if parsed.link.is_some() && parsed.net.is_none() && parsed.relay.is_none() {
         return Err(bad(
             "`--link` is of a networked run's links, so it needs `--host`, `--join`, `--serve` or \
-             `--connect`"
+             `--connect`, or `--relay` for the sessions the game starts"
                 .to_owned(),
         ));
     }
