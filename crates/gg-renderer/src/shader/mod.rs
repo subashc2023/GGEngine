@@ -1127,6 +1127,27 @@ mod tests {
         assert_eq!(spirv::return_no_motion(moving_spirv.clone()), moving_spirv);
     }
 
+    /// The engine's own shaders that draw into the game's view without writing its depth return
+    /// something at the motion's location all the same, which their pipelines don't write but
+    /// lavapipe may, as `GraphicsDesc::format` in gg-gpu says.
+    #[test]
+    fn the_engines_shaders_that_draw_into_the_view_return_motion() {
+        let shaders: [(&str, &[u8]); 3] = [
+            (
+                "particles",
+                include_bytes!(concat!(env!("OUT_DIR"), "/particles.spv")),
+            ),
+            ("sky", include_bytes!(concat!(env!("OUT_DIR"), "/sky.spv"))),
+            (
+                "atmosphere's sky",
+                include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere_sky.spv")),
+            ),
+        ];
+        for (name, spirv) in shaders {
+            assert_eq!(spirv::fragment_locations(spirv), [0, 1, 2], "{name}");
+        }
+    }
+
     #[test]
     fn a_shader_that_breaks_the_contract_says_each_way_and_takes_no_handle() {
         type Vertex = [f32; 3];

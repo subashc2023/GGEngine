@@ -38,9 +38,12 @@ Varyings vertex_main(uint index: SV_VulkanVertexID) {
     return out;
 }
 
+// The color, no ID, and zeros at the motion's location, which the pipeline doesn't write, but
+// lavapipe may, as `GraphicsDesc::format` in gg-gpu says.
 struct Targets {
     float4 color : SV_Target0;
     uint2 id : SV_Target1;
+    float4 motion : SV_Target2;
 };
 
 [shader("fragment")]
@@ -55,5 +58,6 @@ Targets fragment_main(Varyings input) {
     Targets out;
     out.color = float4(min(color * push.scale, BRIGHTEST), 1.0);
     out.id = uint2(0, 0);
+    out.motion = float4(0.0);
     return out;
 }

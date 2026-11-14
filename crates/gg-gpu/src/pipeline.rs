@@ -203,6 +203,14 @@ pub struct GraphicsDesc<'a> {
     /// Where they have motion, a pipeline that writes depth
     /// writes it at location 2, a float4 that replaces what's there, as the motion belongs to what
     /// owns the depth; one that doesn't leaves it as it was.
+    ///
+    /// lavapipe, once a command buffer has bound a pipeline without color targets, writes every
+    /// target of the pipelines it binds after as it writes the color target, by its blending and
+    /// write mask (Mesa's `lvp_execute.c` clears `independent_blend_enable` then, and only a new
+    /// command buffer sets it again, through Mesa 25.3 at least). So there, a fragment shader that
+    /// returns nothing at a location its targets have, even one the pipeline doesn't write, leaves
+    /// undefined values in that target, which differ from one run to the next; zeros returned there
+    /// leave a target that blends as it was.
     pub format: Format,
     pub blend: Blend,
     /// Whether it writes its depth where it draws, for later draws to test against. Only a

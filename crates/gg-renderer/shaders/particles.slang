@@ -115,8 +115,17 @@ Varyings vertex_main(uint vertex: SV_VulkanVertexID, uint instance: SV_VulkanIns
     return out;
 }
 
+// The color and the emitter's ID, as mesh.slang's `Targets` has them, and zeros at the motion's
+// location, which the pipeline doesn't write, but lavapipe may, as `GraphicsDesc::format` in gg-gpu
+// says, blending them by the color's blending, which leaves the motion as it was.
+struct Drawn {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+    float4 motion : SV_Target2;
+};
+
 [shader("fragment")]
-Targets fragment_main(Varyings input) {
+Drawn fragment_main(Varyings input) {
     float4 color = input.color;
     if (input.texture == DISC) {
         // Brightest at its middle, falling smoothly to nothing at its edge.
@@ -137,12 +146,13 @@ Targets fragment_main(Varyings input) {
     if (!(shown >= 1.0 / 1024.0)) {
         discard;
     }
-    Targets out;
+    Drawn out;
     // Unlit, as they draw their colors as they are, but fogged as what they're in is, so that one
     // far off in fog fades into it as what's behind it does, and one that adds its light adds less.
     float4 color_out = float4(premultiplied, input.additive != 0 ? 0.0 : alpha);
     out.color = fogged_premultiplied(input.fog, color_out);
     out.id = input.id;
+    out.motion = float4(0.0);
     return out;
 }
 
