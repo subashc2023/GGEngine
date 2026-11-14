@@ -166,10 +166,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sessions measured across the internet** (2026-11-13)
 - **Phase 20, play across the internet** (2026-11-13)
 - **Sessions from the game's menu** (2026-11-14)
+- **Sessions across OSes** (2026-11-14)
 
 ## Now
 
-Phase 21's second milestone, sessions across OSes, as Next has it, once its plan is written and
+Phase 21's third milestone, a relay for players, as Next has it, once its plan is written and
 approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is

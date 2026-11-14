@@ -297,6 +297,34 @@ impl Package {
         read_at(&self.file, entry.offset, &mut bytes)?;
         Ok(bytes)
     }
+
+    /// The digest of the whole file, as [`bytes_digest`](crate::ecs::bytes_digest) has it, which a
+    /// session's hello names the run's build by, as [`Build`](crate::net::Build) says, so that
+    /// runs of other packages, whose simulations may go otherwise, don't join.
+    ///
+    /// Reads the file whole, as the hello's digest of an executable does: a package of hundreds of
+    /// MB, as no game's is yet, would be read and digested a piece at a time instead.
+    ///
+    /// Fails with `package.unreadable` if the file can't be read.
+    pub(crate) fn digest(&self) -> Result<u64> {
+        let unreadable = |error: io::Error| {
+            let message = format!("can't read the package {}", self.path.display());
+            Error::new("package.unreadable", message).with_source(error)
+        };
+        let len = self.file.metadata().map_err(unreadable)?.len();
+        let mut bytes = Vec::new();
+        // An error rather than an abort if there's no memory for it, as `read` gives.
+        let len = usize::try_from(len)
+            .map_err(io::Error::other)
+            .map_err(unreadable)?;
+        bytes
+            .try_reserve_exact(len)
+            .map_err(io::Error::from)
+            .map_err(unreadable)?;
+        bytes.resize(len, 0);
+        read_at(&self.file, 0, &mut bytes).map_err(unreadable)?;
+        Ok(crate::ecs::bytes_digest(&bytes))
+    }
 }
 
 /// Where a run reads the files under its asset root: the disk, or its game's package, in which

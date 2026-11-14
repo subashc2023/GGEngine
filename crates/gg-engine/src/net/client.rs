@@ -22,14 +22,13 @@ use std::mem;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use gg_core::Result;
 use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
 use super::states::rebuild;
 use super::{
     Code, Handshaken, Inputs, Link, Looking, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE,
-    Queued, REFUSED, Stalls, Turn, build, connect, hello, tick_of, write_inputs,
+    Queued, REFUSED, Stalls, Turn, connect, hello, tick_of, write_inputs,
 };
 use crate::args::{Conditions, Toward};
 use crate::layer::Commands;
@@ -76,8 +75,9 @@ pub(crate) struct Client {
     connecting: Option<Receiver<Handshaken>>,
     looking: Looking,
     pub(super) app: &'static str,
-    /// The run's build, as [`build`] says, which the server's must be.
-    build: &'static str,
+    /// The run's build, as [`Build::name`](super::Build::name) names it, which the server's must
+    /// be.
+    build: String,
     /// The layers' names, from the bottom up, which the server's must be.
     layers: String,
     /// What `--link` has the link do to what comes, and the state of the random numbers it draws.
@@ -168,24 +168,23 @@ struct Sample {
 }
 
 impl Client {
-    /// A client of the server `toward` finds, given the session's `code`, for app `app`, whose
-    /// layers are `layers`, from the bottom up, which tries to connect to it in the background,
-    /// until it does.
-    ///
-    /// Fails with `net.build` if the run's build can't be read, as [`build`] says.
+    /// A client of the server `toward` finds, given the session's `code`, for app `app` of build
+    /// `build`, as [`Build::name`](super::Build::name) names it, whose layers are `layers`, from
+    /// the bottom up, which tries to connect to it in the background, until it does.
     pub(crate) fn start(
         toward: &Toward,
         code: Code,
         app: &'static str,
+        build: &str,
         layers: &[&str],
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             toward: toward.clone(),
             code,
             connecting: None,
             looking: Looking::default(),
             app,
-            build: build()?,
+            build: build.to_owned(),
             layers: layers.join(" "),
             conditions: None,
             random: 0,
@@ -218,7 +217,7 @@ impl Client {
             desynced: false,
             sent: None,
             buffer: vec![0; 1 << 16],
-        })
+        }
     }
 
     /// Whether the client has joined: it has the server's world, which it said it restored.
@@ -317,7 +316,7 @@ impl Client {
                 return;
             }
         };
-        let hello = |link: &Link| hello(PROTOCOL, self.app, self.build, &self.layers, link.port());
+        let hello = |link: &Link| hello(PROTOCOL, self.app, &self.build, &self.layers, link.port());
         let link = Link::new(shaken.stream, shaken.keys, false, shaken.relayed);
         match link.and_then(|mut link| link.send(hello(&link)).map(|()| link)) {
             Ok(link) => {
@@ -915,7 +914,7 @@ fn header(line: &str) -> Option<Header> {
 mod tests {
     use gg_core::math::{DVec3, Vec3};
 
-    use super::super::TESTED;
+    use super::super::{BUILD, TESTED};
     use super::*;
 
     /// A transform at `x`.
@@ -940,9 +939,9 @@ mod tests {
             &Toward::Address("127.0.0.1:1".to_owned()),
             TESTED,
             "Tested",
+            BUILD,
             &[],
-        )
-        .expect("started");
+        );
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let state = |tick: u64| {
@@ -970,9 +969,9 @@ mod tests {
             &Toward::Address("127.0.0.1:1".to_owned()),
             TESTED,
             "Tested",
+            BUILD,
             &[],
-        )
-        .expect("started");
+        );
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let text = "gg-snapshot 2\n";
@@ -1007,9 +1006,9 @@ mod tests {
             &Toward::Address("127.0.0.1:1".to_owned()),
             TESTED,
             "Tested",
+            BUILD,
             &[],
-        )
-        .expect("started");
+        );
         let now = Instant::now();
         (client.since, client.came) = (100, now);
         let state = |tick: u64, base: Option<(u64, &str)>, text: &str| {
@@ -1055,15 +1054,15 @@ mod tests {
             sample(12, &[(a, at(2.0)), (b, at(7.0))]),
             sample(11 + INTERPOLATION as u64, &[(a, at(4.0)), (b, at(9.0))]),
         ];
-        // The latest came `ago` before now, once the client has started, which reads its build.
+        // The latest came `ago` before now, once the client has started.
         let client = |ago: Duration| {
             let mut client = Client::start(
                 &Toward::Address("127.0.0.1:1".to_owned()),
                 TESTED,
                 "Tested",
+                BUILD,
                 &[],
-            )
-            .expect("started");
+            );
             client.samples = samples.iter().map(|s| sample(s.tick, &s.poses)).collect();
             client.arrived = Some(Instant::now().checked_sub(ago).expect("an instant"));
             client
@@ -1124,9 +1123,9 @@ mod tests {
             &Toward::Address("127.0.0.1:1".to_owned()),
             TESTED,
             "Tested",
+            BUILD,
             &[],
-        )
-        .expect("started");
+        );
         client.restored(0, &ours);
         step_navigation(&mut ours);
         client.texts.insert(1, text.clone());

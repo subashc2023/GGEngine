@@ -112,6 +112,9 @@ pub(crate) use client::Client;
 pub(crate) use secure::Code;
 #[cfg(test)]
 pub(crate) use secure::TESTED;
+/// The build the tests' sessions are of, as [`Build::name`] names one.
+#[cfg(test)]
+pub(crate) const BUILD: &str = "0123456789abcdef-fedcba9876543210";
 pub(crate) use server::Server;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -136,6 +139,7 @@ use crate::assets::{Asset, Counts};
 use crate::cells::Seen;
 use crate::edits::{Done, Edit};
 use crate::layer::Commands;
+use crate::package::Files;
 use crate::recording::text::{self, Text};
 use crate::reflect::Value;
 use crate::{Context, Sound, Tick, World, WorldHash};
@@ -1273,9 +1277,9 @@ pub(crate) struct Lockstep {
     /// The joiner's: whether its host's world has come, so that a link lost after is its host lost.
     played: bool,
     app: &'static str,
-    /// The run's build, as [`build`] says, which both peers' must be: a test's own, to stand for
-    /// another's.
-    build: &'static str,
+    /// The run's build, as [`Build::name`] names it, which both peers' must be: a test's own, to
+    /// stand for another's.
+    build: String,
     /// The layers' names, from the bottom up, which both peers' must be.
     layers: String,
     link: Option<Link>,
@@ -1390,14 +1394,19 @@ struct Patches {
 const UNSENT: u64 = u64::MAX;
 
 impl Lockstep {
-    /// Starts the session `net` says, keyed by `code`, for app `app`, whose layers are `layers`,
-    /// from the bottom up: the host listening at its address, the joiner trying to connect to its
-    /// host's, in the background, until it does.
+    /// Starts the session `net` says, keyed by `code`, for app `app` of build `build`, as
+    /// [`Build::name`] names it, whose layers are `layers`, from the bottom up: the host listening
+    /// at its address, the joiner trying to connect to its host's, in the background, until it
+    /// does.
     ///
-    /// Fails with `net.start` if the host can't listen at its address, and with `net.build` if the
-    /// run's build can't be read, as [`build`] says.
-    pub(crate) fn start(net: &Net, code: Code, app: &'static str, layers: &[&str]) -> Result<Self> {
-        let build = build()?;
+    /// Fails with `net.start` if the host can't listen at its address.
+    pub(crate) fn start(
+        net: &Net,
+        code: Code,
+        app: &'static str,
+        build: &str,
+        layers: &[&str],
+    ) -> Result<Self> {
         #[cfg(test)]
         let mut listening = None;
         let find = match net {
@@ -1434,7 +1443,7 @@ impl Lockstep {
             refused: None,
             played: false,
             app,
-            build,
+            build: build.to_owned(),
             layers: layers.join(" "),
             link: None,
             coming: None,
@@ -1657,7 +1666,7 @@ impl Lockstep {
         };
         let (shaken, toward) = made;
         let protocol = self.protocol();
-        let hello = |link: &Link| hello(protocol, self.app, self.build, &self.layers, link.port());
+        let hello = |link: &Link| hello(protocol, self.app, &self.build, &self.layers, link.port());
         let link = Link::new(shaken.stream, shaken.keys, false, shaken.relayed)
             .and_then(|mut link| link.send(hello(&link)).map(|()| link));
         match link {
@@ -1863,7 +1872,7 @@ impl Lockstep {
             self.protocol(),
             self.app,
             &engine,
-            self.build,
+            &self.build,
             self.layers.as_str(),
         ];
         match port_of(line, ours, "the host") {
@@ -2907,22 +2916,25 @@ pub(crate) enum Session {
 }
 
 impl Session {
-    /// Starts the session `net` says, keyed by `code`, for app `app`, whose layers are `layers`,
-    /// from the bottom up, as [`Lockstep::start`], [`Server::start`] and [`Client::start`] say. A
-    /// host or a server given no code makes one, which it prints to stdout, `code
-    /// 7KQ2-9XMB-4TZD-P0WH`, for the runs that join it, and not to the log, as it's the session's
-    /// key, which the log says only it made (`net.code`).
+    /// Starts the session `net` says, keyed by `code`, for app `app` of build `build`, whose layers
+    /// are `layers`, from the bottom up, as [`Lockstep::start`], [`Server::start`] and
+    /// [`Client::start`] say. A host or a server given no code makes one, which it prints to
+    /// stdout, `code 7KQ2-9XMB-4TZD-P0WH`, for the runs that join it, and not to the log, as it's
+    /// the session's key, which the log says only it made (`net.code`).
     ///
-    /// Fails with `net.start` if a host or a server can't listen at its address, or make or print
-    /// its code, or a joiner or a client is given none. A relay that can't be reached isn't a
-    /// failure: a host or a server registers at it once it can, and a joiner or a client comes
-    /// for its room once it can, as [`listen`] and [`connect`] say.
+    /// Fails with `net.build` if the run's build can't be read, as [`Build::name`] says, and with
+    /// `net.start` if a host or a server can't listen at its address, or make or print its code,
+    /// or a joiner or a client is given none. A relay that can't be reached isn't a failure: a host
+    /// or a server registers at it once it can, and a joiner or a client comes for its room once
+    /// it can, as [`listen`] and [`connect`] say.
     pub(crate) fn start(
         net: &Net,
         code: Option<Code>,
         app: &'static str,
+        build: &Build,
         layers: &[&str],
     ) -> Result<Self> {
+        let build = build.name()?;
         let code = match code {
             Some(code) => code,
             None if matches!(net, Net::Host(_) | Net::Serve(_)) => {
@@ -2946,11 +2958,11 @@ impl Session {
         };
         Ok(match net {
             Net::Host(_) | Net::Join(_) => {
-                Self::Peer(Box::new(Lockstep::start(net, code, app, layers)?))
+                Self::Peer(Box::new(Lockstep::start(net, code, app, &build, layers)?))
             }
-            Net::Serve(at) => Self::Server(Box::new(Server::start(at, code, app, layers)?)),
+            Net::Serve(at) => Self::Server(Box::new(Server::start(at, code, app, &build, layers)?)),
             Net::Connect(toward) => {
-                Self::Client(Box::new(Client::start(toward, code, app, layers)?))
+                Self::Client(Box::new(Client::start(toward, code, app, &build, layers)))
             }
         })
     }
@@ -2964,11 +2976,12 @@ impl Session {
         net: &Net,
         code: Option<Code>,
         app: &'static str,
+        build: &Build,
         layers: &[&str],
         rollback: bool,
         link: Option<Conditions>,
     ) -> Result<Self> {
-        let mut session = Self::start(net, code, app, layers)?;
+        let mut session = Self::start(net, code, app, build, layers)?;
         if rollback {
             session.predict();
         }
@@ -3226,14 +3239,52 @@ impl Session {
     }
 }
 
-/// What the hello says the run's build is: the digest of its executable's bytes, as 16 hex digits,
-/// read once a process, so that a host or a server refuses a peer or a client of another build,
-/// whose simulation may go otherwise, as one rebuilt with an edit's would. Builds of one source on
-/// two machines differ too, as rustc writes the paths of the sources and the debug info's into the
-/// executable: peers share one build, as a game's players do.
+/// What a session's hello names the run's build by, so that a host or a server refuses a peer or a
+/// client of another build, whose simulation may go otherwise, as one rebuilt with an edit's
+/// would: the source its code is compiled from, as [`App::source`](crate::App::source) names it,
+/// and the package it reads.
+#[derive(Clone, Default)]
+pub(crate) struct Build {
+    /// The source's digest, as `App::source` names it.
+    pub(crate) source: Option<&'static str>,
+    /// Where the run reads its files: its package, if it reads one.
+    pub(crate) files: Files,
+}
+
+impl Build {
+    /// The build, as the hello names it: for an app that names its source, the source's digest
+    /// and the run's package's, as [`Package::digest`](crate::package::Package::digest) has it,
+    /// each 16 hex digits, `-` between them, as in `5c7cd8abeeed5f44-641dce7a72446a9c`, the
+    /// package's `-` for a run that reads its files from the disk, which the hello doesn't name;
+    /// for an app that names none, its executable's digest, as [`executable`] says, which builds
+    /// of one source on other OSes or machines don't share.
+    ///
+    /// Fails with `net.build` if the package or the executable can't be read.
+    pub(crate) fn name(&self) -> Result<String> {
+        let Some(source) = self.source else {
+            return executable().map(str::to_owned);
+        };
+        let package = match self.files.packaged() {
+            Some(package) => {
+                let digest = package.digest().map_err(|error| {
+                    let why = "can't digest the run's package, which the hello names its build by";
+                    Error::new("net.build", why).with_source(error)
+                })?;
+                format!("{digest:016x}")
+            }
+            None => "-".to_owned(),
+        };
+        Ok(format!("{source}-{package}"))
+    }
+}
+
+/// The digest of the run's executable's bytes, as 16 hex digits, read once a process, which names
+/// the build of an app that names no source, as [`Build::name`] says. Builds of one source on two
+/// OSes differ, and on two machines, as rustc writes the paths of the sources and the debug info's
+/// into the executable.
 ///
 /// Fails with `net.build` if the executable can't be read.
-fn build() -> Result<&'static str> {
+fn executable() -> Result<&'static str> {
     static BUILD: OnceLock<std::result::Result<String, String>> = OnceLock::new();
     let build = BUILD.get_or_init(|| {
         let _zone = gg_core::zone!();
@@ -3892,7 +3943,8 @@ mod tests {
             link: Option<Conditions>,
         ) -> Self {
             let names = stack.names().to_vec();
-            let mut lockstep = Lockstep::start(net, TESTED, "Tested", &names).expect("started");
+            let mut lockstep =
+                Lockstep::start(net, TESTED, "Tested", BUILD, &names).expect("started");
             if rollback {
                 lockstep.predict();
             }
@@ -3950,6 +4002,7 @@ mod tests {
             let mut cx = Context::seeded(seed);
             cx.own = crate::layer::OwnSessions {
                 app: "Tested",
+                build: Build::default(),
                 layers: stack.names().to_vec(),
                 relay: Some(relay.to_owned()),
                 link: None,
@@ -5265,7 +5318,7 @@ mod tests {
         stack.push_layer(game);
         let names = stack.names().to_vec();
         let net = Net::Host(crate::args::Listen::at("127.0.0.1:0"));
-        stack.lockstep(Lockstep::start(&net, TESTED, "Tested", &names).expect("started"));
+        stack.lockstep(Lockstep::start(&net, TESTED, "Tested", BUILD, &names).expect("started"));
         let mut cx = Context::seeded(3);
         cx.world_mut().register::<Score>().expect("described");
         let restored = stack.restore(&mut cx, &snapshot.expect("read"), false);
@@ -5284,7 +5337,7 @@ mod tests {
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let address = host.net().listening.expect("listening").to_string();
         let join = Net::Join(crate::args::Toward::Address(address));
-        let mut other = Lockstep::start(&join, TESTED, "Other", &["Game"]).expect("started");
+        let mut other = Lockstep::start(&join, TESTED, "Other", BUILD, &["Game"]).expect("started");
         let mut refused = 0;
         until_refused_and_after(|| {
             host.turn();
@@ -5313,7 +5366,7 @@ mod tests {
         let layers: Vec<&str> = layers.split(' ').collect();
         let code = "0000-0000-0000-0000".parse().expect("a code");
         let net = Net::Join(crate::args::Toward::Address(address));
-        let mut other = Lockstep::start(&net, code, "Tested", &layers).expect("started");
+        let mut other = Lockstep::start(&net, code, "Tested", BUILD, &layers).expect("started");
         let mut refused = 0;
         until_refused_and_after(|| {
             host.turn();
@@ -5870,7 +5923,7 @@ mod tests {
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let (mut stranger, mut sealer) = stranger(&mut host);
         let net = host.net();
-        let line = hello(net.protocol(), net.app, net.build, &net.layers, 9);
+        let line = hello(net.protocol(), net.app, &net.build, &net.layers, 9);
         sealer
             .write(&mut stranger, line.as_bytes())
             .expect("said hello");
@@ -5927,7 +5980,7 @@ mod tests {
     }
 
     /// A joiner of another build, whose simulation may go otherwise, is refused, its hello naming
-    /// both builds.
+    /// both builds: one of the same source and another package too.
     #[test]
     fn a_joiner_of_another_build_is_refused() {
         let ours = [
@@ -5951,8 +6004,9 @@ mod tests {
         let layers = host.net().layers.clone();
         let layers: Vec<&str> = layers.split(' ').collect();
         let join = Net::Join(crate::args::Toward::Address(address));
-        let mut other = Lockstep::start(&join, TESTED, "Tested", &layers).expect("started");
-        other.build = "0000000000000000";
+        let mut other = Lockstep::start(&join, TESTED, "Tested", BUILD, &layers).expect("started");
+        // Of the same source, as `BUILD`, and another package.
+        other.build = "0123456789abcdef-0000000000000000".to_owned();
         let start = Instant::now();
         let mut refused = 0;
         while refused < 2 {
@@ -5967,6 +6021,55 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(other.link.is_none() && host.net().link.is_none());
+    }
+
+    /// A run that names its source is named by it and by its package's bytes, as two runs of one
+    /// source and package are alike wherever their packages are, and one of another package isn't,
+    /// or by its source alone if it reads the disk; its session's hello naming it so, in place of
+    /// its executable's digest.
+    #[test]
+    fn a_run_naming_its_source_is_named_by_it_and_its_package() {
+        use crate::package::{Kind, Package, Writer};
+
+        let dir = std::env::temp_dir().join(format!("gg-net-build-{}", std::process::id()));
+        let files = |name: &str, scene: &[u8]| {
+            let mut writer = Writer::new(".", Some("scenes/arena.ron"));
+            (writer.add("scenes/arena.ron", None, Kind::File, scene.to_vec())).expect("added");
+            let path = dir.join(name).join("game.ggpk");
+            writer.write(&path).expect("written");
+            let package = Package::open(&path).expect("opened");
+            Files::package(Arc::new(package), dir.join(name))
+        };
+        let source = Some("3f8a6c2e9b1d4057");
+        let named = |files| Build { source, files }.name().expect("named");
+        let ours = files("ours", b"(speed: 2)");
+        let bytes = std::fs::read(dir.join("ours").join("game.ggpk")).expect("read");
+        let digest = crate::ecs::bytes_digest(&bytes);
+        assert_eq!(
+            named(ours.clone()),
+            format!("3f8a6c2e9b1d4057-{digest:016x}")
+        );
+        let apart = named(files("apart", b"(speed: 2)"));
+        assert_eq!(apart, named(ours.clone()), "the same bytes elsewhere");
+        let theirs = named(files("theirs", b"(speed: 3)"));
+        assert_ne!(theirs, named(ours.clone()), "another scene");
+        assert_eq!(named(Files::default()), "3f8a6c2e9b1d4057--");
+        let unnamed = Build::default().name().expect("named");
+        assert_eq!(unnamed, executable().expect("digested"));
+
+        let net = Net::Host(crate::args::Listen::at("127.0.0.1:0"));
+        let build = Build {
+            source,
+            files: ours,
+        };
+        let session = Session::start(&net, Some(TESTED), "Tested", &build, &[]).expect("started");
+        let Session::Peer(peer) = &session else {
+            panic!("a peer");
+        };
+        assert_eq!(peer.build, format!("3f8a6c2e9b1d4057-{digest:016x}"));
+        // Closed first, as Windows removes no file that's open.
+        drop((session, build));
+        std::fs::remove_dir_all(&dir).expect("removed");
     }
 
     /// A peer's command that names the other's player is refused by both peers, which go on in
@@ -6375,7 +6478,7 @@ mod tests {
             let mut stack = Stack::default();
             stack.push_layer(Painter::default());
             let names = stack.names().to_vec();
-            stack.lockstep(Lockstep::start(net, TESTED, "Tested", &names).expect("started"));
+            stack.lockstep(Lockstep::start(net, TESTED, "Tested", BUILD, &names).expect("started"));
             stack.attach(&mut cx);
             Peer { stack, cx, next: 0 }
         };
@@ -6573,7 +6676,7 @@ mod tests {
     #[test]
     fn a_peer_keeps_the_other_s_inputs_to_a_second() {
         let net = Net::Join(crate::args::Toward::Address("127.0.0.1:1".to_owned()));
-        let mut peer = Lockstep::start(&net, TESTED, "Tested", &[]).expect("started");
+        let mut peer = Lockstep::start(&net, TESTED, "Tested", BUILD, &[]).expect("started");
         let now = Instant::now();
         assert!(
             peer.read_ticks(b"a 0 0 0 - 0 - -\nt 0\nt 63\n", now)

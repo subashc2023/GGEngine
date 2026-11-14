@@ -341,6 +341,28 @@ impl App {
         self
     }
 
+    /// Names the source the app's code is compiled from by its digest, `env!("GG_SOURCE")`, which
+    /// a game's build script that runs `gg_api::build::emit()` gives, as gg-api's `build` says
+    /// what it reads: a session's hello names the run's build by it and by the digest of the
+    /// package the run reads, so that runs of one source and one package join whatever OS or
+    /// machine built them, as ARCHITECTURE.md's Networking says. A run that reads its files from
+    /// the disk, as a development build does without `--package`, is named by its source alone.
+    /// An app that names none is named by its executable's digest, which no build on another OS
+    /// or machine shares.
+    ///
+    /// # Panics
+    ///
+    /// If `digest` isn't 16 hex digits, as `GG_SOURCE` is.
+    #[must_use]
+    pub fn source(mut self, digest: &'static str) -> Self {
+        assert!(
+            digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "a source's digest is 16 hex digits, as `GG_SOURCE` is, not {digest:?}"
+        );
+        self.own_sessions.build.source = Some(digest);
+        self
+    }
+
     /// Names each asset the layers add from a file by its path relative to `root`, the game's
     /// directory, as `env!("CARGO_MANIFEST_DIR")` gives it, with `/` between its parts, such as
     /// `assets/logo.png`: what scenes, snapshots, recordings and the tool API name a sprite's
@@ -705,9 +727,12 @@ fn run_args(
         if let Some(recorder) = recorder.transpose()? {
             app.stack.record(recorder);
         }
+        app.own_sessions.build.files = app.files.clone();
         if let Some(net) = &args.net {
             let (code, names, rollback) = (args.code, app.stack.names(), args.rollback);
-            let session = net::Session::begin(net, code, app.name, names, rollback, args.link)?;
+            let build = &app.own_sessions.build;
+            let session =
+                net::Session::begin(net, code, app.name, build, names, rollback, args.link)?;
             app.stack.session(session);
         }
         let own = &mut app.own_sessions;

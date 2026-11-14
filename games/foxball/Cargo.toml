@@ -14,6 +14,10 @@ path = "src/main.rs"
 [dependencies]
 gg-engine.workspace = true
 
+[build-dependencies]
+# Digests what the game's code is compiled from, which its sessions name its build by.
+gg-api.workspace = true
+
 [features]
 default = ["dev"]
 # A development build, which serves the tool API, applies its scene file's saves and reloads its

@@ -61,7 +61,7 @@ use crate::model::{self, Made, Nodes};
 use crate::navigation::{self, NavAgent, NavMeshVolume};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
-use crate::net::{Code, Outside, Session, SessionStatus, Turn};
+use crate::net::{Build, Code, Outside, Session, SessionStatus, Turn};
 use crate::opaque::OpaqueMeshes;
 use crate::package::{self, Files};
 use crate::perf::{self, Perf};
@@ -578,8 +578,9 @@ pub struct Context {
 /// How the sessions a game hosts and joins from its own UI start, as [`Context::host`] says.
 #[derive(Clone, Default)]
 pub(crate) struct OwnSessions {
-    /// The app, and its layers' names, from the bottom up, which a session's hello names.
+    /// The app, its build and its layers' names, from the bottom up, which a session's hello names.
     pub(crate) app: &'static str,
+    pub(crate) build: Build,
     pub(crate) layers: Vec<&'static str>,
     /// The relay they meet through, as `--relay` given alone names it.
     pub(crate) relay: Option<String>,
@@ -1005,7 +1006,8 @@ impl Context {
     fn start_session(&mut self, net: &Net, code: Code) -> Result<()> {
         let own = &self.own;
         let (predicting, link) = (own.predicting, own.link);
-        let session = Session::begin(net, Some(code), own.app, &own.layers, predicting, link)?;
+        let (app, build, layers) = (own.app, &own.build, &own.layers);
+        let session = Session::begin(net, Some(code), app, build, layers, predicting, link)?;
         self.asked = Some(Asked::Start(Box::new(session)));
         Ok(())
     }

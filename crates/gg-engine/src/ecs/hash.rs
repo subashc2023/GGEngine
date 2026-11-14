@@ -158,7 +158,7 @@ pub(crate) fn text_digest(text: &str) -> u64 {
 }
 
 /// The digest of `bytes`, as [`text_digest`]'s of a text's: a session's hello carries the running
-/// executable's, so that peers of other builds don't join.
+/// executable's or its package's, so that peers of other builds don't join.
 pub(crate) fn bytes_digest(bytes: &[u8]) -> u64 {
     absorb_bytes(TEXT, bytes)
 }

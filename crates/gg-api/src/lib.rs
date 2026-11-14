@@ -5,8 +5,10 @@
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
 //! [`Project`], which tools find a game by and its development build reads; assets' ID files,
 //! [`asset`], which its development build writes beside each texture, model, font, prefab and UI;
-//! and a project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it. It depends on no
-//! crate of the engine's, so that tools build without the GPU's toolchain.
+//! a project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it; and, for a game's
+//! build script, the digest of what its code is compiled from, [`build`], which a session's hello
+//! names its build by. It depends on no crate of the engine's, so that tools and games' build
+//! scripts build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -290,6 +292,7 @@
 //! `(opaque)` that a create or an add gives says.
 
 pub mod asset;
+pub mod build;
 pub mod fetch;
 pub mod probe;
 mod project;

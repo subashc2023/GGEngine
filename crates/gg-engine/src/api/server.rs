@@ -5105,7 +5105,9 @@ mod tests {
         let mut peer = Stack::default();
         let net = Net::Host(crate::args::Listen::at("127.0.0.1:0"));
         let code = crate::net::TESTED;
-        peer.lockstep(Lockstep::start(&net, code, "Tested", &[]).expect("hosting"));
+        peer.lockstep(
+            Lockstep::start(&net, code, "Tested", crate::net::BUILD, &[]).expect("hosting"),
+        );
         let no_scene = Some("api.no_scene".to_owned());
         let no_project = Some("engine.no_project".to_owned());
         for (stack, project, codes) in [

@@ -149,7 +149,9 @@ fn main() -> ExitCode {
 /// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
 /// recordings replay.
 fn app() -> App {
-    let app = App::new("Showcase").project(env!("CARGO_MANIFEST_DIR"));
+    let app = App::new("Showcase")
+        .project(env!("CARGO_MANIFEST_DIR"))
+        .source(env!("GG_SOURCE"));
     let app = app.layer(Showcase::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }

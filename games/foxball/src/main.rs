@@ -73,6 +73,7 @@ fn app() -> App {
     // lockstep's answer some 160 ms late over a link of 150 ms there and back.
     let app = App::new("Foxball")
         .project(env!("CARGO_MANIFEST_DIR"))
+        .source(env!("GG_SOURCE"))
         .predicting();
     let app = app.layer(Foxball::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())

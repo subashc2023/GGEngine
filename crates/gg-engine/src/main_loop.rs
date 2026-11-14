@@ -1387,7 +1387,9 @@ pub(crate) mod tests {
                 let join =
                     crate::args::Net::Join(crate::args::Toward::Address("127.0.0.1:9".to_owned()));
                 let code = crate::net::TESTED;
-                let net = crate::net::Lockstep::start(&join, code, "Tested", &[]).expect("joining");
+                let net =
+                    crate::net::Lockstep::start(&join, code, "Tested", crate::net::BUILD, &[])
+                        .expect("joining");
                 stack.lockstep(net);
             }
             let mut cx = Context::new(None);

@@ -1,6 +1,6 @@
 //! `gg new`: a new game in the workspace, at `games/<NAME>`, as ARCHITECTURE.md's Game code
-//! describes: its package, its project, an empty start scene, and a main module whose layer loads
-//! it.
+//! describes: its package, its build script, its project, an empty start scene, and a main module
+//! whose layer loads it.
 
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -27,6 +27,10 @@ path = "src/main.rs"
 [dependencies]
 gg-engine.workspace = true
 
+[build-dependencies]
+# Digests what the game's code is compiled from, which its sessions name its build by.
+gg-api.workspace = true
+
 [features]
 default = ["dev"]
 # A development build, which serves the tool API, applies its scene file's saves and reloads its
@@ -35,6 +39,15 @@ dev = ["gg-engine/dev"]
 
 [lints]
 workspace = true
+"#;
+
+/// The game's build script.
+const BUILD: &str = r#"//! Tells the game's code the digest of what it's compiled from, `GG_SOURCE`, which its sessions name
+//! its build by, as gg-api's `build` says.
+
+fn main() -> Result<(), gg_api::Failure> {
+    gg_api::build::emit()
+}
 "#;
 
 /// The game's main module.
@@ -58,7 +71,9 @@ fn main() -> ExitCode {
 /// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
 /// recordings replay.
 fn app() -> App {
-    let app = App::new("{name}").project(env!("CARGO_MANIFEST_DIR"));
+    let app = App::new("{name}")
+        .project(env!("CARGO_MANIFEST_DIR"))
+        .source(env!("GG_SOURCE"));
     let app = app.layer(Game).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }
@@ -128,7 +143,8 @@ fn has(metadata: &Value, name: &str) -> bool {
 }
 
 /// Writes new game `name`'s files in directory `dir`, writing over nothing, and returns their
-/// paths: its package's manifest, its project's, its start scene and its main module.
+/// paths: its package's manifest, its build script, its project's, its start scene and its main
+/// module.
 ///
 /// Fails with `gg.new` if `dir` is there, writing nothing, or if a file can't be written, keeping
 /// those written.
@@ -139,6 +155,7 @@ fn write_files(dir: &Path, name: &str) -> Result<Vec<PathBuf>, Failure> {
     }
     let files = [
         ("Cargo.toml", MANIFEST.replace("{name}", name)),
+        ("build.rs", BUILD.to_owned()),
         (Project::FILE, project(name).text()),
         ("scenes/main.ron", SCENE.to_owned()),
         ("src/main.rs", MAIN.replace("{name}", name)),
@@ -168,8 +185,9 @@ mod tests {
         let dir = games.join("probe");
         let files = write_files(&dir, "probe").expect("written");
         let read = |file: &str| fs::read_to_string(dir.join(file)).expect("written");
-        let (manifest, scene, main) = (
+        let (manifest, build, scene, main) = (
             read("Cargo.toml"),
+            read("build.rs"),
             read("scenes/main.ron"),
             read("src/main.rs"),
         );
@@ -182,11 +200,17 @@ mod tests {
             .map(|failure| failure.code);
         let empty = fs::read_dir(&there).expect("there").next().is_none();
         let _ = fs::remove_dir_all(&games);
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 5);
         assert_eq!(project, Ok(super::project("probe")));
         assert!(manifest.contains("name = \"gg-probe\""), "{manifest}");
+        // Its sessions name its build by its source, as its build script digests it.
+        assert!(
+            manifest.contains("[build-dependencies]\n# Digests") && build.contains("emit()"),
+            "{manifest}{build}"
+        );
         assert_eq!(scene, SCENE);
         assert!(main.contains("App::new(\"probe\")"), "{main}");
+        assert!(main.contains(".source(env!(\"GG_SOURCE\"))"), "{main}");
         // A start scene that doesn't load ends the run with its error, as runtime failures do,
         // rather than panicking.
         assert!(

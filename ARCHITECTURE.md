@@ -1404,11 +1404,16 @@ starts none, as a recording holds a run alone or a session from its start.
   that loses its host waits for it, frozen, and connects again, while a host that loses its joiner
   plays on alone, the joiner's player still.
 - **A session takes runs of its own build, and loses those gone.** A joiner's or a client's hello
-  names its app, engine, layers and build, the digest of its executable's bytes, read once as the
-  session starts, which fails where it can't be (`net.build`); and a host or a server refuses one
-  where any differs (`net.refused`), as builds that simulate otherwise would part at every tick:
-  builds of one source on two machines differ too, by the paths rustc writes into them, so a
-  session's runs share one build, as a game's players do. A link nothing has come
+  names its app, engine, layers and build, and a host or a server refuses one where any differs
+  (`net.refused`), as builds that simulate otherwise would part at every tick. A game names its
+  build by two digests: of the source its code is compiled from, which its build script's
+  `gg_api::build::emit` makes and `App::source` gives, leaving out paths and the OS, as gg-api's
+  `build` says; and of the package the run reads, read as the session starts, which fails where
+  it can't be (`net.build`). So runs of one source and one package join whatever OS or machine
+  built them, CI's reference hashes holding the simulation alike on each platform, and a run that
+  reads its files from the disk is named by its source alone. An app that names no source, as the
+  sandbox, the editor and the player, is named by its executable's bytes, which builds on other
+  OSes or machines don't share, by the paths rustc writes into them. A link nothing has come
   by for 10 s, line or packet, is lost (`net.lost`), as is a connection taken that says no hello
   within 5 s, which would hold a joiner's place. A thread of each link's writes its stream, so
   that a slow link never holds the main thread, and writes a line after each second with nothing

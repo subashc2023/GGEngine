@@ -66,8 +66,8 @@ use tracing::{info, warn};
 
 use super::states::{Base, States, Wanted, Written};
 use super::{
-    AHEAD, Accepted, Code, Link, MAX_LINE, MAX_PACKET_TEXT, Merged, Queued, Turn, build, engine,
-    listen, port_of, read_batches, tick_of,
+    AHEAD, Accepted, Code, Link, MAX_LINE, MAX_PACKET_TEXT, Merged, Queued, Turn, engine, listen,
+    port_of, read_batches, tick_of,
 };
 use crate::World;
 use crate::args::{Conditions, Listen};
@@ -100,8 +100,8 @@ pub(crate) struct Server {
     #[cfg(test)]
     pub(super) listening: Option<SocketAddr>,
     pub(super) app: &'static str,
-    /// The run's build, as [`build`] says, which a client's must be.
-    build: &'static str,
+    /// The run's build, as [`Build::name`](super::Build::name) names it, which a client's must be.
+    build: String,
     /// The layers' names, from the bottom up, which a client's must be.
     layers: String,
     /// What `--link` has the links do to what comes, and the state of the random numbers it draws.
@@ -153,19 +153,19 @@ struct Remote {
 }
 
 impl Server {
-    /// Starts taking clients of app `app`, whose layers are `layers`, from the bottom up, where
-    /// `at` says, as [`listen`] takes them, given the session's `code`.
+    /// Starts taking clients of app `app` of build `build`, as
+    /// [`Build::name`](super::Build::name) names it, whose layers are `layers`, from the bottom
+    /// up, where `at` says, as [`listen`] takes them, given the session's `code`.
     ///
     /// Fails with `net.start` if it can't listen at its address or start the thread that writes
-    /// the clients' states, and with `net.build` if the run's build can't be read, as [`build`]
-    /// says.
+    /// the clients' states.
     pub(crate) fn start(
         at: &Listen,
         code: Code,
         app: &'static str,
+        build: &str,
         layers: &[&str],
     ) -> Result<Self> {
-        let build = build()?;
         let states = States::start()?;
         let (accepted, at) = listen(at, "clients", code)?;
         match at {
@@ -177,7 +177,7 @@ impl Server {
             #[cfg(test)]
             listening: at,
             app,
-            build,
+            build: build.to_owned(),
             layers: layers.join(" "),
             conditions: None,
             random: 0,
@@ -231,7 +231,7 @@ impl Server {
             }
         }
         let engine = engine();
-        let ours = [PROTOCOL, self.app, &engine, self.build, &self.layers];
+        let ours = [PROTOCOL, self.app, &engine, &self.build, &self.layers];
         let Self {
             clients,
             buffer,
@@ -657,7 +657,7 @@ mod tests {
 
     use super::super::client::{LATE, LEAD};
     use super::super::tests::{Command, Game, SLOW, Score};
-    use super::super::{Client, Session, TESTED, secure};
+    use super::super::{BUILD, Build, Client, Session, TESTED, secure};
     use super::*;
     use crate::Context;
     use crate::args::Net;
@@ -685,7 +685,8 @@ mod tests {
             let mut stack = Stack::default();
             stack.push_layer(layer);
             let names = stack.names();
-            let mut session = Session::start(net, Some(TESTED), "Tested", names).expect("started");
+            let mut session = Session::start(net, Some(TESTED), "Tested", &Build::default(), names)
+                .expect("started");
             session.condition(SLOW);
             stack.session(session);
             stack.attach(&mut cx);
@@ -814,7 +815,7 @@ mod tests {
     #[test]
     fn a_server_counts_the_inputs_that_came_late() {
         let listen = crate::args::Listen::at("127.0.0.1:0");
-        let mut server = Server::start(&listen, TESTED, "Tested", &[]).expect("started");
+        let mut server = Server::start(&listen, TESTED, "Tested", BUILD, &[]).expect("started");
         let [_other, (stream, keys)] = secure::linked();
         let mut link = Link::new(stream, keys, true, None).expect("a link");
         link.joined = true;
@@ -1164,7 +1165,7 @@ mod tests {
         let (other, layers) = ("0000-0000-0000-0000".parse(), server.stack.names().to_vec());
         let other = other.expect("a code");
         let toward = crate::args::Toward::Address(address.clone());
-        let mut stranger = Client::start(&toward, other, "Tested", &layers).expect("started");
+        let mut stranger = Client::start(&toward, other, "Tested", BUILD, &layers);
         let start = Instant::now();
         let mut refused = 0;
         while start.elapsed() < Duration::from_millis(600) {

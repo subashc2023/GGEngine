@@ -1519,7 +1519,9 @@ pub(crate) mod tests {
         let mut stack = Stack::default();
         let net = Net::Host(crate::args::Listen::at("127.0.0.1:0"));
         let code = crate::net::TESTED;
-        stack.lockstep(Lockstep::start(&net, code, "Tested", &[]).expect("hosting"));
+        stack.lockstep(
+            Lockstep::start(&net, code, "Tested", crate::net::BUILD, &[]).expect("hosting"),
+        );
         let look = |cx: &mut Context, stack: &mut Stack| {
             cx.scenes.looked = None;
             look(cx, stack);
