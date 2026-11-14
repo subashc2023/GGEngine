@@ -265,9 +265,12 @@ jobs:
           ! grep -q '"code":"net.desync"' $logs
       # The 3D demo's server registered at a relay alone, and two clients given the relay and the
       # code alone, over the slow link of the step above, the clients for 640 ticks: each joins as
-      # a player of its own, the third and fourth to in these steps, each of the four links'
-      # packets go direct, and each run logs what its links carried and the clients how they were
-      # corrected; the server, sent Ctrl+C, ends cleanly.
+      # a player of its own, the third and fourth to in these steps, each of the four links' ends
+      # sends direct, to an address of its own, and each run logs what its links carried and the
+      # clients how they were corrected; the server, sent Ctrl+C, ends cleanly. A client here draws
+      # a frame in some 300 ms, on lavapipe, sending a few packets a second, so each packet the
+      # link loses leaves it none direct for longer than a way direct is kept: its ends go back to
+      # the relay and direct again, many times, as DEFECTS.md has it.
       - name: Run the 3D demo's server and clients through a relay, over a slow link
         if: matrix.part == 'runs'
         run: |
@@ -287,7 +290,7 @@ jobs:
           kill $relay
           wait $relay || true
           test "$(grep -h '"message":"Joined the server"' $logs | wc -l)" = 4
-          test "$(grep -h '"code":"net.direct"' $logs | wc -l)" = 4
+          test "$(grep -h '"code":"net.direct"' $logs | grep -o '"address":"[^"]*"' | sort -u | wc -l)" = 4
           grep -q '"code":"net.traffic"' $logs
           grep -q '"code":"net.corrected"' $logs
           ! grep -q '"code":"net.desync"' $logs
