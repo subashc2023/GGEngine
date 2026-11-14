@@ -162,11 +162,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Delays that follow the link** (2026-11-13)
 - **Sessions their players alone join** (2026-11-13)
 - **Runs that meet through a relay** (2026-11-13)
+- **States by what changed** (2026-11-13)
 
 ## Now
 
-Phase 20's fifth milestone, states by what changed, as Next has it, once its plan is written and
-approved.
+Phase 20's sixth and last milestone, Foxball across the internet, measured, as Next has it, once
+its plan is written and approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -743,6 +744,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | TURN and other standard relays, beside the engine's own: a relay is `gg-relay` | A game is hosted where a TURN service already runs |
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
 | `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
+| A server's states compressed against their base as zstd's reference prefix, as `zstd --patch-from` does, in place of its dictionary: 2.7 times quicker for Foxball's (0.17 ms against 0.46), at 10% more bytes | A server's states thread falls behind with many clients, skipping ticks |
 
 ## Open questions
 

@@ -90,11 +90,25 @@ impl World {
     pub(crate) fn save_seen(&self, out: &mut String, seen: Option<&Seen>) -> Result<()> {
         use std::fmt::Write as _;
 
-        use crate::recording::text;
-
         let _zone = gg_core::zone!();
         let hidden = seen.map_or(&[][..], |seen| &seen.hidden[..]);
-        let hides = |entity: Entity| super::hash::hidden(hidden, entity);
+        self.save_head(out, hidden);
+        for table in 0..self.tables.len() {
+            self.save_table(out, table, hidden)?;
+        }
+        self.save_children(out, hidden);
+        for (name, text) in self.save_resources(seen)? {
+            writeln!(out, "resource {name} {text}").expect("a string takes any text");
+        }
+        Ok(())
+    }
+
+    /// Writes the head of what [`save_seen`](Self::save_seen) writes after `out`, its lines before
+    /// the tables': the stream, the slots, their generations, and the free and the vacant ones, of
+    /// the world but for the entities whose slots `hidden` says, as [`Seen`]'s does.
+    pub(crate) fn save_head(&self, out: &mut String, hidden: &[bool]) {
+        use std::fmt::Write as _;
+
         let text = "a string takes any text";
         writeln!(out, "stream {:016x}", self.stream.state()).expect(text);
         writeln!(out, "slots {}", self.meta.len()).expect(text);
@@ -121,49 +135,73 @@ impl World {
             write!(out, " {index}").expect(text);
         }
         out.push('\n');
+    }
+
+    /// Writes table `table` after `out`, as [`save_seen`](Self::save_seen) writes it: its `table`
+    /// line and its rows, each row's `opaque` lines after it, but for the entities whose slots
+    /// `hidden` says.
+    ///
+    /// Fails as `save_seen` does for a table's names and values.
+    pub(crate) fn save_table(&self, out: &mut String, table: usize, hidden: &[bool]) -> Result<()> {
+        use std::fmt::Write as _;
+
+        use crate::recording::text;
+
+        let text = "a string takes any text";
         let id = |entity: Entity| self.id(entity).expect("a row's entity is alive");
-        for table in &self.tables {
-            out.push_str("table");
-            for &component in table.components() {
-                let name = self.components.name(component);
-                one_word(name)?;
-                write!(out, " {name}").expect(text);
+        let table = &self.tables[table];
+        out.push_str("table");
+        for &component in table.components() {
+            let name = self.components.name(component);
+            one_word(name)?;
+            write!(out, " {name}").expect(text);
+        }
+        out.push('\n');
+        for (row, &entity) in table.entities().iter().enumerate() {
+            if super::hash::hidden(hidden, entity) {
+                continue;
             }
+            write!(out, "row {} {} ", entity.index, id(entity)).expect(text);
+            let values: Vec<Value> = (table.columns().iter())
+                .map(|column| column.value(row))
+                .collect();
+            let name = |at: usize| self.components.name(table.components()[at]);
+            if let Some(at) = values.iter().position(|value| depth(value) > MAX_DEPTH) {
+                return Err(Error::new(
+                    "snapshot.too_deep",
+                    format!(
+                        "entity {}'s `{}` is more than {MAX_DEPTH} levels deep, the most a \
+                         snapshot nests, as a scene does",
+                        id(entity),
+                        name(at)
+                    ),
+                ));
+            }
+            text::write(out, &Value::List(values), self);
             out.push('\n');
-            for (row, &entity) in table.entities().iter().enumerate() {
-                if hides(entity) {
-                    continue;
-                }
-                write!(out, "row {} {} ", entity.index, id(entity)).expect(text);
-                let values: Vec<Value> = (table.columns().iter())
-                    .map(|column| column.value(row))
-                    .collect();
-                let name = |at: usize| self.components.name(table.components()[at]);
-                if let Some(at) = values.iter().position(|value| depth(value) > MAX_DEPTH) {
-                    return Err(Error::new(
-                        "snapshot.too_deep",
-                        format!(
-                            "entity {}'s `{}` is more than {MAX_DEPTH} levels deep, the most a \
-                             snapshot nests, as a scene does",
-                            id(entity),
-                            name(at)
-                        ),
-                    ));
-                }
-                text::write(out, &Value::List(values), self);
-                out.push('\n');
-                for (at, column) in table.columns().iter().enumerate() {
-                    if let Some(opaque) = column.opaque(row) {
-                        let what = format!("entity {}'s `{}`", id(entity), name(at));
-                        one_line(&opaque, &what)?;
-                        writeln!(out, "opaque {at} {opaque}").expect(text);
-                    }
+            for (at, column) in table.columns().iter().enumerate() {
+                if let Some(opaque) = column.opaque(row) {
+                    let what = format!("entity {}'s `{}`", id(entity), name(at));
+                    one_line(&opaque, &what)?;
+                    writeln!(out, "opaque {at} {opaque}").expect(text);
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Writes the `children` lines of what [`save_seen`](Self::save_seen) writes after `out`: each
+    /// parent's, in the order of the tables and their rows, but for the entities whose slots
+    /// `hidden` says.
+    pub(crate) fn save_children(&self, out: &mut String, hidden: &[bool]) {
+        use std::fmt::Write as _;
+
+        let text = "a string takes any text";
+        let id = |entity: Entity| self.id(entity).expect("a row's entity is alive");
         // A view hides an entity with what's under it, so that a parent shown has its children.
         for table in &self.tables {
-            for &entity in table.entities().iter().filter(|&&entity| !hides(entity)) {
+            let shown = |&&entity: &&Entity| !super::hash::hidden(hidden, entity);
+            for &entity in table.entities().iter().filter(shown) {
                 let mut children = self.children(entity).expect("a row's entity is alive");
                 let Some(first) = children.next() else {
                     continue;
@@ -175,7 +213,20 @@ impl World {
                 out.push('\n');
             }
         }
-        self.resources.save(self, out, seen.map(|seen| &seen.cells))
+    }
+
+    /// The text of each resource that saves itself, by its name, as [`save_seen`](Self::save_seen)
+    /// writes its `resource` lines, in the order their types first came: of what `seen` sees, as
+    /// [`Saved::save_seen`](super::Saved::save_seen) writes a resource for it, and its cells'
+    /// state in place of the world's.
+    ///
+    /// Fails as a resource's `save_seen` does, with `snapshot.bad_name` for a name that isn't a
+    /// word, and with `snapshot.line_break` for text with a line break.
+    pub(crate) fn save_resources(
+        &self,
+        seen: Option<&Seen>,
+    ) -> Result<Vec<(&'static str, String)>> {
+        self.resources.save(self, seen)
     }
 
     /// Puts the world that `lines` give, as [`save_whole`](Self::save_whole) wrote them, each with

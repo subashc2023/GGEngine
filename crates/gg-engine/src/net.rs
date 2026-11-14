@@ -106,6 +106,7 @@ mod client;
 mod path;
 mod secure;
 mod server;
+mod states;
 
 pub(crate) use client::Client;
 pub(crate) use secure::Code;
@@ -2731,9 +2732,10 @@ impl Session {
     }
 
     /// Once tick `tick` has run, leaving `world`: a peer ends it if it ran on both peers' inputs,
-    /// as [`Lockstep::end_tick`] says; a server sends its clients their states, as
-    /// [`Server::end_tick`] says; and a client keeps its world's hash, as [`Client::end_tick`] says.
-    pub(crate) fn ran(&mut self, tick: u64, world: &World) {
+    /// as [`Lockstep::end_tick`] says; a server sends its clients their states, and moves the
+    /// world's change tick on, as [`Server::end_tick`] says; and a client keeps its world's hash,
+    /// as [`Client::end_tick`] says.
+    pub(crate) fn ran(&mut self, tick: u64, world: &mut World) {
         match self {
             Self::Peer(net) if net.settled(tick) => net.end_tick(tick, world),
             Self::Peer(_) => {}

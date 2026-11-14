@@ -3,15 +3,17 @@
 //! in real time on its own layers' commands and on each client's inputs, which apply in the order
 //! their ticks have them, each tick's at the first the server runs that's its tick or past it, once
 //! those before have; and after each tick it sends each client the text of what it sees of the
-//! world, the world but for the cells near no viewer of its own, as `World::seen_by` says,
-//! compressed against the text it sent after the latest tick the client has said it has, with the
-//! hash of what it sees, as the client's state.
+//! world, the world but for the cells near no viewer of its own, as `World::seen_by` says, with
+//! the hash of what it sees, as the client's state: what changed since the latest state the client
+//! has said it has, the rest named as kept, compressed against that state's text, as
+//! [`states`](super::states) says, which a thread of the server's own writes from a copy of the
+//! world taken as the tick ends.
 //!
 //! A client's stream is lines as a lockstep session's are, as [the session's](super) say, but for
 //! these:
 //!
 //! ```text
-//! hello\tgg-server 4\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
+//! hello\tgg-server 5\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123
 //!                                                    the client, as it connects: its app, engine,
 //!                                                      build and layers, and the port its packets
 //!                                                      come from
@@ -36,9 +38,9 @@
 //! t 1241
 //! ```
 //!
-//! The server's, after each tick, are the client's state, in as many packets as it takes, each a
-//! line and then its part of the state's bytes, the world's text as zstd compresses it, which the
-//! text of the state it's against is the dictionary of:
+//! The server's, after each tick the states thread was idle at the end of, are the client's state,
+//! in as many packets as it takes, each a line and then its part of the state's bytes, its text as
+//! zstd compresses it, which the whole text of the state it's against is the dictionary of:
 //!
 //! ```text
 //! s 1240 1238 1241 2 58183b6352a09a44 fb695ce29daa8479 0 1 34183
@@ -61,19 +63,20 @@ use std::time::Instant;
 use gg_core::Result;
 use tracing::{info, warn};
 
+use super::states::{Base, States, Wanted, Written};
 use super::{
     AHEAD, Accepted, Code, Link, MAX_LINE, MAX_PACKET_TEXT, Merged, Queued, Turn, build, engine,
     listen, port_of, read_batches, tick_of,
 };
+use crate::World;
 use crate::args::{Conditions, Listen};
 use crate::cells::{Cell, Seen};
 use crate::layer::Commands;
 use crate::recording::text;
-use crate::{World, WorldHash};
 
 /// The hello's first part, the protocol and its version, which a client's must be: a change to the
 /// lines or the packets takes it to the next.
-pub(super) const PROTOCOL: &str = "gg-server 4";
+pub(super) const PROTOCOL: &str = "gg-server 5";
 
 /// How many of the latest ticks the server keeps the world's text after, and a client its states,
 /// half a second's, past which a client's state is sent whole.
@@ -81,9 +84,6 @@ pub(super) const KEPT: usize = 32;
 
 /// The most bytes of a state's a packet carries, past its line.
 pub(super) const PART: usize = MAX_PACKET_TEXT - 128;
-
-/// The level zstd compresses states at: its default, quick, as states go out each tick.
-const LEVEL: i32 = 3;
 
 /// A server: where its clients' connections come, and each client.
 pub(crate) struct Server {
@@ -101,18 +101,26 @@ pub(crate) struct Server {
     pub(super) conditions: Option<Conditions>,
     pub(super) random: u64,
     clients: Vec<Remote>,
+    /// How many clients have connected, which numbers each.
+    numbered: u64,
     /// The server's own layers' commands for the tick about to run, each with its layer's index.
     ours: Vec<(usize, String)>,
+    /// What writes the clients' states.
+    states: States,
     /// What a packet is read into.
     buffer: Vec<u8>,
-    /// How many times the server sent a client its world, how many states it sent, and their bytes.
-    served: [u64; 3],
+    /// How many times the server sent a client its world, how many states it sent, and their
+    /// bytes; how many ticks ended without states, as the states thread was still writing the last
+    /// tick's; and how many tables the states sent wrote, and how many they kept.
+    served: [u64; 6],
     /// Whether the world couldn't be written as a state, which is warned of once.
     unsaved: bool,
 }
 
 /// A client, as its server knows it.
 struct Remote {
+    /// Which client it is among those that connected, as the states thread names it.
+    number: u64,
     link: Link,
     /// Whether its hello has been taken, after which it has a player, unless the server has no
     /// player left, and the server owes it its world.
@@ -129,19 +137,20 @@ struct Remote {
     lead: i64,
     /// The latest tick it has said it has the state after.
     have: Option<u64>,
-    /// The cells it saw as its last state was written, as [`World::seen_by`] has them; and the
-    /// text of each of its latest [`KEPT`] states, by tick, which its next is compressed against,
-    /// shared with the clients that saw the world alike.
+    /// The cells it saw as its last state was written, as [`World::seen_by`] has them; and each of
+    /// its latest [`KEPT`] states whole, by tick, which its next is against, shared with the
+    /// clients that saw the world alike against the same.
     cells: BTreeSet<Cell>,
-    texts: BTreeMap<u64, Arc<str>>,
+    texts: BTreeMap<u64, Arc<Base>>,
 }
 
 impl Server {
     /// Starts taking clients of app `app`, whose layers are `layers`, from the bottom up, where
     /// `at` says, as [`listen`] takes them, given the session's `code`.
     ///
-    /// Fails with `net.start` if it can't listen at its address, and with `net.build` if the run's
-    /// build can't be read, as [`build`] says.
+    /// Fails with `net.start` if it can't listen at its address or start the thread that writes
+    /// the clients' states, and with `net.build` if the run's build can't be read, as [`build`]
+    /// says.
     pub(crate) fn start(
         at: &Listen,
         code: Code,
@@ -149,6 +158,7 @@ impl Server {
         layers: &[&str],
     ) -> Result<Self> {
         let build = build()?;
+        let states = States::start()?;
         let (accepted, at) = listen(at, "clients", code)?;
         match at {
             Some(at) => info!(address = %at, "Serving the world"),
@@ -164,9 +174,11 @@ impl Server {
             conditions: None,
             random: 0,
             clients: Vec::new(),
+            numbered: 0,
             ours: Vec::new(),
+            states,
             buffer: vec![0; 1 << 16],
-            served: [0; 3],
+            served: [0; 6],
             unsaved: false,
         })
     }
@@ -177,7 +189,9 @@ impl Server {
     /// engine, build or layers, giving one taken the least player no other client has; and returns
     /// whether the server owes a client its world. Logs a client lost: its connection closed,
     /// nothing came from it for [`LOST`](super::LOST), or no hello within [`HELLO`](super::HELLO).
+    /// First it sends the states the states thread has written since, if it has.
     pub(crate) fn turn(&mut self, next: u64) -> Turn {
+        self.send_written(None);
         let now = Instant::now();
         while let Some(handshaken) = self.accepted.handshaken() {
             let shaken = match handshaken {
@@ -187,8 +201,11 @@ impl Server {
                     continue;
                 }
             };
+            let number = self.numbered;
+            self.numbered += 1;
             match Link::new(shaken.stream, shaken.keys, true, shaken.relayed) {
                 Ok(link) => self.clients.push(Remote {
+                    number,
                     link,
                     hello: false,
                     player: None,
@@ -353,67 +370,90 @@ impl Server {
         merged
     }
 
-    /// Once tick `tick` has run, leaving `world`: sends each joined client its state, the text and
-    /// hash of what it sees of the world, as [`World::seen_by`] has it, each view written and
-    /// hashed once for the clients that see alike, against the text it was sent after the latest
-    /// tick it has said it has, if it still keeps it, and whole otherwise, with the first tick of
-    /// its inputs not applied and how early its latest came; and keeps the text.
-    pub(crate) fn end_tick(&mut self, tick: u64, world: &World) {
-        let Self {
-            clients,
-            served,
-            unsaved,
-            ..
-        } = self;
-        let mut views: Vec<(Seen, Arc<str>, WorldHash)> = Vec::new();
-        for client in clients.iter_mut().filter(|client| client.link.joined) {
-            let Some(player) = client.player else {
+    /// Once tick `tick` has run, leaving `world`: sends the states the states thread has written
+    /// since, if it has; and then, if it's idle, gives it a copy of the world, for it to write each
+    /// joined client's state, as [`states`](super::states) says, against the latest state the
+    /// client has said it has, if the server still keeps it, and whole otherwise, with the first
+    /// tick of its inputs not applied and how early its latest came. If it isn't idle, the tick
+    /// sends no states, and the next state each client gets is against its latest, as ever. Then
+    /// it moves the world's change tick on, as a run that draws does as each tick starts, so that
+    /// what changes after, between ticks too, is marked as changed since the tick.
+    pub(crate) fn end_tick(&mut self, tick: u64, world: &mut World) {
+        self.send_written(None);
+        let joined = |client: &&Remote| client.link.joined && client.player.is_some();
+        if self.clients.iter().any(|client| joined(&client)) {
+            if self.states.idle() {
+                let wanted = (self.clients.iter().filter(joined))
+                    .map(|client| Wanted {
+                        client: client.number,
+                        player: client.player.expect("a joined client's"),
+                        had: client.cells.clone(),
+                        base: (client.have)
+                            .and_then(|have| Some((have, Arc::clone(client.texts.get(&have)?)))),
+                        next: client.next,
+                        lead: client.lead,
+                    })
+                    .collect();
+                self.states.give(world, tick, wanted);
+            } else {
+                self.served[3] += 1;
+            }
+        }
+        world.advance();
+    }
+
+    /// Between frames, until `until`: sends the states the states thread is writing, as soon as
+    /// it has, and then waits out the time left.
+    pub(crate) fn wait(&mut self, until: Instant) {
+        self.send_written(Some(until));
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+    }
+
+    /// Sends each client its state that the states thread has written, by `until`, waiting until
+    /// then, or at once if it's `None`, if it has; and keeps it whole, for the client's next state
+    /// to be against. Warns once, as the world can't be written as a state (`net.link` and the
+    /// codes `World::save_seen` fails with).
+    fn send_written(&mut self, until: Option<Instant>) {
+        let Some((tick, written)) = self.states.take(until) else {
+            return;
+        };
+        let written = match written {
+            Ok(written) => written,
+            Err(error) => {
+                if !mem::replace(&mut self.unsaved, true) {
+                    warn!(
+                        code = error.code(),
+                        "Can't send the clients the world, which they don't correct to: {error:#}"
+                    );
+                }
+                return;
+            }
+        };
+        let served = &mut self.served;
+        for Written {
+            client,
+            base,
+            next,
+            lead,
+            hash,
+            cells,
+            state,
+        } in written
+        {
+            // Unless it was lost since. A client joined has had its world, which a client is sent
+            // once, as its hello comes.
+            let Some(client) = self
+                .clients
+                .iter_mut()
+                .find(|remote| remote.number == client)
+            else {
                 continue;
             };
-            let seen = world.seen_by(player, &client.cells);
-            let at = match views.iter().position(|(view, ..)| *view == seen) {
-                Some(at) => at,
-                None => {
-                    let mut text = String::new();
-                    if let Err(error) = world.save_seen(&mut text, Some(&seen)) {
-                        if !mem::replace(unsaved, true) {
-                            warn!(
-                                code = error.code(),
-                                "Can't send the clients the world, which they don't correct to: \
-                                 {error:#}"
-                            );
-                        }
-                        return;
-                    }
-                    let hash = world.hash_seen(Some(&seen));
-                    views.push((seen, text.into(), hash));
-                    views.len() - 1
-                }
-            };
-            let (seen, text, hash) = &views[at];
-            client.cells.clone_from(&seen.cells.cells_in);
-            let texts = &client.texts;
-            let base = client.have.and_then(|have| Some((have, texts.get(&have)?)));
-            let compressed = match base {
-                Some((_, base)) => zstd::bulk::Compressor::with_dictionary(LEVEL, base.as_bytes())
-                    .and_then(|mut compressor| compressor.compress(text.as_bytes())),
-                None => zstd::bulk::compress(text.as_bytes(), LEVEL),
-            };
-            let bytes = match compressed {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    warn!(
-                        code = "net.link",
-                        "Can't compress a client's state: {error}"
-                    );
-                    continue;
-                }
-            };
-            let base = base.map_or_else(|| "-".to_owned(), |(have, _)| have.to_string());
-            let parts = bytes.len().div_ceil(PART);
-            for (part, bytes) in bytes.chunks(PART).enumerate() {
+            client.cells = cells;
+            let base = base.map_or_else(|| "-".to_owned(), |base| base.to_string());
+            let (parts, size) = (state.bytes.len().div_ceil(PART), state.size);
+            for (part, bytes) in state.bytes.chunks(PART).enumerate() {
                 let mut line = String::new();
-                let (next, lead, size) = (client.next, client.lead, text.len());
                 writeln!(
                     line,
                     "s {tick} {base} {next} {lead} {hash} {part} {parts} {size}"
@@ -424,8 +464,10 @@ impl Server {
                 client.link.send_packet(&packet);
             }
             served[1] += 1;
-            served[2] += bytes.len() as u64;
-            client.texts.insert(tick, Arc::clone(text));
+            served[2] += state.bytes.len() as u64;
+            served[4] += state.tables[0];
+            served[5] += state.tables[1];
+            client.texts.insert(tick, Arc::clone(&state.whole));
             while client.texts.len() > KEPT {
                 client.texts.pop_first();
             }
@@ -433,9 +475,11 @@ impl Server {
     }
 
     /// Logs what the server sent its clients (`net.served`), as the run ends: how many times a
-    /// client its world, and how many states, and their bytes.
+    /// client its world, and how many states, and their bytes; how many ticks sent none, as the
+    /// states thread was still writing the last tick's; and how many tables the states wrote, and
+    /// how many they kept, as the client's base had them.
     pub(crate) fn ended(&self) {
-        let [worlds, states, bytes] = self.served;
+        let [worlds, states, bytes, skipped, written, kept] = self.served;
         let mean = bytes.checked_div(states).unwrap_or(0);
         info!(
             code = "net.served",
@@ -443,8 +487,12 @@ impl Server {
             states,
             bytes,
             mean,
+            skipped,
+            written,
+            kept,
             "Sent clients the world {worlds} times, and {states} states, {mean} bytes each on \
-             average"
+             average; {skipped} ticks sent none, as the last tick's were still being written; the \
+             states wrote {written} tables and kept {kept}"
         );
     }
 }
@@ -683,6 +731,7 @@ mod tests {
         let mut link = Link::new(stream, keys, true, None).expect("a link");
         link.joined = true;
         let mut client = Remote {
+            number: 0,
             link,
             hello: true,
             player: Some(0),
@@ -1172,6 +1221,107 @@ mod tests {
             "net.lost",
             "snapshot.hash",
         ];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// A resource that saves itself once its lock is free, waiting while the test holds it, but
+    /// no more than 5 s.
+    #[derive(Clone, Default)]
+    struct Gate(Arc<std::sync::Mutex<()>>);
+
+    impl crate::Saved for Gate {
+        const NAME: &'static str = "Gate";
+
+        fn save(&self, _: &World) -> Result<String> {
+            let start = Instant::now();
+            while self.0.try_lock().is_err() {
+                if start.elapsed() > Duration::from_secs(5) {
+                    return Err(gg_core::Error::new("test.gate", "held for 5 s"));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok("open".to_owned())
+        }
+
+        fn load(_: &str, _: &World) -> Result<Self> {
+            Ok(Self::default())
+        }
+    }
+
+    /// A world of a [`Gate`], an entity that moves along each tick, and one that stays.
+    struct Gated(Gate);
+
+    impl crate::Layer for Gated {
+        fn attach(&mut self, cx: &mut Context) {
+            let world = cx.world_mut();
+            world.register_saved::<Gate>().expect("registered");
+            world.insert_resource(self.0.clone());
+            world.spawn(crate::Transform::IDENTITY);
+            world.spawn(crate::Owner { player: 7 });
+        }
+
+        fn tick(&mut self, world: &mut World, _: crate::Tick) {
+            for at in world.query_mut::<&mut crate::Transform>() {
+                at.translation.x += 1.0;
+            }
+        }
+    }
+
+    /// A server's clients' states are written on a thread of the server's own, from a copy of the
+    /// world taken as a tick ends: while the thread waits, the server's ticks go on, sending no
+    /// states, which it counts; and once it's done, the states go on, each against the latest the
+    /// client has, which reads it, without a desync or a bad state.
+    #[test]
+    fn states_are_written_on_a_thread_of_the_server_s_own() {
+        let logged = crate::testing::logged();
+        let gate = Gate::default();
+        let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
+        let mut server = Node::of(&serve, Context::seeded(1), Gated(gate.clone()));
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
+            _ => panic!("a server"),
+        };
+        let connect = Net::Connect(crate::args::Toward::Address(address));
+        let mut clients = [Node::of(
+            &connect,
+            Context::seeded(2),
+            Gated(Gate::default()),
+        )];
+        let served = |server: &mut Node| match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.served,
+            _ => panic!("a server"),
+        };
+        let taken = |client: &mut Node| client.client().corrected[3];
+        until(&mut server, &mut clients, |_, clients| {
+            clients[0].joined() && taken(&mut clients[0]) > 0
+        });
+        let held = gate.0.lock().expect("unpoisoned");
+        let (ticks, [_, sent, _, skipped, ..]) = (server.stepper.ticks, served(&mut server));
+        until(&mut server, &mut clients, |server, _| {
+            server.stepper.ticks >= ticks + 16
+        });
+        let [_, held_sent, _, held_skipped, ..] = served(&mut server);
+        // The thread's tick's states, at most, once it was given them.
+        assert!(held_sent <= sent + 1, "sent {held_sent} for {sent}");
+        assert!(
+            held_skipped >= skipped + 15,
+            "skipped {held_skipped} for {skipped}"
+        );
+        drop(held);
+        let had = taken(&mut clients[0]);
+        until(&mut server, &mut clients, |_, clients| {
+            taken(&mut clients[0]) >= had + 16
+        });
+        let [_, _, _, _, written, kept] = served(&mut server);
+        assert!(
+            kept > 0 && written > 0,
+            "wrote {written} tables, kept {kept}"
+        );
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let parted = ["net.desync", "net.bad_state", "net.lost", "test.gate"];
         assert!(
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"

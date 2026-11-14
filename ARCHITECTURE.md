@@ -1456,9 +1456,17 @@ alone, as Foxball's bot, a session's runs leave out.
   commands, each tick's tagged with the tick; the server applies them in their order, each tick's
   at the first tick it runs that's theirs or past it, its own layers' first and then each client's
   by its player. After each tick it sends each client its state: the text of what it sees of the
-  world, as a snapshot writes the world, compressed by zstd against the text of the latest state
-  the client has said it has, which is its dictionary, about 600 bytes in the demo against 34 KB
-  whole, with the hash of what it sees.
+  world, as a snapshot writes the world, but with what hasn't changed since the latest state the
+  client has said it has named as kept, a line in place of each run of tables kept, the children
+  and each resource whose text is the same; compressed by zstd against that state's text whole,
+  which is its dictionary, about 450 bytes in the demo; with the hash of what it sees. A table is
+  kept as the ECS's change marks say nothing joined it or changed in it since that state, and it
+  has as many rows: the server's world moves its change tick on as each tick ends, as a run that
+  draws does as each tick starts. A thread of the server's own writes the states, from a copy of
+  the world the main thread takes as the tick ends (44 µs a tick for Foxball's, in a release
+  build), so that the main thread's time doesn't grow with the clients or the world; a tick that
+  ends while it's still writing sends none, which `net.served` counts. The client rebuilds each
+  state's text whole from the state it's against, which it keeps, as the server does.
   The server's own world is the only one edited: a client refuses the tool API's edits
   (`net.no_edit`), as the server's next state would take them away.
 - **Clients predict their own player, and correct.** A client runs as far ahead of the server as
@@ -1485,9 +1493,13 @@ alone, as Foxball's bot, a session's runs leave out.
   come as retired, so that its spawns take the slots the server's would, and a value naming one
   finds it dead. Its world's cells' state holds the cells it sees alone, what the cells out keep
   staying on the server; the hash is of that view, as its load gives it (`World::hash_seen`); and
-  a client starts without the cell files' texts, which it never reads. The server writes each
-  view once a tick, for the clients that see alike. A client brings no cell in itself, its
-  predictions corrected as a cell comes into its view or leaves it. Physics' state goes whole.
+  a client starts without the cell files' texts, which it never reads. The states thread writes
+  each view's tables once a tick, for the clients that see alike, and only those a state needs. A
+  client brings no cell in itself, its predictions corrected as a cell comes into its view or
+  leaves it. Physics' state, rapier's own, is of the bodies the client sees: the bodies and
+  characters of the entities the view hides are taken out of a copy, as the client's next step
+  would take them out, its world without their entities, so that its rapier is as that step would
+  leave it.
 - **The other players draw between the server's states.** An entity whose `Owner` component names
   another player, and its descendants, draw on a client between the two states about three ticks
   behind the latest, where the time since the latest came puts it, eased so that the states'
@@ -1516,7 +1528,8 @@ are too long for a packet; and the server's states over UDP, in as many packets 
 state lost being lost, as the next is sent against the latest the client has. `--link` has a
 run's links hold each packet that comes, and up to more, losing some, and the stream's lines, as a
 slow link would. [net.rs](crates/gg-engine/src/net.rs),
-[server.rs](crates/gg-engine/src/net/server.rs), [secure.rs](crates/gg-engine/src/net/secure.rs),
+[server.rs](crates/gg-engine/src/net/server.rs), [states.rs](crates/gg-engine/src/net/states.rs),
+[secure.rs](crates/gg-engine/src/net/secure.rs),
 [path.rs](crates/gg-engine/src/net/path.rs) and [gg-relay's root](crates/gg-relay/src/lib.rs) have
 their formats and the rest. `gg run --peers 2` runs a host and a joiner from one build,
 patching both and restarting both after a rebuild, its arguments after `--`, as `--rollback`,

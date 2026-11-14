@@ -281,9 +281,10 @@ pub struct World {
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
     version: u64,
     /// The world's change tick, which each table marks the rows of its columns with as they
-    /// change, as [`Changed`](table::Changed) says: moved on by the engine as each tick starts and
-    /// as each frame has drawn the world, so that drawing finds what changed since it last drew.
-    /// Neither it nor the marks are hashed, saved or recorded.
+    /// change, as [`Changed`](table::Changed) says: moved on by the engine as
+    /// [`advance`](Self::advance) says, so that drawing finds what changed since it last drew, and
+    /// a server what changed since a client's state. Neither it nor the marks are hashed, saved or
+    /// recorded.
     change_tick: u64,
     /// In the order they were made, which is the order queries search them in.
     tables: Vec<Table>,
@@ -754,7 +755,9 @@ impl World {
     }
 
     /// Moves the world's change tick on: as each tick starts, and as each frame has drawn the
-    /// world, so that drawing tells what changed since it last looked.
+    /// world, so that drawing tells what changed since it last looked; and, a server's, which
+    /// draws nothing, as each tick ends, so that its clients' states tell what changed since the
+    /// tick each has.
     pub(crate) fn advance(&mut self) {
         self.change_tick += 1;
     }

@@ -25,6 +25,7 @@ use gg_core::Result;
 use tracing::{debug, error, info, warn};
 
 use super::server::{KEPT, PART, PROTOCOL};
+use super::states::rebuild;
 use super::{
     Code, Handshaken, Inputs, Link, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE, Queued,
     REFUSED, Turn, build, connect, hello, tick_of, write_inputs,
@@ -88,8 +89,7 @@ pub(crate) struct Client {
     tagged: u64,
     /// The first tick of the client's inputs that the world as it stands doesn't hold.
     local: u64,
-    /// The text of each of the latest [`KEPT`] states, by tick, which a state is compressed
-    /// against.
+    /// The text of each of the latest [`KEPT`] states, by tick, whole, which a state is against.
     texts: BTreeMap<u64, String>,
     /// The parts of the latest states still coming, by tick.
     parts: BTreeMap<u64, Parts>,
@@ -507,7 +507,8 @@ impl Client {
     }
 
     /// Reads the bytes of the state `header` heads, come whole at `now`, as the text of the world
-    /// after its tick, against the state it names, as the latest whole.
+    /// after its tick, against the state it names, rebuilt whole, as [`rebuild`] says, as the
+    /// latest whole.
     fn decode(&mut self, header: Header, bytes: Vec<u8>, now: Instant) {
         let tick = header.tick;
         let base = match header.base {
@@ -519,13 +520,14 @@ impl Client {
                     );
                     return;
                 };
-                Some(base.as_bytes())
+                Some(base.as_str())
             }
             None => None,
         };
-        let text = decompress(&bytes, base, header.size)
+        let text = decompress(&bytes, base.map(str::as_bytes), header.size)
             .map_err(|error| error.to_string())
-            .and_then(|text| String::from_utf8(text).map_err(|error| error.to_string()));
+            .and_then(|text| String::from_utf8(text).map_err(|error| error.to_string()))
+            .and_then(|text| rebuild(base.unwrap_or(""), &text));
         match text {
             Ok(text) => {
                 self.texts.insert(tick, text);
@@ -902,6 +904,44 @@ mod tests {
             .expect("compressed");
         let read = decompress(&against, base, text.len()).expect("decompressed");
         assert_eq!(read, text.as_bytes());
+    }
+
+    /// A state rebuilds whole against its base, which the client keeps for the next; one whose
+    /// `kept` lines name more than its base holds is `net.bad_state`, and dropped.
+    #[test]
+    fn a_state_rebuilds_against_its_base_or_is_bad() {
+        let logged = crate::testing::logged();
+        let mut client = Client::start(
+            &Toward::Address("127.0.0.1:1".to_owned()),
+            TESTED,
+            "Tested",
+            &[],
+        )
+        .expect("started");
+        let now = Instant::now();
+        (client.since, client.came) = (100, now);
+        let state = |tick: u64, base: Option<(u64, &str)>, text: &str| {
+            let bytes = match base {
+                Some((_, base)) => zstd::bulk::Compressor::with_dictionary(3, base.as_bytes())
+                    .and_then(|mut compressor| compressor.compress(text.as_bytes())),
+                None => zstd::bulk::compress(text.as_bytes(), 3),
+            };
+            let against = base.map_or_else(|| "-".to_owned(), |(tick, _)| tick.to_string());
+            let line = format!("s {tick} {against} 0 0 0 0 0 1 {}\n", text.len());
+            [line.as_bytes(), &bytes.expect("compressed")].concat()
+        };
+        let base = "stream 1\ntable A\nrow 0 1 [Int(1)]\nresource Cells in\n";
+        client.read_packet(&state(101, None, base), now);
+        let kept = "stream 2\nkept tables 1\nkept resource Cells\n";
+        client.read_packet(&state(102, Some((101, base)), kept), now);
+        assert_eq!(client.texts[&102], base.replace("stream 1", "stream 2"));
+        for (tick, bad) in [(103, "kept tables 2\n"), (104, "kept resource Audio\n")] {
+            client.read_packet(&state(tick, Some((101, base)), bad), now);
+            assert!(!client.texts.contains_key(&tick), "{bad}");
+        }
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let bad = codes.iter().filter(|&code| code == "net.bad_state");
+        assert_eq!(bad.count(), 2, "{codes:?}");
     }
 
     /// The other players' entities draw between the two states [`INTERPOLATION`] ticks behind the

@@ -689,6 +689,40 @@ impl Saved for Physics3D {
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
 
+    /// As [`save`](Saved::save), but without the bodies and characters of the entities `hides`
+    /// says, taken out of a copy as the next step of a world without those entities takes them
+    /// out, so that a client's world, which hasn't them, reads the bodies it sees alone, its rapier
+    /// as its own step would leave it. Their joints go as that step's would, the joints of the
+    /// bodies taken out with them.
+    fn save_seen(&self, world: &World, hides: &dyn Fn(Entity) -> bool) -> Result<String> {
+        let bodies = self.links.linked.iter().map(|linked| linked.entity);
+        let characters = self
+            .characters
+            .linked
+            .iter()
+            .map(|character| character.entity);
+        if !bodies.chain(characters).any(hides) {
+            return self.save(world);
+        }
+        let mut seen = self.clone();
+        let rapier = &mut seen.rapier;
+        seen.links.retain(|linked| {
+            if !hides(linked.entity) {
+                return true;
+            }
+            remove_body(rapier, linked.body);
+            false
+        });
+        seen.characters.retain(|character| {
+            if !hides(character.entity) {
+                return true;
+            }
+            remove_body(rapier, character.body);
+            false
+        });
+        seen.save(world)
+    }
+
     fn load(text: &str, world: &World) -> Result<Self> {
         let saved: SavedPhysics<Rapier> =
             ron::from_str(text).map_err(|error| Error::new("physics.load", error.to_string()))?;
@@ -1634,6 +1668,70 @@ mod tests {
         step(&mut world, 60);
         step(&mut loaded, 60);
         assert_eq!(loaded.hash(), world.hash(), "stepped on");
+    }
+
+    /// Physics written for a server's client's view, which hides some entities, holds none of
+    /// their bodies or characters, taken out of a copy; and leaves the client's rapier, in a world
+    /// without those entities, as physics written whole leaves it once the client's next step has
+    /// taken them out itself: stepped on, the two are alike, bit for bit, and the crate the client
+    /// sees falls as the server's does.
+    #[test]
+    fn physics_seen_steps_on_as_physics_whole_does() {
+        let mut world = World::seeded(3);
+        floor(&mut world);
+        let far = Transform {
+            translation: DVec3::new(100.0, 0.0, 0.0),
+            scale: Vec3::new(10.0, 1.0, 10.0),
+            ..Transform::IDENTITY
+        };
+        let fixed = RigidBody3D {
+            body_type: BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        let far_floor = world.spawn((far, fixed, BoxCollider3D::default()));
+        let near = crate_at(&mut world, Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY);
+        let hidden = crate_at(&mut world, Vec3::new(100.0, 2.0, 0.0), Quat::IDENTITY);
+        let walker = Transform {
+            translation: DVec3::new(103.0, 2.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let controller = CharacterController3D::default();
+        let walker = world.spawn((walker, controller, CapsuleCollider3D::default()));
+        step(&mut world, 20);
+        let gone = [far_floor, hidden, walker];
+        let hides = |entity: Entity| gone.contains(&entity);
+        let physics = world.resource::<Physics3D>().expect("stepped");
+        assert_eq!(physics.characters.linked.len(), 1);
+        let whole = physics.save(&world).expect("saved");
+        let seen = physics.save_seen(&world, &hides).expect("saved");
+        assert_eq!(physics.save_seen(&world, &|_| false).expect("saved"), whole);
+        let mut client = world.clone();
+        for entity in gone {
+            client.despawn(entity).expect("alive");
+        }
+        let [mut from_whole, mut from_seen] = [&whole, &seen].map(|text| {
+            let mut copy = client.clone();
+            let loaded = Physics3D::load(text, &copy).expect("loaded");
+            copy.insert_resource(loaded);
+            copy
+        });
+        let physics = from_seen.resource::<Physics3D>().expect("loaded");
+        let held = (physics.rapier.bodies.len(), physics.characters.linked.len());
+        assert_eq!(
+            held,
+            (2, 0),
+            "the near floor's and crate's bodies, and no character"
+        );
+        step(&mut from_whole, 60);
+        step(&mut from_seen, 60);
+        let text = |world: &World| {
+            let physics = world.resource::<Physics3D>().expect("stepped");
+            physics.save(world).expect("saved")
+        };
+        assert_eq!(text(&from_seen), text(&from_whole));
+        assert_eq!(from_seen.hash(), from_whole.hash());
+        step(&mut world, 60);
+        assert_eq!(transform(&from_seen, near), transform(&world, near));
     }
 
     /// Saved text whose bodies name what its rapier's state doesn't hold as theirs, as text from a

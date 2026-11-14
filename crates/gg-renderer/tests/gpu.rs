@@ -11596,10 +11596,11 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
             ..Fog::default()
         };
         let fire_at = |frame| Mat4::from_translation(from_origin(frame, Vec3::new(-0.9, 0.2, 0.0)));
-        let draws = |frame: u32| {
+        // The scene's draws, and a wall of stripes behind, of draws, which the camera's motion alone
+        // blurs.
+        let stripes = |frame: u32| {
             let mut draws = Draws::default();
             draws.draw_scene();
-            // A wall of stripes behind, of draws, which the camera's motion alone blurs.
             for stripe in -12..12 {
                 let at = from_origin(frame, Vec3::new(0.1 + 0.2 * stripe as f32, 1.5, -1.5));
                 let at = Mat4::from_scale_rotation_translation(
@@ -11610,6 +11611,10 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
                 let shade = if stripe % 2 == 0 { 0.5 } else { 0.05 };
                 draws.push(square, flat, at, Vec4::new(shade, shade, shade * 1.2, 1.0));
             }
+            draws
+        };
+        let draws = |frame: u32| {
+            let mut draws = stripes(frame);
             let at = fire_at(frame);
             let births = Births {
                 first: u64::from(frame) * 4,
@@ -11647,21 +11652,32 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
                 let at = facing_up(6.0, from_origin(frame, Vec3::ZERO));
                 stores.scene.set(1, at, &floor, 2);
             }
-            let draws = draws(frame);
-            // The first frame's again until its meshes are drawable.
-            for _ in 0..200 {
-                let data = RenderData {
-                    antialiasing: Antialiasing::Taa,
-                    motion_blur: Some(MotionBlur { shutter: 0.5 }),
-                    fog: Some(fog),
-                    origin: origin(frame),
-                    ..stores.data(viewport, viewpoint(frame), &draws)
-                };
-                render_without_ui(&mut renderer, data);
-                if frame > 0 || renderer.streaming().is_empty() {
-                    break;
-                }
+            if frame == 0 {
+                // Frames of the first's place until its meshes are drawable: as many as streaming
+                // takes, a count that differs from one render to the next, and so without what a
+                // frame keeps for the next, antialiasing's history, ambient occlusion's, motion
+                // blur's and the particles alive, so that the frames compared follow from none.
+                let settling = stripes(0);
+                let settled = (0..200).any(|_| {
+                    let data = RenderData {
+                        origin: origin(0),
+                        ambient_occlusion: None,
+                        ..stores.data(viewport, viewpoint(0), &settling)
+                    };
+                    render_without_ui(&mut renderer, data);
+                    renderer.streaming().is_empty()
+                });
+                assert!(settled, "still streaming after 200 frames");
             }
+            let draws = draws(frame);
+            let data = RenderData {
+                antialiasing: Antialiasing::Taa,
+                motion_blur: Some(MotionBlur { shutter: 0.5 }),
+                fog: Some(fog),
+                origin: origin(frame),
+                ..stores.data(viewport, viewpoint(frame), &draws)
+            };
+            render_without_ui(&mut renderer, data);
             drawn.push(frame_pixels(&mut renderer));
         }
         shut_down(renderer);
@@ -11674,8 +11690,8 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
     let far_out = render(far, [first, moved]);
     // Within rounding, of the scene's points 1,500 or so from the origin they're drawn from, at
     // most 0.0005 apart on average in linear light, and a few pixels; where a renderer that left
-    // one of what it keeps as it was draws the frame of the move apart: by 0.0045 for the scene's
-    // motion, 0.014 for antialiasing's history and 0.02 for motion blur's, or by 27 pixels for the
+    // one of what it keeps as it was draws the frame of the move apart: by 0.0038 for the scene's
+    // motion, 0.015 for antialiasing's history and 0.02 for motion blur's, or by 26 pixels for the
     // particles alive.
     for (frame, (near, far)) in at_the_origin.iter().zip(&far_out).enumerate() {
         let apart = linear_distance(near, far);

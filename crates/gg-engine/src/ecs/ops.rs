@@ -1824,6 +1824,14 @@ impl World {
         for (parent, child) in links {
             self.append(parent, child);
         }
+        // A value naming an entity put back, under its handle, names a living one again, which no
+        // mark says, as nothing reached its column: a row's text, `Dead` while the entity was out,
+        // is its ID again. So every row is marked, as a rewind marks them, for what keeps a table
+        // unmarked since as it was, as a server's states do.
+        let tick = self.change_tick;
+        for table in &mut self.tables {
+            table.mark_all(tick);
+        }
     }
 
     /// The living entity whose ID is `id`.

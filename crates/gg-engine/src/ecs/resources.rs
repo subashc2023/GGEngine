@@ -6,8 +6,8 @@ use std::any::{Any, TypeId};
 
 use gg_core::{Error, Result};
 
-use super::World;
-use crate::cells::CellState;
+use super::{Entity, World};
+use crate::cells::{CellState, Seen};
 
 /// What a world holds beside its entities, one of each type: the rest of the simulation, such as
 /// [`Physics2D`](crate::Physics2D)'s bodies and contacts, so that a snapshot restored goes on as
@@ -35,6 +35,17 @@ pub trait Saved: Resource {
     /// Fails as the type says, for what it can't write.
     fn save(&self, world: &World) -> Result<String>;
 
+    /// Writes it as [`save`](Self::save) does, but as a server's client sees `world`, without the
+    /// entities `hides` says, which the client's world, loaded from the text, doesn't hold: as
+    /// `save` does, unless the type says otherwise, as physics leaves out the hidden entities'
+    /// bodies.
+    ///
+    /// Fails as `save` does.
+    fn save_seen(&self, world: &World, hides: &dyn Fn(Entity) -> bool) -> Result<String> {
+        let _ = hides;
+        self.save(world)
+    }
+
     /// Makes it again from `text`, which [`save`](Self::save) wrote, in `world`, whose entities
     /// are back, each under its ID.
     ///
@@ -57,14 +68,22 @@ pub(super) struct Resources {
 pub(super) struct SavedType {
     pub(super) type_id: TypeId,
     pub(super) name: &'static str,
-    save: fn(&dyn AnyResource, &World) -> Result<String>,
+    save: SaveSeen,
     pub(super) load: fn(&str, &World) -> Result<Box<dyn AnyResource>>,
 }
 
-fn save_as<T: Saved>(resource: &dyn AnyResource, world: &World) -> Result<String> {
+/// What writes a resource without its type, as [`Saved::save_seen`] does, the entities the second
+/// hides left out.
+type SaveSeen = fn(&dyn AnyResource, &World, &dyn Fn(Entity) -> bool) -> Result<String>;
+
+fn save_as<T: Saved>(
+    resource: &dyn AnyResource,
+    world: &World,
+    hides: &dyn Fn(Entity) -> bool,
+) -> Result<String> {
     let resource: &dyn Any = resource;
     let resource = resource.downcast_ref::<T>();
-    resource.expect("a type's resource").save(world)
+    resource.expect("a type's resource").save_seen(world, hides)
 }
 
 fn load_as<T: Saved>(text: &str, world: &World) -> Result<Box<dyn AnyResource>> {
@@ -156,22 +175,23 @@ impl Resources {
         self.saved.iter().find(|saved| saved.name == name).copied()
     }
 
-    /// Writes each resource that saves itself after `out`, a line each, `resource`, its name and
-    /// its text, in `world`, in the order their types first came: `cells` in place of the world's
-    /// cells' state, if it's given, as a client's view has its own.
+    /// The text of each resource that saves itself, by its name, in `world`, in the order their
+    /// types first came: of what `seen` sees, if it's given, as [`Saved::save_seen`] writes a
+    /// resource for it, and its cells' state in place of the world's, as a client's view has its
+    /// own.
     ///
-    /// Fails as a resource's [`Saved::save`] does, with `snapshot.bad_name` for a name that isn't a
-    /// word, and with `snapshot.line_break` for text with a line break.
+    /// Fails as a resource's [`Saved::save_seen`] does, with `snapshot.bad_name` for a name that
+    /// isn't a word, and with `snapshot.line_break` for text with a line break.
     pub(super) fn save(
         &self,
         world: &World,
-        out: &mut String,
-        cells: Option<&CellState>,
-    ) -> Result<()> {
-        use std::fmt::Write as _;
-
+        seen: Option<&Seen>,
+    ) -> Result<Vec<(&'static str, String)>> {
         use super::file::{one_line, one_word};
 
+        let hidden = seen.map_or(&[][..], |seen| &seen.hidden[..]);
+        let hides = |entity: Entity| super::hash::hidden(hidden, entity);
+        let mut texts = Vec::new();
         for slot in &self.slots {
             let saved = self
                 .saved
@@ -181,14 +201,15 @@ impl Resources {
                 continue;
             };
             one_word(saved.name)?;
+            let cells = seen.map(|seen| &seen.cells);
             let text = match cells.filter(|_| slot.type_id == TypeId::of::<CellState>()) {
                 Some(cells) => cells.save(world)?,
-                None => (saved.save)(&**resource, world)?,
+                None => (saved.save)(&**resource, world, &hides)?,
             };
             one_line(&text, &format!("resource `{}`", saved.name))?;
-            writeln!(out, "resource {} {text}", saved.name).expect("a string takes any text");
+            texts.push((saved.name, text));
         }
-        Ok(())
+        Ok(texts)
     }
 
     /// Puts `resource`, of the type `type_id` names, in its type's slot.

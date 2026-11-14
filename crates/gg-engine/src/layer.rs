@@ -5843,6 +5843,16 @@ impl Stack {
         self.net.as_ref().is_some_and(|net| !net.ready(next))
     }
 
+    /// Waits out a frame until `until`: a server sending its clients' states as soon as its states
+    /// thread has written them, as [`Server::wait`](crate::net::Server::wait) says; any other run
+    /// asleep.
+    pub(crate) fn net_wait(&mut self, until: Instant) {
+        match &mut self.net {
+            Some(Session::Server(server)) => server.wait(until),
+            _ => std::thread::sleep(until.saturating_duration_since(Instant::now())),
+        }
+    }
+
     /// The time a frame `dt` after the last owes the simulation: a networked run's as
     /// [`Session::pace`] says, and any other run's `dt`.
     pub(crate) fn paced(&self, dt: Duration) -> Duration {
@@ -6584,7 +6594,7 @@ impl Stack {
             recorder.ticked(tick, &cx.world);
         }
         if let Some(net) = net {
-            net.ran(tick.number, &cx.world);
+            net.ran(tick.number, &mut cx.world);
         }
     }
 

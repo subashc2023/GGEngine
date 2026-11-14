@@ -541,6 +541,13 @@ impl Table {
         &self.joined
     }
 
+    /// Whether a row joined the table after tick `tick`, or a column's rows changed after it, or
+    /// may have, as [`Changed::since`] says. A row taken out marks nothing: the table's last row
+    /// moves into its place.
+    pub(crate) fn changed_since(&self, tick: u64) -> bool {
+        self.joined.since(tick) || self.changed.iter().any(|changed| changed.since(tick))
+    }
+
     /// Its columns, without their types, in its components' order.
     pub(super) fn columns(&self) -> &[Box<dyn AnyColumn>] {
         &self.columns

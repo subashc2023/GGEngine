@@ -387,6 +387,27 @@ impl Saved for Physics2D {
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
 
+    /// As [`save`](Saved::save), but without the bodies of the entities `hides` says, taken out of a
+    /// copy as the next step of a world without those entities takes them out, so that a client's
+    /// world, which hasn't them, reads the bodies it sees alone, its rapier as its own step would
+    /// leave it. Their joints go as that step's would, the joints of the bodies taken out with
+    /// them.
+    fn save_seen(&self, world: &World, hides: &dyn Fn(Entity) -> bool) -> Result<String> {
+        if !self.links.linked.iter().any(|linked| hides(linked.entity)) {
+            return self.save(world);
+        }
+        let mut seen = self.clone();
+        let rapier = &mut seen.rapier;
+        seen.links.retain(|linked| {
+            if !hides(linked.entity) {
+                return true;
+            }
+            remove_body(rapier, linked.body);
+            false
+        });
+        seen.save(world)
+    }
+
     fn load(text: &str, world: &World) -> Result<Self> {
         let mut saved: SavedPhysics<Rapier> =
             ron::from_str(text).map_err(|error| Error::new("physics.load", error.to_string()))?;
@@ -575,15 +596,7 @@ impl Physics2D {
             if has && matches!(world.parent(entity), Ok(None)) {
                 return true;
             }
-            rapier.bodies.remove(
-                linked.body,
-                &mut rapier.islands,
-                &mut rapier.colliders,
-                &mut rapier.impulse_joints,
-                &mut rapier.multibody_joints,
-                &mut rapier.soft_bodies,
-                true,
-            );
+            remove_body(rapier, linked.body);
             false
         });
     }
@@ -661,6 +674,19 @@ fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '
 /// What the body of `entity` holds as its user data, which its contacts find the entity by.
 fn user_data(entity: Entity) -> u128 {
     u128::from(entity.to_bits())
+}
+
+/// Takes `body` out of `rapier`, with its colliders.
+fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
+    rapier.bodies.remove(
+        body,
+        &mut rapier.islands,
+        &mut rapier.colliders,
+        &mut rapier.impulse_joints,
+        &mut rapier.multibody_joints,
+        &mut rapier.soft_bodies,
+        true,
+    );
 }
 
 /// Makes `entity`'s body in `rapier`, as its components say, and gives back its link.
@@ -914,6 +940,49 @@ mod tests {
 
     pub(super) fn transform(world: &World, entity: Entity) -> Transform {
         *world.get::<Transform>(entity).expect("alive, with one")
+    }
+
+    /// Physics written for a server's client's view, which hides some entities, holds none of
+    /// their bodies, taken out of a copy; and leaves the client's rapier, in a world without those
+    /// entities, as physics written whole leaves it once the client's next step has taken them out
+    /// itself: stepped on, the two are alike, bit for bit, and the box the client sees falls as the
+    /// server's does.
+    #[test]
+    fn physics_seen_steps_on_as_physics_whole_does() {
+        let mut world = World::seeded(3);
+        floor(&mut world);
+        let near = crate_at(&mut world, 0.0, 2.0, 0.0);
+        let hidden = crate_at(&mut world, 100.0, 2.0, 0.0);
+        step(&mut world, 20);
+        let hides = |entity: Entity| entity == hidden;
+        let physics = world.resource::<Physics2D>().expect("stepped");
+        let whole = physics.save(&world).expect("saved");
+        let seen = physics.save_seen(&world, &hides).expect("saved");
+        assert_eq!(physics.save_seen(&world, &|_| false).expect("saved"), whole);
+        let mut client = world.clone();
+        client.despawn(hidden).expect("alive");
+        let [mut from_whole, mut from_seen] = [&whole, &seen].map(|text| {
+            let mut copy = client.clone();
+            let loaded = Physics2D::load(text, &copy).expect("loaded");
+            copy.insert_resource(loaded);
+            copy
+        });
+        let physics = from_seen.resource::<Physics2D>().expect("loaded");
+        assert_eq!(
+            physics.rapier.bodies.len(),
+            2,
+            "the floor's and the near box's"
+        );
+        step(&mut from_whole, 60);
+        step(&mut from_seen, 60);
+        let text = |world: &World| {
+            let physics = world.resource::<Physics2D>().expect("stepped");
+            physics.save(world).expect("saved")
+        };
+        assert_eq!(text(&from_seen), text(&from_whole));
+        assert_eq!(from_seen.hash(), from_whole.hash());
+        step(&mut world, 60);
+        assert_eq!(transform(&from_seen, near), transform(&world, near));
     }
 
     /// A box dropped onto a floor falls, lands and comes to rest on it, its z and its scale as

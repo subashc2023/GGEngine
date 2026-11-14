@@ -279,7 +279,7 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
         let ticked = start.elapsed();
         cx.perf.ran(ticked, Duration::ZERO, Duration::ZERO);
         frames += 1;
-        std::thread::sleep((start + crate::Tick::DT).saturating_duration_since(Instant::now()));
+        app.stack.net_wait(start + crate::Tick::DT);
     }
     cx.perf.finish(clock.since_last(Instant::now()));
     let stopping = Instant::now();
