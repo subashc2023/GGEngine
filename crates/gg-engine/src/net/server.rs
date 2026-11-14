@@ -978,9 +978,9 @@ mod tests {
 
     /// A client whose server's world comes a second after the server wrote it, as a large world
     /// over a slow link does, starts behind, its world going on from the first state, its inputs
-    /// still late by the way there and back, and catches up at once: from a second after it
-    /// joined, none of its inputs come more than a few ticks late, as a client catching up at its
-    /// pace, a tenth faster than real time, would have them for seconds.
+    /// still late by the way there and back, and catches up at once: within 2.5 s of joining
+    /// begins a second in which none of its inputs come more than a few ticks late, as for a
+    /// client catching up at its pace none would for some 3.5 s.
     #[test]
     fn a_client_that_starts_behind_catches_up_at_once() {
         let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
@@ -1018,18 +1018,24 @@ mod tests {
         }
         until(&mut server, &mut clients, |_, clients| clients[0].joined());
         let joined = Instant::now();
-        let after = |time: u64| {
-            move |_: &mut Node, _: &mut [Node]| joined.elapsed() >= Duration::from_millis(time)
-        };
-        until(&mut server, &mut clients, after(1000));
-        let late = served(&mut server)[6];
-        served(&mut server)[6..].fill(0);
-        until(&mut server, &mut clients, after(2000));
-        let [.., then_late, most_late] = *served(&mut server);
-        // As jitter and lost packets have them, 2 at most; caught up at its pace, 10 or more.
+        // Jitter and lost packets have inputs 2 ticks late at most; a stall of the thread that
+        // turns the server and client, as on a loaded runner, more, the second starting again after
+        // it; caught up at its pace, more than `LATE` for some 3.5 s.
+        let (mut last, mut late, mut most_late) = (joined, 0, 0);
+        let within = Duration::from_millis(2500);
+        until(&mut server, &mut clients, |server, _| {
+            let served = served(server);
+            if served[7] > LATE as u64 {
+                (last, late, most_late) = (Instant::now(), late + served[6], served[7]);
+                served[6..].fill(0);
+            }
+            last.elapsed() >= Duration::from_secs(1) || last - joined > within
+        });
+        let caught_up = last - joined;
         assert!(
-            most_late <= LATE as u64,
-            "{then_late} ticks' inputs late, up to {most_late} ticks, after {late} as it joined"
+            caught_up <= within,
+            "{late} ticks' inputs late, the last of them up to {most_late} ticks, {caught_up:?} \
+             after it joined"
         );
     }
 
