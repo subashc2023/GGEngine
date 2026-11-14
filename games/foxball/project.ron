@@ -5,4 +5,5 @@
         "scenes",
     ],
     start: "scenes/arena.ron",
+    relay: Some("152.53.19.145:7800"),
 )

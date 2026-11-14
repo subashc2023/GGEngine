@@ -957,7 +957,7 @@ fn a_run_from_a_package_lists_and_reads_its_cells_there() {
     use crate::package::{Kind, Package, Writer};
 
     let dir = Scratch::new("cells-package");
-    let mut writer = Writer::new(".", None);
+    let mut writer = Writer::new(".", None, None);
     for cell in [0, 1] {
         let text = scene(&[(id_of(cell).get(), cell as f32 * 10.0 + 5.0)]);
         let path = format!("cells/{cell}_0_0.ron");

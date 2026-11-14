@@ -36,6 +36,10 @@
 //! a datagram that starts `gg-relay ` is the relay's own, never forwarded, which a sealed packet
 //! never does, as its first byte is 0x80 or more.
 //!
+//! A relay holds each end of a pair to the rates its [`Limits`] give, and refuses a connection past
+//! the most it holds, or past the most from one address, answering `refused <why>` before its first
+//! line comes.
+//!
 //! Lines are read a byte at a time, at both ends, so that none of the bytes after `paired` land
 //! in a buffer that whatever reads the connection next doesn't read.
 
@@ -51,6 +55,9 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 pub use relay::{Relay, serve};
+
+/// Each end of a pair, as logs name it, by its side: the joiner's first.
+const ENDS: [&str; 2] = ["joiner", "host"];
 
 /// The protocol and its version, which each connection's first line names, and which a change to
 /// the lines or the datagrams takes to the next.
@@ -84,9 +91,64 @@ const IDLE: Duration = Duration::from_secs(30);
 /// The most bytes a datagram may have, a path's MTU, past which the relay drops it.
 const MAX_DATAGRAM: usize = 1500;
 
-/// Where a relay listens by default, and the most connections it holds at once.
+/// Where a relay listens by default, the most connections it holds at once, and the most of them
+/// from one address.
 const LISTEN: &str = "0.0.0.0:7800";
 const MOST: usize = 4096;
+const PER_ADDRESS: usize = 16;
+
+/// What a relay holds and forwards at most, as `gg-relay`'s flags set them; the default, the
+/// executable's, sits well above what a game's session sends through it, so that only what isn't
+/// one meets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Connections at once, past which it refuses them (`full`).
+    pub most: usize,
+    /// Connections at once from one address, an IPv6 address's /64 counting as one, as one host
+    /// holds a whole /64, and an IPv4 address that IPv6 maps as that address; past it, it refuses
+    /// them. A session through a relay takes three, its host's room, its joiner's and its host's
+    /// end of their pair; a server one, and two for each client.
+    pub per_address: usize,
+    /// Each end of a pair's bytes on its connection, past which the relay reads it more slowly,
+    /// TCP holding its sender meanwhile, so that none are lost.
+    pub stream: Rate,
+    /// Each end of a pair's datagrams, and their bytes, past which it drops them, as a lossy link
+    /// would, which sessions send again.
+    pub datagrams: Rate,
+    pub datagram_bytes: Rate,
+}
+
+/// A rate, as a token bucket keeps it: so many a second, of 1 or more, in bursts of up to so many;
+/// a datagram of more bytes than its burst never passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rate {
+    pub per_second: u64,
+    pub burst: u64,
+}
+
+impl Default for Limits {
+    /// At four times the datagrams a second, and three times their bytes, that Foxball's sessions
+    /// send at the most, a server's to each client; and a stream that passes the world a joiner
+    /// takes at once, in its burst, and 30 times what a session's stream sends after.
+    fn default() -> Self {
+        Self {
+            most: MOST,
+            per_address: PER_ADDRESS,
+            stream: Rate {
+                per_second: 128 << 10,
+                burst: 1 << 20,
+            },
+            datagrams: Rate {
+                per_second: 500,
+                burst: 1000,
+            },
+            datagram_bytes: Rate {
+                per_second: 256 << 10,
+                burst: 512 << 10,
+            },
+        }
+    }
+}
 
 /// A session's room at a relay, which its host registers by and its joiners come for: 16 bytes,
 /// written as 32 hex digits. A host's run derives it from the session's code, which its joiners'
@@ -429,6 +491,15 @@ fn unknown(line: &str) -> io::Error {
 
 /// The help text, for the program called `program`.
 fn usage(program: &str) -> String {
+    let Limits {
+        stream,
+        datagrams,
+        datagram_bytes: bytes,
+        ..
+    } = Limits::default();
+    let kib = |rate: Rate| (rate.per_second >> 10, rate.burst >> 10);
+    let ((stream_rate, stream_burst), (bytes_rate, bytes_burst)) = (kib(stream), kib(bytes));
+    let (datagram_rate, datagram_burst) = (datagrams.per_second, datagrams.burst);
     format!(
         "Usage: {program} [options]
 
@@ -437,30 +508,50 @@ client that comes for its room, by its code, and copies what each pair sends the
 under keys the relay doesn't hold: over TCP, and over UDP on the same port.
 
 Options:
-  --listen <ADDRESS>  Listen at ADDRESS, TCP and UDP, rather than {LISTEN}
-  --most <N>          Hold at most N connections at once, rather than {MOST}, refusing those past
-                      it: a host holds one, and each joiner or client one, and one more of its
-                      host's while it's paired
-  -h, --help          Print this help
+  --listen <ADDRESS>   Listen at ADDRESS, TCP and UDP, rather than {LISTEN}
+  --most <N>           Hold at most N connections at once, rather than {MOST}, refusing those past
+                       it: a host holds one, and each joiner or client one, and one more of its
+                       host's while it's paired
+  --per-address <N>    Hold at most N of them from one address, rather than {PER_ADDRESS}, an IPv6
+                       address's /64 counting as one
+  --logs <DIR>         Write its JSON log in DIR, rather than in `logs` beside its executable
+  -h, --help           Print this help
+
+Each end of a pair may send, a second and in a burst:
+  its stream     {stream_rate:>4} KiB  {stream_burst:>5} KiB  read more slowly past them
+  datagrams      {datagram_rate:>4}      {datagram_burst:>5}      dropped past them
+  their bytes    {bytes_rate:>4} KiB  {bytes_burst:>5} KiB  dropped past them
 
 Environment:
-  RUST_LOG            The log filter, such as `debug`
+  RUST_LOG             The log filter, such as `debug`
 
-Its JSON log is in `logs` beside its executable. Exits 1 if it can't listen, and 2 on bad
-arguments.
+Exits 1 if it can't listen, and 2 on bad arguments.
 "
     )
 }
 
+/// A relay's options, as [`parse`] reads them from its arguments.
+#[derive(Debug, PartialEq)]
+struct Options {
+    listen: String,
+    limits: Limits,
+    /// The JSON log's folder; `None` for `logs` beside the executable.
+    logs: Option<PathBuf>,
+}
+
 /// Runs a relay as the `gg-relay` executable does, by the arguments after its name, `args`:
-/// logging to the console and to a JSON log in `logs` beside the executable, as runs of the engine
-/// do, and relaying until the process ends.
+/// logging to the console and to a JSON log in the folder `--logs` names, else `logs` beside the
+/// executable, as runs of the engine do, and relaying until the process ends.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     let program = std::env::current_exe()
         .ok()
         .and_then(|exe| Some(exe.file_stem()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "gg-relay".to_owned());
-    let (listen, most) = match parse(args) {
+    let Options {
+        listen,
+        limits,
+        logs,
+    } = match parse(args) {
         Ok(Some(parsed)) => parsed,
         Ok(None) => {
             print!("{}", usage(&program));
@@ -471,12 +562,14 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let logs = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join("logs")))
-        .unwrap_or_else(|| PathBuf::from("logs"));
+    let logs = logs.unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join("logs")))
+            .unwrap_or_else(|| PathBuf::from("logs"))
+    });
     gg_core::log::init("relay", &logs, true);
-    match serve(&listen, most) {
+    match serve(&listen, limits) {
         Ok(relay) => {
             relay.wait();
             ExitCode::SUCCESS
@@ -488,10 +581,22 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     }
 }
 
-/// Parses a relay's arguments, as [`run`] takes them: where it listens and the most connections it
-/// holds; `None` for `--help`.
-fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<(String, usize)>, String> {
-    let (mut listen, mut most) = (LISTEN.to_owned(), MOST);
+/// Parses a relay's arguments, as [`run`] takes them; `None` for `--help`.
+fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, String> {
+    let mut options = Options {
+        listen: LISTEN.to_owned(),
+        limits: Limits::default(),
+        logs: None,
+    };
+    let connections = |flag: &str, given: String| {
+        given
+            .parse()
+            .ok()
+            .filter(|&most: &usize| most > 0)
+            .ok_or_else(|| {
+                format!("`{flag}` takes a number of connections, 1 or more, not `{given}`")
+            })
+    };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let arg = (arg.into_string()).map_err(|arg| format!("{arg:?} isn't valid Unicode"))?;
@@ -507,17 +612,20 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<(String, usi
         };
         match flag {
             "-h" | "--help" => return Ok(None),
-            "--listen" => listen = value()?,
-            "--most" => {
+            "--listen" => options.listen = value()?,
+            "--most" => options.limits.most = connections(flag, value()?)?,
+            "--per-address" => options.limits.per_address = connections(flag, value()?)?,
+            "--logs" => {
                 let given = value()?;
-                most = given.parse().ok().filter(|&most| most > 0).ok_or_else(|| {
-                    format!("`--most` takes a number of connections, 1 or more, not `{given}`")
-                })?;
+                if given.is_empty() {
+                    return Err("`--logs` takes a folder, not nothing".to_owned());
+                }
+                options.logs = Some(PathBuf::from(given));
             }
             _ => return Err(format!("unknown argument `{arg}`")),
         }
     }
-    Ok(Some((listen, most)))
+    Ok(Some(options))
 }
 
 #[cfg(test)]

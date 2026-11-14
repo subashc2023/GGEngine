@@ -474,7 +474,7 @@ fn a_run_from_a_package_changes_to_a_scene_it_holds() {
     // Never made: what loads, loads from the package.
     let root = dir.0.join("game");
     let block = ktx2(ktx2::Format::BC7_SRGB_BLOCK, [1, 1], &[vec![0; 16]], true);
-    let mut writer = Writer::new(".", Some("scenes/menu.ron"));
+    let mut writer = Writer::new(".", Some("scenes/menu.ron"), None);
     let (id, named) = (0x5f3c_9a1e_07b2_d846, "5f3c9a1e07b2d846");
     writer
         .add(MOSS, Some(id), Kind::Texture, block)

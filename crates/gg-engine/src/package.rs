@@ -8,10 +8,10 @@
 //! The format, every number little-endian:
 //!
 //! ```text
-//! header   32 bytes: "GGPK", the version (5), the number of entries, the string table's length,
+//! header   40 bytes: "GGPK", the version (6), the number of entries, the string table's length,
 //!          then the asset root's path and the start scene's, each from the project's directory,
-//!          as its manifest gives them, and each its start and length in the string table, the
-//!          start's 0 long for none
+//!          and the project's relay, as its manifest gives them, each its start and length in the
+//!          string table, the start's and the relay's 0 long for none
 //! entries  32 bytes each, in the order of their paths' bytes: an ID (0 for none), the offset and
 //!          length of its data, its path's start in the string table, its path's length (16 bits),
 //!          its kind and its codec (8 bits each, the codec 0, stored as it is)
@@ -34,9 +34,9 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-/// 5 since cooked models' parts hold their nodes' names.
-const VERSION: u32 = 5;
-const HEADER: usize = 32;
+/// 6 since its header names the project's relay.
+const VERSION: u32 = 6;
+const HEADER: usize = 40;
 const ENTRY: usize = 32;
 /// What each entry's data starts at a multiple of, so that data mapped into memory is aligned for
 /// any of the GPU's types.
@@ -121,6 +121,8 @@ pub(crate) struct Package {
     assets: Box<str>,
     /// The start scene's path from the project's directory.
     start: Option<Box<str>>,
+    /// The project's relay, `host:port`.
+    relay: Option<Box<str>>,
 }
 
 impl Package {
@@ -183,11 +185,12 @@ impl Package {
             Ok(text.into())
         };
         let assets = string(u32_at(&header, 16), u64::from(u32_at(&header, 20))).map_err(bad)?;
-        let start_len = u64::from(u32_at(&header, 28));
-        let start = match start_len {
-            0 => None,
-            len => Some(string(u32_at(&header, 24), len).map_err(bad)?),
+        let optional = |at: usize| match u64::from(u32_at(&header, at + 4)) {
+            0 => Ok(None),
+            len => string(u32_at(&header, at), len).map(Some),
         };
+        let start = optional(24).map_err(bad)?;
+        let relay = optional(32).map_err(bad)?;
         if !(&*assets == "." || inside(&assets))
             || start.as_deref().is_some_and(|start| !inside(start))
         {
@@ -238,6 +241,7 @@ impl Package {
             by_id,
             assets,
             start,
+            relay,
         })
     }
 
@@ -251,6 +255,12 @@ impl Package {
     /// project has one.
     pub(crate) fn start(&self) -> Option<&str> {
         self.start.as_deref()
+    }
+
+    /// The relay the game's own sessions meet through, `host:port`, as its manifest names it, if
+    /// it names one.
+    pub(crate) fn relay(&self) -> Option<&str> {
+        self.relay.as_deref()
     }
 
     fn entry(&self, path: &str) -> Option<&Entry> {
@@ -492,18 +502,20 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 pub struct Writer {
     assets: String,
     start: Option<String>,
+    relay: Option<String>,
     /// Each entry's ID, 0 for none, its kind and its data, by its path.
     entries: BTreeMap<String, (u64, Kind, Vec<u8>)>,
 }
 
 impl Writer {
-    /// A package of a project whose asset root is at `assets` from its directory, and whose start
-    /// scene, if it has one, is at `start` from it, each with `/` between its parts, as its
-    /// manifest gives them.
-    pub fn new(assets: &str, start: Option<&str>) -> Self {
+    /// A package of a project whose asset root is at `assets` from its directory, whose start
+    /// scene, if it has one, is at `start` from it, each with `/` between its parts, and whose
+    /// relay, if it names one, is `relay`, as its manifest gives them.
+    pub fn new(assets: &str, start: Option<&str>, relay: Option<&str>) -> Self {
         Self {
             assets: assets.to_owned(),
             start: start.map(str::to_owned),
+            relay: relay.map(str::to_owned),
             entries: BTreeMap::new(),
         }
     }
@@ -556,10 +568,12 @@ impl Writer {
             Ok((start, len))
         };
         let assets = string(&self.assets)?;
-        let start = match &self.start {
-            Some(start) => string(start)?,
-            None => (0, 0),
+        let mut optional = |text: &Option<String>| match text {
+            Some(text) => string(text),
+            None => Ok((0, 0)),
         };
+        let start = optional(&self.start)?;
+        let relay = optional(&self.relay)?;
         let mut paths = Vec::with_capacity(self.entries.len());
         for path in self.entries.keys() {
             paths.push(string(path)?);
@@ -576,6 +590,8 @@ impl Writer {
             assets.1,
             start.0,
             start.1,
+            relay.0,
+            relay.1,
         ] {
             bytes.extend_from_slice(&number.to_le_bytes());
         }
@@ -625,10 +641,12 @@ mod tests {
     }
 
     /// What's written reads back: each entry by its path, of its kind, its ID both ways, the asset
-    /// root and the start scene; and the same entries, added in any order, make the same bytes.
+    /// root, the start scene and the relay; and the same entries, added in any order, make the same
+    /// bytes.
     #[test]
     fn a_package_reads_back_what_was_written() {
-        let mut writer = Writer::new(".", Some("scenes/arena.ron"));
+        let relay = Some("relay.example.com:7800");
+        let mut writer = Writer::new(".", Some("scenes/arena.ron"), relay);
         let id = 0x5f3c_9a1e_07b2_d846;
         writer
             .add("textures/stone.png", Some(id), Kind::File, vec![1, 2, 3])
@@ -643,6 +661,7 @@ mod tests {
         let package = Package::open(&path).unwrap();
         assert_eq!(package.assets(), ".");
         assert_eq!(package.start(), Some("scenes/arena.ron"));
+        assert_eq!(package.relay(), relay);
         let stone = package
             .read("textures/stone.png", Kind::File, u64::MAX)
             .unwrap();
@@ -667,7 +686,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(wrong.kind(), io::ErrorKind::InvalidData);
 
-        let mut reversed = Writer::new(".", Some("scenes/arena.ron"));
+        let mut reversed = Writer::new(".", Some("scenes/arena.ron"), relay);
         reversed
             .add("scenes/arena.ron", None, Kind::File, b"()".to_vec())
             .unwrap();
@@ -685,7 +704,7 @@ mod tests {
     /// holding `\` or `:`, which Windows reads as a separator and a drive's.
     #[test]
     fn a_writer_refuses_what_wouldnt_read_back() {
-        let mut writer = Writer::new(".", None);
+        let mut writer = Writer::new(".", None, None);
         writer
             .add("a.png", Some(1), Kind::File, Vec::new())
             .unwrap();
@@ -707,7 +726,7 @@ mod tests {
     /// `package.bad`, and one that isn't there with `package.unreadable`.
     #[test]
     fn a_package_that_doesnt_hold_together_is_refused() {
-        let mut writer = Writer::new("assets", None);
+        let mut writer = Writer::new("assets", None, None);
         writer
             .add("a.png", Some(1), Kind::File, vec![0; 5])
             .unwrap();
@@ -716,14 +735,18 @@ mod tests {
             .unwrap();
         let path = written(&writer, "refused");
         let good = std::fs::read(&path).unwrap();
-        assert!(Package::open(&path).is_ok());
+        let package = Package::open(&path).unwrap();
+        assert_eq!((package.start(), package.relay()), (None, None));
         let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
         let mut magic = good.clone();
         magic[0] = b'X';
         cases.push(("magic", magic));
-        let mut version = good.clone();
-        version[4] = VERSION as u8 + 1;
-        cases.push(("version", version));
+        // The next version's, and the last's, whose header is shorter.
+        for number in [VERSION + 1, VERSION - 1] {
+            let mut version = good.clone();
+            version[4..8].copy_from_slice(&number.to_le_bytes());
+            cases.push(("version", version));
+        }
         cases.push(("short", good[..HEADER + ENTRY].to_vec()));
         // The second entry's ID made the first's.
         let mut twice = good.clone();
@@ -759,7 +782,7 @@ mod tests {
             ("C:/assets", None),
         ];
         for (assets, start) in outside {
-            let path = written(&Writer::new(assets, start), "outside");
+            let path = written(&Writer::new(assets, start, None), "outside");
             let error = Package::open(&path).unwrap_err();
             assert_eq!(error.code(), "package.bad", "{assets}: {error:#}");
             let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -773,7 +796,7 @@ mod tests {
     /// their paths, each found again by its path; the disk lists none.
     #[test]
     fn a_packages_files_are_listed_under_the_root_in_the_order_of_their_paths() {
-        let mut writer = Writer::new(".", Some("scenes/arena.ron"));
+        let mut writer = Writer::new(".", Some("scenes/arena.ron"), None);
         for path in ["scripts/spin.luau", "scenes/arena.ron", "scripts/bob.luau"] {
             writer.add(path, None, Kind::File, Vec::new()).unwrap();
         }

@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn a_server_and_its_clients_meet_through_a_relay() {
         let logged = crate::testing::logged();
-        let relay = gg_relay::serve("127.0.0.1:0", 64).expect("a relay");
+        let relay = gg_relay::serve("127.0.0.1:0", gg_relay::Limits::default()).expect("a relay");
         let at = relay.address().to_string();
         let listen = crate::args::Listen {
             address: None,

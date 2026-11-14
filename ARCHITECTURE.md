@@ -80,7 +80,7 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   `gg-*` crates, so that a relay builds and runs on a server without Vulkan, sound or input
   libraries.
 - **`relay`:** the relay's executable, `gg-relay`, whose `main` hands control to `gg-relay` rather
-  than `gg-engine`, as it runs no game.
+  than `gg-engine`, as it runs no game; and its systemd unit, `gg-relay.service`, for a server.
 - **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
@@ -533,11 +533,13 @@ A project's state is text that people and agents edit, diff and merge with ordin
 
 - **Projects.** A game's project is its crate's directory, which holds its manifest,
   `project.ron`, beside its `Cargo.toml`, in canonical RON: the game's package (`game`); its asset
-  root (`assets`), which is `App::root`; the folders in it that hold its scenes (`scenes`); and the
+  root (`assets`), which is `App::root`; the folders in it that hold its scenes (`scenes`); the
   scene it starts in (`start`), which `Context::load_start_scene` loads; each path relative to the
-  manifest's directory. Tools read a manifest and never rewrite it, and `gg new` writes one. A
+  manifest's directory; and, if it names one, the relay its own sessions meet through (`relay`,
+  `host:port`). Tools read a manifest and never rewrite it, and `gg new` writes one. A
   development build reads its game's, through `App::project`; shipping builds start from cooked
-  data, so a build without `dev` reads none, and runs from its game's package.
+  data, so a build without `dev` reads none, and runs from its game's package, which holds the
+  asset root, the start scene and the relay as the manifest names them.
 - **Fetched files.** What a project uses that its repository mustn't hold, as a model whose license
   keeps it out, as Sponza's does the showcase's, its fetch list, `fetch.ron` beside its manifest,
   names: each file under a folder at a URL pinned to what it holds, as a repository's at a commit,
@@ -1324,8 +1326,8 @@ server's too, whose player is none as a run alone's is, so that what a game sets
 alone, as Foxball's bot, a session's runs leave out.
 
 A game hosts and joins sessions from its own UI too, as Foxball's menu does, so that its players
-need no flags. `Context::host` starts a lockstep session through the relay `--relay` names, given
-without a session flag, from the next frame: the run plays on from its world as player 0, alone
+need no flags. `Context::host` starts a lockstep session through the run's relay, the one
+`--relay` names, given without a session flag, else the one its project names, from the next frame: the run plays on from its world as player 0, alone
 until someone joins. `Context::join` joins one by the code a player types or pastes, its host's
 world taking the run's place, as a joiner's does. `Context::leave` ends either, the run playing on
 alone from the world it has, a joiner's its host's. `Context::session` says where the session
@@ -1460,6 +1462,17 @@ starts none, as a recording holds a run alone or a session from its start.
   way leave a session's packets on the relay; the stream always stays there, as TCP's hole punching
   gets through fewer routers than UDP's. TURN relays UDP alone, and iroh would rewrite the links on
   QUIC; the engine's own relay carries both, and builds on gg-core alone of the engine's crates.
+  Runs resolve a relay's name to its IPv4 address first, as a relay listens on IPv4 by default and
+  a link's socket follows its connection's family.
+- **A relay holds each pair to rates.** `gg-relay` refuses connections past 4,096 (`--most`), and
+  past 16 from one address (`--per-address`), an IPv6 address's /64 counting as one. It holds each
+  end of a pair to 500 datagrams and 256 KiB of them a second, in bursts of 1,000 and 512 KiB,
+  dropping those past as a lossy link does, and its stream to 128 KiB a second past a burst of
+  1 MiB, reading it more slowly, so that TCP holds the sender back and nothing is lost
+  (`relay.limited`): token buckets, at three to four times what Foxball's sessions send at the
+  most, a server to each client, with a joiner's world passing in one burst. On a server it runs as
+  the systemd service `apps/relay/gg-relay.service`, sandboxed and restarting itself, its JSON log
+  in `/var/log/gg-relay`.
 - **A player's commands steer that player alone.** A command whose variant or struct has a field
   `player`, an integer, as the demos' have, names the player whose inputs carry it, a peer's or a
   server's client's, or is refused, by every run of the session alike (`net.bad_command`), so that

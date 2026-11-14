@@ -289,6 +289,9 @@ pub struct App {
     project: Option<Result<Manifest>>,
     /// The project's start scene, as its manifest or its package names it.
     start: Option<PathBuf>,
+    /// The project's relay, as its manifest or its package names it, which the run's own sessions
+    /// meet through unless `--relay` names another.
+    relay: Option<String>,
     /// Whether the run reads its files from a game's package whatever its build, as
     /// [`from_package`](Self::from_package) says.
     from_package: bool,
@@ -323,6 +326,7 @@ impl App {
             project_dir: None,
             project: None,
             start: None,
+            relay: None,
             from_package: false,
             files: Files::default(),
             mods: None,
@@ -400,6 +404,7 @@ impl App {
             if let Ok(manifest) = &manifest {
                 self.root = Some(manifest.root.clone());
                 self.start = Some(manifest.start.clone());
+                self.relay.clone_from(&manifest.relay);
             }
             self.project = Some(manifest);
         }
@@ -475,6 +480,7 @@ impl App {
             .unwrap_or_default();
         let root = package::under(&dir, package.assets());
         self.start = package.start().map(|start| package::under(&dir, start));
+        self.relay = package.relay().map(str::to_owned);
         self.files = Files::package(package, root.clone());
         self.root = Some(root);
         info!(path = %path.display(), "Running from the game's package");
@@ -737,7 +743,8 @@ fn run_args(
         }
         let own = &mut app.own_sessions;
         (own.app, own.layers) = (app.name, app.stack.names().to_vec());
-        (own.relay, own.link) = (args.relay.clone(), args.link);
+        own.relay = args.relay.clone().or_else(|| app.relay.clone());
+        own.link = args.link;
         own.recorded = args.record.is_some();
         // A server renders nothing, and serves no tool API, whose tools look at a run's frames.
         if matches!(args.net, Some(args::Net::Serve(_))) {
@@ -796,12 +803,14 @@ fn run_args(
 }
 
 /// What a run takes from its project's manifest, as [`App::project`] says: the manifest's path, the
-/// project's asset root, its start scene's path and its scenes folders' paths, which hold the scene
-/// files the tool API's `scene` opens and saves.
+/// project's asset root, its start scene's path, its relay and its scenes folders' paths, which hold
+/// the scene files the tool API's `scene` opens and saves.
 pub(crate) struct Manifest {
     pub(crate) path: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) start: PathBuf,
+    #[cfg(feature = "dev")]
+    pub(crate) relay: Option<String>,
     #[cfg(feature = "dev")]
     pub(crate) scenes: Vec<PathBuf>,
 }
@@ -827,6 +836,7 @@ impl Manifest {
                 root: project.assets_dir(dir),
                 start: project.start_path(dir),
                 scenes: project.scene_dirs(dir),
+                relay: project.relay,
             })
         }
         #[cfg(not(feature = "dev"))]
@@ -980,6 +990,34 @@ mod tests {
             ),
         ] {
             assert_eq!(package_beside(exe, os), Path::new(package), "{os}");
+        }
+    }
+
+    /// A run's own sessions meet through the relay its project's manifest names, or, run from a
+    /// package, the one the package names, or none, as its start scene comes from there too.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_run_takes_its_project_s_relay_from_its_manifest_or_its_package() {
+        let scratch = crate::dirs::tests::Scratch::new("project-relay");
+        let dir = &scratch.0;
+        std::fs::create_dir_all(dir).expect("a directory");
+        let project = gg_api::Project {
+            game: "tested".to_owned(),
+            assets: ".".to_owned(),
+            scenes: vec!["scenes".to_owned()],
+            start: "scenes/main.ron".to_owned(),
+            relay: Some("manifest.example.com:7800".to_owned()),
+        };
+        std::fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
+        let app = App::new("Relayed").project(dir);
+        assert_eq!(app.relay.as_deref(), Some("manifest.example.com:7800"));
+        for relay in [Some("package.example.com:7800"), None] {
+            let path = dir.join(format!("{}.ggpk", relay.is_some()));
+            let writer = package::Writer::new(".", Some("scenes/main.ron"), relay);
+            writer.write(&path).expect("written");
+            let app = App::new("Relayed").project(dir).package(&path);
+            let app = app.unwrap_or_else(|error| panic!("{error:#}"));
+            assert_eq!(app.relay.as_deref(), relay);
         }
     }
 

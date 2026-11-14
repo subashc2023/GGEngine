@@ -747,6 +747,7 @@ fn new_project(name: &str) -> Result<(), String> {
         assets: ".".to_owned(),
         scenes: vec!["scenes".to_owned()],
         start: "scenes/main.ron".to_owned(),
+        relay: None,
     };
     project.check().map_err(|failure| failure.message)
 }
@@ -834,6 +835,7 @@ mod tests {
             assets: ".".to_owned(),
             scenes: vec!["scenes".to_owned()],
             start: "scenes/main.ron".to_owned(),
+            relay: None,
         };
         fs::write(dir.join(Project::FILE), manifest.text()).expect("written");
         fs::write(dir.join("Cargo.toml"), "").expect("written");

@@ -1266,6 +1266,7 @@ pub(crate) mod tests {
             assets: ".".to_owned(),
             scenes: vec!["scenes".to_owned()],
             start: "scenes/main.ron".to_owned(),
+            relay: None,
         };
         fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
         let mut file = World::seeded(1);
@@ -1371,6 +1372,7 @@ pub(crate) mod tests {
             assets: ".".to_owned(),
             scenes: vec!["scenes".to_owned()],
             start: "scenes/main.ron".to_owned(),
+            relay: None,
         };
         fs::write(dir.0.join(gg_api::Project::FILE), project.text()).expect("written");
         let mut file = crate::World::seeded(1);

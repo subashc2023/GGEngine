@@ -121,7 +121,11 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
         .filter(|found| !in_mod(&found.path) && found.file != manifest && found.file != fetch)
         .filter_map(|found| Some((found, Take::of(&found.path)?)));
     let mut package = Package {
-        writer: Writer::new(&project.assets, Some(&project.start)),
+        writer: Writer::new(
+            &project.assets,
+            Some(&project.start),
+            project.relay.as_deref(),
+        ),
         cooked: BTreeMap::new(),
     };
     let mut shaders = Vec::new();
@@ -503,16 +507,19 @@ Targets fragment_main(Varyings input) {
     /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab and a UI, with
     /// their IDs too, and a script as they are; and a shader compiled, but the module it includes,
     /// which doesn't compile alone; and leaves out the manifest, the fetch list, a mod's folder,
-    /// and what no run loads, as code and notes. Cooked again, it's the same bytes.
+    /// and what no run loads, as code and notes, but the relay the manifest names. Cooked again,
+    /// it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
         let lamp = id_file("6a4d0b2f18c9e357");
         let menu = id_file("7b5e1c3a29d0f468");
+        let relay = "relay.example.com:7800";
+        let project = PROJECT.replace(")\n", &format!("    relay: Some(\"{relay}\"),\n)\n"));
         let fixture = Fixture::new(
             "holds",
             &[
-                ("project.ron", PROJECT),
+                ("project.ron", &project),
                 ("fetch.ron", "[]\n"),
                 ("scenes/main.ron", SCENE),
                 ("prefabs/lamp.prefab", SCENE),
@@ -556,6 +563,13 @@ Targets fragment_main(Varyings input) {
         ];
         assert_eq!(held, expected);
         let first = fs::read(&out).unwrap();
+        // In its header's strings, which gg-engine's tests read back.
+        assert!(
+            first
+                .windows(relay.len())
+                .any(|bytes| bytes == relay.as_bytes()),
+            "the relay"
+        );
         cook(&fixture.0, &out).unwrap_or_else(|error| panic!("{error:#}"));
         assert_eq!(fs::read(&out).unwrap(), first, "the same bytes");
     }

@@ -945,8 +945,9 @@ impl Context {
     /// [`networked`](Self::networked), playing on alone until a run joins by its code, which
     /// [`session`](Self::session) gives, for the game's UI to show. Its peers predict each other's
     /// inputs if the app's sessions do, as [`App::predicting`] says. The run's relay is the one
-    /// `--relay` names, given without a session flag; the sessions a game starts go through one,
-    /// as two players' runs behind their routers need.
+    /// `--relay` names, given without a session flag, else the one its project's manifest names,
+    /// which a build without `dev` reads from its package; the sessions a game starts go through
+    /// one, as two players' runs behind their routers need.
     ///
     /// Fails if the run takes part in a session already, or has one started (`net.busy`); names no
     /// relay (`net.no_relay`); is recorded (`net.recorded`), as a recording holds a run alone or a
@@ -996,7 +997,8 @@ impl Context {
             return Err(Error::new("net.recorded", why));
         }
         self.own.relay.clone().ok_or_else(|| {
-            let why = "the run names no relay, which `--relay` gives, for the sessions it starts";
+            let why = "the run names no relay, which `--relay` or its project's manifest gives, \
+                       for the sessions it starts";
             Error::new("net.no_relay", why)
         })
     }
@@ -8246,7 +8248,7 @@ mod tests {
             })
             .collect();
         let still = "local Still = gg.declare(\"Still\", { rate = 1 })\nreturn Still\n";
-        let mut writer = Writer::new(".", Some("scenes/main.ron"));
+        let mut writer = Writer::new(".", Some("scenes/main.ron"), None);
         let id = 0x5f3c_9a1e_07b2_d846;
         writer
             .add("textures/stone.png", Some(id), Kind::Texture, block([1, 1]))
@@ -8750,6 +8752,7 @@ mod tests {
             assets: "content".to_owned(),
             scenes: vec!["content/scenes".to_owned()],
             start: "content/scenes/main.ron".to_owned(),
+            relay: None,
         };
         std::fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
         let (id, hash) = (

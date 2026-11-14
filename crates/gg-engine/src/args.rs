@@ -55,7 +55,8 @@ pub(crate) struct Args {
     pub(crate) net: Option<Net>,
     pub(crate) code: Option<Code>,
     /// The relay the sessions the game hosts and joins from its own UI meet through, as
-    /// [`Context::host`](crate::Context::host) says: `--relay` given without a session flag.
+    /// [`Context::host`](crate::Context::host) says, in place of the one its project names:
+    /// `--relay` given without a session flag.
     pub(crate) relay: Option<String>,
     /// Whether the session's peers predict each other's inputs, rolling back where a prediction
     /// missed, rather than waiting for them.
@@ -237,7 +238,7 @@ Options:
                     own routers can't. The session's code finds its room there, and its packets go
                     straight between its runs where their routers let them, and through the relay
                     where they don't. Alone, the relay of the sessions the game hosts and joins
-                    from its own UI
+                    from its own UI, in place of the one its project names
   --code <CODE>     With --host, --join, --serve or --connect, the session's code, 16 digits and
                     letters such as `7KQ2-9XMB-4TZD-P0WH`, which keeps the session to the runs
                     given it and what they send to them alone: --join and --connect need their

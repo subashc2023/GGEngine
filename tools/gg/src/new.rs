@@ -103,6 +103,7 @@ pub(crate) fn project(name: &str) -> Project {
         assets: ".".to_owned(),
         scenes: vec!["scenes".to_owned()],
         start: "scenes/main.ron".to_owned(),
+        relay: None,
     }
 }
 

@@ -1,0 +1,63 @@
+# gg-relay as a systemd service on a Linux server: the relay a game's own sessions meet through,
+# which its project.ron names, as ARCHITECTURE.md's Networking says.
+#
+# Build the executable for the server's CPU, `cargo build --release -p relay`, which writes
+# target/release/gg-relay. It needs a glibc as new as the symbols it links, which
+# `objdump -T gg-relay | grep GLIBC_` lists: one built on Debian 13 needs 2.34 or later. Then, on the
+# server, as root:
+#
+#     install -m 755 gg-relay /usr/local/bin/gg-relay
+#     install -m 644 gg-relay.service /etc/systemd/system/gg-relay.service
+#     systemctl daemon-reload
+#     systemctl enable --now gg-relay
+#
+# and let TCP and UDP to port 7800 through the server's firewall and its provider's. It logs to the
+# journal, `journalctl -u gg-relay`, and its JSON log, a file each time it starts, in
+# /var/log/gg-relay. `systemctl stop gg-relay` stops it, ending every session through it; an update
+# is the install again and `systemctl restart gg-relay`, which ends them too.
+
+[Unit]
+Description=gg-relay, the relay a game's sessions meet through
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/gg-relay --listen 0.0.0.0:7800 --logs /var/log/gg-relay
+Restart=always
+RestartSec=2
+
+# Its 4,096 connections at most, each a socket and a clone of it, a host's two: a thread each, and
+# one more for each host. systemd's defaults, 1,024 files and some 4,900 tasks, would cut them first.
+LimitNOFILE=16384
+TasksMax=8192
+
+# A user of its own, made as it starts, which can write nothing but its logs: port 7800 needs no
+# capability, and it speaks IPv4 and IPv6 alone.
+DynamicUser=yes
+LogsDirectory=gg-relay
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

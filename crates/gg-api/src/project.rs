@@ -4,6 +4,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::net::Ipv6Addr;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -32,6 +33,11 @@ pub struct Project {
     pub scenes: Vec<String>,
     /// The scene the game starts in, a `.ron` file in one of the scenes folders.
     pub start: String,
+    /// The relay the game's own sessions meet through, `host:port`, as `relay.example.com:7800`,
+    /// which its builds take unless given `--relay`, its package holding it for those without
+    /// `dev`; `None`, left out of the manifest, for a game that names none.
+    #[serde(default)]
+    pub relay: Option<String>,
 }
 
 impl Project {
@@ -75,14 +81,17 @@ impl Project {
     /// the workspace, every member of which Cargo reads; each path relative, its parts named,
     /// neither `.` nor `..`, with `/` between them, but `assets`, which may be `.`; `scenes` at
     /// least one folder, each once and inside `assets`; `start` a `.ron` file inside one of them;
-    /// and every string printable ASCII without `"` or `\`.
+    /// `relay`, if there is one, `host:port`, its host letters, digits, `.` and `-`, or an IPv6
+    /// address in brackets, and its port 1 to 65535; and every string printable ASCII without `"`
+    /// or `\`.
     ///
     /// Fails with `project.bad`, naming the field.
     pub fn check(&self) -> Result<(), Failure> {
         let bad = |message: String| Err(Failure::new("project.bad", message));
         let strings = [("game", &self.game), ("assets", &self.assets)].into_iter();
         let strings = strings.chain(self.scenes.iter().map(|scene| ("scenes", scene)));
-        for (field, value) in strings.chain([("start", &self.start)]) {
+        let strings = strings.chain([("start", &self.start)]);
+        for (field, value) in strings.chain(self.relay.iter().map(|relay| ("relay", relay))) {
             if let Some(c) =
                 (value.chars()).find(|&c| !(' '..='~').contains(&c) || "\"\\".contains(c))
             {
@@ -133,12 +142,19 @@ impl Project {
                 "`start` is `{start}`, which isn't in a scenes folder"
             ));
         }
+        if let Some(relay) = self.relay.as_deref().filter(|&relay| !is_relay(relay)) {
+            return bad(format!(
+                "`relay` is `{relay}`, which isn't a relay's `host:port`: its host letters, digits, \
+                 `.` and `-`, or an IPv6 address in brackets, and its port 1 to 65535"
+            ));
+        }
         Ok(())
     }
 
     /// The manifest's canonical text, a part to a line, with four spaces to each level and a
     /// comma after each part, as ARCHITECTURE.md's Project state describes, its lines ending in
-    /// `\n`: for a project that [`check`](Self::check) passes, which reads back as it is.
+    /// `\n`, and no line for a relay it hasn't: for a project that [`check`](Self::check) passes,
+    /// which reads back as it is.
     pub fn text(&self) -> String {
         let (game, assets, start) = (&self.game, &self.assets, &self.start);
         let mut text =
@@ -146,7 +162,11 @@ impl Project {
         for scene in &self.scenes {
             let _ = writeln!(text, "        \"{scene}\",");
         }
-        let _ = write!(text, "    ],\n    start: \"{start}\",\n)\n");
+        let _ = writeln!(text, "    ],\n    start: \"{start}\",");
+        if let Some(relay) = &self.relay {
+            let _ = writeln!(text, "    relay: Some(\"{relay}\"),");
+        }
+        text.push_str(")\n");
         text
     }
 
@@ -207,6 +227,26 @@ pub(crate) fn is_relative(path: &str) -> bool {
     !path.contains(refused) && path.split('/').all(named)
 }
 
+/// Whether `address` is a relay's, as a manifest names it: `host:port`, the host letters, digits,
+/// `.` and `-`, a name or an IPv4 address, or an IPv6 address in brackets, and the port a number
+/// from 1 to 65535 in digits alone.
+fn is_relay(address: &str) -> bool {
+    let Some((host, port)) = address.rsplit_once(':') else {
+        return false;
+    };
+    let port = !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port > 0);
+    let host = match host.strip_prefix('[').and_then(|ip| ip.strip_suffix(']')) {
+        Some(ip) => ip.parse::<Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && (host.chars()).all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        }
+    };
+    port && host
+}
+
 /// Whether `name` is one Windows keeps for a device, whatever its case, as `CON` or `com1`, which
 /// names no file or folder there.
 fn device(name: &str) -> bool {
@@ -245,6 +285,7 @@ mod tests {
             assets: ".".to_owned(),
             scenes: vec!["scenes".to_owned()],
             start: "scenes/arena.ron".to_owned(),
+            relay: None,
         }
     }
 
@@ -257,8 +298,29 @@ mod tests {
             assets: "content".to_owned(),
             scenes: vec!["content/levels".to_owned(), "content/menus".to_owned()],
             start: "content/menus/title/main.ron".to_owned(),
+            relay: None,
         };
         assert_eq!(Project::parse(&nested.text()), Ok(nested));
+        // A relay, its line after the start scene's.
+        let relayed = SHARDS.replace(")\n", "    relay: Some(\"relay.example.com:7800\"),\n)\n");
+        let project = Project {
+            relay: Some("relay.example.com:7800".to_owned()),
+            ..shards()
+        };
+        assert_eq!(project.text(), relayed);
+        assert_eq!(Project::parse(&relayed), Ok(project));
+        for relay in [
+            "203.0.113.7:7800",
+            "[2001:db8::7]:7800",
+            "a-b.c:1",
+            "x:65535",
+        ] {
+            let project = Project {
+                relay: Some(relay.to_owned()),
+                ..shards()
+            };
+            assert_eq!(Project::parse(&project.text()), Ok(project), "{relay}");
+        }
     }
 
     #[test]
@@ -277,7 +339,26 @@ mod tests {
             change(&mut project);
             project
         };
-        let cases: [(Change, &str); 15] = [
+        let cases: [(Change, &str); 25] = [
+            (|p| p.relay = Some("relay.example.com".to_owned()), "relay"),
+            (
+                |p| p.relay = Some("relay.example.com:0".to_owned()),
+                "relay",
+            ),
+            (
+                |p| p.relay = Some("relay.example.com:70000".to_owned()),
+                "relay",
+            ),
+            (
+                |p| p.relay = Some("relay.example.com:+80".to_owned()),
+                "relay",
+            ),
+            (|p| p.relay = Some("relay.example.com:".to_owned()), "relay"),
+            (|p| p.relay = Some(":7800".to_owned()), "relay"),
+            (|p| p.relay = Some("a b:7800".to_owned()), "relay"),
+            (|p| p.relay = Some("a/b:7800".to_owned()), "relay"),
+            (|p| p.relay = Some("2001:db8::7:7800".to_owned()), "relay"),
+            (|p| p.relay = Some("[not an ip]:7800".to_owned()), "relay"),
             (|p| p.start = "/scenes/arena.ron".to_owned(), "start"),
             (|p| p.start = "C:/scenes/arena.ron".to_owned(), "start"),
             (|p| p.start = "scenes/../arena.ron".to_owned(), "start"),

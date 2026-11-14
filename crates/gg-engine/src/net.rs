@@ -3525,15 +3525,23 @@ pub(crate) struct Looking {
     heard: Heard,
 }
 
-/// The first of the addresses `address` names, as `host:port` or `ip:port`.
+/// The address `address` names, as `host:port` or `ip:port`, as [`preferred`] picks it.
 ///
 /// Fails if it names none.
 fn resolve(address: &str) -> io::Result<SocketAddr> {
-    let mut addresses = address.to_socket_addrs()?;
-    addresses.next().ok_or_else(|| {
+    let addresses: Vec<SocketAddr> = address.to_socket_addrs()?.collect();
+    preferred(&addresses).ok_or_else(|| {
         let why = format!("{address} names no address");
         io::Error::new(ErrorKind::NotFound, why)
     })
+}
+
+/// The first IPv4 address of `addresses`, else the first: a relay listens on IPv4 by default, and
+/// a link's socket follows its connection's family, so that a host name with an IPv6 address too,
+/// which a resolver may list first, would otherwise reach none.
+fn preferred(addresses: &[SocketAddr]) -> Option<SocketAddr> {
+    let v4 = addresses.iter().find(|address| address.is_ipv4());
+    v4.or(addresses.first()).copied()
 }
 
 /// A connection whose handshake held: its stream, the keys it made, and, for one made through a
@@ -5422,7 +5430,7 @@ mod tests {
 
     /// A relay of the tests' own, on the loopback, and where it is, as `--relay` names it.
     fn relay() -> (gg_relay::Relay, String) {
-        let relay = gg_relay::serve("127.0.0.1:0", 64).expect("a relay");
+        let relay = gg_relay::serve("127.0.0.1:0", gg_relay::Limits::default()).expect("a relay");
         let at = relay.address().to_string();
         (relay, at)
     }
@@ -5710,6 +5718,21 @@ mod tests {
         });
     }
 
+    /// A name's first IPv4 address is the one taken, wherever its resolver lists it, else its first.
+    #[test]
+    fn a_name_s_ipv4_address_is_taken_first() {
+        let at = |text: &str| text.parse::<SocketAddr>().expect("an address");
+        let (v6, v4) = (at("[2001:db8::7]:7800"), at("203.0.113.7:7800"));
+        let other = at("[2001:db8::8]:7800");
+        assert_eq!(preferred(&[v6, v4, at("198.51.100.1:7800")]), Some(v4));
+        assert_eq!(preferred(&[v6, other]), Some(v6));
+        assert_eq!(preferred(&[]), None);
+        assert_eq!(
+            resolve("127.0.0.1:7800").expect("resolved"),
+            at("127.0.0.1:7800")
+        );
+    }
+
     /// A session whose relay is replaced at its address goes on through the new one: both peers
     /// lose their link, the host registers again within [`REGISTER`], and the joiner joins again.
     #[test]
@@ -5718,7 +5741,7 @@ mod tests {
         let (mut host, mut joiner) = relayed(&at, Game::default);
         join(&mut host, &mut joiner);
         relay.stop();
-        let again = gg_relay::serve(&at, 64).expect("the same address");
+        let again = gg_relay::serve(&at, gg_relay::Limits::default()).expect("the same address");
         let start = Instant::now();
         while host.net().link.is_some() || joiner.net().link.is_some() {
             assert!(start.elapsed() < Duration::from_secs(10), "never lost");
@@ -6033,7 +6056,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("gg-net-build-{}", std::process::id()));
         let files = |name: &str, scene: &[u8]| {
-            let mut writer = Writer::new(".", Some("scenes/arena.ron"));
+            let mut writer = Writer::new(".", Some("scenes/arena.ron"), None);
             (writer.add("scenes/arena.ron", None, Kind::File, scene.to_vec())).expect("added");
             let path = dir.join(name).join("game.ggpk");
             writer.write(&path).expect("written");

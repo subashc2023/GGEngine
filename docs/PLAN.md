@@ -167,11 +167,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 20, play across the internet** (2026-11-13)
 - **Sessions from the game's menu** (2026-11-14)
 - **Sessions across OSes** (2026-11-14)
+- **A relay for players** (2026-11-14)
 
 ## Now
 
-Phase 21's third milestone, a relay for players, as Next has it, once its plan is written and
-approved.
+Phase 21's fourth milestone, what a shipped build owes, as Next has it, once its plan is written
+and approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -739,7 +740,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An index of a world's cells for the cells' step, which tests each cell with a file or a kept state against each viewer as each tick ends, O(cells × viewers), allocating nothing where none comes or goes | The step is measured to cost a frame, as at 100,000 cells |
 | Terrain and heightfields, which a large world's ground would be: a world's cells hold meshes and colliders | A world's ground is more than its cells' models |
 | Short codes, a few words, stretched by a PAKE, as SPAKE2 or CPace, before Noise's handshake, each guess costing a connection: a code is 16 symbols, 80 bits, as a recorded first message lets one test codes against it offline; and with them a room at a relay that the code doesn't give, as a relay could test short codes against the rooms it sees | Players read codes out or type them by hand |
-| A relay run for players, and a project naming its relay, so that its players give none: each run is given `--relay`, and none runs for players | A game's players meet through a relay |
 | `gg run --peers 2` through a relay, as two machines' peers would: it refuses `--relay` | Peers on two machines run under `gg run` |
 | TURN and other standard relays, beside the engine's own: a relay is `gg-relay` | A game is hosted where a TURN service already runs |
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |

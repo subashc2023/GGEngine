@@ -9,6 +9,7 @@
 //! `mio` does.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
@@ -23,8 +24,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::{
-    ANSWER, BIND, DATAGRAM, IDLE, KEEP, MAX_DATAGRAM, Room, SILENT, TAKE, Ticket, Token, VERSION,
-    answer, read_line, write_line,
+    ANSWER, BIND, DATAGRAM, ENDS, IDLE, KEEP, Limits, MAX_DATAGRAM, Rate, Room, SILENT, TAKE,
+    Ticket, Token, VERSION, answer, read_line, write_line,
 };
 
 /// How long the thread of datagrams waits for one before it looks whether the relay is stopping.
@@ -53,8 +54,7 @@ pub struct Relay {
 /// What a relay's threads share.
 struct Shared {
     state: Mutex<State>,
-    /// The most connections it holds at once.
-    most: usize,
+    limits: Limits,
     /// How long a connection's first line may take to come, and a host to take a joiner:
     /// [`ANSWER`] and [`TAKE`] but in the tests that wait them out.
     answer: Duration,
@@ -70,6 +70,8 @@ struct State {
     /// Each connection open, by its number, with a clone of its stream, which [`Relay::stop`]
     /// shuts; their count is the connections the relay holds.
     open: HashMap<u64, TcpStream>,
+    /// How many of them each address holds, by its [`key`], while it holds any.
+    addresses: HashMap<IpAddr, usize>,
     /// The next number a connection or a pair takes.
     next: u64,
     /// Whether the relay has refused a connection for being full since it last took one, which it
@@ -105,27 +107,129 @@ struct Waiting {
     paired: Sender<(u64, TcpStream)>,
 }
 
-/// A pair: its room; each end's socket, as bound, the joiner's first; the bytes and datagrams each
-/// end has sent; how many of its two connections' threads haven't ended; and when it was made.
+/// A pair, each of its arrays by end, the joiner's first: its room; each end's socket, as bound;
+/// the bytes each end has sent, and how long the relay held its stream back for its rate; the
+/// datagrams each has sent that went on, and those dropped past its rates; the buckets that count
+/// its datagrams and their bytes against those rates, and whether it's logged that it went past
+/// one; how many of its two connections' threads haven't ended; and when it was made.
 struct Pair {
     room: Room,
     tokens: [Token; 2],
     bound: [Option<SocketAddr>; 2],
     bytes: [u64; 2],
+    held: [Duration; 2],
     datagrams: [u64; 2],
+    dropped: [u64; 2],
+    counted: [Bucket; 2],
+    weighed: [Bucket; 2],
+    limited: [bool; 2],
     ends: u8,
     made: Instant,
 }
 
-/// A connection the relay holds, which it no longer does once this is dropped.
+impl Pair {
+    /// Counts a datagram of `size` bytes from end `side` at `now`: whether `limits` let it on, and
+    /// else which of them it's past.
+    fn datagram(
+        &mut self,
+        side: usize,
+        size: usize,
+        limits: &Limits,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let size = size as u64;
+        if !self.counted[side].holds(limits.datagrams, 1, now) {
+            self.dropped[side] += 1;
+            return Err("datagrams");
+        }
+        if !self.weighed[side].holds(limits.datagram_bytes, size, now) {
+            self.dropped[side] += 1;
+            return Err("datagram bytes");
+        }
+        self.counted[side].spend(1);
+        self.weighed[side].spend(size);
+        self.datagrams[side] += 1;
+        Ok(())
+    }
+}
+
+/// A token bucket, which a [`Rate`] fills: the tokens it holds, fewer than none while what has
+/// been let through owes them, and when it last filled.
+struct Bucket {
+    tokens: f64,
+    filled: Instant,
+}
+
+impl Bucket {
+    /// A bucket full, as each end of a pair starts, so that what a session sends as it starts, as
+    /// the world a joiner takes, passes at once.
+    fn full(rate: Rate, now: Instant) -> Self {
+        Self {
+            tokens: rate.burst as f64,
+            filled: now,
+        }
+    }
+
+    /// Fills it as `rate` has by `now`, up to its burst.
+    fn fill(&mut self, rate: Rate, now: Instant) {
+        let secs = now.saturating_duration_since(self.filled).as_secs_f64();
+        self.tokens = (self.tokens + secs * rate.per_second as f64).min(rate.burst as f64);
+        self.filled = now;
+    }
+
+    /// Whether it holds `n` tokens at `now`, filled by `rate`.
+    fn holds(&mut self, rate: Rate, n: u64, now: Instant) -> bool {
+        self.fill(rate, now);
+        self.tokens >= n as f64
+    }
+
+    fn spend(&mut self, n: u64) {
+        self.tokens -= n as f64;
+    }
+
+    /// Takes `n` tokens at `now`, filled by `rate`, owing what it doesn't hold: how long `rate`
+    /// takes to fill what's owed, which the taker waits before passing on what took them.
+    fn owe(&mut self, rate: Rate, n: u64, now: Instant) -> Duration {
+        self.fill(rate, now);
+        self.spend(n);
+        if self.tokens >= 0.0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(-self.tokens / rate.per_second as f64)
+        }
+    }
+}
+
+/// What a connection from `ip` counts as toward [`Limits::per_address`]: an IPv4 address, as
+/// itself or as IPv6 maps it; another IPv6 address's /64, as one host holds a whole /64.
+pub(crate) fn key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => IpAddr::V4(ip),
+            None => IpAddr::V6(Ipv6Addr::from_bits(ip.to_bits() & (u128::MAX << 64))),
+        },
+    }
+}
+
+/// A connection the relay holds, from the address `key` gives, which it no longer does once this
+/// is dropped.
 struct Open {
     shared: Arc<Shared>,
     number: u64,
+    address: IpAddr,
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
-        self.shared.lock().open.remove(&self.number);
+        let mut state = self.shared.lock();
+        state.open.remove(&self.number);
+        if let Entry::Occupied(mut held) = state.addresses.entry(self.address) {
+            *held.get_mut() -= 1;
+            if *held.get() == 0 {
+                held.remove();
+            }
+        }
     }
 }
 
@@ -137,28 +241,33 @@ impl Shared {
 }
 
 /// Starts a relay at `address`, TCP and UDP on one port, any free for both given port 0, as tests
-/// give, holding at most `most` connections at once, as the crate's root says.
+/// give, holding connections and pairs to `limits`, as the crate's root says.
 ///
-/// Fails if it can't bind both at `address`, or given port 0 at any of the ports it tries, or start
-/// its threads.
-pub fn serve(address: &str, most: usize) -> io::Result<Relay> {
-    serve_within(address, most, ANSWER, TAKE)
+/// Fails with `InvalidInput` if a rate of `limits` is 0 a second; and if it can't bind both at
+/// `address`, or given port 0 at any of the ports it tries, or start its threads.
+pub fn serve(address: &str, limits: Limits) -> io::Result<Relay> {
+    serve_within(address, limits, ANSWER, TAKE)
 }
 
 /// As [`serve`], but a connection's first line may take `answer` to come, and a host `take` to take
 /// a joiner, where [`serve`] has [`ANSWER`] and [`TAKE`].
 pub(crate) fn serve_within(
     address: &str,
-    most: usize,
+    limits: Limits,
     answer: Duration,
     take: Duration,
 ) -> io::Result<Relay> {
+    let rates = [limits.stream, limits.datagrams, limits.datagram_bytes];
+    if rates.iter().any(|rate| rate.per_second == 0) {
+        let why = format!("a rate of 0 a second, in {limits:?}");
+        return Err(io::Error::new(ErrorKind::InvalidInput, why));
+    }
     let (listener, udp) = listen(address)?;
     let address = listener.local_addr()?;
     udp.set_read_timeout(Some(WAKE))?;
     let shared = Arc::new(Shared {
         state: Mutex::new(State::default()),
-        most,
+        limits,
         answer,
         take,
         forwarded: AtomicU64::new(0),
@@ -180,7 +289,26 @@ pub(crate) fn serve_within(
             .name("gg-relay-datagrams".to_owned())
             .spawn(move || forward(&udp, &shared))?
     };
-    info!(code = "relay.start", address = %address, most, "Relaying at {address}");
+    let Limits {
+        most,
+        per_address,
+        stream,
+        datagrams,
+        datagram_bytes,
+    } = limits;
+    info!(
+        code = "relay.start",
+        address = %address,
+        most,
+        per_address,
+        stream = stream.per_second,
+        stream_burst = stream.burst,
+        datagrams = datagrams.per_second,
+        datagrams_burst = datagrams.burst,
+        datagram_bytes = datagram_bytes.per_second,
+        datagram_bytes_burst = datagram_bytes.burst,
+        "Relaying at {address}"
+    );
     Ok(Relay {
         address,
         shared,
@@ -200,13 +328,14 @@ impl Relay {
         self.shared.forwarded.load(Ordering::Relaxed)
     }
 
-    /// How many of each it holds: connections, rooms, joiners waiting, pairs, tokens and bound
-    /// sockets; for tests, which see that it keeps nothing of what has gone.
+    /// How many of each it holds: connections, addresses holding them, rooms, joiners waiting,
+    /// pairs, tokens and bound sockets; for tests, which see that it keeps nothing of what has gone.
     #[cfg(test)]
-    pub(crate) fn holds(&self) -> [usize; 6] {
+    pub(crate) fn holds(&self) -> [usize; 7] {
         let state = self.shared.lock();
         [
             state.open.len(),
+            state.addresses.len(),
             state.rooms.len(),
             state.waiting.len(),
             state.pairs.len(),
@@ -274,9 +403,13 @@ fn both(at: &[SocketAddr]) -> io::Result<(TcpListener, UdpSocket)> {
     Ok((listener, udp))
 }
 
-/// Accepts each connection to `listener`, refusing it past `shared`'s most, and starts the thread
-/// that serves it, until the relay stops; those refused for being full go to `close`.
+/// Accepts each connection to `listener`, refusing it past `shared`'s most, or past its most from
+/// one address, and starts the thread that serves it, until the relay stops; those refused go to
+/// `close`.
 fn accept(listener: TcpListener, shared: &Arc<Shared>, close: &SyncSender<TcpStream>) {
+    let Limits {
+        most, per_address, ..
+    } = shared.limits;
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
@@ -287,6 +420,10 @@ fn accept(listener: TcpListener, shared: &Arc<Shared>, close: &SyncSender<TcpStr
                 continue;
             }
         };
+        // Fails once its other end has gone again.
+        let Ok(address) = stream.peer_addr().map(|at| key(at.ip())) else {
+            continue;
+        };
         let admitted = {
             let mut state = shared.lock();
             // Read under the lock, so that `stop`, which sets it before it shuts every connection
@@ -294,35 +431,52 @@ fn accept(listener: TcpListener, shared: &Arc<Shared>, close: &SyncSender<TcpStr
             if shared.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            if state.open.len() >= shared.most {
+            let from_address = state.addresses.get(&address).copied().unwrap_or(0);
+            if state.open.len() >= most {
                 if !std::mem::replace(&mut state.full, true) {
                     warn!(
                         code = "relay.refused",
-                        most = shared.most,
-                        "Refusing connections: the relay holds the most it holds, {}, as those \
-                         after are until one closes",
-                        shared.most
+                        most,
+                        "Refusing connections: the relay holds the most it holds, {most}, as \
+                         those after are until one closes"
                     );
                 }
-                None
+                Err("full".to_owned())
+            } else if from_address >= per_address {
+                // Without the address, as the relay logs none.
+                debug!(
+                    code = "relay.refused",
+                    per_address, "Refused a connection: its address holds the most it may"
+                );
+                Err(format!(
+                    "its address holds {per_address} connections, the most the relay holds from one"
+                ))
             } else {
                 state.full = false;
                 let number = state.number();
-                stream.try_clone().ok().map(|clone| {
-                    state.open.insert(number, clone);
-                    Open {
-                        shared: Arc::clone(shared),
-                        number,
+                match stream.try_clone() {
+                    Ok(clone) => {
+                        state.open.insert(number, clone);
+                        *state.addresses.entry(address).or_default() += 1;
+                        Ok(Open {
+                            shared: Arc::clone(shared),
+                            number,
+                            address,
+                        })
                     }
-                })
+                    Err(_) => Err("full".to_owned()),
+                }
             }
         };
-        let Some(open) = admitted else {
-            let _ = stream.write_all(b"refused full\n");
-            let _ = stream.shutdown(Shutdown::Write);
-            // Closed at once, past those waiting.
-            let _ = close.try_send(stream);
-            continue;
+        let open = match admitted {
+            Ok(open) => open,
+            Err(why) => {
+                let _ = stream.write_all(format!("refused {why}\n").as_bytes());
+                let _ = stream.shutdown(Shutdown::Write);
+                // Closed at once, past those waiting.
+                let _ = close.try_send(stream);
+                continue;
+            }
         };
         let spawned = thread::Builder::new()
             .name("gg-relay-connection".to_owned())
@@ -565,6 +719,12 @@ fn take(mut stream: TcpStream, open: Open, ticket: &Ticket) {
             return refuse(&mut stream, "no joiner waits with its ticket");
         };
         let number = state.number();
+        let Limits {
+            datagrams,
+            datagram_bytes,
+            ..
+        } = open.shared.limits;
+        let now = Instant::now();
         state.pairs.insert(
             number,
             Pair {
@@ -572,9 +732,14 @@ fn take(mut stream: TcpStream, open: Open, ticket: &Ticket) {
                 tokens,
                 bound: [None; 2],
                 bytes: [0; 2],
+                held: [Duration::ZERO; 2],
                 datagrams: [0; 2],
+                dropped: [0; 2],
+                counted: [(); 2].map(|()| Bucket::full(datagrams, now)),
+                weighed: [(); 2].map(|()| Bucket::full(datagram_bytes, now)),
+                limited: [false; 2],
                 ends: 2,
-                made: Instant::now(),
+                made: now,
             },
         );
         for (side, token) in tokens.into_iter().enumerate() {
@@ -602,17 +767,24 @@ fn take(mut stream: TcpStream, open: Open, ticket: &Ticket) {
     }
     // The joiner's thread copies its way, and counts its end.
     if paired.send((number, host)).is_err() {
-        end(&open.shared, number, 0, 0);
+        end(&open.shared, number, 0, 0, Duration::ZERO);
     }
     copy(stream, joiner, &open, number, 1);
 }
 
-/// Copies what comes from `from`, end `side` of pair `number`, to `to`, the other end, until `from`
-/// ends, which it then ends `to`'s sending side at, as `from`'s end closed its own, or nothing has
-/// come from it for [`IDLE`], or a read or a write fails, which shut both; then counts the end done.
+/// Copies what comes from `from`, end `side` of pair `number`, to `to`, the other end, at the
+/// relay's rate for a stream, until `from` ends, which it then ends `to`'s sending side at, as
+/// `from`'s end closed its own, or nothing has come from it for [`IDLE`], or a read or a write
+/// fails, which shut both; then counts the end done.
+///
+/// Past the rate it holds what it read until the rate allows it, reading nothing meanwhile, so
+/// that TCP holds the sender back as its buffers fill.
 fn copy(mut from: TcpStream, mut to: TcpStream, open: &Open, number: u64, side: usize) {
     let _ = from.set_read_timeout(Some(IDLE));
     let _ = to.set_write_timeout(Some(IDLE));
+    let rate = open.shared.limits.stream;
+    let mut bucket = Bucket::full(rate, Instant::now());
+    let mut held = Duration::ZERO;
     let mut buffer = [0; 16 << 10];
     let mut bytes = 0;
     let ended = loop {
@@ -624,6 +796,21 @@ fn copy(mut from: TcpStream, mut to: TcpStream, open: &Open, number: u64, side: 
                 break Ok(());
             }
             Ok(read) => {
+                let wait = bucket.owe(rate, read as u64, Instant::now());
+                if !wait.is_zero() {
+                    if held.is_zero() {
+                        info!(
+                            code = "relay.limited",
+                            pair = number,
+                            end = ENDS[side],
+                            limit = "stream",
+                            "Holding back the {} of pair {number}'s stream, past its rate",
+                            ENDS[side]
+                        );
+                    }
+                    thread::sleep(wait);
+                    held += wait;
+                }
                 if let Err(error) = to.write_all(&buffer[..read]) {
                     break Err(error);
                 }
@@ -637,17 +824,18 @@ fn copy(mut from: TcpStream, mut to: TcpStream, open: &Open, number: u64, side: 
         let _ = from.shutdown(Shutdown::Both);
         let _ = to.shutdown(Shutdown::Both);
     }
-    end(&open.shared, number, side, bytes);
+    end(&open.shared, number, side, bytes, held);
 }
 
-/// Counts end `side` of pair `number` done, having copied `bytes`: once both are, the pair ends,
-/// and its tokens and bound sockets with it, which it logs.
-fn end(shared: &Shared, number: u64, side: usize, bytes: u64) {
+/// Counts end `side` of pair `number` done, having copied `bytes`, held back for `held`: once both
+/// are, the pair ends, and its tokens and bound sockets with it, which it logs.
+fn end(shared: &Shared, number: u64, side: usize, bytes: u64, held: Duration) {
     let mut state = shared.lock();
     let Some(pair) = state.pairs.get_mut(&number) else {
         return;
     };
     pair.bytes[side] = bytes;
+    pair.held[side] = held;
     pair.ends -= 1;
     if pair.ends > 0 {
         return;
@@ -670,6 +858,10 @@ fn end(shared: &Shared, number: u64, side: usize, bytes: u64) {
         host_bytes = pair.bytes[1],
         joiner_datagrams = pair.datagrams[0],
         host_datagrams = pair.datagrams[1],
+        joiner_dropped = pair.dropped[0],
+        host_dropped = pair.dropped[1],
+        joiner_held_secs = pair.held[0].as_secs_f64(),
+        host_held_secs = pair.held[1].as_secs_f64(),
         secs = pair.made.elapsed().as_secs_f64(),
         "A pair ended: the joiner sent {} bytes and {} datagrams, the host {} and {}",
         pair.bytes[0],
@@ -718,15 +910,36 @@ fn forward(udp: &UdpSocket, shared: &Shared) {
             }
             continue;
         }
-        let to = {
+        let now = Instant::now();
+        let (to, limited) = {
             let mut state = shared.lock();
             let State { bound, pairs, .. } = &mut *state;
-            bound.get(&from).and_then(|&(number, side)| {
-                let pair = pairs.get_mut(&number)?;
-                pair.datagrams[side] += 1;
-                pair.bound[1 - side]
-            })
+            let at = bound
+                .get(&from)
+                .and_then(|&(number, side)| Some((number, side, pairs.get_mut(&number)?)));
+            match at {
+                None => (None, None),
+                Some((number, side, pair)) => {
+                    match pair.datagram(side, size, &shared.limits, now) {
+                        Ok(()) => (pair.bound[1 - side], None),
+                        Err(limit) => {
+                            let first = !std::mem::replace(&mut pair.limited[side], true);
+                            (None, first.then_some((number, side, limit)))
+                        }
+                    }
+                }
+            }
         };
+        if let Some((number, side, limit)) = limited {
+            info!(
+                code = "relay.limited",
+                pair = number,
+                end = ENDS[side],
+                limit,
+                "Dropping the {}'s datagrams of pair {number} past its rate of {limit}",
+                ENDS[side]
+            );
+        }
         if let Some(to) = to
             && udp.send_to(datagram, to).is_ok()
         {
