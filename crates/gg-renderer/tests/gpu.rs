@@ -7539,44 +7539,47 @@ fn ambient_occlusion_leaves_no_trail_behind_what_moves() {
     let [width, height] = [WIDTH as usize, HEIGHT as usize];
     let unit = HEIGHT as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
     let viewpoint = floor_seen(0, 1, SIZE);
+    // Where the sphere is at each frame rolling `speed` pixels a frame: ending in the middle of the
+    // view, at frame `FRAMES`, whatever its speed.
+    let at = |speed: f32, frame: usize| {
+        let x = (frame as f32 - FRAMES as f32) * speed / unit;
+        Vec3::new(x, FLOOR_BALL, 0.0)
+    };
+    // The last of the frames from `first` to `last`, the sphere at `at` of each, but no further than
+    // where it ends up.
+    let run = |speed: f32, first: usize, last: usize| {
+        let mut renderer = renderer(WIDTH, HEIGHT);
+        let mut stores = Stores {
+            ambient_occlusion: Some(AmbientOcclusion::default()),
+            ..Stores::default()
+        };
+        let (floor, round) = floor_and_ball(&mut stores);
+        let draws = |frame: usize| floor_with_balls(&floor, &round, [at(speed, frame.min(FRAMES))]);
+        let viewport = filling(SIZE);
+        settle(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            viewpoint,
+            &draws(first),
+        );
+        for frame in first..=last {
+            let drawn = draws(frame);
+            render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &drawn));
+        }
+        let pixels = frame_pixels(&mut renderer);
+        shut_down(renderer);
+        (pixels.as_chunks::<4>().0.iter())
+            .map(|pixel| f64::from(pixel[1]))
+            .collect::<Vec<f64>>()
+    };
+    // The sphere resting where it ends up, alike at either speed.
+    let rested = run(1.0, FRAMES, FRAMES + 64);
     for speed in [1.0, 3.0] {
-        // Ending in the middle of the view.
-        let at = |frame: usize| {
-            let x = (frame as f32 - FRAMES as f32) * speed / unit;
-            Vec3::new(x, FLOOR_BALL, 0.0)
-        };
-        // The last of the frames from `first` to `last`, the sphere at `at` of each, but no further
-        // than where it ends up.
-        let run = |first: usize, last: usize| {
-            let mut renderer = renderer(WIDTH, HEIGHT);
-            let mut stores = Stores {
-                ambient_occlusion: Some(AmbientOcclusion::default()),
-                ..Stores::default()
-            };
-            let (floor, round) = floor_and_ball(&mut stores);
-            let draws = |frame: usize| floor_with_balls(&floor, &round, [at(frame.min(FRAMES))]);
-            let viewport = filling(SIZE);
-            settle(
-                &mut renderer,
-                &mut stores,
-                viewport,
-                viewpoint,
-                &draws(first),
-            );
-            for frame in first..=last {
-                let drawn = draws(frame);
-                render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &drawn));
-            }
-            let pixels = frame_pixels(&mut renderer);
-            shut_down(renderer);
-            (pixels.as_chunks::<4>().0.iter())
-                .map(|pixel| f64::from(pixel[1]))
-                .collect::<Vec<f64>>()
-        };
-        let (rolled, rested) = (run(0, FRAMES), run(FRAMES, FRAMES + 64));
+        let rolled = run(speed, 0, FRAMES);
         // Of the floor behind the sphere, the half of the view it came from, 4 pixels or more from
         // it, the pixels that differ by more than 2 levels.
-        let ball = floor_balls_shown(viewpoint, SIZE, [at(FRAMES)].into_iter(), 4);
+        let ball = floor_balls_shown(viewpoint, SIZE, [at(speed, FRAMES)].into_iter(), 4);
         let behind = (0..height)
             .flat_map(|y| (0..width / 2).map(move |x| y * width + x))
             .filter(|&at| !ball[at] && (rolled[at] - rested[at]).abs() > 2.0)
@@ -9727,9 +9730,10 @@ impl FoggedScene {
 /// fog of no opacity has its pass fog what's opaque and draws what blends after it; fog that takes
 /// some light draws it otherwise. Likewise with ambient occlusion, which has the view draw what's
 /// opaque again, shaded, once the occlusion is found, after which the fog's pass fogs it: the sky,
-/// which the occlusion doesn't darken, as fogged as without it. The frames compared are 8 apart,
-/// once the occlusion's history has settled: a still view's occlusion takes 8 frames' noise in
-/// turn, which its history averages, so that each frame draws it as the frame 8 before it did.
+/// which the occlusion doesn't darken, as fogged as without it. With the occlusion, the frames
+/// compared are 8 apart, once its history has settled: a still view's occlusion takes 8 frames'
+/// noise in turn, which its history averages, so that each frame draws it as the frame 8 before it
+/// did. Without, each frame draws as the one before.
 fn fog_of_no_density_or_opacity_changes_nothing() {
     const SIZE: [u32; 2] = [96, 64];
     let mut scene = FoggedScene::new(SIZE[0], SIZE[1]);
@@ -9747,9 +9751,9 @@ fn fog_of_no_density_or_opacity_changes_nothing() {
         density: 0.5,
         ..Fog::default()
     };
-    // The 8th of the frames from now, in `fog`, the 7 before it without.
-    let eighth = |scene: &mut FoggedScene, fog| {
-        for _ in 0..7 {
+    // The frame `apart` frames from now, in `fog`, those before it without.
+    let later = |scene: &mut FoggedScene, apart: usize, fog| {
+        for _ in 1..apart {
             scene.render(None);
         }
         scene.render(fog)
@@ -9757,17 +9761,22 @@ fn fog_of_no_density_or_opacity_changes_nothing() {
     let mut fogged = Vec::new();
     for occlusion in [None, Some(AmbientOcclusion::default())] {
         scene.stores.ambient_occlusion = occlusion;
-        for _ in 0..128 {
-            scene.render(None);
-        }
+        let apart = if occlusion.is_some() {
+            for _ in 0..128 {
+                scene.render(None);
+            }
+            8
+        } else {
+            1
+        };
         let without = scene.render(None);
         for (name, fog) in [("no density", thin), ("no opacity", clear)] {
             assert!(
-                eighth(&mut scene, Some(fog)) == without,
+                later(&mut scene, apart, Some(fog)) == without,
                 "fog of {name} changes what's drawn, with ambient occlusion {occlusion:?}"
             );
         }
-        let frame = eighth(&mut scene, Some(foggy));
+        let frame = later(&mut scene, apart, Some(foggy));
         assert!(
             frame != without,
             "fog changes nothing, with ambient occlusion {occlusion:?}"
@@ -12019,8 +12028,9 @@ fn antialiasing_keeps_still_dark_colors_as_drawn() {
 /// at a quarter of a pixel, a pixel and 3 pixels a frame, from where it stood still long enough for
 /// the plate to settle: drawn by a shader that returns how far it moved, `moving.slang`, and by one
 /// that doesn't, `flat_color.slang`, as nothing moves where a shadow crosses what stands still. In
-/// every frame, every pixel 3 or more from the speck's middle past its edge shows the plate: where
-/// it was leaves no trail, as the pixels it left are resolved against what's round them.
+/// every frame of its crossing, every pixel 3 or more from the speck's middle past its edge shows
+/// the plate: where it was leaves no trail, as the pixels it left are resolved against what's round
+/// them.
 fn antialiasing_leaves_no_trail_behind_dark_specks() {
     const SIZE: u32 = 64;
     const STILL: usize = 48;
@@ -12063,13 +12073,16 @@ fn antialiasing_leaves_no_trail_behind_dark_specks() {
             let (viewport, viewpoint) = (filling([SIZE, SIZE]), seeing_from(Vec3::ZERO));
             let draws = drawing(&mut stores, 0);
             settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-            for frame in (0..STILL).map(|_| 0).chain(0..=moves) {
+            for (i, frame) in (0..STILL).map(|_| 0).chain(0..=moves).enumerate() {
                 let draws = drawing(&mut stores, frame);
                 let data = RenderData {
                     antialiasing: Antialiasing::Taa,
                     ..stores.data(viewport, viewpoint, &draws)
                 };
                 render_without_ui(&mut renderer, data);
+                if i < STILL {
+                    continue;
+                }
                 let pixels = frame_pixels(&mut renderer);
                 let seen = middle(frame) * PIXELS_A_UNIT;
                 let center = [SIZE as f32 / 2.0 + seen.x, SIZE as f32 / 2.0 - seen.y];
@@ -12529,9 +12542,10 @@ fn disk(meshes: &mut Meshes, segments: u32) -> Mesh<[f32; 3]> {
 fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
     const SIZE: u32 = 96;
     const LARGER: u32 = 8;
-    // The disk of light `light` drawn as `antialiasing` says, `scale` times the size, graded by
-    // a slope of `slope` and tonemapped by `tonemapper`: its pixels' green, in linear light.
-    let render = |light: f32, tonemapper, slope: f32, scale: u32, antialiasing| {
+    // The disk of light `light`, `scale` times the size, graded by a slope of `slope` and
+    // tonemapped by `tonemapper`, drawn by one renderer in a frame as each of `antialiasing` says:
+    // each frame's pixels' green, in linear light. SMAA keeps nothing from one frame to the next.
+    let render = |light: f32, tonemapper, slope: f32, scale: u32, antialiasing: &[Antialiasing]| {
         let size = SIZE * scale;
         let mut renderer = renderer(size, size);
         let mut stores = Stores::default();
@@ -12544,25 +12558,30 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
         draws.push(disk, flat, Mat4::from_scale(Vec3::splat(1.2)), color);
         let (viewport, viewpoint) = (filling([size, size]), seeing_from(Vec3::ZERO));
         settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-        let data = RenderData {
-            clear_color: [0.0, 0.0, 0.0, 1.0],
-            tonemapper,
-            antialiasing,
-            grade: Grade {
-                slope: Vec3::splat(slope),
-                ..Grade::IDENTITY
-            },
-            ..stores.data(viewport, viewpoint, &draws)
-        };
-        render_without_ui(&mut renderer, data);
-        let pixels = frame_pixels(&mut renderer);
+        let frames: Vec<Vec<f32>> = (antialiasing.iter())
+            .map(|&antialiasing| {
+                let data = RenderData {
+                    clear_color: [0.0, 0.0, 0.0, 1.0],
+                    tonemapper,
+                    antialiasing,
+                    grade: Grade {
+                        slope: Vec3::splat(slope),
+                        ..Grade::IDENTITY
+                    },
+                    ..stores.data(viewport, viewpoint, &draws)
+                };
+                render_without_ui(&mut renderer, data);
+                let pixels = frame_pixels(&mut renderer);
+                let green = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pixel| decoded(pixel[1]));
+                green.collect()
+            })
+            .collect();
         shut_down(renderer);
-        let green = pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|pixel| decoded(pixel[1]));
-        green.collect::<Vec<f32>>()
+        frames
     };
     // The disk of `light` under `tonemapper` and `slope`, with SMAA and without antialiasing: each
     // eighth of the way round it, from the right, and all of it, the mean distance between each
@@ -12570,9 +12589,18 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
     // over the pixels whose share there is between 2% and 98%; and the most at any pixel, with
     // SMAA.
     let distances = |light: f32, tonemapper, slope: f32| {
-        let smaa = render(light, tonemapper, slope, 1, Antialiasing::Smaa);
-        let aliased = render(light, tonemapper, slope, 1, Antialiasing::None);
-        let larger = render(light, tonemapper, slope, LARGER, Antialiasing::None);
+        let modes = [Antialiasing::Smaa, Antialiasing::None];
+        let [smaa, aliased] =
+            <[Vec<f32>; 2]>::try_from(render(light, tonemapper, slope, 1, &modes))
+                .expect("a frame each");
+        let [larger] = <[Vec<f32>; 1]>::try_from(render(
+            light,
+            tonemapper,
+            slope,
+            LARGER,
+            &[Antialiasing::None],
+        ))
+        .expect("a frame");
         let averaged = |[x, y]: [u32; 2]| {
             let (width, by) = (SIZE * LARGER, LARGER);
             let at = |(dx, dy)| larger[((y * by + dy) * width + x * by + dx) as usize];

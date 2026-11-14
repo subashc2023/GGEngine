@@ -55,6 +55,10 @@ struct Shared {
     state: Mutex<State>,
     /// The most connections it holds at once.
     most: usize,
+    /// How long a connection's first line may take to come, and a host to take a joiner:
+    /// [`ANSWER`] and [`TAKE`] but in the tests that wait them out.
+    answer: Duration,
+    take: Duration,
     /// The datagrams it has forwarded.
     forwarded: AtomicU64,
     stopping: AtomicBool,
@@ -138,12 +142,25 @@ impl Shared {
 /// Fails if it can't bind both at `address`, or given port 0 at any of the ports it tries, or start
 /// its threads.
 pub fn serve(address: &str, most: usize) -> io::Result<Relay> {
+    serve_within(address, most, ANSWER, TAKE)
+}
+
+/// As [`serve`], but a connection's first line may take `answer` to come, and a host `take` to take
+/// a joiner, where [`serve`] has [`ANSWER`] and [`TAKE`].
+pub(crate) fn serve_within(
+    address: &str,
+    most: usize,
+    answer: Duration,
+    take: Duration,
+) -> io::Result<Relay> {
     let (listener, udp) = listen(address)?;
     let address = listener.local_addr()?;
     udp.set_read_timeout(Some(WAKE))?;
     let shared = Arc::new(Shared {
         state: Mutex::new(State::default()),
         most,
+        answer,
+        take,
         forwarded: AtomicU64::new(0),
         stopping: AtomicBool::new(false),
     });
@@ -344,9 +361,10 @@ fn close_all(closing: Receiver<TcpStream>) {
 /// Serves a connection, `stream`, by its first line, which comes within [`ANSWER`]: a host's, a
 /// joiner's or a host's new connection's. Ends once it does, closing it, `open` with it.
 fn serve_connection(mut stream: TcpStream, open: Open) {
+    let within = open.shared.answer;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_write_timeout(Some(ANSWER));
-    let line = match answer(&mut stream, ANSWER) {
+    let _ = stream.set_write_timeout(Some(within));
+    let line = match answer(&mut stream, within) {
         Ok(line) => line,
         Err(error) => {
             debug!(
@@ -506,13 +524,13 @@ fn join(mut stream: TcpStream, open: Open, room: Room) {
         let _ = stream.shutdown(Shutdown::Write);
         return;
     }
-    let pair = match pairing.recv_timeout(TAKE) {
+    let pair = match pairing.recv_timeout(open.shared.take) {
         Ok(pair) => pair,
         Err(_) => {
             // The thread that takes it may have just now; whichever takes it from `waiting` has it.
             let gone = open.shared.lock().waiting.remove(&ticket).is_some();
             if gone {
-                let secs = TAKE.as_secs();
+                let secs = open.shared.take.as_secs_f64();
                 return refuse(
                     &mut stream,
                     &format!("its host didn't take it within {secs} s"),

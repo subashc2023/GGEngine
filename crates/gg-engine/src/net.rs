@@ -4750,17 +4750,16 @@ mod tests {
         let address = host.net().listening.expect("listening").to_string();
         let join = Net::Join(crate::args::Toward::Address(address));
         let mut other = Lockstep::start(&join, TESTED, "Other", &["Game"]).expect("started");
-        let start = Instant::now();
         let mut refused = 0;
-        while start.elapsed() < Duration::from_millis(600) {
+        until_refused_and_after(|| {
             host.turn();
             assert!(matches!(other.turn(0), Turn::None));
             refused += logged
                 .try_iter()
                 .filter(|code| code == "net.refused")
                 .count();
-            thread::sleep(Duration::from_millis(1));
-        }
+            refused
+        });
         // Each side's.
         assert_eq!(refused, 2);
         assert!(other.link.is_none() && host.net().link.is_none());
@@ -4780,20 +4779,35 @@ mod tests {
         let code = "0000-0000-0000-0000".parse().expect("a code");
         let net = Net::Join(crate::args::Toward::Address(address));
         let mut other = Lockstep::start(&net, code, "Tested", &layers).expect("started");
-        let start = Instant::now();
         let mut refused = 0;
-        while start.elapsed() < Duration::from_millis(600) {
+        until_refused_and_after(|| {
             host.turn();
             assert!(matches!(other.turn(0), Turn::None));
             assert!(other.link.is_none() && host.net().link.is_none());
             let codes = logged.codes.try_iter();
             refused += codes.filter(|code| code == "net.refused").count();
-            thread::sleep(Duration::from_millis(1));
-        }
+            refused
+        });
         // Each side's.
         assert_eq!(refused, 2);
         let mut joiner = Peer::joiner(&mut host);
         join(&mut host, &mut joiner);
+    }
+
+    /// Turns a refused joiner and its host, `turn` saying how many refusals have been logged, until
+    /// each side's has, and then for a fifth of a second, in which a joiner that tried again sooner
+    /// than [`REFUSED`] would be refused again.
+    fn until_refused_and_after(mut turn: impl FnMut() -> usize) {
+        let start = Instant::now();
+        let mut both = None;
+        while both.is_none_or(|both: Instant| both.elapsed() < Duration::from_millis(200)) {
+            let refused = turn();
+            assert!(start.elapsed() < REFUSED, "{refused} refusals");
+            if refused >= 2 {
+                both.get_or_insert_with(Instant::now);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     thread_local! {

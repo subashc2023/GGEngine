@@ -107,6 +107,10 @@ fn every_scene_loads_and_saves_as_it_is() {
     let scenes = scenes();
     assert_eq!(scenes.len(), 44, "{scenes:?}");
     let unfetched = unfetched();
+    // One context for them all, each scene loaded into an empty world: what a scene names, by ID
+    // or path, it finds whether or not a scene before loaded it. The prefabs' own tests load
+    // theirs afresh.
+    let (mut cx, _showcase) = loaded();
     for path in scenes {
         let text = fs::read_to_string(&path).expect("the scene");
         if let Some(name) = (unfetched.iter()).find(|name| text.contains(&format!("\"{name}\""))) {
@@ -116,7 +120,7 @@ fn every_scene_loads_and_saves_as_it_is() {
             );
             continue;
         }
-        let (mut cx, _showcase) = loaded();
+        cx.world_mut().clear();
         let roots = cx.load_scene_file(&path);
         let roots = roots.unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
         let primary = cx.world().query::<&gg_engine::Camera>();

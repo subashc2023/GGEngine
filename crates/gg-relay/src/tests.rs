@@ -1,9 +1,14 @@
 use std::net::{Shutdown, UdpSocket};
 use std::thread;
 
+use super::relay::serve_within;
 use super::*;
 
 const ROOM: Room = Room([7; 16]);
+
+/// How long a relay waits for a first line or a host's take in the tests that wait it out, in place
+/// of [`ANSWER`] or [`TAKE`].
+const WAITED: Duration = Duration::from_secs(1);
 
 fn relay(most: usize) -> Relay {
     serve("127.0.0.1:0", most).expect("a relay")
@@ -114,11 +119,11 @@ fn a_room_is_its_first_host_s_alone_and_a_joiner_finds_none_without_one() {
 }
 
 /// A take of a ticket the relay didn't give is refused, as is one of a joiner its host didn't take
-/// within 5 s, which the relay refuses; and past the most connections, a connection is refused, the
+/// in time, which the relay refuses; and past the most connections, a connection is refused, the
 /// relay full.
 #[test]
 fn a_relay_refuses_tickets_it_didn_t_give_joiners_left_waiting_and_connections_past_its_most() {
-    let relay = relay(3);
+    let relay = serve_within("127.0.0.1:0", 3, ANSWER, WAITED).expect("a relay");
     let at = relay.address();
     let error = take(at, &Ticket([1; 32])).err().expect("refused");
     assert!(refusal(&error).contains("no joiner waits"), "{error}");
@@ -133,13 +138,13 @@ fn a_relay_refuses_tickets_it_didn_t_give_joiners_left_waiting_and_connections_p
     let start = Instant::now();
     let error = joining.join().expect("joined").err().expect("refused");
     assert!(
-        refusal(&error).contains("didn't take it within 5 s"),
+        refusal(&error).contains("didn't take it within 1 s"),
         "{error}"
     );
+    let waited = start.elapsed();
     assert!(
-        start.elapsed() >= Duration::from_secs(4),
-        "{:?}",
-        start.elapsed()
+        waited >= WAITED * 4 / 5 && waited < WAITED + Duration::from_secs(4),
+        "{waited:?}"
     );
     let error = take(at, &ticket).err().expect("refused");
     assert!(refusal(&error).contains("no joiner waits"), "{error}");
@@ -163,11 +168,11 @@ fn a_relay_refuses_tickets_it_didn_t_give_joiners_left_waiting_and_connections_p
     relay.stop();
 }
 
-/// A connection whose first line doesn't come within 5 s, is too long, isn't one, or speaks another
+/// A connection whose first line doesn't come in time, is too long, isn't one, or speaks another
 /// version of the protocol is closed, answered with why if it speaks the protocol.
 #[test]
 fn a_connection_whose_first_line_isn_t_one_is_closed() {
-    let relay = relay(16);
+    let relay = serve_within("127.0.0.1:0", 16, WAITED, TAKE).expect("a relay");
     let at = relay.address();
     let send = |text: &[u8]| {
         let mut stream = TcpStream::connect(at).expect("connected");
@@ -196,7 +201,7 @@ fn a_connection_whose_first_line_isn_t_one_is_closed() {
     ended(send(b""));
     let waited = start.elapsed();
     assert!(
-        waited >= Duration::from_secs(4) && waited < Duration::from_secs(9),
+        waited >= WAITED * 4 / 5 && waited < WAITED + Duration::from_secs(4),
         "{waited:?}"
     );
     relay.stop();

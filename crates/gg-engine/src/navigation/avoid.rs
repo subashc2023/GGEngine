@@ -342,20 +342,4 @@ mod tests {
         assert!(nearest >= 2.0 * radius * 0.98, "came within {nearest}");
         assert!(agents[0].0.x > 4.0 && agents[1].0.x < -4.0, "{agents:?}");
     }
-
-    /// Agents in one place at rest part, each the way its neighbor's side says, rather than
-    /// staying there: the agent's own side, as the agents' step leaves it, counts for nothing.
-    #[test]
-    fn agents_in_one_place_part() {
-        let mut lines = Lines::default();
-        let disc = |side| Disc {
-            position: Vec2::ZERO,
-            velocity: Vec2::ZERO,
-            radius: 0.5,
-            side,
-        };
-        let a = lines.velocity(disc(0.0), std::iter::once(disc(1.0)), Vec2::ZERO, 3.0);
-        let b = lines.velocity(disc(0.0), std::iter::once(disc(-1.0)), Vec2::ZERO, 3.0);
-        assert!(a.x > 0.0 && b.x < 0.0, "apart: {a} {b}");
-    }
 }

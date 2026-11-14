@@ -422,11 +422,13 @@ mod tests {
         // `gg run` the editor keeps going for its project; the directory is in the workspace, so
         // that cargo names its target directory.
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("project.ron");
+        // Two of the pauses between its looks for the file.
+        let timeout = WRITE * 2;
         let start = Instant::now();
-        let waited = wait(&pick(Some(project)), Duration::from_secs(1));
+        let waited = wait(&pick(Some(project)), timeout);
         let failed = waited.err().map(|failure| failure.code);
         assert_eq!(failed.as_deref(), Some("gg.no_run"));
-        assert!(start.elapsed() >= Duration::from_secs(1) && start.elapsed() < GRACE * 2);
+        assert!(start.elapsed() >= timeout && start.elapsed() < GRACE * 2);
     }
 
     /// A wait goes on until the run has looked at the sources since it started, then ends as the
