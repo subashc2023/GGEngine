@@ -52,11 +52,11 @@ jobs:
     env:
       GG_SKIP_GPU_TESTS: ${{ matrix.skip-gpu-tests }}
     steps:
-      # The runner's tool cache, which the container mounts and no step here uses: the job that builds
-      # every crate a second time, in the shipping profile, needs its room on the runner's disk, whose
-      # space left the log shows.
+      # The runner's tool cache, which the container mounts and no step here uses: Linux x86-64's
+      # jobs need its room on the runner's disk, whose space left the log shows, as each builds every
+      # crate, the gates' tests and the shipping job's second build, in the shipping profile, the most.
       - name: Make room on the runner's disk
-        if: matrix.part == 'shipping'
+        if: matrix.runner == 'ubuntu-24.04'
         run: |
           rm -rf "${RUNNER_TOOL_CACHE:?}"/*
           df -h "$RUNNER_TEMP"
