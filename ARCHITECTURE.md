@@ -1329,8 +1329,9 @@ alone, as Foxball's bot, a session's runs leave out.
   drawing while it waits. Each tick, a peer takes what its layers queued since the last and sends it
   as its inputs for the tick its delay on: `ROLLBACK_DELAY` ticks, 31.25 ms, in a rollback session,
   and in lockstep, so that the inputs reach the other peer before it needs them, the ticks the way
-  one way takes, half the link's way there and back, and four of its deviations, as TCP smooths
-  them (RFC 6298), and one more, from 2 to 16, 31.25 ms to 250 ms, and
+  one way takes, half the link's way there and back, and two of its deviations, both smoothed as
+  TCP smooths them (RFC 6298), which allows four for its retransmissions, where late inputs cost a
+  stall, and one more, from 2 to 16, 31.25 ms to 250 ms, and
   [`DELAY`](crates/gg-engine/src/net.rs), 62.5 ms, until the way is timed. A delay rises at once,
   the ticks it passes over going out holding none of the peer's inputs, and falls to the most the
   link has needed in the last 2 s, once that's less, so that a jittery link doesn't have it fall at
@@ -1362,8 +1363,9 @@ alone, as Foxball's bot, a session's runs leave out.
   predict far while the other predicts little, as a host ahead of its joiner by the time its world
   took to come and be restored would, and a lockstep peer ahead doesn't wait for the other's
   inputs at the link's every jitter, as it would, taking the ticks owed meanwhile at once after.
-  Each peer logs the least and most its delay or window was, and how many ticks waited for the
-  other's inputs, as the run ends (`net.delay`).
+  Each peer logs the least and most its delay or window was, how many ticks waited for the other's
+  inputs, and its stalls as they did, how many, their time together and the longest, as the run
+  ends (`net.delay`).
 - **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
   peer's inputs for the tick its delay on, and apply on both before it, so that a request's answer
   comes once its edit has applied. A scene file's save is an edit of the file's text, which each
@@ -1455,11 +1457,13 @@ alone, as Foxball's bot, a session's runs leave out.
   A client starts from its world, as a joiner from its host's, and sends its inputs, its layers'
   commands, each tick's tagged with the tick; the server applies them in their order, each tick's
   at the first tick it runs that's theirs or past it, its own layers' first and then each client's
-  by its player. After each tick it sends each client its state: the text of what it sees of the
-  world, as a snapshot writes the world, but with what hasn't changed since the latest state the
-  client has said it has named as kept, a line in place of each run of tables kept, the children
-  and each resource whose text is the same; compressed by zstd against that state's text whole,
-  which is its dictionary, about 450 bytes in the demo; with the hash of what it sees. A table is
+  by its player. After every second tick, 32 times a second, which halves a client's download
+  against every tick's (0.77 Mbit/s for Foxball's), it sends each client its state: the text of
+  what it sees of the world, as a snapshot writes the world, but with what hasn't changed since
+  the latest state the client has said it has named as kept, a line in place of each run of
+  tables kept, the children and each resource whose text is the same; compressed by zstd against
+  that state's text whole, which is its dictionary, about 450 bytes in the demo; with the hash of
+  what it sees. A table is
   kept as the ECS's change marks say nothing joined it or changed in it since that state, and it
   has as many rows: the server's world moves its change tick on as each tick ends, as a run that
   draws does as each tick starts. A thread of the server's own writes the states, from a copy of
@@ -1473,7 +1477,12 @@ alone, as Foxball's bot, a session's runs leave out.
   the way there and back and two ticks more, on its own inputs alone, which predicts its own player
   exactly and the others as going on as their last commands had them, as rollback predicts; its
   ticks run up to a tenth faster or slower than real time, so that its inputs come two ticks before
-  the server runs their ticks, and it waits at half a second past the latest state. It reads each
+  the server runs their ticks, and it waits at half a second past the latest state. Its inputs
+  that come more than four ticks late, as a client's do that joins over a slow link, its world's
+  age and its loading not counted where it starts, or whose frames stopped, have it catch up at
+  once, running the ticks owed, up to four more a frame, once a round trip at most; a client whose
+  world goes on from a state past its own ticks sends those ticks' inputs empty, as the server,
+  which applies them in their order, would wait for them. It reads each
   state into a world of its own, of its types and assets, logging `net.desync` where that doesn't
   hash as the server's world did, as when a state's text leaves out what the hash reads; and where
   the world it predicted after that tick hashes otherwise, takes its world back to the server's,
@@ -1482,8 +1491,9 @@ alone, as Foxball's bot, a session's runs leave out.
   server would, the sounds played before not played again. A queue that edits, as the Inspector's,
   goes to the server alone. A scene a tick changes to, as [Project state](#project-state) says,
   goes in on the server and on each client predicting it at the same tick, from the assets the
-  layers loaded alone. As the run ends a client logs how often it corrected (`net.corrected`), and
-  the server what it sent (`net.served`).
+  layers loaded alone. As the run ends a client logs how often it corrected and its stalls past
+  its window (`net.corrected`), and the server what it sent and how many of the clients' inputs
+  came late (`net.served`).
 - **Each client gets the cells near its own viewers.** A server's cells come in around every
   viewer, and a client sees, of the cells in, those within the radius of a viewer of its own, one
   whose `Owner`, or an ancestor's, names its player, and those it saw within the radius and half a
@@ -1501,7 +1511,7 @@ alone, as Foxball's bot, a session's runs leave out.
   would take them out, its world without their entities, so that its rapier is as that step would
   leave it.
 - **The other players draw between the server's states.** An entity whose `Owner` component names
-  another player, and its descendants, draw on a client between the two states about three ticks
+  another player, and its descendants, draw on a client between the two states about five ticks
   behind the latest, where the time since the latest came puts it, eased so that the states'
   jitter doesn't show, rather than where the client's ticks left them; the rest draw as every
   run's do. So a collision with another player happens where the client predicted it, ahead of
@@ -1525,9 +1535,12 @@ waited while a peer's frames stopped time the wait too. A server's link to each 
 same: a client's inputs go over
 UDP, each packet repeating those the server hasn't said it applied, or on the stream if a tick's
 are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
-state lost being lost, as the next is sent against the latest the client has. `--link` has a
-run's links hold each packet that comes, and up to more, losing some, and the stream's lines, as a
-slow link would. [net.rs](crates/gg-engine/src/net.rs),
+state lost being lost, as the next is sent against the latest the client has. Each link logs what
+it carried as it ends (`net.traffic`): the bytes each way, sealed, their mean a second and the
+most in one, the stream's apart from the packets', and how many packets went through the relay.
+`--link` has a run's links hold each packet that comes, and up to more, losing some, and the
+stream's lines, as a slow link would; headless peers given `--real-time` play over it as windowed
+ones do. [net.rs](crates/gg-engine/src/net.rs),
 [server.rs](crates/gg-engine/src/net/server.rs), [states.rs](crates/gg-engine/src/net/states.rs),
 [secure.rs](crates/gg-engine/src/net/secure.rs),
 [path.rs](crates/gg-engine/src/net/path.rs) and [gg-relay's root](crates/gg-relay/src/lib.rs) have

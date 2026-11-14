@@ -121,6 +121,7 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread;
@@ -465,11 +466,10 @@ struct Link {
     said: Option<SocketAddr>,
     bind_sent: Option<Instant>,
     bind: Vec<u8>,
-    /// A link's through a relay: which way its packets go, as [`Path`] chooses it; and the packets
-    /// it has sent and taken each way, through the relay and direct, which its changes of way log.
+    /// A link's through a relay: which way its packets go, as [`Path`] chooses it.
     path: Path,
-    sent_by: [u64; 2],
-    came_by: [u64; 2],
+    /// What the link sent and took, which its changes of way and its end log.
+    traffic: Traffic,
     /// The keys the link's handshake made, which its threads seal and open the stream's frames
     /// under, and the main thread its packets; the nonce of this end's next packet, from
     /// [`PACKETS`](secure::PACKETS); the nonces of those taken from the other end; what a packet's
@@ -532,8 +532,14 @@ impl Link {
         stream.set_read_timeout(Some(LOST * 2))?;
         let peer = stream.peer_addr().ok();
         let keys = Arc::new(keys);
-        let (to, unwritten) = write_from(stream.try_clone()?, Arc::clone(&keys))?;
-        let mut reader = Opened::new(BufReader::new(stream), Arc::clone(&keys));
+        let traffic = Traffic::default();
+        let written = Arc::clone(&traffic.written);
+        let (to, unwritten) = write_from(stream.try_clone()?, Arc::clone(&keys), written)?;
+        let read = Counted {
+            stream,
+            bytes: Arc::clone(&traffic.read),
+        };
+        let mut reader = Opened::new(BufReader::new(read), Arc::clone(&keys));
         let (lines, from) = mpsc::channel();
         thread::Builder::new()
             .name("gg-net".to_owned())
@@ -576,8 +582,7 @@ impl Link {
             bind_sent: None,
             bind: Vec::new(),
             path: Path::default(),
-            sent_by: [0; 2],
-            came_by: [0; 2],
+            traffic,
             keys,
             nonce: secure::PACKETS,
             replays: Replays::default(),
@@ -631,13 +636,13 @@ impl Link {
         }
         self.bind_sent = Some(now);
         gg_relay::bind(&relayed.token, &mut self.bind);
-        if let Err(error) = self.udp.send_to(&self.bind, relayed.relay)
-            && !mem::replace(&mut self.unsent, true)
-        {
-            warn!(
+        match self.udp.send_to(&self.bind, relayed.relay) {
+            Ok(_) => self.traffic.sent[RELAYED].add(self.bind.len()),
+            Err(error) if !mem::replace(&mut self.unsent, true) => warn!(
                 code = "net.link",
                 "Can't bind the link's socket at the relay, as its packets go: {error}"
-            );
+            ),
+            Err(_) => {}
         }
     }
 
@@ -679,10 +684,11 @@ impl Link {
         Ok(())
     }
 
-    /// Logs `change`, a link's way changing, as [`Path::step`] gives it.
+    /// Logs `change`, a link's way changing, as [`Path::step`] gives it, with the packets the link
+    /// has sent and taken each way, through the relay and direct.
     fn log_way(&self, change: &Change) {
-        let [relayed_sent, direct_sent] = self.sent_by;
-        let [relayed_came, direct_came] = self.came_by;
+        let [relayed_sent, direct_sent] = self.traffic.sent.map(|count| count.packets);
+        let [relayed_came, direct_came] = self.traffic.taken.map(|count| count.packets);
         match change {
             Change::Direct(at) => info!(
                 code = "net.direct",
@@ -803,6 +809,7 @@ impl Link {
         }
         self.bind(now);
         self.receive(buffer, conditions, random, now);
+        self.traffic.count(self.clock(now) / 1000);
         self.say_where();
         self.packets.sort_by_key(|(due, _)| *due);
         let due = self.packets.partition_point(|(due, _)| *due <= now);
@@ -854,6 +861,7 @@ impl Link {
                         && let Some(at) = gg_relay::bound(&buffer[..size])
                     {
                         self.reflexive = Some(at);
+                        self.traffic.taken[RELAYED].add(size);
                         continue;
                     }
                     let opened = secure::open_packet(&self.keys, &buffer[..size]);
@@ -881,8 +889,9 @@ impl Link {
                     if relayed {
                         let direct = (!usual).then_some(from);
                         self.path.came(direct, hears_direct, now);
-                        self.came_by[usize::from(!usual)] += 1;
                     }
+                    let way = if relayed && usual { RELAYED } else { DIRECT };
+                    self.traffic.taken[way].add(size);
                     self.heard = now;
                     self.packets.push((due, text));
                 }
@@ -910,7 +919,7 @@ impl Link {
         self.plain.push(u8::from(self.path.hears_direct(now)));
         self.plain.extend_from_slice(packet);
         if self.relayed.is_none() {
-            self.send_sealed(other, true);
+            self.send_sealed(other, DIRECT, true);
             return;
         }
         let (ways, change) = self.path.step(now);
@@ -918,38 +927,93 @@ impl Link {
             self.log_way(&change);
         }
         if ways.relay {
-            self.send_sealed(other, true);
-            self.sent_by[0] += 1;
+            self.send_sealed(other, RELAYED, true);
         }
         for to in ways.direct {
             // A probe to an address that turns out not to reach the other is unsaid.
-            self.send_sealed(to, !ways.relay);
-            self.sent_by[1] += 1;
+            self.send_sealed(to, DIRECT, !ways.relay);
         }
     }
 
     /// Seals what [`send_packet`](Self::send_packet) wrote under the next nonce and sends it to
-    /// `to`, warning once a link of one that can't be sent if `warned`.
-    fn send_sealed(&mut self, to: SocketAddr, warned: bool) {
+    /// `to`, counting it as gone `way`, [`RELAYED`] or [`DIRECT`], warning once a link of one that
+    /// can't be sent if `warned`.
+    fn send_sealed(&mut self, to: SocketAddr, way: usize, warned: bool) {
         secure::seal_packet(&self.keys, self.nonce, &self.plain, &mut self.sealed);
         self.nonce += 1;
-        if let Err(error) = self.udp.send_to(&self.sealed, to)
-            && warned
-            && !mem::replace(&mut self.unsent, true)
-        {
-            warn!(
+        match self.udp.send_to(&self.sealed, to) {
+            Ok(_) => self.traffic.sent[way].add(self.sealed.len()),
+            Err(error) if warned && !mem::replace(&mut self.unsent, true) => warn!(
                 code = "net.link",
                 "Can't send the peer a packet, which is lost, as those after may be: {error}"
-            );
+            ),
+            Err(_) => {}
         }
+    }
+
+    /// Logs what the link sent and took (`net.traffic`), as it ends, `whose` it was, as
+    /// [`Traffic`] counts it: for its whole time, and each way the bytes, their mean a second and
+    /// the most in one, the stream's, and the packets' and how many, and how many of those went
+    /// through the relay. IP's and UDP's headers aren't counted: a packet's count gives them, some
+    /// 28 bytes a packet over IPv4.
+    fn ended(&self, whose: &str) {
+        let seconds = self.made.elapsed().as_secs_f64();
+        let traffic = &self.traffic;
+        // Each counter read once, as the link's threads may count on meanwhile.
+        let [stream_sent, stream_taken] =
+            [&traffic.written, &traffic.read].map(|bytes| bytes.load(Ordering::Relaxed));
+        let [packet_bytes_sent, packet_bytes_taken] =
+            [traffic.sent, traffic.taken].map(|[relayed, direct]| relayed.bytes + direct.bytes);
+        let [packets_sent, packets_taken] =
+            [traffic.sent, traffic.taken].map(|[relayed, direct]| relayed.packets + direct.packets);
+        let [relayed_sent, relayed_taken] =
+            [traffic.sent, traffic.taken].map(|[relayed, _]| relayed.packets);
+        let (bytes_sent, bytes_taken) = (
+            stream_sent + packet_bytes_sent,
+            stream_taken + packet_bytes_taken,
+        );
+        let [busiest_sent, busiest_taken] = traffic.busiest([bytes_sent, bytes_taken]);
+        let a_second = |bytes: u64| {
+            if seconds > 0.0 {
+                (bytes as f64 / seconds).round() as u64
+            } else {
+                0
+            }
+        };
+        let (per_second_sent, per_second_taken) = (a_second(bytes_sent), a_second(bytes_taken));
+        info!(
+            code = "net.traffic",
+            seconds,
+            bytes_sent,
+            bytes_taken,
+            per_second_sent,
+            per_second_taken,
+            busiest_sent,
+            busiest_taken,
+            stream_sent,
+            stream_taken,
+            packet_bytes_sent,
+            packet_bytes_taken,
+            packets_sent,
+            packets_taken,
+            relayed_sent,
+            relayed_taken,
+            "The link to {whose} ended after {seconds:.1} s. It sent {bytes_sent} bytes, \
+             {per_second_sent} a second on average and {busiest_sent} in its busiest second: \
+             {stream_sent} on the stream, and {packet_bytes_sent} in {packets_sent} packets, \
+             {relayed_sent} of them through the relay. It took {bytes_taken} bytes, \
+             {per_second_taken} a second on average and {busiest_taken} in its busiest second: \
+             {stream_taken} on the stream, and {packet_bytes_taken} in {packets_taken} packets, \
+             {relayed_taken} of them through the relay"
+        );
     }
 }
 
 /// Starts the thread that writes to `stream` what's sent through the channel it returns, each text
 /// whole and in order, sealed under `keys` as [`Sealer`] seals it, and `k` after [`KEEP`] with
 /// nothing else, so that the other end hears from this one while its main thread is busy, as
-/// restoring a world or stopped at a script's breakpoint; and returns, with the channel, where the
-/// error comes that stopped it, if one did.
+/// restoring a world or stopped at a script's breakpoint, adding the bytes it writes to `written`;
+/// and returns, with the channel, where the error comes that stopped it, if one did.
 ///
 /// Once the channel closes, as its link is dropped, and what was sent before is written, it shuts
 /// the connection's sending side: the other end reads what was sent, as a refusal's why, and then
@@ -958,8 +1022,9 @@ impl Link {
 /// wasn't read, as a joiner's hello the host refuses unread, and the other end lose what was sent.
 /// At a write that fails, as one that can't go on for [`LOST`] does, it shuts both sides.
 fn write_from(
-    mut stream: TcpStream,
+    stream: TcpStream,
     keys: Arc<Keys>,
+    written: Arc<AtomicU64>,
 ) -> io::Result<(Sender<String>, Receiver<io::Error>)> {
     let (to, texts) = mpsc::channel::<String>();
     let (failed, unwritten) = mpsc::channel();
@@ -967,23 +1032,122 @@ fn write_from(
         .name("gg-net-write".to_owned())
         .spawn(move || {
             let mut sealer = Sealer::new(keys);
+            let mut out = Counted {
+                stream,
+                bytes: written,
+            };
             loop {
-                let written = match texts.recv_timeout(KEEP) {
-                    Ok(text) => sealer.write(&mut stream, text.as_bytes()),
-                    Err(RecvTimeoutError::Timeout) => sealer.write(&mut stream, b"k\n"),
+                let wrote = match texts.recv_timeout(KEEP) {
+                    Ok(text) => sealer.write(&mut out, text.as_bytes()),
+                    Err(RecvTimeoutError::Timeout) => sealer.write(&mut out, b"k\n"),
                     Err(RecvTimeoutError::Disconnected) => {
-                        let _ = stream.shutdown(Shutdown::Write);
+                        let _ = out.stream.shutdown(Shutdown::Write);
                         return;
                     }
                 };
-                if let Err(error) = written {
+                if let Err(error) = wrote {
                     let _ = failed.send(error);
-                    let _ = stream.shutdown(Shutdown::Both);
+                    let _ = out.stream.shutdown(Shutdown::Both);
                     return;
                 }
             }
         })?;
     Ok((to, unwritten))
+}
+
+/// A stream that adds the bytes read from it, or written to it, to `bytes`: a link's, whose
+/// threads count what its stream carries, sealed.
+struct Counted<S> {
+    stream: S,
+    bytes: Arc<AtomicU64>,
+}
+
+impl<S: io::Read> io::Read for Counted<S> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let size = self.stream.read(out)?;
+        self.bytes.fetch_add(size as u64, Ordering::Relaxed);
+        Ok(size)
+    }
+}
+
+impl<S: io::Write> io::Write for Counted<S> {
+    fn write(&mut self, text: &[u8]) -> io::Result<usize> {
+        let size = self.stream.write(text)?;
+        self.bytes.fetch_add(size as u64, Ordering::Relaxed);
+        Ok(size)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// The indices of what a link's packets went through, in [`Traffic`]'s counts: the relay, or
+/// direct to the other end, as every packet of a link not through a relay goes.
+const RELAYED: usize = 0;
+const DIRECT: usize = 1;
+
+/// What a link sent and took, which `net.traffic` logs as it ends: its stream's bytes, sealed in
+/// their frames, as its threads write and read them, `k`s among them; its packets and their bytes,
+/// sealed, each way, by what they went through, as the main thread sends them and takes them from
+/// the other end, the binds and the relay's answers among those through the relay, and those
+/// `--link` loses not taken; and the most bytes in a second of the link, each way, as the main
+/// thread counts them as it takes what came, a frame's at a time, so that a second its frames
+/// stopped for counts toward the next.
+#[derive(Default)]
+struct Traffic {
+    written: Arc<AtomicU64>,
+    read: Arc<AtomicU64>,
+    /// By [`RELAYED`] and [`DIRECT`].
+    sent: [Count; 2],
+    taken: [Count; 2],
+    /// The second of the link counted toward, how many bytes each way had gone as it started,
+    /// and the most in one of those before it, each way.
+    second: u64,
+    at_second: [u64; 2],
+    most: [u64; 2],
+}
+
+/// Packets and their bytes.
+#[derive(Clone, Copy, Default)]
+struct Count {
+    packets: u64,
+    bytes: u64,
+}
+
+impl Count {
+    fn add(&mut self, bytes: usize) {
+        self.packets += 1;
+        self.bytes += bytes as u64;
+    }
+}
+
+impl Traffic {
+    /// The bytes sent and taken so far, the stream's and the packets'.
+    fn bytes(&self) -> [u64; 2] {
+        let packets = |[relayed, direct]: [Count; 2]| relayed.bytes + direct.bytes;
+        [
+            self.written.load(Ordering::Relaxed) + packets(self.sent),
+            self.read.load(Ordering::Relaxed) + packets(self.taken),
+        ]
+    }
+
+    /// Counts the bytes since the last second started toward it, once the link's second is
+    /// `second`, past it, and starts that one.
+    fn count(&mut self, second: u64) {
+        if second != self.second {
+            let bytes = self.bytes();
+            self.most = self.busiest(bytes);
+            self.at_second = bytes;
+            self.second = second;
+        }
+    }
+
+    /// The most bytes in a second of the link, each way, the one going on among them, `bytes`
+    /// having gone so far, as [`bytes`](Self::bytes) gave them.
+    fn busiest(&self, bytes: [u64; 2]) -> [u64; 2] {
+        [0, 1].map(|way| self.most[way].max(bytes[way] - self.at_second[way]))
+    }
 }
 
 /// A link's way there and back, smoothed as TCP smooths its own (RFC 6298's SRTT and RTTVAR): its
@@ -1008,12 +1172,53 @@ impl Trip {
         }
     }
 
-    /// The ticks the way one way takes, half the way there and back, and four deviations, as TCP
-    /// allows for its retransmissions, rounded up: within which what's sent comes, but seldom; none
-    /// before the first time is taken.
+    /// The ticks the way one way takes, half the way there and back, and [`MARGIN`] deviations,
+    /// rounded up: within which what's sent comes, but seldom; none before the first time is taken.
     fn ticks(&self) -> Option<u64> {
-        let way = self.mean? / 2.0 + 4.0 * self.deviation;
+        let way = self.mean? / 2.0 + MARGIN * self.deviation;
         Some((way / Tick::DT.as_secs_f64()).ceil() as u64)
+    }
+}
+
+/// How many of its deviations past the way one way a link's delay allows: two, where TCP allows
+/// four for its retransmissions. The deviation is the way there and back's, some 1.4 times one
+/// way's where the two ways' jitter is its own, so two allow nearly three of one way's; and inputs
+/// that come late cost a stall, which `net.delay` counts, where four had the delay most of the way
+/// there and back.
+const MARGIN: f64 = 2.0;
+
+/// A run's stalls: the runs of its frames that waited, ticks owed, for what the next tick needs
+/// from the other end of its link, as a lockstep peer's do for the other's inputs, and a client's
+/// past its window for the server's states: how many, their time together and the longest, which
+/// `net.delay` and `net.corrected` log; and when the one going on started.
+#[derive(Default)]
+struct Stalls {
+    count: u64,
+    total: Duration,
+    longest: Duration,
+    since: Option<Instant>,
+}
+
+impl Stalls {
+    /// Notes that a tick waited at `now`, which starts a stall, unless one has.
+    fn waited(&mut self, now: Instant) {
+        self.since.get_or_insert(now);
+    }
+
+    /// Ends the stall going on at `now`, if one is: as a tick runs, or the link is lost.
+    fn end(&mut self, now: Instant) {
+        if let Some(since) = self.since.take() {
+            let stall = now.saturating_duration_since(since);
+            self.count += 1;
+            self.total += stall;
+            self.longest = self.longest.max(stall);
+        }
+    }
+
+    /// How many, and their time together and the longest, in milliseconds.
+    fn logged(&self) -> (u64, u64, u64) {
+        let millis = |time: Duration| time.as_millis() as u64;
+        (self.count, millis(self.total), millis(self.longest))
     }
 }
 
@@ -1075,12 +1280,13 @@ pub(crate) struct Lockstep {
     /// later, so that the first is the most, and the values from the least to the most each appear
     /// once at most, 15 of them.
     needs: VecDeque<(Instant, u64)>,
-    /// The least and the most delay or window this peer has had with the other there; and how many
-    /// ticks waited for the other's inputs, and the last that did: as the run ends, `net.delay`
-    /// logs them.
+    /// The least and the most delay or window this peer has had with the other there; how many
+    /// ticks waited for the other's inputs, and the last that did; and its stalls as they waited:
+    /// as the run ends, `net.delay` logs them.
     ranged: Option<[u64; 2]>,
     waits: u64,
     waited: Option<u64>,
+    stalls: Stalls,
     /// What `--link` has the link do to what comes, and the state of the random numbers it draws.
     conditions: Option<Conditions>,
     random: u64,
@@ -1219,6 +1425,7 @@ impl Lockstep {
             ranged: None,
             waits: 0,
             waited: None,
+            stalls: Stalls::default(),
             conditions: None,
             random: 0,
             next: 0,
@@ -1873,11 +2080,13 @@ impl Lockstep {
     }
 
     /// Counts tick `tick` among those that waited for the other peer's inputs, once, if the other
-    /// has joined: as it can't run, as [`ready`](Self::ready) says.
+    /// has joined: as it can't run, as [`ready`](Self::ready) says; the first starts a stall,
+    /// which the next tick that runs ends.
     pub(crate) fn waited(&mut self, tick: u64) {
         if self.link.as_ref().is_some_and(|link| link.joined) && self.waited != Some(tick) {
             self.waits += 1;
             self.waited = Some(tick);
+            self.stalls.waited(Instant::now());
         }
     }
 
@@ -1896,7 +2105,9 @@ impl Lockstep {
         world: &World,
     ) {
         self.next = tick;
-        self.follow_link(Instant::now());
+        let now = Instant::now();
+        self.stalls.end(now);
+        self.follow_link(now);
         let ahead = tick + self.delay;
         // As the run starts, or its ticks jump, as a restore has them: none of this peer's inputs
         // went out for the ticks before.
@@ -2150,20 +2361,29 @@ impl Lockstep {
         debug!(tick = from, ticks, "Rolled back");
     }
 
-    /// Logs, as the run ends, if the other peer joined, the least and the most its delay or its
-    /// window were, and how many ticks waited for the other's inputs (`net.delay`); and, in a
-    /// rollback session, how many times the peer rolled back, how many ticks it ran again, and the
-    /// most at once (`net.rollback`).
+    /// Logs, as the run ends, what its link to the other peer sent and took, if it has one, as
+    /// [`Link::ended`] says; if the other peer joined, the least and the most its delay or its
+    /// window were, how many ticks waited for the other's inputs, and its stalls as they did, as
+    /// [`Stalls`] says (`net.delay`); and, in a rollback session, how many times the peer rolled
+    /// back, how many ticks it ran again, and the most at once (`net.rollback`).
     pub(crate) fn ended(&self) {
+        if let Some(link) = &self.link {
+            link.ended("the other peer");
+        }
         if let Some([least, most]) = self.ranged {
             let (what, waits) = (if self.window > 0 { "window" } else { "delay" }, self.waits);
+            let (stalls, stalled_ms, longest_stall_ms) = self.stalls.logged();
             info!(
                 code = "net.delay",
                 least,
                 most,
                 waits,
+                stalls,
+                stalled_ms,
+                longest_stall_ms,
                 "The {what} ranged from {least} to {most} ticks as the link needed, and {waits} \
-                 ticks waited for the other peer's inputs"
+                 ticks waited for the other peer's inputs, in {stalls} stalls of {stalled_ms} ms \
+                 together, the longest {longest_stall_ms} ms"
             );
         }
         if self.window == 0 {
@@ -2476,8 +2696,13 @@ impl Lockstep {
         self.drop_link();
     }
 
+    /// Lets go of the link to the other peer, logging what it sent and took, as [`Link::ended`]
+    /// says, and ending the stall going on, if one is, and what came by it.
     fn drop_link(&mut self) {
-        self.link = None;
+        if let Some(link) = self.link.take() {
+            link.ended("the other peer");
+        }
+        self.stalls.end(Instant::now());
         self.coming = None;
         self.parting = None;
         self.owed = false;
@@ -2661,18 +2886,20 @@ impl Session {
         }
     }
 
-    /// Counts tick `tick`, which isn't [`ready`](Self::ready), as a peer's tick that waited, as
-    /// [`Lockstep::waited`] says.
+    /// Counts tick `tick`, which isn't [`ready`](Self::ready), as a peer's or a client's tick that
+    /// waited, as [`Lockstep::waited`] and [`Client::waited`] say.
     pub(crate) fn waited(&mut self, tick: u64) {
-        if let Self::Peer(net) = self {
-            net.waited(tick);
+        match self {
+            Self::Peer(net) => net.waited(tick),
+            Self::Server(_) => {}
+            Self::Client(client) => client.waited(),
         }
     }
 
     /// The time a frame `dt` after the last owes the run's ticks: a peer's a little less, as
-    /// [`Lockstep::pace`] says, a client's a little more or less, as [`Client::pace`] says, and a
-    /// server's `dt`.
-    pub(crate) fn pace(&self, dt: Duration) -> Duration {
+    /// [`Lockstep::pace`] says, a client's a little more or less, or more while it catches up, as
+    /// [`Client::pace`] says, and a server's `dt`.
+    pub(crate) fn pace(&mut self, dt: Duration) -> Duration {
         match self {
             Self::Peer(net) => net.pace(dt),
             Self::Server(_) => dt,
@@ -3858,9 +4085,48 @@ mod tests {
         assert!(delays.iter().all(|&delay| delay < MOST_DELAY), "{delays:?}");
     }
 
+    /// A peer counts the stalls its ticks make waiting for the other's inputs, each from the first
+    /// tick that waited to the next that ran: here the host's, as its joiner's frames stop for
+    /// 300 ms, less the few ticks whose inputs it had, and the joiner's first tick's time after.
+    #[test]
+    fn a_peer_counts_its_stalls_and_their_time() {
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+        real_time(
+            &mut host,
+            &mut joiner,
+            Duration::from_millis(200),
+            &mut |_, _| {},
+        );
+        let counted = |peer: &mut Peer| (peer.net().stalls.count, peer.net().stalls.total);
+        let before = counted(&mut host);
+        let stopped = Instant::now();
+        while stopped.elapsed() < Duration::from_millis(300) {
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        real_time(
+            &mut host,
+            &mut joiner,
+            Duration::from_millis(300),
+            &mut |_, _| {},
+        );
+        let after = counted(&mut host);
+        let stalled = after.1 - before.1;
+        assert!(after.0 > before.0, "no stall counted");
+        // 310 ms or so; more on a machine running tests on every thread, whose frames wait to turn.
+        assert!(
+            (Duration::from_millis(250)..Duration::from_millis(600)).contains(&stalled),
+            "{stalled:?} in {} stalls",
+            after.0 - before.0
+        );
+    }
+
     /// A delay or window falls to the most the link has needed in the last [`FALLS`], not to what
     /// it needs at a lull, as a jittery link's has it: here a link whose way one way takes 11
-    /// ticks, then 8 for 2 s, then 5, the 8 counting until it's 2 s old. A need above rises at once.
+    /// ticks, then 8 for 2 s, then 5, the 8 counting until it's 2 s old. A need above rises at once,
+    /// [`MARGIN`] deviations past the way.
     #[test]
     fn a_delay_falls_to_the_most_the_link_needed_in_the_last_two_seconds() {
         for rollback in [false, true] {
@@ -3873,16 +4139,19 @@ mod tests {
             join(&mut host, &mut joiner);
             // The joiner's, joined as `join` returns, where the host's link waits for its line.
             let net = joiner.net();
-            // Times the way one way at `ticks`, and has the delay or window follow it at `at`.
-            let follow = |net: &mut Lockstep, ticks: u64, at: Instant| {
-                let mean = 2.0 * ticks as f64 * Tick::DT.as_secs_f64();
+            // Times the way one way at `ticks`, with a deviation of `deviation` ticks, and has the
+            // delay or window follow it at `at`.
+            let follow_deviating = |net: &mut Lockstep, ticks: u64, deviation: u64, at: Instant| {
+                let tick = Tick::DT.as_secs_f64();
                 net.link.as_mut().expect("joined").trip = Trip {
-                    mean: Some(mean),
-                    deviation: 0.0,
+                    mean: Some(2.0 * ticks as f64 * tick),
+                    deviation: deviation as f64 * tick,
                 };
                 net.follow_link(at);
                 if rollback { net.window } else { net.delay }
             };
+            let follow =
+                |net: &mut Lockstep, ticks: u64, at: Instant| follow_deviating(net, ticks, 0, at);
             let start = Instant::now();
             let at = |ms: u64| start + Duration::from_millis(ms);
             // A delay of a tick more than the way's, a window of two more, 8 at least.
@@ -3902,6 +4171,10 @@ mod tests {
             }
             assert!(has.ends_with(&[least; 10]), "{has:?}");
             assert_eq!(follow(net, 11, at(4210)), most);
+            // The way one way and two deviations: 8 ticks and 2 of 2 ticks, 12, a delay of 13 and
+            // a window of 14; four would be 16, the most.
+            let margin = if rollback { 14 } else { 13 };
+            assert_eq!(follow_deviating(net, 8, 2, at(4220)), margin);
         }
     }
 
@@ -5030,6 +5303,52 @@ mod tests {
         assert_eq!(taken, [b"one".to_vec(), b"two".to_vec()]);
         let forged = logged.codes.try_iter().filter(|code| code == "net.forged");
         assert_eq!(forged.count(), 1);
+    }
+
+    /// What each end of a link counts it sent, on its stream and in packets, the other counts it
+    /// took: the stream's bytes as sealed, more than its lines', and the packets and their bytes.
+    #[test]
+    fn each_end_of_a_link_counts_what_the_other_sent() {
+        let [(made, made_keys), (taken, taken_keys)] = secure::linked();
+        let mut ends = [
+            Link::new(taken, taken_keys, true, None).expect("a link"),
+            Link::new(made, made_keys, false, None).expect("a link"),
+        ];
+        let ports = [ends[0].port(), ends[1].port()];
+        ends[0].packets_from(ports[1]);
+        ends[1].packets_from(ports[0]);
+        let lines = "t 1\n".repeat(100);
+        for (sends, end) in [1, 2].into_iter().zip(&mut ends) {
+            for _ in 0..sends {
+                end.send(lines.clone()).expect("sent");
+                end.send_packet(lines.as_bytes());
+            }
+        }
+        let (mut buffer, mut random) = (vec![0; 1 << 16], 0);
+        let ways = |ends: &[Link; 2]| {
+            [(0, 1), (1, 0)].map(|(from, to)| {
+                let [from, to] = [&ends[from].traffic, &ends[to].traffic];
+                let stream = [&from.written, &to.read].map(|bytes| bytes.load(Ordering::Relaxed));
+                let packets = [from.sent[DIRECT], to.taken[DIRECT]].map(|c| (c.packets, c.bytes));
+                (stream, packets)
+            })
+        };
+        let start = Instant::now();
+        let alike = |(stream, packets): ([u64; 2], [(u64, u64); 2])| {
+            stream[0] == stream[1] && packets[0] == packets[1]
+        };
+        while !ways(&ends).into_iter().all(alike) && start.elapsed() < Duration::from_secs(5) {
+            for end in &mut ends {
+                end.take(&mut buffer, None, &mut random, Instant::now());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        for (sends, (stream, packets)) in [1, 2].into_iter().zip(ways(&ends)) {
+            assert_eq!(stream[0], stream[1], "the stream's bytes");
+            assert!(stream[0] > sends * lines.len() as u64, "sealed: {stream:?}");
+            assert_eq!(packets[0], packets[1], "the packets and their bytes");
+            assert_eq!(packets[0].0, sends);
+        }
     }
 
     /// What a link writes on its stream is sealed: its bytes hold none of its lines, which the

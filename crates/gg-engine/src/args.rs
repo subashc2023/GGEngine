@@ -183,9 +183,9 @@ Options:
                     ends at its recording's end alone
   --real-time       With --headless, step the simulation in real time, its frames a tick apart,
                     rather than a tick a frame as fast as frames run, so that a game watched
-                    through the tool API plays at its own pace; --frames and --capture count
-                    frames as they come, a tick's time apart or more. Not for --host or --join,
-                    whose headless peers step in lockstep
+                    through the tool API plays at its own pace, and peers (--host, --join) play
+                    as windowed ones do, over a link as slow as --link makes it; --frames and
+                    --capture count frames as they come, a tick's time apart or more
   --frames <N>      Exit after N frames
   --size <WxH>      With --headless, render the view W by H pixels, such as `--size 320x180`,
                     rather than 1280 by 720
@@ -539,13 +539,6 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
-    if parsed.real_time && matches!(parsed.net, Some(Net::Host(_) | Net::Join(_))) {
-        return Err(bad(
-            "`--real-time` steps a run by the clock, and a headless lockstep peer a tick a frame, \
-             as its other peer's inputs come, so `--host` and `--join` take no `--real-time`"
-                .to_owned(),
-        ));
-    }
     if parsed.size.is_some() && !parsed.headless {
         return Err(bad(
             "`--size` is of a headless run's view, as a window's view is the window's and an \
@@ -752,6 +745,13 @@ mod tests {
         // Counting its frames as they come.
         let paced = parse_strs(&["--headless", "--real-time", "--frames", "60"]);
         assert_eq!(paced.unwrap().unwrap().frames, Some(60));
+        // A peer's too, which plays as a windowed one does.
+        for peer in [["--host", "0.0.0.0:7700"], ["--join", "127.0.0.1:7700"]] {
+            let code = ["--code", "7KQ2-9XMB-4TZD-P0WH"];
+            let paced = parse_strs(&[&["--headless", "--real-time"][..], &peer, &code].concat());
+            let paced = paced.unwrap().unwrap();
+            assert!(paced.real_time && paced.net.is_some(), "{peer:?}");
+        }
         assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
         // A run embedded in a tool publishes its view through the API, which only they serve.
         let embedded = parse_strs(&["--embedded"]).map(|args| args.unwrap().embedded);
@@ -983,8 +983,6 @@ mod tests {
             &["--real-time"],
             &["--embedded", "--real-time"],
             &["--real-time=yes", "--headless"],
-            &["--headless", "--real-time", "--host", "0.0.0.0:7700"],
-            &["--headless", "--real-time", "--join", "127.0.0.1:7700"],
             &["--embedded", "--no-api"],
             &["--stopped", "--no-api"],
             &["--stopped", "--record", "run.recording"],

@@ -2,10 +2,10 @@
 //! describes, and serves it to clients, [`Client`](super::Client)s (`--connect`): it runs its ticks
 //! in real time on its own layers' commands and on each client's inputs, which apply in the order
 //! their ticks have them, each tick's at the first the server runs that's its tick or past it, once
-//! those before have; and after each tick it sends each client the text of what it sees of the
-//! world, the world but for the cells near no viewer of its own, as `World::seen_by` says, with
-//! the hash of what it sees, as the client's state: what changed since the latest state the client
-//! has said it has, the rest named as kept, compressed against that state's text, as
+//! those before have; and after every [`STATES`]th tick it sends each client the text of what it
+//! sees of the world, the world but for the cells near no viewer of its own, as `World::seen_by`
+//! says, with the hash of what it sees, as the client's state: what changed since the latest state
+//! the client has said it has, the rest named as kept, compressed against that state's text, as
 //! [`states`](super::states) says, which a thread of the server's own writes from a copy of the
 //! world taken as the tick ends.
 //!
@@ -38,9 +38,10 @@
 //! t 1241
 //! ```
 //!
-//! The server's, after each tick the states thread was idle at the end of, are the client's state,
-//! in as many packets as it takes, each a line and then its part of the state's bytes, its text as
-//! zstd compresses it, which the whole text of the state it's against is the dictionary of:
+//! The server's, after every [`STATES`]th tick the states thread was idle at the end of, are the
+//! client's state, in as many packets as it takes, each a line and then its part of the state's
+//! bytes, its text as zstd compresses it, which the whole text of the state it's against is the
+//! dictionary of:
 //!
 //! ```text
 //! s 1240 1238 1241 2 58183b6352a09a44 fb695ce29daa8479 0 1 34183
@@ -85,6 +86,12 @@ pub(super) const KEPT: usize = 32;
 /// The most bytes of a state's a packet carries, past its line.
 pub(super) const PART: usize = MAX_PACKET_TEXT - 128;
 
+/// How many ticks apart the server sends its clients' states: two, 32 a second, which takes a
+/// client's download to about half of what a state each tick takes, as a state holds about as many
+/// bytes whichever tick it's against; a client's corrections come up to a tick later, and the other
+/// players draw further behind, as [`Client`](super::Client) says.
+const STATES: u64 = 2;
+
 /// A server: where its clients' connections come, and each client.
 pub(crate) struct Server {
     accepted: Accepted,
@@ -111,8 +118,9 @@ pub(crate) struct Server {
     buffer: Vec<u8>,
     /// How many times the server sent a client its world, how many states it sent, and their
     /// bytes; how many ticks ended without states, as the states thread was still writing the last
-    /// tick's; and how many tables the states sent wrote, and how many they kept.
-    served: [u64; 6],
+    /// tick's; how many tables the states sent wrote, and how many they kept; and how many ticks
+    /// of the clients' inputs applied after their tick, as they came late, and the most ticks after.
+    served: [u64; 8],
     /// Whether the world couldn't be written as a state, which is warned of once.
     unsaved: bool,
 }
@@ -178,7 +186,7 @@ impl Server {
             ours: Vec::new(),
             states,
             buffer: vec![0; 1 << 16],
-            served: [0; 6],
+            served: [0; 8],
             unsaved: false,
         })
     }
@@ -247,17 +255,16 @@ impl Server {
                 lost = Err(Some(why));
             }
             match lost {
-                Ok(()) => true,
-                Err(Some(why)) => {
-                    warn!(
-                        code = "net.lost",
-                        player = client.player,
-                        "Lost a client: {why}"
-                    );
-                    false
-                }
-                Err(None) => false,
+                Ok(()) => return true,
+                Err(Some(why)) => warn!(
+                    code = "net.lost",
+                    player = client.player,
+                    "Lost a client: {why}"
+                ),
+                Err(None) => {}
             }
+            client.ended();
+            false
         });
         for at in 0..clients.len() {
             if clients[at].hello && clients[at].player.is_none() {
@@ -269,6 +276,7 @@ impl Server {
                         warn!(code = "net.refused", "Refused a client: {why}");
                         let _ = clients[at].link.send(format!("refused {why}\n"));
                         clients[at].owed = false;
+                        clients[at].ended();
                     }
                 }
             }
@@ -348,7 +356,7 @@ impl Server {
     /// What tick `tick` runs on: the server's own commands, then each joined client's, by its
     /// player, those of its inputs come from the first not applied for each tick to `tick`, in
     /// turn, until one hasn't come, so that a client's inputs apply in their order, those that
-    /// came late at the first tick after theirs that has them.
+    /// came late at the first tick after theirs that has them, which are counted.
     pub(crate) fn inputs(&mut self, tick: u64) -> Merged {
         let mut merged = Merged {
             commands: Queued::of(mem::take(&mut self.ours), None, false).collect(),
@@ -364,6 +372,10 @@ impl Server {
             {
                 let player = client.player;
                 merged.commands.extend(Queued::of(commands, player, true));
+                if client.next < tick {
+                    self.served[6] += 1;
+                    self.served[7] = self.served[7].max(tick - client.next);
+                }
                 client.next += 1;
             }
         }
@@ -371,7 +383,8 @@ impl Server {
     }
 
     /// Once tick `tick` has run, leaving `world`: sends the states the states thread has written
-    /// since, if it has; and then, if it's idle, gives it a copy of the world, for it to write each
+    /// since, if it has; and then, at every [`STATES`]th tick, if it's idle, gives it a copy of the
+    /// world, for it to write each
     /// joined client's state, as [`states`](super::states) says, against the latest state the
     /// client has said it has, if the server still keeps it, and whole otherwise, with the first
     /// tick of its inputs not applied and how early its latest came. If it isn't idle, the tick
@@ -381,7 +394,7 @@ impl Server {
     pub(crate) fn end_tick(&mut self, tick: u64, world: &mut World) {
         self.send_written(None);
         let joined = |client: &&Remote| client.link.joined && client.player.is_some();
-        if self.clients.iter().any(|client| joined(&client)) {
+        if tick.is_multiple_of(STATES) && self.clients.iter().any(|client| joined(&client)) {
             if self.states.idle() {
                 let wanted = (self.clients.iter().filter(joined))
                     .map(|client| Wanted {
@@ -474,12 +487,26 @@ impl Server {
         }
     }
 
-    /// Logs what the server sent its clients (`net.served`), as the run ends: how many times a
-    /// client its world, and how many states, and their bytes; how many ticks sent none, as the
-    /// states thread was still writing the last tick's; and how many tables the states wrote, and
-    /// how many they kept, as the client's base had them.
+    /// Logs, as the run ends, what each client's link sent and took, as [`Link::ended`] says; and
+    /// what the server sent its clients (`net.served`): how many times a client its world, and how
+    /// many states, and their bytes; how many ticks sent none, as the states thread was still
+    /// writing the last tick's; how many tables the states wrote, and how many they kept, as the
+    /// client's base had them; and how many ticks of the clients' inputs came late, applying after
+    /// their tick, and the most ticks after.
     pub(crate) fn ended(&self) {
-        let [worlds, states, bytes, skipped, written, kept] = self.served;
+        for client in &self.clients {
+            client.ended();
+        }
+        let [
+            worlds,
+            states,
+            bytes,
+            skipped,
+            written,
+            kept,
+            late,
+            most_late,
+        ] = self.served;
         let mean = bytes.checked_div(states).unwrap_or(0);
         info!(
             code = "net.served",
@@ -490,14 +517,26 @@ impl Server {
             skipped,
             written,
             kept,
+            late,
+            most_late,
             "Sent clients the world {worlds} times, and {states} states, {mean} bytes each on \
              average; {skipped} ticks sent none, as the last tick's were still being written; the \
-             states wrote {written} tables and kept {kept}"
+             states wrote {written} tables and kept {kept}; {late} ticks of the clients' inputs \
+             came late, applying up to {most_late} ticks after theirs"
         );
     }
 }
 
 impl Remote {
+    /// Logs what the client's link sent and took, as it ends, as [`Link::ended`] says.
+    fn ended(&self) {
+        let whose = match self.player {
+            Some(player) => format!("player {player}'s client"),
+            None => "a client".to_owned(),
+        };
+        self.link.ended(&whose);
+    }
+
     /// Takes `line`, from the client, of the protocol, app, engine, build and layers `ours` are: its
     /// hello, that it has joined, or a line of a tick's inputs, the next tick to run being `next`.
     /// Fails with `None` for a hello refused, which it logs, and with why for any other line, and
@@ -616,7 +655,7 @@ mod tests {
 
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::super::client::LEAD;
+    use super::super::client::{LATE, LEAD};
     use super::super::tests::{Command, Game, SLOW, Score};
     use super::super::{Client, Session, TESTED, secure};
     use super::*;
@@ -770,6 +809,39 @@ mod tests {
         assert!(client.read(&half, ours, next).is_err());
     }
 
+    /// The server counts a client's inputs that apply after their tick, as they came late, and the
+    /// most ticks after; those that apply at their tick aren't late.
+    #[test]
+    fn a_server_counts_the_inputs_that_came_late() {
+        let listen = crate::args::Listen::at("127.0.0.1:0");
+        let mut server = Server::start(&listen, TESTED, "Tested", &[]).expect("started");
+        let [_other, (stream, keys)] = secure::linked();
+        let mut link = Link::new(stream, keys, true, None).expect("a link");
+        link.joined = true;
+        let inputs = (10..14).map(|tick| (tick, Vec::new()));
+        server.clients.push(Remote {
+            number: 0,
+            link,
+            hello: true,
+            player: Some(0),
+            owed: false,
+            inputs: inputs.collect(),
+            next: 10,
+            stream: String::new(),
+            newest: None,
+            lead: 0,
+            have: None,
+            cells: BTreeSet::new(),
+            texts: BTreeMap::new(),
+        });
+        // Ticks 10 and 11's inputs at tick 12, 2 and 1 ticks late; 12's and 13's at theirs.
+        for tick in 12..14 {
+            server.inputs(tick);
+        }
+        assert_eq!(server.served[6..], [2, 2]);
+        assert!(server.clients[0].inputs.is_empty());
+    }
+
     /// A server and three clients over a slow link, which grows slower: each client starts from the
     /// server's world, given a player of its own, as many as connect; each runs its own commands at
     /// once, predicting its own player exactly, as two of them queue commands for theirs, as their
@@ -901,6 +973,63 @@ mod tests {
         assert!(
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"
+        );
+    }
+
+    /// A client whose server's world comes a second after the server wrote it, as a large world
+    /// over a slow link does, starts behind, its world going on from the first state, its inputs
+    /// still late by the way there and back, and catches up at once: from a second after it
+    /// joined, none of its inputs come more than a few ticks late, as a client catching up at its
+    /// pace, a tenth faster than real time, would have them for seconds.
+    #[test]
+    fn a_client_that_starts_behind_catches_up_at_once() {
+        let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
+        let mut server = Node::new(&serve, Context::seeded(1));
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
+            _ => panic!("a server"),
+        };
+        let connect = Net::Connect(crate::args::Toward::Address(address));
+        let mut clients = [Node::new(&connect, Context::seeded(2))];
+        // 150 ms each way: some 20 ticks there and back.
+        let link = Conditions {
+            latency: Duration::from_millis(150),
+            ..SLOW
+        };
+        match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.conditions = Some(link),
+            _ => panic!("a server"),
+        }
+        clients[0].client().conditions = Some(link);
+        fn served(server: &mut Node) -> &mut [u64; 8] {
+            match server.stack.session_mut() {
+                Some(Session::Server(server)) => &mut server.served,
+                _ => panic!("a server"),
+            }
+        }
+        until(&mut server, &mut clients, |server, _| {
+            served(server)[0] == 1
+        });
+        // The world held a second before the client takes it.
+        let held = Instant::now();
+        while held.elapsed() < Duration::from_secs(1) {
+            server.turn();
+            thread::sleep(Duration::from_millis(2));
+        }
+        until(&mut server, &mut clients, |_, clients| clients[0].joined());
+        let joined = Instant::now();
+        let after = |time: u64| {
+            move |_: &mut Node, _: &mut [Node]| joined.elapsed() >= Duration::from_millis(time)
+        };
+        until(&mut server, &mut clients, after(1000));
+        let late = served(&mut server)[6];
+        served(&mut server)[6..].fill(0);
+        until(&mut server, &mut clients, after(2000));
+        let [.., then_late, most_late] = *served(&mut server);
+        // As jitter and lost packets have them, 2 at most; caught up at its pace, 10 or more.
+        assert!(
+            most_late <= LATE as u64,
+            "{then_late} ticks' inputs late, up to {most_late} ticks, after {late} as it joined"
         );
     }
 
@@ -1272,8 +1401,9 @@ mod tests {
 
     /// A server's clients' states are written on a thread of the server's own, from a copy of the
     /// world taken as a tick ends: while the thread waits, the server's ticks go on, sending no
-    /// states, which it counts; and once it's done, the states go on, each against the latest the
-    /// client has, which reads it, without a desync or a bad state.
+    /// states, which it counts; and once it's done, the states go on, after every [`STATES`]th
+    /// tick, each against the latest the client has, which reads it, without a desync or a bad
+    /// state.
     #[test]
     fn states_are_written_on_a_thread_of_the_server_s_own() {
         let logged = crate::testing::logged();
@@ -1304,10 +1434,11 @@ mod tests {
             server.stepper.ticks >= ticks + 16
         });
         let [_, held_sent, _, held_skipped, ..] = served(&mut server);
-        // The thread's tick's states, at most, once it was given them.
+        // The thread's tick's states, at most, once it was given them; each of the 8 or so ticks
+        // of the 16 that would have sent states, every second, skipped.
         assert!(held_sent <= sent + 1, "sent {held_sent} for {sent}");
         assert!(
-            held_skipped >= skipped + 15,
+            held_skipped >= skipped + 7,
             "skipped {held_skipped} for {skipped}"
         );
         drop(held);
@@ -1315,10 +1446,19 @@ mod tests {
         until(&mut server, &mut clients, |_, clients| {
             taken(&mut clients[0]) >= had + 16
         });
-        let [_, _, _, _, written, kept] = served(&mut server);
+        let [_, _, _, _, written, kept, ..] = served(&mut server);
         assert!(
             kept > 0 && written > 0,
             "wrote {written} tables, kept {kept}"
+        );
+        // States after every second tick alone.
+        let sent: Vec<u64> = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.clients[0].texts.keys().copied().collect(),
+            _ => panic!("a server"),
+        };
+        assert!(
+            sent.len() >= 16 && sent.iter().all(|tick| tick.is_multiple_of(STATES)),
+            "{sent:?}"
         );
         let codes: Vec<String> = logged.codes.try_iter().collect();
         let parted = ["net.desync", "net.bad_state", "net.lost", "test.gate"];

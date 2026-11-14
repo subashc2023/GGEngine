@@ -163,11 +163,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sessions their players alone join** (2026-11-13)
 - **Runs that meet through a relay** (2026-11-13)
 - **States by what changed** (2026-11-13)
+- **Sessions measured across the internet** (2026-11-13)
+- **Phase 20, play across the internet** (2026-11-13)
 
 ## Now
 
-Phase 20's sixth and last milestone, Foxball across the internet, measured, as Next has it, once
-its plan is written and approved.
+No milestone, until the phase after Phase 20 is chosen.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -193,24 +194,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 19 are done, as Done has it, but for what Deferred holds.
-
-20. **Play across the internet**: sessions robust and safe on a network others share, through
-    NATs, at the internet's latencies, with states that grow with what changed rather than with the
-    world. *Done when* Foxball's server and two clients, and Shards' lockstep and rollback peers,
-    play through a relay over a link of 150 ms there and back, with jitter and 2% lost (`--link`),
-    each session joined by its code alone; a stranger's connection and forged packets are refused;
-    a silent peer is lost and rejoins; and each client's bandwidth and each peer's stalls are
-    measured. Its milestones, in order: sessions that hold, a link silent for 10 s lost, kept by a
-    thread that writes its stream, a hello's deadline, a peer or client of another build refused,
-    and a player's commands steering that player alone; delays that follow the link, each link's
-    round trip measured, a lockstep session's delay and a rollback session's window following it,
-    and peers kept alike in time; sessions their players alone join, a session's key from
-    a code, every line and packet authenticated and encrypted, replays dropped; through NATs, a
-    relay both ends connect out to, which pairs them by the code and can't read what it forwards,
-    direct where a hole punch works; states by what changed, a server's state of the tables changed
-    since the client's latest, written on a thread, and physics' of the bodies a client sees; and
-    Foxball across the internet, measured.
+Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
 
 Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
 (no macOS driver does today).
@@ -744,6 +728,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | TURN and other standard relays, beside the engine's own: a relay is `gg-relay` | A game is hosted where a TURN service already runs |
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
 | `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
+| Sessions measured over the real internet, a relay on a rented server and runs on other machines and networks, and over Docker's NATs with `--link`, packets kept on the relay: Phase 20 measured on one machine's loopback, through a local relay, every link's packets direct, `--link` holding them as a slow link would | A game ships to players, as DEFECTS.md's row on punching on real networks has it |
 | A server's states compressed against their base as zstd's reference prefix, as `zstd --patch-from` does, in place of its dictionary: 2.7 times quicker for Foxball's (0.17 ms against 0.46), at 10% more bytes | A server's states thread falls behind with many clients, skipping ticks |
 
 ## Open questions

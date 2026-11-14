@@ -9,9 +9,10 @@
 //! predicted it, by their hashes, and where they differ, takes its world back to the server's and
 //! runs the ticks after again, its inputs the server hasn't applied applying in them, those whose
 //! ticks have gone at the first, as the server would apply them. Its ticks run a little faster or
-//! slower than real time, so that its inputs come [`LEAD`] ticks before the server runs theirs; and
-//! its frames draw the other players' entities, as [`Owner`] says, as the latest states have them,
-//! [`INTERPOLATION`] ticks behind.
+//! slower than real time, so that its inputs come [`LEAD`] ticks before the server runs theirs, and
+//! catch up at once where they come more than [`LATE`] ticks late; and its frames draw the other
+//! players' entities, as [`Owner`] says, as the latest states have them, [`INTERPOLATION`] ticks
+//! behind.
 //!
 //! A client's ticks allocate, for their inputs' text, the packets and the world's hash, and the
 //! states it takes, for their text and the other players' poses.
@@ -28,7 +29,7 @@ use super::server::{KEPT, PART, PROTOCOL};
 use super::states::rebuild;
 use super::{
     Code, Handshaken, Inputs, Link, MAX_PACKET_TEXT, MAX_WORLD, MOST_PACE, Merged, PACE, Queued,
-    REFUSED, Turn, build, connect, hello, tick_of, write_inputs,
+    REFUSED, Stalls, Turn, build, connect, hello, tick_of, write_inputs,
 };
 use crate::args::{Conditions, Toward};
 use crate::layer::Commands;
@@ -40,13 +41,25 @@ use crate::{Entity, EntityId, Owner, Sound, Tick, Transform, World, WorldHash, i
 /// time.
 pub(super) const LEAD: u64 = 2;
 
+/// How many ticks late the client's inputs may come, as a state says, before the client catches up
+/// at once, rather than at its pace: past the two or three a jittery link's have them late, short
+/// of the second or so a client that joins over a slow link starts behind, as the world's age and
+/// its loading aren't counted where it starts.
+pub(super) const LATE: i64 = 4;
+
+/// The most ticks a frame of a client catching up runs past those its time owes, so that its
+/// frames run fewer than the stepper's most at 30 frames a second, and it catches up a second
+/// behind in 16 frames.
+const CATCH_UP: u64 = 4;
+
 /// The most ticks a client runs past the latest it has the server's state after, half a second's,
 /// after which it waits for the next state, as over a link slower than that it would.
 const WINDOW: u64 = 32;
 
-/// How many ticks behind the latest state come the frames draw the other players' entities: 46.875
-/// ms, so that past a state lost, or held by a link's jitter, they draw toward the one after.
-const INTERPOLATION: f64 = 3.0;
+/// How many ticks behind the latest state come the frames draw the other players' entities: 78.125
+/// ms, so that past a state lost, or held by a link's jitter, they draw toward the one after, the
+/// states coming two ticks apart.
+const INTERPOLATION: f64 = 5.0;
 
 /// How many of the latest states' poses of the other players' entities the client keeps.
 const SAMPLES: usize = 16;
@@ -101,8 +114,13 @@ pub(crate) struct Client {
     hashes: BTreeMap<u64, WorldHash>,
     /// The sounds each tick's runs played, past the latest state taken, by tick.
     pub(super) played: BTreeMap<u64, Vec<Sound>>,
-    /// How many ticks before the server ran their tick the client's inputs came, on average.
+    /// How many ticks before the server ran their tick the client's inputs came, on average; how
+    /// many ticks the client owes still, catching up; and, once it has started to, or its world has
+    /// gone on from a state past its own ticks, the tick of its inputs the server applies once it's
+    /// there, until which its states say what came before.
     pub(super) lead: f64,
+    behind: u64,
+    caught: Option<u64>,
     /// The poses of the other players' entities in each of the latest states, oldest first, and
     /// when the latest came; and where among the server's ticks the frames draw them, and what they
     /// draw, the last frame's.
@@ -111,8 +129,9 @@ pub(crate) struct Client {
     clock: Option<f64>,
     drawn: Vec<(EntityId, Transform)>,
     /// How many times the client corrected its world, how many ticks it ran again, the most at
-    /// once, and how many states it took.
+    /// once, and how many states it took; and its stalls, past its window, as [`Stalls`] says.
     pub(super) corrected: [u64; 4],
+    stalls: Stalls,
     /// Whether the latest state's world, read from its text, didn't hash as the server's did.
     desynced: bool,
     /// When the client last sent its packets.
@@ -186,11 +205,14 @@ impl Client {
             hashes: BTreeMap::new(),
             played: BTreeMap::new(),
             lead: LEAD as f64,
+            behind: 0,
+            caught: None,
             samples: VecDeque::new(),
             arrived: None,
             clock: None,
             drawn: Vec::new(),
             corrected: [0; 4],
+            stalls: Stalls::default(),
             desynced: false,
             sent: None,
             buffer: vec![0; 1 << 16],
@@ -210,6 +232,14 @@ impl Client {
             .last_key_value()
             .map_or(self.since, |(&tick, _)| tick + 1);
         self.joined() && tick < latest + WINDOW
+    }
+
+    /// Notes that a tick waited, as it isn't [`ready`](Self::ready): once the client has joined,
+    /// past its window, which starts a stall, unless one has, which the next tick that runs ends.
+    pub(crate) fn waited(&mut self) {
+        if self.joined() {
+            self.stalls.waited(Instant::now());
+        }
     }
 
     /// Between ticks, as a frame starts: connects to the server, if the client hasn't, saying hello;
@@ -381,7 +411,7 @@ impl Client {
         self.played.clear();
         self.samples.clear();
         (self.arrived, self.clock) = (None, None);
-        self.lead = LEAD as f64;
+        (self.lead, self.behind, self.caught) = (LEAD as f64, 0, None);
         let trip = (self.trip.as_secs_f64() / Tick::DT.as_secs_f64()).ceil() as u64;
         let ahead = (trip + LEAD).min(WINDOW / 2);
         (self.local, self.tagged) = (tick, tick + ahead);
@@ -405,6 +435,7 @@ impl Client {
         queues: impl Iterator<Item = (usize, &'q mut dyn Commands)>,
         world: &World,
     ) {
+        self.stalls.end(Instant::now());
         let mut inputs = Inputs::default();
         self.edits.clear();
         for (layer, queue) in queues {
@@ -585,7 +616,21 @@ impl Client {
         }
         self.sample(tick);
         self.ours = self.ours.split_off(&state.next);
-        self.lead += (state.lead as f64 - self.lead) / 8.0;
+        if tick < next {
+            self.follow_lead(&state);
+        } else {
+            // The client's world goes on from the state's, past its own ticks, as it had fallen
+            // behind: those ticks' inputs go out empty, as the server ran them without any of the
+            // client's, so that it doesn't wait for them, as it applies a client's inputs in their
+            // order; the ticks the client owes, catching up, are fewer by those gone past; and the
+            // states until the server applies its inputs from there say what came before, as
+            // `follow_lead` passes them over, unless a catch-up or a jump before already has them.
+            for skipped in next..=tick {
+                self.ours.entry(skipped).or_default();
+            }
+            self.behind = self.behind.saturating_sub(tick + 1 - next);
+            self.caught.get_or_insert(tick + 1);
+        }
         self.played = self.played.split_off(&(tick + 1));
         let predicted = self.hashes.get(&tick) == Some(&state.hash);
         self.hashes = self.hashes.split_off(&(tick + 1));
@@ -594,6 +639,33 @@ impl Client {
         }
         self.local = state.next;
         Some(tick + 1)
+    }
+
+    /// Takes how early the client's latest inputs came, as `state` says, a state its world doesn't
+    /// go on from: into the average its pace follows, as [`pace`](Self::pace) says; or, if they
+    /// came more than [`LATE`] ticks late, as a client that joins over a slow link starts behind,
+    /// its world going on from the first state, past its own ticks, but no further, or one whose
+    /// frames stopped falls behind, has the client owe at once the ticks that would have them come
+    /// [`LEAD`] ticks early, which its frames pay, predicted. The states after, until the server has
+    /// applied the inputs it sends once it has caught up, a round trip or so, say what came before,
+    /// and are passed over.
+    fn follow_lead(&mut self, state: &Header) {
+        if self.caught.is_some_and(|caught| state.next <= caught) {
+            return;
+        }
+        self.caught = None;
+        if state.lead >= -LATE {
+            self.lead += (state.lead as f64 - self.lead) / 8.0;
+            return;
+        }
+        // At most a window's, as a client further behind is behind the server's states too, and
+        // goes on from them, as `settle` says.
+        let behind = ((LEAD as i64).saturating_sub(state.lead) as u64).min(WINDOW);
+        (self.lead, self.behind, self.caught) = (LEAD as f64, behind, Some(self.tagged + behind));
+        debug!(
+            tick = state.tick,
+            behind, "The client's inputs came late; it catches up {behind} ticks"
+        );
     }
 
     /// The world as tick `tick`, which [`settle`](Self::settle) gave, starts: the server's after
@@ -691,15 +763,18 @@ impl Client {
         drawn.as_slice()
     }
 
-    /// The time a frame `dt` after the last owes the client's ticks: a little more or less, as its
-    /// inputs came later or earlier than [`LEAD`] ticks before the server ran their ticks, on
-    /// average, once it has joined.
-    pub(crate) fn pace(&self, dt: Duration) -> Duration {
+    /// The time a frame `dt` after the last owes the client's ticks, once it has joined: a little
+    /// more or less, as its inputs came later or earlier than [`LEAD`] ticks before the server ran
+    /// their ticks, on average; and, while it catches up, as [`follow_lead`](Self::follow_lead)
+    /// says, up to [`CATCH_UP`] ticks' more of those it owes.
+    pub(crate) fn pace(&mut self, dt: Duration) -> Duration {
         if !self.joined() {
             return dt;
         }
         let pace = ((LEAD as f64 - self.lead) * PACE).clamp(-MOST_PACE, MOST_PACE);
-        dt.mul_f64(1.0 + pace)
+        let paid = self.behind.min(CATCH_UP);
+        self.behind -= paid;
+        dt.mul_f64(1.0 + pace) + Tick::DT * paid as u32
     }
 
     /// Sends the server the client's packets, once it has joined: the latest state it has, and its
@@ -731,29 +806,41 @@ impl Client {
         self.sent = Some(Instant::now());
     }
 
-    /// Loses the server, as `why` says: the client's world stands still until it has the server's
-    /// world again.
+    /// Loses the server, as `why` says, logging what the link sent and took, as [`Link::ended`]
+    /// says, and ending the stall going on, if one is: the client's world stands still until it has
+    /// the server's world again.
     pub(crate) fn lose(&mut self, why: &str) {
-        if self.link.is_some() {
+        if let Some(link) = self.link.take() {
             warn!(code = "net.lost", "Lost the server: {why}");
+            link.ended("the server");
         }
-        self.link = None;
+        self.stalls.end(Instant::now());
         self.coming = None;
         self.hello = None;
     }
 
-    /// Logs how the client was corrected toward the server (`net.corrected`), as the run ends: how
-    /// many times, how many ticks it ran again, the most at once, and how many states it took.
+    /// Logs, as the run ends, what its link to the server sent and took, if it has one, as
+    /// [`Link::ended`] says; and how the client was corrected toward the server (`net.corrected`):
+    /// how many times, how many ticks it ran again, the most at once, how many states it took, and
+    /// its stalls, as [`Stalls`] says.
     pub(crate) fn ended(&self) {
+        if let Some(link) = &self.link {
+            link.ended("the server");
+        }
         let [corrections, ticks, most, states] = self.corrected;
+        let (stalls, stalled_ms, longest_stall_ms) = self.stalls.logged();
         info!(
             code = "net.corrected",
             corrections,
             ticks,
             most,
             states,
+            stalls,
+            stalled_ms,
+            longest_stall_ms,
             "Took {states} states, and corrected toward the server's {corrections} times, running \
-             {ticks} ticks again, at most {most} at once"
+             {ticks} ticks again, at most {most} at once; past its window, it stalled {stalls} \
+             times, for {stalled_ms} ms together, the longest {longest_stall_ms} ms"
         );
     }
 }
@@ -957,10 +1044,11 @@ mod tests {
             poses.sort_unstable_by_key(|&(id, _)| id);
             Sample { tick, poses }
         };
+        // The latest `INTERPOLATION` ticks past 11.
         let samples = [
             sample(10, &[(a, at(0.0))]),
             sample(12, &[(a, at(2.0)), (b, at(7.0))]),
-            sample(14, &[(a, at(4.0)), (b, at(9.0))]),
+            sample(11 + INTERPOLATION as u64, &[(a, at(4.0)), (b, at(9.0))]),
         ];
         // The latest came `ago` before now, once the client has started, which reads its build.
         let client = |ago: Duration| {

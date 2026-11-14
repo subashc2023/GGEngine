@@ -5855,8 +5855,8 @@ impl Stack {
 
     /// The time a frame `dt` after the last owes the simulation: a networked run's as
     /// [`Session::pace`] says, and any other run's `dt`.
-    pub(crate) fn paced(&self, dt: Duration) -> Duration {
-        self.net.as_ref().map_or(dt, |net| net.pace(dt))
+    pub(crate) fn paced(&mut self, dt: Duration) -> Duration {
+        self.net.as_mut().map_or(dt, |net| net.pace(dt))
     }
 
     /// Has a client's frame, `dt` after the last, draw the other players' entities as the server's

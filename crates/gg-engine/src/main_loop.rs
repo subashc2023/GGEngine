@@ -51,7 +51,8 @@ pub(crate) fn run_headless(
 ) -> Result<Ran> {
     let embedded = args.embedded;
     // A client's ticks keep pace with its server's, in real time, and `--real-time` paces a
-    // headless run's so, as for an agent that watches it play.
+    // headless run's so, as for an agent that watches it play, and a peer's, which then waits for
+    // the other's inputs as a windowed peer does, its ticks owed meanwhile.
     let real_time = embedded || args.real_time || matches!(args.net, Some(Net::Connect(_)));
     let [mut width, mut height] = args.size.unwrap_or([1280, 720]);
     // An embedded run keeps the pipeline cache as a windowed run does, as a tool restarts it at
@@ -196,8 +197,9 @@ pub(crate) fn run_headless(
                 }
                 None => {}
             }
-            // Rather than spinning while a lockstep peer's inputs are on their way.
-            if app.stack.net_waits(stepper.ticks) {
+            // Rather than spinning while a lockstep peer's inputs are on their way, its frames
+            // unpaced.
+            if !real_time && app.stack.net_waits(stepper.ticks) {
                 std::thread::sleep(Duration::from_millis(1));
             }
             app.stack.recorded()?;
