@@ -5984,6 +5984,17 @@ impl Stack {
         restored
     }
 
+    /// Tells `cx` the session the run takes part in, if any, as [`Context::player`] and
+    /// [`Context::networked`] say, and whether it's a server's or a client's: as the layers attach
+    /// or pick up from a restore.
+    fn tell_session(&self, cx: &mut Context) {
+        cx.player = self.net.as_ref().and_then(Session::player);
+        cx.networked = self.net.is_some();
+        cx.served = self.served();
+        cx.client = matches!(self.net, Some(Session::Client(_)));
+        cx.follows |= self.joins();
+    }
+
     /// Whether the run hosts or plays alone, rather than joining a lockstep session or connecting
     /// to a server, whose host or server alone watches the scene and script files the layers
     /// loaded.
@@ -6127,11 +6138,7 @@ impl Stack {
         if let Some(recorder) = &mut self.recorder {
             recorder.start(&self.names, cx.world.stream_state());
         }
-        cx.player = self.net.as_ref().and_then(Session::player);
-        cx.networked = self.net.is_some();
-        cx.served = self.served();
-        cx.client = matches!(self.net, Some(Session::Client(_)));
-        cx.follows |= self.joins();
+        self.tell_session(cx);
         #[cfg(feature = "dev")]
         {
             cx.sync_tested = self.sync_test.is_some();
@@ -6167,11 +6174,7 @@ impl Stack {
         serves: bool,
     ) -> Result<(u64, bool)> {
         let _zone = gg_core::zone!();
-        cx.player = self.net.as_ref().and_then(Session::player);
-        cx.networked = self.net.is_some();
-        cx.served = self.served();
-        cx.client = matches!(self.net, Some(Session::Client(_)));
-        cx.follows |= self.joins();
+        self.tell_session(cx);
         #[cfg(feature = "dev")]
         {
             cx.sync_tested = self.sync_test.is_some();

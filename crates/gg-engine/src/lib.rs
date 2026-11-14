@@ -691,13 +691,8 @@ fn run_args(
             app.stack.record(recorder);
         }
         if let Some(net) = &args.net {
-            let mut session = net::Session::start(net, args.code, app.name, app.stack.names())?;
-            if args.rollback {
-                session.predict();
-            }
-            if let Some(link) = args.link {
-                session.condition(link);
-            }
+            let (code, names, rollback) = (args.code, app.stack.names(), args.rollback);
+            let session = net::Session::begin(net, code, app.name, names, rollback, args.link)?;
             app.stack.session(session);
         }
         // A server renders nothing, and serves no tool API, whose tools look at a run's frames.

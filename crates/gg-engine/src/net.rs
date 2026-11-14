@@ -2830,6 +2830,29 @@ impl Session {
         })
     }
 
+    /// Starts the session `net` says, as [`start`](Self::start) does, its peers predicting each
+    /// other's inputs if `rollback` says so, as [`predict`](Self::predict) has them, and its links
+    /// doing to what comes as `link` says, as [`condition`](Self::condition) has them.
+    ///
+    /// Fails as `start` does.
+    pub(crate) fn begin(
+        net: &Net,
+        code: Option<Code>,
+        app: &'static str,
+        layers: &[&str],
+        rollback: bool,
+        link: Option<Conditions>,
+    ) -> Result<Self> {
+        let mut session = Self::start(net, code, app, layers)?;
+        if rollback {
+            session.predict();
+        }
+        if let Some(link) = link {
+            session.condition(link);
+        }
+        Ok(session)
+    }
+
     /// Has a peer predict the other's inputs, as [`Lockstep::predict`] says: before its first turn.
     pub(crate) fn predict(&mut self) {
         if let Self::Peer(net) = self {
