@@ -1196,14 +1196,16 @@ pub(super) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
-/// `spirv`, a shader that writes depth slangc compiled, its fragment shader, `fragment_main`,
-/// returning zeros at location 2, as the motion of what it draws, if it returns nothing there. The
-/// pipelines of shaders that write depth write the view's motion, the motion of what owns the
-/// depth: one whose fragment shader returned none would leave there what drew behind it, whose
-/// motion its pixels would then be taken back by, where zeros move them with the camera alone. The
-/// motion is a float4, the type of the color at location 0, which the contract has a float4, whose
-/// output's pointer type the motion's takes too. SPIR-V it can't read, or whose fragment shader
-/// returns something at location 2 already, or nothing at location 0, stays as it is.
+/// `spirv`, a shader slangc compiled, its fragment shader, `fragment_main`, returning zeros at
+/// location 2, as the motion of what it draws, if it returns nothing there. The pipelines of
+/// shaders that write depth write the view's motion, the motion of what owns the depth: one whose
+/// fragment shader returned none would leave there what drew behind it, whose motion its pixels
+/// would then be taken back by, where zeros move them with the camera alone. Those of shaders that
+/// blend don't write it, but lavapipe may, as `GraphicsDesc::format` in gg-gpu says, blending the
+/// zeros as the color blends, which leaves it as it was. The motion is a float4, the type of the
+/// color at location 0, which the contract has a float4, whose output's pointer type the motion's
+/// takes too. SPIR-V it can't read, or whose fragment shader returns something at location 2
+/// already, or nothing at location 0, stays as it is.
 pub(super) fn return_no_motion(spirv: Vec<u8>) -> Vec<u8> {
     let Some(words) = words(&spirv) else {
         return spirv;

@@ -480,7 +480,7 @@ impl Shaders {
             index,
             replacement: false,
             name: name.to_owned(),
-            spirv: prepared(spirv, blend),
+            spirv: prepared(spirv),
             vertex_size: types.vertex_size,
             params_size: types.params_size,
             blend,
@@ -683,22 +683,17 @@ impl ShaderSource {
         check(&self.name, &self.path, &spirv, &self.types)?;
         Ok(Compiled {
             source: self.clone(),
-            spirv: prepared(spirv, self.blend),
+            spirv: prepared(spirv),
             files,
         })
     }
 }
 
-/// `spirv`, a shader that blends as `blend` says, as a renderer makes its pipelines: its sampled
-/// images decorated as [`spirv::decorate_non_uniform`] says, and, if it writes depth, its fragment
-/// shader returning no motion where it returns none, as [`spirv::return_no_motion`] says.
-fn prepared(spirv: Vec<u8>, blend: Blend) -> Vec<u8> {
-    let spirv = spirv::decorate_non_uniform(spirv);
-    if writes_depth(blend) {
-        spirv::return_no_motion(spirv)
-    } else {
-        spirv
-    }
+/// `spirv`, a shader, as a renderer makes its pipelines: its sampled images decorated as
+/// [`spirv::decorate_non_uniform`] says, and its fragment shader returning no motion where it
+/// returns none, as [`spirv::return_no_motion`] says.
+fn prepared(spirv: Vec<u8>) -> Vec<u8> {
+    spirv::return_no_motion(spirv::decorate_non_uniform(spirv))
 }
 
 /// A game's shader compiled again, which [`Shaders::replace`] puts in place of the one it was
@@ -1082,10 +1077,10 @@ mod tests {
         assert_eq!(shaders.sources().len(), 7);
     }
 
-    /// A shader that writes depth and returns no motion returns zeros there, as one that does
-    /// keeps its own and one that blends goes without, and each still keeps to the contract.
+    /// A shader that returns no motion returns zeros there, whether it writes depth or blends, as
+    /// one that does keeps its own, and each still keeps to the contract.
     #[test]
-    fn shaders_that_write_depth_return_motion() {
+    fn shaders_return_motion() {
         let mut shaders = Shaders::default();
         let (flat, moving) = (fixture("flat_color.slang"), fixture("moving.slang"));
         let added = [
@@ -1108,7 +1103,7 @@ mod tests {
             locations,
             [
                 ("opaque", vec![0, 1, 2]),
-                ("blended", vec![0, 1]),
+                ("blended", vec![0, 1, 2]),
                 ("moving", vec![0, 1, 2]),
             ]
         );
