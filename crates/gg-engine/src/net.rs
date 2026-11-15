@@ -5841,17 +5841,26 @@ mod tests {
                 (stream, packets)
             })
         };
-        let start = Instant::now();
-        let alike = |(stream, packets): ([u64; 2], [(u64, u64); 2])| {
-            stream[0] == stream[1] && packets[0] == packets[1]
+        // Until both ways are as asserted below, which counts that match alone aren't: they match
+        // at nothing, before the links' threads have written.
+        let done = |sends: u64, (stream, packets): ([u64; 2], [(u64, u64); 2])| {
+            stream[0] == stream[1]
+                && stream[0] > sends * lines.len() as u64
+                && packets[0] == packets[1]
+                && packets[0].0 == sends
         };
-        while !ways(&ends).into_iter().all(alike) && start.elapsed() < Duration::from_secs(5) {
+        let start = Instant::now();
+        let mut now = ways(&ends);
+        while !([1, 2].into_iter().zip(now)).all(|(sends, way)| done(sends, way))
+            && start.elapsed() < Duration::from_secs(5)
+        {
             for end in &mut ends {
                 end.take(&mut buffer, None, &mut random, Instant::now());
             }
             thread::sleep(Duration::from_millis(1));
+            now = ways(&ends);
         }
-        for (sends, (stream, packets)) in [1, 2].into_iter().zip(ways(&ends)) {
+        for (sends, (stream, packets)) in [1, 2].into_iter().zip(now) {
             assert_eq!(stream[0], stream[1], "the stream's bytes");
             assert!(stream[0] > sends * lines.len() as u64, "sealed: {stream:?}");
             assert_eq!(packets[0], packets[1], "the packets and their bytes");
