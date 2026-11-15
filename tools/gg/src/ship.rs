@@ -25,7 +25,7 @@ pub(crate) struct Ship {
 }
 
 /// Cargo's flags for a build as it ships: without the game's `dev`, in the shipping profile, which
-/// the root manifest gives.
+/// the workspace's `.cargo/config.toml` gives.
 const SHIPPING: [&str; 3] = ["--no-default-features", "--profile", "shipping"];
 
 /// The loader's name in a bundle's `Contents/Frameworks`, which gg-gpu loads it by, and the link

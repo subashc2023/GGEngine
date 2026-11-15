@@ -13,3 +13,80 @@ gg = "run --quiet --package gg --"
 CXXFLAGS_x86_64_unknown_linux_gnu = "-ffp-contract=off"
 CXXFLAGS_aarch64_unknown_linux_gnu = "-ffp-contract=off"
 CXXFLAGS_aarch64_apple_darwin = "-ffp-contract=off"
+
+# The workspace's profiles, here rather than in the root Cargo.toml so that this one file holds
+# every setting a game's build takes from the engine: a game in a workspace of its own builds as
+# the engine's games do with a copy of it, but for the alias. Cargo reads this file only for builds
+# started in this directory or one below it, as `gg`, `dx` and the editor start theirs. Unlike the
+# manifest's, a package named below that the workspace doesn't have, as one an update dropped,
+# isn't warned of.
+
+# Games' builds as they ship, as `gg ship` builds them, into `target/shipping`: release's, linked
+# whole with fat LTO, a codegen unit to a crate. Panics still unwind, so that the render thread's
+# resumes on the main thread. Debug info is line tables alone, with the symbols kept, so that a
+# panic names its functions and the frames it logs turn into lines; `gg ship` keeps them beside the
+# players' folder, not in it: the PDB on Windows, the executable before it's stripped on Linux, a
+# dSYM on macOS.
+[profile.shipping]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+# Debug builds decode a model's JPEGs as a layer adds it, the sandbox's 2,048 by 2,048 one in about
+# 0.75 s unoptimized, at each of its tests' attaches and CI's runs.
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+# Debug builds bake a font's field as a layer adds it, Inter's in some 15 s unoptimized, at each of
+# their tests' and runs' starts. nalgebra's and image's code that it runs is generic, and builds in
+# fdsm, at fdsm's level; but fdsm's functions that fill a field are generic over its image, and build
+# unoptimized in gg-engine, where Inter still takes about a second on one thread, as tests bake it,
+# which a process takes once (gg-engine's font.rs).
+[profile.dev.package.fdsm]
+opt-level = 3
+
+# Debug builds make a mesh collider's BVH in the step its body is made, at each Play's first tick
+# in the editor: Sponza's in 1.37 s unoptimized, 0.11 s so. Floats step to the same bits at any
+# level, so a world's hash doesn't change with it.
+[profile.dev.package.parry3d-f64]
+opt-level = 3
+
+# Debug builds draw their development UI through egui each frame, and its text through the crates
+# that shape, read and rasterize it, which unoptimized take some 6 times as long: the editor's
+# panels some 6 ms a frame, where these make them 1 ms. Optimizing every dependency gained nothing
+# more.
+[profile.dev.package.egui]
+opt-level = 3
+[profile.dev.package.epaint]
+opt-level = 3
+[profile.dev.package.emath]
+opt-level = 3
+[profile.dev.package.ecolor]
+opt-level = 3
+[profile.dev.package.harfrust]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.read-fonts]
+opt-level = 3
+[profile.dev.package.font-types]
+opt-level = 3
+[profile.dev.package.vello_cpu]
+opt-level = 3
+[profile.dev.package.vello_common]
+opt-level = 3
+[profile.dev.package.fearless_simd]
+opt-level = 3
+[profile.dev.package.kurbo]
+opt-level = 3
+[profile.dev.package.peniko]
+opt-level = 3
+[profile.dev.package.guillotiere]
+opt-level = 3
+[profile.dev.package.unicode-segmentation]
+opt-level = 3
+[profile.dev.package.unicode-general-category]
+opt-level = 3
+[profile.dev.package.unicode-properties]
+opt-level = 3

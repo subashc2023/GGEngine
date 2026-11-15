@@ -245,7 +245,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 |---|---|
 | A coding agent built into the editor, modeled on the pi coding agent, which edits a project's files and works on its running game through the tool API: the agent is Claude Code, through the user's subscription | One built in serves the user better than Claude Code does |
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
-| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
+| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); the crates .cargo/config.toml names are, for the reasons it gives | Physics or another heavy dependency makes debug builds slow |
 | Compiling debug events out of shipping builds as well as trace events: `release_max_level_debug` keeps them in every optimized build, as agents read them of `gg run --release`'s runs, and Cargo can't give one profile features of its own | A shipped game's debug events cost it measurably |
 | Signing a macOS .app with a Developer ID and notarizing it, which take a paid Apple Developer account: `gg ship` signs it ad hoc, which Apple Silicon needs to run it, and which Gatekeeper refuses once it's downloaded, until the user opens it anyway from System Settings | A game ships to players on macOS |
 | A game's own bundle identifier and name, which its project would give: `gg ship` names a game's files and its .app after its package, capitalized, its identifier `com.ggengine.<package>` | A game ships under a name other than its package's |
