@@ -194,6 +194,9 @@ symphonia = { version = "0.6.1", default-features = false, features = [
 ] }
 # serde_derive's version, so that the two build once.
 syn = "3.0.9"
+# Reads TOML, for gg, which holds a game's clippy.toml and rust-toolchain.toml against its engine's:
+# cargo's own parser, without its defaults' writing.
+toml_edit = { version = "0.25.17", default-features = false, features = ["parse"] }
 # Without its default `attributes`, the `#[instrument]` macro, which nothing uses.
 # release_max_level_debug, so that optimized builds, those that ship among them, compile trace
 # events out; debug events stay in every build, as `gg run --release` runs development builds

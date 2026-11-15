@@ -1123,7 +1123,10 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   gives identical results on every platform, so lockstep games and rollback netcode stay in sync.
   So glam is built without SIMD and with libm's functions, for the whole build
   ([Cargo.toml](Cargo.toml)), and clippy refuses std's float methods whose precision is the
-  platform's ([clippy.toml](clippy.toml)), for `gg_core::math`'s. Luau's math is held to the same:
+  platform's ([clippy.toml](clippy.toml)), for `gg_core::math`'s: a game of its own has a copy, as
+  `gg new` writes it, which `gg check` warns of (`gg.settings`) where it lacks a method the
+  engine's bans, and where the game's rust-toolchain.toml pins another release than the engine's,
+  reading the engine the game builds against. Luau's math is held to the same:
   its functions whose precision is the platform's are libm's, a script that uses `^`, which
   calls the platform's `pow` past any hook, is refused, and its libraries' functions that make an
   integer of a number, by a C cast that platforms make otherwise past the integer's range, fail at

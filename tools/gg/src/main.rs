@@ -19,6 +19,7 @@ mod patch;
 mod probe;
 mod run;
 mod runs;
+mod settings;
 mod ship;
 
 use std::fs;
@@ -108,7 +109,10 @@ Build and run:
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
-      One that runs longer than SECONDS (600) is ended.
+      One that runs longer than SECONDS (600) is ended. First it warns, on stderr, where PACKAGE's
+      settings aren't those of the engine it builds against (`gg.settings`): where the clippy.toml
+      clippy finds for it lacks a method the engine's bans, or its rust-toolchain.toml pins another
+      Rust release.
   ship [PACKAGE]
       Build PACKAGE, the project's game without one, as it ships, without `dev` in the shipping
       profile, cook its project into its package beside its executable, with the workspace's
@@ -499,6 +503,13 @@ fn print(line: &str) {
 fn report(failure: &Failure) {
     let error = json!({"error": {"code": failure.code, "message": failure.message}});
     let _ = writeln!(std::io::stderr().lock(), "{error}");
+}
+
+/// Prints a warning on stderr, as a line of JSON: its code, its message, and the file or directory
+/// `path` it's about.
+fn warn(code: &str, message: &str, path: &Path) {
+    let warning = json!({"warning": {"code": code, "message": message, "path": path}});
+    let _ = writeln!(std::io::stderr().lock(), "{warning}");
 }
 
 fn bad(message: String) -> Failure {

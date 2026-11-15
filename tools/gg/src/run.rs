@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::patch::{Patches, Process, Watcher};
 use crate::runs::{self, State, Told};
-use crate::{Scope, build, game};
+use crate::{Scope, build, game, settings};
 
 /// What `gg run` runs: a package, the project gg works in, if any, the package's profile, whether
 /// it's patched, unless `--no-patch`, how long its frames may stop before it has hung, `None` for
@@ -1283,12 +1283,15 @@ fn failed(exe: &Path, error: std::io::Error) -> Failure {
 
 /// Builds `check`'s package and runs it headless for its frames, without the tool API, and prints
 /// what it did as a line of JSON: its exit status, its warnings and errors, and `engine.perf`'s
-/// frame times. Returns whether it passed: it exited cleanly, in time, and logged no error.
+/// frame times. Returns whether it passed: it exited cleanly, in time, and logged no error. Before
+/// building, it warns of the package's settings that aren't its engine's, as [`warn_settings`]
+/// does, which don't fail it.
 ///
-/// Fails as [`check_game`] does, with `gg.build` if it doesn't build, and `gg.run` if it can't
-/// start or be waited for.
+/// Fails as [`check_game`] and [`warn_settings`] do, with `gg.build` if it doesn't build, and
+/// `gg.run` if it can't start or be waited for.
 pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
     check_game(&check.package, check.project.as_ref())?;
+    warn_settings(&check.package, check.project.as_ref())?;
     let exe = build::build(
         &check.package,
         release(check.release),
@@ -1343,6 +1346,37 @@ pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
     });
     event(&checked);
     Ok(passed)
+}
+
+/// Warns `gg.settings`, on stderr, of each setting of `package`, as cargo run in the directory of
+/// project `project`, if any, finds it, that isn't the engine's it builds against, as
+/// [`settings::drifts`] says: its clippy.toml looked for as clippy looks, from `CLIPPY_CONF_DIR` or
+/// else the package's directory, and its rust-toolchain.toml as rustup looks, from the directory
+/// cargo runs in. A package that builds against no engine has nothing to warn of.
+///
+/// Fails as [`build::package`] does, and with `gg.run` if gg can't tell its working directory.
+fn warn_settings(package: &str, project: Option<&Scope>) -> Result<(), Failure> {
+    let dir = project.map(Scope::dir);
+    let package = build::package(package, dir)?;
+    let Some(engine) = package.engine else {
+        return Ok(());
+    };
+    let crate_dir = (package.manifest.parent()).expect("cargo names a manifest by its file's path");
+    let clippy_from =
+        std::env::var_os("CLIPPY_CONF_DIR").map_or(crate_dir.to_owned(), PathBuf::from);
+    let cargo_dir = match dir {
+        Some(dir) => dir.to_owned(),
+        None => std::env::current_dir().map_err(|error| {
+            Failure::new(
+                "gg.run",
+                format!("can't tell gg's working directory: {error}"),
+            )
+        })?,
+    };
+    for drift in settings::drifts(&clippy_from, &cargo_dir, &engine) {
+        crate::warn("gg.settings", &drift.message, &drift.path);
+    }
+    Ok(())
 }
 
 /// Cargo's flags for a development build, optimized if `release`.

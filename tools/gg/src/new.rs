@@ -160,7 +160,8 @@ cargo test
 settings its games build with, Luau's C++ flags among them; the float methods whose bits differ by
 platform; its Rust release; the licenses a shipped game's notices accept; and LF line endings, as
 the digest a session names a build by reads files' bytes. Keep them as the engine's are, copying
-them again as the game moves to another revision of the engine.
+them again as the game moves to another revision of the engine: `gg check` warns (`gg.settings`)
+where `clippy.toml` lacks a method the engine's bans, or `rust-toolchain.toml` pins another release.
 "#;
 
 /// The engine's own files that a game outside its workspace gets copies of, as `gg` was built with

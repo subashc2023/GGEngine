@@ -1258,6 +1258,7 @@ dependencies = [
  "gg-api",
  "serde_json",
  "syn 3.0.9",
+ "toml_edit",
 ]
 
 [[package]]
