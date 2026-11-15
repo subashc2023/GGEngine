@@ -8753,6 +8753,7 @@ mod tests {
             scenes: vec!["content/scenes".to_owned()],
             start: "content/scenes/main.ron".to_owned(),
             relay: None,
+            icon: None,
         };
         std::fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
         let (id, hash) = (

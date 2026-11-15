@@ -1,0 +1,13 @@
+The licenses of the Rust crates the game is built from, and of the C and C++ libraries they compile
+in, each followed by the crates under it. Each crate's source is on crates.io by its name and
+version, and in the repository named beside it.
+{{#each licenses}}
+
+================================================================================
+{{{name}}}, for:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}}, {{{crate.repository}}}{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

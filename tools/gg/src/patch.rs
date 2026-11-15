@@ -105,7 +105,7 @@ impl Builder {
                 dir,
             } => {
                 let args: &[&str] = if *release { &["--release"] } else { &[] };
-                build::build(package, args, dir.as_deref()).map(Fat::unpatchable)
+                build::build(package, args, dir.as_deref()).map(|built| Fat::unpatchable(built.exe))
             }
         }
     }

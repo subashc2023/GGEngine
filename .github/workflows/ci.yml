@@ -24,8 +24,8 @@ jobs:
     # A pull request from a branch of this repository was already checked when it was pushed.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     # About twice a run that compiles every crate afresh: a job that hangs holds its billed runner
-    # that long, rather than GitHub's 360 minutes. The job that ships the demo builds every crate a
-    # second time, in the shipping profile, and links it whole.
+    # that long, rather than GitHub's 360 minutes. The job that ships the demos builds every crate a
+    # second time, in the shipping profile, and links each demo whole.
     timeout-minutes: ${{ matrix.part == 'shipping' && 60 || 45 }}
     strategy:
       fail-fast: false
@@ -305,26 +305,38 @@ jobs:
         run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
         env:
           TRACY_NO_INVARIANT_CHECK: "1"
-      # The demo as it ships, as `gg ship` lays it out: built without `dev` in the shipping profile,
-      # beside the package the cooker writes, it replays its live recording to every hash, exiting 0,
-      # and runs headless, from a directory of its own, with neither its project nor slangc where its
-      # build found them. Builds without `dev` log in the per-user state directory, here the job's
-      # own.
-      - name: Ship the demo, and run it as it ships
+      # Which writes a shipped game's notices, as `gg ship` runs it.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        if: matrix.part == 'shipping'
+        with:
+          tool: cargo-about@0.9.2
+      # The demos as they ship, as `gg ship` lays them out: built without `dev` in the shipping
+      # profile, beside the package the cooker writes, named after the game, with their notices and
+      # their symbols beside; each replays its live recording to every hash, exiting 0, and runs
+      # headless, from a directory of its own, with neither its project nor slangc where its build
+      # found them. Builds without `dev` log in the per-user state directory, here the job's own.
+      - name: Ship the demos, and run them as they ship
         if: matrix.part == 'shipping'
         run: |
           export XDG_STATE_HOME="$RUNNER_TEMP/state"
-          cargo gg ship shards
-          shipped="$RUNNER_TEMP/shipped"
-          cp -R target/ship/shards "$shipped"
-          cp games/shards/tests/references/live.recording "$shipped"
-          mv games/shards "$RUNNER_TEMP/shards"
-          mv "$RUNNER_TEMP/slang" "$RUNNER_TEMP/slang-away"
-          "$shipped/gg-shards" --replay "$shipped/live.recording"
-          "$shipped/gg-shards" --headless --frames 120
-          mv "$RUNNER_TEMP/slang-away" "$RUNNER_TEMP/slang"
-          mv "$RUNNER_TEMP/shards" games/shards
-          grep -q "Running from the game's package" "$XDG_STATE_HOME"/ggengine/Shards/logs/shards-*.jsonl
+          for game in shards foxball; do
+            name="$(echo "${game:0:1}" | tr '[:lower:]' '[:upper:]')${game:1}"
+            cargo gg ship "$game"
+            shipped="$RUNNER_TEMP/shipped-$game"
+            cp -R "target/ship/$game" "$shipped"
+            cp "games/$game/tests/references/live.recording" "$shipped"
+            mv "games/$game" "$RUNNER_TEMP/$game"
+            mv "$RUNNER_TEMP/slang" "$RUNNER_TEMP/slang-away"
+            "$shipped/$name" --replay "$shipped/live.recording"
+            "$shipped/$name" --headless --frames 120
+            mv "$RUNNER_TEMP/slang-away" "$RUNNER_TEMP/slang"
+            mv "$RUNNER_TEMP/$game" "games/$game"
+            grep -q "Running from the game's package" "$XDG_STATE_HOME/ggengine/$name/logs/$game"-*.jsonl
+            # The notices name what's compiled in, Luau's C++ among it, and the symbols the build.
+            grep -q "Roblox Corporation" "$shipped/NOTICES.txt"
+            grep -q "^source [0-9a-f]\{16\}$" "target/ship/$game-symbols/build.txt"
+          done
+          grep -q "tomkranis" "$RUNNER_TEMP/shipped-foxball/NOTICES.txt"
       # The reference player as it ships, a build of it alone, without `dev`: with the showcase cooked
       # into its package beside it, in a directory of its own, it runs the showcase's scenes and Luau
       # scripts headless, with neither the showcase's project nor slangc where its build found them,

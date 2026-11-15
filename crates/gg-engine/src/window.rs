@@ -25,7 +25,7 @@ use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 #[cfg(feature = "dev")]
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use crate::api::{self, Api, Waited, Waiting};
 use crate::args::Args;
@@ -233,9 +233,22 @@ impl Handler<'_> {
             let most: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
             (width, height) = (width.min(most.width), height.min(most.height));
         }
+        let icon = self.app.icon.and_then(|png| {
+            window_icon(png)
+                .inspect_err(|error| warn!(code = error.code(), "{error:#}"))
+                .ok()
+        });
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
             .with_inner_size(LogicalSize::new(width, height));
+        // Windows' taskbar and Alt+Tab show a window's big icon, which winit sets apart from the
+        // small one its title bar shows.
+        #[cfg(target_os = "windows")]
+        let attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows as _;
+            attributes.with_taskbar_icon(icon.clone())
+        };
+        let attributes = attributes.with_window_icon(icon);
         #[cfg(feature = "dev")]
         let attributes = chrome::attributes(self.chrome, attributes);
         let window = event_loop.create_window(attributes).map_err(|error| {
@@ -979,5 +992,47 @@ impl ApplicationHandler for Handler<'_> {
             self.egui_winit = None;
         }
         self.window = None;
+    }
+}
+
+/// The window's icon, `png` decoded to RGBA.
+///
+/// Fails with `engine.icon` if it doesn't decode.
+fn window_icon(png: &[u8]) -> Result<Icon> {
+    let failed = |why: String| {
+        let message = format!("can't give the window its icon, which {why}; it opens without one");
+        Error::new("engine.icon", message)
+    };
+    let image = crate::image::decode_png(png).map_err(failed)?;
+    let [width, height] = image.size;
+    Icon::from_rgba(image.pixels, width, height).map_err(|error| failed(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PNG of RGBA, `width` by `height` pixels.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut file = Vec::new();
+        let mut encoder = png::Encoder::new(&mut file, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("a header");
+        let pixels = [200, 120, 40, 255].repeat(width as usize * height as usize);
+        writer.write_image_data(&pixels).expect("written");
+        writer.finish().expect("finished");
+        file
+    }
+
+    /// winit takes the icon's RGBA only if it's as long as its size says.
+    #[test]
+    fn an_icon_decodes_to_rgba_of_its_size_and_anything_else_is_refused() {
+        assert!(window_icon(&png(256, 256)).is_ok());
+        assert!(window_icon(&png(3, 5)).is_ok());
+        for refused in [&b"not a png"[..], &png(4, 4)[..20]] {
+            let code = window_icon(refused).err().map(|error| error.code());
+            assert_eq!(code, Some("engine.icon"));
+        }
     }
 }

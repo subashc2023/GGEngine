@@ -14,6 +14,18 @@ tracing-subscriber.workspace = true
 tracy-client = { workspace = true, optional = true }
 tracy-client-sys = { workspace = true, optional = true }
 
+# A panic's frames, by the module each return address is in (src/log/frames.rs): Windows' calls, and
+# glibc's and libSystem's on Linux and macOS.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [features]
 # Zones, plots and frame marks for Tracy (src/profile.rs), which compile to nothing without it.
 tracy = ["dep:tracy-client", "dep:tracy-client-sys"]

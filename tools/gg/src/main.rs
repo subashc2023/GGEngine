@@ -112,12 +112,17 @@ Build and run:
   ship [PACKAGE]
       Build PACKAGE, the project's game without one, as it ships, without `dev` in the shipping
       profile, cook its project into its package beside its executable, with the workspace's
-      cooker, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, printing
-      a line naming the folder and each file in it, with its size: side by side on Windows and
-      Linux, whose GPUs' drivers install the Vulkan loader; on macOS in an app bundle, PACKAGE
-      capitalized, as `Shards.app`, with the loader and KosmicKrisp of the Vulkan SDK, 1.4.363.0 or
-      later, whose `macOS` folder `VULKAN_SDK` names (`gg.no_sdk`, `gg.sdk_version`), signed ad hoc
-      (`gg.sign`).
+      cooker, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, named
+      after the game, PACKAGE capitalized, as `Foxball.exe` and `Foxball.ggpk`, with NOTICES.txt:
+      the project's CREDITS.txt and the licenses of the crates it's built from, which cargo-about
+      0.9.2 writes with the workspace's about.toml (`gg.notices`). Side by side on Windows, with the
+      Visual C++ runtime from Visual Studio's redist folder (`gg.no_redist`), and on Linux, whose
+      GPUs' drivers install the Vulkan loader; on macOS in an app bundle, as `Foxball.app`, with the
+      project's icon and the loader and KosmicKrisp of the Vulkan SDK, 1.4.363.0 or later, whose
+      `macOS` folder `VULKAN_SDK` names (`gg.no_sdk`, `gg.sdk_version`), signed ad hoc (`gg.sign`).
+      The build's symbols go in `ship/PACKAGE-symbols` beside it, with build.txt naming the build:
+      the PDB on Windows, the executable before it's stripped (objcopy) on Linux, a dSYM (dsymutil)
+      on macOS (`gg.symbols`). Prints a line naming the folders and each file in them, with sizes.
       Building the project's game, `run`, `check` and `ship` first check that it's the package
       beside the project's manifest (`gg.project`).
   fetch

@@ -658,7 +658,7 @@ fn read_png(bytes: &[u8]) -> Result<[u32; 2], String> {
 
 /// Decodes a PNG of any color type and bit depth to RGBA8: gray to equal red, green and blue, a
 /// palette to its colors, 16-bit samples to their high bytes, and missing alpha to opaque.
-fn decode_png(bytes: &[u8]) -> Result<Image, String> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     let png = |error: png::DecodingError| error.to_string();
     let mut decoder = png_decoder(bytes);
     let header = decoder.read_header_info().map_err(png)?;

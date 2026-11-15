@@ -67,8 +67,8 @@ impl Take {
 ///
 /// The package holds the files under the asset root, through the folders gg-api's scan goes
 /// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, the
-/// manifest and the fetch list: sounds and music, scenes and other RON, UIs, and scripts, as they
-/// are;
+/// manifest, the icon it names, which the game's build compiles in, and the fetch list: sounds and
+/// music, scenes and other RON, UIs, and scripts, as they are;
 /// textures compressed
 /// to BC7, or a Radiance HDR's colors of high dynamic range to BC6H, of one level, as a layer's
 /// texture has; models read as a run reads them, with the
@@ -117,8 +117,11 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
         })
     };
     let (manifest, fetch) = (dir.join(Project::FILE), dir.join(Fetch::FILE));
+    // The icon is the executable's and the window's, which the game's build compiles in.
+    let icon = project.icon_path(dir);
+    let unpacked = |file: &Path| file == manifest || file == fetch || icon.as_deref() == Some(file);
     let taken = (found.iter())
-        .filter(|found| !in_mod(&found.path) && found.file != manifest && found.file != fetch)
+        .filter(|found| !in_mod(&found.path) && !unpacked(&found.file))
         .filter_map(|found| Some((found, Take::of(&found.path)?)));
     let mut package = Package {
         writer: Writer::new(
@@ -506,16 +509,20 @@ Targets fragment_main(Varyings input) {
     /// A package holds what a game's runs load, by their paths from the asset root: a texture
     /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab and a UI, with
     /// their IDs too, and a script as they are; and a shader compiled, but the module it includes,
-    /// which doesn't compile alone; and leaves out the manifest, the fetch list, a mod's folder,
-    /// and what no run loads, as code and notes, but the relay the manifest names. Cooked again,
-    /// it's the same bytes.
+    /// which doesn't compile alone; and leaves out the manifest, the icon it names, with its ID
+    /// file, the fetch list, a mod's folder, and what no run loads, as code and notes, but the
+    /// relay the manifest names. Cooked again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
         let lamp = id_file("6a4d0b2f18c9e357");
         let menu = id_file("7b5e1c3a29d0f468");
+        let icon = id_file("8c6f2d4b3ae1f579");
         let relay = "relay.example.com:7800";
-        let project = PROJECT.replace(")\n", &format!("    relay: Some(\"{relay}\"),\n)\n"));
+        let project = PROJECT.replace(
+            ")\n",
+            &format!("    relay: Some(\"{relay}\"),\n    icon: Some(\"art/icon.png\"),\n)\n"),
+        );
         let fixture = Fixture::new(
             "holds",
             &[
@@ -527,6 +534,7 @@ Targets fragment_main(Varyings input) {
                 ("ui/menu.ui", MENU),
                 ("ui/menu.ui.meta", &menu),
                 ("textures/stone.png.meta", &stone),
+                ("art/icon.png.meta", &icon),
                 ("shaders/flat.slang", FLAT),
                 ("shaders/common.slang", COMMON),
                 ("scripts/spin.luau", "return nil\n"),
@@ -537,6 +545,7 @@ Targets fragment_main(Varyings input) {
             ],
         );
         fixture.write("textures/stone.png", &png([5, 3], [90, 80, 70, 255]));
+        fixture.write("art/icon.png", &png([256, 256], [200, 120, 40, 255]));
         let crate_model = fs::read(showcase_model("crate.gltf")).unwrap();
         fixture.write("models/crate.gltf", &crate_model);
         let out = fixture.0.join("target/game.ggpk");

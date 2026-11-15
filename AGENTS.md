@@ -98,7 +98,7 @@ cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means 
 cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes
 cargo run -p sandbox -- --replay target/run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
-cargo gg ship shards              # as it ships, in target/ship/shards; on macOS, Shards.app
+cargo gg ship shards              # as it ships, in target/ship/shards; needs cargo-about 0.9.2
 cargo run -p cook -- games/shards target/debug/gg-shards.ggpk   # for a build --no-default-features
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`

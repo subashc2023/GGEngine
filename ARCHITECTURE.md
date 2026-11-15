@@ -213,20 +213,32 @@ the Inspector's and the Performance panel's UI and the torn-off windows are behi
 
 Shipping builds are optimized in the `shipping` profile: release's, with the whole program
 optimized as one at link time (fat LTO, one codegen unit), panics still unwinding, as the render
-thread's resumes on the main thread. Release and shipping builds compile trace events out
+thread's resumes on the main thread, and line tables kept as debug info, which the players' folder
+doesn't hold. Release and shipping builds compile trace events out
 (`tracing`'s `release_max_level_debug`), and keep debug events, which agents read of `gg run
 --release`'s runs. A game built without `dev`, and the player built optimized, open no console
-window on Windows, their logs recording their runs. `cargo gg ship` builds a project's game so,
-cooks its package beside it and lays the two out in `target/ship/<game>`: side by side on Windows
-and Linux, whose GPUs' drivers install the Vulkan loader; on macOS, in an app bundle,
-`<Game>.app`, its package in `Contents/Resources`, and the Vulkan SDK's loader and KosmicKrisp in
+window on Windows, their logs recording their runs. A game's build script, gg-api's
+`build::emit`, links version info into its Windows executables, naming the game, and the
+manifest's icon, which its window takes too, through `App::icon`. `cargo gg ship` builds a
+project's game so, cooks its package beside it and lays the two out in `target/ship/<game>`, named
+after the game, its package's name capitalized, as `Foxball.exe` and `Foxball.ggpk`, with
+`NOTICES.txt`: the project's `CREDITS.txt` and the licenses of every crate the build is made from,
+build dependencies included, as Luau's C++ is compiled in through one, which cargo-about writes
+with the workspace's `about.toml`, a license it doesn't accept failing the ship. Side by side on
+Windows, with the Visual C++ runtime's DLLs from Visual Studio's redist folder, which Windows
+doesn't include, and Linux, whose GPUs' drivers install the Vulkan loader, built for players in
+Valve's Steam Runtime 3 SDK image, whose glibc is 2.31, by ship.yml; on macOS, in an app bundle,
+`<Game>.app`, with the game's icon, its package in `Contents/Resources`, and the Vulkan SDK's loader and KosmicKrisp in
 `Contents/Frameworks`, which an executable in a bundle loads the loader from, by its path, with
 KosmicKrisp's manifest in `Contents/Resources/vulkan/icd.d`, where a loader in a bundle looks
 first. Its Info.plist, of identifier `com.ggengine.<game>`, has a launch through Launch Services,
 as from Finder, load the bundle's driver alone (`VK_LOADER_SEARCH_ONLY_IN_BUNDLE`), which needs the
 SDK 1.4.363.0 or later, the first whose KosmicKrisp is a conformant Vulkan 1.4 driver too. It's
 signed ad hoc, as Apple Silicon runs nothing unsigned, inside out, without the hardened runtime,
-under which it would load no library a team of its own didn't sign.
+under which it would load no library a team of its own didn't sign. The build's symbols go beside
+the folder, in `target/ship/<game>-symbols`, which pair with that build alone, with `build.txt`
+naming it: the PDB on Windows, the executable before objcopy strips its debug info on Linux, a dSYM
+on macOS.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
@@ -535,8 +547,11 @@ A project's state is text that people and agents edit, diff and merge with ordin
   `project.ron`, beside its `Cargo.toml`, in canonical RON: the game's package (`game`); its asset
   root (`assets`), which is `App::root`; the folders in it that hold its scenes (`scenes`); the
   scene it starts in (`start`), which `Context::load_start_scene` loads; each path relative to the
-  manifest's directory; and, if it names one, the relay its own sessions meet through (`relay`,
-  `host:port`). Tools read a manifest and never rewrite it, and `gg new` writes one. A
+  manifest's directory; if it names one, the relay its own sessions meet through (`relay`,
+  `host:port`); and if it has one, its icon (`icon`), a PNG of 256 by 256 pixels, which its builds
+  compile in and its package doesn't hold. A `CREDITS.txt` beside it, if there is one, credits what
+  the game is made from, as the authors and licenses of its assets, at the head of a shipped
+  folder's notices. Tools read a manifest and never rewrite it, and `gg new` writes one. A
   development build reads its game's, through `App::project`; shipping builds start from cooked
   data, so a build without `dev` reads none, and runs from its game's package, which holds the
   asset root, the start scene and the relay as the manifest names them.
@@ -1606,7 +1621,16 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   involved. A run whose validation layer can't validate synchronization warns
   `gpu.no_sync_validation`, naming why: the layer takes no settings (`VK_EXT_layer_settings`), or
   RenderDoc's layer hides them. A panic is logged as `log.panic`, with its location, before the
-  process ends, even under `RUST_LOG=off`.
+  process ends, even under `RUST_LOG=off`, with its backtrace, whatever `RUST_BACKTRACE` says, and
+  its `frames`: each return address, innermost first, as its module's file name and the offset
+  there of the call, as `Foxball.exe+0x12a4f0`, which the symbols `gg ship` kept beside the
+  shipped folder turn into functions and lines offline, as a player's machine can't: on Windows,
+  `llvm-symbolizer --obj <symbols>/Foxball.exe --relative-address <offset>...`, which Visual Studio
+  installs, finding the PDB beside it; on Linux, `addr2line -f -C -e <symbols>/Foxball <offset>...`
+  (binutils 2.36 or later demangles Rust's symbols); on macOS, `atos -o
+  <symbols>/Foxball.dSYM/Contents/Resources/DWARF/<executable> -l 0x100000000 <0x100000000 plus
+  the offset>`. `Starting GGEngine` names the build's source digest (`source`), as the symbols'
+  `build.txt` does.
 - **Captures.** A run that RenderDoc's layer is active on, as one `renderdoccmd capture` starts,
   captures its Nth frame with `--capture N`, through RenderDoc's in-application API, headless
   too, and logs the capture's path; asked to without the layer, it doesn't start

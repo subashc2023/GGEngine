@@ -19,7 +19,8 @@
 //! and Quit, its
 //! options choosing how well the bot plays, a command each player's runs and replays apply as
 //! they do New match, and the volumes of the main, music and sound buses and how the view is
-//! antialiased, by TAA, SMAA or neither, this run's own, which no world holds. The scores and the
+//! antialiased, by TAA, SMAA or neither, this run's own, which no world holds; all of them kept for
+//! the player between windowed runs, as the `options` module says. The scores and the
 //! keys' hint are the same file's, on the view's canvas. The foxes are Khronos's Fox (`models/fox`,
 //! CC0 by PixelMannen, rigged and animated by tomkranis and made glTF by AsoboStudio and scurest
 //! under CC BY 4.0, as its README there says), skinned, each played by a state machine, Survey
@@ -59,8 +60,11 @@ use gg_engine::{
     Transform, UiEvent, UiValue, Viewpoint, World, step_animation, step_navigation, step_physics,
 };
 
+mod options;
 #[cfg(test)]
 mod tests;
+
+use options::Options;
 
 fn main() -> ExitCode {
     gg_engine::run(app())
@@ -74,6 +78,7 @@ fn app() -> App {
     let app = App::new("Foxball")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"))
+        .icon(include_bytes!(env!("GG_ICON")))
         .predicting();
     let app = app.layer(Foxball::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
@@ -419,6 +424,9 @@ struct Foxball {
     seen: Option<Vec3>,
     /// The scores' text, written again in its memory each frame.
     text: String,
+    /// The options as the player's file holds them, as the run read them as it attached or saved
+    /// them since: they're saved again only if they've changed.
+    kept: Options,
     /// Each fox's player and place at a tick, gathered before the bots see them, the players whose
     /// bots kick, before they kick, and each fox's speed, before its state machine and dust are
     /// given it: kept, so that ticks reuse their room.
@@ -469,6 +477,7 @@ impl Foxball {
             pitch: VIEW_PITCH,
             seen: None,
             text: String::new(),
+            kept: Options::default(),
             foxes: Vec::new(),
             kicks: Vec::new(),
             speeds: Vec::new(),
@@ -540,6 +549,9 @@ impl Foxball {
     /// antialiased, as the run chose, or else as the world's environment says; the code to join by
     /// shown empty. A node a file edited to drop it goes without, as the scores do.
     fn show_page(&mut self, cx: &mut Context, page: Page) {
+        if self.page == Page::Options && page != Page::Options {
+            self.keep_options(cx);
+        }
         let Some(assets) = &self.assets else {
             return;
         };
@@ -682,6 +694,40 @@ impl Foxball {
         let _ = ui.set_text(cx, "session_status", &said);
     }
 
+    /// Takes up `options`, those the player kept: each bus's volume and the antialiasing, the run's
+    /// own, at once; and in a run alone, the bot's difficulty, if it isn't the default, queued after
+    /// the bot, so that a recording keeps it.
+    fn take_options(&mut self, cx: &mut Context, options: Options) {
+        for ((.., bus), volume) in VOLUMES.into_iter().zip(options.volumes) {
+            cx.set_volume(bus, volume, Duration::ZERO);
+        }
+        cx.set_antialiasing(options.antialiasing);
+        if !cx.networked() && options.difficulty != Difficulty::default() {
+            let (player, level) = (self.player, options.difficulty);
+            self.commands.push(Command::Difficulty { player, level });
+        }
+        self.kept = options;
+    }
+
+    /// Keeps the options for the player as the run has them, if they've changed since they were
+    /// read or last kept, as [`Options::save`] does: the bot's difficulty the world's in a run
+    /// alone, and in a session, whose bot is none, as it was.
+    fn keep_options(&mut self, cx: &Context) {
+        let found = cx
+            .world()
+            .query::<&Match>()
+            .next()
+            .map(|found| found.difficulty);
+        let difficulty = found
+            .filter(|_| !cx.networked())
+            .unwrap_or(self.kept.difficulty);
+        let options = Options::of(cx, difficulty);
+        if options != self.kept {
+            options.save(cx);
+            self.kept = options;
+        }
+    }
+
     /// Has the menu's options choose the bot's difficulty in a run alone, and disables it in a
     /// session, which has no bot.
     fn offer_difficulty(&self, cx: &mut Context) {
@@ -747,6 +793,15 @@ impl Layer for Foxball {
             let player = BOT_PLAYER;
             self.commands.push(Command::Bot { player });
         }
+        if let Some(options) = Options::read(cx) {
+            self.take_options(cx, options);
+        }
+    }
+
+    /// Keeps the options the player changed since they were last kept, as the menu's options close
+    /// do.
+    fn detach(&mut self, cx: &mut Context) {
+        self.keep_options(cx);
     }
 
     /// Takes back which player this run steers, which a joiner's world, the host's, and a client's,

@@ -277,6 +277,8 @@ pub struct App {
     docked: Vec<(&'static str, Docked)>,
     /// The window's size as it opens, in points, as [`window_size`](Self::window_size) gives it.
     window_size: [u32; 2],
+    /// The window's icon, a PNG's bytes, as [`icon`](Self::icon) gives it.
+    icon: Option<&'static [u8]>,
     /// What the world's IDs are drawn from, rather than a seed drawn at random.
     seed: Option<u64>,
     /// How far apart headless frames are, rather than a tick each.
@@ -320,6 +322,7 @@ impl App {
             #[cfg(feature = "dev")]
             docked: Vec::new(),
             window_size: [1280, 720],
+            icon: None,
             seed: None,
             headless_step: None,
             root: None,
@@ -364,6 +367,16 @@ impl App {
             "a source's digest is 16 hex digits, as `GG_SOURCE` is, not {digest:?}"
         );
         self.own_sessions.build.source = Some(digest);
+        self
+    }
+
+    /// Gives the app's window the icon `png`, a PNG's bytes, as a game's
+    /// `include_bytes!(env!("GG_ICON"))` gives them, which gg-api's `build` names from the
+    /// project's manifest, where the OS shows a window's own icon: on Windows and X11. A PNG that
+    /// doesn't decode warns `engine.icon` as the window opens, which opens without it.
+    #[must_use]
+    pub fn icon(mut self, png: &'static [u8]) -> Self {
+        self.icon = Some(png);
         self
     }
 
@@ -668,6 +681,7 @@ fn run_args(
         version = env!("CARGO_PKG_VERSION"),
         app = app.name,
         build = BUILD,
+        source = app.own_sessions.build.source,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         cpus = std::thread::available_parallelism().map_or(0, |cpus| cpus.get()),
@@ -1007,6 +1021,7 @@ mod tests {
             scenes: vec!["scenes".to_owned()],
             start: "scenes/main.ron".to_owned(),
             relay: Some("manifest.example.com:7800".to_owned()),
+            icon: None,
         };
         std::fs::write(dir.join(gg_api::Project::FILE), project.text()).expect("written");
         let app = App::new("Relayed").project(dir);

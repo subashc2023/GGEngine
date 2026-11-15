@@ -3,8 +3,11 @@
 //! the tool API to serve as they come.
 
 mod console;
+// The OS's calls that walk the stack and name the module an address is in, behind a safe function.
+#[allow(unsafe_code)]
+mod frames;
 
-use std::backtrace::{Backtrace, BacktraceStatus};
+use std::backtrace::Backtrace;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -462,7 +465,10 @@ fn create(name: &str, dir: &Path) -> Result<(PathBuf, File), (PathBuf, io::Error
 }
 
 /// Logs a panic as an error, with where it happened, so it reaches the JSON log too: under
-/// [`PANICS`], which the filter lets through, `off` included.
+/// [`PANICS`], which the filter lets through, `off` included. With its backtrace, whatever
+/// `RUST_BACKTRACE` says, as a panic is rare and its backtrace what explains it, resolved as far as
+/// the player's machine can, which on Windows has no PDB; and with its `frames`, as [`frames`]
+/// captures them, which the build's kept symbols resolve.
 fn log_panic(info: &PanicHookInfo<'_>) {
     let message = info
         .payload_as_str()
@@ -470,19 +476,9 @@ fn log_panic(info: &PanicHookInfo<'_>) {
     let location = info.location().map(tracing::field::display);
     let thread = std::thread::current();
     let thread = thread.name().unwrap_or("unnamed");
-    let backtrace = Backtrace::capture();
-    if matches!(backtrace.status(), BacktraceStatus::Captured) {
-        error!(target: PANICS, code = "log.panic", location, thread, %backtrace, "{message}");
-    } else {
-        error!(
-            target: PANICS,
-            code = "log.panic",
-            location,
-            thread,
-            backtrace = "off; set RUST_BACKTRACE=1 to capture one",
-            "{message}"
-        );
-    }
+    let frames = frames::capture();
+    let backtrace = Backtrace::force_capture();
+    error!(target: PANICS, code = "log.panic", location, thread, frames, %backtrace, "{message}");
 }
 
 #[cfg(test)]

@@ -38,6 +38,12 @@ pub struct Project {
     /// `dev`; `None`, left out of the manifest, for a game that names none.
     #[serde(default)]
     pub relay: Option<String>,
+    /// The game's icon, a PNG of 256 by 256 pixels, by its path from the manifest's directory, as
+    /// `icon.png`, which its builds take as the executable's, on Windows, and the window's, as
+    /// gg-api's `build` says, and a macOS bundle as its own; `None`, left out of the manifest, for a
+    /// game without one. Its package doesn't hold it.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl Project {
@@ -82,8 +88,8 @@ impl Project {
     /// neither `.` nor `..`, with `/` between them, but `assets`, which may be `.`; `scenes` at
     /// least one folder, each once and inside `assets`; `start` a `.ron` file inside one of them;
     /// `relay`, if there is one, `host:port`, its host letters, digits, `.` and `-`, or an IPv6
-    /// address in brackets, and its port 1 to 65535; and every string printable ASCII without `"`
-    /// or `\`.
+    /// address in brackets, and its port 1 to 65535; `icon`, if there is one, a relative path ending
+    /// in `.png`; and every string printable ASCII without `"` or `\`.
     ///
     /// Fails with `project.bad`, naming the field.
     pub fn check(&self) -> Result<(), Failure> {
@@ -91,7 +97,8 @@ impl Project {
         let strings = [("game", &self.game), ("assets", &self.assets)].into_iter();
         let strings = strings.chain(self.scenes.iter().map(|scene| ("scenes", scene)));
         let strings = strings.chain([("start", &self.start)]);
-        for (field, value) in strings.chain(self.relay.iter().map(|relay| ("relay", relay))) {
+        let strings = strings.chain(self.relay.iter().map(|relay| ("relay", relay)));
+        for (field, value) in strings.chain(self.icon.iter().map(|icon| ("icon", icon))) {
             if let Some(c) =
                 (value.chars()).find(|&c| !(' '..='~').contains(&c) || "\"\\".contains(c))
             {
@@ -148,13 +155,27 @@ impl Project {
                  `.` and `-`, or an IPv6 address in brackets, and its port 1 to 65535"
             ));
         }
+        if let Some(icon) = &self.icon {
+            relative("icon", icon)?;
+            if !icon.ends_with(".png") {
+                return bad(format!("`icon` is `{icon}`, which isn't a `.png` file"));
+            }
+        }
         Ok(())
+    }
+
+    /// The game's name as a player sees it: its package's, capitalized, as `Foxball`, which a
+    /// shipped folder names its executable, its package and a macOS bundle by.
+    pub fn name(&self) -> String {
+        let mut chars = self.game.chars();
+        let first = chars.next().map(|first| first.to_ascii_uppercase());
+        first.into_iter().chain(chars).collect()
     }
 
     /// The manifest's canonical text, a part to a line, with four spaces to each level and a
     /// comma after each part, as ARCHITECTURE.md's Project state describes, its lines ending in
-    /// `\n`, and no line for a relay it hasn't: for a project that [`check`](Self::check) passes,
-    /// which reads back as it is.
+    /// `\n`, and no line for a relay or an icon it hasn't: for a project that
+    /// [`check`](Self::check) passes, which reads back as it is.
     pub fn text(&self) -> String {
         let (game, assets, start) = (&self.game, &self.assets, &self.start);
         let mut text =
@@ -165,6 +186,9 @@ impl Project {
         let _ = writeln!(text, "    ],\n    start: \"{start}\",");
         if let Some(relay) = &self.relay {
             let _ = writeln!(text, "    relay: Some(\"{relay}\"),");
+        }
+        if let Some(icon) = &self.icon {
+            let _ = writeln!(text, "    icon: Some(\"{icon}\"),");
         }
         text.push_str(")\n");
         text
@@ -193,6 +217,11 @@ impl Project {
     /// The scenes folders' paths, for the project whose manifest is in `dir`.
     pub fn scene_dirs(&self, dir: &Path) -> Vec<PathBuf> {
         self.scenes.iter().map(|scene| under(dir, scene)).collect()
+    }
+
+    /// The icon's path, for the project whose manifest is in `dir`, if it names one.
+    pub fn icon_path(&self, dir: &Path) -> Option<PathBuf> {
+        self.icon.as_deref().map(|icon| under(dir, icon))
     }
 }
 
@@ -286,6 +315,7 @@ mod tests {
             scenes: vec!["scenes".to_owned()],
             start: "scenes/arena.ron".to_owned(),
             relay: None,
+            icon: None,
         }
     }
 
@@ -299,6 +329,7 @@ mod tests {
             scenes: vec!["content/levels".to_owned(), "content/menus".to_owned()],
             start: "content/menus/title/main.ron".to_owned(),
             relay: None,
+            icon: None,
         };
         assert_eq!(Project::parse(&nested.text()), Ok(nested));
         // A relay, its line after the start scene's.
@@ -321,6 +352,35 @@ mod tests {
             };
             assert_eq!(Project::parse(&project.text()), Ok(project), "{relay}");
         }
+        // An icon, its line after the relay's.
+        let iconic = relayed.replace(")\n", "    icon: Some(\"art/icon.png\"),\n)\n");
+        let project = Project {
+            relay: Some("relay.example.com:7800".to_owned()),
+            icon: Some("art/icon.png".to_owned()),
+            ..shards()
+        };
+        assert_eq!(project.text(), iconic);
+        assert_eq!(Project::parse(&iconic), Ok(project));
+        let alone = SHARDS.replace(")\n", "    icon: Some(\"icon.png\"),\n)\n");
+        assert_eq!(
+            Project::parse(&alone).map(|project| project.icon),
+            Ok(Some("icon.png".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_games_name_is_its_packages_capitalized() {
+        assert_eq!(shards().name(), "Shards");
+        let named = |game: &str| {
+            Project {
+                game: game.to_owned(),
+                ..shards()
+            }
+            .name()
+        };
+        assert_eq!(named("foxball"), "Foxball");
+        assert_eq!(named("my_game-2"), "My_game-2");
+        assert_eq!(named("_hidden"), "_hidden");
     }
 
     #[test]
@@ -339,7 +399,12 @@ mod tests {
             change(&mut project);
             project
         };
-        let cases: [(Change, &str); 25] = [
+        let cases: [(Change, &str); 30] = [
+            (|p| p.icon = Some("/icon.png".to_owned()), "icon"),
+            (|p| p.icon = Some("../icon.png".to_owned()), "icon"),
+            (|p| p.icon = Some("art/../icon.png".to_owned()), "icon"),
+            (|p| p.icon = Some("icon.ico".to_owned()), "icon"),
+            (|p| p.icon = Some("icon".to_owned()), "icon"),
             (|p| p.relay = Some("relay.example.com".to_owned()), "relay"),
             (
                 |p| p.relay = Some("relay.example.com:0".to_owned()),

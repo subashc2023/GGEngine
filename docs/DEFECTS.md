@@ -194,6 +194,12 @@ file, under Workflow.
 |---|---|---|
 | The cooker cooks each image a model names twice: with its model, with its full chain of levels, and again as a texture of its own, of one level, as it takes every PNG and JPEG under the asset root, which no run loads unless a layer or a scene names it alone. Sponza's 69 images, once fetched, add 50 MB to the showcase's package of 141 MB, and part of its cook's 37 s | Leave out an image that a model names unless a scene names it, or the project says the game's code adds it alone, which the cooker can't see | A package's size or its cook's time matters, as a shipped game's does |
 
+## Shipping
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| The Visual C++ runtime a Windows folder holds beside the game isn't serviced by Windows Update, as the Visual C++ Redistributable installed system-wide is: a fix to it reaches players only with the game's next ship | Have an installer of the game's run the Redistributable's own, from the same redist folder, in its place | The game ships through an installer, or Microsoft fixes a flaw in the runtime |
+
 ## Animation
 
 | Defect | Fix | Worth it when |

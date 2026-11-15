@@ -177,7 +177,7 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     };
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
-        None => build::build(&run.package, release(run.release), run.dir())?,
+        None => build::build(&run.package, release(run.release), run.dir())?.exe,
     };
     let build_ms = millis(building.elapsed());
     event(&json!({"event": "built", "exe": exe, "build_ms": build_ms}));
@@ -1293,7 +1293,8 @@ pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
         &check.package,
         release(check.release),
         check.project.as_ref().map(Scope::dir),
-    )?;
+    )?
+    .exe;
     let frames = check.frames.to_string();
     // Its console says what its JSON log does, which is read below. Its stdin, which `child` holds,
     // closes as gg ends, however it ends, ending the game then.

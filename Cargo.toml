@@ -214,12 +214,15 @@ undocumented_unsafe_blocks = "warn"
 
 # Games' builds as they ship, as `gg ship` builds them, into `target/shipping`: release's, linked
 # whole with fat LTO, a codegen unit to a crate. Panics still unwind, so that the render thread's
-# resumes on the main thread, and debug info stays release's, none, with the symbols kept, so that a
-# panic names its functions.
+# resumes on the main thread. Debug info is line tables alone, with the symbols kept, so that a
+# panic names its functions and the frames it logs turn into lines; `gg ship` keeps them beside the
+# players' folder, not in it: the PDB on Windows, the executable before it's stripped on Linux, a
+# dSYM on macOS.
 [profile.shipping]
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+debug = "line-tables-only"
 
 # Debug builds decode a model's JPEGs as a layer adds it, the sandbox's 2,048 by 2,048 one in about
 # 0.75 s unoptimized, at each of its tests' attaches and CI's runs.

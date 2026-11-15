@@ -11,6 +11,12 @@
 //!
 //! and its `main` names the digest to its app, `.source(env!("GG_SOURCE"))`.
 //!
+//! It also reads the game's project manifest, beside its `Cargo.toml`. On Windows, built by MSVC's
+//! linker, it gives the game's executables version info, which names the game as
+//! [`Project::name`] does, and the manifest's icon, if it names one, in a resource file it links in.
+//! With an icon, it tells the game's code the icon's path, `GG_ICON`, which its `main` gives its
+//! app's window, `.icon(include_bytes!(env!("GG_ICON")))`.
+//!
 //! The digest reads each file by its path from the workspace's root, `/` between its parts, and its
 //! bytes, in the order of their paths:
 //!
@@ -39,15 +45,23 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::Failure;
+use crate::{Failure, Project};
+
+mod resource;
 
 /// For a game's build script: tells cargo `GG_SOURCE`, the digest of what the game's code is
 /// compiled from, as 16 hex digits, as the module says, and to run the script again as any file it
-/// reads changes.
+/// reads changes, the manifest and its icon among them; with an icon, `GG_ICON`, its absolute path;
+/// and for a Windows target built by MSVC, to link the game's executables with the resource file
+/// `gg.res` it writes in its `OUT_DIR`, holding their version info and any icon, as the module
+/// says.
 ///
 /// Fails with `build.metadata` if cargo's environment for build scripts, `cargo metadata` or
-/// `rustc -vV` doesn't give what it should, and with `build.read` if a file can't be read, naming
-/// it.
+/// `rustc -vV` doesn't give what it should; with `build.read` if a file can't be read, naming it; as
+/// gg-api's [`Project::read`] does for the manifest, with `project.read` or `project.bad`; with
+/// `build.icon` for an icon that isn't a PNG of 256 by 256 pixels; with `build.version` for a
+/// package's version that Windows' version info can't hold; and with `build.write` if the resource
+/// file can't be written.
 pub fn emit() -> Result<(), Failure> {
     let var = |name: &str| {
         env::var_os(name).ok_or_else(|| {
@@ -59,10 +73,11 @@ pub fn emit() -> Result<(), Failure> {
         .filter_map(|(key, _)| Some(key.to_str()?.strip_prefix("CARGO_FEATURE_")?.to_owned()))
         .collect();
     features.sort();
+    let dir = PathBuf::from(var("CARGO_MANIFEST_DIR")?);
     let source = source(&Given {
         cargo: var("CARGO")?,
         rustc: var("RUSTC")?,
-        dir: var("CARGO_MANIFEST_DIR")?.into(),
+        dir: dir.clone(),
         package: var("CARGO_PKG_NAME")?.to_string_lossy().into_owned(),
         features,
         rustflags: var("CARGO_ENCODED_RUSTFLAGS")?
@@ -73,7 +88,67 @@ pub fn emit() -> Result<(), Failure> {
         println!("cargo::rerun-if-changed={}", path.display());
     }
     println!("cargo::rustc-env=GG_SOURCE={:016x}", source.digest);
+
+    let project = Project::read(&dir)?;
+    println!(
+        "cargo::rerun-if-changed={}",
+        dir.join(Project::FILE).display()
+    );
+    let icon = match project.icon_path(&dir) {
+        Some(path) => {
+            println!("cargo::rerun-if-changed={}", path.display());
+            let png = fs::read(&path).map_err(|error| unreadable(&path, &error))?;
+            check_icon(&path, &png)?;
+            println!("cargo::rustc-env=GG_ICON={}", path.display());
+            Some(png)
+        }
+        None => None,
+    };
+    let windows = var("CARGO_CFG_TARGET_OS")? == "windows";
+    if windows && var("CARGO_CFG_TARGET_ENV")? == "msvc" {
+        let version = var("CARGO_PKG_VERSION")?;
+        let version = version.to_string_lossy();
+        let resources = resource::resources(&project.name(), &version, icon.as_deref())?;
+        let path = PathBuf::from(var("OUT_DIR")?).join("gg.res");
+        fs::write(&path, resources).map_err(|error| {
+            let message = format!("can't write {}: {error}", path.display());
+            Failure::new("build.write", message)
+        })?;
+        // link.exe takes a resource file as it takes an object.
+        println!("cargo::rustc-link-arg-bins={}", path.display());
+    }
     Ok(())
+}
+
+/// Checks that `png`, the bytes of the icon at `path`, are a PNG of 256 by 256 pixels, by its
+/// signature and its first chunk, its header, which gives its size.
+///
+/// Fails with `build.icon` if they aren't.
+fn check_icon(path: &Path, png: &[u8]) -> Result<(), Failure> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let header = (png.starts_with(SIGNATURE) && png.get(12..16) == Some(b"IHDR"))
+        .then(|| png.get(16..24))
+        .flatten();
+    let size = header.map(|size| {
+        let side =
+            |at: usize| u32::from_be_bytes([size[at], size[at + 1], size[at + 2], size[at + 3]]);
+        [side(0), side(4)]
+    });
+    match size {
+        Some([256, 256]) => Ok(()),
+        Some([width, height]) => {
+            let message = format!(
+                "the icon {} is {width} by {height} pixels, not 256 by 256, as Windows and macOS \
+                 take a game's icon",
+                path.display()
+            );
+            Err(Failure::new("build.icon", message))
+        }
+        None => {
+            let message = format!("the icon {} isn't a PNG", path.display());
+            Err(Failure::new("build.icon", message))
+        }
+    }
 }
 
 /// What cargo tells a package's build script, which the digest reads.
@@ -410,5 +485,32 @@ mod tests {
         let featured = source(&given(&there, &["DEV", "TRACY"])).expect("digested");
         assert!(!seen.contains(&featured.digest), "features");
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A PNG's signature and header, of `width` by `height` pixels, as far as an icon is checked.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(width.to_be_bytes());
+        png.extend(height.to_be_bytes());
+        png.extend([8, 6, 0, 0, 0]);
+        png
+    }
+
+    #[test]
+    fn an_icon_is_a_png_of_256_by_256_pixels() {
+        let path = Path::new("icon.png");
+        assert_eq!(check_icon(path, &png(256, 256)), Ok(()));
+        let mut not_png = png(256, 256);
+        not_png[1] = b'J';
+        for refused in [
+            png(255, 256),
+            png(256, 512),
+            not_png,
+            b"GIF89a".to_vec(),
+            Vec::new(),
+        ] {
+            let code = check_icon(path, &refused).err().map(|failure| failure.code);
+            assert_eq!(code.as_deref(), Some("build.icon"), "{refused:?}");
+        }
     }
 }

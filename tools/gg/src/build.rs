@@ -26,13 +26,21 @@ pub(crate) fn cargo(dir: Option<&Path>) -> Command {
     command
 }
 
+/// What a build made: its executable, and the digest of the source a game's code is compiled from,
+/// `GG_SOURCE`, which its build script gives, as gg-api's `build` says, if the build ran one that
+/// does.
+pub(crate) struct Built {
+    pub(crate) exe: PathBuf,
+    pub(crate) source: Option<String>,
+}
+
 /// Builds package `package`, with `args`, cargo's flags that pick its profile and features, as
 /// `--release`, through cargo run in `dir`, whose messages about the code go to stderr as rustc
-/// renders them, in color on a terminal; and returns its executable.
+/// renders them, in color on a terminal; and returns what it made.
 ///
 /// Fails with `gg.build` if cargo can't run, the build fails, with rustc's errors, or it makes no
 /// executable.
-pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<PathBuf, Failure> {
+pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<Built, Failure> {
     let mut command = cargo(dir);
     command.args(["build", "--package", package]).args(args);
     let format = if io::stderr().is_terminal() {
@@ -47,7 +55,7 @@ pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<
         .spawn()
         .map_err(|error| failed(format!("can't run cargo: {error}")))?;
     let messages = BufReader::new(child.stdout.take().expect("piped"));
-    let built = read_messages(messages.lines().map_while(Result::ok), |rendered| {
+    let said = read_messages(messages.lines().map_while(Result::ok), |rendered| {
         let _ = io::stderr().lock().write_all(rendered.as_bytes());
     });
     let status = child
@@ -56,15 +64,17 @@ pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<
     if !status.success() {
         let args = args.iter().map(|arg| format!(" {arg}")).collect::<String>();
         let what = format!("cargo build --package {package}{args}");
-        return Err(failed(if built.errors.is_empty() {
+        return Err(failed(if said.errors.is_empty() {
             format!("`{what}` failed, as cargo said above")
         } else {
-            format!("`{what}` failed:\n\n{}", listed_errors(&built.errors))
+            format!("`{what}` failed:\n\n{}", listed_errors(&said.errors))
         }));
     }
-    built
-        .exe
-        .ok_or_else(|| failed(format!("package `{package}` has no executable")))
+    let exe = (said.exe).ok_or_else(|| failed(format!("package `{package}` has no executable")))?;
+    Ok(Built {
+        exe,
+        source: said.source,
+    })
 }
 
 /// How many of a build's errors its failure gives, the first, as rustc reports them: the rest, which
@@ -108,17 +118,19 @@ pub(crate) fn listed_errors(errors: &[String]) -> String {
     listed
 }
 
-/// What a build's messages, cargo's lines of JSON, said: the executable it made, the last, and
-/// rustc's errors, each once, as plain text.
+/// What a build's messages, cargo's lines of JSON, said: the executable it made, the last; the
+/// `GG_SOURCE` a build script gave, which cargo says of a script it ran and of one it didn't need
+/// to; and rustc's errors, each once, as plain text.
 #[derive(Debug, Default, PartialEq)]
-struct Built {
+struct Said {
     exe: Option<PathBuf>,
+    source: Option<String>,
     errors: Vec<String>,
 }
 
 /// Reads `lines`, cargo's messages, giving `show` each of rustc's, as rustc rendered it.
-fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)) -> Built {
-    let mut built = Built::default();
+fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)) -> Said {
+    let mut said = Said::default();
     for line in lines {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -126,7 +138,15 @@ fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)
         match message["reason"].as_str() {
             Some("compiler-artifact") => {
                 if let Some(path) = message["executable"].as_str() {
-                    built.exe = Some(PathBuf::from(path));
+                    said.exe = Some(PathBuf::from(path));
+                }
+            }
+            Some("build-script-executed") => {
+                let source = (list(&message["env"]).iter())
+                    .find(|pair| pair[0] == "GG_SOURCE")
+                    .and_then(|pair| pair[1].as_str());
+                if let Some(source) = source {
+                    said.source = Some(source.to_owned());
                 }
             }
             Some("compiler-message") => {
@@ -137,15 +157,14 @@ fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)
                 show(rendered);
                 let level = diagnostic["level"].as_str().unwrap_or_default();
                 let error = dx::plain(rendered);
-                if level.starts_with("error") && !summary(&error) && !built.errors.contains(&error)
-                {
-                    built.errors.push(error);
+                if level.starts_with("error") && !summary(&error) && !said.errors.contains(&error) {
+                    said.errors.push(error);
                 }
             }
             _ => {}
         }
     }
-    built
+    said
 }
 
 /// The directory cargo builds the workspace into, as `cargo metadata`, run in `dir`, says.
@@ -358,12 +377,16 @@ mod tests {
 
     use super::*;
 
-    /// A build's messages give its executable and rustc's errors, each once and plain, every one of
-    /// rustc's messages shown as rendered, warnings too.
+    /// A build's messages give its executable, its game's source and rustc's errors, each once and
+    /// plain, every one of rustc's messages shown as rendered, warnings too.
     #[test]
-    fn a_builds_messages_give_its_executable_and_errors() {
+    fn a_builds_messages_give_its_executable_source_and_errors() {
         let error = |text: &str| json!({"reason": "compiler-message", "message": {"level": "error", "rendered": text}});
+        let script = |env: Value| json!({"reason": "build-script-executed", "env": env});
         let lines = [
+            script(json!([])),
+            script(json!([["OTHER", "x"], ["GG_SOURCE", "5c7cd8abeeed5f44"]])),
+            script(json!([["OTHER", "y"]])),
             json!({"reason": "compiler-message", "message": {"level": "warning", "rendered": "w"}}),
             error("\u{1b}[31merror[E0308]\u{1b}[0m: mismatched types\n"),
             error("\u{1b}[31merror[E0308]\u{1b}[0m: mismatched types\n"),
@@ -379,8 +402,9 @@ mod tests {
         let built = read_messages(lines, |rendered| shown.push(rendered.to_owned()));
         assert_eq!(
             built,
-            Built {
+            Said {
                 exe: Some(PathBuf::from("target/debug/gg-shards")),
+                source: Some("5c7cd8abeeed5f44".to_owned()),
                 errors: vec!["error[E0308]: mismatched types".to_owned()],
             }
         );

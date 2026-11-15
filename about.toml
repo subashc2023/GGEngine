@@ -1,0 +1,47 @@
+# cargo-about's config, with which `gg ship` writes a shipped game's NOTICES.txt from its build's
+# dependency graph: the licenses accepted, a crate under any other failing `gg ship` (`gg.notices`)
+# until someone has read that license and added it here; earlier ones preferred where a crate
+# offers a choice. Build dependencies count, as Luau's C++ is compiled in through one, luau0-src;
+# those of tests alone don't.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+
+# What the workspace's crates compile in of others', which their manifests' license doesn't say. A
+# file whose checksum no longer matches, as after updating it, fails `gg ship` until it's looked at.
+
+# VMA, MIT, from the sources gg-gpu vendors, against the Vulkan headers it vendors, Apache-2.0 or
+# MIT, taken as MIT, whose text names Khronos.
+[gg-gpu.clarify]
+license = "(MIT OR Apache-2.0) AND MIT"
+
+[[gg-gpu.clarify.files]]
+path = "vendor/VulkanMemoryAllocator/LICENSE.txt"
+license = "MIT"
+checksum = "52df2c03d6cfc9ffec13c9d3626c530fc9ce0cbe41d5ea3d10cd46edeb1aeb38"
+
+[[gg-gpu.clarify.files]]
+path = "vendor/Vulkan-Headers/LICENSES/MIT.txt"
+license = "MIT"
+checksum = "1ca3502222d967f3be5751c55f6b7ee735b5383909c3b501495f54b216dbf227"
+
+# Inter's Regular, the font game UI draws in by default, which gg-engine holds.
+[gg-engine.clarify]
+license = "(MIT OR Apache-2.0) AND OFL-1.1"
+
+[[gg-engine.clarify.files]]
+path = "assets/fonts/Inter/LICENSE.txt"
+license = "OFL-1.1"
+checksum = "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"

@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 gg-engine.workspace = true
+# Warns of options kept that can't be read or saved.
+tracing.workspace = true
 
 [build-dependencies]
 # Digests what the game's code is compiled from, which its sessions name its build by.

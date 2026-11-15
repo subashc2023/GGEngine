@@ -124,8 +124,9 @@ fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(&project.assets_dir(dir));
     assert_eq!(
         found.assets.len(),
-        8,
-        "the ball, the box, the tiles, the Fox and its texture, the font, the wall and the UI"
+        9,
+        "the ball, the box, the tiles, the Fox and its texture, the font, the wall, the UI and the \
+         icon"
     );
     let mut ids = HashSet::new();
     for asset in &found.assets {

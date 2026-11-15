@@ -63,6 +63,7 @@ fn main() {
             panic.is_some_and(|line| line.contains("the run panics")),
             "{filter}: the JSON log has no panic:\n{json}"
         );
+        check_frames(panic.unwrap_or_default());
         // The run printed the events kept before it panicked.
         let kept: Vec<&str> = printed.collect();
         let written: Vec<&str> = (json.lines())
@@ -97,6 +98,33 @@ fn main() {
         let without = if console { "" } else { " without the console" };
         println!("test a panic is logged under RUST_LOG={filter}{without} ... ok");
     }
+}
+
+/// Checks the frames the panic's line, `panic`, names, innermost first, and its backtrace, logged
+/// whatever `RUST_BACKTRACE` says: the first frame is in the test's own executable, which the
+/// panic hook is linked into, by its file name, at an offset within the file.
+fn check_frames(panic: &str) {
+    let field = |name: &str| {
+        let rest = panic.split(&format!(r#""{name}":""#)).nth(1)?;
+        rest.split('"').next()
+    };
+    assert!(
+        field("backtrace").is_some_and(|backtrace| !backtrace.is_empty()),
+        "{panic}"
+    );
+    let frames = field("frames").expect("the panic's frames");
+    let exe = std::env::current_exe().expect("the test's path");
+    let name = exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("its name");
+    let first = frames.split(' ').next().expect("a frame");
+    let (module, offset) = first.split_once("+0x").expect("a module and an offset");
+    let offset = u64::from_str_radix(offset, 16).expect("hex digits");
+    let size = std::fs::metadata(&exe).expect("the test's file").len();
+    assert_eq!(module, name, "{frames}");
+    assert!(offset < size, "{offset:#x} of {size} bytes: {frames}");
+    assert!(frames.split(' ').count() > 3, "{frames}");
 }
 
 /// Starts logging, on the console unless [`QUIET`] is set, prints the JSON log's path, logs

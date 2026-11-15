@@ -168,11 +168,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sessions from the game's menu** (2026-11-14)
 - **Sessions across OSes** (2026-11-14)
 - **A relay for players** (2026-11-14)
+- **What a shipped build owes** (2026-11-14)
 
 ## Now
 
-Phase 21's fourth milestone, what a shipped build owes, as Next has it, once its plan is written
-and approved.
+Phase 21's fifth milestone, measured over the real internet, as Next has it, once its plan is
+written and approved.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -227,11 +228,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
 | Compiling debug events out of shipping builds as well as trace events: `release_max_level_debug` keeps them in every optimized build, as agents read them of `gg run --release`'s runs, and Cargo can't give one profile features of its own | A shipped game's debug events cost it measurably |
-| Linux builds against an older glibc, as the Steam Runtime's: a build needs the glibc it was built against or a later one, and CI builds on Debian trixie | A game ships to players on Linux |
-| The notices a shipped game owes its dependencies' licenses, gathered from Cargo's metadata | A game ships to players |
 | Signing a macOS .app with a Developer ID and notarizing it, which take a paid Apple Developer account: `gg ship` signs it ad hoc, which Apple Silicon needs to run it, and which Gatekeeper refuses once it's downloaded, until the user opens it anyway from System Settings | A game ships to players on macOS |
-| A game's own bundle identifier, name and icon, which its project would give: `gg ship` names a game's .app after its package, capitalized, its identifier `com.ggengine.<package>`, its icon macOS's own | A game ships under a name of its own |
-| Symbols for a shipped game's crashes: the shipping profile keeps release's debug info, none, and no PDB or dSYM ships beside the game; a panic names its functions, by the symbols the executable keeps | A shipped game's crash needs symbolicating |
+| A game's own bundle identifier and name, which its project would give: `gg ship` names a game's files and its .app after its package, capitalized, its identifier `com.ggengine.<package>` | A game ships under a name other than its package's |
+| A Linux desktop entry and its icon, which work only once installed, and from which Wayland's compositors take a window's icon: a shipped Linux folder has none, and its window shows the game's icon on X11 alone | A game ships with an installer |
+| Minidumps of a shipped game's native crashes, and uploading them: a panic logs its frames, which the symbols kept beside its folder turn into lines, but a crash in C or C++ code or in a driver logs nothing | A shipped game crashes outside Rust's panics |
 | Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
 | ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
@@ -460,12 +460,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Scripts reading a machine's state, as `gg.state(entity)`, which scripts can't read as a field, holding no strings | A script branches on what its model plays |
 | Where frames draw an entity between ticks, for layers: `Context` gives none, so Foxball's view eases toward its fox as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
 | Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
-| Foxball shipped and run as it ships in CI, as Shards is: its tests cook its package and replay its live recording from it | A change could break its shipping alone |
 | Foxball's menu sounds, as Shards plays them for its focus moving and its choices: the menu is silent | Foxball has sounds of its own for them |
 | Pausing a run alone as Foxball's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu and the bot can score meanwhile | A game alone needs a pause, or players lose goals to the menu |
 | Asking the other player before a session's New match: either player's menu starts the match afresh for both, scores and wins wiped, at the next tick | Players of a session start matches over each other's |
 | A bot for a session's empty player, as a server's player 1 before a client takes it: a session's foxes are all people's | A session wants a player it hasn't |
-| Foxball's options kept between runs, its volumes, its antialiasing and its bot's difficulty: they're the run's, each run starting at full volume, with the arena's TAA and at Normal | Players expect their settings kept |
 | Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
 | Foxball's foxes as instances of a prefab: each fox, its model, animator, state machine and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
 | Foxball's players' colors read from one place: each is written in ui/menu.ui's texts and, brightened, in arena.ron's emitter at its scorer's goal mouth | The players' colors change, or a game has more than two players |

@@ -43,7 +43,7 @@ workspace = true
 
 /// The game's build script.
 const BUILD: &str = r#"//! Tells the game's code the digest of what it's compiled from, `GG_SOURCE`, which its sessions name
-//! its build by, as gg-api's `build` says.
+//! its build by, and gives its Windows executable version info, as gg-api's `build` says.
 
 fn main() -> Result<(), gg_api::Failure> {
     gg_api::build::emit()
@@ -104,6 +104,7 @@ pub(crate) fn project(name: &str) -> Project {
         scenes: vec!["scenes".to_owned()],
         start: "scenes/main.ron".to_owned(),
         relay: None,
+        icon: None,
     }
 }
 

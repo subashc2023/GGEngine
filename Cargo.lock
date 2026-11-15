@@ -1157,6 +1157,7 @@ dependencies = [
  "cook",
  "gg-api",
  "gg-engine",
+ "tracing",
 ]
 
 [[package]]
@@ -1275,12 +1276,14 @@ name = "gg-core"
 version = "0.1.0"
 dependencies = [
  "glam 0.34.1",
+ "libc",
  "libm",
  "nu-ansi-term",
  "tracing",
  "tracing-subscriber",
  "tracy-client",
  "tracy-client-sys",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

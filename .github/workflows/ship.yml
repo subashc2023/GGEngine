@@ -1,16 +1,25 @@
 name: Ship
 
-# The demo shipped, as `cargo gg ship shards` lays it out, on each OS a game ships for: Linux's run
-# headless on lavapipe, macOS's bundle signed, and each folder kept a few days, to run by hand.
-# Started by hand alone, as its runs are billed, a macOS minute at ten times a Linux one.
+# A game shipped, as `cargo gg ship` lays it out, on each OS a game ships for: Linux's built in an
+# older distribution's container and run headless on lavapipe in Debian trixie's, Windows' version
+# info read, macOS's bundle signed; each folder kept a few days, to run by hand, with the build's
+# symbols beside it. Started by hand alone, as its runs are billed, a macOS minute at ten times a
+# Linux one.
 on:
   workflow_dispatch:
+    inputs:
+      game:
+        description: The game to ship
+        type: choice
+        options: [foxball, shards]
+        default: foxball
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  GAME: ${{ inputs.game }}
 
 jobs:
   ship:
@@ -21,20 +30,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # lavapipe and the validation layer from Debian trixie, as ci.yml has them.
-          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie" }
+          # Valve's Steam Runtime 3 ("sniper") SDK, maintained for building Linux games: Debian 11's
+          # glibc 2.31 and GCC 10, with the udev and ALSA headers the engine builds against, so that
+          # the game starts on the distributions since 2020. Its Mesa has no Vulkan 1.4 lavapipe,
+          # which the next job runs the folder on.
+          - name: Linux x86-64
+            runner: ubuntu-24.04
+            container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk@sha256:bb30053d3cd19d35c76ae69b2790dbaa1430448006f8240cb6d7e723f2d1940e
           - { name: Windows x86-64, runner: windows-2025 }
           # macOS 26, the oldest that KosmicKrisp, and so the bundle, runs on.
           - { name: macOS ARM64, runner: macos-26 }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     steps:
-      - name: Install build tools, lavapipe and the validation layer
-        if: matrix.container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libasound2-dev \
-            libc6-dev libudev-dev libvulkan1 mesa-vulkan-drivers pkgconf vulkan-validationlayers
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/slangc
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -44,6 +52,10 @@ jobs:
           # A shipping build's target directory would push ci.yml's caches out of the repository's
           # 10 GB, for a workflow that runs now and then.
           cache: false
+      # Which writes the folder's notices, as `gg ship` runs it.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-about@0.9.2
       # The SDK whose loader and KosmicKrisp a macOS bundle holds, checked against the digest
       # LunarG publishes, copied into a directory of the job's own without touching the system's.
       # The shaders compile with the slangc ci.yml's do, which `SLANGC` names, rather than the
@@ -67,36 +79,79 @@ jobs:
         env:
           SDK: "1.4.363.1"
           DIGEST: a65c707cf0a32bf8c2ca6b9af1985b7af61dbadfc19b352dae51a323f3a547a6
-      - run: cargo gg ship shards
+      # The game's name, as the folder's files take it: its package's, capitalized.
+      - name: Ship the game
+        shell: bash
+        run: |
+          cargo gg ship "$GAME"
+          echo "NAME=$(echo "${GAME:0:1}" | tr '[:lower:]' '[:upper:]')${GAME:1}" >> "$GITHUB_ENV"
       # The bundle's signatures, checked strictly, as Gatekeeper checks them and `gg ship` did. It
       # doesn't run here, as hosted runners may have no Metal for KosmicKrisp: it runs on a Mac, by
       # hand.
       - name: Check the bundle's signature
         if: runner.os == 'macOS'
-        run: codesign --verify --deep --strict --verbose=2 target/ship/shards/Shards.app
+        run: codesign --verify --deep --strict --verbose=2 "target/ship/$GAME/$NAME.app"
+      # What Explorer's Details and Task Manager show, which the build linked in.
+      - name: Check the executable's version info
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $info = (Get-Item "target/ship/$env:GAME/$env:NAME.exe").VersionInfo
+          $info | Format-List ProductName, FileDescription, FileVersion, OriginalFilename
+          if ($info.ProductName -ne $env:NAME -or $info.OriginalFilename -ne "$env:NAME.exe") { exit 1 }
       # From a directory of its own, it replays its live recording to every hash, which needs no
       # GPU, exiting 0: Windows' too, which has no console window, and which a script still waits
-      # for and reads the status of. On lavapipe it runs headless too. ci.yml runs it so at every
-      # push, with its project and slangc away.
-      - name: Run the demo as it ships
+      # for and reads the status of, with the Visual C++ runtime beside it. ci.yml runs it so at
+      # every push, with its project and slangc away.
+      - name: Run the game as it ships
         if: runner.os != 'macOS'
         shell: bash
         run: |
           shipped="$RUNNER_TEMP/shipped"
-          cp -R target/ship/shards "$shipped"
-          cp games/shards/tests/references/live.recording "$shipped"
-          "$shipped/gg-shards" --replay "$shipped/live.recording"
-          if [ "$RUNNER_OS" = Linux ]; then
-            "$shipped/gg-shards" --headless --frames 120
-          fi
-      # A tar keeps the executables' modes, which the artifact's own zip would drop, and the
-      # artifact is the tar alone, unzipped.
-      - name: Pack the folder
+          cp -R "target/ship/$GAME" "$shipped"
+          cp "games/$GAME/tests/references/live.recording" "$shipped"
+          "$shipped/$NAME" --replay "$shipped/live.recording"
+      # Tars keep the executables' modes, which the artifact's own zip would drop, and each artifact
+      # is its tar alone, unzipped: the players' folder, and its symbols, which pair with this build
+      # alone.
+      - name: Pack the folders
         shell: bash
-        run: tar -czf "shards-$RUNNER_OS-$RUNNER_ARCH.tar.gz" -C target/ship shards
+        run: |
+          tar -czf "$GAME-$RUNNER_OS-$RUNNER_ARCH.tar.gz" -C target/ship "$GAME"
+          tar -czf "$GAME-symbols-$RUNNER_OS-$RUNNER_ARCH.tar.gz" -C target/ship "$GAME-symbols"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          path: shards-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          path: ${{ inputs.game }}-${{ runner.os }}-${{ runner.arch }}.tar.gz
           archive: false
           if-no-files-found: error
           retention-days: 5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ inputs.game }}-symbols-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 5
+
+  # Linux's folder, as a player unpacks it, run headless on Debian trixie's lavapipe, with the
+  # libraries the game links installed, as a desktop has them.
+  lavapipe:
+    name: Linux x86-64 on lavapipe
+    needs: ship
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    container: "debian:trixie"
+    steps:
+      - name: Install lavapipe and the libraries the game links
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libasound2t64 libudev1 libvulkan1 mesa-vulkan-drivers
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.game }}-Linux-X64.tar.gz
+      - name: Run the game headless
+        run: |
+          export XDG_STATE_HOME="$RUNNER_TEMP/state"
+          name="$(echo "${GAME:0:1}" | tr '[:lower:]' '[:upper:]')${GAME:1}"
+          tar -xzf "$GAME-Linux-X64.tar.gz"
+          "$GAME/$name" --headless --frames 120
+          grep -q "Running from the game's package" "$XDG_STATE_HOME/ggengine/$name/logs/$GAME"-*.jsonl
