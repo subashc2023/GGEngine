@@ -17,24 +17,30 @@
 //! With an icon, it tells the game's code the icon's path, `GG_ICON`, which its `main` gives its
 //! app's window, `.icon(include_bytes!(env!("GG_ICON")))`.
 //!
-//! The digest reads each file by its path from the workspace's root, `/` between its parts, and its
-//! bytes, in the order of their paths:
+//! The digest reads each file by its name and its bytes, in the order of their names. A file of the
+//! game's workspace is named by its path from the workspace's root, `/` between its parts; one of a
+//! workspace outside it, which a path dependency reaches, by `/`, the workspace's number, counting
+//! from 1 in the order they're reached, and its path from that workspace's root, so that a checkout
+//! of the engine beside a game digests alike wherever the two are. It reads:
 //!
-//! - the game's package's, and those of each package of the workspace it reaches through path
-//!   dependencies, normal or build ones, on any target, as `cargo metadata` lists them: every file
-//!   under its `src/` but those whose names begin with `.`, as macOS's `.DS_Store`, its `build.rs`
-//!   and its `Cargo.toml`;
-//! - the workspace's `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`,
-//!   those there are;
+//! - the game's package's, and those of each package it reaches through path dependencies, normal
+//!   or build ones, on any target, as `cargo metadata --no-deps` lists them in each one's own
+//!   workspace: every file under its `src/` but those whose names begin with `.`, as macOS's
+//!   `.DS_Store`, its `build.rs` and its `Cargo.toml`;
+//! - the game's workspace's `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and
+//!   `.cargo/config.toml`, those there are, and each outside workspace's `Cargo.toml`, which its
+//!   packages inherit from, the game's build reading no other file of it;
 //!
 //! and then `rustc -vV`'s answer but its `host` line, the game's features, and its flags to rustc,
-//! `CARGO_ENCODED_RUSTFLAGS`. It leaves out where the workspace is, the target and the OS, which the
-//! simulation doesn't depend on, as CI's reference hashes check on each platform; files outside
+//! `CARGO_ENCODED_RUSTFLAGS`. It leaves out where the workspaces are, the target and the OS, which
+//! the simulation doesn't depend on, as CI's reference hashes check on each platform; files outside
 //! `src/`, as shaders, which only render, and assets, which the game's package holds and the hello
 //! names apart; the profile's levels of optimization and debug info, at which floats give the same
 //! bits, debug and release told apart by the hello's engine; and the C and C++ compilers, which
 //! differ by OS, CI's hashes checking Luau's results across them. A crate whose simulation code is
-//! made from files outside its `src/` would have to be read here too.
+//! made from files outside its `src/` would have to be read here too. A dependency by git is read
+//! through `Cargo.lock`, which names its commit; a `[patch]` that puts a path in a dependency's
+//! place isn't read, as `cargo metadata --no-deps` doesn't list patches.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -196,58 +202,78 @@ struct Dependency {
 
 /// The digest of what `given`'s package is compiled from, as the module says.
 fn source(given: &Given) -> Result<Source, Failure> {
-    let workspace = metadata(&given.cargo, &given.dir)?;
-    let root = &workspace.workspace_root;
+    // The game's workspace, then each outside it that a path dependency reaches, in the order
+    // reached, which numbers their files' names.
+    let mut workspaces = vec![metadata(&given.cargo, &given.dir)?];
     let mut files = BTreeMap::new();
     let mut watched = Vec::new();
     let mut seen = BTreeSet::new();
-    let game = (workspace.packages.iter()).find(|package| package.name == given.package);
-    let mut packages: Vec<&Package> = game.into_iter().collect();
-    if packages.is_empty() {
+    let game = (workspaces[0].packages.iter()).position(|package| package.name == given.package);
+    let Some(game) = game else {
         let message = format!("`cargo metadata` lists no package `{}`", given.package);
         return Err(Failure::new("build.metadata", message));
-    }
-    while let Some(package) = packages.pop() {
-        if !seen.insert(&package.manifest_path) {
+    };
+    // Each package to read, by its workspace's place in `workspaces` and its own in that.
+    let mut packages = vec![(0, game)];
+    while let Some((at, index)) = packages.pop() {
+        let workspace = &workspaces[at];
+        let (root, package) = (&workspace.workspace_root, &workspace.packages[index]);
+        if !seen.insert(package.manifest_path.clone()) {
             continue;
         }
+        let prefix = prefix(at);
         let dir = package.manifest_path.parent().unwrap_or(root);
-        read_dir(root, &dir.join("src"), &mut files)?;
+        read_dir(root, &prefix, &dir.join("src"), &mut files)?;
         watched.push(dir.join("src"));
         for file in [dir.join("build.rs"), package.manifest_path.clone()] {
             if file.is_file() {
-                files.insert(relative(root, &file)?, file.clone());
+                files.insert(format!("{prefix}{}", relative(root, &file)?), file.clone());
                 watched.push(file);
             }
         }
-        let paths = (package.dependencies.iter())
+        let name = package.name.clone();
+        let paths: Vec<PathBuf> = (package.dependencies.iter())
             .filter(|dependency| dependency.kind.as_deref() != Some("dev"))
-            .filter_map(|dependency| dependency.path.as_deref());
+            .filter_map(|dependency| dependency.path.clone())
+            .collect();
         for path in paths {
-            let found = (workspace.packages.iter())
-                .find(|package| package.manifest_path.parent() == Some(path));
-            let Some(found) = found else {
-                let message = format!(
-                    "`{}` depends on the package at {}, which isn't a member of the workspace, \
-                     whose members alone `cargo metadata --no-deps` lists",
-                    package.name,
-                    path.display()
-                );
-                return Err(Failure::new("build.metadata", message));
+            let found = match find(&workspaces, &path) {
+                Some(found) => found,
+                None => {
+                    workspaces.push(metadata(&given.cargo, &path)?);
+                    find(&workspaces, &path).ok_or_else(|| {
+                        let message = format!(
+                            "`{name}` depends on the package at {}, which `cargo metadata` there \
+                             doesn't list",
+                            path.display()
+                        );
+                        Failure::new("build.metadata", message)
+                    })?
+                }
             };
             packages.push(found);
         }
     }
-    for name in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        ".cargo/config.toml",
-    ] {
-        let file = root.join(name);
-        if file.is_file() {
-            files.insert(name.to_owned(), file.clone());
-            watched.push(file);
+    for (at, workspace) in workspaces.iter().enumerate() {
+        // An outside workspace's packages inherit from its `Cargo.toml`, the one file of it beside
+        // theirs that the game's build reads: the lock, toolchain and cargo's config it builds with
+        // are the game's workspace's.
+        let names: &[&str] = if at == 0 {
+            &[
+                "Cargo.toml",
+                "Cargo.lock",
+                "rust-toolchain.toml",
+                ".cargo/config.toml",
+            ]
+        } else {
+            &["Cargo.toml"]
+        };
+        for name in names {
+            let file = workspace.workspace_root.join(name);
+            if file.is_file() {
+                files.insert(format!("{}{name}", prefix(at)), file.clone());
+                watched.push(file);
+            }
         }
     }
 
@@ -267,6 +293,26 @@ fn source(given: &Given) -> Result<Source, Failure> {
         digest: digest.0,
         watched,
     })
+}
+
+/// The place among `workspaces` of the workspace, and of its package, whose directory is `dir`.
+fn find(workspaces: &[Metadata], dir: &Path) -> Option<(usize, usize)> {
+    workspaces.iter().enumerate().find_map(|(at, workspace)| {
+        let mut packages = workspace.packages.iter();
+        let index = packages.position(|package| package.manifest_path.parent() == Some(dir))?;
+        Some((at, index))
+    })
+}
+
+/// What the names of the files of the digest's `at`th workspace begin with: nothing for the
+/// game's, the first; for one outside it, `/`, which no path from a root begins with, and its
+/// number.
+fn prefix(at: usize) -> String {
+    if at == 0 {
+        String::new()
+    } else {
+        format!("/{at}/")
+    }
 }
 
 /// The workspace of the package in `dir`, as `cargo metadata --no-deps` lists it, which resolves
@@ -296,9 +342,14 @@ fn metadata(cargo: &OsStr, dir: &Path) -> Result<Metadata, Failure> {
     serde_json::from_slice(&output.stdout).map_err(|error| failed(error.to_string()))
 }
 
-/// Adds each file under `dir` to `files`, by its path from `root`, as [`relative`] has it, but
-/// those whose names begin with `.`.
-fn read_dir(root: &Path, dir: &Path, files: &mut BTreeMap<String, PathBuf>) -> Result<(), Failure> {
+/// Adds each file under `dir` to `files`, by `prefix` and its path from `root`, as [`relative`] has
+/// it, but those whose names begin with `.`.
+fn read_dir(
+    root: &Path,
+    prefix: &str,
+    dir: &Path,
+    files: &mut BTreeMap<String, PathBuf>,
+) -> Result<(), Failure> {
     let entries = fs::read_dir(dir).map_err(|error| unreadable(dir, &error))?;
     for entry in entries {
         let path = entry.map_err(|error| unreadable(dir, &error))?.path();
@@ -309,9 +360,9 @@ fn read_dir(root: &Path, dir: &Path, files: &mut BTreeMap<String, PathBuf>) -> R
             continue;
         }
         if path.is_dir() {
-            read_dir(root, &path, files)?;
+            read_dir(root, prefix, &path, files)?;
         } else {
-            files.insert(relative(root, &path)?, path);
+            files.insert(format!("{prefix}{}", relative(root, &path)?), path);
         }
     }
     Ok(())
@@ -383,11 +434,33 @@ mod tests {
     use super::*;
 
     /// A workspace at `root`: a game, `game`, which depends on `lib` by path and is built by a
-    /// script, and uses `tested` in its tests alone.
+    /// script, and uses `tested` in its tests alone; and beside it, in `engine`, a workspace of its
+    /// own, whose `front` the game depends on by path, and which depends on `core` there.
     fn workspace(root: &Path) {
         let manifest = |name: &str, more: &str| {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{more}")
         };
+        let engine = root.parent().unwrap().join("engine");
+        let _ = fs::remove_dir_all(&engine);
+        for (path, text) in [
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"front\", \"core\"]\nresolver = \"3\"\n".to_owned(),
+            ),
+            ("Cargo.lock", "version = 4\n".to_owned()),
+            ("README.md", "An engine.\n".to_owned()),
+            (
+                "front/Cargo.toml",
+                manifest("front", "\n[dependencies]\ncore = { path = \"../core\" }\n"),
+            ),
+            ("front/src/lib.rs", "\n".to_owned()),
+            ("core/Cargo.toml", manifest("core", "")),
+            ("core/src/lib.rs", "\n".to_owned()),
+        ] {
+            let path = engine.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
         let files = [
             (
                 "Cargo.toml",
@@ -400,7 +473,7 @@ mod tests {
                 "game/Cargo.toml",
                 manifest(
                     "game",
-                    "\n[dependencies]\nlib = { path = \"../lib\" }\n\n[dev-dependencies]\ntested = { path = \"../tested\" }\n",
+                    "\n[dependencies]\nlib = { path = \"../lib\" }\nfront = { path = \"../../engine/front\" }\n\n[dev-dependencies]\ntested = { path = \"../tested\" }\n",
                 ),
             ),
             ("game/build.rs", "fn main() {}\n".to_owned()),
@@ -440,12 +513,21 @@ mod tests {
         workspace(&there);
         let digest = |root: &Path| source(&given(root, &["DEV"])).expect("digested").digest;
         let ours = source(&given(&here, &["DEV"])).expect("digested");
-        assert_eq!(ours.digest, digest(&there), "where the workspace is");
+        assert_eq!(ours.digest, digest(&there), "where the workspaces are");
+        let engine = base.join("engine");
         let mut watched: Vec<String> = (ours.watched.iter())
-            .map(|path| relative(&here, path).unwrap())
+            .map(|path| match path.strip_prefix(&engine) {
+                Ok(_) => format!("../engine/{}", relative(&engine, path).unwrap()),
+                Err(_) => relative(&here, path).unwrap(),
+            })
             .collect();
         watched.sort();
         let expected = [
+            "../engine/Cargo.toml",
+            "../engine/core/Cargo.toml",
+            "../engine/core/src",
+            "../engine/front/Cargo.toml",
+            "../engine/front/src",
             "Cargo.lock",
             "Cargo.toml",
             "game/Cargo.toml",
@@ -463,6 +545,11 @@ mod tests {
             ("tested/src/lib.rs", "pub fn changed() {}\n"),
             ("target/debug/game", "rebuilt\n"),
             ("lib/src/.DS_Store", "Finder's\n"),
+            ("../engine/README.md", "Another.\n"),
+            (
+                "../engine/Cargo.lock",
+                "version = 4\n\n[[package]]\nname = \"core\"\nversion = \"0.1.0\"\n",
+            ),
         ] {
             fs::write(there.join(path), text).unwrap();
             assert_eq!(ours.digest, digest(&there), "{path}");
@@ -476,6 +563,11 @@ mod tests {
                 "version = 4\n\n[[package]]\nname = \"game\"\nversion = \"0.1.0\"\n",
             ),
             ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.99.1\"\n"),
+            ("../engine/core/src/lib.rs", "pub const MORE: u8 = 1;\n"),
+            (
+                "../engine/Cargo.toml",
+                "[workspace]\nmembers = [\"front\", \"core\"]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.1.0\"\n",
+            ),
         ] {
             fs::write(there.join(path), text).unwrap();
             let changed = digest(&there);
