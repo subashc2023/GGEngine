@@ -7647,7 +7647,7 @@ mod tests {
     #[test]
     fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
         let mut cx = Context::seeded(1);
-        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
         let model = cx
             .add_model("fox", fox.join("Fox.gltf"))
             .expect("the Fox reads");
@@ -7704,7 +7704,7 @@ mod tests {
     /// leaves its skinned copy spare.
     fn spare_fox() -> (Context, Model) {
         let mut cx = Context::seeded(1);
-        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
         let model = cx
             .add_model("fox", fox.join("Fox.gltf"))
             .expect("the Fox reads");
@@ -7754,7 +7754,7 @@ mod tests {
     #[test]
     fn a_skinned_copy_of_an_entity_still_alive_goes_rather_than_being_spare() {
         let mut cx = Context::seeded(1);
-        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
         let model = cx
             .add_model("fox", fox.join("Fox.gltf"))
             .expect("the Fox reads");

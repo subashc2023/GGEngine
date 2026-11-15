@@ -1269,7 +1269,7 @@ mod tests {
         // the checkout is.
         let scratch = crate::dirs::tests::Scratch::new("states-hash");
         std::fs::create_dir_all(&scratch.0).expect("a directory");
-        let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox");
+        let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
         for file in ["Fox.gltf", "Fox.bin", "Texture.png"] {
             std::fs::copy(files.join(file), scratch.0.join(file)).expect("copied");
         }

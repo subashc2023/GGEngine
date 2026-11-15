@@ -1326,17 +1326,22 @@ mod tests {
         );
         // Tests run in the package's directory, which is in no project.
         assert_eq!(run.project, None);
-        let shards = std::path::absolute("../../games/shards").unwrap();
-        for project in ["../../games/shards", "../../games/shards/project.ron"] {
-            let Ok(Command::Run(run)) = parsed(&["run", "--project", project]) else {
+        // A project, named by its directory or its manifest, whose game is the package.
+        let dir = std::env::temp_dir().join(format!("gg-args-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory");
+        let manifest = dir.join(Project::FILE);
+        fs::write(&manifest, new::project("probe").text()).expect("written");
+        let at = dir.to_str().expect("a UTF-8 path");
+        for given in [at, manifest.to_str().expect("a UTF-8 path")] {
+            let Ok(Command::Run(run)) = parsed(&["run", "--project", given]) else {
                 panic!("a run");
             };
-            assert_eq!(run.package, "shards", "{project}");
-            let manifest = shards.join(Project::FILE);
-            assert_eq!(run.project.map(|scope| scope.manifest), Some(manifest));
+            assert_eq!(run.package, "probe", "{given}");
+            let scoped = run.project.map(|scope| scope.manifest);
+            assert_eq!(scoped.as_ref(), Some(&manifest), "{given}");
         }
-        let Ok(Command::Check(check)) =
-            parsed(&["check", "sandbox", "--project=../../games/shards"])
+        let Ok(Command::Check(check)) = parsed(&["check", "sandbox", &format!("--project={at}")])
         else {
             panic!("a check");
         };
@@ -1344,21 +1349,20 @@ mod tests {
             (check.package.as_str(), check.project.is_some()),
             ("sandbox", true)
         );
-        let Ok(Command::Call { pick, .. }) = parsed(&["status", "--project", "../../games/shards"])
-        else {
+        let Ok(Command::Call { pick, .. }) = parsed(&["status", "--project", at]) else {
             panic!("a call");
         };
-        assert_eq!(pick.project, Some(shards.join(Project::FILE)));
+        assert_eq!(pick.project.as_ref(), Some(&manifest));
         let Ok(Command::Ship(ship)) = parsed(&["ship", "shards"]) else {
             panic!("a ship");
         };
         assert_eq!((ship.package.as_str(), ship.project), ("shards", None));
-        let Ok(Command::Ship(ship)) = parsed(&["ship", "--project", "../../games/shards"]) else {
+        let Ok(Command::Ship(ship)) = parsed(&["ship", "--project", at]) else {
             panic!("a ship");
         };
-        assert_eq!(ship.package, "shards");
-        let manifest = ship.project.map(|scope| scope.manifest);
-        assert_eq!(manifest, Some(shards.join(Project::FILE)));
+        assert_eq!(ship.package, "probe");
+        assert_eq!(ship.project.map(|scope| scope.manifest), Some(manifest));
+        fs::remove_dir_all(&dir).expect("removed");
         let Ok(Command::New(name)) = parsed(&["new", "probe"]) else {
             panic!("a new game");
         };
@@ -1671,7 +1675,7 @@ mod tests {
             &["new", "-probe"],
             &["new", "aux"],
             &["new", "a", "b"],
-            &["new", "probe", "--project", "../../games/shards"],
+            &["new", "probe", "--project", "elsewhere"],
         ] {
             let error = parsed(args).err().map(|error| error.code);
             assert_eq!(error.as_deref(), Some("gg.args"), "{args:?}");

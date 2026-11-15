@@ -3890,8 +3890,7 @@ pub(crate) mod tests {
     /// the vertices themselves.
     #[test]
     fn a_skinned_meshs_leaves_hold_its_vertices_in_every_pose() {
-        let fox =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox/Fox.gltf");
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox/Fox.gltf");
         let imported = read("fox", &fox, crate::dirs::read_file, MAX_MEMORY).expect("the Fox");
         let (part, skinned) = (imported.parts.iter().enumerate())
             .find(|(_, part)| part.skin.is_some())

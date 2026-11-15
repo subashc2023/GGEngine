@@ -493,10 +493,11 @@ Targets fragment_main(Varyings input) {
         file
     }
 
-    /// The file of one of the showcase's models, `name`.
-    fn showcase_model(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models");
-        dir.join(name)
+    /// The file of one of the cooker's test models, `name`.
+    fn test_model(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/models")
+            .join(name)
     }
 
     fn id_file(id: &str) -> String {
@@ -546,7 +547,7 @@ Targets fragment_main(Varyings input) {
         );
         fixture.write("textures/stone.png", &png([5, 3], [90, 80, 70, 255]));
         fixture.write("art/icon.png", &png([256, 256], [200, 120, 40, 255]));
-        let crate_model = fs::read(showcase_model("crate.gltf")).unwrap();
+        let crate_model = fs::read(test_model("crate.gltf")).unwrap();
         fixture.write("models/crate.gltf", &crate_model);
         let out = fixture.0.join("target/game.ggpk");
         let cooked = cook(&fixture.0, &out).unwrap_or_else(|error| panic!("{error:#}"));
@@ -589,7 +590,7 @@ Targets fragment_main(Varyings input) {
     #[test]
     fn a_model_cooks_to_what_a_run_reads() {
         for name in ["crate.gltf", "torus.gltf", "tiles.gltf", "fox/Fox.gltf"] {
-            let file = showcase_model(name);
+            let file = test_model(name);
             let read = cook::read_model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
             let bytes = model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
             let cooked = cook::read_cooked_model(name, &bytes)
@@ -624,7 +625,7 @@ Targets fragment_main(Varyings input) {
             }
         }
         // The torus is enough triangles to simplify.
-        let torus = showcase_model("torus.gltf");
+        let torus = test_model("torus.gltf");
         let bytes = model("torus.gltf", &torus).unwrap();
         let cooked = cook::read_cooked_model("torus.gltf", &bytes).unwrap();
         let lods = &cooked.primitives[0]

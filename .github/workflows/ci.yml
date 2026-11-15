@@ -383,3 +383,8 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check bans
+      # Games depend on the engine, never the other way round: no crate, app or tool reads a game's
+      # folder, its tests included, which keep what they read in their own `tests`.
+      - name: Check that nothing of the engine reads a game's folder
+        run: |
+          ! git grep -n '\.\./games/' -- crates apps tools

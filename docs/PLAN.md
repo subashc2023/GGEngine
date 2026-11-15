@@ -170,6 +170,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **A relay for players** (2026-11-14)
 - **What a shipped build owes** (2026-11-14)
 - **Round trips and joins in the logs** (2026-11-14)
+- **The engine reads no game's folder** (2026-11-14)
 
 ## Now
 
@@ -177,6 +178,9 @@ Phase 21 closes once two people on other networks, one of them on a phone's hots
 of Foxball's shipped builds through the rented relay, its numbers read from both ends' logs and the
 relay's and what they call for fixed, as Next has it. The builds are made and rehearsed through that
 relay, a Windows host and a Linux joiner on one network, and wait for players at hand.
+
+Phase 22 is under way, its next milestone a game outside the workspace, which starts from a game
+made by hand outside it, whose failures the milestone's steps fix.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -217,6 +221,18 @@ Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
     version, its notices, its symbols, an older glibc on Linux, Foxball shipped in CI, and its
     options kept between runs; and measured over the real internet, two machines on other
     networks, a phone's among them, and what the numbers call for fixed.
+22. **Games of their own, and a sweep.** The engine reads no game's folder; a game in a repository
+    of its own builds, runs, reloads, ships and joins sessions as one in `games/` does, with the
+    same determinism, build digest and `gg` commands; Foxball, the game going to players, moves to
+    one, the first to, while Shards and the showcase stay as the engine's demo and test bed; and the
+    backlog is triaged. *Done when* Foxball's repository builds, tests and ships it against the
+    engine pinned by revision, two of its builds join a session, and each of Deferred's rows and
+    DEFECTS.md's defects has been kept, rewritten, deleted or fixed. Its milestones, in order: the
+    engine reading no game's folder; a game outside the workspace, which `gg new` makes, whose build
+    gets the engine's settings and whose digest reads the engine it builds against, with Luau's
+    flags checked as gg-engine builds and `gg ship` cooking with that engine's cooker; Foxball's
+    move; and the sweep, Deferred and DEFECTS.md triaged, the fixes chosen made, and the docs
+    checked against the code.
 
 Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
 (no macOS driver does today).

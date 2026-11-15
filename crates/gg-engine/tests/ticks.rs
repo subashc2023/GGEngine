@@ -273,8 +273,7 @@ impl Layer for Movers {
             let _ = fs::remove_file(&path);
             loaded.unwrap_or_else(|error| panic!("{error:#}"));
         }
-        let fox =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models/fox/Fox.gltf");
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox/Fox.gltf");
         let fox = cx.add_model("fox", fox);
         self.fox = Some(fox.unwrap_or_else(|error| panic!("{error:#}")));
     }

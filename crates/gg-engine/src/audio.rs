@@ -1336,21 +1336,19 @@ pub(crate) mod tests {
     }
 
     /// A sound decodes to what kira's own decoding of its file does, its frames, its rate, its
-    /// settings and its slice alike: the demo's sounds, of WAV, and Ogg Vorbis, whose first packet
-    /// decodes to no frames.
+    /// settings and its slice alike: the crate's test sounds, of WAV, and Ogg Vorbis, whose first
+    /// packet decodes to no frames.
     #[test]
     fn a_sound_decodes_as_kiras_decoding_of_it_does() {
-        let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/shards/sounds");
-        let mut files: Vec<_> = (std::fs::read_dir(&demo).expect("the demo's sounds"))
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio");
+        let files: Vec<_> = (std::fs::read_dir(&dir).expect("the test sounds"))
             .map(|entry| {
                 let path = entry.expect("a sound's entry").path();
                 let bytes = std::fs::read(&path).expect("a sound's file");
                 (path, bytes)
             })
             .collect();
-        assert!(files.len() >= 5, "{} of the demo's sounds", files.len());
-        let tone = include_bytes!("../tests/audio/tone.ogg").to_vec();
-        files.push(("tone.ogg".into(), tone));
+        assert!(files.len() >= 6, "{} test sounds", files.len());
         for (path, bytes) in files {
             let kiras = StaticSoundData::from_cursor(Cursor::new(bytes.clone()));
             let kiras = kiras.expect("kira decodes it");
