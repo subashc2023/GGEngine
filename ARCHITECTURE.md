@@ -72,8 +72,10 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   view is shared through as it renders; and the readers and writers of the text of a
   [project](#project-state)'s manifest and of its assets' ID files, with the scan that finds those
   under an asset root: files that tools and development builds share. It depends on no `gg-*`
-  crate, so that tools build without the engine, and `gg-engine` uses it in development builds
-  alone, so that only they read a manifest or an ID file: shipping builds start from cooked data.
+  crate, so that tools build without the engine, and `gg-engine`'s code uses it in development
+  builds alone, so that only they read a manifest or an ID file: shipping builds start from cooked
+  data. `gg-engine`'s build script uses it in every build, to check the flags Luau's C++ builds
+  with.
 - **`gg-relay`:** the relay that a session's runs meet through when they can't connect to each
   other, as [Networking](#networking) says: both ends of its protocol, which `gg-engine`'s sessions
   speak, and the relay itself, which the `relay` app runs. It depends on `gg-core` alone of the
@@ -1122,7 +1124,9 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   calls the platform's `pow` past any hook, is refused, and its libraries' functions that make an
   integer of a number, by a C cast that platforms make otherwise past the integer's range, fail at
   such a number, as `string.format` does at a float it would write as NaN or infinity, which C
-  libraries write each their own way. A recorded run hashes the world once its
+  libraries write each their own way. Its C++ compiles with no multiplication fused into an
+  addition, by [.cargo/config.toml](.cargo/config.toml)'s `LUAU_CXXFLAGS`, which gg-engine's build
+  refuses to go without on any target but MSVC's. A recorded run hashes the world once its
   layers attach and after every tick, so that its replay, on another machine or after a change,
   finds the first tick where it goes another way. `World::difference` names the entity and field
   where two worlds part in one process; across two machines, `--dump` writes the world there a

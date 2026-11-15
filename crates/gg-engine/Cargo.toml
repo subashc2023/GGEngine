@@ -42,6 +42,10 @@ winit.workspace = true
 zstd.workspace = true
 zune-jpeg.workspace = true
 
+# Refuses C++ flags that would let Luau's scripts give other bits on one platform than on another.
+[build-dependencies]
+gg-api.workspace = true
+
 # Hot reload's tests wait for the warnings its thread logs.
 [dev-dependencies]
 tracing-subscriber.workspace = true

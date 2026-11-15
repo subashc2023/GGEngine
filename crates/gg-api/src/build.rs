@@ -41,6 +41,9 @@
 //! made from files outside its `src/` would have to be read here too. A dependency by git is read
 //! through `Cargo.lock`, which names its commit; a `[patch]` that puts a path in a dependency's
 //! place isn't read, as `cargo metadata --no-deps` doesn't list patches.
+//!
+//! For gg-engine's build script, [`check_cxx_contract`] refuses C++ flags that would let Luau's
+//! scripts give other bits on one platform than on another.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -155,6 +158,74 @@ fn check_icon(path: &Path, png: &[u8]) -> Result<(), Failure> {
             Err(Failure::new("build.icon", message))
         }
     }
+}
+
+/// For gg-engine's build script: checks that Luau's C++, which mlua builds through luau0-src and the
+/// cc crate, compiles for `target` on `host` with `-ffp-contract=off`, fusing no multiplication into
+/// an addition, so that scripts give the same bits on every platform, as the engine's
+/// `.cargo/config.toml` says. `var` gives an environment variable's value, `None` where it's unset.
+///
+/// The flag must come from `LUAU_CXXFLAGS`, the one variable whose change builds Luau again, as
+/// luau0-src tells cargo; cc, whose cargo metadata luau0-src turns off, tells it of none of its own
+/// variables. cc 1.9 passes the compiler luau0-src's flags, `LUAU_CXXFLAGS`' among them, and after
+/// them its own variables', from the first to the last of `CXXFLAGS`, `HOST_CXXFLAGS`
+/// (`TARGET_CXXFLAGS` for a target other than the host), `CXXFLAGS_` and the target with its `-`
+/// and `.` as `_`, and `CXXFLAGS_` and the target, a flag's last instance winning; so none of those
+/// may give another `-ffp-contract=`. Each is split at whitespace, as cc splits them unless
+/// `CC_SHELL_ESCAPED_FLAGS` has it read them as a shell would. A target built by MSVC passes: it
+/// takes no such flag, and fuses none by default.
+///
+/// Fails with `build.flags`, saying what to change.
+pub fn check_cxx_contract(
+    target: &str,
+    host: &str,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<(), Failure> {
+    if target.ends_with("-msvc") {
+        return Ok(());
+    }
+    const OFF: &str = "-ffp-contract=off";
+    let kind = if target == host { "HOST" } else { "TARGET" };
+    let names = [
+        "LUAU_CXXFLAGS".to_owned(),
+        "CXXFLAGS".to_owned(),
+        format!("{kind}_CXXFLAGS"),
+        format!("CXXFLAGS_{}", target.replace(['-', '.'], "_")),
+        format!("CXXFLAGS_{target}"),
+    ];
+    // Each variable's last `-ffp-contract=`, in the order the compiler gets them.
+    let flags: Vec<(&str, Option<String>)> = (names.iter())
+        .map(|name| {
+            let value = var(name).unwrap_or_default();
+            let mut flags = value.split_ascii_whitespace();
+            let last = flags.rfind(|flag| flag.starts_with("-ffp-contract="));
+            (name.as_str(), last.map(str::to_owned))
+        })
+        .collect();
+    let effect = "so that the compiler could fuse a script's multiplications into additions, and \
+                  the script give other bits than on other platforms";
+    if flags[0].1.as_deref() != Some(OFF) {
+        let message = format!(
+            "Luau's C++ would build for {target} without `{OFF}` in `LUAU_CXXFLAGS`, {effect}: set \
+             `LUAU_CXXFLAGS = \"{OFF}\"` under `[env]` in the workspace's `.cargo/config.toml`, as \
+             the engine's does, or end the `LUAU_CXXFLAGS` you set with the flag. It goes there \
+             rather than in a `CXXFLAGS`, as Luau builds again when `LUAU_CXXFLAGS` changes, and \
+             not when those do."
+        );
+        return Err(Failure::new("build.flags", message));
+    }
+    let later = (flags[1..].iter().rev()).find_map(|(name, flag)| Some((name, flag.as_deref()?)));
+    if let Some((name, flag)) = later
+        && flag != OFF
+    {
+        let message = format!(
+            "`{name}` gives `{flag}`, which cc passes Luau's compiler for {target} after \
+             `LUAU_CXXFLAGS`, {effect}: take it out, and then run `cargo clean -p mlua-sys`, as \
+             Luau doesn't build again when `{name}` changes."
+        );
+        return Err(Failure::new("build.flags", message));
+    }
+    Ok(())
 }
 
 /// What cargo tells a package's build script, which the digest reads.
@@ -604,5 +675,50 @@ mod tests {
             let code = check_icon(path, &refused).err().map(|failure| failure.code);
             assert_eq!(code.as_deref(), Some("build.icon"), "{refused:?}");
         }
+    }
+
+    #[test]
+    fn luau_builds_with_no_fused_multiply_add_from_luau_s_flags_and_none_after() {
+        let linux = "x86_64-unknown-linux-gnu";
+        let (off, fast) = ("-O2 -ffp-contract=off", "-ffp-contract=fast -g");
+        let luau = ("LUAU_CXXFLAGS", off);
+        let check = |target: &str, host: &str, vars: &[(&str, &str)]| {
+            let var = |name: &str| {
+                let set = vars.iter().find(|(set, _)| *set == name);
+                set.map(|(_, value)| (*value).to_owned())
+            };
+            check_cxx_contract(target, host, var)
+        };
+        let failure = check(linux, linux, &[]).expect_err("no flags");
+        assert_eq!(failure.code, "build.flags");
+        let fix = "`LUAU_CXXFLAGS = \"-ffp-contract=off\"`";
+        assert!(failure.message.contains(fix), "{}", failure.message);
+        assert_eq!(check("aarch64-pc-windows-msvc", linux, &[]), Ok(()));
+
+        let on_linux = |vars: &[(&str, &str)]| check(linux, linux, vars).is_ok();
+        let (underscored, dashed) = (
+            "CXXFLAGS_x86_64_unknown_linux_gnu",
+            "CXXFLAGS_x86_64-unknown-linux-gnu",
+        );
+        assert!(on_linux(&[luau]));
+        assert!(on_linux(&[luau, ("CXXFLAGS", "-O3 -march=native")]));
+        // Luau doesn't build again as cc's variables change.
+        assert!(!on_linux(&[(underscored, off)]));
+        let undone = "-ffp-contract=off -ffp-contract=on";
+        assert!(!on_linux(&[("LUAU_CXXFLAGS", undone)]));
+        // cc's variables, after Luau's, the last instance winning.
+        for name in ["CXXFLAGS", "HOST_CXXFLAGS", underscored, dashed] {
+            assert!(!on_linux(&[luau, (name, fast)]), "{name}");
+        }
+        assert!(on_linux(&[luau, ("CXXFLAGS", fast), (dashed, off)]));
+        assert!(!on_linux(&[luau, ("CXXFLAGS", off), (dashed, fast)]));
+        // `TARGET_CXXFLAGS` for another target than the host's, `HOST_CXXFLAGS` for its own.
+        assert!(on_linux(&[luau, ("TARGET_CXXFLAGS", fast)]));
+        let mac = "aarch64-apple-darwin";
+        assert!(check(mac, linux, &[luau, ("TARGET_CXXFLAGS", fast)]).is_err());
+        assert!(check(mac, linux, &[luau, ("HOST_CXXFLAGS", fast)]).is_ok());
+        let dotted = "thumbv8m.main-none-eabi";
+        let its = "CXXFLAGS_thumbv8m_main_none_eabi";
+        assert!(check(dotted, dotted, &[luau, (its, fast)]).is_err());
     }
 }
