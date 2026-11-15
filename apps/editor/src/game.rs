@@ -1,7 +1,8 @@
-//! The game of the project the editor is started in, run as an agent runs it: under `cargo gg run
-//! --embedded` in the project's directory, which builds it, patches it as its code changes and
-//! restarts it after any other change, and which ends, with the game, as the editor ends, closing
-//! its stdin; or, given `--release-game`, under `cargo gg run --release --embedded`, which builds
+//! The game of the project the editor is started in, run as an agent runs it: under `gg run
+//! --embedded` in the project's directory, wherever it is, with the gg of the engine the editor
+//! is built from, as [`crate::gg`] has it, which builds it, patches it as its code changes and
+//! restarts it after any other change, and which ends, with the game, as the editor ends,
+//! closing its stdin; or, given `--release-game`, under `gg run --release --embedded`, which builds
 //! it optimized, without patches. The game starts stopped, as `--stopped` has it: its world is the
 //! world as edited, which only edits, scene files' saves and the File menu's New and Open change,
 //! until Play. It renders offscreen for the editor, which shows its view in the Viewport from
@@ -101,7 +102,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -557,7 +558,7 @@ impl Game {
         }
     }
 
-    /// Starts `cargo` with [`gg_run`]'s arguments in the project's directory, once, with threads
+    /// Starts gg with [`gg_run`]'s arguments in the project's directory, once, with threads
     /// that read what it prints, saying why if it can't start it; but nothing outside a project,
     /// and while the run of the project open before in the same directory goes on ending, it waits,
     /// each update starting it again, until that has ended.
@@ -572,11 +573,8 @@ impl Game {
         let Some(send) = self.send.take() else {
             return;
         };
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let args = gg_run(self.release);
-        let started = Command::new(cargo)
-            .args(&args)
-            .current_dir(dir)
+        let started = (crate::gg(dir).args(&args))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -584,13 +582,13 @@ impl Game {
         let mut child = match started {
             Ok(child) => child,
             Err(error) => {
-                let why = format!("can't run `cargo gg run` in {}: {error}", dir.display());
+                let why = format!("can't run `gg run` in {}: {error}", dir.display());
                 self.log(Level::Error, why.clone());
                 self.run_state = RunState::Ended(why);
                 return;
             }
         };
-        let started = format!("cargo {}, in {}", args.join(" "), dir.display());
+        let started = format!("gg {}, in {}", args.join(" "), dir.display());
         self.log(Level::Info, started);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -2525,16 +2523,11 @@ impl Layer for Game {
     }
 }
 
-/// What the editor gives `cargo` to run its game: `gg run`, optimized if `release`, embedded, the
-/// game starting stopped.
+/// What the editor gives gg to run its game: `run`, optimized if `release`, embedded, the game
+/// starting stopped.
 fn gg_run(release: bool) -> Vec<&'static str> {
     let optimized: &[&str] = if release { &["--release"] } else { &[] };
-    [
-        &["gg", "run"],
-        optimized,
-        &["--embedded", "--", "--stopped"],
-    ]
-    .concat()
+    [&["run"], optimized, &["--embedded", "--", "--stopped"]].concat()
 }
 
 /// Reads `from` a line at a time on a thread of its own, until it ends, sending each to `send` as
@@ -2919,9 +2912,9 @@ mod tests {
     /// it optimized, by its `--release`, which goes before the game's own arguments.
     #[test]
     fn the_game_runs_optimized_where_the_editor_is_given_release_game() {
-        let as_built = ["gg", "run", "--embedded", "--", "--stopped"];
+        let as_built = ["run", "--embedded", "--", "--stopped"];
         assert_eq!(gg_run(false), as_built);
-        let optimized = ["gg", "run", "--release", "--embedded", "--", "--stopped"];
+        let optimized = ["run", "--release", "--embedded", "--", "--stopped"];
         assert_eq!(gg_run(true), optimized);
     }
 

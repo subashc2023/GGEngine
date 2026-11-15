@@ -50,6 +50,10 @@ const BUNDLED_NOTICES: [&str; 2] = [
     include_str!("../notices/kosmickrisp.txt"),
 ];
 
+/// The template cargo-about writes the licenses of a game's crates with, embedded, as an installed
+/// gg runs without its sources.
+const LICENSES_TEMPLATE: &str = include_str!("../notices.hbs");
+
 /// The Visual C++ runtime's DLLs a game's executable imports, for Luau's and VMA's C++, which
 /// Windows doesn't include: a folder that holds them beside the executable starts on a PC without
 /// the Visual C++ Redistributable, as Microsoft documents for deploying them locally.
@@ -584,12 +588,14 @@ fn about(root: &Path) -> Result<(), Failure> {
 
 /// The licenses of the game whose manifest is `manifest`, in the workspace at `root`, as its build
 /// as it ships depends on its crates, on the OS and architecture gg runs on: cargo-about's, with the
-/// workspace's `about.toml` and gg's `notices.hbs`, offline and with `Cargo.lock` as it is, which
-/// a build made before has fetched what it names, written at `out`, beside the build, and read back;
-/// what cargo-about logs going to stderr.
+/// workspace's `about.toml` and [`LICENSES_TEMPLATE`], written beside `out` with the extension
+/// `hbs`, as cargo-about reads templates from files alone, offline and with `Cargo.lock` as it is,
+/// which a build made before has fetched what it names, written at `out`, beside the build, and
+/// read back; what cargo-about logs going to stderr.
 ///
-/// Fails with `gg.notices` if rustc can't say what it builds for, or cargo-about fails, as for a
-/// license `about.toml` doesn't accept, as it said on stderr, or what it wrote can't be read.
+/// Fails with `gg.notices` if rustc can't say what it builds for, the template can't be written,
+/// or cargo-about fails, as for a license `about.toml` doesn't accept, as it said on stderr, or
+/// what it wrote can't be read.
 fn licenses(root: &Path, manifest: &Path, out: &Path) -> Result<String, Failure> {
     let failed = |what: String| Failure::new("gg.notices", what);
     let rustc = (Command::new("rustc").arg("-vV").current_dir(root))
@@ -598,7 +604,9 @@ fn licenses(root: &Path, manifest: &Path, out: &Path) -> Result<String, Failure>
     let version = String::from_utf8_lossy(&rustc.stdout);
     let host = (version.lines()).find_map(|line| line.strip_prefix("host: "));
     let host = host.ok_or_else(|| failed("`rustc -vV` named no host".to_owned()))?;
-    let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("notices.hbs");
+    let template = out.with_extension("hbs");
+    fs::write(&template, LICENSES_TEMPLATE)
+        .map_err(|error| failed(format!("can't write {}: {error}", template.display())))?;
     // Into a file, as cargo-about refuses to write to a pipe where it finds PowerShell, which
     // would re-encode it.
     let status = (build::cargo(Some(root)).args(["about", "generate", "--fail", "--frozen"]))

@@ -87,10 +87,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
-  the game's view in a panel among the others. Started in a game's project, it runs the project's
-  game as an agent does, under `gg run --embedded`, or optimized with `--release`, as the editor's
-  own flag `--release-game` asks, which ends as the editor does, the game starting stopped
-  (`--stopped`), its world the world as edited; and shows the game's view; the
+  the game's view in a panel among the others. Started in a game's project, wherever it is, it runs
+  the project's game as an agent does, under `gg run --embedded`, gg built from the engine the
+  editor is built from, by its manifest, or optimized with `--release`, as the editor's own flag
+  `--release-game` asks, which ends as the editor does, the game starting stopped (`--stopped`),
+  its world the world as edited; and shows the game's view; the
   game's world in its Entities and Inspector panels, a remote Inspector's, which edit it through
   the API as the editor's own edits, as the handles in the view do, a click picking what the view
   shows under the cursor through the API, with Ctrl or Shift held adding it to what's picked, the
@@ -142,9 +143,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`player`:** the reference player. It runs a game's package without the game's code, its start
   scene, its Luau scripts and physics, as the showcase's package runs, and shows how a game
   builds its own player.
-- **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs, and which
-  builds a game as it ships, `gg ship`, as [Builds](#builds) says, and fetches a project's files
-  its repository doesn't hold, `gg fetch`, as [Project state](#project-state) says.
+- **`tools/gg`:** the command-line tool, a client of the tool API: `cargo gg` in the engine's
+  workspace, by its alias, and `gg`, installed from the engine, in a game's own workspace, which
+  has no alias; not as `cargo-gg`, which the alias would shadow, as cargo warns. It builds a game
+  as it ships, `gg ship`, as [Builds](#builds) says, and fetches a project's files its repository
+  doesn't hold, `gg fetch`, as [Project state](#project-state) says.
 - **`tools/cook`:** the offline asset cooker, `gg-cook`, which writes a game's
   [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts,
   compiles shaders, decodes images, reads models and makes mip levels as runs do and writes and

@@ -16,19 +16,20 @@ mod scenes;
 mod view;
 
 use std::ffi::OsString;
-use std::process::ExitCode;
+use std::path::Path;
+use std::process::{Command, ExitCode};
 
 use gg_engine::App;
 
-/// The editor's own flag: its game built optimized, as `cargo gg run --release` builds it, so that
-/// it runs as fast as a player's, without Vulkan's validation and without patches, each edit to its
+/// The editor's own flag: its game built optimized, as `gg run --release` builds it, so that it
+/// runs as fast as a player's, without Vulkan's validation and without patches, each edit to its
 /// code restarting it. The editor itself is built as it was.
 const RELEASE_GAME: &str = "--release-game";
 
 /// What `--help` adds, after the flags every app shares.
 const USAGE: &str = "
 Editor options:
-  --release-game    Build and run the project's game optimized, under `cargo gg run --release`:
+  --release-game    Build and run the project's game optimized, under `gg run --release`:
                     as fast as a player's, without Vulkan validation, each edit to its code
                     restarting it rather than patching it
 ";
@@ -61,6 +62,21 @@ fn app(release_game: bool) -> App {
     game::app(project, workspace, release_game)
 }
 
+/// Cargo running gg in directory `dir`, whose cargo config and toolchain apply, gg's arguments to
+/// follow: gg built from the source of the engine the editor is built from, by its manifest, as
+/// `cargo gg` builds it in the engine's workspace, and as no alias can in a game's own workspace.
+/// Cargo is the one `CARGO` names, as cargo sets it for what it runs, else the first on the `PATH`.
+fn gg(dir: &Path) -> Command {
+    let editor = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let engine = (editor.ancestors().nth(2)).expect("the editor is at apps/editor in the engine");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.args(["run", "--quiet", "--manifest-path"]);
+    command.arg(engine.join("tools").join("gg").join("Cargo.toml"));
+    command.arg("--").current_dir(dir);
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -83,6 +99,20 @@ mod tests {
         );
         let given = args(&["--max-fps", "60"]);
         assert_eq!(super::own_flags(given.clone()), (false, given));
+    }
+
+    /// gg runs, in the directory given, from the manifest of the engine's gg, wherever the
+    /// directory is.
+    #[test]
+    fn gg_runs_from_the_engines_manifest_in_the_directory_given() {
+        let dir = std::env::temp_dir();
+        let gg = super::gg(&dir);
+        let args: Vec<_> = gg.get_args().collect();
+        assert_eq!(args[..3], ["run", "--quiet", "--manifest-path"]);
+        assert_eq!(args[4..], ["--"]);
+        let manifest = std::fs::read_to_string(args[3]).expect("gg's manifest reads");
+        assert_eq!(manifest.lines().nth(1), Some("name = \"gg\""), "{manifest}");
+        assert_eq!(gg.get_current_dir(), Some(dir.as_path()));
     }
 
     /// A view whose top left isn't the window's, at [`SCALE`] pixels a point: through the editor's

@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -307,7 +307,7 @@ impl Hub {
         let made = match making.run.as_ref()?.try_recv() {
             Ok(made) => made,
             Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => Err("`cargo gg new` ended unheard".to_owned()),
+            Err(TryRecvError::Disconnected) => Err("`gg new` ended unheard".to_owned()),
         };
         making.run = None;
         match made {
@@ -440,7 +440,7 @@ impl Hub {
                     ui.colored_label(error, why.as_str());
                 }
                 _ => {
-                    ui.weak(format!("Made in {} by `cargo gg new`", games.display()));
+                    ui.weak(format!("Made in {} by `gg new`", games.display()));
                 }
             }
         });
@@ -753,20 +753,16 @@ fn new_project(name: &str) -> Result<(), String> {
     project.check().map_err(|failure| failure.message)
 }
 
-/// Runs `cargo gg new <name>` in `workspace` on a thread of its own, whose result comes back as
-/// [`made`] reads it.
+/// Runs `gg new <name>` in `workspace`, as [`crate::gg`] runs gg, on a thread of its own, whose
+/// result comes back as [`made`] reads it.
 fn make(workspace: &Path, name: &str) -> Receiver<Result<PathBuf, String>> {
     let (send, made_it) = mpsc::channel();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .args(["gg", "new", name])
-        .current_dir(workspace)
-        .stdin(Stdio::null());
+    let mut command = crate::gg(workspace);
+    command.args(["new", name]).stdin(Stdio::null());
     thread::spawn(move || {
         let output = command.output();
         let result = output
-            .map_err(|error| format!("can't run `cargo gg new`: {error}"))
+            .map_err(|error| format!("can't run `gg new`: {error}"))
             .and_then(|output| made(&output));
         let _ = send.send(result);
     });
@@ -798,7 +794,7 @@ fn made(output: &Output) -> Result<PathBuf, String> {
     });
     let printed = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Err(error.unwrap_or(if printed.is_empty() {
-        format!("`cargo gg new` ended, {}", output.status)
+        format!("`gg new` ended, {}", output.status)
     } else {
         printed
     }))
