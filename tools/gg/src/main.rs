@@ -135,11 +135,17 @@ Build and run:
       `fetched` or `kept`, with the `id` it wrote, then one for the list.
 
 Make a game:
-  new <NAME>
-      Write a new game in the workspace, in `games/NAME`, writing over nothing: package NAME, whose
-      binary is `gg-NAME`, a development build of the engine's; its project, whose start scene is
-      `scenes/main.ron`, empty; and its main module, whose layer loads the start scene. Prints a
-      line naming its directory and files.
+  new <NAME> [--engine <SOURCE>]
+      Write a new game, writing over nothing: package NAME, whose binary is `gg-NAME`, a
+      development build of the engine's; its project, whose start scene is `scenes/main.ron`,
+      empty; and its main module, whose layer loads the start scene. In the engine's workspace, a
+      member, in `games/NAME`. Elsewhere, a workspace of its own, in `NAME`, building against the
+      engine SOURCE names, which it needs: an engine checkout's directory, or
+      `<GIT URL>#<REVISION>`; with copies of the engine's `.cargo/config.toml` but its `cargo gg`
+      alias, `clippy.toml`, `rust-toolchain.toml`, `about.toml`, `.gitattributes` and `.gitignore`,
+      its `Cargo.lock`, to start the game's from, and an AGENTS.md and CLAUDE.md pointing agents at
+      the engine's docs. NAME can't be a package's in the engine's lock, as `--package NAME`, with
+      which gg builds a game, would name both. Prints a line naming its directory and files.
 
 Talk to a running game, through its tool API:
   sessions                       List the running games
@@ -382,7 +388,8 @@ enum Command {
     Check(Check),
     Ship(Ship),
     Fetch(Scope),
-    New(String),
+    /// A new game's name, and the engine a game outside the engine's workspace builds against.
+    New(String, Option<new::Engine>),
     /// The running games, those of the project whose manifest it names alone.
     Sessions(Option<PathBuf>),
     Logs {
@@ -437,7 +444,7 @@ fn main() -> ExitCode {
         Command::Check(check) => run::check(&check),
         Command::Ship(ship) => ship::ship(&ship).map(|()| true),
         Command::Fetch(scope) => fetch::fetch(&scope).map(|()| true),
-        Command::New(name) => new::new(&name).map(|()| true),
+        Command::New(name, engine) => new::new(&name, engine.as_ref()).map(|()| true),
         Command::Sessions(project) => game::sessions(project.as_deref()).map(|sessions| {
             print(&sessions.to_string());
             true
@@ -511,7 +518,8 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 20] = [
+const VALUED: [&str; 21] = [
+    "--engine",
     "--viewpoints",
     "--rect",
     "--project",
@@ -836,7 +844,9 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             Command::Fetch(scope)
         }
         "new" => {
-            let name = parsed.positional(1, 1, "new <NAME>")?.remove(0);
+            let name = parsed
+                .positional(1, 1, "new <NAME> [--engine <SOURCE>]")?
+                .remove(0);
             if new::project(&name).check().is_err() {
                 return Err(bad(format!(
                     "`gg new` takes a package's name, of ASCII letters, digits, `-` and `_`, \
@@ -844,7 +854,10 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                      `con`, not `{name}`"
                 )));
             }
-            Command::New(name)
+            let engine = parsed
+                .value("--engine")
+                .map(|given| new::Engine::parse(&given));
+            Command::New(name, engine.transpose().map_err(bad)?)
         }
         "sessions" => {
             parsed.positional(0, 0, "sessions")?;
@@ -1363,10 +1376,26 @@ mod tests {
         assert_eq!(ship.package, "probe");
         assert_eq!(ship.project.map(|scope| scope.manifest), Some(manifest));
         fs::remove_dir_all(&dir).expect("removed");
-        let Ok(Command::New(name)) = parsed(&["new", "probe"]) else {
+        let Ok(Command::New(name, None)) = parsed(&["new", "probe"]) else {
             panic!("a new game");
         };
         assert_eq!(name, "probe");
+        // Outside the engine's workspace, against an engine by its checkout or its repository.
+        let Ok(Command::New(_, Some(engine))) = parsed(&["new", "probe", "--engine", "../engine"])
+        else {
+            panic!("a new game");
+        };
+        assert_eq!(engine, new::Engine::Path(PathBuf::from("../engine")));
+        let Ok(Command::New(_, Some(engine))) = parsed(&[
+            "--engine=https://example.com/engine.git#4f2a91c",
+            "new",
+            "probe",
+        ]) else {
+            panic!("a new game");
+        };
+        let url = "https://example.com/engine.git".to_owned();
+        let rev = "4f2a91c".to_owned();
+        assert_eq!(engine, new::Engine::Git { url, rev });
         let snapshot = std::path::absolute("world.snapshot").unwrap();
         let png = std::path::absolute("view.png").unwrap();
         let level = std::path::absolute("scenes/level2.ron").unwrap();
@@ -1676,6 +1705,9 @@ mod tests {
             &["new", "aux"],
             &["new", "a", "b"],
             &["new", "probe", "--project", "elsewhere"],
+            &["new", "probe", "--engine"],
+            &["new", "probe", "--engine="],
+            &["new", "probe", "--engine", "https://example.com/engine.git"],
         ] {
             let error = parsed(args).err().map(|error| error.code);
             assert_eq!(error.as_deref(), Some("gg.args"), "{args:?}");
