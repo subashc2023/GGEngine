@@ -1586,7 +1586,12 @@ UDP, each packet repeating those the server hasn't said it applied, or on the st
 are too long for a packet; and the server's states over UDP, in as many packets as each takes, a
 state lost being lost, as the next is sent against the latest the client has. Each link logs what
 it carried as it ends (`net.traffic`): the bytes each way, sealed, their mean a second and the
-most in one, the stream's apart from the packets', and how many packets went through the relay.
+most in one, the stream's apart from the packets', how many packets went through the relay (its
+socket's binds there and their answers among them, one a second each way, which the relay doesn't
+count as an end's datagrams), and its round trip, smoothed as TCP's, and that round trip's
+deviation (`trip_ms`, `trip_deviation_ms`), which `net.direct` and `net.relayed` give too as the way
+changes. A run looking for its host or server through a relay logs as it starts, so that a join's
+time reads from its log.
 `--link` has a run's links hold each packet that comes, and up to more, losing some, and the
 stream's lines, as a slow link would; headless peers given `--real-time` play over it as windowed
 ones do. [net.rs](crates/gg-engine/src/net.rs),

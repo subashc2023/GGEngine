@@ -169,11 +169,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Sessions across OSes** (2026-11-14)
 - **A relay for players** (2026-11-14)
 - **What a shipped build owes** (2026-11-14)
+- **Round trips and joins in the logs** (2026-11-14)
 
 ## Now
 
-Phase 21's fifth milestone, measured over the real internet, as Next has it, once its plan is
-written and approved.
+Phase 21 closes once two people on other networks, one of them on a phone's hotspot, play a match
+of Foxball's shipped builds through the rented relay, its numbers read from both ends' logs and the
+relay's and what they call for fixed, as Next has it. The builds are made and rehearsed through that
+relay, a Windows host and a Linux joiner on one network, and wait for players at hand.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -742,7 +745,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | TURN and other standard relays, beside the engine's own: a relay is `gg-relay` | A game is hosted where a TURN service already runs |
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
 | `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
-| Sessions measured over the real internet, a relay on a rented server and runs on other machines and networks, and over Docker's NATs with `--link`, packets kept on the relay: Phase 20 measured on one machine's loopback, through a local relay, every link's packets direct, `--link` holding them as a slow link would | A game ships to players, as DEFECTS.md's row on punching on real networks has it |
+| Sessions measured over Docker's NATs with `--link`, packets kept on the relay: Phase 20 measured on one machine's loopback, through a local relay, every link's packets direct, `--link` holding them as a slow link would; Phase 21 through its rented relay, both ends on one network, their packets direct by the LAN | Phase 21's sessions on other networks keep their packets on the relay |
 | A server's states compressed against their base as zstd's reference prefix, as `zstd --patch-from` does, in place of its dictionary: 2.7 times quicker for Foxball's (0.17 ms against 0.46), at 10% more bytes | A server's states thread falls behind with many clients, skipping ticks |
 
 ## Open questions

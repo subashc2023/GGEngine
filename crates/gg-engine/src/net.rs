@@ -689,10 +689,12 @@ impl Link {
     }
 
     /// Logs `change`, a link's way changing, as [`Path::step`] gives it, with the packets the link
-    /// has sent and taken each way, through the relay and direct.
+    /// has sent and taken each way, through the relay and direct, and its way there and back so
+    /// far, as [`Trip::millis`] gives it, if it has been timed.
     fn log_way(&self, change: &Change) {
         let [relayed_sent, direct_sent] = self.traffic.sent.map(|count| count.packets);
         let [relayed_came, direct_came] = self.traffic.taken.map(|count| count.packets);
+        let trip_ms = self.trip.millis().map(|[mean, _]| mean);
         match change {
             Change::Direct(at) => info!(
                 code = "net.direct",
@@ -701,6 +703,7 @@ impl Link {
                 direct_sent,
                 relayed_came,
                 direct_came,
+                trip_ms,
                 "The link's packets go direct to the other end, at {at}, past the relay"
             ),
             Change::Stopped => info!(
@@ -709,6 +712,7 @@ impl Link {
                 direct_sent,
                 relayed_came,
                 direct_came,
+                trip_ms,
                 "The link's packets go through the relay again: none came direct for {} ms, or the \
                  other end had none; probing again for {} s",
                 path::QUIET.as_millis(),
@@ -720,6 +724,7 @@ impl Link {
                 direct_sent,
                 relayed_came,
                 direct_came,
+                trip_ms,
                 "The link's packets go through the relay: no way direct to the other end worked \
                  both ways within {} s, as routers that map each destination their own way have it",
                 path::PUNCH.as_secs()
@@ -958,8 +963,9 @@ impl Link {
     /// Logs what the link sent and took (`net.traffic`), as it ends, `whose` it was, as
     /// [`Traffic`] counts it: for its whole time, and each way the bytes, their mean a second and
     /// the most in one, the stream's, and the packets' and how many, and how many of those went
-    /// through the relay. IP's and UDP's headers aren't counted: a packet's count gives them, some
-    /// 28 bytes a packet over IPv4.
+    /// through the relay; and its way there and back as it ended, smoothed, and its deviation, as
+    /// [`Trip::millis`] gives them, if it was timed. IP's and UDP's headers aren't counted: a
+    /// packet's count gives them, some 28 bytes a packet over IPv4.
     fn ended(&self, whose: &str) {
         let seconds = self.made.elapsed().as_secs_f64();
         let traffic = &self.traffic;
@@ -985,6 +991,8 @@ impl Link {
             }
         };
         let (per_second_sent, per_second_taken) = (a_second(bytes_sent), a_second(bytes_taken));
+        let trip = self.trip.millis();
+        let (trip_ms, trip_deviation_ms) = (trip.map(|[mean, _]| mean), trip.map(|[_, dev]| dev));
         info!(
             code = "net.traffic",
             seconds,
@@ -1002,6 +1010,8 @@ impl Link {
             packets_taken,
             relayed_sent,
             relayed_taken,
+            trip_ms,
+            trip_deviation_ms,
             "The link to {whose} ended after {seconds:.1} s. It sent {bytes_sent} bytes, \
              {per_second_sent} a second on average and {busiest_sent} in its busiest second: \
              {stream_sent} on the stream, and {packet_bytes_sent} in {packets_sent} packets, \
@@ -1181,6 +1191,13 @@ impl Trip {
     fn ticks(&self) -> Option<u64> {
         let way = self.mean? / 2.0 + MARGIN * self.deviation;
         Some((way / Tick::DT.as_secs_f64()).ceil() as u64)
+    }
+
+    /// The mean and the mean deviation in milliseconds, to a tenth, as the logs give them; none
+    /// before the first time is taken.
+    fn millis(&self) -> Option<[f64; 2]> {
+        let millis = |seconds: f64| (seconds * 10_000.0).round() / 10.0;
+        Some([millis(self.mean?), millis(self.deviation)])
     }
 }
 
@@ -3663,10 +3680,10 @@ fn read_batches(
 /// Connects to `what` where `toward` says, on a thread of its own, after `after`: to its address,
 /// trying again every [`RETRY`] until it does, or through its relay, coming for the room `code`
 /// gives there, again every [`UNHOSTED`] until its host takes it, as [`gg_relay::join`] says,
-/// noting each answer in `looking`'s [`Heard`]. Then runs the handshake keyed by `code` on the
-/// connection, as [`shake`] does; returns where the connection comes, with its keys, or why its
-/// handshake failed. The thread ends, connecting no more, once `looking` is gone, as its session
-/// is.
+/// noting each answer in `looking`'s [`Heard`], and logging as it starts through a relay, so that
+/// a join's time reads from its log. Then runs the handshake keyed by `code` on the connection, as
+/// [`shake`] does; returns where the connection comes, with its keys, or why its handshake failed.
+/// The thread ends, connecting no more, once `looking` is gone, as its session is.
 fn connect(
     toward: Toward,
     what: &'static str,
@@ -3681,6 +3698,9 @@ fn connect(
         .spawn(move || {
             if !sleep_while_kept(after, &kept) {
                 return;
+            }
+            if let Toward::Relay(relay) = &toward {
+                info!(relay = %relay, "Looking for {what} through its relay");
             }
             let mut warned = false;
             loop {
