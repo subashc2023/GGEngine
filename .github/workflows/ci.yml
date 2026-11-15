@@ -317,6 +317,8 @@ jobs:
       # found them. Builds without `dev` log in the per-user state directory, here the job's own.
       - name: Ship the demos, and run them as they ship
         if: matrix.part == 'shipping'
+        # For the name's capital, which the container's sh, dash, can't make.
+        shell: bash
         run: |
           export XDG_STATE_HOME="$RUNNER_TEMP/state"
           for game in shards foxball; do

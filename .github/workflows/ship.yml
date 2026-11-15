@@ -149,6 +149,8 @@ jobs:
         with:
           name: ${{ inputs.game }}-Linux-X64.tar.gz
       - name: Run the game headless
+        # For the name's capital, which the container's sh, dash, can't make.
+        shell: bash
         run: |
           export XDG_STATE_HOME="$RUNNER_TEMP/state"
           name="$(echo "${GAME:0:1}" | tr '[:lower:]' '[:upper:]')${GAME:1}"
