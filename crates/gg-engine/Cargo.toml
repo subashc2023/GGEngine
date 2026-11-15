@@ -41,10 +41,23 @@ tracing.workspace = true
 winit.workspace = true
 zstd.workspace = true
 zune-jpeg.workspace = true
+# Unused: named so that the root Cargo.toml's pins of the crates beneath mlua and rapier hold.
+glamx.workspace = true
+mlua-sys.workspace = true
+nalgebra.workspace = true
+parry2d-f64.workspace = true
+parry3d-f64.workspace = true
+rapier-glam.workspace = true
+safe_arch.workspace = true
+simba.workspace = true
+wide.workspace = true
 
 # Refuses C++ flags that would let Luau's scripts give other bits on one platform than on another.
 [build-dependencies]
 gg-api.workspace = true
+# Unused: named so that the root Cargo.toml's pin of Luau's C++, which mlua-sys's build script
+# builds, holds.
+luau0-src.workspace = true
 
 # Hot reload's tests wait for the warnings its thread logs.
 [dev-dependencies]

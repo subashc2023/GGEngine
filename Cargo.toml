@@ -64,8 +64,9 @@ gilrs = "0.11.2"
 # and libm, so that its math gives the same bits on every platform, as the simulation needs:
 # without SIMD, whose SSE2 and NEON paths add in different orders and fuse multiplications with
 # additions only on ARM, and with libm's functions rather than the platform's C library's. Cargo
-# merges features across a build, so drawing's math is scalar too.
-glam = { version = "0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
+# merges features across a build, so drawing's math is scalar too. Pinned, as ARCHITECTURE.md's
+# Determinism says.
+glam = { version = "=0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
 # 16-bit floats, which skies' texels are as a development run decodes them. ctt's version.
 half = { version = "2.7.1", default-features = false }
 # Shapes games' text. epaint's version, so that the two build once.
@@ -97,7 +98,8 @@ libc = "0.2.191"
 libloading = "0.8.9"
 # The float functions std leaves to the platform, in Rust and so the same everywhere: musl's,
 # ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
-libm = "0.2.16"
+# Pinned, as ARCHITECTURE.md's Determinism says.
+libm = "=0.2.16"
 # The cooker's meshes: their triangles ordered for the GPU's caches, and their levels of detail.
 # meshoptimizer 1.3's C++, which needs a C++ compiler, as VMA and Luau do.
 meshopt = "0.7.0"
@@ -105,8 +107,14 @@ meshopt = "0.7.0"
 # compiler, as VMA does. luau-vector4, so that a quaternion crosses into a script as a vector, by
 # value. Without luau-jit, whose native code nothing checks for the same bits on every platform, and
 # without send, as the VM stays on the ticks' thread. Luau's C++ fuses no multiplications into
-# additions, as .cargo/config.toml has it built.
-mlua = { version = "0.12.2", features = ["luau", "luau-vector4"] }
+# additions, as .cargo/config.toml has it built. Pinned, as ARCHITECTURE.md's Determinism says.
+mlua = { version = "=0.12.2", features = ["luau", "luau-vector4"] }
+# Pinned beneath mlua, as ARCHITECTURE.md's Determinism says, gg-engine naming them for that alone:
+# mlua's bindings, whose build script builds Luau with the vector size and C stack its features
+# give, and Luau's C++, 0.22.0 holding Luau 740. Without their defaults, so that naming them turns
+# nothing on.
+mlua-sys = { version = "=0.13.0", default-features = false }
+luau0-src = { version = "=0.22.0", default-features = false }
 nu-ansi-term = "0.50.3"
 png = "0.18.1"
 proc-macro2 = "1.0.107"
@@ -119,9 +127,23 @@ quote = "1.0.47"
 # world steps on from as the world saved would have. Its f64 builds, dimforge's, under the names the
 # code uses, as the engine's translations are f64, so that a body 1,000 km from the origin moves as
 # precisely as one at it; rapier3d-f64's defaults add block-solver, which rapier3d's don't, so its
-# others are named, keeping the solver the f32 build had.
-rapier2d = { package = "rapier2d-f64", version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
-rapier3d = { package = "rapier3d-f64", version = "0.36.1", default-features = false, features = ["dim3", "f64", "std", "enhanced-determinism", "serde-serialize"] }
+# others are named, keeping the solver the f32 build had. Pinned, as ARCHITECTURE.md's
+# Determinism says.
+rapier2d = { package = "rapier2d-f64", version = "=0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
+rapier3d = { package = "rapier3d-f64", version = "=0.36.1", default-features = false, features = ["dim3", "f64", "std", "enhanced-determinism", "serde-serialize"] }
+# Pinned beneath rapier, as ARCHITECTURE.md's Determinism says, gg-engine naming them for that
+# alone: what its arithmetic goes through. parry's collision detection, in each dimension;
+# nalgebra's vectors and glamx's, which are its glam's, named rapier-glam here, as the engine's glam
+# has the name; simba's scalars, and its four lanes, wide's, on safe_arch's intrinsics. Without their
+# defaults, so that naming them turns nothing on.
+parry2d-f64 = { version = "=0.31.1", default-features = false }
+parry3d-f64 = { version = "=0.31.1", default-features = false }
+nalgebra = { version = "=0.35.0", default-features = false }
+glamx = { version = "=0.3.1", default-features = false }
+rapier-glam = { package = "glam", version = "=0.33.12", default-features = false }
+simba = { version = "=0.10.2", default-features = false }
+wide = { version = "=1.7.1", default-features = false }
+safe_arch = { version = "=1.2.0", default-features = false }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 # The job system's pool and `join`, with the thread that ticks as a thread of the pool: `join` from
 # one keeps its job on the stack, where a call from outside the pool allocates through its queue.

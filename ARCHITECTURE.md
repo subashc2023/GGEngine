@@ -1126,11 +1126,17 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   such a number, as `string.format` does at a float it would write as NaN or infinity, which C
   libraries write each their own way. Its C++ compiles with no multiplication fused into an
   addition, by [.cargo/config.toml](.cargo/config.toml)'s `LUAU_CXXFLAGS`, which gg-engine's build
-  refuses to go without on any target but MSVC's. A recorded run hashes the world once its
-  layers attach and after every tick, so that its replay, on another machine or after a change,
-  finds the first tick where it goes another way. `World::difference` names the entity and field
-  where two worlds part in one process; across two machines, `--dump` writes the world there a
-  field a line, and the two dumps diff to them.
+  refuses to go without on any target but MSVC's. The engine pins glam, libm, mlua and rapier,
+  which the simulation's bits go through, and beneath them Luau's C++ and mlua-sys, which builds
+  it, and rapier's parry, nalgebra, glamx and its glam 0.33, and simba and its lanes, wide and
+  safe_arch, to the releases CI's reference hashes were made with (`=` in [Cargo.toml](Cargo.toml),
+  gg-engine naming those beneath for that alone), so that neither `cargo update` nor the lock of a
+  game in a workspace of its own moves one: a new release is a change of its own, with the hashes
+  rewritten.
+  A recorded run hashes the world once its layers attach and after every tick, so that its replay,
+  on another machine or after a change, finds the first tick where it goes another way.
+  `World::difference` names the entity and field where two worlds part in one process; across two
+  machines, `--dump` writes the world there a field a line, and the two dumps diff to them.
 - **Ticks run again:** a SyncTest (`--sync-test`) runs each tick again once it has run, a replay's
   too, on a copy of the world taken as it started, each layer given back the commands its tick
   applied, and ends the run where the copy and the world then part (`sync_test.diverged`), naming
