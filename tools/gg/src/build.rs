@@ -227,6 +227,10 @@ pub(crate) struct Package {
     pub(crate) deps: Vec<PathBuf>,
     /// The release of subsecond its binary depends on, if it does.
     pub(crate) subsecond: Option<String>,
+    /// The engine's checkout its binary builds with, if it does: two directories above gg-engine's
+    /// manifest, as the engine keeps its crates in `crates/`; the workspace's root in the engine's
+    /// workspace, else a checkout outside it, by path or cargo's of a git revision.
+    pub(crate) engine: Option<PathBuf>,
     /// The workspace's root directory, and the directory cargo builds it into.
     pub(crate) root: PathBuf,
     pub(crate) target: PathBuf,
@@ -351,6 +355,9 @@ fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
         .find(|dep| dep["name"] == "subsecond")
         .and_then(|dep| dep["version"].as_str())
         .map(str::to_owned);
+    let engine = (reached.iter())
+        .find(|dep| dep["name"] == "gg-engine")
+        .and_then(|engine| Some(dir(engine).parent()?.parent()?.to_owned()));
     let modules = path(&bin["src_path"]).parent().map(Path::to_owned);
     Ok(Package {
         bin: bin["name"].as_str().unwrap_or_default().to_owned(),
@@ -361,6 +368,7 @@ fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
         library,
         deps,
         subsecond,
+        engine,
         root: path(&metadata["workspace_root"]),
         target: target_of(metadata)?,
     })
@@ -532,5 +540,40 @@ mod tests {
             .err()
             .map(|error| error.code);
         assert_eq!(none.as_deref(), Some("gg.build"));
+    }
+
+    /// A binary's engine is the checkout of the gg-engine it builds with, in the workspace or
+    /// outside it, and none that only its tests use.
+    #[test]
+    fn a_packages_engine_is_the_checkout_of_the_gg_engine_its_binary_builds_with() {
+        // The game's metadata with gg-engine's manifest at `manifest`, which node `node` of the
+        // resolve depends on as `kind`.
+        let engine = |manifest: &str, node: usize, kind: Value| {
+            let mut metadata = workspace();
+            let id = "gg-engine 0.1.0";
+            let package = json!({"id": id, "name": "gg-engine", "version": "0.1.0",
+                "manifest_path": manifest, "targets": []});
+            (metadata["packages"].as_array_mut().expect("packages")).push(package);
+            let dep = json!({"pkg": id, "dep_kinds": [{"kind": kind}]});
+            let deps = metadata["resolve"]["nodes"][node]["deps"].as_array_mut();
+            deps.expect("deps").push(dep);
+            package_in(&metadata, "game").expect("the game").engine
+        };
+        let at = |dir: &str| Some(PathBuf::from(dir));
+        let checkout = "/c/git/checkouts/ggengine-1a2b/48f0cd0";
+        let outside = engine(
+            &format!("{checkout}/crates/gg-engine/Cargo.toml"),
+            1,
+            Value::Null,
+        );
+        assert_eq!(outside, at(checkout));
+        let inside = engine("/w/crates/gg-engine/Cargo.toml", 0, Value::Null);
+        assert_eq!(inside, at("/w"));
+        assert_eq!(
+            engine("/e/crates/gg-engine/Cargo.toml", 0, json!("dev")),
+            None
+        );
+        let game = package_in(&workspace(), "game").expect("the game");
+        assert_eq!(game.engine, None);
     }
 }

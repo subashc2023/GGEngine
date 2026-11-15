@@ -137,8 +137,10 @@ gg-engine's root, `crates/gg-engine/src/lib.rs`, what games use; and `docs/LUAU.
 can use.
 
 `gg`, the engine's command-line tool, runs here as in the engine's workspace: `gg run` runs the game
-supervised, reloading it as it's edited; `gg check` runs it headless; `gg help` says the rest.
-Install it from the engine the game builds against:
+supervised, reloading it as it's edited; `gg check` runs it headless; `gg ship` lays it out as it
+ships, in `target/ship`, once cargo-about 0.9.2 is installed and the game's manifest names its
+license, which its notices list; `gg help` says the rest. Install `gg` from the engine the game
+builds against:
 
 ```sh
 {install}

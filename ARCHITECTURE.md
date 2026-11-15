@@ -222,8 +222,9 @@ doesn't hold. Release and shipping builds compile trace events out
 window on Windows, their logs recording their runs. A game's build script, gg-api's
 `build::emit`, links version info into its Windows executables, naming the game, and the
 manifest's icon, which its window takes too, through `App::icon`. `cargo gg ship` builds a
-project's game so, cooks its package beside it and lays the two out in `target/ship/<game>`, named
-after the game, its package's name capitalized, as `Foxball.exe` and `Foxball.ggpk`, with
+project's game so, cooks its package beside it with the cooker of the engine it builds against,
+built in `target/gg-cook` for a game of its own, and lays the two out in `target/ship/<game>`,
+named after the game, its package's name capitalized, as `Foxball.exe` and `Foxball.ggpk`, with
 `NOTICES.txt`: the project's `CREDITS.txt` and the licenses of every crate the build is made from,
 build dependencies included, as Luau's C++ is compiled in through one, which cargo-about writes
 with the workspace's `about.toml`, a license it doesn't accept failing the ship. Side by side on

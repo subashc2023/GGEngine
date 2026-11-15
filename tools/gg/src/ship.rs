@@ -1,11 +1,12 @@
 //! `gg ship`: a game built as it ships, without `dev` in the shipping profile, beside the package
-//! the workspace's cooker cooks from its project, laid out in a folder of its own, named as the
-//! game is, as gg-api's `Project::name` says, with the notices of what it's made from: on Windows
-//! and Linux, whose GPUs' drivers install the Vulkan loader, the executable and its package side by
-//! side, on Windows with the Visual C++ runtime; on macOS, an app bundle holding them with the
-//! Vulkan SDK's loader and KosmicKrisp, its Vulkan driver over Metal, and the game's icon, signed
-//! ad hoc. The build's symbols are laid out in a folder beside it, by the OS's own tools, from which
-//! the frames a panic logs are turned into lines, as ARCHITECTURE.md's Diagnostics says.
+//! the cooker of the engine it builds with cooks from its project, laid out in a folder of its own,
+//! named as the game is, as gg-api's `Project::name` says, with the notices of what it's made from:
+//! on Windows and Linux, whose GPUs' drivers install the Vulkan loader, the executable and its
+//! package side by side, on Windows with the Visual C++ runtime; on macOS, an app bundle holding
+//! them with the Vulkan SDK's loader and KosmicKrisp, its Vulkan driver over Metal, and the game's
+//! icon, signed ad hoc. The build's symbols are laid out in a folder beside it, by the OS's own
+//! tools, from which the frames a panic logs are turned into lines, as ARCHITECTURE.md's
+//! Diagnostics says.
 
 use std::ffi::OsString;
 use std::fs;
@@ -63,7 +64,8 @@ const RUNTIME_ARCH: &str = if cfg!(target_arch = "aarch64") {
 };
 
 /// Builds `ship`'s package as it ships, cooks its project into its package beside its executable,
-/// where a build without `dev` finds it, and lays the two out in `ship/<package>` in the target
+/// where a build without `dev` finds it, with the cooker of the engine it builds with, as
+/// [`cooker`] says, and lays the two out in `ship/<package>` in the target
 /// directory, emptied first, as [`files`] says, with the notices [`notices`] writes; on Windows, with
 /// the Visual C++ runtime, as [`runtime`] finds it; on macOS, with the loader and KosmicKrisp of
 /// the Vulkan SDK that `VULKAN_SDK` names and the project's icon, signed as [`sign`] says. Lays the
@@ -71,8 +73,9 @@ const RUNTIME_ARCH: &str = if cfg!(target_arch = "aarch64") {
 /// naming each folder and each file in it, with its size.
 ///
 /// Fails as [`run::check_game`] does; with `project.read` or `project.bad` for a package whose
-/// directory holds no project that reads, and `gg.project` for one whose project names another
-/// game; before building, with `gg.notices` if cargo-about can't run, on Windows as [`redist`] and
+/// directory holds no project that reads, `gg.project` for one whose project names another game,
+/// and `gg.cook` for one that doesn't build with gg-engine, whose cooker would cook it; before
+/// building, with `gg.notices` if cargo-about can't run, on Windows as [`redist`] and
 /// [`runtime`] do, and on macOS as [`sdk`] does, or with `gg.ship` if the icon can't be read;
 /// with `gg.build` if the workspace has no such package, it has no binary or it doesn't build,
 /// `gg.cook` if its project doesn't cook, and `gg.cargo` if cargo can't run to say what the
@@ -95,6 +98,13 @@ pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
         );
         return Err(Failure::new("gg.project", message));
     }
+    let engine = package.engine.as_deref().ok_or_else(|| {
+        let message = format!(
+            "package `{}` doesn't build with gg-engine, whose cooker cooks a game's project",
+            ship.package
+        );
+        Failure::new("gg.cook", message)
+    })?;
     // Before the build, which takes minutes.
     about(&package.root)?;
     let bundle = if cfg!(target_os = "macos") {
@@ -118,7 +128,8 @@ pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
     };
     let built = build::build(&ship.package, &SHIPPING, dir)?;
     let ggpk = built.exe.with_extension("ggpk");
-    cook(project_dir, &ggpk, dir)?;
+    let cooker = cooker(engine, &package.root, &package.target);
+    cook(project_dir, &ggpk, &cooker, dir)?;
 
     let name = project.name();
     let credits = project_dir.join("CREDITS.txt");
@@ -198,14 +209,35 @@ pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Cooks the project in directory `project` into the package at `ggpk`, with the workspace's
-/// cooker, through cargo run in `dir`; the lines the cooker prints go to stderr, as gg prints one
-/// of its own.
+/// Cargo's arguments that run the cooker of the engine whose checkout is `engine`, for a game in
+/// the workspace whose root is `root`, built into `target`, up to the cooker's own: the cooker's
+/// manifest, in the engine's `tools/cook`; and, for an engine outside the workspace, as a game of
+/// its own builds with, a target directory of the cooker's in the game's, `gg-cook`, as the
+/// engine's own may be in cargo's checkout of a git revision. In the engine's workspace, the
+/// workspace's target, where its other builds are.
+fn cooker(engine: &Path, root: &Path, target: &Path) -> Vec<OsString> {
+    let manifest = engine.join("tools").join("cook").join("Cargo.toml");
+    let mut args: Vec<OsString> = vec!["run".into(), "--manifest-path".into(), manifest.into()];
+    if engine != root {
+        args.extend(["--target-dir".into(), target.join("gg-cook").into()]);
+    }
+    args.push("--".into());
+    args
+}
+
+/// Cooks the project in directory `project` into the package at `ggpk`, with the cooker that
+/// `cooker`, cargo's arguments as [`cooker`] gives them, runs, through cargo run in `dir`; the
+/// lines the cooker prints go to stderr, as gg prints one of its own.
 ///
 /// Fails with `gg.cook` if cargo can't run, or the cooker fails, as it said on stderr.
-fn cook(project: &Path, ggpk: &Path, dir: Option<&Path>) -> Result<(), Failure> {
+fn cook(
+    project: &Path,
+    ggpk: &Path,
+    cooker: &[OsString],
+    dir: Option<&Path>,
+) -> Result<(), Failure> {
     let failed = |what: String| Failure::new("gg.cook", what);
-    let status = (build::cargo(dir).args(["run", "--package", "cook", "--"]))
+    let status = (build::cargo(dir).args(cooker))
         .args([project, ggpk])
         .stdout(io::stderr())
         .status()
@@ -1124,6 +1156,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(missing.as_deref(), Some("gg.symbols"));
         assert_eq!(found, Ok(dir.join("gg_shards.pdb")));
+    }
+
+    /// The cooker is the engine's, built where the workspace's builds are in the engine's workspace,
+    /// and apart in the game's target for an engine outside it.
+    #[test]
+    fn the_cooker_is_the_engines_built_apart_for_an_engine_outside() {
+        let args = |engine: &str, root: &str| -> Vec<PathBuf> {
+            let target = Path::new(root).join("target");
+            let args = cooker(Path::new(engine), Path::new(root), &target);
+            args.into_iter().map(PathBuf::from).collect()
+        };
+        let paths = |args: &[&str]| -> Vec<PathBuf> { args.iter().map(PathBuf::from).collect() };
+        let inside = ["run", "--manifest-path", "/w/tools/cook/Cargo.toml", "--"];
+        assert_eq!(args("/w", "/w"), paths(&inside));
+        let outside = [
+            "run",
+            "--manifest-path",
+            "/e/tools/cook/Cargo.toml",
+            "--target-dir",
+            "/g/target/gg-cook",
+            "--",
+        ];
+        assert_eq!(args("/e", "/g"), paths(&outside));
     }
 
     /// The folder is emptied of what an earlier ship left, and nothing beside it is touched.
