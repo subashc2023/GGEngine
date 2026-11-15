@@ -416,7 +416,12 @@ in the editor is out of an agent's reach.
   its scripts, as [Game code](#game-code) describes, read [diagnostics](#diagnostics), and log a
   client's notes among them, warnings or facts it gives with stable codes, as `gg run` tells a game
   of a patch or a rebuild that failed. Requests and their answers are lines of JSON, as
-  [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
+  [gg-api](crates/gg-api/src/lib.rs) describes. The session file names the protocol's revision,
+  gg-api's `PROTOCOL`, bumped by hand at a change that a `gg` built before it would misread, and
+  `gg` warns (`gg.protocol`) as it reaches a game whose revision isn't its own, as one built against
+  another revision of the engine than `gg` may have: a number rather than the engine's commit, which
+  would rebuild games and `gg` at each commit and warn of every running game after one.
+  A connection's first request says hello with
   the token, which the game compares in constant time, so that only processes that can read the
   file reach the game: the user's own, as the file is the user's alone from before it holds the
   token: on Unix of mode 0600, and on Windows of a protected DACL that allows its owner alone. It

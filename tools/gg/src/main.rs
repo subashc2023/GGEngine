@@ -366,8 +366,12 @@ Options for every command but `new`:
                         rather than in the one gg is in
 
 Each result is a line of JSON on stdout; `logs` prints a line for each of the game's events, and
-`run` one for each of its own, the game's own output and cargo's going to stderr. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
-1 on an error, a check that failed or a run that didn't end cleanly, and 2 on bad arguments.
+`run` one for each of its own, the game's own output and cargo's going to stderr. An error is a
+line on stderr, {\"error\":{\"code\":...,\"message\":...}}, and a warning one too,
+{\"warning\":{\"code\":...,\"message\":...,\"path\":...}}: as gg reaches a game, `gg.protocol` where
+the game speaks another revision of the tool API than gg, as one built against another revision of
+the engine may, naming its session file. Exits 0 on success, 1 on an error, a check that failed or
+a run that didn't end cleanly, and 2 on bad arguments.
 ";
 
 /// The project gg works in, as `--project` names it or gg finds it: its manifest's path, absolute,

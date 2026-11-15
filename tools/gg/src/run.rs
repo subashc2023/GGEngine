@@ -650,8 +650,8 @@ impl Supervisor<'_> {
     }
 
     /// Looks after `game`, peer `peer`'s, for a turn of the loop: finds its session once it serves,
-    /// snapshots it, and pings it; and returns what happened if its process ended, or hung and was
-    /// ended, having printed it.
+    /// warning if its revision of the tool API isn't gg's, snapshots it, and pings it; and returns
+    /// what happened if its process ended, or hung and was ended, having printed it.
     fn tend(&mut self, peer: usize, game: &mut Game) -> Result<Option<Happened>, Failure> {
         let ended = game.child.try_wait();
         if let Some(status) = ended.map_err(|error| failed(&self.peers[peer].copy, error))? {
@@ -677,6 +677,7 @@ impl Supervisor<'_> {
                     "project": session.project,
                     "log": session.log,
                 }));
+                game::warn_protocol(&file, &session);
                 game.session = Some(session);
                 self.served = true;
             }
@@ -1738,6 +1739,7 @@ mod tests {
             aslr_reference: 0,
             player: None,
             project: None,
+            protocol: Some(gg_api::PROTOCOL),
         };
         (session, asked)
     }

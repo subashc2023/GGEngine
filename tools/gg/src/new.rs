@@ -146,6 +146,9 @@ builds against:
 {install}
 ```
 
+Install it again as the game moves to another revision of the engine: `gg` warns (`gg.protocol`) as
+it reaches a game whose engine speaks another revision of the tool API than its own.
+
 A change is done when these pass:
 
 ```sh

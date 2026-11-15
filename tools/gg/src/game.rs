@@ -94,7 +94,8 @@ fn connect_to(
 }
 
 /// Connects to each game of `sessions`, each read from its file, as `client`, kept to `grant`, as
-/// [`connect_to`] does, and returns those that answered, each with its session. One that fails
+/// [`connect_to`] does, and returns those that answered, each with its session, warning of each
+/// whose revision of the tool API isn't gg's, as [`warn_protocol`] does. One that fails
 /// otherwise than by having ended is left out if another answers, as a file that a kill left naming
 /// a port that another game, or another process, has since been given fails, which then mustn't
 /// fail every command; its file stays, as its game may yet answer.
@@ -108,7 +109,10 @@ fn answering(
     let (mut answering, mut failed) = (Vec::new(), None);
     for (path, session) in sessions {
         match connect_to(&path, &session, client, grant) {
-            Ok(Some(client)) => answering.push((session, client)),
+            Ok(Some(client)) => {
+                warn_protocol(&path, &session);
+                answering.push((session, client));
+            }
             Ok(None) => {}
             Err(failure) => {
                 failed.get_or_insert(failure);
@@ -119,6 +123,35 @@ fn answering(
         Some(failure) if answering.is_empty() => Err(failure),
         _ => Ok(answering),
     }
+}
+
+/// Warns `gg.protocol` of the session file at `path` if the game `session`, read from it, speaks
+/// another revision of the tool API than this gg does, as [`protocol_drift`] says.
+pub(crate) fn warn_protocol(path: &Path, session: &Session) {
+    if let Some(message) = protocol_drift(session) {
+        crate::warn("gg.protocol", &message, path);
+    }
+}
+
+/// What's amiss if the game `session` names speaks another revision of the tool API than this gg's,
+/// [`gg_api::PROTOCOL`], as one built against another revision of the engine may; `None` if it's
+/// this gg's.
+fn protocol_drift(session: &Session) -> Option<String> {
+    let theirs = match session.protocol {
+        Some(theirs) if theirs == gg_api::PROTOCOL => return None,
+        Some(theirs) => format!("speaks revision {theirs} of the tool API"),
+        None => "names no revision of the tool API, its engine older than them".to_owned(),
+    };
+    Some(format!(
+        "{} (process {}) {theirs}, where gg speaks revision {}: gg and the game were built against \
+         different revisions of the engine, so gg may misread the game, or the game refuse gg; \
+         build the game again against gg's engine, or run the gg of the engine the game builds \
+         against, installed with `cargo install --path <engine>/tools/gg`, or `--git <url> --rev \
+         <revision> gg`",
+        session.app,
+        session.pid,
+        gg_api::PROTOCOL
+    ))
 }
 
 /// Connects to the running game `pick` picks, waiting for its answers as long as it says.
@@ -447,6 +480,7 @@ mod tests {
             aslr_reference: 0,
             player: None,
             project,
+            protocol: Some(gg_api::PROTOCOL),
         };
         let text = serde_json::to_string(&session).expect("JSON");
         fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
@@ -517,6 +551,7 @@ mod tests {
             aslr_reference: 0,
             player,
             project: None,
+            protocol: Some(gg_api::PROTOCOL),
         };
         let host = session(1, "Shards", Some(0));
         let joiner = session(2, "Shards", Some(1));
@@ -535,6 +570,38 @@ mod tests {
             let pids: Vec<u32> = sessions.iter().map(|session| session.pid).collect();
             assert_eq!(host_of(sessions), None, "{pids:?}");
         }
+    }
+
+    /// A game that speaks gg's revision of the tool API passes; one of another, or of none, as an
+    /// older engine's, is told, naming the game and both revisions.
+    #[test]
+    fn a_game_of_another_revision_of_the_tool_api_is_told() {
+        let session = |protocol| Session {
+            app: "Shards".to_owned(),
+            pid: 7,
+            address: "127.0.0.1:4000".parse().expect("an address"),
+            token: "t".to_owned(),
+            log: None,
+            engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0,
+            player: None,
+            project: None,
+            protocol,
+        };
+        let ours = gg_api::PROTOCOL;
+        assert_eq!(protocol_drift(&session(Some(ours))), None);
+        let other = protocol_drift(&session(Some(ours + 1))).expect("told");
+        let speaks = format!("Shards (process 7) speaks revision {}", ours + 1);
+        assert!(other.starts_with(&speaks), "{other}");
+        assert!(
+            other.contains(&format!("where gg speaks revision {ours}:")),
+            "{other}"
+        );
+        let older = protocol_drift(&session(None)).expect("told");
+        assert!(
+            older.starts_with("Shards (process 7) names no revision"),
+            "{older}"
+        );
     }
 
     /// Serves the API's `hello` on the loopback as a game does, on a thread for each connection,
@@ -588,6 +655,7 @@ mod tests {
                 aslr_reference: 0,
                 player: None,
                 project: None,
+                protocol: Some(gg_api::PROTOCOL),
             };
             let path = dir.join(Session::file_name("Sandbox", pid));
             fs::write(&path, serde_json::to_string(&session).expect("JSON")).expect("written");

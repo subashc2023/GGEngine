@@ -553,6 +553,7 @@ impl Api {
             aslr_reference: patch::aslr_reference(),
             player,
             project: project.map(Path::to_owned),
+            protocol: Some(gg_api::PROTOCOL),
         };
         let welcome = Welcome {
             app: session.app.clone(),

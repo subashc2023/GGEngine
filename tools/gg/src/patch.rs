@@ -1197,6 +1197,7 @@ mod tests {
             aslr_reference: 26064,
             player: None,
             project: None,
+            protocol: Some(gg_api::PROTOCOL),
         };
         let serving = [Process {
             pid: 7,
@@ -1290,6 +1291,7 @@ mod tests {
             aslr_reference,
             player: None,
             project: None,
+            protocol: Some(gg_api::PROTOCOL),
         };
         let (patchable, unpatchable) = (session(26064), session(0));
         let serving = |session| {

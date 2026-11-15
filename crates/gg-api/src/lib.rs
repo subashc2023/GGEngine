@@ -12,7 +12,9 @@
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
-//! each a line. A connection's first request is `hello`, with the session's token. The methods:
+//! each a line. A connection's first request is `hello`, with the session's token. The session file
+//! names the protocol's revision, [`PROTOCOL`], which a change to what follows may bump. The
+//! methods:
 //!
 //! - `hello`, [`Hello`]: answers [`Welcome`]; names the client, whose edits the connection's
 //!   `apply`, `undo` and `redo` are, and the capabilities the connection is kept to.
@@ -332,6 +334,16 @@ pub const MOST_IN_FLIGHT: usize = 16;
 /// which leaves over 3.8 KiB for the client's name and the component types a grant names.
 pub const MAX_HELLO: usize = 4 << 10;
 
+/// The revision of what `gg` and a game's engine rely on of each other, which the session file
+/// names, [`Session::protocol`], and `gg` warns of where a game's isn't its own (`gg.protocol`), as
+/// a game built against another revision of the engine than `gg` may have. Bump it with any change
+/// after which a `gg` built before it would misread a game, or a game it, or be refused: to a
+/// method, a parameter, a field of an answer or the session file, or an error's code, renamed,
+/// removed or meaning something else, or a parameter a method requires added; or to the flags `gg`
+/// starts a game with, or the snapshot files it reads. A method, or a field the other end can go
+/// without, added needs none.
+pub const PROTOCOL: u32 = 1;
+
 /// Where a running game serves the API, which its development build writes as a file of JSON in
 /// the `sessions` directory beside its executable as the API starts, and removes as the run ends;
 /// one that a crash or a kill leaves behind names an address that refuses connections. Only the
@@ -368,6 +380,10 @@ pub struct Session {
     /// than projects.
     #[serde(default)]
     pub project: Option<PathBuf>,
+    /// The [`PROTOCOL`] the game's engine was built with; `None` for one whose engine is older than
+    /// it.
+    #[serde(default)]
+    pub protocol: Option<u32>,
 }
 
 impl Session {
@@ -2222,6 +2238,7 @@ mod tests {
             aslr_reference: 0x7ff6_1234_5678,
             player: None,
             project: Some(PathBuf::from("games/shards/project.ron")),
+            protocol: Some(PROTOCOL),
         };
         for pid in [2, 1] {
             let text = serde_json::to_string(&session(pid)).unwrap();
@@ -2231,15 +2248,16 @@ mod tests {
         let whole = serde_json::to_string(&session(3)).unwrap();
         fs::write(dir.join("sandbox-3.json.tmp"), whole).unwrap();
         fs::write(dir.join("sandbox-4.json"), "{\"app\":").unwrap();
-        // Of an engine older than projects.
+        // Of an engine older than projects and the protocol's revisions.
         let mut older = serde_json::to_value(session(5)).unwrap();
         older.as_object_mut().unwrap().remove("project");
+        older.as_object_mut().unwrap().remove("protocol");
         fs::write(dir.join("sandbox-5.json"), older.to_string()).unwrap();
         let listed = Session::list(&dir);
         let pids: Vec<_> = listed.iter().map(|(_, session)| session.pid).collect();
         assert_eq!(pids, [1, 2, 5]);
         assert_eq!(listed[0].1, session(1));
-        assert_eq!(listed[2].1.project, None);
+        assert_eq!((&listed[2].1.project, listed[2].1.protocol), (&None, None));
         assert!(Session::list(&dir.join("none")).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -2870,6 +2888,7 @@ mod tests {
             aslr_reference: 0x7ff6_1234_5678,
             player: None,
             project: None,
+            protocol: Some(PROTOCOL),
         }
     }
 
