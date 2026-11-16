@@ -362,12 +362,27 @@ jobs:
           grep -q '"code":"engine.loaded"' "$logs"/player-*.jsonl
           # Last, as `set -e` ignores a command that `!` inverts, and the step ends with this one's.
           ! grep -qE '"level":"(WARN|ERROR)"' "$logs"/player-*.jsonl
-      # `gg new`'s game builds against the engine as it is and runs headless, from the workspace and
-      # from inside its project: nothing else compiles its template. Last, as the new member changes
-      # the lock file, which `--locked` refuses.
-      - name: Make a new game, and check it
+      # `gg new`'s games build against the engine as it is and run headless: nothing else compiles
+      # its templates. First a game of its own, outside the workspace, against this checkout by its
+      # path, made and checked with the gg built here, as an installed one does. It shares the
+      # workspace's target directory, whose dependencies it reuses; cargo builds the engine's crates
+      # again beside the workspace's, as it names them by their paths: about a minute. Then a member
+      # of the workspace, from the workspace and from inside its project, last, as it changes the
+      # lock file, which `--locked` refuses.
+      - name: Make new games, outside the workspace and in it, and check them
         if: matrix.part == 'runs'
-        run: cargo gg new probe && cargo gg check probe && (cd games/probe && cargo gg check)
+        run: |
+          cargo build -p gg --locked
+          engine="$PWD"
+          gg="$engine/target/debug/gg"
+          cd "$RUNNER_TEMP"
+          "$gg" new outside --engine "$engine"
+          cd outside
+          CARGO_TARGET_DIR="$engine/target" "$gg" check
+          cd "$engine"
+          cargo gg new probe
+          cargo gg check probe
+          (cd games/probe && cargo gg check)
 
   layering:
     name: Layering rules
