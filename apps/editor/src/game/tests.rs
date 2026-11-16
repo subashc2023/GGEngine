@@ -24,8 +24,8 @@ use crate::tests::{SCALE, VIEW, reading};
 use crate::view::{OUTLINE, OUTLINE_WIDTH};
 use gg_engine::api_viewpoint;
 
-/// The game runs embedded and starts stopped either way; `--release-game` has `gg run` build
-/// it optimized, by its `--release`, which goes before the game's own arguments.
+/// The game runs embedded and starts stopped either way; `--release-game` adds `--release` before
+/// the game's own arguments.
 #[test]
 fn the_game_runs_optimized_where_the_editor_is_given_release_game() {
     let as_built = ["run", "--embedded", "--", "--stopped"];
@@ -34,8 +34,8 @@ fn the_game_runs_optimized_where_the_editor_is_given_release_game() {
     assert_eq!(gg_run(true), optimized);
 }
 
-/// The game's ends of the connections of a layer that [`serving`] gives: the requests the layer
-/// sends, where their answers go back, the picks it asks for, and where their answers go back.
+/// The game's ends of [`serving`]'s layer's connections: requests and their answers, picks and
+/// theirs.
 struct Ends {
     asked: Receiver<(String, Value)>,
     answer: Sender<(String, Result<Value, Failure>)>,
@@ -45,8 +45,8 @@ struct Ends {
     read: Sender<(u64, Result<Probe, Failure>)>,
 }
 
-/// The layer with a game serving, as `serve` leaves it, that plays, through its camera, as the
-/// game was told; and the game's ends of its connections.
+/// A layer with a game serving, as `serve` leaves it, told to play through its camera; and the
+/// game's ends.
 fn serving() -> (Game, Ends) {
     let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
     let (asks, asked) = mpsc::channel();
@@ -78,8 +78,7 @@ fn serving() -> (Game, Ends) {
     (game, ends)
 }
 
-/// The game's answer to a `status`, `play`, `stop`, `pause`, `resume` or `step`, stopped or
-/// not, and paused or not.
+/// The game's answer to a `status`, `play`, `stop`, `pause`, `resume` or `step`.
 fn status(stopped: bool, paused: bool) -> Result<Value, Failure> {
     let status = Status {
         ticks: 0,
@@ -96,8 +95,8 @@ fn status(stopped: bool, paused: bool) -> Result<Value, Failure> {
     Ok(json!(status))
 }
 
-/// The game's answer to a `status` or a `scene`, stopped, its open scene's file `scene`, with
-/// unsaved edits or not.
+/// The game's answer to a `status` or a `scene`, stopped, its open scene's file `scene`, `unsaved`
+/// or not.
 fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
     let status = Status {
         ticks: 0,
@@ -114,7 +113,7 @@ fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
     Ok(json!(status))
 }
 
-/// The `scene` requests the layer whose ends are `ends` sent since.
+/// The `scene` requests sent since.
 fn scenes(ends: &Ends) -> Vec<Scene> {
     let asked = ends
         .asked
@@ -124,7 +123,7 @@ fn scenes(ends: &Ends) -> Vec<Scene> {
     scenes.collect()
 }
 
-/// The `scene` request that saves the open scene, to `path`, or to its file.
+/// The `scene` request saving the open scene, to `path` or to its file.
 fn save(path: Option<PathBuf>) -> Scene {
     Scene {
         action: SceneAction::Save,
@@ -133,25 +132,25 @@ fn save(path: Option<PathBuf>) -> Scene {
     }
 }
 
-/// The methods of the requests the layer whose ends are `ends` sent since.
+/// The methods of the requests sent since.
 fn methods(ends: &Ends) -> Vec<String> {
     ends.asked.try_iter().map(|(method, _)| method).collect()
 }
 
-/// The looks the layer whose ends are `ends` asked the game for since.
+/// The looks asked for since.
 fn looks(ends: &Ends) -> Vec<Look> {
     let asked = ends.asked.try_iter().filter(|(method, _)| method == "look");
     let looks = asked.map(|(_, look)| serde_json::from_value(look).expect("a look"));
     looks.collect()
 }
 
-/// In Play, all the view gets goes to the game, in the view's pixels, whatever the tool: what
-/// the editor's camera takes otherwise among it, a press of its buttons, Alt with the left, the
-/// left under Pan or Orbit, the wheel and Home, which leave the view on the game's camera; and
-/// a press asks for no pick. Stopped, through the game's camera, as the game starts, nothing
-/// goes, but a press off the handles asks for a pick, and what the editor's camera takes turns
-/// the view to it; in Simulate, nothing goes either, and Q, W, E and R pick tools. Turning back
-/// to the game's camera while it plays gives the game the cursor, if it's over the view.
+/// In Play, all the view gets goes to the game, in the view's pixels, whatever the tool, the view
+/// staying on the game's camera. That includes what the editor's camera takes otherwise: its
+/// buttons, Alt with the left, the left under Pan or Orbit, the wheel and Home. A press asks for no
+/// pick. Stopped, through the game's camera, nothing goes: a press off the handles asks for a pick,
+/// and what the editor's camera takes turns the view to it. In Simulate nothing goes either, and Q,
+/// W, E and R pick tools. Turning back to the game's camera while it plays gives the game the
+/// cursor, if it's over the view.
 #[test]
 fn in_play_the_game_gets_all_the_views_input() {
     let (mut game, ends) = serving();
@@ -263,12 +262,11 @@ fn in_play_the_game_gets_all_the_views_input() {
     }
 }
 
-/// Play and Simulate each ask the game to play, whatever the editor last knew of it, Play
-/// turning the view to the game's camera and Simulate to the editor's, so that a switch between
-/// them carries on; Stop asks it to stop, after which none of the view's input goes to the
-/// game, what wasn't sent yet among it, until it answers, but its letting go. Its answer ends
-/// that, whether the game refused, playing on, or stopped, the view turning to the editor's
-/// camera; but not if a Play clicked since waits for its answer.
+/// Play and Simulate each ask the game to play, whatever the editor last knew, Play turning the
+/// view to the game's camera and Simulate to the editor's, so a switch carries on. Stop asks it to
+/// stop. Until it answers, no view input goes to the game, unsent input included, but its letting
+/// go. The answer ends that, refused, playing on, or stopped, the view turning to the editor's
+/// camera; not if a Play clicked since awaits its answer.
 #[test]
 fn play_and_simulate_ask_the_game_to_play_and_stop_to_stop() {
     let (mut game, ends) = serving();
@@ -335,9 +333,9 @@ fn play_and_simulate_ask_the_game_to_play_and_stop_to_stop() {
     assert!(game.view.toolbar.world_camera, "the game's camera");
 }
 
-/// The title bar's controls ask the game for what they show: Pause and Resume while it plays;
-/// Play from stopped, which resumes a game paused since before its stop first; and Step a
-/// step, a stopped game paused and played first, through the camera the view shows.
+/// The run controls ask for what they show: Pause and Resume while it plays; Play from stopped,
+/// which first resumes a game paused since before its stop; Step a step, a stopped game paused and
+/// played first, through the camera the view shows.
 #[test]
 fn the_controls_pause_resume_and_step_the_game() {
     let (mut game, ends) = serving();
@@ -364,12 +362,11 @@ fn the_controls_pause_resume_and_step_the_game() {
     }
 }
 
-/// Another client's `play`, `pause` and `stop` reach the editor in the `status` it asks for:
-/// playing, Play or Simulate lights as the toolbar's switch says, and in Play the view's input
-/// goes to the game; stopped, the view turns to the editor's camera, the input not sent going
-/// and the game letting go of what's held, and the next look sets the editor's viewpoint and
-/// the grid, though the user didn't turn the view. A game that answers stopped as it starts
-/// leaves the view as it was.
+/// Another client's `play`, `pause` and `stop` reach the editor in its `status` polls. Playing:
+/// Play or Simulate lights as the camera switch says, and in Play the view's input goes to the
+/// game. Stopped: the view turns to the editor's camera, unsent input dropped and the game letting
+/// go of what's held; the next look sets the editor's viewpoint and the grid, though the user
+/// didn't turn the view. A game answering stopped as it starts leaves the view as it was.
 #[test]
 fn another_clients_play_and_stop_reach_the_view() {
     let (mut game, ends) = serving();
@@ -430,9 +427,9 @@ fn another_clients_play_and_stop_reach_the_view() {
     assert_eq!(look, expected);
 }
 
-/// A stop the game answers drops the input meant for it that wasn't sent, but its letting go of
-/// what's held, which a turn from Play to Simulate queued after it; but none while a Play
-/// clicked since waits for its answer, the input then going to the copy that Play starts.
+/// A stop the game answers drops the unsent input meant for it, but the letting go a turn from Play
+/// to Simulate queued after it. Not while a Play clicked since awaits its answer: the input then
+/// goes to the copy Play starts.
 #[test]
 fn a_stop_drops_the_input_not_sent_but_the_letting_go() {
     let at = [300.0, 200.0];
@@ -482,8 +479,8 @@ fn a_stop_drops_the_input_not_sent_but_the_letting_go() {
     assert!(game.view.toolbar.world_camera, "the game's camera");
 }
 
-/// The editor asks the game how it runs as a game serves, and every quarter second after, a
-/// `status` at a time.
+/// The editor asks the game's `status` as a game serves and every quarter second after, one at a
+/// time.
 #[test]
 fn the_game_is_asked_how_it_runs_a_status_at_a_time() {
     let (mut game, ends) = serving();
@@ -512,9 +509,9 @@ fn the_game_is_asked_how_it_runs_a_status_at_a_time() {
     assert_eq!(asks(&mut game), 1);
 }
 
-/// An Open goes to the game at once while the last status said the open scene has no unsaved
-/// edits; refused for edits made since, it prompts, logged but in no message, and Don't Save
-/// asks again, discarding them, with the path the dialog picked.
+/// An Open goes at once while the last status said no unsaved edits. Refused for edits made since,
+/// it prompts, logged but in no message; Don't Save asks again, discarding them, with the dialog's
+/// path.
 #[test]
 fn a_refusal_for_unsaved_edits_prompts_and_dont_save_discards_them() {
     let (mut game, ends) = serving();
@@ -552,9 +549,8 @@ fn a_refusal_for_unsaved_edits_prompts_and_dont_save_discards_them() {
     assert_eq!(scenes(&ends), [open(true)]);
 }
 
-/// The prompt's Save has the game save the open scene, then does what it asked about again,
-/// an Open with the path the dialog picked; a save refused does nothing more, saying why in a
-/// message.
+/// The prompt's Save saves the open scene, then redoes what it asked about, an Open with the
+/// dialog's path. A refused save does nothing more, saying why in a message.
 #[test]
 fn the_prompts_save_saves_then_does_it_again() {
     let (mut game, ends) = serving();
@@ -609,10 +605,9 @@ fn the_prompts_save_saves_then_does_it_again() {
     assert!(game.files());
 }
 
-/// Save As has the game save to the file the dialog picked, with `.ron` after its name unless
-/// it ends in it, in any case, as the XDG portal's dialog may leave it; and refuses a name
-/// with `.ron` after it that a file has already, which the dialog didn't ask about replacing,
-/// saying so.
+/// Save As saves to the dialog's file, adding `.ron` unless it ends in it, in any case, as the XDG
+/// portal's dialog may leave it. It refuses, saying so, a name with `.ron` added that a file
+/// already has, which the dialog didn't ask about replacing.
 #[test]
 fn save_as_ends_the_name_in_ron_and_replaces_no_file_unasked() {
     let dir = std::env::temp_dir().join(format!("gg-editor-save-as-{}", std::process::id()));
@@ -644,9 +639,8 @@ fn save_as_ends_the_name_in_ron_and_replaces_no_file_unasked() {
     assert!(game.request.is_none());
 }
 
-/// Save has the game save the open scene to its file, as the last status named one; refused as
-/// untitled, as after another client's `new`, it goes to Save As, whose dialog the next UI
-/// shows, with no message.
+/// Save saves the open scene to the file the last status named. Refused as untitled, as after
+/// another client's `new`, it goes to Save As, whose dialog the next UI shows, with no message.
 #[test]
 fn a_save_refused_as_untitled_goes_to_save_as() {
     let (mut game, ends) = serving();
@@ -708,8 +702,8 @@ fn a_save_refused_as_untitled_mid_close_goes_to_save_as_from_the_prompt_alone() 
     assert_eq!(game.due, Some(Item::SaveAs), "the prompt's own Save");
 }
 
-/// A status saying the world has cells has each poll ask for them with the status, the answer
-/// kept for the Scenes panel; one saying it has none stops it, and forgets them.
+/// A status saying the world has cells has each poll ask for them, the answer kept for the Scenes
+/// panel. One saying it has none stops that, and forgets them.
 #[test]
 fn a_worlds_cells_are_asked_with_each_status() {
     let (mut game, ends) = serving();
@@ -755,10 +749,9 @@ fn a_worlds_cells_are_asked_with_each_status() {
     assert_eq!(folder(&game).as_deref(), Some("scenes/cells"), "kept");
 }
 
-/// A close is vetoed while a game serves, until the answer to a status asked after it says
-/// whether the open scene has unsaved edits, the answer to one asked before not counting: then
-/// it's prompted for, Cancel going back to none, and Don't Save granting it, which lets the
-/// next close through.
+/// A close is vetoed while a game serves, until a status asked after it says whether there are
+/// unsaved edits; one asked before doesn't count. Then it's prompted for: Cancel drops it, and
+/// Don't Save grants it, letting the next close through.
 #[test]
 fn a_close_asks_a_fresh_status_and_prompts_for_unsaved_edits() {
     let (mut game, ends) = serving();
@@ -795,10 +788,9 @@ fn a_close_asks_a_fresh_status_and_prompts_for_unsaved_edits() {
     assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
 }
 
-/// While no game serves after one has, a close goes by the last status: at once if it said
-/// the open scene has no unsaved edits, and otherwise prompted for without Save, which does
-/// nothing, Don't Save granting it; as a close being checked as the game goes does. Before any
-/// game serves, it goes at once.
+/// While no game serves after one has, a close goes by the last status: at once if it said no
+/// unsaved edits, else prompted for without Save, Don't Save granting it, as for a close checked as
+/// the game goes. Before any game serves, it goes at once.
 #[test]
 fn a_close_while_no_game_serves_goes_by_the_last_status() {
     let mut cx = Context::seeded(1);
@@ -831,9 +823,8 @@ fn a_close_while_no_game_serves_goes_by_the_last_status() {
     assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
 }
 
-/// Neither the File menu's request nor a close's status goes to the game while the Inspector
-/// has an edit waiting for it, which goes on a connection of its own; once it has none, both
-/// go, the request first.
+/// Neither the File menu's request nor a close's status goes while the Inspector has an edit
+/// waiting, which goes on its own connection. Once it has none, both go, the request first.
 #[test]
 fn nothing_goes_while_the_inspector_has_edits_waiting() {
     let (mut game, ends) = serving();
@@ -867,13 +858,12 @@ fn nothing_goes_while_the_inspector_has_edits_waiting() {
     assert_eq!(game.closing, Closing::Checking(true));
 }
 
-/// A New or an Open turns the view to the game's camera, as the editor starts, so that it
-/// frames the scene the game has now: one that stopped a copy playing, though the stop turns
-/// the view to the editor's camera, as another client's `stop` does; and one from the editor's
-/// camera, as a Stop leaves the view, the next look giving its viewpoint and the grid back to
-/// the game. Not one refused, nor one whose answer comes before that of a Simulate clicked
-/// since. And the title bar names the open scene's file once a game has served, Untitled after
-/// a New, marked while it has unsaved edits.
+/// A New or an Open turns the view to the game's camera, as at start, to frame the game's new
+/// scene. That holds for one that stopped a copy playing, though the stop turns the view to the
+/// editor's camera as another client's `stop` does; and for one from the editor's camera, as a Stop
+/// leaves it, the next look giving the viewpoint and the grid back to the game. Not one refused,
+/// nor one answered before a Simulate clicked since. The title bar names the open scene's file once
+/// a game has served, Untitled after a New, marked while unsaved.
 #[test]
 fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
     let game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
@@ -985,11 +975,11 @@ fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
     assert_eq!(looks(&ends), [back]);
 }
 
-/// The game's camera, which the view sees through as the editor starts and after a New or an
-/// Open, only frames the scene: stopped, the first frame that drew through it turns the view to
-/// the editor's camera, from where it saw, the handles and the grid showing, whose viewpoint
-/// goes to the game with the grid. Not a frame drawn before the game gave its viewpoint back,
-/// whose answer it waits for; nor through the toolbar's switch, which the user turned.
+/// The game's camera, which the view sees through at start and after a New or an Open, only frames
+/// the scene. Stopped, the first frame drawn through it turns the view to the editor's camera from
+/// where it saw, the handles and the grid showing, its viewpoint going to the game with the grid.
+/// Not a frame drawn before the game gave its viewpoint back, whose answer it waits for; nor
+/// through the toolbar's switch, which the user turned.
 #[test]
 fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
     let (mut game, ends) = serving();
@@ -1091,9 +1081,9 @@ fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
     assert!(game.view.toolbar.world_camera, "the user's turn");
 }
 
-/// In Play, a press or a repeat of N, O or S with the command key held, a key of the File
-/// menu's shortcuts, goes neither to the game nor to the view's tools; its release does, and so
-/// do other keys with it, and those keys without it.
+/// In Play, a press or repeat of N, O or S with the command key, a File menu shortcut, goes neither
+/// to the game nor to the view's tools. Its release does, as do other keys with it, and those keys
+/// without it.
 #[test]
 fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
     let (mut game, _ends) = serving();
@@ -1127,9 +1117,9 @@ fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
     assert_eq!(game.input, expected);
 }
 
-/// Started outside a project, with none opened before, the layer opens none as it attaches,
-/// and runs nothing: the hub shows, the File menu's items on the open scene and the Scenes
-/// panel doing nothing, and the Assets and Scenes panels have no folder to show.
+/// Started outside a project, none opened before, the layer opens and runs nothing: the hub shows,
+/// the File menu's scene items and the Scenes panel do nothing, and the Assets and Scenes panels
+/// have no folder.
 #[test]
 fn outside_a_project_it_runs_nothing_and_shows_the_hub() {
     let mut game = Game::new(None, Inspector::remote(CLIENT).link());
@@ -1140,12 +1130,11 @@ fn outside_a_project_it_runs_nothing_and_shows_the_hub() {
     assert!(game.assets.is_none() && game.scenes.is_none());
 }
 
-/// The hub's pick of another project goes as a close does: at once before any game has served;
-/// otherwise, while the open scene has unsaved edits, as a fresh status says, the prompt asks
-/// whether to save them before that project opens, Cancel keeping the project open, and Don't
-/// Save granting the switch, to that project rather than the editor's close. A close of the
-/// editor while the prompt shows is the editor's own. A pick of the project open opens
-/// nothing, the hub giving way to it.
+/// The hub's pick of another project goes as a close does: at once before any game has served.
+/// Otherwise, with unsaved edits by a fresh status, the prompt asks to save them first: Cancel
+/// keeps the project, and Don't Save grants the switch rather than the editor's close. Closing the
+/// editor while the prompt shows is the editor's own close. Picking the open project opens nothing,
+/// the hub giving way to it.
 #[test]
 fn another_project_opens_as_a_close_goes() {
     let other = PathBuf::from("other");
@@ -1196,14 +1185,13 @@ fn another_project_opens_as_a_close_goes() {
     assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
 }
 
-/// A part of the look goes to the game only as the user changes it: not as the editor's camera
-/// adopts the frames' viewpoints through the game's camera, which the toolbar's switch turned
-/// the view to, nor as it takes another client's
-/// viewpoint while it drives, nor as it settles after; nor as the Inspector makes the pick
-/// another client's outline asks for. A wheel, while the game is stopped, turns the view to the
-/// editor's camera, from where the frames left it, whose viewpoint goes, with the grid; the
-/// switch back to the game's camera gives both back; and a pick of the user's goes as the
-/// outline, though the Inspector makes it in the pass that makes the outline's.
+/// A look's part goes to the game only as the user changes it. Not as the editor's camera adopts
+/// the frames' viewpoints through the game's camera, which the toolbar's switch turned the view to;
+/// nor as it takes another client's viewpoint while that drives, or settles after; nor as the
+/// Inspector makes the pick another client's outline asks for. A wheel, stopped, turns the view to
+/// the editor's camera from where the frames left it, its viewpoint going with the grid; the switch
+/// back gives both back. A pick of the user's goes as the outline, though the Inspector makes it in
+/// the outline's pass.
 #[test]
 fn the_look_goes_to_the_game_as_the_user_changes_it() {
     let (mut game, ends) = serving();
@@ -1359,9 +1347,8 @@ fn the_look_goes_to_the_game_as_the_user_changes_it() {
     }
 }
 
-/// The toolbar's switch to the editor's camera sends its viewpoint, as it adopted the frames',
-/// with the grid, though the camera hasn't moved: from then on, the editor's camera drives the
-/// view.
+/// The toolbar's switch to the editor's camera sends its viewpoint, adopted from the frames, with
+/// the grid, though the camera hasn't moved: from then on it drives the view.
 #[test]
 fn the_switch_to_the_editors_camera_sends_its_viewpoint() {
     let (mut game, ends) = serving();
@@ -1399,9 +1386,9 @@ fn the_switch_to_the_editors_camera_sends_its_viewpoint() {
     assert_eq!(looks(&ends), [sent]);
 }
 
-/// Another client's viewpoint, which turns the view to the editor's camera, sends the
-/// toolbar's grid, as the user's turn does; giving it back, which turns the view back to the
-/// game's, gives the grid back; but a grid another client set stays as the view turns.
+/// Another client's viewpoint, which turns the view to the editor's camera, sends the toolbar's
+/// grid, as the user's turn does. Giving it back turns the view back and gives the grid back. A
+/// grid another client set stays as the view turns.
 #[test]
 fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
     let (mut game, ends) = serving();
@@ -1527,9 +1514,9 @@ fn the_passes_left_out_go_to_the_game_and_are_taken_from_other_clients() {
     assert_eq!(looks(&ends), [skips(None)], "the user's null");
 }
 
-/// A press with the Probe tool asks the game for a probe of its pixel, in the view's pixels,
-/// taking the press from the camera; its answer fills the numbers shown beside it, an answer to
-/// a probe another took the place of dropped; and Escape, or another tool, closes them.
+/// A Probe press asks the game for a probe of its pixel, in the view's pixels, taking the press
+/// from the camera. Its answer fills the numbers beside it; an answer to a probe another replaced
+/// is dropped. Escape, or another tool, closes them.
 #[test]
 fn a_probe_is_asked_and_its_numbers_shown_until_escape_or_another_tool() {
     let (mut game, ends) = serving();
@@ -1621,9 +1608,9 @@ fn the_images_are_asked_for_as_the_list_opens_and_listed() {
     assert_eq!(game.view.toolbar.images_refused.as_deref(), Some(why));
 }
 
-/// While the game hasn't answered the last `input`, as while a script has stopped it, the
-/// cursor's moves queued take each other's places, the presses between them kept in order, so
-/// that what goes once it answers grows with the presses alone.
+/// While the game hasn't answered the last `input`, as when a script stopped it, queued cursor
+/// moves replace each other, the presses between them kept in order, so the queue grows with
+/// presses alone.
 #[test]
 fn the_cursors_moves_queued_for_the_game_take_each_others_places() {
     let (mut game, _ends) = serving();
@@ -1651,9 +1638,9 @@ fn the_cursors_moves_queued_for_the_game_take_each_others_places() {
     assert_eq!(game.input, [in_game(at(499)), w_down, in_game(at(999))]);
 }
 
-/// A game that asks for the cursor grabbed has the editor ask for its own in Play: Escape lets
-/// go of it, though the game asks still, until a press in the view, the game getting both;
-/// Simulate lets go; and the mouse's raw motion queued for the game adds up.
+/// A game asking for the cursor grabbed has the editor grab its own in Play. Escape lets go, though
+/// the game still asks, until a press in the view; the game gets both. Simulate lets go. Raw motion
+/// queued for the game adds up.
 #[test]
 fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
     let (mut game, _ends) = serving();
@@ -1705,11 +1692,11 @@ fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
     assert!(!cx.cursor_grabbed(), "Simulate lets go");
 }
 
-/// Play captures the view's input for a game that doesn't ask for the cursor grabbed: the
-/// editor grabs its own from the game's answer until Escape, after which a press in the view
-/// grabs nothing; Resume in Play captures again, after an Escape too, as Play from Simulate
-/// does; and another client's stop lets go, as Simulate and Stop do, for good: a switch back to
-/// the game's camera after another client's play isn't a click of Play.
+/// Play captures the view's input for a game that doesn't ask for a grab: the editor grabs the
+/// cursor from the game's answer until Escape, after which a press in the view grabs nothing.
+/// Resume in Play captures again, after an Escape too, as Play from Simulate does. Another client's
+/// stop lets go for good, as Simulate and Stop do: a switch back to the game's camera after another
+/// client's play isn't a click of Play.
 #[test]
 fn play_captures_the_views_input_for_any_game_until_escape() {
     let (mut game, ends) = serving();
@@ -1763,8 +1750,8 @@ fn play_captures_the_views_input_for_any_game_until_escape() {
     assert!(!grabbed(&mut game), "Stop");
 }
 
-/// Through the editor's camera, the editor grabs the cursor while the camera looks about, from
-/// the right button's press in the view to its release; not while it pans.
+/// Through the editor's camera, the editor grabs the cursor while the camera looks about, from the
+/// right button's press in the view to its release; not while it pans.
 #[test]
 fn the_editors_camera_grabs_the_cursor_while_it_looks_about() {
     let (mut game, _ends) = serving();
@@ -1853,9 +1840,9 @@ fn gg_runs_events_say_how_the_run_goes_and_reach_the_logs() {
     );
 }
 
-/// The Logs panel, holding all it keeps of more logged, the oldest gone, lays out only the
-/// rows in view, a row to each line, and fills itself with the latest lines in order, entries
-/// of more than one line among them, the last at its bottom.
+/// The Logs panel, holding its most, the oldest gone, lays out only the rows in view, a row per
+/// line. It fills with the latest lines in order, entries of several lines among them, the last at
+/// its bottom.
 #[test]
 fn the_logs_lay_out_only_the_rows_in_view_and_show_the_latest() {
     let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
@@ -1945,9 +1932,9 @@ fn a_build_says_where_it_has_come_to_in_the_title_bar() {
     assert_eq!(game.logs.len(), count, "each reaches the Logs too");
 }
 
-/// The game's events reach the Logs as they're read, each with its code, its message and its
-/// fields, but where and when it was logged, at its level; but `gg run`'s notes of a patch that
-/// failed, which its own events show.
+/// The game's events reach the Logs as they're read, at their level, with code, message and fields,
+/// but not where and when they were logged. `gg run`'s notes of a failed patch don't, as its own
+/// events show it.
 #[test]
 fn the_games_events_reach_the_logs_with_their_codes_and_fields() {
     let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
@@ -2000,8 +1987,8 @@ fn the_games_events_reach_the_logs_with_their_codes_and_fields() {
     assert_eq!(logs, expected);
 }
 
-/// The events of a drag with the primary button from `from` to `to`, a frame's each, as egui
-/// gets them: past how far a click goes in the frame after the press, then to `to`, then let go.
+/// A primary-button drag from `from` to `to`, an event a frame: past a click's reach the frame
+/// after the press, then to `to`, then let go.
 fn drag(from: egui::Pos2, to: egui::Pos2) -> Vec<egui::Event> {
     let button = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -2019,10 +2006,9 @@ fn drag(from: egui::Pos2, to: egui::Pos2) -> Vec<egui::Event> {
     ]
 }
 
-/// A texture dragged from the Assets panel outlines the view once it's held over it, until
-/// it's let go there, which asks the game for a pick where it was let go, in the view's pixels.
-/// One let go elsewhere asks nothing, nor does a file that isn't a texture or a model, which
-/// doesn't drag.
+/// A texture dragged from the Assets panel outlines the view while it's held over it, until let go
+/// there, which asks for a pick there, in the view's pixels. One let go elsewhere asks nothing, nor
+/// does a file that isn't a texture or a model, which doesn't drag.
 #[test]
 fn a_texture_dragged_from_the_assets_panel_is_let_go_on_the_view() {
     let scratch = Scratch::new("dragged");
@@ -2085,11 +2071,10 @@ fn a_texture_dragged_from_the_assets_panel_is_let_go_on_the_view() {
     assert_eq!(game.dropping.map(|dropping| dropping.ticket), Some(ticket));
 }
 
-/// A texture let go over the view asks the game for a pick there; the entity the answer finds
-/// is picked, and its sprite's texture set through the link, as an edit of its own, to the
-/// texture's ID, as its ID file gives it, or without one, its path from the asset root. Where
-/// no entity draws, nothing is set, and the Logs say so; and of two let go before an answer,
-/// the latest alone is set.
+/// A texture let go over the view asks for a pick there. The entity found is picked, and its
+/// sprite's texture set through the link, as an edit of its own, to the texture's ID from its ID
+/// file, or without one, its path from the asset root. Where no entity draws, nothing is set and
+/// the Logs say so. Of two let go before an answer, the latest alone is set.
 #[test]
 fn a_texture_let_go_on_the_view_sets_the_texture_of_the_sprite_there() {
     let scratch = Scratch::new("texture-let-go");
@@ -2151,9 +2136,8 @@ fn a_texture_let_go_on_the_view_sets_the_texture_of_the_sprite_there() {
     assert_eq!(pending[2..], [set("textures/new.png"), None]);
 }
 
-/// A font let go over the view, as a texture is, sets the font of the text the game's view
-/// shows there through the link, as an edit of its own: by its path from the asset root,
-/// without an ID file.
+/// A font let go over the view sets the font of the text there through the link, as an edit of its
+/// own, by its path from the asset root, without an ID file.
 #[test]
 fn a_font_let_go_on_the_view_sets_the_font_of_the_text_there() {
     let scratch = Scratch::new("font-let-go");
@@ -2179,10 +2163,9 @@ fn a_font_let_go_on_the_view_sets_the_font_of_the_text_there() {
 }
 
 /// A model let go over the view is a root the link creates, named after its file, by its path
-/// from the asset root without an ID file, where the view's last frame shows the grid's plane
-/// there: through the editor's camera as it starts, the plane the 2D games are in. In
-/// perspective, where the ray meets the ground in front of the camera, and above the horizon,
-/// where it doesn't, on the plane through the camera's pivot facing the view. Before a frame
+/// without an ID file, where the last frame shows the grid's plane there: through the editor's
+/// starting camera, the 2D games' plane. In perspective, where the ray meets the ground in front of
+/// the camera; above the horizon, on the plane through the pivot facing the view. Before a frame
 /// has come, it lands nowhere, and the Logs say so.
 #[test]
 fn a_model_let_go_on_the_view_lands_where_the_cursor_shows_the_grids_plane() {
@@ -2249,8 +2232,8 @@ fn a_model_let_go_on_the_view_lands_where_the_cursor_shows_the_grids_plane() {
 }
 
 /// A prefab let go over the view is an instance's root the link creates where it lands, as a
-/// model's is: its transform there and its link, by its asset ID where its ID file holds one,
-/// without a name, which it takes from its prefab's root; and before a frame has come, nowhere.
+/// model's is: its transform and its link, by asset ID where its ID file holds one, unnamed, as it
+/// takes its prefab root's name. Before a frame has come, nowhere.
 #[test]
 fn a_prefab_let_go_on_the_view_is_an_instance_where_it_lands() {
     let scratch = Scratch::new("prefab-let-go");

@@ -1,9 +1,6 @@
-//! The tools of the editor's view of a project's game: its camera; the toolbar; the handles, which
-//! pick and edit through the Inspector's link; the pick a press off them asks for, and what the
-//! view shows under the cursor; and what they paint over the view and show over it. What depends
-//! on the world the view shows, the layer gives them: what the Inspector has picked, as the handles
-//! see it; the picks, which it asks for and whose answers it hands them; and what's under the
-//! cursor called.
+//! The tools of the editor's view: its camera, the toolbar, the handles, which pick and edit
+//! through the Inspector's link, picks, and what's under the cursor. The layer gives them what
+//! depends on the world: what's picked, the picks' answers, and what's under the cursor called.
 
 use std::ops::ControlFlow;
 
@@ -17,49 +14,42 @@ use crate::handles::{Aim, Along, Handles, Picked, Reading, Reply, Sight};
 use crate::overlay::{self, Toolbar};
 use crate::shortcuts::{Does, SHORTCUTS, Shortcut};
 
-/// The color of the outline round what's picked, in linear RGBA: an orange, as other editors
-/// outline what's selected in.
+/// The outline round what's picked, in linear RGBA: orange, as other editors outline a selection.
 pub const OUTLINE: Vec4 = Vec4::new(1.0, 0.35, 0.02, 1.0);
 
-/// How wide the outline's solid band round what's picked is, in points, its glow reaching as far
-/// again: wide enough to read as a selection over a busy scene.
+/// The width of the outline's solid band, in points, its glow reaching as far again: enough to read
+/// over a busy scene.
 pub const OUTLINE_WIDTH: f32 = 3.0;
 
-/// The view's tools: the editor's camera, the toolbar and the handles, which pick and edit through
-/// the Inspector's link; what the view sees from, which the handles are hit against; the pick a
-/// press asked for; and what the view shows under the cursor. Each pick's ticket is a `T`, and
-/// what one finds an `F`, as the layer asks for picks and reads their answers.
+/// The view's tools. A pick's ticket is a `T`, and what it finds an `F`, as the layer asks for
+/// picks and reads their answers.
 pub struct ViewTools<T, F> {
     pub camera: OrbitCamera,
     pub toolbar: Toolbar,
     pub handles: Handles,
-    /// The Inspector's, which says what's picked, and takes the handles' edits.
+    /// Says what's picked, and takes the handles' edits.
     pub link: InspectorLink,
-    /// What the view on screen sees from, while that's the editor's camera, which the handles are
-    /// hit against.
+    /// The view's viewpoint while it's the editor's camera, which the handles are hit against.
     pub shown: Option<Viewpoint>,
-    /// Where the last press over the view off the handles asked to pick, in the main window's
-    /// pixels, until the layer asks for it, keeping the ticket in `asked`; and whether Ctrl (Cmd
-    /// on macOS) or Shift was held at it, for its answer to add what it finds to what's picked, or
-    /// take it out, rather than pick it alone.
+    /// Where the last press off the handles asked to pick, in the main window's pixels, until the
+    /// layer asks, keeping the ticket in `asked`; and whether Ctrl (Cmd on macOS) or Shift was
+    /// held, which toggles what it finds in what's picked rather than picking it alone.
     pub picking: Option<([f64; 2], bool)>,
-    /// Where the last press over the view with the Probe tool asked to probe, in the main window's
-    /// pixels, until the layer asks for it.
+    /// Where the last Probe press asked to probe, in the main window's pixels, until the layer
+    /// asks.
     pub probing: Option<[f64; 2]>,
-    /// The ticket of the latest pick asked for, until its answer comes back, which the layer has
-    /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
-    /// handle drops it, so that it picks nothing else under the drag. And whether it toggles, as
-    /// its press's `picking` said.
+    /// The latest pick's ticket, until its answer comes back for the Inspector to pick
+    /// ([`answer`]), and whether it toggles. A later press's replaces it. A grab of a handle drops
+    /// it, so it picks nothing under the drag.
     pub asked: Option<T>,
     pub toggles: bool,
-    /// What the view shows under the cursor, from the picks asked at the cursor while it's over the
-    /// view, which the view's bottom left names.
+    /// What's under the cursor, from picks asked there while it's over the view, named at the
+    /// view's bottom left.
     pub hover: Hover<T, F>,
 }
 
 impl<T, F> ViewTools<T, F> {
-    /// The tools, the toolbar set as `toolbar` is, whose handles pick and edit through `link`, the
-    /// Inspector's.
+    /// The tools, with `toolbar`, picking and editing through `link`.
     pub fn new(link: InspectorLink, toolbar: Toolbar) -> Self {
         Self {
             camera: OrbitCamera::new(),
@@ -75,23 +65,22 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Has the editor's camera keep its pivot on the plane the grid shows, as
-    /// [`OrbitCamera::settle`] says.
+    /// Keeps the camera's pivot on the grid's plane ([`OrbitCamera::settle`]).
     pub fn settle(&mut self) {
         let plane = grid::shown(&self.camera.viewpoint(), self.toolbar.plane);
         self.camera.settle(plane.normal());
     }
 
-    /// Does what `event` does, as the editor reads the window, `reading`, with what the Inspector
-    /// has picked, `picked`, the active one, and `along`, the others a drag moves with it: first
-    /// the handles, which take a press that grabs one from the camera, and while a drag lasts,
-    /// every other press, the wheel and Home, setting what the drag gives through the link and
-    /// sealing its edit as it ends, or as the pick, the world or the Inspector's steps change; and
-    /// which have a press off them ask for a pick, which adds what it finds to what's picked, or
-    /// takes it out, with Ctrl (Cmd on macOS) or Shift held. Then Q, W, E and R, which pick a tool,
-    /// and X, which flips the handles' space; then F, which frames what's picked, as
-    /// [`frame`](Self::frame) does; then the camera, which the view goes back to as it takes a
-    /// press, the wheel or Home. `Break` for what the handles, F or the camera took.
+    /// Does what `event` does, with `reading`, `picked` the active pick and `along` the others a
+    /// drag moves, in this order. `Break` for what the handles, F or the camera took.
+    ///
+    /// 1. The handles ([`Handles::event`](crate::handles::Handles::event)). Their sets go through
+    ///    the link, and a drag's edit seals as it ends, or as the pick, the world or the
+    ///    Inspector's steps change. A press off them asks for a pick, which Ctrl (Cmd on macOS) or
+    ///    Shift toggles in what's picked.
+    /// 2. The tool keys ([`choose_tool`](Self::choose_tool)).
+    /// 3. F, which frames what's picked ([`frame`](Self::frame)).
+    /// 4. The camera. The view goes back to it as it takes a press, the wheel or Home.
     pub fn take(
         &mut self,
         event: &Event<'_>,
@@ -149,12 +138,10 @@ impl<T, F> ViewTools<T, F> {
         handled
     }
 
-    /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, and X flip the space of
-    /// Move's and Rotate's axes between the entity's own and the world's, as [`SHORTCUTS`] has
-    /// them, for `event`, a press of it, not a repeat; but not one with `command` held, Ctrl, or Cmd
-    /// on macOS, which is a shortcut's; nor while the view sees through the game's camera, which
-    /// shows no handles; nor while the editor's camera flies, as its keys steer it; nor during a
-    /// drag of the handles.
+    /// Has Q, W, E or R pick Select, Move, Rotate or Scale, and X flip Move's and Rotate's space
+    /// ([`SHORTCUTS`]), for a press, not a repeat. Not with `command` held, Ctrl or Cmd on macOS, a
+    /// shortcut's; nor through the game's camera, which shows no handles; nor while the editor's
+    /// camera flies, as its keys steer it; nor during a drag of the handles.
     pub fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
         let Event::Key {
             key,
@@ -178,13 +165,12 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Eases the editor's camera to look at what's picked, `picked` the active one, the view going
-    /// back to it, as F over the view and the Entities panel ask: at a sphere round the spheres
-    /// round what each entity picked and those under it draw, and the origins of those that draw
-    /// nothing, as the game's last reads of them gave them, filling the view, as
-    /// [`OrbitCamera::frame_sphere`] says; or, where that's a point, as for one entity that draws
-    /// nothing, at it, as [`OrbitCamera::frame`] says. The active one alone until the reads of the
-    /// others have come, as [`InspectorLink::along`] says.
+    /// Eases the editor's camera to what's picked, `picked` the active one, the view going back to
+    /// it, as F and the Entities panel ask. It frames ([`OrbitCamera::frame_sphere`]) a sphere
+    /// round the spheres each picked entity and its descendants draw, and the origins of those that
+    /// draw nothing, as the game last read them. Where that's a point, as for one entity that draws
+    /// nothing, it frames that ([`OrbitCamera::frame`]). The active one alone until the others'
+    /// reads come ([`InspectorLink::along`]).
     pub fn frame(&mut self, picked: &Picked) {
         let placed =
             (self.link.along()).unwrap_or_else(|| self.link.placed().into_iter().collect());
@@ -197,9 +183,8 @@ impl<T, F> ViewTools<T, F> {
         self.frame_bounds(picked, spheres.reduce(enclosing));
     }
 
-    /// Frames `picked` by `bounds`, a sphere's center and radius, as [`frame`](Self::frame) finds
-    /// it: by the sphere where it has a radius; else at its center, or for none at the pick's
-    /// origin, from as far as the camera is.
+    /// Frames `picked` by `bounds`, a sphere's center and radius: by the sphere where it has a
+    /// radius; else at its center, or with none at the pick's origin, from the camera's distance.
     fn frame_bounds(&mut self, picked: &Picked, bounds: Option<(DVec3, f32)>) {
         let origin = (picked.parent.matrix).transform_point3(picked.local.translation);
         match bounds {
@@ -210,9 +195,8 @@ impl<T, F> ViewTools<T, F> {
         self.toolbar.world_camera = false;
     }
 
-    /// Ends a drag of the handles as the pick, `picked` as the handles see it, changes or dies, the
-    /// world is another, the Inspector undoes or redoes, or the view goes to the game's camera,
-    /// sealing its edit.
+    /// Ends a drag of the handles, sealing its edit, as the pick changes or dies, the world is
+    /// another, the Inspector undoes or redoes, or the view goes to the game's camera.
     pub fn hold(&mut self, picked: Option<&Picked>) {
         let ended = self.handles.hold(picked);
         let left = self.toolbar.world_camera && self.handles.end();
@@ -221,11 +205,10 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Paints the handles over `picked`, the pick as they see it, on the view's own layer: over the
-    /// world it shows, and under what's over it, as `sight` sees it, while it's through the
-    /// editor's camera; lighting the one a press would grab, but while the camera drags or eases,
-    /// or with Alt held, as `alt` says, which orbits. And over them, at the view's bottom left,
-    /// `name`, what the view shows under the cursor, while the cursor's over the view.
+    /// Paints the handles over `picked` on the view's own layer, as `sight` sees them, while it's
+    /// the editor's camera. Lights the one a press would grab, except while the camera drags or
+    /// eases, or with `alt`, which orbits. Over them, at the view's bottom left, `name`, what's
+    /// under the cursor, while the cursor's over the view.
     pub fn paint(
         &self,
         ui: &Ui<'_>,
@@ -254,11 +237,10 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Shows the toolbar over the view's top left, or where its grip has moved it, and while the
-    /// view is through the editor's camera, the gizmo over its top right, naming the side the
-    /// camera looks squarely from, as [`grid::square`] says, in `view`, where the view is in the
-    /// main window. Then has the cursor over the view say what the left button does, and while a
-    /// drag goes on, what it does, wherever the cursor is.
+    /// Shows the toolbar, and while the view is the editor's camera, the gizmo, naming the side the
+    /// camera looks squarely from ([`grid::square`]); `view` is the view's place in the main
+    /// window. Then has the cursor over the view say what the left button does, and during a drag,
+    /// what it does, wherever the cursor is.
     pub fn overlay(&mut self, ui: &mut Ui<'_>, view: Option<Viewport>) {
         let Self {
             camera, toolbar, ..
@@ -298,9 +280,9 @@ impl<T, F> ViewTools<T, F> {
     }
 }
 
-/// What the editor reads of the window, as `cx` has it, as an event comes, with the game's view
-/// shown at `view`, in the main window's pixels: the scale; whether Alt is held, the command key,
-/// which egui's shortcuts take as it, Ctrl, or Cmd on macOS, and Shift; and where the cursor is.
+/// What the editor reads of the window with an event, the game's view at `view`, in the main
+/// window's pixels: the scale; Alt; the command key as egui's shortcuts take it, Ctrl or Cmd on
+/// macOS; Shift; and the cursor.
 pub fn reading(cx: &Context, view: Option<Viewport>) -> Reading {
     let input = cx.input();
     let command = if cfg!(target_os = "macos") {
@@ -337,8 +319,8 @@ fn enclosing(a: (DVec3, f32), b: (DVec3, f32)) -> (DVec3, f32) {
     (a + (b - a) * ((radius - r) / apart), radius as f32)
 }
 
-/// Whether `event` is a press of F, as [`SHORTCUTS`] has it, not a repeat, without `command` held,
-/// which a shortcut's would have: as other editors frame what's selected.
+/// Whether `event` is a press of F ([`SHORTCUTS`]), not a repeat, without `command`, which a
+/// shortcut's has. Other editors frame a selection so.
 fn frames(event: &Event<'_>, command: bool) -> bool {
     let Event::Key {
         key,
@@ -357,11 +339,10 @@ pub fn alt_down(input: &Input) -> bool {
     input.key_down(Key::AltLeft) || input.key_down(Key::AltRight)
 }
 
-/// What the answers to picks that came back, `answers`, each a pick's ticket and what the view
-/// showed there, if anything, have the Inspector pick: once the latest pick asked for, `asked`,
-/// has its answer, which forgets it, what it found, or nothing, which unpicks, as an entity no
-/// longer alive does; `None` while it waits. The answers to picks that a later press superseded
-/// pick nothing.
+/// What the picks' `answers`, each a ticket and what the view showed there, have the Inspector
+/// pick. Once `asked`, the latest pick, has its answer, it's forgotten, and what it found is
+/// picked, or nothing, which unpicks, as for an entity no longer alive. `None` while it waits.
+/// Answers to picks a later press superseded pick nothing.
 pub fn answer<T: Copy + PartialEq, F: Clone>(
     asked: &mut Option<T>,
     answers: &[(T, Option<F>)],
@@ -372,9 +353,9 @@ pub fn answer<T: Copy + PartialEq, F: Clone>(
     Some(found.clone())
 }
 
-/// What the view shows under the cursor, as the answers to the picks asked at the cursor while it's
-/// over the view come back, each pick's ticket a `T`, and what it finds an `F`: the view's bottom
-/// left names what the latest answer found, a few frames behind the cursor.
+/// What's under the cursor, from the answers to picks asked there while it's over the view; a
+/// pick's ticket is a `T`, what it finds an `F`. The view's bottom left names what the latest
+/// answer found, a few frames behind the cursor.
 pub struct Hover<T, F> {
     /// The ticket of the first pick asked since the cursor last came over the view, while it's over
     /// it: the answers to picks asked before it found what was under the cursor before it left.
@@ -395,10 +376,10 @@ impl<T, F> Default for Hover<T, F> {
 }
 
 impl<T: Copy + Ord, F: Clone> Hover<T, F> {
-    /// Takes `answers`, those that came back with the frame, with the cursor `over` the view or
-    /// not. Over it, an answer to a pick asked since it came over the view, later than the latest,
-    /// becomes the latest: a press's too, since a press off the handles asks at the cursor as well.
-    /// Off it, the picks asked and their answers are forgotten.
+    /// Takes the `answers` that came back with the frame, the cursor `over` the view or not. Over
+    /// it, an answer to a pick asked since it came over, later than the latest, becomes the latest:
+    /// a press's too, since a press off the handles asks at the cursor as well. Off it, the picks
+    /// and their answers are forgotten.
     pub fn see(&mut self, over: bool, answers: &[(T, Option<F>)]) {
         let Some(since) = self.since.filter(|_| over) else {
             *self = Self::default();
@@ -412,13 +393,13 @@ impl<T: Copy + Ord, F: Clone> Hover<T, F> {
         }
     }
 
-    /// Keeps `asked`, the ticket of a pick at the cursor over the view, if one was asked, for
-    /// [`see`](Self::see) to take its answer and those after it.
+    /// Keeps the ticket of a pick asked at the cursor over the view, if any, for [`see`](Self::see)
+    /// to take its answer and those after.
     pub fn ask(&mut self, asked: Option<T>) {
         self.since = self.since.or(asked);
     }
 
-    /// What the view shows under the cursor, as the latest answer found it.
+    /// What's under the cursor, as the latest answer found.
     pub fn under(&self) -> Option<F> {
         self.latest.as_ref().and_then(|(_, found)| found.clone())
     }
@@ -463,8 +444,8 @@ mod tests {
         })
     }
 
-    /// What `tools` do with the cursor moved to `at`, and then with `button` pressed or let go
-    /// there, as the editor reads the window there, with `picked` picked.
+    /// What `tools` do with the cursor moved to `at`, then `button` pressed or let go there, with
+    /// `picked` picked.
     fn press_at(
         tools: &mut Tools,
         picked: Option<Picked>,
@@ -489,9 +470,8 @@ mod tests {
         tools
     }
 
-    /// A drag of a handle sets one field of the picked entity through the Inspector's link, the
-    /// latest value of it alone between the Inspector's passes, and seals the edit as it ends; the
-    /// camera sees the moves: here Move's X arrow, dragged right along it, and off it a little.
+    /// A drag of a handle sets one field of the pick through the link, only the latest value
+    /// between the Inspector's passes, and seals the edit as it ends. The camera sees the moves.
     #[test]
     fn a_drag_of_a_handle_sets_one_field_of_the_pick_and_seals() {
         let mut tools = dragging();
@@ -519,9 +499,9 @@ mod tests {
         assert_eq!(tools.picking, None, "it picked nothing");
     }
 
-    /// While a drag of the handles lasts, the tools take the other buttons' presses, the wheel and
-    /// Home from the editor's camera, which neither drags, dollies nor goes home; and while the
-    /// camera drags, a press on a handle grabs nothing, and asks for no pick.
+    /// During a drag of the handles, the tools take the other buttons' presses, the wheel and Home
+    /// from the camera. While the camera drags, a press on a handle grabs nothing and asks for no
+    /// pick.
     #[test]
     fn the_handles_and_the_camera_keep_out_of_each_others_drags() {
         let mut tools = dragging();
@@ -561,9 +541,8 @@ mod tests {
         assert_eq!(tools.picking, None);
     }
 
-    /// F frames the pick, eased to look at its origin as it has no sphere, turning the view to the
-    /// editor's camera from the game's: not without a pick, as it repeats, with Ctrl held, nor
-    /// during a drag of the handles.
+    /// F frames the pick at its origin, as it has no sphere, turning the view to the editor's
+    /// camera. Not without a pick, as it repeats, with Ctrl held, or during a drag of the handles.
     #[test]
     fn f_frames_the_pick_turning_the_view_to_the_editors_camera() {
         let f = |repeat| Event::Key {
@@ -605,8 +584,8 @@ mod tests {
         );
     }
 
-    /// A press off the handles with Ctrl or Shift held asks for a pick that adds what it finds to
-    /// what's picked, or takes it out; one without them, for one that picks it alone.
+    /// A press off the handles with Ctrl or Shift held asks for a pick that toggles what it finds
+    /// in what's picked; without them, for one that picks it alone.
     #[test]
     fn a_press_with_ctrl_or_shift_asks_for_a_pick_that_toggles() {
         let off = [200.0, 500.0];
@@ -632,9 +611,8 @@ mod tests {
         }
     }
 
-    /// The sphere framing several picks frames holds the spheres round each: the smallest that
-    /// holds two apart, the larger of two where it holds the other, and of two points the one
-    /// round both.
+    /// The sphere round several picks holds each one's: the smallest round two apart, the larger
+    /// where it holds the other, and of two points the one round both.
     #[test]
     fn the_sphere_round_two_holds_both() {
         let (center, radius) = enclosing((DVec3::ZERO, 1.0), (DVec3::new(4.0, 0.0, 0.0), 1.0));
@@ -653,9 +631,9 @@ mod tests {
         assert!(center.abs_diff_eq(DVec3::Y, 1e-6) && (radius - 1.0).abs() < 1e-6);
     }
 
-    /// Framing a pick the game gave a sphere for centers the view on the sphere, not on the pick's
-    /// origin, and goes back far enough to fill the view with it, and turns the view to the
-    /// editor's camera; one without a sphere is framed at its origin, as it was.
+    /// Framing a pick the game gave a sphere for centers the sphere, from far enough back to fill
+    /// the view, and turns the view to the editor's camera. One without a sphere is framed at its
+    /// origin.
     #[test]
     fn framing_a_pick_with_a_sphere_looks_at_the_sphere() {
         let placed = at_the_origin().expect("picked");
@@ -682,9 +660,8 @@ mod tests {
         assert_eq!(at_origin.projection, framed.projection, "as far back");
     }
 
-    /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,
-    /// with Ctrl held, through the game's camera, while the editor's camera flies, nor during a
-    /// drag of the handles.
+    /// Q, W, E and R pick their tools as they're pressed: not as they repeat, with Ctrl held,
+    /// through the game's camera, while the editor's camera flies, or during a drag of the handles.
     #[test]
     fn q_w_e_and_r_pick_the_tools() {
         let mut tools = fresh();
@@ -730,9 +707,8 @@ mod tests {
         assert_eq!(tools.toolbar.tool, Tool::Scale, "let go");
     }
 
-    /// X flips the space of Move's and Rotate's axes, Local and World, as it's pressed: not as it
-    /// repeats, with Ctrl held, through the game's camera, while the editor's camera flies, nor
-    /// during a drag of the handles; and it starts Local.
+    /// X flips Local and World as it's pressed, with the same exceptions as the tools' keys; it
+    /// starts Local.
     #[test]
     fn x_flips_the_handles_space() {
         let mut tools = fresh();
@@ -774,10 +750,10 @@ mod tests {
         assert_eq!(tools.toolbar.space, Space::World, "let go");
     }
 
-    /// For an entity turned 45° about Z, a press on the world's X arrow, where the unturned
-    /// entity's is, grabs Move's X arrow in the World space, which a drag moves along the world's
-    /// X; in the Local space it grabs nothing, since the arrow is turned off it: through the tools
-    /// as the editor feeds them, the toolbar's space the one they go by.
+    /// For an entity turned 45° about Z, a press where the unturned entity's X arrow is grabs
+    /// Move's X arrow in World, which drags along the world's X. In Local it grabs nothing, the
+    /// arrow being turned off it. Through the tools as the editor feeds them, which go by the
+    /// toolbar's space.
     #[test]
     fn the_toolbars_space_sets_the_axes_the_handles_go_along() {
         let mut turned = at_the_origin().expect("picked");
@@ -803,8 +779,8 @@ mod tests {
         assert!(moved.x > 0.5 && moved.y == 0.0 && moved.z == 0.0, "{moved}");
     }
 
-    /// A press of the left button over the view with Probe asks for a probe at the cursor, and
-    /// takes it from the camera, picking nothing.
+    /// With Probe, a left press over the view asks for a probe at the cursor and takes it from the
+    /// camera, picking nothing.
     #[test]
     fn a_press_with_probe_asks_for_a_probe() {
         let off = [200.0, 500.0];
@@ -816,11 +792,10 @@ mod tests {
         assert_eq!((tools.probing, tools.picking), (Some(off), None));
     }
 
-    /// A press of the left button over the view off the handles asks for a pick at the cursor,
-    /// with Select, Move, Rotate and Scale, through the game's camera too, which it leaves the
-    /// view seeing through; but not with Alt, which orbits, with Pan or Orbit, or with nothing
-    /// under it to pick, as a press on a handle has. A grab of a handle drops the pick asked
-    /// before it.
+    /// A left press off the handles asks for a pick at the cursor with Select, Move, Rotate and
+    /// Scale, through the game's camera too, which it keeps. Not with Alt, which orbits, with Pan
+    /// or Orbit, or with nothing under it to pick, as a press on a handle has. A grab of a handle
+    /// drops the pick asked before it.
     #[test]
     fn a_press_off_the_handles_asks_for_a_pick() {
         let off = [200.0, 500.0];
@@ -865,9 +840,8 @@ mod tests {
         assert_eq!(tools.asked, None, "a grab drops the pick asked before it");
     }
 
-    /// The answer to the latest pick asked for picks what it found, or unpicks for none; answers
-    /// to older picks, which a later press superseded, pick nothing; and once answered, a pick is
-    /// forgotten.
+    /// The latest pick's answer picks what it found, or unpicks for none. Answers to older picks,
+    /// which a later press superseded, pick nothing. Once answered, a pick is forgotten.
     #[test]
     fn the_latest_picks_answer_picks() {
         let [a, b]: [EntityId; 2] =
@@ -889,10 +863,10 @@ mod tests {
         assert_eq!(unpicked, Some(None), "unpicks");
     }
 
-    /// What the view shows under the cursor is what the latest answer found, of those to picks
-    /// asked since the cursor came over the view: nothing until one comes back, nor where it found
-    /// nothing, and an answer that comes back after a later one's says nothing. Off the view,
-    /// nothing is, and back over it, the answers to picks asked before say nothing either.
+    /// What's under the cursor is what the latest answer found, of picks asked since the cursor
+    /// came over the view: nothing until one comes back, or where it found nothing. An answer that
+    /// comes after a later one's says nothing. Off the view, nothing is under it; back over it,
+    /// earlier picks' answers say nothing.
     #[test]
     fn the_latest_pick_since_the_cursor_came_over_the_view_finds_whats_under_it() {
         let [a, b]: [EntityId; 2] =

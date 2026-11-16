@@ -1,13 +1,17 @@
-//! The editor's camera: one that looks at a point, its pivot, from a distance, under either
-//! projection, so that 2D and 3D views steer alike. The wheel dollies toward the point under the
-//! cursor; the middle button trucks and pedestals, keeping what's under the cursor there; the right
-//! button looks about in perspective and pans in orthographic, and, while it's held, W, A, S and D
-//! fly and Q and E roll; Alt with the left button orbits the pivot, and Alt with the right dollies.
-//! The left button alone does what the toolbar's tool says. Looking about, orbiting and dollying go
-//! by the mouse's raw motion, the cursor grabbed meanwhile, hidden, and held where the drag started
-//! where the platform locks it: so that they go on past the screen's edges, and by the mouse's own
-//! steps, which pointer acceleration, as Windows' enhanced pointer precision, makes finer than the
-//! cursor's pixels at slow speeds. Panning follows the cursor.
+//! The editor's camera: it looks at a pivot from a distance, under either projection, so 2D and 3D
+//! views steer alike.
+//!
+//! - Wheel: dollies toward the point under the cursor.
+//! - Middle button: trucks and pedestals, keeping what's under the cursor there.
+//! - Right button: looks about in perspective, pans in orthographic. While it's held, W, A, S and D
+//!   fly and Q and E roll.
+//! - Alt and the left button orbit the pivot; Alt and the right dolly.
+//! - The left button alone does what the toolbar's tool says.
+//!
+//! Looking about, orbiting and dollying go by the mouse's raw motion, the cursor grabbed, hidden,
+//! and held where the platform locks it. So they go on past the screen's edges, and by the mouse's
+//! own steps, which pointer acceleration, as Windows' enhanced pointer precision, makes finer than
+//! the cursor's pixels at slow speeds. Panning follows the cursor.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::ops::ControlFlow;
@@ -21,48 +25,48 @@ use gg_engine::{
 
 /// How much the view spans from its bottom to its top in perspective: 60°.
 const FOV: f32 = PI / 3.0;
-/// How much of the world the view spans from its bottom to its top at the pivot, as it starts.
+/// How much of the world the view spans, bottom to top, at the pivot as it starts.
 const START_HEIGHT: f32 = 10.0;
-/// The least and most the camera is from its pivot.
+/// The least and most distance from the pivot.
 const DISTANCES: [f32; 2] = [0.01, 100_000.0];
 /// How much of the view's height a framed sphere fills.
 const FRAMED: f32 = 0.8;
-/// How far looking about turns it for a point the mouse moves, in radians: the fly camera
-/// controller's for a point the cursor is dragged. The mouse's raw motion counts as physical pixels,
-/// as Windows moves the cursor by it at its default speed without enhanced pointer precision.
+/// Looking about's turn per point of mouse motion, in radians: the fly camera controller's per
+/// point dragged. Raw motion counts as physical pixels, as Windows moves the cursor by it at its
+/// default speed without enhanced pointer precision.
 const LOOK: f32 = 0.003;
-/// How far orbiting turns it for a point the mouse moves, in radians.
+/// Orbiting's turn per point of mouse motion, in radians.
 const ORBIT: f32 = 0.005;
-/// How much a line of the wheel dollies it.
+/// How much a line of the wheel dollies.
 const ZOOM: f32 = 1.1;
-/// How fast Q and E roll it, in radians a second: a quarter turn.
+/// Q's and E's roll speed, in radians a second: a quarter turn.
 const ROLL_SPEED: f32 = FRAC_PI_2;
-/// How much faster it flies with Shift held.
+/// Flying's speed-up with Shift held.
 const FAST: f32 = 3.0;
-/// How long it takes to ease to a view of an axis, or back home, in seconds.
+/// How long an ease to an axis's view, or home, takes, in seconds.
 const EASE: f32 = 0.25;
-/// How far in front of the camera perspective sees from, of its distance from the pivot.
+/// Perspective's near plane, as a share of the distance to the pivot.
 const NEAR: f32 = 1e-4;
-/// How far in front of the camera and behind it orthographic sees, in the view's heights.
+/// How far in front of the camera and behind it orthographic sees, in view heights.
 const DEPTH: f32 = 1000.0;
-/// The least of the view's direction across a plane that the pivot slides along onto it: a view
-/// that runs along the plane would slide it away.
+/// The least of the view's direction across a plane for the pivot to slide onto it: a view along
+/// the plane would slide it away.
 const GRAZING: f32 = 0.002;
 
-/// What the left button does over the view, which the toolbar picks, and Q, W, E and R pick the
-/// first four of.
+/// What the left button does over the view. The toolbar picks it;
+/// [`SHORTCUTS`](crate::shortcuts::SHORTCUTS) holds keys for the first four.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
     /// Picks what's under the cursor.
     #[default]
     Select,
-    /// Moves what's picked by its handles, along its axes, across its planes or in the view's
-    /// plane; and picks, off them.
+    /// Moves what's picked by its handles: along its axes, across its planes or in the view's
+    /// plane. Picks, off them.
     Move,
-    /// Turns what's picked by its rings, about its axes or the view's; and picks, off them.
+    /// Turns what's picked by its rings, about its axes or the view's. Picks, off them.
     Rotate,
-    /// Scales what's picked by its handles, along its axes or all three ways at once; and picks,
-    /// off them.
+    /// Scales what's picked by its handles, along its axes or all three ways at once. Picks, off
+    /// them.
     Scale,
     /// Trucks and pedestals, as the middle button does.
     Pan,
@@ -72,9 +76,9 @@ pub enum Tool {
     Probe,
 }
 
-/// Which axes the Move and Rotate handles go along, which the toolbar picks and X flips; Scale's
-/// are always the entity's own, since scaling a turned entity along the world's would shear it,
-/// which a transform can't hold.
+/// Which axes Move's and Rotate's handles go along; the toolbar picks it. Scale's are always the
+/// entity's own: scaling a turned entity along the world's would shear it, which a transform can't
+/// hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Space {
     /// The entity's own axes, as drawing carries them.
@@ -180,9 +184,8 @@ impl Side {
     }
 }
 
-/// What the camera reads of the editor's window as an event comes, besides the event: where the
-/// game's view is, in the main window's pixels, how many pixels a point spans, and whether Alt is
-/// held.
+/// What the camera reads of the window with an event: where the game's view is, in the main
+/// window's pixels; pixels per point; and whether Alt is held.
 #[derive(Clone, Copy, Debug)]
 pub struct Screen {
     pub view: Option<Viewport>,
@@ -203,10 +206,9 @@ enum Action {
     Home,
 }
 
-/// Where the camera is: the point it looks at and orbits, which way it faces, as turns about the
-/// world's up, then about its own right, then about where it looks, and how far back it is. The
-/// pivot is in `f64`, as the world's positions are, so that the camera flies as smoothly 1,000 km
-/// from the origin as at it.
+/// Where the camera is: the pivot it looks at and orbits; its facing, as turns about the world's
+/// up, then its own right, then where it looks; and its distance back. The pivot is `f64`, as the
+/// world's positions are, so the camera flies as smoothly 1,000 km from the origin as at it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Pose {
     pivot: DVec3,
@@ -239,7 +241,6 @@ impl Pose {
     }
 }
 
-/// A drag under way.
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     /// The button that started it, whose release ends it.
@@ -260,14 +261,12 @@ struct Ease {
     elapsed: f32,
 }
 
-/// The editor's camera, which the editor's layer feeds its events, updates each frame, and makes
-/// the game's view's camera. Orthographic, it sees as tall a piece of the world as perspective
-/// sees at the pivot, so that switching between them keeps what's at the pivot as big, and
-/// dollying is one thing in both: the distance.
+/// The editor's camera. The layer feeds it events, updates it each frame, and makes it the game's
+/// view's camera. Orthographic, it sees as tall a piece of the world as perspective sees at the
+/// pivot, so a switch keeps what's at the pivot as big, and dollying is the distance in both.
 pub struct OrbitCamera {
     /// Where it is, or, while it eases, where it's going.
     pose: Pose,
-    /// Whether it sees with perspective, rather than orthographically.
     pub perspective: bool,
     ease: Option<Ease>,
     drag: Option<Drag>,
@@ -334,12 +333,15 @@ impl OrbitCamera {
         }
     }
 
-    /// Sees from `viewpoint`, as [`viewpoint`](Self::viewpoint) gives it back: turned as it's
-    /// turned, its yaw, pitch and roll read in the order the camera turns by, which at the poles,
-    /// where a yaw and a roll turn alike, folds the roll into the yaw, the turn still exact; with
-    /// perspective if it has it, the camera's own field of view kept; as far from the pivot as an
-    /// orthographic height makes it, or in perspective, as far as it was, within the distances it
-    /// goes; and the pivot that far in front. An ease stops where it was.
+    /// Sees from `viewpoint`, as [`viewpoint`](Self::viewpoint) gives it back:
+    ///
+    /// - turned as it is, its yaw, pitch and roll read in the camera's turn order. At the poles,
+    ///   where a yaw and a roll turn alike, the roll folds into the yaw, the turn still exact;
+    /// - with perspective if it has it, the camera's own field of view kept;
+    /// - as far from the pivot as an orthographic height makes it, or in perspective as far as it
+    ///   was, within the distances it goes; the pivot that far in front.
+    ///
+    /// An ease stops where it was.
     pub fn adopt(&mut self, viewpoint: &Viewpoint) {
         let (yaw, pitch, roll) = viewpoint.rotation.to_euler(EulerRot::YXZ);
         let distance = match viewpoint.projection {
@@ -389,9 +391,8 @@ impl OrbitCamera {
         )
     }
 
-    /// Feeds the camera an event the layer was sent, which it acts on as `screen` and `tool` say.
-    /// `Break` when it took a press, the wheel or Home, each of which moves it, so that the layers
-    /// below don't act on them too.
+    /// Feeds the camera an event, acting as `screen` and `tool` say. `Break` when it took a press,
+    /// the wheel or Home, each of which moves it, so the layers below don't act on them too.
     pub fn event(&mut self, event: &Event<'_>, screen: Screen, tool: Tool) -> ControlFlow<()> {
         let mut home = false;
         self.actions.event(event, |change| {
@@ -492,10 +493,10 @@ impl OrbitCamera {
         }
     }
 
-    /// Eases on toward where it's going, for `dt`, and while the right button looks about or pans,
-    /// flies and rolls by its keys: W and S forward and back, the distance a second, or zoom in
-    /// orthographic, and A and D to the sides, three times as fast with Shift; Q and E roll, a
-    /// quarter turn a second. Otherwise the keys leave it be, free for tools.
+    /// Eases on toward where it's going, for `dt`. While the right button looks about or pans, its
+    /// keys fly and roll it: W and S forward and back, the distance a second, or zoom in
+    /// orthographic; A and D to the sides; three times as fast with Shift; Q and E roll a quarter
+    /// turn a second. Otherwise the keys are left to tools.
     pub fn update(&mut self, dt: Duration) {
         let seconds = dt.as_secs_f32();
         if let Some(ease) = &mut self.ease {
@@ -557,9 +558,8 @@ impl OrbitCamera {
         self.ease_to(Pose::start());
     }
 
-    /// Eases to look at `point` from where it would be, keeping which way it faces and how far
-    /// back it is, as framing what's picked does when the size of what's there isn't known: it
-    /// stays as big as the view showed things at the pivot.
+    /// Eases to look at `point`, keeping its facing and distance, as framing what's picked does
+    /// when its size isn't known: things stay as big as the view showed them at the pivot.
     pub fn frame(&mut self, point: DVec3) {
         self.ease_to(Pose {
             pivot: point,
@@ -567,11 +567,11 @@ impl OrbitCamera {
         });
     }
 
-    /// Eases to look at the sphere of `radius` round `center`, keeping which way it faces, from as
-    /// far back as the sphere fills [`FRAMED`] of the view's height: in perspective, where it just
-    /// subtends that part of the field of view; orthographically, where the view is as tall as the
-    /// sphere's diameter over [`FRAMED`]. Within the distances the camera goes. A sphere of no size,
-    /// or none that is finite, is framed as a point is, at the distance the camera has.
+    /// Eases to look at the sphere of `radius` round `center`, keeping its facing, from as far back
+    /// as the sphere fills [`FRAMED`] of the view's height. In perspective the sphere just subtends
+    /// that part of the field of view; orthographically, the view is as tall as its diameter over
+    /// [`FRAMED`]. Within the camera's distances. A sphere of no size, or not finite, is framed as
+    /// a point is.
     pub fn frame_sphere(&mut self, center: DVec3, radius: f32) {
         if !radius.is_finite() || radius <= 0.0 {
             self.frame(center);
@@ -590,10 +590,10 @@ impl OrbitCamera {
         });
     }
 
-    /// In orthographic, slides the pivot along the view onto the plane through the origin that
-    /// faces `normal`, which changes nothing in the view, but keeps the plane in its depth, however
-    /// far it was panned off it; and so a switch to perspective orbits the point of the plane at
-    /// the view's center. Not while it eases, nor while the view runs along the plane.
+    /// In orthographic, slides the pivot along the view onto the plane through the origin facing
+    /// `normal`. The view doesn't change, but the plane stays in its depth however far it was
+    /// panned off, so a switch to perspective orbits the plane's point at the view's center. Not
+    /// while it eases, nor while the view runs along the plane.
     pub fn settle(&mut self, normal: Vec3) {
         if self.perspective || self.ease.is_some() {
             return;
@@ -605,9 +605,9 @@ impl OrbitCamera {
         }
     }
 
-    /// Where it is, which way it faces, and how far back from the pivot: on the way from where an
-    /// ease started to where it's going, while it eases, the turn slerped and the distance
-    /// changing by the same factor each moment, so that neither spins nor rushes.
+    /// Where it is, its facing and its distance back. While it eases, on the way from the ease's
+    /// start: the turn slerped, the distance changing by the same factor each moment, so it neither
+    /// spins nor rushes.
     fn current(&self) -> (DVec3, Quat, f32) {
         let pose = &self.pose;
         let Some(ease) = &self.ease else {
@@ -635,9 +635,9 @@ impl OrbitCamera {
         });
     }
 
-    /// Moves the camera as `drag` does, for a move by `pixels`, in the main window's physical
-    /// pixels, `scale` to a point, over `view`: the cursor's, for a pan, and the mouse's raw motion,
-    /// counted as pixels, for the drags that grab the cursor.
+    /// Moves the camera as `drag` does, by `pixels` over `view`, in the main window's physical
+    /// pixels, `scale` to a point: the cursor's for a pan, the mouse's raw motion for the drags
+    /// that grab the cursor.
     fn drag_by(&mut self, drag: Drag, pixels: Vec2, view: Viewport, scale: f32) {
         let points = pixels / scale;
         match drag.what {
@@ -662,11 +662,10 @@ impl OrbitCamera {
         self.pose.pivot -= (by * per_pixel).as_dvec3();
     }
 
-    /// Turns the camera `by` radians, as the cursor went across and down the view: about the
-    /// pivot (`orbit`), as though grabbing the world, so that dragging right or down takes the
-    /// camera left or up; or where it is, so that it looks the way the cursor goes. The drag is
-    /// turned by the roll first, so that it turns the view the way the cursor goes however the
-    /// view is rolled.
+    /// Turns the camera `by` radians, as the cursor went across and down: about the pivot if
+    /// `orbit`, as though grabbing the world, so dragging right or down takes the camera left or
+    /// up; else where it is, looking the way the cursor goes. The roll turns the drag first, so it
+    /// turns the view the cursor's way however it's rolled.
     fn turn(&mut self, by: Vec2, orbit: bool) {
         let position = self.pose.pivot - (self.pose.forward() * self.pose.distance).as_dvec3();
         let (sin, cos) = libm::sincosf(self.pose.roll);
@@ -693,8 +692,8 @@ impl OrbitCamera {
         self.pose.distance = distance;
     }
 
-    /// The point `at`, in the main window's pixels, shows, on the plane through the pivot facing
-    /// the view, which `view` shows.
+    /// The point at `at`, in the main window's pixels, on the plane through the pivot facing the
+    /// view that `view` shows.
     pub fn under(&self, at: [f64; 2], view: Viewport) -> DVec3 {
         let [width, height] = view.size.map(|side| side as f32);
         let x = (at[0] - f64::from(view.origin[0])) as f32 / width * 2.0 - 1.0;
@@ -785,9 +784,9 @@ mod tests {
         let _ = send(camera, event, false, Tool::Select);
     }
 
-    /// Drags `button` from `from` to `to` in a few moves, holding Alt if `alt`, and lets go: each
-    /// the mouse's raw motion and the cursor's move by as much, as a mouse at the OS's default
-    /// pointer speed gives both.
+    /// Drags `button` from `from` to `to` in a few moves, with Alt if `alt`, then lets go. Each
+    /// move is raw motion and a cursor move by as much, as a mouse at the OS's default pointer
+    /// speed gives.
     fn drag(camera: &mut OrbitCamera, button: MouseButton, alt: bool, from: Vec2, to: Vec2) {
         move_to(camera, from);
         self::button(camera, button, true, alt, Tool::Select);
@@ -827,9 +826,8 @@ mod tests {
         assert!(camera.ease.is_none());
     }
 
-    /// Framing a point eases to look at it, turned as the camera was and as far back, both ways
-    /// it sees: the point ends in the middle of the view, and the camera as far from it as it was
-    /// from the pivot.
+    /// Framing a point eases to look at it, its facing and distance kept, in both projections: the
+    /// point ends in the view's middle, the camera as far from it as it was from the pivot.
     #[test]
     fn framing_eases_to_look_at_a_point_turned_and_as_far_back_as_it_was() {
         for perspective in [false, true] {
@@ -850,11 +848,10 @@ mod tests {
         }
     }
 
-    /// Framing a sphere puts its center in the middle of the view, turned as the camera was, and
-    /// as far back as it fills 80% of the view's height: in perspective, its edge that high above
-    /// the middle seen from the eye; orthographically, the view as tall as its diameter over 0.8,
-    /// whatever the distance it had. A sphere too large or small for the distances goes as far as
-    /// they do.
+    /// Framing a sphere centers it, its facing kept, from as far back as it fills 80% of the view's
+    /// height: in perspective, its edge that high above the middle as seen from the eye;
+    /// orthographically, the view as tall as its diameter over 0.8, whatever the distance. A sphere
+    /// too large or small for the distances goes as far as they allow.
     #[test]
     fn framing_a_sphere_fills_80_percent_of_the_views_height() {
         let center = Vec3::new(-4.0, 6.0, 2.5);
@@ -1034,9 +1031,9 @@ mod tests {
         assert!(!eye(&camera).abs_diff_eq(start, 0.1));
     }
 
-    /// Looking about, orbiting and dollying go by the mouse's raw motion alone, and want the cursor
-    /// grabbed, which holds it still, so that they go on past the screen's edges; panning goes by
-    /// the cursor alone, and doesn't.
+    /// Looking about, orbiting and dollying go by raw motion alone and want the cursor grabbed,
+    /// which holds it still, so they go on past the screen's edges. Panning goes by the cursor
+    /// alone and grabs nothing.
     #[test]
     fn turning_and_dollying_go_by_the_mouses_motion_and_panning_by_the_cursor() {
         for (perspective, button, alt, what) in [
@@ -1356,9 +1353,9 @@ mod tests {
         assert_eq!(camera.pose.pivot, pivot);
     }
 
-    /// Asserts that `seen` sees as `from` does, for `what`: from the same place, turned the same way,
-    /// through the same projection, but how deep an orthographic one sees, which the camera's
-    /// reaches past.
+    /// Asserts that `seen` sees as `from` does, for `what`: from the same place, turned the same
+    /// way, through the same projection, except how deep an orthographic one sees, which the
+    /// camera's reaches past.
     fn assert_sees_as(seen: &Viewpoint, from: &Viewpoint, what: &str) {
         let close = seen.position.abs_diff_eq(from.position, 1e-4);
         assert!(close, "{what}: at {}, not {}", seen.position, from.position);
