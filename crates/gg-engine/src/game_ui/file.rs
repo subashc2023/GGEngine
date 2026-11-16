@@ -510,10 +510,6 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     if kind == Kind::Image && texture.is_none() {
         return Err(("ui.bad_field", format!("{called} names no `texture`")));
     }
-    let bad = |field: &str, value: String, why: &str| {
-        let message = format!("{called}'s `{field}` is {value}, and {why}");
-        ("ui.bad_value", message)
-    };
     // A slider is as wide as a menu's buttons and as tall as its thumb by default.
     let fit = match kind {
         Kind::Slider => [RawSize::Fixed(Units(400.0)), RawSize::Fixed(Units(48.0))],
@@ -525,7 +521,7 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         RawSize::Fill(Units(share)) if share > 0.0 => Ok(Size::Fill(share)),
         RawSize::Fill(Units(share)) => {
             let why = "a fill's share is above 0";
-            Err(bad(field, format!("Fill({share})"), why))
+            Err(bad(&called, field, format!("Fill({share})"), why))
         }
     };
     let size = [
@@ -547,6 +543,7 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     let text_size = em.map_or(if kind == Kind::Button { 34.0 } else { 32.0 }, |em| em.0);
     if text_size <= 0.0 {
         return Err(bad(
+            &called,
             "size",
             text_size.to_string(),
             "a text's size is above 0",
@@ -555,125 +552,24 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     let slice = match slice {
         Some((fraction, _)) if !(0.0..=0.5).contains(&fraction) => {
             let why = "a slice is a fraction of its texture, 0 to 0.5, and its width";
-            return Err(bad("slice", fraction.to_string(), why));
+            return Err(bad(&called, "slice", fraction.to_string(), why));
         }
         slice => slice.map(|(fraction, units)| (fraction, units.0)),
     };
-    let colored = |field: &str, given: (f32, f32, f32, f32)| {
-        let color = Vec4::from(given);
-        color
-            .is_finite()
-            .then_some(color)
-            .ok_or_else(|| bad(field, format!("{given:?}"), "a color is finite"))
-    };
     let looks = if kind.focuses() {
-        let RawLooks {
-            normal,
-            focused,
-            pressed,
-            disabled,
-        } = looks.unwrap_or_default();
-        let mut built = if kind == Kind::Button { BUTTON } else { WIDGET };
-        for (look, given) in built.iter_mut().zip([normal, focused, pressed, disabled]) {
-            let RawLook {
-                color,
-                text_color,
-                texture,
-            } = given.unwrap_or_default();
-            if let Some(color) = color {
-                look.color = colored("looks' color", color)?;
-            }
-            if let Some(text) = text_color {
-                look.text = colored("looks' text_color", text)?;
-            }
-            look.texture = texture.and_then(named);
-        }
-        // Each look shows the normal look's texture unless it gives its own.
-        let normal = built[0].texture.clone();
-        for look in &mut built[1..] {
-            if look.texture.is_none() {
-                look.texture.clone_from(&normal);
-            }
-        }
-        built
+        widget_looks(&called, kind, looks)?
     } else {
-        // A list shows nothing behind its children but the color its file gives it.
-        let unseen = if kind == Kind::List {
-            Vec4::ZERO
-        } else {
-            Vec4::ONE
-        };
-        let color = color.map_or(Ok(unseen), |color| colored("color", color))?;
-        let look = Look {
-            color,
-            text: color,
-            texture: texture.and_then(named),
-        };
-        [look.clone(), look.clone(), look.clone(), look]
+        plain_looks(&called, kind, color, texture)?
     };
-    let accent = accent.map_or(Ok(ACCENT), |accent| colored("accent", accent))?;
+    let accent = accent.map_or(Ok(ACCENT), |accent| colored(&called, "accent", accent))?;
     let text = text.unwrap_or_default();
     let widget = match kind {
-        Kind::Slider => {
-            let (min, max) = (min.map_or(0.0, |min| min.0), max.map_or(1.0, |max| max.0));
-            if max <= min {
-                let why = format!("a slider's `max` is above its `min`, {min}");
-                return Err(bad("max", max.to_string(), &why));
-            }
-            let value = value.map_or(min, |value| value.0);
-            if !(min..=max).contains(&value) {
-                let why = format!("a slider's `value` is from its `min`, {min}, to its `max`");
-                return Err(bad("value", value.to_string(), &why));
-            }
-            let step = step.map_or(0.0, |step| step.0);
-            Widget::Slider {
-                min,
-                max,
-                step,
-                value,
-            }
-        }
+        Kind::Slider => slider(&called, min, max, step, value)?,
         Kind::Toggle => Widget::Toggle {
             on: on.unwrap_or(false),
         },
-        Kind::Dropdown => {
-            let Some(options) = options.filter(|options| !options.is_empty()) else {
-                return Err(("ui.bad_field", format!("{called} names no `options`")));
-            };
-            if options.len() > MOST_OPTIONS {
-                let why = format!("a drop-down has at most {MOST_OPTIONS} options");
-                return Err(bad("options", format!("{} long", options.len()), &why));
-            }
-            let choice = choice.unwrap_or(0);
-            if choice as usize >= options.len() {
-                let why = format!("a drop-down's `choice` is one of its {}", options.len());
-                return Err(bad("choice", choice.to_string(), &why));
-            }
-            let backing = color.map_or(Ok(BACKING), |color| colored("color", color))?;
-            Widget::Dropdown {
-                options,
-                choice: choice as usize,
-                backing,
-            }
-        }
-        Kind::Field => {
-            let most = most.unwrap_or(64);
-            if !(1..=MOST_TYPED).contains(&most) {
-                let why = format!("a text field holds from 1 to {MOST_TYPED} characters");
-                return Err(bad("most", most.to_string(), &why));
-            }
-            let typed = text.chars().count();
-            if typed > most as usize || text.chars().any(char::is_control) {
-                let why = format!(
-                    "a text field's text is a line of at most the {most} characters it holds"
-                );
-                return Err(bad("text", format!("{typed} characters"), &why));
-            }
-            Widget::Field {
-                hint: hint.unwrap_or_default(),
-                most: most as usize,
-            }
-        }
+        Kind::Dropdown => dropdown(&called, options, choice, color)?,
+        Kind::Field => text_field(&called, &text, hint, most)?,
         _ => Widget::None,
     };
     let align = align.map_or(
@@ -714,5 +610,165 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     Ok(Built {
         node,
         children: children.into_iter().map(|child| child.0).collect(),
+    })
+}
+
+/// The refusal of `called`'s `field`, which is `value`, saying `why` (`ui.bad_value`).
+fn bad(called: &str, field: &str, value: String, why: &str) -> (&'static str, String) {
+    let message = format!("{called}'s `{field}` is {value}, and {why}");
+    ("ui.bad_value", message)
+}
+
+/// `given`, `called`'s `field`, as a color, refused unless it's finite.
+fn colored(
+    called: &str,
+    field: &str,
+    given: (f32, f32, f32, f32),
+) -> std::result::Result<Vec4, (&'static str, String)> {
+    let color = Vec4::from(given);
+    color
+        .is_finite()
+        .then_some(color)
+        .ok_or_else(|| bad(called, field, format!("{given:?}"), "a color is finite"))
+}
+
+/// A button's or a widget's four looks: `looks` over its kind's.
+fn widget_looks(
+    called: &str,
+    kind: Kind,
+    looks: Option<RawLooks>,
+) -> std::result::Result<[Look; 4], (&'static str, String)> {
+    let RawLooks {
+        normal,
+        focused,
+        pressed,
+        disabled,
+    } = looks.unwrap_or_default();
+    let mut built = if kind == Kind::Button { BUTTON } else { WIDGET };
+    for (look, given) in built.iter_mut().zip([normal, focused, pressed, disabled]) {
+        let RawLook {
+            color,
+            text_color,
+            texture,
+        } = given.unwrap_or_default();
+        if let Some(color) = color {
+            look.color = colored(called, "looks' color", color)?;
+        }
+        if let Some(text) = text_color {
+            look.text = colored(called, "looks' text_color", text)?;
+        }
+        look.texture = texture.and_then(named);
+    }
+    // Each look shows the normal look's texture unless it gives its own.
+    let normal = built[0].texture.clone();
+    for look in &mut built[1..] {
+        if look.texture.is_none() {
+            look.texture.clone_from(&normal);
+        }
+    }
+    Ok(built)
+}
+
+/// The one look of a node that's no button or widget, of `color` and `texture`, in each place.
+fn plain_looks(
+    called: &str,
+    kind: Kind,
+    color: Option<(f32, f32, f32, f32)>,
+    texture: Option<String>,
+) -> std::result::Result<[Look; 4], (&'static str, String)> {
+    // A list shows nothing behind its children but the color its file gives it.
+    let unseen = if kind == Kind::List {
+        Vec4::ZERO
+    } else {
+        Vec4::ONE
+    };
+    let color = color.map_or(Ok(unseen), |color| colored(called, "color", color))?;
+    let look = Look {
+        color,
+        text: color,
+        texture: texture.and_then(named),
+    };
+    Ok([look.clone(), look.clone(), look.clone(), look])
+}
+
+fn slider(
+    called: &str,
+    min: Option<Number>,
+    max: Option<Number>,
+    step: Option<Units>,
+    value: Option<Number>,
+) -> std::result::Result<Widget, (&'static str, String)> {
+    let (min, max) = (min.map_or(0.0, |min| min.0), max.map_or(1.0, |max| max.0));
+    if max <= min {
+        let why = format!("a slider's `max` is above its `min`, {min}");
+        return Err(bad(called, "max", max.to_string(), &why));
+    }
+    let value = value.map_or(min, |value| value.0);
+    if !(min..=max).contains(&value) {
+        let why = format!("a slider's `value` is from its `min`, {min}, to its `max`");
+        return Err(bad(called, "value", value.to_string(), &why));
+    }
+    let step = step.map_or(0.0, |step| step.0);
+    Ok(Widget::Slider {
+        min,
+        max,
+        step,
+        value,
+    })
+}
+
+/// A drop-down of `options`, `choice` chosen, `color` behind them as they're open.
+fn dropdown(
+    called: &str,
+    options: Option<Vec<String>>,
+    choice: Option<u32>,
+    color: Option<(f32, f32, f32, f32)>,
+) -> std::result::Result<Widget, (&'static str, String)> {
+    let Some(options) = options.filter(|options| !options.is_empty()) else {
+        return Err(("ui.bad_field", format!("{called} names no `options`")));
+    };
+    if options.len() > MOST_OPTIONS {
+        let why = format!("a drop-down has at most {MOST_OPTIONS} options");
+        return Err(bad(
+            called,
+            "options",
+            format!("{} long", options.len()),
+            &why,
+        ));
+    }
+    let choice = choice.unwrap_or(0);
+    if choice as usize >= options.len() {
+        let why = format!("a drop-down's `choice` is one of its {}", options.len());
+        return Err(bad(called, "choice", choice.to_string(), &why));
+    }
+    let backing = color.map_or(Ok(BACKING), |color| colored(called, "color", color))?;
+    Ok(Widget::Dropdown {
+        options,
+        choice: choice as usize,
+        backing,
+    })
+}
+
+/// A text field holding `text`, its node's, of at most `most` characters, saying `hint` while empty.
+fn text_field(
+    called: &str,
+    text: &str,
+    hint: Option<String>,
+    most: Option<u32>,
+) -> std::result::Result<Widget, (&'static str, String)> {
+    let most = most.unwrap_or(64);
+    if !(1..=MOST_TYPED).contains(&most) {
+        let why = format!("a text field holds from 1 to {MOST_TYPED} characters");
+        return Err(bad(called, "most", most.to_string(), &why));
+    }
+    let typed = text.chars().count();
+    if typed > most as usize || text.chars().any(char::is_control) {
+        let why =
+            format!("a text field's text is a line of at most the {most} characters it holds");
+        return Err(bad(called, "text", format!("{typed} characters"), &why));
+    }
+    Ok(Widget::Field {
+        hint: hint.unwrap_or_default(),
+        most: most as usize,
     })
 }
