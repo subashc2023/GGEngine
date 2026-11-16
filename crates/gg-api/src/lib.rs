@@ -1,70 +1,59 @@
-//! The tool API's protocol, which a game's development build serves and tools speak, as
-//! ARCHITECTURE.md's Agents and tools describes: requests and their answers as lines of JSON over a
-//! TCP connection on the machine's loopback; the session file a running game says where it serves
-//! in; what each method takes and answers; the memory a game's view is shared through as it
-//! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
-//! [`Project`], which tools find a game by and its development build reads; assets' ID files,
-//! [`asset`], which its development build writes beside each texture, model, font, prefab and UI;
-//! a project's fetch list, [`Fetch`], of the files `gg fetch` fetches into it; and, for a game's
-//! build script, the digest of what its code is compiled from, [`build`], which a session's hello
-//! names its build by. It depends on no crate of the engine's, so that tools and games' build
-//! scripts build without the GPU's toolchain.
+//! The tool API's protocol, which a game's development build serves and tools speak
+//! (ARCHITECTURE.md's Agents and tools): lines of JSON over TCP on the loopback, the session file
+//! that says where a game serves, each method's params and answer, the memory the view is shared
+//! through ([`view`]), and a client. It also holds the project manifest ([`Project`]), assets' ID
+//! files ([`asset`]), the fetch list ([`Fetch`]) and a game's source digest ([`build`]). It depends
+//! on no engine crate, so that tools and build scripts build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
-//! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
-//! each a line. A connection's first request is `hello`, with the session's token. The session file
-//! names the protocol's revision, [`PROTOCOL`], which a change to what follows may bump. The
-//! methods:
+//! takes none, and its answer `{"id":1,"result":...}` or
+//! `{"id":1,"error":{"code":...,"message":...}}`, each a line. A connection's first request is
+//! `hello`, with the session's token. The session file names the protocol's revision,
+//! [`PROTOCOL`]. The methods:
 //!
-//! - `hello`, [`Hello`]: answers [`Welcome`]; names the client, whose edits the connection's
+//! - `hello`, [`Hello`]: answers [`Welcome`]. Names the client, whose edits the connection's
 //!   `apply`, `undo` and `redo` are, and the capabilities the connection is kept to.
-//! - `ping`: answers [`Pulse`] at once, even while the game's main thread is busy.
-//! - `status`, `pause`, `resume`, `play` and `stop`: answer [`Status`].
+//! - `ping`: answers [`Pulse`] at once, even while the main thread is busy.
+//! - `status`, `pause`, `resume`, `play` and `stop`: answer [`Status`]. `play` and `stop` do
+//!   nothing in a state the game is already in.
 //!
-//!   `stop` stops the game: frames run no ticks, and its world is the world as edited, which only
-//!   edits, scene files' saves and `scene`'s `open` and `new` change, until `play`. While a copy
-//!   plays, `stop` brings back the world as edited as it was when the copy started: at its ticks;
-//!   with its scene files as last applied, to which a save made since applies; and with the
-//!   authors' edits, which `undo` steps back through again. What the copy did goes with it, edits
-//!   and entities. The IDs it drew are drawn again, so a client keeps no ID learned while it
-//!   played across a `stop`.
+//!   `stop` stops the game: frames run no ticks, and the world is the world as edited, which only
+//!   edits, scene files' saves and `scene`'s `open` and `new` change, until `play`. Stopping a copy
+//!   that plays brings back the world as edited as the copy found it: at its ticks, with its scene
+//!   files as last applied (a save made since applies), and with the authors' edits, which `undo`
+//!   steps back through again. What the copy did goes, edits and entities, and the IDs it drew are
+//!   drawn again: a client keeps no ID learned while it played across a `stop`.
 //!
 //!   A game playing from its start, which no `play` started, holds no world as edited: `stop` stops
-//!   it where it is, and that world is the world as edited from then on. Its ticks change the
-//!   very world `unsaved` compares, so `unsaved` is true there once physics moves a body:
-//!   [`Status::edited`] says whether an author's edit has applied, which ticks never set.
+//!   it where it is, and that world is the world as edited from then on. Its ticks change the very
+//!   world `unsaved` compares, so `unsaved` is true once physics moves a body; [`Status::edited`]
+//!   says whether an author's edit has applied, which ticks never set.
 //!
-//!   `stop` fails the `step`s waiting with `api.stopped`. It fails itself with `api.no_stop` in a
-//!   recorded run or a lockstep peer, which play from start to end.
+//!   `stop` fails the waiting `step`s with `api.stopped`, and fails itself with `api.no_stop` in a
+//!   recorded run or a lockstep peer, which play from start to end. `play` has a copy of the world
+//!   as edited play in its place, from its ticks, until `stop`.
+//! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run.
+//!   Fails with `api.stopped` while the game is stopped: `play` first.
+//! - `scene`, [`Scene`]: opens, saves or empties the open scene, the scene file the game started in
+//!   or one opened since, and answers [`Status`], which names it.
 //!
-//!   `play` has a copy of the world as edited play in its place, from its ticks, until `stop`.
+//!   The open scene owns the entities its file held as last applied, and clients' creates and
+//!   duplicates since, never the game's code's. `open` puts a scene file's entities in place of its
+//!   own, and watches the file. `new` deletes its entities and leaves it untitled. `save` writes
+//!   them to its file, or to `path`, which becomes its file; the watch applies nothing for that.
 //!
-//!   Neither does anything in a state the game is already in.
-//! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run;
-//!   fails with `api.stopped` while the game is stopped: `play` first.
-//! - `scene`, [`Scene`]: opens, saves or empties the open scene, the project's scene file the game
-//!   started in or one opened since, and answers [`Status`], which names it.
-//!
-//!   The open scene owns the entities its file held as last applied and those clients' edits have
-//!   made since it opened, their creates and duplicates, never those the game's code made. `open`
-//!   puts a scene file's entities in place of the open scene's, the game watching the file from
-//!   then on. `new` deletes the open scene's entities and leaves it untitled. `save` writes them to
-//!   its file, or to `path`, which becomes its file, and the game's watch applies nothing for it.
-//!
-//!   In a world of cells, the cells' entities are the open scene's too: `save` writes each streamed
-//!   root, with what's under it, to the file of the cell it stands in, each cell's file that would
-//!   change, and the rest to the world's file; `new` and `open` delete them, and empty the cells.
-//!   While the game is stopped, cells come in around the look's viewpoint, and one edited stays in
-//!   until it's saved; a cell's file saved on disk applies to its cell as the open scene's does.
+//!   In a world of cells, the cells' entities are the open scene's too. `save` writes each streamed
+//!   root, with what's under it, to its cell's file, each that would change, and the rest to the
+//!   world's file; `new` and `open` delete them and empty the cells. While the game is stopped,
+//!   cells come in around the look's viewpoint, and one edited stays in until saved. A cell's file
+//!   saved on disk applies to its cell as the open scene's does.
 //!
 //!   Each acts on the world as edited: `save` writes it while a copy plays, and `open` and `new`
 //!   stop the copy first. Neither `open` nor `new` can be undone: every author's edits start
 //!   afresh, as after a restore.
 //!
-//!   A path is absolute, or relative to the asset root, as [`Status::scene`] names files; it is in
-//!   one of the project's scene folders and ends in `.ron`.
-//!
-//!   It fails with:
+//!   A path is absolute or from the asset root, as [`Status::scene`] names files, in one of the
+//!   project's scene folders, ending in `.ron`. It fails with:
 //!   - `engine.no_project`, in a game that isn't a project's;
 //!   - `scene.bad_path`, for a path outside the scene folders;
 //!   - `scene.unsaved`, for `open` or `new` while the open scene has unsaved edits, unless
@@ -74,224 +63,211 @@
 //!   - `scene.changed`, for `save` while the file, or a cell's file it would write, differs from
 //!     what the game last applied, so that an edit to it isn't lost;
 //!   - `scene.cell_out`, for `save` while a streamed root stands in a cell whose file hasn't come
-//!     in, as one refused, or a root just moved into it, whose entities the save would lose;
+//!     in, as one refused or a root just moved there, whose entities the save would lose;
 //!   - `api.no_scene`, in a lockstep peer, and for `open` and `new` in a recorded run;
-//!   - and as loading or saving a scene fails, such as with `scene.file` or `scene.outside`.
-//! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
-//!   shown, the look among it, or as the game shows it on its own, showing what [`Shown`] says in
-//!   place of its light if asked, and answers [`Captured`]; fails with `api.bad_params` for an
-//!   image's name as `look` refuses it, and for an `at` that isn't finite or is negative. With `at`
-//!   it answers the bytes of that pixel, and with `at` alone writes no PNG.
-//! - `frames`, [`Frames`]: captures frames of the view in a row, none skipped, each as a PNG, as
-//!   `capture` does one, each drawn from the next of the viewpoints it's given, if any, and answers
-//!   [`Framed`] once all are written. It fails with `api.bad_params` as `capture` and `look` would
-//!   for its `show` and its viewpoints, for a `dir` that isn't an absolute path to a directory, a
-//!   `count` of 0 or past [`MOST_FRAMES`], a `rect` of no area, and frames that would hold more
-//!   than [`MOST_FRAMES_BYTES`] of pixels; with `api.no_view` for a frame that has no view, none of
-//!   the `rect`, or that doesn't render, as while a window resizes, which would break the row; and
-//!   with `api.capture_file` for a PNG it can't write. One asked while another captures frames
-//!   waits for it, and while one does, a `capture` that shows otherwise waits too.
+//!   - and as loading or saving a scene fails, as with `scene.file` or `scene.outside`.
+//! - `capture`, [`Capture`]: writes the view as a PNG once a frame renders it, and answers
+//!   [`Captured`]. Fails with `api.bad_params` for an image name `look` refuses, and an `at`
+//!   that's negative or not finite.
+//! - `frames`, [`Frames`]: captures frames of the view in a row, none skipped, and answers
+//!   [`Framed`] once all are written. One asked while another captures waits for it, and meanwhile
+//!   so does a `capture` that shows otherwise. Fails with:
+//!   - `api.bad_params`, as `capture` and `look` would for its `show` and viewpoints, for a `dir`
+//!     that isn't an absolute path to a directory, a `count` of 0 or past [`MOST_FRAMES`], a `rect`
+//!     of no area, and frames past [`MOST_FRAMES_BYTES`] of pixels;
+//!   - `api.no_view`, for a frame without a view, with none of the `rect`, or that doesn't render,
+//!     as while a window resizes, which would break the row;
+//!   - `api.capture_file`, for a PNG it can't write.
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
-//!   client made, as [`view::Reader`] makes it, in place of any it published to before, or stop
-//!   publishing for `null`, and answers `{}`; fails with `api.view` if the memory can't be opened.
-//!   A game run `--embedded` renders its view at the size the memory asks, and runs a frame once
-//!   the client has taken the last; another publishes its view at its own size, while it fits.
-//! - `input`, [`Input`]: hands the game's layers events, in order, as its window would, as the
-//!   frame starts, and answers `{}`.
-//! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
-//!   last to set a part winning, and which last until a client changes them or the run ends: the
-//!   viewpoint the view is seen from, the outline round several entities and every entity under
-//!   each, with a glow past its band, a grid, whether colliders'
-//!   outlines show, what the view shows in place of its light, [`Shown`], and the passes it leaves
-//!   out, [`Pass`]; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
-//!   It's set as a frame starts,
-//!   which draws with it. It fails with `api.bad_params`, saying why, for a viewpoint that isn't
-//!   finite, whose rotation doesn't normalize, or whose projection can't project, as
-//!   [`Projection`] says; for an outline with an ID that isn't 16 hex digits, whose color isn't
-//!   finite, or whose width isn't finite and positive; or for an image's name that's empty or
-//!   longer than [`MOST_IMAGE_NAME`] bytes. An outline of no IDs, or of an ID no entity has,
-//!   outlines nothing, and isn't refused, nor is an image's name the frame doesn't make.
-//! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
-//!   look among it, in the frame that reads it, about four frames after it's asked: for a model's
-//!   node, the model's root, or `within` the root or one of its nodes, the node itself. It fails
-//!   with `api.bad_params` for a `within` that isn't 16 hex digits.
-//! - `images`: answers [`ImageList`], the images the next frame that renders makes that
-//!   [`Shown::Image`] names, each by its debug name, with what it holds and its size, in the order
-//!   the frame makes them: as the look has the view drawn, its light or an image every pass's but
-//!   antialiasing's, which a frame showing an image doesn't make, and a part of shading none after
-//!   the view's passes. It fails with `api.paused` while frames pause.
+//!   client made with [`view::Reader`], in place of any before, or stop for `null`, and answers
+//!   `{}`. Fails with `api.view` if the memory can't be opened. A run `--embedded` renders at the
+//!   memory's size, and runs a frame once the client has taken the last; another publishes at its
+//!   own size, while it fits.
+//! - `input`, [`Input`]: hands the game's layers events in order, as its window would, as the frame
+//!   starts, and answers `{}`.
+//! - `look`, [`Look`]: sets parts of the look, the view settings clients share, the last setter of
+//!   a part winning, until a client changes it or the run ends. It's set as a frame starts, which
+//!   draws with it, and answers [`Looked`], or the look as it is for `{}` or no params. Fails with
+//!   `api.bad_params`, saying why, for:
+//!   - a viewpoint that isn't finite, whose rotation doesn't normalize, or whose projection can't
+//!     project ([`Projection`]);
+//!   - an outline with an ID that isn't 16 hex digits, a color that isn't finite, or a width that
+//!     isn't finite and positive;
+//!   - an image name that's empty or past [`MOST_IMAGE_NAME`] bytes.
+//!
+//!   An outline of no IDs, or of IDs no entity has, outlines nothing and isn't refused, nor is an
+//!   image name the frame doesn't make.
+//! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel as shown (the look
+//!   among it), in the frame that reads it, about four frames on. Fails with `api.bad_params` for a
+//!   `within` that isn't 16 hex digits.
+//! - `images`: answers [`ImageList`], the images [`Shown::Image`] names that the next frame that
+//!   renders makes, each by debug name, with what it holds and its size, in the frame's order. They
+//!   follow the look: with the light drawn or an image shown, every pass's but antialiasing's,
+//!   which a frame showing an image doesn't make; with a part of shading, none after the view's
+//!   passes.
+//!   Fails with `api.paused` while frames pause.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
 //!   revision of its types, as `types` answers it.
-//! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
-//!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`, its name as
-//!   [`Listed`] has it, its components in the order their types registered; and `space`, where the
-//!   space its `Transform` is in sits in the world, as the last tick left it: its parent's pose, as
-//!   a matrix of 16 floats, column by column, and a rotation, `[x, y, z, w]`, without the parent's
-//!   scales; the identity for a root. Its floats are written as a value's are. `bounds` is a
-//!   [`Sphere`] in the world, `{"center":[x,y,z],"radius":r}`, round what the entity and every
-//!   entity under it draw, as the last tick left them: meshes, sprites and circles, but not text,
-//!   particles or lines, nor a mesh whose extent the engine doesn't know; absent when nothing there
-//!   draws. An instance's entity, its root or one its prefab gives, has `instance` too,
-//!   [`Instanced`]: what of it differs from its prefab, which `revert` sets back, as a scene saves
-//!   it; reading it parses the prefab's text, and changes nothing.
+//! - `entity`, [`Entity`]: answers `{"id":...,"name":...,"parent":...,"children":[...],
+//!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`: its name as
+//!   [`Listed`] has it, its components in their types' registration order, and `space`, where its
+//!   `Transform`'s space sits in the world as the last tick left it. That's its parent's pose, 16
+//!   floats column by column, and a rotation, `[x, y, z, w]`, without the parent's scales; the
+//!   identity for a root. Its floats are written as a value's are. `bounds` is a [`Sphere`] in the
+//!   world, `{"center":[x,y,z],"radius":r}`, round what the entity and those under it draw, as the
+//!   last tick left them: meshes, sprites and circles, not text, particles, lines or a mesh of
+//!   unknown extent; absent where nothing draws. An instance's entity, its root or one its prefab
+//!   gives, has `instance` too ([`Instanced`]): what differs from its prefab, which `revert` sets
+//!   back, as a scene saves it. Reading it parses the prefab's text, changing nothing.
 //! - `get`, [`Field`]: answers a component's field, as a value.
-//! - `types`: answers [`Types`], the world's component types and the descriptions of the types
-//!   they hold, which values are read and written by: a client draws and checks values by them, as
-//!   the editor's Inspector does; and their revision. A type's description changes as a script
-//!   that declares it reloads with other fields, and as a game rebuilt describes its types
-//!   otherwise; the revision changes with each change to the types, so that a client reads them
-//!   again as the revision `entities` answers moves on.
+//! - `types`: answers [`Types`]: the world's component types and the descriptions of the types they
+//!   hold, by which values are read and written and a client draws and checks them, as the
+//!   Inspector does; and their revision. A description changes as a script declaring it reloads
+//!   with other fields, or a rebuilt game describes it otherwise. The revision changes with each,
+//!   so that a client reads them again as `entities`' revision moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
-//! - `cells`: answers [`CellList`], the world's cells, in a world whose `Cells` cut it into scene
-//!   files that come in around its viewers, as gg-engine's `cells` module describes: which
-//!   are in, coming, kept, refused or filed, the viewers they come in around, the look's viewpoint
-//!   among them while the game is stopped, and which a `scene` `save` would write.
+//! - `cells`: answers [`CellList`], in a world whose `Cells` cut it into scene files that come in
+//!   around its viewers (gg-engine's `cells` module): which are in, coming, kept, refused or filed;
+//!   the viewers, the look's viewpoint among them while stopped; and which `scene`'s `save` would
+//!   write.
 //! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts, prefabs
-//!   and UIs under the game's asset root, in the order of their paths, each with its ID, which its
-//!   ID file beside it, [`asset::Meta`], holds, and the ID files whose assets aren't there. It
-//!   answers once the game has looked at the root since it asked, or at once from its last look
-//!   while its frames pause, as while its window is minimized, so that an asset added or renamed
-//!   since is listed, a run that writes ID files, a game alone or a lockstep session's host that
-//!   serves the API, having written each one missing and moved beside its file each that a rename
-//!   of the file alone left behind, as it does as it starts and as it watches the root. A listed
+//!   and UIs under the asset root, with their ID files' IDs ([`asset::Meta`]). It answers once the
+//!   game has looked at the root since it asked, or at once from its last look while frames pause,
+//!   so that an asset added or renamed since is listed. A run that writes ID files, a game alone or
+//!   a lockstep host serving the API, has by then written each one missing, and moved beside its
+//!   file each that a rename left behind, as it does as it starts and watches the root. A listed
 //!   asset's `problem` says what's wrong with its ID file:
-//!   - `asset.no_id`, none, in a run that writes none, a lockstep session's joiner: its host writes
-//!     it, as a game alone does;
+//!   - `asset.no_id`, none, in a run that writes none, a lockstep joiner: its host writes it, as a
+//!     game alone does;
 //!   - `asset.bad_meta`, one that doesn't read: fix it, or remove it for a fresh one;
 //!   - `asset.meta_case`, one whose name differs from `<file>.meta` in case alone: rename it;
 //!   - `asset.duplicate_id`, one holding the ID another asset has this run, as a copy's does, or
-//!     none while another ID file holds its ID. From the next run, the
-//!     first asset by path whose ID file holds an ID has it, as the message says, and another
-//!     whose file holds it goes without until that file is removed, after which a run writes it a
-//!     fresh one, as it does for one without an ID file: remove a copy's ID file, rather than the
+//!     none while another ID file holds its ID. From the next run, the first asset by path whose ID
+//!     file holds the ID has it, as the message says; another goes without until its file is
+//!     removed, after which a run writes it a fresh one: remove a copy's ID file, not the
 //!     original's;
-//!   - `asset.id_changed`, one changed since the run read it: the run keeps the ID it had until it
-//!     ends;
+//!   - `asset.id_changed`, one changed since the run read it: the run keeps its ID until it ends;
 //!   - `asset.unwritten`, one the run couldn't write, saying why.
 //!
 //!   An orphan, an ID file left behind as by a rename the game couldn't pair with its file, as one
-//!   made with an edit, goes beside its asset, named for it, or is deleted. It fails with
-//!   `engine.no_root` in a game that names no asset root, and with `asset.unlisted` if the root
-//!   can't be listed.
-//! - `ui`: answers [`UiList`], each UI the game's layers added, as ARCHITECTURE.md's Events and
-//!   layers describes, with its nodes laid out for the view: each one's name, kind, parent, its
-//!   rectangle in the canvas's units and in the view's pixels, whether it shows, what it says, and
-//!   a button's state, so that a client checks a layout as data rather than by eye; it changes
-//!   nothing but a layout that its tree, its texts or the view changed since a frame drew it, which
-//!   it lays out again. A button is pressed as a click does it, through `input`, at its pixels.
-//! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
-//!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
-//!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run
-//!   restored from it goes on as it was, paused if it was. Before the first tick of a game playing
-//!   from its start, which applies what the layers queued as they started, it fails with
-//!   `api.not_ticked`. With `quit`, the run ends once the snapshot is written, as `quit` ends it,
-//!   which then needs `quit` too.
-//! - `patch`, [`Patch`]: applies a patch of the game's code, which `dx tools hotpatch` built for the
-//!   game's process, between ticks, and answers [`Patched`]; fails with `api.bad_params` if the
-//!   table's library, `lib`, isn't an absolute path, and with `api.patch` if the build can't take
-//!   patches, as [`Session::aslr_reference`] says, the table's reference is past where the game's
-//!   `main` is, so that it isn't for this process, the library doesn't load, or it isn't a patch of
-//!   the game's build, as one that exports no `main` isn't.
-//! - `apply`, [`Apply`]: applies an edit, [`Operation`]s that undo and redo together, as the
-//!   frame starts, between ticks, and answers [`Applied`]; it applies all or none, failing with
-//!   the code of the first refused, such as `ecs.no_entity`, which names it. The sets of a
-//!   gesture, such as a drag, of one field of one entity or several, join the client's last edit
-//!   if that's sets of the same field in the same gesture, so that the gesture undoes whole.
-//! - `save_prefab`, [`SavePrefab`]: saves an entity and its descendants as a new prefab, and links
-//!   the entity to it, as an edit of the client's, and answers [`SavedPrefab`]. The prefab's file
-//!   is `path`, absolute or from the asset root, in a folder there that [`asset::scan`] reaches,
-//!   ending in `.prefab`, or else in `prefabs/` under the root, which it makes, named after the
-//!   entity's `Name` in at most 64 lowercase letters, digits and `_`, or `prefab`, with `-2`, `-3`
-//!   and so on after it while a file of that name, or its ID file, is there; written whole, over
-//!   nothing, with its ID file beside it, as the game writes an asset's.
-//!   Each of its entities' IDs is the one the instance whose root is the entity mixes to the ID
-//!   the entity has, so that linking it, which `undo` unlinks, changes no entity's ID, nor anything
-//!   a scene saves but the entity's link; and the prefab's root's `Transform` is the identity, the
+//!   made with an edit, goes beside its asset, named for it, or is deleted. Fails with
+//!   `engine.no_root` in a game with no asset root, and `asset.unlisted` if the root can't be
+//!   listed.
+//! - `ui`: answers [`UiList`], each UI the layers added (ARCHITECTURE.md's Events and layers), its
+//!   nodes laid out for the view: each one's name, kind, parent, rectangle in canvas units and in
+//!   view pixels, whether it shows, what it says, and a button's state, so that a client checks a
+//!   layout as data. It changes nothing but a layout whose tree, texts or view changed since a
+//!   frame drew it, which it lays out again. A click at a button's pixels, through `input`,
+//!   presses it.
+//! - `snapshot`, [`Snapshot`]: saves the whole world as a file a run given `--restore` starts from,
+//!   and answers [`Snapshotted`] once it's written. A stopped game's file records that it's
+//!   stopped, and one taken while a copy plays saves the world as edited too, so that a restored
+//!   run goes on as it was, paused if it was. Fails with `api.not_ticked` before the first tick of
+//!   a game playing from its start, which applies what the layers queued as they started.
+//! - `patch`, [`Patch`]: applies, between ticks, a patch of the game's code that
+//!   `dx tools hotpatch` built for its process, and answers [`Patched`]. Fails with
+//!   `api.bad_params` if the table's library, `lib`, isn't an absolute path, and with `api.patch`
+//!   if the build can't take patches ([`Session::aslr_reference`]), the table's reference is past
+//!   where `main` is, so that it isn't for this process, the library doesn't load, or it isn't a
+//!   patch of the build, as one exporting no `main` isn't.
+//! - `apply`, [`Apply`]: applies an edit, [`Operation`]s that undo and redo together, as the frame
+//!   starts, between ticks, and answers [`Applied`]. It applies all or none, failing with the code
+//!   of the first refused, such as `ecs.no_entity`, which names it. A gesture's sets, as a drag's,
+//!   of one field of one or several entities, join the client's last edit if that's sets of the
+//!   same field in the same gesture, so that the gesture undoes whole.
+//! - `save_prefab`, [`SavePrefab`]: saves an entity and its descendants as a new prefab, links the
+//!   entity to it as the client's edit, and answers [`SavedPrefab`]. The file is `path`, absolute
+//!   or from the asset root, in a folder [`asset::scan`] reaches, ending in `.prefab`. Without one,
+//!   it's in `prefabs/` under the root, which it makes, named after the entity's `Name` in at most
+//!   64 lowercase letters, digits and `_`, or `prefab`, then `-2`, `-3` and so on while a file of
+//!   that name or its ID file is there. It's written whole, over nothing, with its ID file, as the
+//!   game writes an asset's. Each prefab entity's ID is the one the instance rooted at the entity
+//!   mixes to the entity's ID, so that linking, which `undo` unlinks, changes no entity's ID nor
+//!   anything a scene saves but the link. The prefab root's `Transform` is the identity, the
 //!   instance's own being the entity's. `undo` leaves the file. It fails, writing nothing, with:
-//!   - `engine.no_root`, in a game that names no asset root;
-//!   - `api.no_scene`, in a game that runs from its package, or a networked one, as `scene`'s
-//!     `save` does, and while a copy of the world as edited plays, whose entities `stop` takes
-//!     away;
+//!   - `engine.no_root`, in a game with no asset root;
+//!   - `api.no_scene`, in a game run from its package or networked, as `scene`'s `save` does, and
+//!     while a copy of the world as edited plays, whose entities `stop` takes away;
 //!   - `ecs.no_entity`, for an ID no living entity has;
-//!   - `ecs.prefab_entity`, for an entity an instance's prefab gives, `scene.prefab_variant` for an
-//!     instance's root, and `ecs.model_node` for a model's node;
+//!   - `ecs.prefab_entity`, for an entity an instance's prefab gives; `scene.prefab_variant`, for
+//!     an instance's root; `ecs.model_node`, for a model's node;
 //!   - `asset.outside_root`, for a path outside the asset root, whose folder isn't there, or that
-//!     the scan skips, as [`asset::reached`] says, as in a folder whose name starts with `.`, in a
-//!     `target` or in a top-level `tests`;
+//!     the scan skips ([`asset::reached`]), as in a folder starting `.`, a `target` or a top-level
+//!     `tests`;
 //!   - `asset.exists`, for a path where a file is, or the ID file of one deleted, whose ID scenes
 //!     may name;
-//!   - `engine.bad_prefab`, for a prefab's text of more than 16 MiB, which no load reads;
-//!   - and as saving a scene of the entity fails, as with `scene.outside` for one that refers to an
-//!     entity outside its subtree.
-//! - `undo` and `redo`, [`Undo`]: undo the last edit of an author, the client's own by default,
-//!   such as a scene file's, which its path names, or redo the last it undid, and answer
-//!   [`Edit`], or `null` if there's none; an edit the world refuses to undo or redo, as when an
-//!   entity it changed is gone since, fails, and is dropped.
+//!   - `engine.bad_prefab`, for a prefab's text over 16 MiB, which no load reads;
+//!   - and as saving a scene of the entity fails, as with `scene.outside` for one that refers
+//!     outside its subtree.
+//! - `undo` and `redo`, [`Undo`]: undo an author's last edit, the client's own by default or, as a
+//!   scene file's, one its path names, or redo the last it undid, and answer [`Edit`], or `null`
+//!   for none. An edit the world refuses to undo or redo, as when an entity it changed is gone,
+//!   fails and is dropped.
 //! - `edits`, [`Edits`]: answers [`History`], an author's edits, or each author's.
-//! - `logs`, [`Logs`]: answers [`LogEvents`], events of the game's JSON log, each its line as the
-//!   log wrote it, of the last the game keeps, at most 10,000 and 8 MiB of lines: from an earlier
-//!   answer's `next`, or else the last of them, or all, from the oldest; those at a level and more
-//!   severe; waiting for one to come, if none is there. A `from` given with another run's `run`, as
-//!   a client following the game's logs across a restart gives, reads from the oldest kept, so that
-//!   the client misses nothing it can still have.
-//! - `note`, [`Note`]: has the game log an event the client gives, naming the client, and answers
-//!   `{}`, so that those following its logs learn what the client knows of it, as `gg run` tells of
-//!   a patch or a rebuild of it that failed. It fails with `api.bad_params` for a code that isn't a
-//!   stable code's shape, a dotted name such as `gg.patch_failed`, or is longer than
-//!   [`MOST_NOTE_CODE`] bytes, for an empty message, and for a message or fields longer than
-//!   [`MOST_NOTE`] bytes.
-//! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
-//!   its layers, which may keep a window open. The requests the main thread takes after a `quit`,
-//!   or a `snapshot` with `quit`, fail with `api.quitting`, applying nothing.
-//! - `debug`, [`Debug`](struct@Debug): debugs the game's Luau scripts, as ARCHITECTURE.md's Game
-//!   code describes,
-//!   and answers [`Debugging`]: sets a script's breakpoints, then pauses the scripts, or goes on from
-//!   where one has stopped, by a continue or a step, then waits for one to stop, as it's asked. A
-//!   script stops inside its tick: the main thread waits there, and with it the frames and the
-//!   requests the main thread answers, until a `debug` has it go on. It fails with
-//!   `script.not_stopped` for a continue or a step while no script has stopped, and with
-//!   `api.bad_params` for a script's path that's empty, a line of 0, or a wait of more than 10,000.
+//! - `logs`, [`Logs`]: answers [`LogEvents`], events of the game's JSON log, of the last it keeps,
+//!   at most 10,000 and 8 MiB of lines. A `from` given with another run's `run`, as a client
+//!   following the logs across a restart gives, reads from the oldest kept, so that it misses
+//!   nothing it can still have.
+//! - `note`, [`Note`]: has the game log an event the client gives, and answers `{}`, so that those
+//!   following its logs learn what the client knows, as `gg run` tells of a failed patch or
+//!   rebuild. Fails with `api.bad_params` for a code that isn't a stable code's
+//!   shape, a dotted name such as `gg.patch_failed`, or is past [`MOST_NOTE_CODE`] bytes; an empty
+//!   message; and a message or fields past [`MOST_NOTE`] bytes.
+//! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, without asking its
+//!   layers, which may keep a window open. Requests the main thread takes after a `quit`, or a
+//!   `snapshot` with `quit`, fail with `api.quitting`, applying nothing.
+//! - `debug`, [`Debug`](struct@Debug): debugs the game's Luau scripts (ARCHITECTURE.md's Game code)
+//!   and answers [`Debugging`]. A stopped script holds the main thread inside its tick, and with it
+//!   the frames and the requests the main thread answers, until a `debug` has it go on. Fails with
+//!   `script.not_stopped` for a continue or a step while none has stopped, and with
+//!   `api.bad_params` for an empty path, a line of 0, or a wait past 10,000.
 //!
-//! The methods but `hello`, `ping`, `logs`, `note` and `debug` are answered by the game's main
-//! thread, as a frame starts, those that came before it did, the rest as the next starts. While the
-//! window is minimized, and no frames run, it answers them between frames, but `step`, `capture`,
-//! `frames` and `pick`, which need frames, fail with `api.paused`; while a file dialog or the window
-//! menu Windows runs is open, holding the main thread, or a script has stopped, they wait. The
-//! connection's own thread answers `hello`, `ping`, `logs`, `note` and `debug` as it reads them, so
-//! that a `logs` or a `debug` that waits holds up the connection's later requests: follow the logs,
-//! or wait for a script to stop, on a connection of their own. A connection has at most
-//! [`MOST_IN_FLIGHT`] requests in flight, the game reading no more of it until it has written an
-//! answer, so that a `ping` sent behind as many that wait for the main thread waits too.
+//! The main thread answers all but `hello`, `ping`, `logs`, `note` and `debug` as a frame starts,
+//! those that came before it, the rest as the next starts. While the window is minimized and no
+//! frames run, it answers between frames, but `step`, `capture`, `frames` and `pick`, which need
+//! frames, fail with `api.paused`. While a file dialog or Windows' window menu holds the main
+//! thread, or a script has stopped, they wait. The connection's own thread answers `hello`, `ping`,
+//! `logs`, `note` and `debug` as it reads them, so a `logs` or `debug` that waits holds up the
+//! connection's later requests: follow the logs, or wait for a script, on a connection of its own.
+//! A connection has at most [`MOST_IN_FLIGHT`] requests in flight, the game reading no more until
+//! it has written an answer, so a `ping` behind as many that wait for the main thread waits too.
 //!
-//! A connection is kept to what its `hello` grants, [`Hello::grant`], every capability without it:
-//! a request its grant doesn't cover fails with `api.ungranted`, naming the capability it needs.
-//! `ping` and `status` need none; `logs`, `entities`, `entity`, `types`, `hash`, `assets`, `ui`
-//! and `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the
-//! type each set, add and remove names, and `write` for any other operation, as `undo` and `redo`
-//! need; `save_prefab` needs `write` and `scene`, as it writes a file of the project's as `scene`
-//! does; `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and
-//! `pick` need `view`, a `pick` answering its entity's name only with `read` of `Name` too;
-//! `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; a `capture` or a
-//! `snapshot` given a path needs `files` too, and a `snapshot` with `quit` needs `quit`; `frames`
-//! needs `view` and `files`.
+//! A connection is kept to what its `hello` grants ([`Hello::grant`]), every capability without
+//! one. Beyond it, a request fails with `api.ungranted`, naming the capability it needs:
 //!
-//! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
-//! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
-//! or `NaN`; an entity its ID, a string of 16 hex digits, or `null` if it isn't alive; a texture
-//! its name, its asset ID where its file has one, such as `5f3c9a1e07b2d846`, a model's image the
-//! model's and its place, such as `5f3c9a1e07b2d846#0`, or else its path, such as
-//! `assets/logo.png`, or `null` for one without; a model, a font or a prefab its name, as a
-//! texture's; an option `null` or its value; a list an array; a struct an object of its fields, in
-//! their order, a tuple struct's named `0`, `1` and so on; an enum's variant its name, as a string,
-//! or for a variant with fields an object of one key, its name, whose value is an object of the
-//! fields; and what reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`. A value
-//! given, as an operation's, is read the same way, by the type of the field it goes in, as a
-//! component's description gives it: an integer where a float goes, a texture, a model, a font or a
-//! prefab by its name or a path to its file, which the game loads from the file under its asset
-//! root if it hasn't, its model's image with its model, an entity by the ID of one that's alive, or
-//! `null` for none alive, and a struct, or a variant's fields, missing a field, which takes its
-//! default, as in a scene; what's opaque is kept as it is, or made as the type's own is, as an
-//! `(opaque)` that a create or an add gives says.
+//! - none: `ping` and `status`;
+//! - `read`: `logs`, `entities`, `entity`, `types`, `hash`, `assets`, `ui` and `edits`; `get` needs
+//!   `read` of its component's type;
+//! - `write`: `apply`, of the type each set, add and remove names, and whole for any other
+//!   operation; `undo` and `redo`; `save_prefab`, with `scene`, as it writes a project's file;
+//! - `play`: `pause`, `resume`, `play`, `stop` and `step`;
+//! - `view`: `capture`, `view`, `look` and `pick`, a `pick` naming its entity only with `read` of
+//!   `Name` too; `frames`, with `files`;
+//! - their own: `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit`;
+//! - `files` too: a `capture` or a `snapshot` given a path; `quit` too: a `snapshot` with `quit`.
+//!
+//! A value is JSON by its kind:
+//!
+//! - a number, a string, a `bool`;
+//! - a vector or a quaternion, an array of numbers, `[x, y, z, w]` for a quaternion;
+//! - a float that isn't finite, the string `inf`, `-inf` or `NaN`;
+//! - an entity, its ID, a string of 16 hex digits, or `null` if it isn't alive;
+//! - a texture, its asset ID where its file has one, such as `5f3c9a1e07b2d846`, a model's image
+//!   the model's and its place, such as `5f3c9a1e07b2d846#0`, or else its path, such as
+//!   `assets/logo.png`, or `null` for none; a model, a font or a prefab likewise;
+//! - an option, `null` or its value; a list, an array;
+//! - a struct, an object of its fields in order, a tuple struct's named `0`, `1` and so on;
+//! - an enum's variant, its name as a string, or for a variant with fields an object of one key,
+//!   its name, holding an object of the fields;
+//! - what reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`.
+//!
+//! A value given, as an operation's, is read alike, by the type of the field it goes in, as a
+//! component's description gives it. It also takes an integer where a float goes; a texture, a
+//! model, a font or a prefab by name or by a path to its file, which the game loads from under its
+//! asset root if it hasn't, a model's image with its model; an entity by a living one's ID, or
+//! `null` for none; and a struct or a variant's fields missing a field, which takes its default, as
+//! in a scene. What's opaque is kept as it is, or made as the type's own is, as an `(opaque)` that
+//! a create or an add gives says.
 
 pub mod asset;
 pub mod build;
@@ -317,45 +293,41 @@ use serde_json::value::RawValue;
 pub use fetch::Fetch;
 pub use project::{Project, UNBUILT};
 
-/// The most bytes a line may have, its line break aside, past which the side reading it drops the
+/// The most bytes a line may have, its line break aside, past which the reader drops the
 /// connection: a request's or an answer's, such as a page of entities.
 pub const MAX_LINE: usize = 16 << 20;
 
-/// The most requests a connection has in flight, read by the game and not yet answered on the wire,
-/// past which the game reads no more of it until an answer is written: a client that sends faster
-/// than it reads its answers, or than they're answered, is held back by the connection, as TCP holds
-/// back a writer, rather than the game holding its requests and answers in memory. [`Client`]
-/// has one at a time.
+/// The most requests a connection has in flight, read and not yet answered on the wire, past which
+/// the game reads no more of it until an answer is written. So TCP holds back a client that sends
+/// faster than it reads its answers, or than they're answered, rather than the game holding them
+/// in memory. [`Client`] has one at a time.
 pub const MOST_IN_FLIGHT: usize = 16;
 
-/// The most bytes a connection's first line, its `hello`, may have, its line break aside, past which
-/// the game closes the connection unanswered, the rest unread. The request's own fields, with the
-/// largest `id`, take under 100, the token 32, and a grant of every capability by name under 100,
-/// which leaves over 3.8 KiB for the client's name and the component types a grant names.
+/// The most bytes a connection's first line, its `hello`, may have, its line break aside, past
+/// which the game closes the connection unanswered. The request's fields with the largest `id` take
+/// under 100, the token 32, and a grant of every capability by name under 100, leaving over 3.8 KiB
+/// for the client's name and the component types a grant names.
 pub const MAX_HELLO: usize = 4 << 10;
 
-/// The revision of what `gg` and a game's engine rely on of each other, which the session file
-/// names, [`Session::protocol`], and `gg` warns of where a game's isn't its own (`gg.protocol`), as
-/// a game built against another revision of the engine than `gg` may have. Bump it with any change
-/// after which a `gg` built before it would misread a game, or a game it, or be refused: to a
-/// method, a parameter, a field of an answer or the session file, or an error's code, renamed,
-/// removed or meaning something else, or a parameter a method requires added; or to the flags `gg`
-/// starts a game with, or the snapshot files it reads. A method, or a field the other end can go
-/// without, added needs none.
+/// The revision of what `gg` and a game's engine rely on of each other. The session file names it
+/// ([`Session::protocol`]), and `gg` warns of a game whose isn't its own (`gg.protocol`), as one
+/// built against another engine may be. Bump it at any change after which an older `gg` would
+/// misread a game, or a game it, or be refused: a method, a parameter, a field of an answer or the
+/// session file, or an error's code renamed, removed or meaning something else; a required
+/// parameter added; or a change to the flags `gg` starts a game with, or the snapshot files it
+/// reads. A method, or a field the other end can go without, added needs none.
 pub const PROTOCOL: u32 = 1;
 
-/// Where a running game serves the API, which its development build writes as a file of JSON in
-/// the `sessions` directory beside its executable as the API starts, and removes as the run ends;
-/// one that a crash or a kill leaves behind names an address that refuses connections. Only the
-/// user the game runs as can read the file: on Unix its mode is 0600, and on Windows its DACL
-/// allows its owner alone.
+/// Where a running game serves the API: a JSON file its development build writes in `sessions`
+/// beside its executable as the API starts, and removes as the run ends. One a crash or a kill
+/// leaves behind names an address that refuses connections. Only the game's user can read it: on
+/// Unix its mode is 0600, and on Windows its DACL allows its owner alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     /// The app's name, as `App::new` gives it, such as `Sandbox`.
     pub app: String,
-    /// Its process's ID.
     pub pid: u32,
-    /// Where it listens, on the loopback.
+    /// On the loopback.
     pub address: SocketAddr,
     /// What a client's `hello` gives, so that only processes that can read the file, the user's
     /// own, talk to it.
@@ -364,24 +336,22 @@ pub struct Session {
     pub log: Option<PathBuf>,
     /// The engine's version and build, such as `0.1.0 debug`.
     pub engine: String,
-    /// Where the game's `main` is in its process, which `dx tools hotpatch` builds a patch for the
-    /// process against (`--aslr-reference`), as the OS loads the executable somewhere else in each;
-    /// 0 in a build that can't take patches: one whose executable exports no `main`, as one that
-    /// cargo built for Windows or Linux doesn't, or one without debug assertions, without which
-    /// subsecond never looks a patch up. A debug build that cargo made for macOS exports its `main`
-    /// all the same, though only patches of the build `dx build --fat-binary` made suit a process.
+    /// Where `main` is in the process, which `dx tools hotpatch` builds a patch against
+    /// (`--aslr-reference`), as the OS loads the executable elsewhere each time. 0 in a build that
+    /// can't take patches: one exporting no `main`, as cargo's for Windows or Linux, or without
+    /// debug assertions, without which subsecond never looks a patch up. cargo's debug build for
+    /// macOS exports `main` all the same, though only patches of `dx build --fat-binary`'s build
+    /// suit it.
     pub aslr_reference: u64,
-    /// The player it plays in a lockstep session, 0 for the host and 1 for the joiner; `None` for a
-    /// game alone, or one whose engine is older than lockstep.
+    /// Its player in a lockstep session, 0 for the host and 1 for the joiner; `None` for a game
+    /// alone, or from an engine older than lockstep.
     #[serde(default)]
     pub player: Option<u8>,
-    /// The path of the game's project manifest, as the game named it, which tools inside the
-    /// project reach it by; `None` for an app that isn't a project, or one whose engine is older
-    /// than projects.
+    /// The project manifest's path, as the game named it, by which tools inside the project reach
+    /// it; `None` for an app that isn't a project, or from an engine older than projects.
     #[serde(default)]
     pub project: Option<PathBuf>,
-    /// The [`PROTOCOL`] the game's engine was built with; `None` for one whose engine is older than
-    /// it.
+    /// The [`PROTOCOL`] the game's engine was built with; `None` from an engine older than it.
     #[serde(default)]
     pub protocol: Option<u32>,
 }
@@ -392,9 +362,8 @@ impl Session {
         exe_dir.join("sessions")
     }
 
-    /// The name of the session file of app `app` in process `pid`, such as `sandbox-1234.json`: the
-    /// app's name in lower case, each character that isn't an ASCII letter or digit a `-`, as its
-    /// log's is.
+    /// The session file's name for app `app` in process `pid`, such as `sandbox-1234.json`: the
+    /// app's name in lower case, each character but ASCII letters and digits a `-`, as its log's.
     pub fn file_name(app: &str, pid: u32) -> String {
         let app: String = app
             .chars()
@@ -409,9 +378,8 @@ impl Session {
         format!("{app}-{pid}.json")
     }
 
-    /// The sessions whose files are in `dir`, each with its file's path, in the order of their
-    /// names; none if `dir` can't be read. A file that isn't a session's is skipped, as a session
-    /// file being written is, beside its own.
+    /// The sessions whose files are in `dir`, with their paths, in name order; none if `dir` can't
+    /// be read. A file that isn't a session's is skipped, as one being written is.
     pub fn list(dir: &Path) -> Vec<(PathBuf, Self)> {
         let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
@@ -445,8 +413,8 @@ pub struct Request {
 #[derive(Debug, Deserialize)]
 pub struct Answer {
     pub id: u64,
-    /// The result's JSON, as the game wrote it: `null` too, as an `undo` with nothing to undo
-    /// answers, which is a result.
+    /// The result's JSON, as the game wrote it, `null` too, as an `undo` with nothing to undo
+    /// answers.
     #[serde(default, deserialize_with = "present")]
     pub result: Option<Box<RawValue>>,
     #[serde(default)]
@@ -462,7 +430,7 @@ where
     T::deserialize(json).map(Some)
 }
 
-/// The line answering request `id`: with `result`, its JSON, or with the error it failed with.
+/// The line answering request `id`, with its result's JSON or its error.
 pub fn answer_line(id: u64, answer: Result<&str, &Failure>) -> String {
     match answer {
         Ok(result) => format!("{{\"id\":{id},\"result\":{result}}}\n"),
@@ -473,8 +441,8 @@ pub fn answer_line(id: u64, answer: Result<&str, &Failure>) -> String {
     }
 }
 
-/// Reads a line, without its line break, `\n` or `\r\n`: `None` once the stream ends, or ends
-/// partway through a line, as a connection cut short does.
+/// Reads a line without its `\n` or `\r\n`; `None` once the stream ends, even partway through a
+/// line, as a connection cut short does.
 ///
 /// Fails with `InvalidData` for a line of more than [`MAX_LINE`] bytes, or one that isn't UTF-8.
 pub fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
@@ -497,7 +465,7 @@ pub fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
 }
 
 /// An error as the API gives it: a stable code, a dotted name such as `ecs.no_entity`, and a
-/// message that says what happened, naming what it's about.
+/// message saying what happened, naming what it's about.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     pub code: String,
@@ -521,24 +489,22 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// What `hello` takes: the session's token, the client's name and the capabilities the connection
-/// is kept to. Any other first request, or another token, is refused with `api.unauthorized`, and
-/// the connection closes.
+/// What `hello` takes. Any other first request, or another token, is refused with
+/// `api.unauthorized`, and the connection closes.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hello {
     pub token: String,
-    /// The client, the author of the edits the connection applies, which the connection's `undo`
-    /// and `redo` step through: `api` without one. Connections with the same name share them, so
-    /// that a client undoes its own edits across connections, as `gg`'s commands do, each one's
-    /// own.
+    /// The client, author of the connection's edits, which its `undo` and `redo` step through;
+    /// `api` without one. Connections of one name share them, so a client undoes its own edits
+    /// across connections, as each of `gg`'s commands does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
     /// The capabilities the connection is kept to, as the crate's docs say each method needs:
-    /// `read` and `write` of the world, whole, or of one component type's, as `read:Shard`, and
-    /// `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` and `quit`;
-    /// every one without it. A capability there's none of fails the `hello` with `grant.unknown`,
-    /// and the connection closes.
+    /// `read` and `write` of the whole world or of one component type, as `read:Shard`, and `play`,
+    /// `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` and `quit`; every
+    /// one without it. An unknown capability fails the `hello` with `grant.unknown`, closing the
+    /// connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<Vec<String>>,
 }
@@ -554,66 +520,63 @@ pub struct Welcome {
     pub log: Option<PathBuf>,
 }
 
-/// What `ping` answers: the frames the game has run, which a hung game's main thread stops
-/// counting, and what frames have paused for, if they've paused for the user: `minimized`, while
-/// the main window has no area, `dialog`, while a file dialog is open, `menu`, while the window
-/// menu Windows runs is, or `breakpoint`, while a script has stopped, as `debug` says, which it
-/// says before any other, as a stopped script holds the main thread whatever else frames wait for.
+/// What `ping` answers: the frames the game has run, which a hung main thread stops counting, and
+/// what frames have paused for the user for: `minimized`, while the main window has no area;
+/// `dialog`, while a file dialog is open; `menu`, while Windows' window menu is; or `breakpoint`,
+/// while a script has stopped (`debug`), which comes first, as it holds the main thread whatever
+/// else frames wait for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pulse {
     pub frames: u64,
     pub waiting: Option<String>,
 }
 
-/// What `status`, `pause`, `resume`, `play`, `stop` and `step` answer: the game as the frame that
-/// answers starts.
+/// What `status`, `pause`, `resume`, `play`, `stop` and `step` answer: the game as the answering
+/// frame starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
-    /// The ticks the simulation has run, which number the next: after a `stop` that brings back the
-    /// world as edited, that world's, so that they may go back.
+    /// The ticks run, which number the next. After a `stop` that brings back the world as edited,
+    /// that world's, so they may go back.
     pub ticks: u64,
-    /// Whether the simulation is paused, as `pause` and `step` leave it, which lasts across `stop`
-    /// and `play`.
+    /// As `pause` and `step` leave it, across `stop` and `play`.
     pub paused: bool,
-    /// Whether the game is stopped, as `stop` and `--stopped` leave it: its world is the world as
-    /// edited, which no tick changes, until `play`. False from an engine older than `stop`.
+    /// As `stop` and `--stopped` leave it: the world is the world as edited, which no tick
+    /// changes, until `play`. False from an engine older than `stop`.
     #[serde(default)]
     pub stopped: bool,
-    /// The frames the game has run.
     pub frames: u64,
     /// The world's living entities.
     pub entities: usize,
-    /// The game's view's width and height in pixels, as the last frame handed it to the renderer;
-    /// `None` while it had no area.
+    /// The view's width and height in pixels, as the last frame handed it to the renderer; `None`
+    /// while it had no area.
     pub view: Option<[u32; 2]>,
-    /// The open scene's file, as the asset root names it, such as `scenes/arena.ron`: the scene
-    /// that `scene` acts on, of the world as edited. `None` while it's untitled, as after `new`; in
-    /// a game that isn't a project's; and from an engine older than `scene`.
+    /// The open scene's file from the asset root, such as `scenes/arena.ron`: what `scene` acts
+    /// on, of the world as edited. `None` while untitled, as after `new`, in a game that isn't a
+    /// project's, and from an engine older than `scene`.
     #[serde(default)]
     pub scene: Option<String>,
-    /// Whether the open scene, in the world as edited, differs from its file, as `save` would
-    /// write it, or, untitled, holds entities. False from an engine older than `scene`. In a game
-    /// that plays from its start the world as edited is the world that ticks change, so a body its
-    /// physics moves makes this true from the first tick: `edited` says what authors changed.
+    /// Whether the open scene, in the world as edited, differs from its file as `save` would write
+    /// it, or, untitled, holds entities. False from an engine older than `scene`. In a game playing
+    /// from its start, ticks change the world as edited, so a body physics moves makes this true
+    /// from the first tick: `edited` says what authors changed.
     #[serde(default)]
     pub unsaved: bool,
-    /// Whether an author's edit (`apply`, `append`, `amend`, `undo` or `redo`, from a client or
-    /// the editor's Inspector) has applied to the world as edited since the open scene was last
-    /// saved, opened or made new, or its own file's save applied. Ticks don't set it, nor scripts'
-    /// reloads or other scene files' saves; an edit of a copy that plays goes with the copy at
-    /// `stop`; a snapshot keeps it, as across `gg run`'s restarts. An undo back to the saved state
-    /// leaves it true. False from an engine older than it.
+    /// Whether an author's edit (`apply`, `append`, `amend`, `undo` or `redo`, from a client or the
+    /// Inspector) has applied to the world as edited since the open scene was last saved, opened or
+    /// made new, or its own file's save applied. Ticks, scripts' reloads and other scene files'
+    /// saves don't set it. A playing copy's edit goes with the copy at `stop`; a snapshot keeps it,
+    /// as across `gg run`'s restarts. An undo back to the saved state leaves it true. False from an
+    /// engine older than it.
     #[serde(default)]
     pub edited: bool,
-    /// The world's cells, in a world of cells, whose `Cells` cut it into scene files that come in
-    /// around its viewers and go out as they go away: how many are in, and how many out keep what
-    /// they held. `None` in a world whose cells never came in, and from an engine older than cells.
+    /// In a world of cells, whose `Cells` cut it into scene files that come in around its viewers
+    /// and go out as they leave: how many are in, and how many out keep what they held. `None`
+    /// where cells never came in, and from an engine older than cells.
     #[serde(default)]
     pub cells: Option<CellCounts>,
 }
 
-/// How many of a world's cells are in, and how many out keep what they held, as [`Status::cells`]
-/// says.
+/// How many of a world's cells are in, and how many out keep what they held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellCounts {
     #[serde(rename = "in")]
@@ -627,11 +590,11 @@ pub struct CellList {
     pub world: Option<WorldCells>,
 }
 
-/// A world of cells, as `cells` reads it: `entity`, the ID of the entity whose `Cells` it streams
-/// by; the cells' `folder`, from the asset root, and `size`, a cell's side; its `viewers`, each
-/// entity's with a `Viewer`, and, while the game is stopped, the look's viewpoint, which cells come
-/// in around then; and each cell that's in, coming in, keeping what it held, refused, holding a
-/// streamed root or whose file the folder holds, in order, by x, then y, then z.
+/// A world of cells, as `cells` reads it: `entity`, whose `Cells` it streams by; the cells'
+/// `folder`, from the asset root, and `size`, a cell's side; its `viewers`, each entity's with a
+/// `Viewer` and, while the game is stopped, the look's viewpoint; and each cell in, coming in,
+/// keeping what it held, refused, holding a streamed root or filed in the folder, ordered by x,
+/// then y, then z.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldCells {
     pub entity: String,
@@ -641,8 +604,8 @@ pub struct WorldCells {
     pub cells: Vec<CellAt>,
 }
 
-/// A viewer, as [`WorldCells`] lists it: its entity's ID, `None` for the look's viewpoint; where it
-/// is in the world, as the last tick left it; and how far from it cells come in.
+/// A viewer: its entity's ID, `None` for the look's viewpoint; where it is, as the last tick left
+/// it; and how far from it cells come in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ViewerAt {
     pub entity: Option<String>,
@@ -650,12 +613,11 @@ pub struct ViewerAt {
     pub radius: f32,
 }
 
-/// A cell, as [`WorldCells`] lists it: its place on the grid, as its file's name has it, `3_0_-2`
-/// for `[3, 0, -2]`; whether the folder holds its `file`, as the game last listed it, or else the
-/// game's code `made` it; whether it's `in`, `coming` in as the next tick starts, or `refused`
-/// while a viewer is near; how many scene texts it keeps, out, of what it held as it went
-/// (`kept`); how many streamed `roots` stand in it; and whether `scene`'s `save` would write its
-/// file, or is refused it (`unsaved`).
+/// A cell: its place on the grid, as its file's name has it, `3_0_-2` for `[3, 0, -2]`; whether
+/// the folder holds its `file`, as last listed, or else the game's code `made` it; whether it's
+/// `in`, `coming` in as the next tick starts, or `refused` while a viewer is near; the scene texts
+/// it keeps, out, of what it held (`kept`); the streamed `roots` in it; and whether `scene`'s
+/// `save` would write its file, or is refused it (`unsaved`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellAt {
     pub cell: [i32; 3],
@@ -670,8 +632,8 @@ pub struct CellAt {
     pub unsaved: bool,
 }
 
-/// What `scene` takes: what to do to the open scene; the file to open, or to save it as, absolute
-/// or relative to the asset root; and, for `open` and `new`, whether to discard its unsaved edits.
+/// What `scene` takes: the action; the file to open or save as, absolute or from the asset root;
+/// and, for `open` and `new`, whether to discard unsaved edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scene {
@@ -682,7 +644,6 @@ pub struct Scene {
     pub discard: bool,
 }
 
-/// What `scene` does to the open scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SceneAction {
@@ -691,10 +652,10 @@ pub enum SceneAction {
     New,
 }
 
-/// What `step` takes: how many ticks to run, 1 by default and at most 10,000, a frame's worth
-/// each frame. The simulation stays paused after them; `resume` runs it again, and drops the
-/// steps not yet run, answering those waiting; `stop` drops the steps not yet run too, failing
-/// those waiting with `api.stopped`.
+/// What `step` takes: the ticks to run, 1 by default and at most 10,000, a frame's worth each
+/// frame. The simulation stays paused after. `resume` runs it again, dropping the steps not yet
+/// run and answering those waiting; `stop` drops them too, failing those waiting with
+/// `api.stopped`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -706,59 +667,52 @@ fn one() -> u64 {
     1
 }
 
-/// What `capture` takes: where to write the PNG, an absolute path, whose directory exists; without
-/// one, a file in the `captures` directory beside the game's executable, named for the run, as
-/// `sandbox-4242-7.png`, the newest 32 of which it keeps, removing older ones as each is written:
-/// those a client named stay.
-///
-/// With `at` and without `path`, it writes no file and keeps none of the newest 32 out: it answers
-/// the pixel alone, as [`Captured::pixel`] says.
+/// What `capture` takes: `path`, an absolute path for the PNG in a directory that exists. Without
+/// it, the PNG goes in `captures` beside the executable, named for the run, as
+/// `sandbox-4242-7.png`; the newest 32 there are kept, older ones removed as each is written, but
+/// those a client named stay. With `at` and no `path`, it writes nothing and answers the pixel
+/// alone ([`Captured::pixel`]).
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// A pixel of the view, `[x, y]` from its top left, as [`Pick::at`] is, whose bytes the answer
-    /// gives as [`Captured::pixel`]; a number that isn't finite, or is negative, is refused with
-    /// `api.bad_params`. The pixel is the one the position falls in, as `pick`'s is.
+    /// A pixel of the view, `[x, y]` from its top left, as [`Pick::at`] is: the one the position
+    /// falls in. Negative or non-finite numbers are refused with `api.bad_params`.
     #[serde(default)]
     pub at: Option<[f64; 2]>,
-    /// Whether to capture the view as the game shows it on its own, through its own viewpoint,
-    /// without the look's outline, grid or colliders, in a frame that isn't published to a view's
-    /// memory, and that a windowed game shows in its window; without it, the capture shows the
-    /// view as it's shown, the look among it.
+    /// Whether to capture the view as the game shows it alone, through its own viewpoint, without
+    /// the look's outline, grid or colliders, as a windowed game shows it, in a frame not published
+    /// to a view's memory. Without it, the view as shown, the look among it.
     #[serde(default)]
     pub own: bool,
-    /// What to show in place of the view's light, as [`Shown`] says, in place of what the look
-    /// shows, in a frame that isn't published to a view's memory; without it, what the look shows,
-    /// unless `own`. Captures of several, one after another while the game is paused, show one
-    /// world.
+    /// What to show in place of the view's light ([`Shown`]), over the look's, in a frame not
+    /// published to a view's memory; without it, the look's, unless `own`. Several captures in a
+    /// row while the game is paused show one world.
     #[serde(default)]
     pub show: Option<Shown>,
 }
 
-/// What `capture` answers: where the PNG is, if it wrote one, its size, the view's in pixels, the
-/// bytes of the pixel it was asked for, if it was asked, and the ticks the
-/// simulation had run in the frame it shows, as that frame drew them: while paused, as the last
-/// tick left the world. A capture waits up to 10 s for a frame in which every texture and mesh
-/// added before it has come to the GPU, rather than showing their stand-ins; past that, it takes
-/// the next frame all the same, and `streaming` says so.
+/// What `capture` answers: the PNG's path, if written; its size, the view's in pixels; the bytes of
+/// the pixel asked for, if any; and the ticks the simulation had run in the frame it shows (while
+/// paused, as the last tick left the world). A capture waits up to 10 s for a frame in which every
+/// texture and mesh added before it is on the GPU, rather than their stand-ins; then it takes the
+/// next frame all the same, and `streaming` says so.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
-    /// The PNG's path; `None` exactly when [`Capture::at`] was given without a `path`, which writes
-    /// none.
+    /// `None` exactly when [`Capture::at`] was given without a `path`.
     #[serde(default)]
     pub path: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
-    /// The red, green, blue and alpha bytes of the pixel at [`Capture::at`], as the PNG has them
-    /// (its alpha, which the PNG leaves out, as the view drew it), each read as [`Shown`] says of
-    /// what the capture shows; `None` where it's outside the view, and without `at`.
+    /// The RGBA bytes of the pixel at [`Capture::at`], as the PNG has them (alpha, which the PNG
+    /// leaves out, as the view drew it), each read as [`Shown`] says; `None` outside the view, and
+    /// without `at`.
     #[serde(default)]
     pub pixel: Option<[u8; 4]>,
     pub ticks: u64,
     /// Whether textures or meshes were still decoding or streaming to the GPU in the frame it
-    /// shows, which shows a stand-in in a texture's place, or nothing in a mesh's.
+    /// shows, which shows a stand-in for a texture, or nothing for a mesh.
     #[serde(default)]
     pub streaming: bool,
 }
@@ -766,35 +720,33 @@ pub struct Captured {
 /// The most frames a `frames` captures.
 pub const MOST_FRAMES: u32 = 1_000;
 
-/// The most bytes of pixels a `frames` holds until its PNGs are written: its `count` frames of its
-/// `rect`, or of the view as it is when it's asked, four bytes a pixel.
+/// The most bytes of pixels a `frames` holds until its PNGs are written: `count` frames of its
+/// `rect`, or of the view as it is when asked, four bytes a pixel.
 pub const MOST_FRAMES_BYTES: u64 = 1 << 30;
 
-/// What `frames` takes: how many frames of the view to capture in a row, none skipped, each as a
-/// PNG in `dir`, an absolute path to a directory that exists, as `frame-0001.png`, `frame-0002.png`
-/// and on, over any there of those names. The first is the next frame made after one comes back
-/// with nothing on its way to the GPU, as a `capture` waits for, or after 10 s all the same, each
-/// frame saying whether it showed what was on its way.
-///
-/// The frames show the view as it's shown, the look among it, or what `show` says in place of its
-/// light, from frames that aren't published to a view's memory.
+/// What `frames` takes: how many frames of the view to capture in a row, none skipped, as PNGs in
+/// `dir`, an absolute path to a directory that exists, named `frame-0001.png`, `frame-0002.png`
+/// and on, over any of those names there. The first is the frame after one comes back with nothing
+/// on its way to the GPU, as `capture` waits for, or after 10 s all the same; each frame says
+/// whether it showed what was on its way. They show the view as shown, the look among it, or what
+/// `show` says in place of its light, from frames not published to a view's memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Frames {
     pub dir: PathBuf,
     /// 1 to [`MOST_FRAMES`].
     pub count: u32,
-    /// The viewpoint of each frame in turn, as the look's viewpoint is drawn, the last held for the
-    /// frames after it, as a scripted move and then a hold; the frames before the first, while it
-    /// waits for what's on its way, are drawn from the first. Empty, the view's own, the look's or
-    /// the game's. Each is checked, its rotation normalized, as `look` does.
+    /// Each frame's viewpoint in turn, drawn as the look's is, the last held for the frames after,
+    /// as a scripted move and then a hold; the frames while it waits for what's on its way are
+    /// drawn from the first. Empty, the view's own, the look's or the game's. Each is checked, its
+    /// rotation normalized, as `look` does.
     #[serde(default)]
     pub viewpoints: Vec<Viewpoint>,
     /// The part of each frame to keep, `[x, y, width, height]` in pixels from the view's top left,
     /// cropped to the view as each frame comes back; the whole view without.
     #[serde(default)]
     pub rect: Option<[u32; 4]>,
-    /// What to show in place of the view's light, as [`Capture::show`] says.
+    /// As [`Capture::show`].
     #[serde(default)]
     pub show: Option<Shown>,
 }
@@ -805,9 +757,8 @@ pub struct Framed {
     pub frames: Vec<FrameShot>,
 }
 
-/// A frame `frames` captured: its PNG and its size, the ticks the simulation had run in it, whether
-/// textures or meshes were still on their way to the GPU in it, as [`Captured::streaming`] says, and
-/// the viewpoint it was drawn from.
+/// A frame `frames` captured: its PNG and size, the ticks run in it, whether textures or meshes
+/// were still on their way to the GPU ([`Captured::streaming`]), and its viewpoint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameShot {
     pub path: PathBuf,
@@ -818,8 +769,8 @@ pub struct FrameShot {
     pub viewpoint: Viewpoint,
 }
 
-/// What `view` takes: the name of the memory to publish the view into, as [`view::Reader::name`]
-/// gives it, or `None` to stop publishing.
+/// What `view` takes: the memory to publish the view into, as [`view::Reader::name`] names it, or
+/// `None` to stop.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct View {
@@ -835,14 +786,14 @@ pub struct Input {
 }
 
 /// An event `input` hands the game's layers, as its window would: `{"key":{"key":"KeyW",
-/// "pressed":true}}`, a key naming it, whose value is what it takes; `"cursor_left"` for one that
-/// takes nothing.
+/// "pressed":true}}`, a key naming it, holding what it takes; `"cursor_left"` for one taking
+/// nothing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputEvent {
-    /// A key went down or up, by its position, as its W3C UI Events `code` names it, such as
-    /// `KeyW`, or winit, which names `MetaLeft` and `MetaRight` `SuperLeft` and `SuperRight`;
-    /// `repeat` marks the presses a held key repeats.
+    /// A key went down or up, by position, as its W3C UI Events `code` names it, such as `KeyW`, or
+    /// winit, which names `MetaLeft` and `MetaRight` `SuperLeft` and `SuperRight`. `repeat` marks a
+    /// held key's repeats.
     Key {
         key: String,
         pressed: bool,
@@ -857,8 +808,8 @@ pub enum InputEvent {
     CursorEntered,
     /// The cursor left the view.
     CursorLeft,
-    /// The mouse moved `[x, y]` in its own units, as its raw motion goes, with no cursor to move:
-    /// positive right and down, as the cursor would, for looking about with the cursor grabbed.
+    /// The mouse's raw motion, `[x, y]` in its own units, moving no cursor: positive right and
+    /// down, for looking about with the cursor grabbed.
     Motion([f64; 2]),
     /// A mouse button went down or up.
     Button { button: Button, pressed: bool },
@@ -868,8 +819,8 @@ pub enum InputEvent {
     Focused(bool),
 }
 
-/// A mouse button: `"left"`, `"right"`, `"middle"`, the side buttons `"back"` and `"forward"`,
-/// or another by its number, `{"other":9}`, which differs from one platform to another.
+/// A mouse button: `"left"`, `"right"`, `"middle"`, the side buttons `"back"` and `"forward"`, or
+/// another by its number, `{"other":9}`, which differs by platform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Button {
@@ -881,8 +832,8 @@ pub enum Button {
     Other(u16),
 }
 
-/// How far a scroll went: `{"lines":[x, y]}`, as a wheel's notches go, or `{"pixels":[x, y]}`, as
-/// a touchpad's do.
+/// How far a scroll went: `{"lines":[x, y]}`, a wheel's notches, or `{"pixels":[x, y]}`, a
+/// touchpad's.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scroll {
@@ -890,10 +841,9 @@ pub enum Scroll {
     Pixels([f64; 2]),
 }
 
-/// Where the game's view is seen from, and how: from `position`, in `f64`s, as the engine's
-/// positions are, facing as `rotation`, a unit quaternion, turns it, through `projection`. World
-/// space is right-handed with +Y up, and a viewpoint without rotation looks down -Z, with +X to its
-/// right and +Y up.
+/// Where the view is seen from and how: from `position`, in `f64`s as the engine's positions are,
+/// turned by `rotation`, a unit quaternion, through `projection`. World space is right-handed with
+/// +Y up; a viewpoint without rotation looks down -Z, +X to its right and +Y up.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Viewpoint {
@@ -916,28 +866,27 @@ impl Viewpoint {
     }
 }
 
-/// How a viewpoint projects what's in front of it onto the view, fitted to the view's aspect
-/// ratio: `{"Orthographic":{"height":2.0,"near":-1.0,"far":1.0}}` or
+/// How a viewpoint projects onto the view, fitted to its aspect ratio:
+/// `{"Orthographic":{"height":2.0,"near":-1.0,"far":1.0}}` or
 /// `{"Perspective":{"fov":1.0472,"near":0.01}}`, as `entity` gives a camera's `projection`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Projection {
-    /// Without perspective, as 2D games draw: the view spans `height` world units from bottom to
-    /// top, and shows what's from `near` to `far` in front of the viewpoint. It projects if
-    /// `height` is a positive normal number, and `near` and `far` are finite and differ.
+    /// Without perspective, as 2D games draw: the view spans `height` world units bottom to top,
+    /// showing what's `near` to `far` in front. It projects if `height` is a positive normal
+    /// number, and `near` and `far` are finite and differ.
     Orthographic { height: f32, near: f32, far: f32 },
-    /// With perspective, as 3D games draw: the view spans `fov` radians from bottom to top, and
-    /// shows what's at least `near` in front of the viewpoint, however far. It projects if `fov` is
-    /// more than 0 and less than π, and `near` is a positive normal number.
+    /// With perspective, as 3D games draw: the view spans `fov` radians bottom to top, showing
+    /// what's at least `near` in front, however far. It projects if `fov` is more than 0 and less
+    /// than π, and `near` is a positive normal number.
     Perspective { fov: f32, near: f32 },
 }
 
-/// An outline round what the view shows of several entities and of every entity under each, a
-/// model's nodes or a prefab's entities among them, by the entities' IDs, 16 hex digits each: one
-/// shape where they touch, in one color, in linear RGBA, alpha not multiplied in; and one width,
-/// how wide the solid band is that reaches out from their pixels, in the view's pixels, a width
-/// past 8 drawing 8. A glow, at up to half the band's alpha, fades over as far again past it. No
-/// IDs outline nothing, as an ID no entity has does.
+/// An outline round what the view shows of some entities and every entity under each, a model's
+/// nodes or a prefab's entities among them, by IDs of 16 hex digits: one shape where they touch,
+/// in one color, linear RGBA, alpha not multiplied in. `width` is the solid band reaching out from
+/// their pixels, in view pixels, past 8 drawing 8. A glow, at up to half the band's alpha, fades
+/// over as far again past it. No IDs, or IDs no entity has, outline nothing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Outline {
@@ -946,8 +895,7 @@ pub struct Outline {
     pub width: f32,
 }
 
-/// One of the world's axis planes, by the two axes it spans: `"xy"`, the plane 2D games are in;
-/// `"xz"`, the ground; or `"yz"`.
+/// A world axis plane, by its two axes: `"xy"`, 2D games' plane; `"xz"`, the ground; or `"yz"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Plane {
@@ -956,50 +904,48 @@ pub enum Plane {
     Yz,
 }
 
-/// What `look` takes: the parts of the game's look to set, each left out to keep it as it is,
-/// `null` to give it back to the game, or its value.
+/// What `look` takes: each part of the look left out to keep it, `null` to give it back to the
+/// game, or its value.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Look {
-    /// The viewpoint the view is seen from, in place of the game's own; its rotation is
-    /// normalized.
+    /// In place of the game's own; its rotation is normalized.
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub viewpoint: Option<Option<Viewpoint>>,
-    /// The outline round several entities and every entity under each, in place of any the game's
-    /// layers draw.
+    /// In place of any the game's layers draw.
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub outline: Option<Option<Outline>>,
-    /// The plane a grid is drawn in, fitted to the view, as the editor draws one.
+    /// The plane of a grid fitted to the view, as the editor draws one.
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub grid: Option<Option<Plane>>,
-    /// Whether the colliders' outlines show, in place of whether the game shows them.
+    /// Whether colliders' outlines show, in place of the game's choice.
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub colliders: Option<Option<bool>>,
-    /// What the view shows in place of its light, as [`Shown`] says.
+    /// What shows in place of the light ([`Shown`]).
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub show: Option<Option<Shown>>,
-    /// The passes the view leaves out, as [`Pass`] says, in any order, a pass named twice left out
-    /// once; an empty list gives the part back to the game, as `null` does.
+    /// The passes left out ([`Pass`]), in any order, a pass named twice left out once; an empty
+    /// list, like `null`, gives the part back to the game.
     #[serde(
         default,
         deserialize_with = "present",
@@ -1008,12 +954,11 @@ pub struct Look {
     pub skip: Option<Option<Vec<Pass>>>,
 }
 
-/// A pass of the game's view that the look can leave out, to narrow down which one makes what the
-/// view shows, by the name of the field of the world's `Environment` that turns it on, or
-/// `shadows`, the lights' shadows: the view draws as it would were the game's environment without
-/// it, every frame as valid, while the game itself, its environment and lights among it, is
-/// unchanged, and a capture of the game's own view shows it as it is. A pass the view doesn't run
-/// leaves nothing out.
+/// A pass of the view the look can leave out, to find which makes what the view shows, named as
+/// the world `Environment`'s field that turns it on, or `shadows`, the lights'. The view draws as
+/// it would were the environment without it, every frame as valid, while the game, its
+/// environment and lights among it, is unchanged, and a capture of the game's own view shows it as
+/// it is. A pass the view doesn't run leaves nothing out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pass {
@@ -1032,7 +977,7 @@ pub enum Pass {
     /// Motion blur.
     MotionBlur,
     /// Antialiasing, temporal or SMAA: each pixel shows what's at its center, drawn without an
-    /// offset. Given back, temporal antialiasing starts afresh from the frame that draws with it.
+    /// offset. Given back, temporal antialiasing starts afresh.
     Antialiasing,
     /// The grade: the view's light as it's drawn.
     Grade,
@@ -1059,64 +1004,62 @@ impl Pass {
     ];
 }
 
-/// What the game's view shows in place of its light, to see how it's made: a part of what lit
-/// shading takes or makes, at each point of what models draw, by its name, as `"roughness"`; or an
-/// image the frame makes, by its debug name, as RenderDoc and ARCHITECTURE.md's Rendering name
-/// them: `{"image":"view depth"}`. The view shows it as drawn, without the offset of antialiasing
-/// nor the exposure metered. A part of shading shows nothing after it: no antialiasing, fog, depth
-/// of field, motion blur, bloom, grade or lens; and no sky, black behind what's drawn; and what
-/// draws without lit shading, as sprites, text and particles, draws as it does. An image takes the
-/// whole view, alone, from a frame drawn as the game's is but for its antialiasing, so that the
-/// images of every pass but antialiasing's are there to show, as `images` lists them.
+/// What the view shows in place of its light, to see how it's made: a part of what lit shading
+/// takes or makes where models draw, by name, as `"roughness"`; or an image the frame makes, by the
+/// debug name RenderDoc and ARCHITECTURE.md's Rendering give it, as `{"image":"view depth"}`. It
+/// shows as drawn, without antialiasing's offset or the metered exposure. A part of shading shows
+/// nothing after it: no antialiasing, fog, depth of field, motion blur, bloom, grade or lens, and
+/// no sky, black behind what's drawn; what draws without lit shading, as sprites, text and
+/// particles, draws as it does. An image takes the whole view, alone, from a frame drawn as the
+/// game's but for antialiasing, so that every pass's images but antialiasing's are there to show,
+/// as `images` lists them.
 ///
-/// A pixel's bytes, as a capture's PNG has them, read as each says: a value of 0 to 1 as its byte
-/// over 255, in red, green and blue alike.
+/// A capture PNG's pixel reads as each says; a value of 0 to 1 is its byte over 255 in red, green
+/// and blue alike.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Shown {
-    /// The base color, its texture's, its vertices' and its factor's, as a texture's sRGB colors
-    /// store it; a specular-glossiness material's diffuse color.
+    /// The base color, its texture's, vertices' and factor's, stored as a texture's sRGB colors; a
+    /// specular-glossiness material's diffuse color.
     BaseColor,
-    /// Which way the point faces in the world, as shading turns it, its normal map's bumps among
-    /// it: each axis from -1 to 1 as its byte over 255, times 2, less 1, X in red, Y in green and
-    /// Z in blue.
+    /// Which way the point faces in the world as shading turns it, normal map included: each axis
+    /// from -1 to 1 as its byte over 255, times 2, less 1, X in red, Y in green and Z in blue.
     Normal,
-    /// Which way the point faces before its normal map, as [`Shown::Normal`] reads.
+    /// Which way it faces before its normal map, read as [`Shown::Normal`].
     SurfaceNormal,
-    /// How metallic it is; 0 for a specular-glossiness material.
+    /// 0 for a specular-glossiness material.
     Metallic,
-    /// How rough it is, as shading takes it: from 0.045, the least it takes, to 1.
+    /// As shading takes it: from 0.045, the least it takes, to 1.
     Roughness,
-    /// The share of the light from all around that reaches it: its material's occlusion map's and
-    /// the view's ambient occlusion's, as shading takes it.
+    /// The share of the light from all around that reaches it, as shading takes it: its material's
+    /// occlusion map's and the view's ambient occlusion's.
     Occlusion,
-    /// The light it gives off, as [`Shown::BaseColor`] reads, past 1 shown as 1.
+    /// The light it gives off, read as [`Shown::BaseColor`], past 1 shown as 1.
     Emission,
-    /// What it reflects head-on, as the frame's lights take it: a metallic-roughness material's 0.04
-    /// mixed with its base color by how metallic it is; a specular-glossiness material's specular
-    /// color. Read as [`Shown::BaseColor`] reads.
+    /// What it reflects head-on, as the frame's lights take it: a metallic-roughness material's
+    /// 0.04 mixed with its base color by how metallic it is; a specular-glossiness material's
+    /// specular color. Read as [`Shown::BaseColor`].
     SpecularColor,
     /// The light the frame's lights shade it with, the sun's among them, shadows and all, exposed
     /// and tonemapped as the view's light is; none on an unlit material.
     DirectLight,
-    /// The light from all around, the sky's diffuse and specular light, darkened by occlusion, as
-    /// [`Shown::DirectLight`] reads.
+    /// The light from all around, the sky's diffuse and specular, darkened by occlusion. It and the
+    /// next three read as [`Shown::DirectLight`].
     SkyLight,
-    /// The view's reflection, which takes the place of as much of the sky's specular light, as
-    /// [`Shown::DirectLight`] reads.
+    /// The view's reflection, which takes the place of as much of the sky's specular light.
     Reflection,
-    /// The light it diffuses, the frame's lights' and the sky's, as [`Shown::DirectLight`] reads:
-    /// beside [`Shown::SpecularLight`], all the light the view shows of it but its emission.
+    /// The light it diffuses, the frame's lights' and the sky's: with [`Shown::SpecularLight`], all
+    /// the light the view shows of it but its emission.
     DiffuseLight,
-    /// The light it reflects, the frame's lights' highlights, the sky's specular light and the
-    /// view's reflection, as [`Shown::DirectLight`] reads.
+    /// The light it reflects: the frame's lights' highlights, the sky's specular light and the
+    /// view's reflection.
     SpecularLight,
-    /// An image the frame makes, by its debug name, as its kind reads: colors as they are, of high
-    /// dynamic range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at
-    /// its near plane, and a 24th darker each time the distance doubles, black where nothing drew;
-    /// IDs and a visibility buffer as a color for each value, black for 0; motion as normals are,
-    /// in units of the world, -1 to 1; a float a pixel as its value. An image the frame doesn't
-    /// make shows black, warning `renderer.no_image`.
+    /// An image the frame makes, by debug name, read by its kind: colors as they are, high dynamic
+    /// range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at the near
+    /// plane and a 24th darker each time the distance doubles, black where nothing drew; IDs and a
+    /// visibility buffer a color per value, black for 0; motion as normals are, in world units, -1
+    /// to 1; one float a pixel as its value. An image the frame doesn't make shows black, warning
+    /// `renderer.no_image`.
     Image(String),
 }
 
@@ -1133,27 +1076,26 @@ pub struct Looked {
     /// `None` from an engine older than what the view shows.
     #[serde(default)]
     pub show: Option<Shown>,
-    /// The passes the view leaves out, in the order of [`Pass::ALL`], each once, never empty;
-    /// `None` from an engine older than passes left out.
+    /// The passes left out, in [`Pass::ALL`]'s order, each once, never empty; `None` from an engine
+    /// older than passes left out.
     #[serde(default)]
     pub skip: Option<Vec<Pass>>,
     pub by: By,
-    /// How many times the look has changed in the run, which a frame shared gives as the revision
-    /// it drew with ([`view::Frame::look`]): a `look` that changes no part's value or setter
+    /// How many times the look has changed in the run, which a shared frame gives as the revision
+    /// it drew with ([`view::Frame::look`]). A `look` that changes no part's value or setter
     /// doesn't count.
     pub revision: u64,
     /// The run's number, as `logs` gives it, so that a client tells a restarted game, whose look
-    /// starts afresh, from a look unchanged.
+    /// starts afresh, from an unchanged look.
     pub run: u64,
-    /// The viewpoint the last frame handed to the renderer drew from, the look's or the game's own;
-    /// `None` before the first, and while the viewpoint it drew from has a number that isn't
-    /// finite, which JSON can't carry. A `look` that sets a viewpoint answers before a frame draws
-    /// with it.
+    /// The viewpoint the last frame handed to the renderer drew from, the look's or the game's;
+    /// `None` before the first, and while it has a number that isn't finite, which JSON can't
+    /// carry. A `look` setting a viewpoint answers before a frame draws with it.
     pub seen: Option<Viewpoint>,
 }
 
-/// Who set each part of the look: the client, by the name it said hello with, or `None` where the
-/// part is the game's own.
+/// Who set each part of the look, by the name it said hello with; `None` where it's the game's
+/// own.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct By {
     pub viewpoint: Option<String>,
@@ -1166,11 +1108,10 @@ pub struct By {
     pub skip: Option<String>,
 }
 
-/// What `pick` takes: the pixel of the view to pick at, `[x, y]` from its top left, as `input`'s
-/// cursor is, and as a capture's PNG, the view, has it; and `within`, an entity's ID, as an
-/// editor's pick: where it's the root of the model drawn at the pixel, or one of that model's
-/// nodes, the answer is the node drawn there itself rather than the root. A `within` of no living
-/// entity is as none.
+/// What `pick` takes: the view's pixel, `[x, y]` from its top left, as `input`'s cursor and a
+/// capture's PNG have it; and `within`, an entity's ID, as an editor's pick: where it's the root of
+/// the model drawn at the pixel, or one of its nodes, the answer is the node drawn there rather
+/// than the root. A `within` of no living entity is as none.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pick {
@@ -1179,19 +1120,19 @@ pub struct Pick {
     pub within: Option<String>,
 }
 
-/// What `pick` answers: the entity the view shows at the pixel, by its ID, and its name, as it's
-/// answered and as [`Listed`] has it, or for a model's node the model's root, which tools change in
-/// its place, unless [`Pick::within`] names that model's root or one of its nodes; both `None`
-/// outside the view or where no entity draws, and the name for an entity gone by the answer, whose
-/// ID is kept, or for a connection not granted `read` of `Name`, which `view` alone isn't.
+/// What `pick` answers: the entity the view shows at the pixel, by ID, and its name as [`Listed`]
+/// has it when answered. For a model's node it's the model's root, which tools change in its place,
+/// unless [`Pick::within`] names that root or one of its nodes. Both are `None` outside the view or
+/// where no entity draws. The name alone is `None` for an entity gone by the answer, whose ID is
+/// kept, and for a connection without `read` of `Name`, which `view` alone isn't.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picked {
     pub id: Option<String>,
     pub name: Option<String>,
 }
 
-/// What `images` answers: the images the frame that read it made that [`Shown::Image`] names, in
-/// the order the frame made them, each name once.
+/// What `images` answers: the images [`Shown::Image`] names that the reading frame made, in its
+/// order, each name once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageList {
     pub images: Vec<FrameImage>,
@@ -1203,7 +1144,7 @@ pub struct FrameImage {
     /// Its debug name, which [`Shown::Image`] takes, as RenderDoc and ARCHITECTURE.md's Rendering
     /// name it: `"view depth"`, `"bloom 1"`.
     pub name: String,
-    /// What it holds, which says how a show reads it, as [`Shown::Image`] says.
+    /// What it holds, which says how a show reads it.
     pub kind: ImageKind,
     /// Its `[width, height]` in pixels, which a show stretches over the view.
     pub size: [u32; 2],
@@ -1213,24 +1154,23 @@ pub struct FrameImage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageKind {
-    /// Colors.
     Color,
     /// Colors of high dynamic range, which a show tonemaps as the view's light is.
     Hdr,
     /// IDs, a color for each.
     Ids,
-    /// Motion, in units of the world, as normals are shown.
+    /// In world units, shown as normals are.
     Motion,
     /// A visibility buffer, a color for each value.
     Visibility,
-    /// Depth, as `1 + log2(depth) / 24`.
+    /// Shown as `1 + log2(depth) / 24`.
     Depth,
-    /// A float a pixel, as its value.
+    /// A float a pixel, shown as its value.
     Scalar,
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
-/// `skip` of them skipped and at most `take`, 100 by default.
+/// skipping `skip` and taking at most `take`, 100 by default.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entities {
@@ -1246,8 +1186,8 @@ fn page() -> usize {
     100
 }
 
-/// What `entities` answers: how many there are in all, the page asked for, and the revision of the
-/// world's types, as `types` answers it.
+/// What `entities` answers: how many in all, the page, and the types' revision, as `types` answers
+/// it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityList {
     pub total: usize,
@@ -1257,9 +1197,9 @@ pub struct EntityList {
     pub types: u64,
 }
 
-/// An entity as `entities` lists it: its ID, its name, its `Name`'s, or else for a model's node its
-/// node's name in the model's file, its parent's ID, its children's, in their order, and its
-/// components' types, in the order they registered.
+/// An entity as `entities` lists it: its ID; its name, its `Name`'s, or else for a model's node the
+/// node's name in the model's file; its parent's ID; its children's, in order; and its components'
+/// types, in registration order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listed {
     pub id: String,
@@ -1278,8 +1218,7 @@ pub struct Entity {
     pub id: String,
 }
 
-/// A sphere in the world's space, as `entity` answers `bounds`: the center, in world units, and the
-/// radius.
+/// A sphere in world space, as `entity` answers `bounds`, in world units.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sphere {
@@ -1287,15 +1226,18 @@ pub struct Sphere {
     pub radius: f32,
 }
 
-/// What `entity` answers of an instance's entity, its root or one its prefab gives, under
-/// `instance`: the ID of the root of the outermost instance whose prefab gives it, or its own for
-/// the root of an instance none gives, and that instance's prefab, by its path from the asset
-/// root; the entity's own prefab, likewise, if it's an instance's root, nested or not, which alone
-/// an outermost instance's root unlinks; each component the prefab gives it that differs from what
-/// the prefab gives, by its type's name, with the fields that differ, a struct of named fields' by
-/// name, as a scene saves them, and else `""`, the whole component, each a path `revert` takes; and
-/// the components it has that the prefab doesn't give it, which a scene saves whole, but the
-/// instance's own: a root's `Transform` and `PrefabRoot`, and a `Parent`.
+/// What `entity` answers under `instance` for an instance's entity, its root or one its prefab
+/// gives:
+///
+/// - `root` and `prefab`: the root of the outermost instance whose prefab gives it, or its own if
+///   none does, and that instance's prefab by its path from the asset root;
+/// - `link`: likewise, its own prefab, if it's an instance's root, nested or not, which only an
+///   outermost instance's root unlinks;
+/// - `overrides`: each component the prefab gives it that differs, by type name, with the fields
+///   that differ, a struct of named fields' by name, as a scene saves them, else `""` for the whole
+///   component, each a path `revert` takes;
+/// - `added`: the components the prefab doesn't give it, which a scene saves whole, but the
+///   instance's own: a root's `Transform` and `PrefabRoot`, and a `Parent`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instanced {
     pub root: String,
@@ -1308,9 +1250,8 @@ pub struct Instanced {
     pub added: Vec<String>,
 }
 
-/// What `save_prefab` takes: the ID of the entity to save with its descendants, and the path of
-/// the prefab's file, absolute or from the asset root, or `None` for one in `prefabs/` named after
-/// the entity.
+/// What `save_prefab` takes: the entity to save with its descendants, and the prefab's path,
+/// absolute or from the asset root, or `None` for one in `prefabs/` named after the entity.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavePrefab {
@@ -1319,9 +1260,9 @@ pub struct SavePrefab {
     pub path: Option<PathBuf>,
 }
 
-/// What `save_prefab` answers: the prefab's file, by its path from the asset root, with `/` between
-/// its parts, as [`Status::scene`] names files; its name, its asset ID or else its path, as values
-/// name it; and the ticks the simulation had run as the link applied.
+/// What `save_prefab` answers: the prefab's path from the asset root, as [`Status::scene`] names
+/// files; its name, its asset ID or else its path, as values name it; and the ticks run as the link
+/// applied.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedPrefab {
     pub path: String,
@@ -1329,8 +1270,8 @@ pub struct SavedPrefab {
     pub ticks: u64,
 }
 
-/// What `get` takes: an entity's ID, one of its components' types, and the path of a field of it,
-/// such as `translation.x` or `rect[1]`, empty for the whole component.
+/// What `get` takes: an entity's ID, a component type, and a field's path, such as `translation.x`
+/// or `rect[1]`, empty for the whole component.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
@@ -1340,10 +1281,9 @@ pub struct Field {
     pub path: String,
 }
 
-/// What `types` answers: the world's component types, in the order they registered, and the named
-/// types, structs and enums, that they are and hold, in the order they were described, each under
-/// a name no other has; and their revision, a number that names them as they are, which each
-/// change to them changes.
+/// What `types` answers: the world's component types, in registration order; the named types,
+/// structs and enums, that they are and hold, in description order, each name unique; and their
+/// revision, which each change to them changes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Types {
     pub components: Vec<ComponentInfo>,
@@ -1353,9 +1293,8 @@ pub struct Types {
     pub revision: u64,
 }
 
-/// A component type, as `types` gives it: its name, which its description has too, and the value an
-/// `add` without one gives it, or why there's none, as when it holds an entity, which has no
-/// default.
+/// A component type: its name, as its description has it, and the value an `add` without one gives
+/// it, or why there's none, as when it holds an entity, which has no default.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComponentInfo {
     pub name: String,
@@ -1377,7 +1316,7 @@ pub struct TypeInfo {
 }
 
 /// What a named type holds: a struct's fields, a tuple struct's named `0`, `1` and so on; an enum's
-/// variants; or, for `"opaque"`, nothing values give or take but `(opaque)`.
+/// variants; or, `"opaque"`, nothing values give or take but `(opaque)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
@@ -1386,10 +1325,10 @@ pub enum Shape {
     Opaque,
 }
 
-/// A field of a struct or of a variant: its name, which paths name it by; its type; the least and
-/// the most its numbers, its vectors' components and its elements may be; how the Inspector shows
-/// it; its doc comment; and its own default, if its description gives it one, which may be `null`,
-/// as an option's: without one, its type's is, as gg-engine's `Types::field_default` makes it.
+/// A struct's or variant's field: its name, which paths use; its type; the least and most its
+/// numbers, vectors' components and elements may be; how the Inspector shows it; its doc comment;
+/// and its own default, if its description gives one, which may be `null`, as an option's. Without
+/// one, its type's applies, as gg-engine's `Types::field_default` makes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FieldInfo {
     pub name: String,
@@ -1411,7 +1350,7 @@ pub struct FieldInfo {
     pub default: Option<Value>,
 }
 
-/// An enum's variant: its name and its fields, a tuple's if `tuple`.
+/// An enum's variant, its fields a tuple's if `tuple`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VariantInfo {
     pub name: String,
@@ -1474,16 +1413,16 @@ impl Show {
     }
 }
 
-/// What `hash` answers: the world's hash, its content's and its layout's, each 16 hex digits, as
-/// recordings write them.
+/// What `hash` answers: the world's content and layout hashes, 16 hex digits each, as recordings
+/// write them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hash {
     pub content: String,
     pub layout: String,
 }
 
-/// What `assets` takes: the assets of kind `kind`, or all, in the order of their paths, `skip` of
-/// them skipped and at most `take`, 100 by default.
+/// What `assets` takes: the assets of `kind`, or all, in path order, skipping `skip` and taking at
+/// most `take`, 100 by default.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assets {
@@ -1495,8 +1434,8 @@ pub struct Assets {
     pub take: usize,
 }
 
-/// What `assets` answers: how many there are in all, of the kind asked for; the page asked for; and
-/// every ID file of that kind whose asset isn't there.
+/// What `assets` answers: how many of the kind in all, the page, and every ID file of the kind
+/// whose asset isn't there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetList {
     pub total: usize,
@@ -1504,11 +1443,10 @@ pub struct AssetList {
     pub orphans: Vec<ListedOrphan>,
 }
 
-/// An asset as `assets` lists it: its ID, 16 hex digits, or `None` while it has none; its path from
-/// the asset root, with `/` between its parts, as [`Status::scene`] names files, spelled as on disk;
-/// its kind; whether a layer has added it, by whatever path; and what's wrong with its ID file, if
-/// anything, as the `assets` method's docs list: why it has no ID, or why its ID isn't the one its
-/// file holds.
+/// An asset as `assets` lists it: its ID, 16 hex digits, or `None` while it has none; its path
+/// from the asset root, as [`Status::scene`] names files, spelled as on disk; its kind; whether a
+/// layer has added it, by any path; and what's wrong with its ID file, as `assets` lists: why it
+/// has no ID, or why its ID isn't the one its file holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListedAsset {
     pub id: Option<String>,
@@ -1519,8 +1457,8 @@ pub struct ListedAsset {
     pub problem: Option<Failure>,
 }
 
-/// An ID file whose asset isn't there, as after a rename that left it behind: its own path from the
-/// asset root, the kind of the asset it names, and the ID it holds, or `None` if it doesn't read.
+/// An ID file whose asset isn't there, as after a rename that left it behind: its path from the
+/// asset root, its asset's kind, and the ID it holds, `None` if it doesn't read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListedOrphan {
     pub path: String,
@@ -1528,19 +1466,18 @@ pub struct ListedOrphan {
     pub id: Option<String>,
 }
 
-/// What `ui` answers: the view's size in its pixels, as the last frame handed it off, or 1,920 by
-/// 1,080 before one has, which each node's `pixels` are in; and each UI the game's layers added, in
-/// the order they added them.
+/// What `ui` answers: the view's size in pixels, which nodes' `pixels` are in, as the last frame
+/// handed it off, or 1,920 by 1,080 before one has; and each UI the layers added, in that order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiList {
     pub view: [u32; 2],
     pub uis: Vec<ListedUi>,
 }
 
-/// A UI as `ui` lists it: the name its layer gave it; its file's name, its asset ID or else its
-/// path, as values name a texture; its file's path from the asset root, as [`Status::scene`] names
-/// files; whether the last frame handed off drew it; whether it takes input; the button with the
-/// focus, by its name; and its nodes, in the order of its file, each after its parent.
+/// A UI as `ui` lists it: the name its layer gave it; its file's name, as values name a texture;
+/// its file's path from the asset root, as [`Status::scene`] names files; whether the last frame
+/// handed off drew it; whether it takes input; the focused button's name; and its nodes, in file
+/// order, each after its parent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListedUi {
     pub name: String,
@@ -1552,14 +1489,18 @@ pub struct ListedUi {
     pub nodes: Vec<UiNode>,
 }
 
-/// A node of a UI as `ui` lists it: its name, if its file gives it one; its kind; its parent's
-/// place among the UI's nodes, `None` for one at its top; its rectangle, `[x, y, width, height]`
-/// from the view's top left, +Y down, in the canvas's units, 1,080 to the view's height, and in the
-/// view's pixels, as a capture's PNG has them, a list's children's where it's scrolled them; whether
-/// it shows, it and each node above it visible, a hidden one's rectangle of no size; what a text, a
-/// button or a toggle says, what's typed in a text field, or a drop-down's choice; what a slider,
-/// a toggle or a drop-down holds; and a button's or a widget's whether it's disabled, has the
-/// focus, or is held pressed, a drop-down's while its options are open.
+/// A UI's node as `ui` lists it:
+///
+/// - `name`, if its file gives one; its `kind`; its `parent`'s place among the nodes, `None` at
+///   the top;
+/// - its rectangle, `[x, y, width, height]` from the view's top left, +Y down: `rect` in canvas
+///   units, 1,080 to the view's height, and `pixels` in view pixels as a capture's PNG has them, a
+///   scrolled list's children where it scrolled them;
+/// - `visible`, it and each node above it, a hidden one's rectangle of no size;
+/// - `text`, what a text, a button or a toggle says, what's typed in a text field, or a drop-down's
+///   choice; `value`, what a slider, a toggle or a drop-down holds;
+/// - for a button or a widget, whether it's `disabled`, `focused`, or held `pressed`, a drop-down
+///   while its options are open.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiNode {
     pub name: Option<String>,
@@ -1584,10 +1525,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// What a node of a UI is, as its file names it: a panel, a background behind the children it
-/// stacks; a text; an image; a button; a widget, a slider, a toggle, a drop-down or a text field;
-/// or a container that lays its children out in a row, a column, stacked over each other, or in a
-/// list, a column that clips and scrolls them.
+/// A UI node's kind, as its file names it: a panel, a background behind the children it stacks; a
+/// text; an image; a button; a widget (slider, toggle, drop-down or text field); or a container
+/// laying its children out in a row, a column, a stack, or a list, a column that clips and scrolls
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiKind {
@@ -1605,8 +1546,8 @@ pub enum UiKind {
     List,
 }
 
-/// What a widget of a UI holds, as `ui` lists it: a slider's number, a toggle's whether it's on,
-/// or a drop-down's choice, by its place among its options, from 0; as `{"number": 0.5}`.
+/// What a UI widget holds: a slider's number, whether a toggle is on, or a drop-down's choice by
+/// its place among the options, from 0; as `{"number": 0.5}`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiValue {
@@ -1615,22 +1556,22 @@ pub enum UiValue {
     Choice(usize),
 }
 
-/// The methods that change nothing of the game but what they're asked to read, which a client may
-/// send again whether or not the first was taken.
+/// The methods that change nothing, which a client may send again whether or not the first was
+/// taken.
 const READS: [&str; 14] = [
     "hello", "ping", "status", "entities", "entity", "get", "types", "hash", "assets", "ui",
     "edits", "logs", "pick", "cells",
 ];
 
-/// Whether `method` may change the game, its world, its run or its files, as every method but those
-/// that only read does, and one there's none of may: a request of it that went unanswered may have
-/// applied, so it's sent again only once a read says it hasn't.
+/// Whether `method` may change the game, its world, run or files, as all but the reads may, an
+/// unknown one too. An unanswered request of it may have applied, so it's sent again only once a
+/// read says it hasn't.
 pub fn changes(method: &str) -> bool {
     !READS.contains(&method)
 }
 
-/// What an error of `method` that went unanswered adds, as [`Client::call`] says: that it may have
-/// applied, if it [`changes`] the game; else nothing.
+/// What an unanswered `method`'s error adds ([`Client::call`]): that it may have applied, if it
+/// [`changes`] the game.
 pub fn unanswered(method: &str) -> &'static str {
     if changes(method) {
         "; the game may have taken it, and it may yet apply, or have applied: read what it changes \
@@ -1640,12 +1581,12 @@ pub fn unanswered(method: &str) -> &'static str {
     }
 }
 
-/// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;
-/// without one, a file in the `snapshots` directory beside the game's executable, named for the
-/// run, as `sandbox-4242-7.snapshot`, the newest 8 of which it keeps, removing older ones as each
-/// is written: those a client named stay, as `gg run`'s, in a directory of its own. With `quit`, the run ends cleanly once the snapshot is
-/// written and answered, as `quit` ends it, nothing applying between the two, so that a run started
-/// again from the snapshot loses no edit answered before.
+/// What `snapshot` takes: `path`, an absolute path in a directory that exists. Without it, the file
+/// goes in `snapshots` beside the executable, named for the run, as `sandbox-4242-7.snapshot`; the
+/// newest 8 there are kept, older ones removed as each is written, but those a client named stay,
+/// as `gg run`'s, in a directory of its own. With `quit`, the run ends cleanly, as `quit` ends it,
+/// once the snapshot is written and answered, nothing applying between, so that a run started again
+/// from it loses no edit answered before.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -1655,8 +1596,8 @@ pub struct Snapshot {
     pub quit: bool,
 }
 
-/// What `snapshot` answers: where the snapshot is, the ticks the simulation had run as it was taken,
-/// which a run restored from it goes on from, its entities, and its size in bytes.
+/// What `snapshot` answers: its path, the ticks run as it was taken, which a restored run goes on
+/// from, its entities, and its size in bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshotted {
     pub path: PathBuf,
@@ -1665,30 +1606,29 @@ pub struct Snapshotted {
     pub bytes: u64,
 }
 
-/// What `patch` takes: the jump table that `dx tools hotpatch` printed, as it printed it, which
-/// names the patch's library and maps each function the patch replaces to its new address.
+/// What `patch` takes: the jump table `dx tools hotpatch` printed, as printed, which names the
+/// patch's library and maps each function it replaces to its new address.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
     pub table: Value,
 }
 
-/// What `patch` answers: the ticks the simulation had run as the patch applied, the first that runs
-/// the patched code being the next.
+/// What `patch` answers: the ticks run as the patch applied; the next is the first to run the
+/// patched code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Patched {
     pub ticks: u64,
 }
 
 /// An authoring change to the world, as `apply` takes it: `{"set":{"id":...,"component":...,
-/// "path":...,"value":...}}`, a key naming it, whose value is an object of what it takes. It names
-/// entities by their IDs, and carries values as gg-api's docs say.
+/// "path":...,"value":...}}`, a key naming it, holding an object of what it takes. It names
+/// entities by ID, and carries values as the crate's docs say.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    /// Spawns an entity with `components`, each by its type's name, its value its whole value: the
-    /// last of `parent`'s children, or a root. Its ID is `id`, or one drawn without one, which
-    /// [`Applied`] gives.
+    /// Spawns an entity with `components`, by type name, each its whole value, as the last of
+    /// `parent`'s children, or a root. Its ID is `id`, or one drawn, which [`Applied`] gives.
     Create {
         #[serde(default)]
         id: Option<String>,
@@ -1697,11 +1637,10 @@ pub enum Operation {
         #[serde(default)]
         components: serde_json::Map<String, Value>,
     },
-    /// Spawns a copy of entity `id` and of its descendants, the copy the last of its parent's
-    /// children, each with its components as they are, each reference to one of them to its copy,
-    /// and each exclusive field false, as a camera's `primary`: their IDs `copies`, `id`'s copy's
-    /// first, then its descendants', each parent's before its children's, or ones drawn without
-    /// them, which [`Applied`] gives.
+    /// Spawns a copy of entity `id` and its descendants, the copy the last of its parent's
+    /// children: components as they are, each reference to one of them to its copy, and each
+    /// exclusive field false, as a camera's `primary`. Their IDs are `copies`, `id`'s copy's first,
+    /// each parent's before its children's, or ones drawn, which [`Applied`] gives.
     Duplicate {
         id: String,
         #[serde(default)]
@@ -1709,8 +1648,7 @@ pub enum Operation {
     },
     /// Despawns entity `id` and its descendants.
     Delete { id: String },
-    /// Gives entity `id` a `component`, which it hasn't: `value`, or the type's default without
-    /// one.
+    /// Gives entity `id` a `component` it hasn't: `value`, or the type's default.
     Add {
         id: String,
         component: String,
@@ -1719,9 +1657,9 @@ pub enum Operation {
     },
     /// Takes entity `id`'s `component` away.
     Remove { id: String, component: String },
-    /// Sets the field at `path` of entity `id`'s `component`, such as `translation.x`, to `value`;
-    /// the whole component for an empty path. A component's exclusive field set true is made false
-    /// on every other entity with the component.
+    /// Sets the field at `path`, such as `translation.x`, of entity `id`'s `component` to `value`;
+    /// the whole component for an empty path. An exclusive field set true is made false on every
+    /// other entity with the component.
     Set {
         id: String,
         component: String,
@@ -1729,25 +1667,24 @@ pub enum Operation {
         path: String,
         value: Value,
     },
-    /// Makes entity `id` the last of `parent`'s children, or a root for `null`: keeping its own
-    /// `Transform`, so that it moves as its new parent is placed; or, `in_place`, keeping where it
-    /// is in the world, as an editor's reparent does, its transform set, in the same edit, to its
-    /// place in its new parent's space as the request finds the two, any shear they give it
-    /// between them lost.
+    /// Makes entity `id` the last of `parent`'s children, or a root for `null`, keeping its
+    /// `Transform`, so that it moves with its new parent. With `in_place`, it keeps its place in
+    /// the world, as an editor's reparent does: the same edit sets its transform to its place in
+    /// the new parent's space as the request finds the two, losing any shear between them.
     Reparent {
         id: String,
-        /// Given, `null` for a root, so that one left out isn't taken for a root.
+        /// Required, `null` for a root, so that one left out isn't taken for a root.
         #[serde(deserialize_with = "Option::deserialize")]
         parent: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         in_place: bool,
     },
-    /// Unlinks the instance of a prefab whose root is entity `id`: takes its `PrefabRoot` away,
-    /// its entities staying as they are, under their IDs, its own from then on.
+    /// Unlinks the prefab instance rooted at entity `id`, taking its `PrefabRoot` away; its
+    /// entities stay as they are, under their IDs, its own from then on.
     Unlink { id: String },
     /// Sets the field at `path` of entity `id`'s `component`, or the whole component for an empty
-    /// path, to what the prefab of the instance that gives it has there: an instance's root's, but
-    /// its `Transform`, which is its own; or an entity's that an instance's prefab gives.
+    /// path, to what the instance's prefab has there: for an instance's root, all but its own
+    /// `Transform`; or for an entity an instance's prefab gives.
     Revert {
         id: String,
         component: String,
@@ -1756,17 +1693,18 @@ pub enum Operation {
     },
 }
 
-/// What `apply` takes: an edit's operations, applied in order; and, for a set that's part of a
-/// gesture, such as a drag or a number typed, the gesture, a number the client gives each of its
-/// own, the same for each of its sets: a set of the field that the client's last edit set, with the
-/// same gesture, joins that edit, taking its value and keeping what undoes it, so that the gesture
-/// undoes whole, whether it sets that field of one entity or of several (a set of another entity
-/// is added to the edit), and any other edit of the client's that reaches the world ends it, refused there
-/// or not; one refused as it's read, as for an ID that isn't one, a type there's none of or a value
-/// of another kind, doesn't. Since a client's edits are those of every connection with its name, a
-/// gesture's number is its own across them, as one drawn at random to start from is. With a
-/// gesture, an apply is of sets, each of one component's one field, no two of one entity, or
-/// refused with `api.bad_params`.
+/// What `apply` takes: an edit's operations, applied in order; and, for sets in a gesture, such as
+/// a drag or a number typed, `gesture`, a number the client gives each of its gestures, the same
+/// for all its sets.
+///
+/// A set of the field the client's last edit set, in the same gesture, joins that edit, taking its
+/// value and keeping what undoes it, so that the gesture undoes whole, of one entity or several (a
+/// set of another entity is added to the edit). Any other edit of the client's that reaches the
+/// world ends the gesture, refused there or not; one refused as it's read, as for a bad ID, an
+/// unknown type or a value of another kind, doesn't. A client's edits are those of every
+/// connection of its name, so a gesture's number must be unique across them, as one counted from a
+/// random start is. With a gesture, an apply is only sets, each of one component's field, no two of
+/// one entity, or it's refused with `api.bad_params`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Apply {
@@ -1775,16 +1713,15 @@ pub struct Apply {
     pub gesture: Option<u64>,
 }
 
-/// What `apply` answers: the ticks the simulation had run as the edit applied, the next being the
-/// first after it, and the IDs of the entities its creates and duplicates spawned, in order.
+/// What `apply` answers: the ticks run as the edit applied, the next the first after it, and the
+/// IDs its creates and duplicates spawned, in order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Applied {
     pub ticks: u64,
     pub entities: Vec<String>,
 }
 
-/// What `undo` and `redo` take: whose last edit to undo, or redo, by its author's name: the
-/// client's own without one.
+/// What `undo` and `redo` take: whose last edit, by author name; the client's own without one.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Undo {
@@ -1792,7 +1729,7 @@ pub struct Undo {
     pub author: Option<String>,
 }
 
-/// An edit, as `undo`, `redo` and `edits` give it: its author and its operations in words, such as
+/// An edit, as `undo`, `redo` and `edits` give it: its author and operations in words, such as
 /// ``set `Spin.speed` of 2b7e151628aed2a6``.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edit {
@@ -1800,7 +1737,7 @@ pub struct Edit {
     pub operations: Vec<String>,
 }
 
-/// What `edits` takes: whose edits to list, by its author's name; every author's without one.
+/// What `edits` takes: whose edits, by author name; every author's without one.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edits {
@@ -1808,18 +1745,17 @@ pub struct Edits {
     pub author: Option<String>,
 }
 
-/// What `edits` answers: each author's log, in the order the authors first edited; each of the
-/// world the game runs, since a world took its place, as one restored from a snapshot does, which
-/// starts the logs afresh. `play` starts the logs afresh for the copy, and `stop` brings back those
-/// of the world as edited.
+/// What `edits` answers: each author's log, in the order the authors first edited, of the world the
+/// game runs since a world last took its place, as a restore does. `play` starts the logs afresh
+/// for the copy, and `stop` brings back the world as edited's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct History {
     pub authors: Vec<Authored>,
 }
 
-/// An author's log, as `edits` gives it: the operations in words of each edit `undo` steps back
-/// through, the first applied first, so that `undo` undoes the last; and of each `redo` steps
-/// through, the last undone last.
+/// An author's log: the operations in words of each edit `undo` steps back through, the first
+/// applied first, so `undo` undoes the last; and of each `redo` steps through, the last undone
+/// last.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Authored {
     pub author: String,
@@ -1827,14 +1763,13 @@ pub struct Authored {
     pub undone: Vec<Vec<String>>,
 }
 
-/// The levels `logs` reads from, by the names its `level` takes, the most severe first.
+/// The names `logs`' `level` takes, the most severe first.
 pub const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
-/// What `logs` takes: the number of the event to read from, `from`, as an earlier answer's `next`
-/// gives it, with that answer's `run`; without `from`, the `last` events to read, or else all, from
-/// the oldest kept; the least severe `level` to read, one of [`LEVELS`], every event the game's
-/// filter let through without one; and how long to wait for an event to come, if none is there to
-/// read, `wait_ms`, in milliseconds, 0 by default and at most 10,000.
+/// What `logs` takes: `from`, the event to read from, an earlier answer's `next`, with its `run`;
+/// without `from`, the `last` events, or else all, from the oldest kept; `level`, the least severe
+/// to read, one of [`LEVELS`], or all the game's filter let through; and `wait_ms`, how long to
+/// wait for an event if none is there, in milliseconds, 0 by default and at most 10,000.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Logs {
@@ -1850,11 +1785,11 @@ pub struct Logs {
     pub wait_ms: u64,
 }
 
-/// What `logs` answers: the run read, `run`, drawn at random as the game's API started, for the next
-/// `logs` to give with `next`, the number of the event to read from then; `end`, the number the
-/// next event logged gets; how many events from where it read, before `next`, it `missed`, of any
-/// level, dropped as newer ones came or too long to keep, as a line of more than 1 MiB is; and the
-/// events read, in order, each the JSON log's line, as written, but for its line break.
+/// What `logs` answers: `run`, drawn at random as the API started, for the next `logs` to give with
+/// `next`, the event to read from then; `end`, the next event's number; how many events of any
+/// level it `missed` between where it read and `next`, dropped for newer ones or too long to keep,
+/// as a line over 1 MiB is; and the events read, in order, each the JSON log's line as written,
+/// without its line break.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogEvents {
     pub run: u64,
@@ -1868,14 +1803,13 @@ pub struct LogEvents {
 pub const MOST_NOTE_CODE: usize = 64;
 
 /// The most bytes a [`Note`]'s message may have, and its fields as JSON: enough for a build's
-/// errors, as rustc renders them, in a line of the log that the game keeps, which may have 1 MiB.
+/// errors as rustc renders them, in a log line the game keeps, which may have 1 MiB.
 pub const MOST_NOTE: usize = 64 << 10;
 
-/// What `note` takes: the event's code, a stable code, as gg-api's errors have, such as
-/// `gg.patch_failed`; its level; its message, which says what happened, naming what it's about;
-/// and its fields, if any, an object of JSON, which the game logs as one field, `fields`, its JSON
-/// as a string. The game logs it with the client's name, as the connection's `hello` gave it, as
-/// `client`.
+/// What `note` takes: the event's stable code, as the API's errors have, such as
+/// `gg.patch_failed`; its level; its message, saying what happened, naming what it's about; and
+/// its fields, if any, a JSON object, which the game logs as one field, `fields`, its JSON as a
+/// string. The game logs it with the `hello`'s client name as `client`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Note {
@@ -1886,8 +1820,8 @@ pub struct Note {
     pub fields: Option<serde_json::Map<String, Value>>,
 }
 
-/// A note's level: `"info"` or `"warn"`, never an error's, as the run's errors are its own, which a
-/// headless run's status counts.
+/// A note's level: `"info"` or `"warn"`, never an error, as a headless run's status counts the
+/// run's own errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoteLevel {
@@ -1895,10 +1829,9 @@ pub enum NoteLevel {
     Warn,
 }
 
-/// What `debug` takes, each part of it optional, done in this order: the breakpoints to set in a
-/// script, in place of those it had; what to do, `action`; and how long to wait for a script to
-/// stop, if none has, `wait_ms`, in milliseconds, 0 by default and at most 10,000. `{}` answers the
-/// debugger as it is.
+/// What `debug` takes, each part optional, done in this order: the breakpoints to set in a script,
+/// in place of its own; an `action`; and `wait_ms`, how long to wait for a script to stop if none
+/// has, in milliseconds, 0 by default and at most 10,000. `{}` answers the debugger as it is.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Debug {
@@ -1910,9 +1843,9 @@ pub struct Debug {
     pub wait_ms: u64,
 }
 
-/// A script's breakpoints, as `debug` sets them: its path from the project's root, as
-/// [`Debugging::scripts`] names it, and their lines, from 1; none clears them. A script no layer has
-/// loaded keeps them until one does.
+/// A script's breakpoints: its path from the project's root, as [`Debugging::scripts`] names it,
+/// and their lines, from 1; none clears them. A script no layer has loaded keeps them until one
+/// does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Breakpoints {
@@ -1920,34 +1853,32 @@ pub struct Breakpoints {
     pub lines: Vec<u32>,
 }
 
-/// What `debug` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugAction {
-    /// Stops the next line a script runs, breaking into one that's running, such as a loop that
-    /// doesn't end; nothing while one has stopped.
+    /// Stops at the next line a script runs, breaking into a running one, such as an endless loop;
+    /// nothing while one has stopped.
     Pause,
     /// From a stop, goes on to the next.
     Continue,
     /// From a stop, stops at the next line that runs, in a function it calls too.
     StepInto,
-    /// From a stop, stops at the next line of the function stopped in, past the calls it makes but
-    /// for a breakpoint in one, or once it returns, of its caller.
+    /// From a stop, stops at the stopped function's next line, past its calls but for a breakpoint
+    /// in one, or once it returns, at its caller's.
     StepOver,
-    /// From a stop, stops at the next line once the function stopped in returns, of its caller.
+    /// From a stop, stops at the caller's next line once the stopped function returns.
     StepOut,
 }
 
-/// What `debug` answers: where a script has stopped, while one has; what a stop to come answers,
-/// `asked`, a pause or a step under way; how many stops the run has had, which number them; the
-/// breakpoints, by script, in the order of the scripts' paths, then of the lines asked; and the
-/// scripts the game's layers have loaded, by their paths from the project's root, in order.
+/// What `debug` answers: where a script has stopped, while one has; `asked`, the pause or step
+/// under way that a stop to come answers; the run's stops so far, which number them; the
+/// breakpoints, in order of script path, then line asked; and the scripts the layers have loaded,
+/// by path from the project's root, in order.
 ///
-/// A step out of a call into a script, from a tick or a chunk as it loads, or over its last line,
-/// stops at the next line a script runs, such as the next entity's tick. A call steps only if it
-/// started while the debugger was armed, a breakpoint placed or a pause or a step asked: a step
-/// from where a pause broke into one that started otherwise stops at the next line a script runs
-/// after it.
+/// A step out of a call into a script, from a tick or a chunk loading, or over its last line, stops
+/// at the next line a script runs, such as the next entity's tick. A call steps only if it started
+/// while the debugger was armed, by a breakpoint placed or a pause or step asked: a step from where
+/// a pause broke into another call stops at the next line a script runs after it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Debugging {
     pub stopped: Option<Stop>,
@@ -1958,8 +1889,8 @@ pub struct Debugging {
 }
 
 /// A breakpoint: its script, the line asked, and the line Luau placed it at, the next with code
-/// from the line asked, or `None` while its script hasn't loaded, or has no code there or after.
-/// It's placed once its script's chunk has run, so none stops the chunk as it loads.
+/// from the line asked; `None` while its script hasn't loaded, or has no code there or after. It's
+/// placed once its script's chunk has run, so none stops the chunk as it loads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breakpoint {
     pub script: String,
@@ -1967,8 +1898,8 @@ pub struct Breakpoint {
     pub placed: Option<u32>,
 }
 
-/// Where a script has stopped: the stop's number, from 1; why; and the stack, the function stopped
-/// in first, then the one that called it, and so on to the call into the script.
+/// Where a script has stopped: the stop's number, from 1; why; and the stack, the stopped function
+/// first, then its caller, and so on to the call into the script.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stop {
     pub number: u64,
@@ -1976,7 +1907,6 @@ pub struct Stop {
     pub frames: Vec<StackFrame>,
 }
 
-/// Why a script stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StopReason {
@@ -1985,9 +1915,8 @@ pub enum StopReason {
     Pause,
 }
 
-/// A function of the stack where a script has stopped: its name, `(chunk)` for a chunk's top level
-/// and `(anonymous)` for one without; its script's path; the line it's at; and its locals and
-/// upvalues, as their values are there.
+/// A function on a stopped script's stack: its name, `(chunk)` for a chunk's top level and
+/// `(anonymous)` for one without; its script's path; its line; and its locals and upvalues there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StackFrame {
     pub function: String,
@@ -1997,11 +1926,11 @@ pub struct StackFrame {
     pub upvalues: Vec<Variable>,
 }
 
-/// A local or an upvalue: its name, and its value as JSON: `null` for `nil`, a number or a string
-/// as its kind is, the string at most [`MOST_SHOWN`] bytes, cut; a vector `[x, y, z, w]`; an entity
-/// its ID, or `null` for `gg.entity` and for one that isn't alive; and anything else its kind in
-/// parentheses, such as `(table)`, `(function)`, or `(handle)` for a field's handle. A float that
-/// isn't finite is `inf`, `-inf` or `NaN`, as a value's is.
+/// A local or an upvalue, its value as JSON: `null` for `nil`; a number or a string as its kind
+/// is, the string cut to [`MOST_SHOWN`] bytes; a vector `[x, y, z, w]`; an entity its ID, or `null`
+/// for `gg.entity` and one not alive; anything else its kind in parentheses, such as `(table)`,
+/// `(function)`, or `(handle)` for a field's handle. A float that isn't finite is `inf`, `-inf` or
+/// `NaN`, as a value's is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Variable {
     pub name: String,
@@ -2016,17 +1945,17 @@ pub const MOST_SHOWN: usize = 1 << 10;
 pub struct Client {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
-    /// The ID of the next request.
+    /// The next request's ID.
     next: u64,
     welcome: Welcome,
-    /// Set once an answer didn't come in time, or the connection broke, after which a line may be
-    /// cut short: every call fails then.
+    /// Set once an answer was late or the connection broke, after which a line may be cut short:
+    /// every call fails then.
     broken: bool,
 }
 
 impl Client {
-    /// Connects to the game `session` names and says hello as client `name`, the author of the
-    /// edits it applies, waiting at most `timeout` to connect and for each answer.
+    /// Connects to the game `session` names and says hello as client `name`, the author of its
+    /// edits, waiting at most `timeout` to connect and for each answer.
     ///
     /// Fails with `api.connect` if nothing listens there, as once the game has ended;
     /// `api.unauthorized` if the session's token isn't the game's; and as [`call`](Self::call)
@@ -2035,10 +1964,10 @@ impl Client {
         Self::connect_granted(session, name, None, timeout)
     }
 
-    /// As [`connect`](Self::connect), the connection kept to the capabilities `grant` names, as
-    /// [`Hello::grant`] says, or granted every one for `None`.
+    /// As [`connect`](Self::connect), kept to the capabilities `grant` names ([`Hello::grant`]), or
+    /// every one for `None`.
     ///
-    /// Fails as `connect` does, and with `grant.unknown` for a capability there's none of.
+    /// Fails as `connect` does, and with `grant.unknown` for an unknown capability.
     pub fn connect_granted(
         session: &Session,
         name: &str,
@@ -2093,13 +2022,13 @@ impl Client {
     }
 
     /// Sends request `method` with `params`, `null` for a method that takes nothing, and returns
-    /// its result's JSON, as the game wrote it.
+    /// its result's JSON as the game wrote it.
     ///
-    /// Fails with the error the game answers; with `api.timeout` if its answer doesn't come in
-    /// time; with `api.closed` if the connection closes first, as when the game ends; and with
-    /// `api.protocol` for an answer that isn't one. After `api.timeout` or `api.closed`, every
-    /// call fails with `api.closed`. Unanswered, a request the game took may still apply, as one
-    /// answered late does: the message of either says so of a method that [`changes`] the game.
+    /// Fails with the game's error; `api.timeout` if its answer is late; `api.closed` if the
+    /// connection closes first, as when the game ends; and `api.protocol` for an answer that isn't
+    /// one. After `api.timeout` or `api.closed`, every call fails with `api.closed`. An unanswered
+    /// or late request the game took may still apply: either's message says so of a method that
+    /// [`changes`] the game.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
         let closed = || Failure::new("api.closed", "the connection to the game closed");
         if self.broken {
@@ -2181,9 +2110,8 @@ impl Client {
     }
 }
 
-/// What `body` does with `call`, sending each request through `call`: `status` first, then `pause`
-/// if the game plays, neither paused nor stopped, then `body`, which sees one world, and `resume` if
-/// and only if it paused it.
+/// Runs `body` with `call` on one world: `status` first, then `pause` if the game plays, neither
+/// paused nor stopped, then `body`, and `resume` if and only if it paused it.
 ///
 /// Fails as `body` does, over a failed `resume`.
 pub fn while_paused<T>(
@@ -2510,8 +2438,6 @@ mod tests {
         }
     }
 
-    /// An image list reads and writes each image's name, its kind by the name of what it holds, and
-    /// its size.
     #[test]
     fn images_read_and_write_by_their_names() {
         let json = serde_json::json!({"images": [
@@ -2958,8 +2884,7 @@ mod tests {
         );
     }
 
-    /// A call that changes the game, answered too late or not at all, may have applied, which its
-    /// error says, and a read's doesn't.
+    /// A read's error doesn't say so.
     #[test]
     fn an_unanswered_change_is_said_to_maybe_have_applied() {
         let mut said = Vec::new();
