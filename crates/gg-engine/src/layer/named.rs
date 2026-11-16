@@ -29,22 +29,20 @@ use crate::snapshot::{self, Again};
 use crate::{Model, Prefab};
 
 impl Context {
-    /// Loads, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model),
-    /// [`add_font`](Self::add_font) and [`add_prefab`](Self::add_prefab) load a file, each texture,
-    /// model, font and prefab that `names` names,
-    /// as text names one, that none loaded has, or none but one removed, which loads anew, as
-    /// [`remove_texture`](Self::remove_texture) says: where a scene, the tool API, or a recorded or
-    /// a lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's Project
-    /// state says; a model's image with its model. A name finds its file as
-    /// [`asset_path`](Self::asset_path) says, inside the asset root. In a run that follows another,
-    /// the asset takes the name its text gave it, that run's, and its file is found by the names it
-    /// was given first.
+    /// Loads each texture, model, font and prefab `names` names, as
+    /// [`add_texture`](Self::add_texture), [`add_model`](Self::add_model),
+    /// [`add_font`](Self::add_font) and [`add_prefab`](Self::add_prefab) load a file. Skips those
+    /// loaded; one removed loads anew ([`remove_texture`](Self::remove_texture)). Runs where a
+    /// scene, the tool API, or a recorded or lockstep peer's command or edit names an asset,
+    /// before the text is read (ARCHITECTURE.md's Project state). A model's image loads with its
+    /// model. A name finds its file inside the asset root ([`asset_path`](Self::asset_path)). In a
+    /// run that follows another, the asset takes the name its text gave, and its file is found by
+    /// the names it was given first.
     ///
-    /// One that can't be loaded stands in, if `stand_in`, as for a run that follows another, so
-    /// that its texts read as that run's did: a texture of magenta and black squares, a model of no
-    /// nodes, or a font that draws in the engine's, named as the name, warning `asset.stand_in`
-    /// with why. Otherwise it stays unloaded, and the refusal of what names it says why, as
-    /// [`Assets::not_found`] does.
+    /// One that can't load stands in if `stand_in`, as in a run that follows another, so its
+    /// texts read as that run's did: a texture of magenta and black squares, a model of no nodes,
+    /// or a font that draws in the engine's, warning `asset.stand_in` with why. Otherwise it stays
+    /// unloaded, and the refusal of what names it says why ([`Assets::not_found`]).
     pub(crate) fn load_named<S: AsRef<str>>(
         &mut self,
         names: impl IntoIterator<Item = Asset<S>>,
@@ -91,13 +89,12 @@ impl Context {
         }
     }
 
-    /// Loads the texture that text names `name`, as [`load_named`](Self::load_named) does: a
-    /// model's image by loading its model, if it isn't. Gives the path from the asset root its name
-    /// led to, if it led to one.
+    /// Like [`load_named`](Self::load_named), for the texture text names `name`; a model's image
+    /// loads its model if needed. Gives the path from the asset root its name led to, if any.
     ///
-    /// Fails as [`asset_path`](Self::asset_path) and [`add_texture`](Self::add_texture) do; for a
-    /// model's image, as [`load_model_named`](Self::load_model_named) does, and with
-    /// `asset.model_image` for an image the model hasn't.
+    /// Fails like [`asset_path`](Self::asset_path) and [`add_texture`](Self::add_texture); for a
+    /// model's image, like [`load_model_named`](Self::load_model_named), and with
+    /// `asset.model_image` for an image the model lacks.
     fn load_texture_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
         if let Some((model, image)) = name.rsplit_once('#')
             && !image.is_empty()
@@ -135,11 +132,11 @@ impl Context {
         }
     }
 
-    /// Loads the model that text names `name`, as [`load_named`](Self::load_named) does, a file
-    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
-    /// path from the asset root its name led to, if it led to one.
+    /// Like [`load_named`](Self::load_named), for the model text names `name`; a file loaded
+    /// already takes the names alone ([`load_path`](Self::load_path)). Gives the path from the
+    /// asset root its name led to, if any.
     ///
-    /// Fails as [`asset_path`](Self::asset_path) and [`add_model`](Self::add_model) do, and with
+    /// Fails like [`asset_path`](Self::asset_path) and [`add_model`](Self::add_model), and with
     /// `asset.outside_root` for a file outside the root, as through `..` or a link.
     fn load_model_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
         let path = match self.asset_path(name, "model", stand_in) {
@@ -162,11 +159,10 @@ impl Context {
         (Some(path), loaded)
     }
 
-    /// Loads the font that text names `name`, as [`load_named`](Self::load_named) does, a file
-    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
-    /// path from the asset root its name led to, if it led to one.
+    /// Like [`load_model_named`](Self::load_model_named), for a font. Gives the path from the
+    /// asset root its name led to, if any.
     ///
-    /// Fails as [`asset_path`](Self::asset_path) and [`add_font`](Self::add_font) do, and with
+    /// Fails like [`asset_path`](Self::asset_path) and [`add_font`](Self::add_font), and with
     /// `asset.outside_root` for a file outside the root, as through `..` or a link.
     fn load_font_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
         let path = match self.asset_path(name, "font", stand_in) {
@@ -189,11 +185,10 @@ impl Context {
         (Some(path), loaded)
     }
 
-    /// Loads the prefab that text names `name`, as [`load_named`](Self::load_named) does, a file
-    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
-    /// path from the asset root its name led to, if it led to one.
+    /// Like [`load_model_named`](Self::load_model_named), for a prefab. Gives the path from the
+    /// asset root its name led to, if any.
     ///
-    /// Fails as [`asset_path`](Self::asset_path) and [`add_prefab`](Self::add_prefab) do, and with
+    /// Fails like [`asset_path`](Self::asset_path) and [`add_prefab`](Self::add_prefab), and with
     /// `asset.outside_root` for a file outside the root, as through `..` or a link.
     fn load_prefab_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
         let path = match self.asset_path(name, "prefab", stand_in) {
@@ -216,20 +211,20 @@ impl Context {
         (Some(path), loaded)
     }
 
-    /// Takes again what the run a snapshot was taken from noted past the notes this run's layers
-    /// made alike as they loaded, of `lines`, the snapshot's `asset` lines, in order, as
-    /// [`Snapshot::added`] gives them: as a run restored from it, or a lockstep joiner given its
-    /// host's world, does before it reads the world, so that its values find every asset they
-    /// name, and what's opaque in it comes back where the run's assets line up with the
-    /// snapshot's. It loads, as [`load_named`](Self::load_named) does with `stand_in`, each
-    /// texture, model, font and prefab a line gives the path of that none loaded has, in the order
-    /// that run
-    /// loaded them, so that a texture's index, which what's opaque holds, is what it was where the
-    /// layers added the same before; a path outside the root, as only a layer gives one, stands
-    /// in, as one text names does. And it removes again what that run removed, a texture, a model
-    /// or a mesh by the index its line gives, while this run's notes are the snapshot's up to that
-    /// line, so that the index is the asset's that run removed; a texture or a model only where the
-    /// one at its index is loaded from the path the line gives, and isn't removed already.
+    /// Takes again what the snapshot's run noted past the notes this run's layers made alike as
+    /// they loaded. `lines` are the snapshot's `asset` lines in order ([`Snapshot::added`]). A
+    /// restored run, or a lockstep joiner given its host's world, does this before reading the
+    /// world, so its values find every asset they name and what's opaque comes back where the
+    /// assets line up with the snapshot's.
+    ///
+    /// It loads each texture, model, font and prefab a line gives the path of that none loaded
+    /// has, as [`load_named`](Self::load_named) does with `stand_in`, in the order that run loaded
+    /// them, so a texture's index, which what's opaque holds, is what it was. A path outside the
+    /// root, which only a layer gives, stands in.
+    ///
+    /// It removes again what that run removed: a texture, model or mesh by its line's index,
+    /// while this run's notes are the snapshot's up to that line. A texture or model goes only if
+    /// the one at its index loaded from the line's path and isn't removed already.
     pub(crate) fn load_restored(&mut self, lines: &[String]) {
         let ours = self.assets.added();
         let common = (lines.iter().zip(ours))
@@ -240,8 +235,8 @@ impl Context {
         for (at, line) in lines.iter().enumerate().skip(common) {
             match snapshot::again(line) {
                 Some(Again::Load(asset)) => self.load_named([asset], true),
-                // The index a removal gives may be another asset's in a run whose assets part
-                // from the snapshot's before it, as one whose newer layers add another first.
+                // The removal's index may be another asset's if this run's assets part from the
+                // snapshot's before it, as when newer layers add another first.
                 Some(_) if !lined_up => debug!(
                     line = &**line,
                     "Not removed again, as the run's assets part from the snapshot's before it"
@@ -271,25 +266,24 @@ impl Context {
         }
     }
 
-    /// Loads each texture, model, font and prefab scene `text` names that none loaded has, and
-    /// those the prefabs it names name, in turn, as [`load_named`](Self::load_named) does, standing
-    /// in for what can't be in a run that follows another; and returns the names of those still
-    /// missing.
+    /// Like [`load_named`](Self::load_named), for each unloaded asset scene `text` names, and in
+    /// turn those its prefabs name; stands in for what can't load in a run that follows another.
+    /// Returns the names still missing.
     ///
-    /// Fails, loading nothing, as [`World::load_scene`] does but for those.
+    /// Fails, loading nothing, like [`World::load_scene`] but for those.
     pub(crate) fn load_scene_assets(&mut self, text: &str) -> Result<Vec<String>> {
         self.load_scene_assets_as(text, self.follows)
     }
 
-    /// As [`load_scene_assets`](Self::load_scene_assets), standing in for what can't be loaded if
-    /// `stand_in`, whatever run this is.
+    /// Like [`load_scene_assets`](Self::load_scene_assets), standing in if `stand_in`, whatever
+    /// run this is.
     pub(super) fn load_scene_assets_as(
         &mut self,
         text: &str,
         stand_in: bool,
     ) -> Result<Vec<String>> {
         let mut missing = Vec::new();
-        // Again while a prefab loads, whose text may name more: each time one more at least.
+        // Again while a prefab loads, whose text may name more; each pass loads one more at least.
         loop {
             let names = self.world.scene_assets(text)?;
             self.load_named(names.iter().map(Asset::as_deref), stand_in);
@@ -309,11 +303,9 @@ impl Context {
         }
     }
 
-    /// Loads each texture, model, font and prefab `text`, a value as a recording writes it, names
-    /// that
-    /// none loaded has, standing in for what can't be, as [`load_named`](Self::load_named) does: a
-    /// value that a recording or a lockstep peer gives, which names assets as the run that wrote it
-    /// did.
+    /// Like [`load_named`](Self::load_named), standing in for what can't load, for each unloaded
+    /// asset `text` names. `text` is a value from a recording or lockstep peer, naming assets as
+    /// the run that wrote it did.
     pub(crate) fn load_followed(&mut self, text: &Text) {
         let mut names = Vec::new();
         text.assets(&mut names);
@@ -322,18 +314,24 @@ impl Context {
         }
     }
 
-    /// The path from the asset root of the file whose texture, model or font, as `kind` says, text
-    /// names `name`, as [`load_named`](Self::load_named) loads it: in a run that follows another,
-    /// the path given that name, as [`name_as`](Self::name_as) gives them; in a run that reads its
-    /// game's package, the asset's whose ID it is there; in a development build, the asset's whose
-    /// ID it is, as the asset database holds it; and else `name` itself, as a path. A run that
-    /// follows another and isn't to stand in for what it can't load, as a lockstep joiner asked by
-    /// the tool API, finds only what it was given, so that it names the asset as its host would.
+    /// The path from the asset root of the file whose texture, model or font (`kind`) text names
+    /// `name`, as [`load_named`](Self::load_named) loads it:
     ///
-    /// Fails with `asset.not_given` for what such a run wasn't given; `asset.unknown_id` for an ID
-    /// no asset has this run, naming the file the project's fetch list gives it, if it gives it
-    /// one, as [`fetched`](Self::fetched) finds it, or any ID in a build without `dev` that reads
-    /// no package, as it reads no ID file; and `asset.outside_root` for an absolute path.
+    /// - in a run that follows another, the path given that name ([`name_as`](Self::name_as));
+    /// - in a package run, the asset whose ID it is there;
+    /// - in a development build, the asset whose ID it is in the database;
+    /// - else `name` itself, as a path.
+    ///
+    /// A run that follows another and isn't to stand in, such as a lockstep joiner asked by the
+    /// tool API, finds only what it was given, so it names the asset as its host would.
+    ///
+    /// Fails with:
+    ///
+    /// - `asset.not_given` for what such a run wasn't given;
+    /// - `asset.unknown_id` for an ID no asset has this run, naming the file the project's fetch
+    ///   list gives it, if any ([`fetched`](Self::fetched)); or any ID in a build without `dev`
+    ///   that reads no package, as it reads no ID file;
+    /// - `asset.outside_root` for an absolute path.
     pub(super) fn asset_path(&self, name: &str, kind: &str, stand_in: bool) -> Result<Arc<str>> {
         #[cfg(feature = "dev")]
         if let Some(given) = &self.dev.given {
@@ -400,11 +398,10 @@ impl Context {
         Ok(name.into())
     }
 
-    /// The path, from the project's directory, of the file the project's fetch list, `fetch.ron`,
-    /// gives asset ID `id`, as gg-api's `Fetch` reads it, if it gives it one: a file that `gg
-    /// fetch` fetches, which the repository doesn't hold, and so a checkout hasn't until it's
-    /// fetched. `None` for a context that isn't a project's game, or one without a fetch list, or
-    /// whose list doesn't read. It reads the list each time, as only an error asks.
+    /// The path, from the project's directory, of the file the fetch list `fetch.ron` (gg-api's
+    /// `Fetch`) gives asset ID `id`: `gg fetch` fetches it, so a checkout lacks it until then.
+    /// `None` for a context that isn't a project's game, has no readable fetch list, or whose list
+    /// gives `id` no file. It reads the list each time, as only an error asks.
     #[cfg(feature = "dev")]
     fn fetched(&self, id: AssetId) -> Option<String> {
         let list = gg_api::Fetch::read(self.dev.project_dir.as_deref()?).ok()?;
@@ -413,11 +410,10 @@ impl Context {
     }
 
     /// Loads the texture at `path` from the asset root, which text names `name`, as
-    /// [`add_texture`](Self::add_texture) loads a file, its name `name` too: a run that follows
-    /// another names it so, as that run did. A file loaded already, as by a layer's add, takes the
-    /// names alone, unnoted, as [`Assets`] keeps its notes.
+    /// [`add_texture`](Self::add_texture) does, also named `name` as a run that follows another
+    /// names it. A file loaded already takes the names alone, unnoted in [`Assets`]'s notes.
     ///
-    /// Fails as [`named_file`](Self::named_file) does, and as `add_texture` does.
+    /// Fails like [`named_file`](Self::named_file) and `add_texture`.
     fn load_path(&mut self, name: &str, path: &str) -> Result<()> {
         let file = self.named_file(name, path)?;
         let resolved = self.files.file_of(&file);
@@ -431,12 +427,12 @@ impl Context {
         Ok(())
     }
 
-    /// The file at `path` from the asset root, which text names `name`, as a run that follows
-    /// another names its asset from then on, as that run did.
+    /// The file at `path` from the asset root, which text names `name`; a run that follows another
+    /// names its asset so from then on, as that run did.
     ///
     /// Fails with `asset.outside_root` for a file outside the root, as through `..` or a link.
     pub(super) fn named_file(&mut self, name: &str, path: &str) -> Result<PathBuf> {
-        // Before anything can fail, so that a stand-in is named so too.
+        // Before anything can fail, so a stand-in is named so too.
         #[cfg(feature = "dev")]
         if let Some(given) = &mut self.dev.given
             && name != path
@@ -455,8 +451,8 @@ impl Context {
     }
 
     /// Fails with `asset.outside_root` if `file`, which `path` names, resolves outside the asset
-    /// root, as through `..` or a link, or, in a run that reads its game's package, as written; one
-    /// that doesn't resolve, as one that isn't there, doesn't.
+    /// root (through `..` or a link), or in a package run, as written. One that doesn't resolve,
+    /// such as a missing file, doesn't fail.
     pub(super) fn within_root(&self, path: &str, file: &Path) -> Result<()> {
         let within = self.root.as_deref().unwrap_or(Path::new("."));
         let outside = if self.reads_package() {
@@ -478,12 +474,11 @@ impl Context {
         Ok(())
     }
 
-    /// Has a stand-in, a texture of magenta and black squares, take the place of the texture text
-    /// names `name`, of the file at `path` from the asset root, if its name led to one, which
-    /// couldn't be loaded, as `why` says, warning `asset.stand_in`: named as the file would have
-    /// been, or else as `name`. In a run that reloads assets, the file's image takes the stand-in's
-    /// place once it loads, as after a checkout brings it, or that of the asset whose ID `name` is,
-    /// once one has it.
+    /// Has a stand-in, a texture of magenta and black squares, replace the texture text names
+    /// `name`, which couldn't load for `why` from `path` (from the asset root, if the name led to
+    /// one), warning `asset.stand_in`. It's named as the file would have been, else `name`. In a
+    /// run that reloads assets, the file's image replaces it once it loads, as after a checkout,
+    /// or that of the asset whose ID `name` is, once one has it.
     fn stand_in(&mut self, name: &str, path: Option<&str>, why: &Error) {
         // 8 pixels across and down, in squares of 4.
         let pixels: Vec<u8> = (0..64)
@@ -513,8 +508,8 @@ impl Context {
             }
             None => (name.into(), name.into(), None),
         };
-        // So that it gives way to its texture once its file comes, or once an asset has its ID; but
-        // never to a file outside the asset root.
+        // It gives way to its texture once its file comes, or an asset has its ID, but never to
+        // a file outside the asset root.
         #[cfg(feature = "dev")]
         match &file {
             Some(_) if why.code() == "asset.outside_root" => {}
@@ -536,11 +531,9 @@ impl Context {
         );
     }
 
-    /// Has a stand-in, a model of no nodes, take the place of the model text names `name`, as
-    /// [`stand_in`](Self::stand_in) has one take a texture's: so that what names it reads, though
-    /// its roots spawn nothing, and a hash of the world parts from its run's where their nodes
-    /// were. It never gives way to its file, since a run that follows another takes no nodes the
-    /// model's file would give later.
+    /// Like [`stand_in`](Self::stand_in), with a model of no nodes. What names it reads, though
+    /// its roots spawn nothing, and the world's hash parts from its run's where their nodes were.
+    /// It never gives way to its file: a run that follows another takes no later nodes.
     fn stand_in_model(&mut self, name: &str, path: Option<&str>, why: &Error) {
         let (path, named): (Arc<str>, Arc<str>) = match path {
             Some(path) => {
@@ -566,10 +559,9 @@ impl Context {
         );
     }
 
-    /// Has a stand-in, a font that draws in the engine's, take the place of the font text names
-    /// `name`, as [`stand_in`](Self::stand_in) has one take a texture's: its field a texture of a
-    /// texel, which its file's takes once it bakes, as after a checkout brings it, or that of the
-    /// asset whose ID `name` is, once one has it, in a run that reloads assets.
+    /// Like [`stand_in`](Self::stand_in), with a font that draws in the engine's. Its field is a
+    /// one-texel texture; in a run that reloads assets, its file's field replaces it once baked,
+    /// or that of the asset whose ID `name` is, once one has it.
     fn stand_in_font(&mut self, name: &str, path: Option<&str>, why: &Error) {
         let field = (self.textures).add(
             &format!("{name} field"),
@@ -621,10 +613,9 @@ impl Context {
         );
     }
 
-    /// Has a stand-in, a prefab whose instances are their roots alone, take the place of the prefab
-    /// text names `name`, as [`stand_in_model`](Self::stand_in_model) has one take a model's: so
-    /// that what names it reads, though its instances spawn nothing. It never gives way to its
-    /// file, since a run that follows another takes no entities the prefab's file would give later.
+    /// Like [`stand_in_model`](Self::stand_in_model), with a prefab whose instances are their
+    /// roots alone. What names it reads, though its instances spawn nothing. It never gives way to
+    /// its file: a run that follows another takes no later entities.
     fn stand_in_prefab(&mut self, name: &str, path: Option<&str>, why: &Error) {
         let (path, named): (Arc<str>, Arc<str>) = match path {
             Some(path) => {
@@ -649,12 +640,14 @@ impl Context {
         );
     }
 
-    /// What names the texture or the model loaded from `file`, which a layer gave as `path`, whose
-    /// path among assets is `named`, as [`Assets`] says, or with `image`, its image of that place
-    /// in the model: in a development build, the name given its path, if the run is given its
-    /// assets' names, as [`name_as`](Self::name_as) says; and else its ID, as [`id_of`] finds it,
-    /// with an image's place after the model's; and otherwise its path, as a build without `dev`
-    /// that reads no package, as it reads no ID file, names every one.
+    /// What names the texture or model loaded from `file`, which a layer gave as `path`, whose
+    /// path among assets is `named` ([`Assets`]); with `image`, its image at that index in the
+    /// model. In order:
+    ///
+    /// - in a development build, the name given its path, if the run is given names
+    ///   ([`name_as`](Self::name_as));
+    /// - else its ID ([`id_of`]), an image's index after the model's;
+    /// - else its path: a build without `dev` that reads no package names every one so.
     ///
     /// [`id_of`]: Self::id_of
     pub(super) fn texture_name(
@@ -679,10 +672,9 @@ impl Context {
         }
     }
 
-    /// The ID of the asset at `path`, whose file is `file`: in a run that reads its game's package,
-    /// the package's; else, in a development build, the asset database's, as
-    /// [`asset_id`](Self::asset_id) finds it; and else none, as a build without `dev` reads no ID
-    /// file.
+    /// The ID of the asset at `path`, whose file is `file`: the package's in a package run; else
+    /// in a development build the asset database's ([`asset_id`](Self::asset_id)); else none, as a
+    /// build without `dev` reads no ID file.
     fn id_of(&self, path: &Path, file: Option<&Path>) -> Option<u64> {
         if let Some(package) = self.files.packaged() {
             return package.id(&self.files.within(path)?);
@@ -697,10 +689,9 @@ impl Context {
     }
 
     /// The texture loaded from `file`, which a layer gave as `path`, whose path among assets is
-    /// `named`, with its size, if one was and isn't removed: by the file, as [`Loaded`] keeps it;
-    /// or else, in a development build, the one loaded from the asset's file before it was renamed
-    /// or moved, which its ID names, kept for `file` too from then on, so that an asset loads once
-    /// whatever its file's been called.
+    /// `named`, with its size, if one was and isn't removed. Found by file ([`Loaded`]); else, in
+    /// a development build, the one its ID names, loaded before a rename or move, and kept for
+    /// `file` too from then on, so an asset loads once whatever its file's called.
     pub(super) fn loaded_texture(
         &mut self,
         named: &str,
@@ -723,8 +714,7 @@ impl Context {
         Some(found)
     }
 
-    /// The model loaded from `file`, which a layer gave as `path`, whose path among assets is
-    /// `named`, if one was, as [`loaded_texture`](Self::loaded_texture) finds a texture.
+    /// The model loaded from `file`; see [`loaded_texture`](Self::loaded_texture).
     pub(super) fn loaded_model(
         &mut self,
         named: &str,
@@ -746,8 +736,7 @@ impl Context {
         Some(model)
     }
 
-    /// The font loaded from `file`, which a layer gave as `path`, whose path among assets is
-    /// `named`, if one was, as [`loaded_texture`](Self::loaded_texture) finds a texture.
+    /// The font loaded from `file`; see [`loaded_texture`](Self::loaded_texture).
     pub(super) fn loaded_font(
         &mut self,
         named: &str,
@@ -769,8 +758,7 @@ impl Context {
         Some(font)
     }
 
-    /// The prefab loaded from `file`, which a layer gave as `path`, whose path among assets is
-    /// `named`, if one was, as [`loaded_texture`](Self::loaded_texture) finds a texture.
+    /// The prefab loaded from `file`; see [`loaded_texture`](Self::loaded_texture).
     pub(super) fn loaded_prefab(
         &mut self,
         named: &str,
@@ -792,10 +780,10 @@ impl Context {
         Some(prefab)
     }
 
-    /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path
-    /// from the root, if it's given inside it, as layers spell a file's path as its disk does, or
-    /// else by the path from the root of the file the OS resolves it to, as through `..`, a link
-    /// or, where names ignore it, case.
+    /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path from
+    /// the root if it's inside it, as layers spell a path as its disk does; else by the path from
+    /// the root of the file the OS resolves it to, through `..`, a link or (where names ignore it)
+    /// case.
     #[cfg(feature = "dev")]
     pub(super) fn asset_id(&self, path: &Path, file: Option<&Path>) -> Option<AssetId> {
         let root = self.root.as_deref()?;
@@ -808,18 +796,18 @@ impl Context {
         })
     }
 
-    /// Has the run name the textures its layers add as `names`, each a name and the path it names,
-    /// names their paths, and every other by its path, in place of the IDs the asset database
-    /// holds, renaming those added already: as a replay names them as its recording's run did, and
-    /// a lockstep session's joiner as its host does, whose ID files its own disk may not hold.
+    /// Has the run name the textures its layers add as `names` (each a name and the path it
+    /// names) give their paths, and every other by its path, instead of the database's IDs,
+    /// renaming those added already. A replay names them as its recording's run did, and a
+    /// lockstep joiner as its host does, whose ID files its disk may not hold.
     #[cfg(feature = "dev")]
     pub(crate) fn name_as(&mut self, names: impl IntoIterator<Item = (Arc<str>, Arc<str>)>) {
         let given = names.into_iter().map(|(name, path)| (path, name)).collect();
         self.rename(given);
     }
 
-    /// As [`name_as`](Self::name_as), but with `names` beside the names given already: as a
-    /// lockstep host names the textures it adds after its joiner has joined.
+    /// Like [`name_as`](Self::name_as), but beside the names given already: a lockstep host names
+    /// the textures it adds after its joiner has joined.
     #[cfg(feature = "dev")]
     pub(crate) fn name_also(&mut self, names: impl IntoIterator<Item = (Arc<str>, Arc<str>)>) {
         let mut given = self.dev.given.take().unwrap_or_default();
@@ -827,7 +815,7 @@ impl Context {
         self.rename(given);
     }
 
-    /// Names the textures as `given` names their paths, and every other by its path, from now on.
+    /// Names textures by `given`, and every other by its path, from now on.
     #[cfg(feature = "dev")]
     fn rename(&mut self, given: HashMap<Arc<str>, Arc<str>>) {
         self.add_assets(|assets| assets.rename(&given));

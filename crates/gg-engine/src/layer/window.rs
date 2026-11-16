@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-/// The app's window, as layers see it.
+/// The app's window.
 pub struct Window {
     pub(super) raw: Arc<winit::window::Window>,
 }

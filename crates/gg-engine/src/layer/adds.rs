@@ -36,27 +36,30 @@ use crate::{Animator, MeshDraw, ModelRoot, PrefabRoot, World};
 use crate::{Model, Prefab, prefab};
 
 impl Context {
-    /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
-    /// then on, which takes parameters of type `P` with each draw, such as a color or a texture:
-    /// `()` for none. `blend` says how its color goes over what's drawn before it, such as
-    /// [`Blend::Alpha`] for straight alpha, as PNGs store it; and so whether it writes depth: every
-    /// shader draws only where it's as near as what's drawn there or nearer, and an opaque one
-    /// writes its depth too, so that what's behind it, drawn later, doesn't show over it, while one
-    /// that blends doesn't, so that what's behind it shows through it. `name` names it in errors
-    /// and GPU captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`]
-    /// describes, which the engine checks.
+    /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with,
+    /// taking parameters of type `P` with each draw, such as a color or texture: `()` for none.
+    /// `name` names it in errors and GPU captures.
     ///
-    /// In a development run that serves the tool API, the shader compiles again as its file or a
-    /// file it includes changes, and the next frame draws with it; a change that doesn't compile,
-    /// or breaks the contract, warns, and the shader keeps drawing as it did.
+    /// `blend` sets how its color goes over what's drawn before it, such as [`Blend::Alpha`] for
+    /// straight alpha, as PNGs store it, and so depth writes. Every shader draws only where it's
+    /// as near as what's there or nearer. An opaque one writes depth, so what's drawn behind it
+    /// later doesn't show over it. One that blends doesn't, so what's behind shows through. The
+    /// engine checks the contract in [`gg_renderer::Shaders::add`].
     ///
-    /// A file added again, by whatever form of its path, with the same vertex and parameter types
-    /// and blend, gives the shader it gave first, which compiles and reloads once.
+    /// In a development run that serves the tool API, the shader recompiles as its file or an
+    /// include changes, and the next frame draws with it. A change that doesn't compile, or breaks
+    /// the contract, warns, and the shader keeps drawing as before.
     ///
-    /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
-    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
-    /// `renderer.shader_files` if slangc's directory in the OS's temporary directory can't be made
-    /// or what it wrote there can't be read, and with `renderer.no_slangc` if slangc can't be run.
+    /// A file added again, by any form of its path, with the same vertex and parameter types and
+    /// blend gives the first shader, compiled and reloaded once.
+    ///
+    /// # Errors
+    ///
+    /// - `renderer.bad_shader`, with slangc's diagnostics, if it doesn't compile.
+    /// - `renderer.shader_mismatch`, with each way it breaks the contract.
+    /// - `renderer.shader_files` if slangc's directory in the OS's temporary directory can't be
+    ///   made or what it wrote there can't be read.
+    /// - `renderer.no_slangc` if slangc can't be run.
     pub fn add_shader<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
@@ -96,38 +99,39 @@ impl Context {
     }
 
     /// Loads the PNG or JPEG file at `path` as a texture for sprites and layers' shaders to sample
-    /// from then on, through the handle: a sprite's `texture`, or a field of a shader's parameters
-    /// as it is. Any PNG loads, and any JPEG that's Huffman-coded at 8 bits, sequential or
-    /// progressive, as nearly all are: its colors are taken as sRGB-encoded, whatever color profile
-    /// or gamma it holds, as glTF requires, and its alpha as not multiplied into them, and shaders
-    /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
-    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The file is
-    /// read, and its header, which gives its size, as the texture is added, which hands out its
-    /// handle then; its pixels decode off the main thread, and frames stream them to the GPU within
-    /// their budget, what samples it sampling a pixel of white until they're there, as
-    /// [`streaming`](Self::streaming) tells. One whose header reads but whose pixels don't decode,
-    /// as a file cut short past its header, loads all the same, warning `engine.bad_texture` as it
-    /// decodes, and samples as white. A run from a game's package reads it as the cooker
-    /// compressed it, to BC7. In a development run that serves the tool API, the texture takes its
-    /// file's image again as the file changes, at whatever size, once frames have streamed it,
-    /// drawing as it did until then, as hot_reload.rs says; one that doesn't decode
-    /// warns, and the texture keeps drawing as it did. A test's context, [`Context::seeded`],
-    /// decodes it on the calling thread as it's added instead, warning at once. A file's add logs
-    /// `asset.texture_loaded`, and its pixels' decode `asset.texture_decoded`, each with how long
-    /// it took, at the debug level.
+    /// through the handle: a sprite's `texture`, or a field of a shader's parameters. Any PNG
+    /// loads, and any JPEG that's Huffman-coded at 8 bits, sequential or progressive. Colors are
+    /// taken as sRGB-encoded whatever the file's profile or gamma, as glTF requires, and alpha as
+    /// not multiplied in. Shaders sample colors decoded to linear, with coordinates from (0, 0) at
+    /// the top left to (1, 1) at the bottom right. `name` names it in errors and GPU captures.
     ///
-    /// A file added again, by whatever form of its path, gives the texture it gave first, without
-    /// loading it again, as `assets::file_of` resolves it, and so does an asset's file renamed
-    /// or moved since, by the ID that names it; `name` is then unused, and the texture keeps the
-    /// path it was first added by, which another path names too; but once the texture's removed,
-    /// as [`remove_texture`](Self::remove_texture) says, the file loads anew. Scenes,
-    /// snapshots, recordings and the tool API name it by its asset ID, where its file has one, as
-    /// ARCHITECTURE.md's Project state says, and otherwise by that path.
+    /// Adding reads the file and its header, which gives the size, and hands out the handle.
+    /// Pixels decode off the main thread and frames stream them to the GPU within their budget;
+    /// until then the texture samples white (see [`streaming`](Self::streaming)). A file whose
+    /// header reads but whose pixels don't decode loads anyway, warns `engine.bad_texture` as it
+    /// decodes, and samples white. A run from a game's package reads the cooker's BC7 compression.
     ///
-    /// Fails with `engine.bad_texture` if the file can't be read, isn't a regular file, is more
-    /// than 1 GiB, isn't a PNG or a JPEG as far as its header, or has a side of more than 8,192
-    /// pixels, the most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past
-    /// the 61,440 a renderer holds, the engine's white one among them.
+    /// In a development run that serves the tool API, the texture takes its file's image again at
+    /// any size as the file changes, once frames have streamed it (hot_reload.rs). A file that
+    /// doesn't decode warns, and the texture keeps drawing as before. A test's context,
+    /// [`Context::seeded`], decodes on the calling thread as it adds, warning at once. The add
+    /// logs `asset.texture_loaded` and the decode `asset.texture_decoded`, each at debug level
+    /// with its duration.
+    ///
+    /// A file added again, by any form of its path, gives the first texture without loading again
+    /// (`assets::file_of` resolves it). So does an asset's file renamed or moved since, by its ID.
+    /// `name` is then unused, and the texture keeps its first path. After
+    /// [`remove_texture`](Self::remove_texture) the file loads anew. Scenes, snapshots, recordings
+    /// and the tool API name it by its asset ID where its file has one (ARCHITECTURE.md's Project
+    /// state), else by that path.
+    ///
+    /// # Errors
+    ///
+    /// - `engine.bad_texture` if the file can't be read, isn't a regular file, is over 1 GiB, isn't
+    ///   a PNG or JPEG as far as its header shows, or has a side over 8,192 pixels, the most every
+    ///   Vulkan 1.4 device takes.
+    /// - `renderer.too_many_textures` past the 61,440 a renderer holds, the engine's white one
+    ///   among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
@@ -160,15 +164,14 @@ impl Context {
         Ok(texture)
     }
 
-    /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
-    /// [`add_texture`](Self::add_texture) loads one, its pixels decoding off the main thread,
-    /// cut into cells `cell` pixels across and down, packed edge to edge from its top left, which
-    /// [`SpriteSheet::sprite`] draws, as its header's size places them. A file added before, as a
-    /// texture or a sprite sheet, isn't loaded again: its texture is cut into these cells. Its
-    /// texture reloads as `add_texture`'s does, but only at the size it has, where its sprites have
-    /// its cells. [`remove_texture`](Self::remove_texture) removes its texture, `sheet.texture`.
+    /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, loaded like
+    /// [`add_texture`](Self::add_texture)'s, cut into cells `cell` pixels across and down, packed
+    /// edge to edge from its top left, for [`SpriteSheet::sprite`] to draw. A file added before,
+    /// as a texture or sheet, isn't loaded again: its texture is cut into these cells. The
+    /// texture reloads like `add_texture`'s, but only at its size, where its sprites have its
+    /// cells. [`remove_texture`](Self::remove_texture) removes `sheet.texture`.
     ///
-    /// Fails as `add_texture` does, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
+    /// Fails like `add_texture`, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
     /// or more than the image's.
     pub fn add_sprite_sheet(
         &mut self,
@@ -216,9 +219,8 @@ impl Context {
         Ok(sheet)
     }
 
-    /// What's still on its way to the GPU, as [`Loading`] says: the textures whose images are
-    /// decoding, and what the renderer was streaming once it had rendered the last frame it handed
-    /// back. A loading screen shows until it's empty, as a test runs frames until it is.
+    /// What's still on its way to the GPU (see [`Loading`]). A loading screen shows until it's
+    /// empty, as a test runs frames until it is.
     pub fn streaming(&self) -> Loading {
         Loading {
             decoding: self.loader.pending(),
@@ -226,10 +228,9 @@ impl Context {
         }
     }
 
-    /// When the engine started, once the run has loaded: the first time it's asked once the layers
-    /// have attached and nothing is on its way to the GPU, as [`streaming`](Self::streaming) tells,
-    /// which the run then logs `engine.loaded` at; `None` before and after, and in a test's or a
-    /// replay's context.
+    /// When the engine started, the first time it's asked once the layers have attached and
+    /// [`streaming`](Self::streaming) is empty. The run then logs `engine.loaded`. `None` before
+    /// and after, and in a test's or replay's context.
     pub(crate) fn take_loaded(&mut self) -> Option<Instant> {
         if self.load_started.is_none() || !self.attached || !self.streaming().is_empty() {
             return None;
@@ -237,10 +238,10 @@ impl Context {
         self.load_started.take()
     }
 
-    /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
-    /// index `vertices`. A vertex is any `#[repr(C)]` type without padding, which derives
-    /// bytemuck's `NoUninit`. `name` names the mesh in errors and GPU captures. Frames stream it
-    /// to the GPU within their budget, and draws of it draw nothing until it's there.
+    /// Adds a mesh for layers to draw: triangles, three of `indices` each, indexing `vertices`.
+    /// A vertex is any `#[repr(C)]` type without padding that derives bytemuck's `NoUninit`.
+    /// `name` names the mesh in errors and GPU captures. Frames stream it to the GPU within their
+    /// budget, and draws of it draw nothing until it's there.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
@@ -256,85 +257,85 @@ impl Context {
     }
 
     /// Loads the glTF 2.0 model at `path`, a `.gltf` or `.glb` file, and the files it names: what
-    /// its default scene draws, `scene` or else the first, which [`Model::spawn`] places in worlds
-    /// as entities, as many times as layers like, as a [`ModelRoot`] does wherever it names the
-    /// model, as scenes do by its name. Its meshes and images are added once, as
-    /// [`add_mesh`](Self::add_mesh) and [`add_texture`](Self::add_texture) add them, each image
-    /// read as far as its header as the model is, and decoded off the main thread, with mip levels
-    /// made there too, so that one whose pixels don't decode warns and samples as white, as a
-    /// texture's does; each draws once frames have streamed it to the GPU. `name` names the model
-    /// in errors and GPU captures. Its add logs `asset.model_loaded`, with how long it took and how
-    /// many meshes and images it added, whose decodes log as a texture's do. A run from a game's
-    /// package reads the model as the cooker cooked it instead, its meshes optimized, with levels
-    /// of detail that each draw picks by its size on screen, and its images compressed with their
-    /// levels, BC7 of colors or values and BC5 of normal maps, but DDS images' blocks as they are,
-    /// as cooked.rs says. A file added again gives the model it gave first, until it's removed, as
-    /// [`remove_model`](Self::remove_model) says.
+    /// its default scene draws, `scene` or else the first. [`Model::spawn`] places it in worlds as
+    /// entities, as does a [`ModelRoot`] naming it, as scenes do by its name. `name` names it in
+    /// errors and GPU captures.
     ///
-    /// Of each node it takes the transform, a matrix or a translation, rotation and scale, and its
-    /// light, as KHR_lights_punctual gives it, which the node's entity has as a [`Light`]; of each
-    /// primitive its mesh draws, the positions, normals and tangents, the texture coordinates its
-    /// material's textures name, and its vertex colors, COLOR_0, as floats or normalized integers,
-    /// and its indices, of 8, 16 or 32 bits; and of its material, glTF's metallic-roughness, as
-    /// ARCHITECTURE.md's Rendering says: the base color factor and texture, the metallic and
-    /// roughness factors and their texture, or, in their place, KHR_materials_pbrSpecularGlossiness's
-    /// diffuse factor and texture, specular and glossiness factors and their texture, the normal map
-    /// and its scale, the occlusion map and its strength, the emissive factor, times
-    /// KHR_materials_emissive_strength's strength, and its texture, each texture's wrapping and
-    /// whether it magnifies to the nearest texel, the alpha mode and cutoff, whether it's
-    /// double-sided, and whether KHR_materials_unlit makes it unlit.
-    /// A primitive without normals draws flat, and a lit material's normal map without tangents
-    /// takes MikkTSpace's; a material that isn't double-sided draws its triangles' fronts alone.
-    /// Buffers
-    /// are in files in the model's folder, named by URIs relative to the model's, read no further
-    /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
-    /// buffer views: PNGs or JPEGs, as `add_texture` takes them, or DDS files of BC7, with one level
-    /// or their full chain, which a texture's MSFT_texture_dds names in place of its source, told
-    /// apart by their bytes rather than by the types the model declares. A file added again gives
-    /// the model it gave first. It's
-    /// named by its asset ID, where its file has one, or else by its path, as a texture is, and its
+    /// Its meshes and images are added once, like [`add_mesh`](Self::add_mesh) and
+    /// [`add_texture`](Self::add_texture). Each image is read as far as its header, then decoded
+    /// off the main thread with its mip levels, so one whose pixels don't decode warns and samples
+    /// white. Each draws once frames have streamed it. The add logs `asset.model_loaded` with its
+    /// duration and the meshes and images it added.
+    ///
+    /// A run from a game's package reads the model as cooked (cooked.rs): meshes optimized, with
+    /// levels of detail each draw picks by its size on screen, and images compressed with their
+    /// levels (BC7 of colors or values, BC5 of normal maps, DDS blocks as they are).
+    ///
+    /// A file added again gives the first model until [`remove_model`](Self::remove_model). It's
+    /// named by its asset ID where its file has one, else by its path, like a texture, and its
     /// images by its name and their places in it, such as `5f3c9a1e07b2d846#0` or
-    /// `assets/truck.glb#0`. In a development run that serves the tool API, it takes what its files
-    /// hold again as they change, as hot_reload.rs says: its meshes and images, and,
-    /// unless the run is recorded, in a lockstep session or follows another, its nodes and
-    /// materials, which its roots' nodes take.
+    /// `assets/truck.glb#0`. In a development run that serves the tool API, it takes what its
+    /// files hold again as they change (hot_reload.rs): meshes and images, and, unless the run is
+    /// recorded, in a lockstep session or follows another, nodes and materials, which its roots'
+    /// nodes take.
     ///
-    /// Its skins move skinned primitives' vertices by their joints, its nodes in the scene, each
-    /// vertex by its first four joints, JOINTS_0 and WEIGHTS_0, as the frame draws them; its
-    /// animations are clips, linear, stepped or cubic splines of its nodes' translations, rotations
-    /// and scales, which an [`Animator`] on a root plays on its nodes.
+    /// # What it reads
     ///
-    /// It ignores cameras, animations' channels of morph weights or of nodes outside the scene,
-    /// JOINTS_1 and WEIGHTS_1, and the extensions the model uses without requiring them but
-    /// those it reads, a material's texture that reads other texture coordinates than its others,
-    /// or whose image another texture samples as what it doesn't, as data where it samples colors,
-    /// and a primitive's TANGENT that holds numbers that aren't finite, which glTF doesn't allow,
-    /// drawing the primitive as one without them, and logs which it has at info level, as
-    /// `engine.model_ignored`: the model draws as
-    /// it is at rest. It ignores without a word the textures' minification filters, since it
-    /// samples them trilinearly and anisotropically unless they magnify to the nearest texel, morph
-    /// targets while their weights are 0, the other scenes, and whatever the scene doesn't reach,
-    /// which it doesn't read.
+    /// - Each node's transform (a matrix, or translation, rotation and scale) and its
+    ///   KHR_lights_punctual light, which becomes a [`Light`] on the node's entity.
+    /// - Each primitive's positions, normals, tangents, the texture coordinates its material's
+    ///   textures name, COLOR_0 (floats or normalized integers) and 8, 16 or 32-bit indices. No
+    ///   normals draws flat; a lit normal map without tangents takes MikkTSpace's.
+    /// - Each material's glTF metallic-roughness (ARCHITECTURE.md's Rendering), or
+    ///   KHR_materials_pbrSpecularGlossiness in its place; normal map and scale; occlusion map and
+    ///   strength; emissive factor times KHR_materials_emissive_strength, and its texture; each
+    ///   texture's wrapping and whether it magnifies to the nearest texel; alpha mode and cutoff;
+    ///   double-sidedness (else only triangles' fronts draw); KHR_materials_unlit.
+    /// - Buffers in files in the model's folder, named by URIs relative to the model's and read no
+    ///   further than their byteLength, in base64 data URIs, or in a GLB's BIN chunk. Images there
+    ///   or in buffer views: PNGs or JPEGs like `add_texture`'s, or BC7 DDS files with one level
+    ///   or their full chain, named by a texture's MSFT_texture_dds in place of its source.
+    ///   Formats are told apart by their bytes, not the declared types.
+    /// - Skins, moving skinned primitives' vertices by their first four joints (JOINTS_0,
+    ///   WEIGHTS_0), joints being nodes in the scene. Animations: clips of linear, stepped or
+    ///   cubic-spline translations, rotations and scales, played by an [`Animator`] on a root.
     ///
-    /// Fails, adding nothing, with `engine.unsupported_model` for glTF the engine doesn't draw:
-    /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
-    /// accessors without a buffer view, morph weights other than 0, a sampler that
-    /// wraps across and down differently, a texture without an image, any required extension but
-    /// KHR_materials_unlit, KHR_lights_punctual, KHR_materials_emissive_strength,
-    /// KHR_materials_pbrSpecularGlossiness and MSFT_texture_dds, and a model that takes more than 8
-    /// GiB to read, of its buffers, images, as read and as decoded, vertices and nodes; with
-    /// `engine.bad_model` for a file that can't be read, isn't a regular file or isn't
-    /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
-    /// its vertices, a skinned primitive without JOINTS_0 and WEIGHTS_0 or moved by a joint past
-    /// its skin's, a skin's joint outside the scene, an animation's times that don't go up from 0,
-    /// a node with two parents, a matrix that isn't a translation, rotation and
-    /// scale, a light the extension doesn't allow, a URI that's neither a data URI nor a relative
-    /// path, or that has a `..`, or an image that isn't a PNG, a JPEG or a DDS of BC7 as far as its
-    /// header, and,
-    /// though glTF allows them, integers written as floats, such as `1.0`, and a primitive whose
-    /// positions span more than its packed vertices reach with what an f32 holds, as -f32::MAX
-    /// beside 0 do; and with
-    /// `renderer.too_many_textures` if the renderer hasn't room for its images.
+    /// # What it ignores
+    ///
+    /// It logs these at info level as `engine.model_ignored`, and the model draws as at rest:
+    ///
+    /// - cameras, animation channels of morph weights or of nodes outside the scene, JOINTS_1 and
+    ///   WEIGHTS_1, and extensions the model uses without requiring but this doesn't read;
+    /// - a material's texture that reads other texture coordinates than its others, or whose image
+    ///   another texture samples as what it doesn't, as data where it samples colors;
+    /// - a primitive's TANGENT with non-finite numbers, which glTF forbids: it draws without
+    ///   tangents.
+    ///
+    /// It ignores without a word: minification filters (it samples trilinearly and anisotropically
+    /// unless a texture magnifies to the nearest texel), morph targets while their weights are 0,
+    /// the other scenes, and whatever the scene doesn't reach.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is added on failure.
+    ///
+    /// - `engine.unsupported_model` for glTF the engine doesn't draw: glTF 1, no scene, primitives
+    ///   that aren't triangle lists, sparse accessors, accessors without a buffer view, morph
+    ///   weights other than 0, a sampler that wraps across and down differently, a texture without
+    ///   an image, a required extension but KHR_materials_unlit, KHR_lights_punctual,
+    ///   KHR_materials_emissive_strength, KHR_materials_pbrSpecularGlossiness and
+    ///   MSFT_texture_dds, or over 8 GiB to read (buffers, images as read and as decoded, vertices
+    ///   and nodes).
+    /// - `engine.bad_model` for a file that can't be read, isn't a regular file or isn't glTF, as
+    ///   far as reading checks: an accessor past its buffer view; an index past its vertices; a
+    ///   skinned primitive without JOINTS_0 and WEIGHTS_0 or moved by a joint past its skin's; a
+    ///   skin's joint outside the scene; animation times that don't go up from 0; a node with two
+    ///   parents; a matrix that isn't a translation, rotation and scale; a light the extension
+    ///   doesn't allow; a URI that's neither a data URI nor a relative path, or has a `..`; an
+    ///   image that isn't a PNG, JPEG or BC7 DDS as far as its header; integers written as floats,
+    ///   such as `1.0`, though glTF allows them; positions that span more than the packed vertices
+    ///   reach with an f32, as -f32::MAX beside 0 do.
+    /// - `renderer.too_many_textures` if the renderer hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
         let zone = gg_core::zone!();
         let path = path.as_ref();
@@ -413,26 +414,24 @@ impl Context {
     }
 
     /// Removes `texture`, a texture or a sprite sheet's (`sheet.texture`) that a layer added or
-    /// text named, as a game does with what it draws no more, such as a level's once it has left
-    /// the level: the GPU lets go of its image once the frames and copies that may use it have
-    /// finished, what of it was still decoding or streaming is dropped, and what samples it samples
-    /// a pixel of white from the frame that takes the removal on. Its handle is never given out
-    /// again, so that a stale one, in the world or a snapshot, never samples another texture; and
-    /// a development run watches its file no more. Removing one removed already does nothing.
+    /// text named, as a game does with what it draws no more, such as a left level's. The GPU lets
+    /// go of its image once the frames and copies that may use it have finished, and what of it
+    /// was still decoding or streaming is dropped. From the frame that takes the removal on, what
+    /// samples it samples white. Its handle is never given out again, so a stale one in the world
+    /// or a snapshot never samples another texture. A development run watches its file no more.
+    /// Removing one removed already does nothing.
     ///
-    /// Removal changes nothing the simulation reads: the texture keeps its name and its path, which
-    /// the world's hash, scenes and snapshots read, and its names go on finding it, so that the
-    /// world's sprites keep it, scene text that a tick loads finds it, and a world hashes alike
-    /// whenever a layer removed it. But what loads a texture by its name or its file, a layer's
-    /// add, a scene that the tool API or a scene file loads, a recorded or a lockstep peer's
-    /// command or edit, and a restore, takes it for none, and loads its file anew, as another
-    /// texture, which its names find from then on.
+    /// The simulation reads nothing that changes: the texture keeps its name and path, which the
+    /// world's hash, scenes and snapshots read, and its names still find it. The world's sprites
+    /// keep it, scene text a tick loads finds it, and a world hashes alike whenever a layer
+    /// removed it. But what loads a texture by name or file (a layer's add, a scene the tool API
+    /// or a scene file loads, a recorded or lockstep peer's command or edit, a restore) takes it
+    /// for none and loads the file anew, as another texture, which its names find from then on.
     ///
     /// # Panics
     ///
-    /// If `texture` is the engine's white texture or a font's field, which aren't removed, or a
-    /// model's image, which goes with its model, as [`remove_model`](Self::remove_model) says; or
-    /// another context's.
+    /// If `texture` is the engine's white texture or a font's field, which aren't removed; a
+    /// model's image, which goes with its [model](Self::remove_model); or another context's.
     pub fn remove_texture(&mut self, texture: Texture) {
         if let Some(why) = self.unremovable(texture) {
             panic!("texture {} {why}", texture.index());
@@ -440,17 +439,16 @@ impl Context {
         self.drop_texture(texture, true);
     }
 
-    /// Removes `mesh`, which a layer added, as [`remove_texture`](Self::remove_texture) removes a
-    /// texture: the GPU lets go of its buffers once the frames and copies that may use them have
-    /// finished, and every draw of it draws nothing from the frame that takes the removal on, its
-    /// handle never given out again. The simulation reads nothing of it, as the world's hash reads
-    /// nothing of a [`MeshDraw`]. Removing one removed already does nothing.
+    /// Removes `mesh`, which a layer added, like [`remove_texture`](Self::remove_texture): the GPU
+    /// lets go of its buffers once the frames and copies that may use them have finished, and every
+    /// draw of it draws nothing from the frame that takes the removal on. Its handle is never
+    /// given out again. The simulation reads nothing of it: the world's hash reads nothing of a
+    /// [`MeshDraw`]. Removing one removed already does nothing.
     ///
     /// # Panics
     ///
-    /// If `mesh` is the engine's quad, which sprites, circles, lines and text are drawn on, or a
-    /// model's, which goes with its model, as [`remove_model`](Self::remove_model) says; or
-    /// another context's.
+    /// If `mesh` is the engine's quad, which sprites, circles, lines and text are drawn on; a
+    /// model's, which goes with its [model](Self::remove_model); or another context's.
     pub fn remove_mesh<V>(&mut self, mesh: Mesh<V>) {
         if let Some(why) = self.unremovable_mesh(mesh.index()) {
             panic!("mesh {} {why}", mesh.index());
@@ -458,14 +456,13 @@ impl Context {
         self.drop_mesh(mesh.index());
     }
 
-    /// Removes `model`, which a layer added or text named, and its meshes and images with it, as
-    /// [`remove_mesh`](Self::remove_mesh) and [`remove_texture`](Self::remove_texture) remove them,
-    /// so that what draws them draws nothing, or samples white, from the frame that takes the
-    /// removal on; a development run watches its files no more. It keeps its name, its path and
-    /// its nodes, as a texture removed keeps its name, so that a root that names it spawns what it
-    /// did, whenever it was removed, of draws that draw nothing; but what loads it by its name or
-    /// its file loads it anew, as another model, as for a texture. Removing one removed already
-    /// does nothing.
+    /// Removes `model`, which a layer added or text named, and its meshes and images with it, like
+    /// [`remove_mesh`](Self::remove_mesh) and [`remove_texture`](Self::remove_texture): what draws
+    /// them draws nothing, or samples white, from the frame that takes the removal on. A
+    /// development run watches its files no more. It keeps its name, path and nodes, so a root
+    /// naming it spawns what it did, whenever it was removed, of draws that draw nothing. What
+    /// loads it by name or file loads it anew, as another model, as for a texture. Removing one
+    /// removed already does nothing.
     ///
     /// # Panics
     ///
@@ -507,8 +504,8 @@ impl Context {
         });
     }
 
-    /// Why `texture` isn't removed, as [`remove_texture`](Self::remove_texture) says, if it isn't:
-    /// `None` for one a layer added or text named.
+    /// Why `texture` isn't removable (see [`remove_texture`](Self::remove_texture)); `None` if it
+    /// is.
     pub(super) fn unremovable(&self, texture: Texture) -> Option<&'static str> {
         if self.assets.name(texture).is_none() {
             return Some(
@@ -521,8 +518,7 @@ impl Context {
         of_model.then_some("is a model's image, which goes with its model, through `remove_model`")
     }
 
-    /// Why the mesh of index `index` isn't removed, as [`remove_mesh`](Self::remove_mesh) says, if
-    /// it isn't.
+    /// Why the mesh of index `index` isn't removable (see [`remove_mesh`](Self::remove_mesh)).
     pub(super) fn unremovable_mesh(&self, index: u32) -> Option<&'static str> {
         if index == 0 {
             return Some(
@@ -534,9 +530,9 @@ impl Context {
         of_model.then_some("is a model's, which goes with its model, through `remove_model`")
     }
 
-    /// Removes `texture`, unless it's removed already, as [`remove_texture`](Self::remove_texture)
-    /// says, noting it among what the layers added if `noted`, by its index and its path, as a
-    /// texture a layer removes is; a model's image goes with its model's note.
+    /// Removes `texture` unless it's removed already (see
+    /// [`remove_texture`](Self::remove_texture)). If `noted`, notes it among what the layers
+    /// added, by index and path; a model's image goes with its model's note.
     pub(super) fn drop_texture(&mut self, texture: Texture, noted: bool) {
         if self.assets.removed(texture) {
             return;
@@ -564,9 +560,8 @@ impl Context {
         });
     }
 
-    /// Removes the mesh of index `index`, unless it's removed already, as
-    /// [`remove_mesh`](Self::remove_mesh) says, noting it among what the layers added, by its
-    /// index.
+    /// Removes the mesh of index `index` unless it's removed already (see
+    /// [`remove_mesh`](Self::remove_mesh)), noting it by index among what the layers added.
     pub(super) fn drop_mesh(&mut self, index: u32) {
         if self.meshes.remove_index(index) {
             self.add_assets(|assets| assets.note(format!("removed mesh {index}")));
@@ -574,25 +569,29 @@ impl Context {
     }
 
     /// Loads the TrueType or OpenType font at `path`, a `.ttf` or `.otf` file, for
-    /// [`draw_text`](Self::draw_text) to draw text in from then on, through the handle, baking its
-    /// field as it loads: a texture of data, a multi-channel signed distance field of each glyph of
-    /// the characters Windows-1252 prints that the font has, and of its `.notdef`, which draws in
-    /// place of the characters the font or the field lacks but whitespace and control characters.
-    /// The outlines are its default instance's, a variable font's at its axes' defaults, unhinted,
-    /// since the field draws them at any size. `name` names
-    /// the font in errors and its field in GPU captures, as `<name> field`; frames stream the field
-    /// to the GPU, and its text draws nothing until it's there, as its glyphs bake and the field
-    /// grows. Its add logs `asset.font_loaded`, with how long it took. A file added again, by
-    /// whatever form of its path, gives the font it gave first, without baking it again, as does an
-    /// asset's file renamed or moved since, by the ID that names it. Scenes, snapshots, recordings
-    /// and the tool API name it by its asset ID, where its file has one, and otherwise by its path,
-    /// as a texture is. In a development run that serves the tool API, it bakes again as its file
-    /// changes, off the main thread.
+    /// [`draw_text`](Self::draw_text) to draw text in, through the handle. Loading bakes its
+    /// field: a data texture of multi-channel signed distance fields, one for each glyph of the
+    /// characters Windows-1252 prints that the font has, and for its `.notdef`, which draws for
+    /// characters the font or field lacks except whitespace and control characters. The outlines
+    /// are the default instance's (a variable font's at its axes' defaults), unhinted, since the
+    /// field draws at any size.
     ///
-    /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
-    /// 256 MiB, isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone isn't,
-    /// or has glyphs that don't fit a field of 8,192 texels square, alone or together; and with
-    /// `renderer.too_many_textures` if the renderer hasn't room for its field.
+    /// `name` names the font in errors and its field in GPU captures, as `<name> field`. Frames
+    /// stream the field to the GPU, and text draws nothing until it's there, as glyphs bake and
+    /// the field grows. The add logs `asset.font_loaded` with its duration.
+    ///
+    /// A file added again, by any form of its path, gives the first font without baking again, as
+    /// does an asset's file renamed or moved since, by its ID. Scenes, snapshots, recordings and
+    /// the tool API name it by its asset ID where its file has one, else by its path, like a
+    /// texture. In a development run that serves the tool API, it bakes again off the main thread
+    /// as its file changes.
+    ///
+    /// # Errors
+    ///
+    /// - `engine.bad_font` if the file can't be read, isn't a regular file, is over 256 MiB, isn't
+    ///   a TrueType or OpenType font with outlines (a bitmap-only font isn't), or has glyphs that
+    ///   don't fit a field of 8,192 texels square, alone or together.
+    /// - `renderer.too_many_textures` if the renderer hasn't room for its field.
     pub fn add_font(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Font> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
@@ -642,21 +641,22 @@ impl Context {
     }
 
     /// Loads the prefab at `path`, a `.prefab` file holding a scene of one subtree, as
-    /// [`World::save_scene`] saves one, for [`Prefab::spawn`] and the [`PrefabRoot`]s that name it
-    /// to spawn instances of from then on, through the handle. `name` names it in errors. A file
-    /// added again, by whatever form of its path, gives the prefab it gave first, as does an
-    /// asset's file renamed or moved since, by the ID that names it. It's named by its asset ID,
-    /// where its file has one, or else by its path, as a texture is. Its text is read as it loads,
-    /// and the textures, models, fonts and prefabs it names that none loaded has are loaded after
-    /// it, as a scene's are; its entities' components are made as its instances spawn, of the types
-    /// the world has registered, as a scene's are, which refuses a text that doesn't load. Its load
-    /// logs `asset.prefab_loaded`, with how long it took, the loads of what it names among it. In a
-    /// development run that serves the tool API, it's read again as its file changes, and every
-    /// instance takes what changed, as [`PrefabRoot`] says, unless the run is recorded, in a
-    /// lockstep session or follows another.
+    /// [`World::save_scene`] saves one, for [`Prefab::spawn`] and the [`PrefabRoot`]s naming it to
+    /// spawn instances of, through the handle. `name` names it in errors. A file added again, by
+    /// any form of its path, gives the first prefab, as does an asset's file renamed or moved
+    /// since, by its ID. It's named by its asset ID where its file has one, else by its path, like
+    /// a texture.
     ///
-    /// Fails with `engine.bad_prefab` if the file can't be read, isn't a regular file, is more than
-    /// 16 MiB, isn't UTF-8, or isn't a scene's RON as far as its syntax and its entities' IDs go.
+    /// Its text is read as it loads, and the textures, models, fonts and prefabs it names that none
+    /// loaded has load after it, like a scene's. Its components are made as instances spawn, of
+    /// the types the world has registered, so a text that doesn't load is refused then. The load
+    /// logs `asset.prefab_loaded` with its duration, those loads among it. In a development run
+    /// that serves the tool API, it's read again as its file changes and every instance takes
+    /// what changed (see [`PrefabRoot`]), unless the run is recorded, in a lockstep session or
+    /// follows another.
+    ///
+    /// Fails with `engine.bad_prefab` if the file can't be read, isn't a regular file, is over
+    /// 16 MiB, isn't UTF-8, or isn't a scene's RON as far as its syntax and entity IDs go.
     pub fn add_prefab(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Prefab> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
@@ -700,27 +700,32 @@ impl Context {
         Ok(prefab)
     }
 
-    /// Loads the UI at `path`, a `.ui` file holding a tree of named nodes, as ARCHITECTURE.md's
-    /// Events and layers describes, or the UI file under the asset root whose asset ID `path` is,
-    /// as text names one; and adds a UI of it, which the layer drives through the handle, as
-    /// [`GameUi`] says, with its own focus and what code sets of its nodes, apart from any other UI
-    /// of the file, which is read once, by whatever form of its path. `name` names it in errors,
-    /// the log and the tool API's `ui`. Its file is named by its asset ID, where it has one, or
-    /// else by its path, as a texture's is. The fonts and textures its nodes name, by their IDs or
-    /// paths, are loaded with it, as a scene's are, and its file's load logs `asset.ui_loaded`, with
-    /// how long it took, theirs among it. In a development run that serves the tool API,
-    /// its file is read again as it changes, every UI of it taking its nodes, each node keeping
-    /// what code set of it by its name, and the focus staying on the button of its name, logging
-    /// `UI reloaded`; a change that doesn't read warns with its code, the UI staying as it was.
+    /// Loads the UI at `path`, a `.ui` file holding a tree of named nodes (ARCHITECTURE.md's
+    /// Events and layers), or the UI file under the asset root whose asset ID `path` is, as text
+    /// names one. Adds a [`GameUi`] of it for the layer to drive through the handle, with its own
+    /// focus and what code sets of its nodes, apart from any other UI of the file, which is read
+    /// once, by any form of its path. `name` names it in errors, the log and the tool API's `ui`.
+    /// The file is named by its asset ID where it has one, else by its path, like a texture's.
     ///
-    /// Fails with `engine.bad_ui` if the file can't be read, isn't a regular file, is more than
-    /// 16 MiB or isn't UTF-8; with `ui.syntax`, `ui.bad_name`, `ui.duplicate_name`,
-    /// `ui.bad_field`, `ui.unnamed_button`, `ui.bad_value` or `ui.no_node` for a file that isn't a
-    /// UI's, as `game_ui::file::parse` says, saying the line and column where it's refused;
-    /// as finding an ID's file fails, as with `asset.unknown_id`; with `asset.no_font` or
-    /// `asset.no_texture` for a font or a texture it names that doesn't load, saying why; and with
-    /// `renderer.too_many_textures` if the renderer hasn't room for the texture rounded corners
-    /// are cut from, which the first UI adds.
+    /// The fonts and textures its nodes name, by ID or path, load with it, like a scene's. The
+    /// load logs `asset.ui_loaded` with its duration, theirs among it. In a development run that
+    /// serves the tool API, the file is read again as it changes: every UI of it takes its nodes,
+    /// each node keeps what code set of it by name, the focus stays on the button of its name, and
+    /// it logs `UI reloaded`. A change that doesn't read warns with its code, the UI staying as it
+    /// was.
+    ///
+    /// # Errors
+    ///
+    /// - `engine.bad_ui` if the file can't be read, isn't a regular file, is over 16 MiB or isn't
+    ///   UTF-8.
+    /// - `ui.syntax`, `ui.bad_name`, `ui.duplicate_name`, `ui.bad_field`, `ui.unnamed_button`,
+    ///   `ui.bad_value` or `ui.no_node` for a file that isn't a UI's (`game_ui::file::parse`),
+    ///   with the line and column where it's refused.
+    /// - As finding an ID's file fails, such as `asset.unknown_id`.
+    /// - `asset.no_font` or `asset.no_texture` for a font or texture it names that doesn't load,
+    ///   saying why.
+    /// - `renderer.too_many_textures` if the renderer hasn't room for the texture rounded corners
+    ///   are cut from, which the first UI adds.
     pub fn add_ui(&mut self, name: &str, path: impl AsRef<Path>) -> Result<GameUi> {
         let path = path.as_ref();
         let path = match path.to_str().filter(|given| assets::is_id(given)) {
@@ -766,10 +771,9 @@ impl Context {
         Ok(self.uis.add(found, name))
     }
 
-    /// Loads each font and texture the nodes of `document`, a UI's, name that none loaded has, as
-    /// [`load_named`](Self::load_named) loads what a scene names, and gives each node what it
-    /// names, and an image its texture's size, where a layer's add or a scene loaded it from its
-    /// file.
+    /// Loads each font and texture the nodes of `document`, a UI's, name that none loaded has,
+    /// like [`load_named`](Self::load_named) for a scene. Gives each node what it names, and an
+    /// image its texture's size, where a layer's add or a scene loaded it from its file.
     ///
     /// Fails with `asset.no_font` or `asset.no_texture` for one that doesn't load, saying why.
     pub(super) fn load_ui_assets(&mut self, document: &mut game_ui::Document) -> Result<()> {
@@ -814,16 +818,16 @@ impl Context {
         Ok(())
     }
 
-    /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types
-    /// that a mesh's, a shader's or a model's draws hold the bytes of, as [`Assets`] keeps it.
+    /// Records that a layer added an asset of `kind`, described by `what`: its name, and the types
+    /// a mesh's, shader's or model's draws hold the bytes of. [`Assets`] keeps it.
     pub(super) fn added(&mut self, kind: &str, what: &str) {
         let (meshes, shaders) = (self.meshes.count(), self.shaders.count());
         let added = format!("{kind} {meshes} {shaders} {} {what}", self.textures.count());
         self.add_assets(|assets| assets.note(added));
     }
 
-    /// Has `path` name `texture`, which another path to its file added before, as [`Assets::alias`]
-    /// does, unless it names a texture already that isn't removed.
+    /// Has `path` name `texture`, which another path to its file added before (see
+    /// [`Assets::alias`]), unless it already names a texture that isn't removed.
     pub(super) fn alias(&mut self, texture: Texture, path: &Arc<str>) {
         if self.assets.live_texture(path).is_none() {
             self.add_assets(|assets| assets.alias(texture, path.clone()));
@@ -831,8 +835,8 @@ impl Context {
     }
 
     /// Has `add` change the assets the layers added, which the world, and the world as edited while
-    /// a copy plays, share from then on: the context's, so that a world that took the world's place
-    /// doesn't lose them, and copied only where a copy of the world shares them.
+    /// a copy plays, share. Kept in the context so a world that took the world's place doesn't lose
+    /// them, and copied only where a copy of the world shares them.
     pub(super) fn add_assets<R>(&mut self, add: impl FnOnce(&mut Assets) -> R) -> R {
         // The worlds let go of their shares for the change.
         self.world.share_assets(&Arc::default());
@@ -849,13 +853,13 @@ impl Context {
         added
     }
 
-    /// Has the world share the assets the layers added again, if a layer put another world in its
-    /// place, as it loaded, attached or ticked, as [`World::share_assets`] says.
+    /// Has the world share the assets again, if a layer put another world in its place (see
+    /// [`World::share_assets`]).
     pub(crate) fn share_assets(&mut self) {
         self.world.share_assets(&self.assets);
     }
 
-    /// The meshes the layers added, which the tool API reads their extents from.
+    /// The meshes the layers added, which the tool API reads extents from.
     #[cfg(feature = "dev")]
     pub(crate) fn meshes(&self) -> &Meshes {
         &self.meshes
@@ -863,9 +867,9 @@ impl Context {
 }
 
 /// Logs `asset.texture_loaded` at the debug level, as a game may add many: texture `named`, `size`
-/// pixels across and down, added from its file in the time since `started`. Its pixels decode on
-/// the loader's threads from then on, as [`Loader`] logs; where the loader decodes inline, as a
-/// test's or a replay's context's does, they decoded within that time.
+/// pixels, added from its file in the time since `started`. Its pixels decode on the loader's
+/// threads from then on, as [`Loader`] logs; where the loader decodes inline, as a test's or
+/// replay's context's does, they decoded within that time.
 fn texture_loaded(named: &str, size: [u32; 2], started: Instant) {
     debug!(
         code = "asset.texture_loaded",
@@ -877,8 +881,8 @@ fn texture_loaded(named: &str, size: [u32; 2], started: Instant) {
 }
 
 /// Adds `image`, sprite sheet `name`'s from `path`, read as far as its header, to `textures`
-/// through `loader`, which decodes it, as a sheet of cells `cell` pixels across and down, if they
-/// fit it, as [`fits`] checks; one that doesn't takes no texture.
+/// through `loader`, as a sheet of cells `cell` pixels across and down, if they fit, as [`fits`]
+/// checks; one that doesn't takes no texture.
 pub(super) fn add_sheet(
     loader: &mut Loader,
     textures: &mut Textures,
@@ -897,8 +901,8 @@ pub(super) fn add_sheet(
     })
 }
 
-/// Checks that cells `cell` pixels across and down fit sprite sheet `name`'s image, from `path`,
-/// `size` pixels across and down.
+/// Checks that cells `cell` pixels across and down fit sprite sheet `name`'s image, from `path`, of
+/// `size` pixels.
 ///
 /// Fails with `engine.bad_sprite_sheet` if a side of `cell` is 0 or more than the image's.
 fn fits(name: &str, path: &Path, size: [u32; 2], cell: [u32; 2]) -> Result<()> {
@@ -919,7 +923,7 @@ fn fits(name: &str, path: &Path, size: [u32; 2], cell: [u32; 2]) -> Result<()> {
 }
 
 /// Type `T`'s name and size, such as `glam::f32::vec3::Vec3 12`: what a snapshot's assets say a
-/// draw holds the bytes of, so that a draw kept in one comes back only where they're the same.
+/// draw holds the bytes of, so a draw kept in one comes back only where they're the same.
 fn layout<T>() -> String {
     format!("{} {}", type_name::<T>(), size_of::<T>())
 }

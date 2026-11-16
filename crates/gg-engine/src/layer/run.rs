@@ -52,11 +52,9 @@ impl Context {
         Self::with_world(window, World::default())
     }
 
-    /// A context for `app`'s run, in `window`, if it has one, whose world draws its entities' IDs
-    /// from the app's seed, or from a seed drawn at random without one; which decodes the images
-    /// of the textures its layers add off the main thread, as [`add_texture`](Self::add_texture)
-    /// says; and which plays sound if `aloud`, as a windowed or embedded run does, as
-    /// [`add_sound`](Self::add_sound) says.
+    /// A context for `app`'s run, in `window` if any. Entity IDs come from the app's seed, else a
+    /// random one. Textures decode off the main thread. It plays sound if `aloud`
+    /// ([`add_sound`](Self::add_sound)).
     pub(crate) fn of_run(window: Option<Window>, app: &App, aloud: bool) -> Self {
         let world = app.seed.map_or_else(World::default, World::seeded);
         let state = window.as_ref().and_then(|_| {
@@ -90,29 +88,26 @@ impl Context {
         cx
     }
 
-    /// Whether the run reads the files under its asset root from its game's package, as
-    /// [`App::project`](crate::App::project) says, rather than the disk: such a run reloads none,
-    /// and has no asset database, no scene files to open or save and no ID files.
+    /// Whether the run reads its asset root's files from its game's package
+    /// ([`App::project`](crate::App::project)), not the disk. It reloads nothing and has no asset
+    /// database, scene files to open or save, or ID files.
     pub(crate) fn reads_package(&self) -> bool {
         self.files.packaged().is_some()
     }
 
-    /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
-    /// `seed`: for calling a layer's [`attach`](Layer::attach) and its [`tick`](Layer::tick)s
-    /// directly, as a test does, so that its simulation goes the same way every run, on every
-    /// machine. It decodes each texture's image as it's added, on the calling thread, rather than off
-    /// the main thread as a run's context does, but alike otherwise: one whose pixels don't decode
-    /// loads and warns, as in the run it goes as.
+    /// A context without a window, renderer or stack, drawing entity IDs from `seed`. For calling
+    /// a layer's [`attach`](Layer::attach) and [`tick`](Layer::tick)s directly, as a test does,
+    /// so the simulation is the same on every run and machine. Textures decode on the calling
+    /// thread as they're added; pixels that don't decode load and warn, as in a run.
     #[doc(hidden)]
     pub fn seeded(seed: u64) -> Self {
         Self::with_world(None, World::seeded(seed))
     }
 
-    /// Names the assets the layers add from files by their paths relative to `root`, as
-    /// [`App::root`](crate::App::root) does for a run, and, in a development build, by the IDs the
-    /// ID files under it hold, which it reads, writing none, as a run that serves no tool API does:
-    /// for a [`seeded`](Self::seeded) context, so that the world's hash, which reads its textures'
-    /// names, doesn't depend on where the game's files are, and names them as the game's runs do.
+    /// Names assets by their paths relative to `root` ([`App::root`](crate::App::root)), and in a
+    /// development build by the IDs in the ID files under it, which it reads and never writes. For
+    /// a [`seeded`](Self::seeded) context: the world's hash reads textures' names, which must
+    /// match a game's runs wherever its files are.
     #[doc(hidden)]
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -122,12 +117,11 @@ impl Context {
         self
     }
 
-    /// Makes the context's game the project whose manifest is in `dir`, as
-    /// [`App::project`](crate::App::project) does for a run, naming assets from its asset root, as
-    /// [`root`](Self::root) does, and loading its start scene: for a [`seeded`](Self::seeded)
-    /// context.
+    /// Makes the game the project whose manifest is in `dir`
+    /// ([`App::project`](crate::App::project)), naming assets as [`root`](Self::root) does and
+    /// loading its start scene. For a [`seeded`](Self::seeded) context.
     ///
-    /// Fails as the manifest's reading does in a run that `App::project` made a project's.
+    /// Fails as reading the manifest does in `App::project`.
     #[doc(hidden)]
     pub fn project(self, dir: impl AsRef<Path>) -> Result<Self> {
         let manifest = crate::Manifest::read(dir.as_ref())?;
@@ -141,9 +135,8 @@ impl Context {
         Ok(cx)
     }
 
-    /// Has the layers' [`Mods`](crate::Mods) load the mods in `dir`, as a run given `--mods` does,
-    /// for game `game`, as [`App::new`](crate::App::new) names it: for a
-    /// [`seeded`](Self::seeded) context.
+    /// Has the layers' [`Mods`](crate::Mods) load the mods in `dir` for game `game`, as `--mods`
+    /// does. For a [`seeded`](Self::seeded) context.
     #[doc(hidden)]
     #[must_use]
     pub fn mods(mut self, game: &str, dir: impl Into<PathBuf>) -> Self {
@@ -152,10 +145,9 @@ impl Context {
         self
     }
 
-    /// Has the context say it takes part in a networked session, as [`networked`](Self::networked)
-    /// does for a session's runs, playing `player`, as [`player`](Self::player) says, `None` for a
-    /// server: for a [`seeded`](Self::seeded) context, so that a test calls a layer's `attach` and
-    /// `restored` as a session's run does.
+    /// Makes the context [`networked`](Self::networked), playing `player` (`None` for a server),
+    /// so a [`seeded`](Self::seeded) test calls a layer's `attach` and `restored` as a session's
+    /// run does.
     #[doc(hidden)]
     #[must_use]
     pub fn in_session(mut self, player: Option<u8>) -> Self {
@@ -164,10 +156,9 @@ impl Context {
         self
     }
 
-    /// Has the sessions the layers host and join go through the relay at `relay`, as `--relay`
-    /// given alone does for a run: for a [`seeded`](Self::seeded) context, so that a test's layer
-    /// starts one as a run's does. No frame takes it up, which [`set_session`](Self::set_session)
-    /// stands for.
+    /// Has the sessions layers host and join go through the relay at `relay`, as `--relay` alone
+    /// does, for a [`seeded`](Self::seeded) context. No frame takes the session up;
+    /// [`set_session`](Self::set_session) stands for that.
     #[doc(hidden)]
     #[must_use]
     pub fn with_relay(mut self, relay: &str) -> Self {
@@ -176,11 +167,9 @@ impl Context {
         self
     }
 
-    /// Has the context say its run's session stands as `status` says, or that it has none, as a
-    /// frame that takes up a session started or left does: [`session`](Self::session),
-    /// [`networked`](Self::networked) and [`player`](Self::player) from then on. For a
-    /// [`seeded`](Self::seeded) context, so that a test sees its layer follow a session as a run's
-    /// does.
+    /// Sets the session to `status`, or none, as a frame that takes up or leaves a session does;
+    /// [`session`](Self::session), [`networked`](Self::networked) and [`player`](Self::player)
+    /// follow. For a [`seeded`](Self::seeded) context.
     #[doc(hidden)]
     pub fn set_session(&mut self, status: Option<SessionStatus>) {
         self.networked = status.is_some();
@@ -189,8 +178,7 @@ impl Context {
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
-        // The engine's names first, so that a game's types can't take them, listed before any
-        // entity has one.
+        // The engine's names first, so a game's types can't take them, before any entity has one.
         let registered = world.register::<Transform>().and_then(|()| {
             world.register::<Sprite>()?;
             world.register::<MeshDraw>()?;
@@ -259,7 +247,7 @@ impl Context {
             shaders: Shaders::default(),
             textures,
             materials: Materials::default(),
-            // A test's or a replay's, which draws nothing: on the calling thread, as each is added.
+            // For a test or replay, which draws nothing: decodes on the calling thread.
             loader: Loader::inline(),
             streamed: Streaming::default(),
             fonts,
@@ -321,51 +309,57 @@ impl Context {
         }
     }
 
-    /// Whether a SyncTest runs each tick again on a copy of the world (`--sync-test`), as
-    /// [`Layer::swapped`] says: for the Inspector, whose tick then keeps its log as the tick
-    /// started, for the tick's run again.
+    /// Whether a SyncTest reruns each tick on a copy of the world (`--sync-test`,
+    /// [`Layer::swapped`]). The Inspector's tick then keeps its log as the tick started, for the
+    /// rerun.
     #[cfg(feature = "dev")]
     pub(crate) fn sync_tested(&self) -> bool {
         self.dev.sync_tested
     }
 
-    /// The player this run plays: 0 for a lockstep host (`--host`, or [`host`](Self::host)), 1 for
-    /// its joiner (`--join`, or [`join`](Self::join)), the one its server gives a client
-    /// (`--connect`); `None` for a server and outside a session, as once a session the game
-    /// started ends. Each peer runs every player's world, and its layers queue commands for their
-    /// own player alone, naming it in them, as the other peer's queue for theirs: a command whose
-    /// variant or struct has a field `player`, an integer, that names another player than the one
-    /// whose inputs it came in, is refused there (`net.bad_command`), by every run of the session
-    /// alike.
+    /// The player this run plays: 0 for a lockstep host (`--host`, [`host`](Self::host)), 1 for
+    /// its joiner (`--join`, [`join`](Self::join)), the one its server gives a client
+    /// (`--connect`). `None` for a server and outside a session, also once a session the game
+    /// started ends.
+    ///
+    /// Each peer runs every player's world, and its layers queue commands for their own player
+    /// alone, naming it in them. A command whose variant or struct has an integer field `player`
+    /// naming another player than the one whose inputs it came in is refused (`net.bad_command`),
+    /// by every run of the session alike.
     pub fn player(&self) -> Option<u8> {
         self.player
     }
 
-    /// Whether the run takes part in a networked session: a lockstep session's, as its host
-    /// (`--host`) or its joiner (`--join`), or a server's, as the server (`--serve`) or a client
-    /// (`--connect`); not a run alone, a replay or a test's context. A game tells by it what only a
-    /// run alone has, as a player the game plays itself, which a server's world, whose
-    /// [`player`](Self::player) is `None` as a run alone's is, mustn't have. It changes as a
-    /// session the game hosts or joins starts, and as it leaves it, from the frame after, which a
+    /// Whether the run takes part in a networked session: a lockstep host (`--host`) or joiner
+    /// (`--join`), or a server (`--serve`) or client (`--connect`). Not a run alone, a replay or a
+    /// test's context.
+    ///
+    /// A game tells by it what only a run alone has, such as a player it plays itself, which a
+    /// server's world must not have though its [`player`](Self::player) is `None` as a run
+    /// alone's is. It changes from the frame after a hosted or joined session starts or ends; a
     /// layer that sets up such a player follows, taking its bot off and putting it back.
     pub fn networked(&self) -> bool {
         self.networked
     }
 
-    /// Hosts a lockstep session through the run's relay, as `--host` given `--relay` alone would,
-    /// from the next frame: the run its player 0, as [`player`](Self::player) says from then, and
-    /// [`networked`](Self::networked), playing on alone until a run joins by its code, which
-    /// [`session`](Self::session) gives, for the game's UI to show. Its peers predict each other's
-    /// inputs if the app's sessions do, as [`App::predicting`] says. The run's relay is the one
-    /// `--relay` names, given without a session flag, else the one its project's manifest names,
-    /// which a build without `dev` reads from its package; the sessions a game starts go through
-    /// one, as two players' runs behind their routers need.
+    /// Hosts a lockstep session through the run's relay, as `--host` with `--relay` alone would,
+    /// from the next frame. The run becomes player 0 and plays on alone until a run joins by the
+    /// code [`session`](Self::session) gives, for the game's UI to show. Its peers predict each
+    /// other's inputs if the app's sessions do ([`App::predicting`]).
     ///
-    /// Fails if the run takes part in a session already, or has one started (`net.busy`); names no
-    /// relay (`net.no_relay`); is recorded (`net.recorded`), as a recording holds a run alone or a
-    /// session from its start; or can't start one, as when its build can't be read (`net.build`),
-    /// or its code can't be made (`net.start`). Reads the run's executable, to name its build, as a
-    /// session does as it starts: some milliseconds on the calling thread.
+    /// The relay is the one `--relay` names without a session flag, else the project
+    /// manifest's (a build without `dev` reads it from its package). Games' sessions use one, as
+    /// runs behind routers need.
+    ///
+    /// Fails if the run:
+    ///
+    /// - takes part in a session already, or has one started (`net.busy`);
+    /// - names no relay (`net.no_relay`);
+    /// - is recorded (`net.recorded`): a recording holds a run alone or a session from its start;
+    /// - can't read its build (`net.build`) or make the code (`net.start`).
+    ///
+    /// Reads the run's executable to name its build, as a session does as it starts: some
+    /// milliseconds on the calling thread.
     pub fn host(&mut self) -> Result<()> {
         let relay = self.startable()?;
         let code = Code::make().map_err(|error| {
@@ -378,16 +372,14 @@ impl Context {
         self.start_session(&net, code)
     }
 
-    /// Joins the lockstep session that `code` names through the run's relay, as `--join` given
-    /// `--relay` alone and `--code` would, from the next frame: the run its player 1, as
-    /// [`player`](Self::player) says from then, and [`networked`](Self::networked). It runs no tick
-    /// until the host's world comes, which takes its own's place, its layers picking up from it as
-    /// [`Layer::restored`] says; [`session`](Self::session) says how it goes meanwhile. `code` is
-    /// read as a player types it: whatever its case, hyphens and spaces skipped, `I` and `L` read as
-    /// `1` and `O` as `0`.
+    /// Joins the lockstep session `code` names through the run's relay, as `--join` with `--relay`
+    /// alone and `--code` would, from the next frame, as player 1. It runs no tick until the
+    /// host's world replaces its own, its layers picking up as [`Layer::restored`] says;
+    /// [`session`](Self::session) says how it goes meanwhile. `code` is read as a player types it:
+    /// any case, hyphens and spaces skipped, `I` and `L` as `1`, `O` as `0`.
     ///
-    /// Fails as [`host`](Self::host) does, and if `code` isn't a session's (`net.code`), saying
-    /// why without repeating it, as a code is a session's key.
+    /// Fails as [`host`](Self::host) does, and if `code` isn't a session's (`net.code`); the error
+    /// omits the code, a session's key.
     pub fn join(&mut self, code: &str) -> Result<()> {
         let relay = self.startable()?;
         let code: Code = code.parse().map_err(|why: String| {
@@ -396,8 +388,7 @@ impl Context {
         self.start_session(&Net::Join(Toward::Relay(relay)), code)
     }
 
-    /// The run's relay, for [`host`](Self::host) and [`join`](Self::join), if it can start a
-    /// session.
+    /// The relay for [`host`](Self::host) and [`join`](Self::join), if the run can start a session.
     fn startable(&self) -> Result<String> {
         if self.networked || matches!(self.asked, Some(Asked::Start(_))) {
             let why = "the run takes part in a session already, which it leaves first";
@@ -415,8 +406,7 @@ impl Context {
         })
     }
 
-    /// Starts the session `net` says, keyed by `code`, as the run's own sessions start, for the
-    /// stack to take up as the next frame starts.
+    /// Starts the session `net` says, keyed by `code`, for the stack to take up next frame.
     fn start_session(&mut self, net: &Net, code: Code) -> Result<()> {
         let own = &self.own;
         let (predicting, link) = (own.predicting, own.link);
@@ -426,30 +416,28 @@ impl Context {
         Ok(())
     }
 
-    /// Leaves the run's session, if it takes part in one, from the next frame: the run plays on
-    /// alone from the world it has, a joiner's its host's, no longer [`networked`](Self::networked),
-    /// and its [`player`](Self::player) `None`; the other run loses it, as when a peer's connection
-    /// closes. A session started this frame ends before it takes part.
+    /// Leaves the run's session, if any, from the next frame. The run plays on alone from its
+    /// world (a joiner's is its host's), no longer [`networked`](Self::networked), its
+    /// [`player`](Self::player) `None`. The other run loses it, as when a connection closes. A
+    /// session started this frame ends before it takes part.
     pub fn leave(&mut self) {
         self.asked = match self.asked.take() {
-            // Not taken up yet: it ends as it drops, the threads that find the other run with it.
+            // Not taken up yet: it ends as it drops, with the threads that find the other run.
             Some(Asked::Start(_)) => None,
             _ if self.networked => Some(Asked::Leave),
             asked => asked,
         };
     }
 
-    /// The run's session, as a game's own UI shows it, as [`SessionStatus`] says: as the frame's
-    /// turn left it, before its ticks. `None` alone, and for a server or a client, whose sessions a
-    /// game's own UI doesn't start.
+    /// The run's session for a game's own UI ([`SessionStatus`]), as the frame's turn left it,
+    /// before its ticks. `None` alone, and for a server or client.
     pub fn session(&self) -> Option<&SessionStatus> {
         self.session.as_ref()
     }
 
-    /// Puts `text` on the OS's clipboard, as a button that copies does, once the frame ends: in a
-    /// windowed run; a headless or embedded run has none, and warns (`ui.clipboard`). A text field
-    /// with the focus copies and pastes through it itself, by Ctrl+C, Ctrl+X and Ctrl+V, or Cmd on
-    /// macOS.
+    /// Puts `text` on the OS's clipboard once the frame ends. A headless or embedded run has none
+    /// and warns (`ui.clipboard`). A focused text field copies and pastes itself, by Ctrl+C,
+    /// Ctrl+X and Ctrl+V (Cmd on macOS).
     pub fn copy(&mut self, text: &str) {
         self.copied = Some(text.to_owned());
     }
@@ -459,21 +447,18 @@ impl Context {
         self.window.as_ref()
     }
 
-    /// The app's window's physical pixels per logical pixel, as [`Window::scale`] says; 1 in a
-    /// headless run.
+    /// The window's physical pixels per logical pixel ([`Window::scale`]); 1 in a headless run.
     pub fn scale(&self) -> f64 {
         self.window.as_ref().map_or(1.0, Window::scale)
     }
 
-    /// What the app keeps for the user as file `name`, such as its settings: what
-    /// [`save_state`](Self::save_state) last saved there, in a windowed run of the app as
-    /// [`App::new`] names it, by this user on this machine; `None` if it saved nothing there, and
-    /// in headless runs, which keep nothing for the user, as their dock keeps no layout. `name` is
-    /// a file's name, such as `projects.json`, in the OS's directory for the app's state, beside
-    /// the dock's layout: on Windows, `%LOCALAPPDATA%\GGEngine\<app>`.
+    /// What [`save_state`](Self::save_state) last saved as file `name`, such as settings, for this
+    /// user and machine and the app as [`App::new`] names it. `None` if nothing was saved, and in
+    /// headless runs. `name`, such as `projects.json`, is a file in the OS's directory for the
+    /// app's state, beside the dock's layout: on Windows, `%LOCALAPPDATA%\GGEngine\<app>`.
     ///
-    /// Fails with `engine.state`, naming the file, if `name` isn't a file's name alone, or if the
-    /// file is there but can't be read or isn't a regular file.
+    /// Fails with `engine.state`, naming the file, if `name` isn't a file name alone, or the file
+    /// exists but can't be read or isn't a regular file.
     pub fn read_state(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let Some(path) = self.state_path(name)? else {
             return Ok(None);
@@ -488,11 +473,10 @@ impl Context {
         }
     }
 
-    /// Keeps `data` for the user as file `name`, which [`read_state`](Self::read_state) reads in
-    /// the app's later runs, written whole or not at all, so that a crash while it's written
-    /// leaves what it held before; and keeps nothing in headless runs.
+    /// Keeps `data` as file `name` for [`read_state`](Self::read_state) in later runs, written
+    /// whole or not at all, so a crash leaves what the file held. Headless runs keep nothing.
     ///
-    /// Fails with `engine.state`, naming the file, if `name` isn't a file's name alone, or if it
+    /// Fails with `engine.state`, naming the file, if `name` isn't a file name alone, or the file
     /// can't be written.
     pub fn save_state(&self, name: &str, data: &[u8]) -> Result<()> {
         let Some(path) = self.state_path(name)? else {
@@ -504,15 +488,14 @@ impl Context {
         })
     }
 
-    /// Keeps what the app keeps for the user in `dir`, as a windowed run's context does in the OS's
-    /// directory for it, for a test's context.
+    /// Keeps the user's state in `dir` instead of the OS's directory, for a test's context.
     #[cfg(all(test, feature = "dev"))]
     pub(crate) fn keep_state_in(&mut self, dir: PathBuf) {
         self.state = Some(dir);
     }
 
-    /// The path of the app's state file `name`, as [`read_state`](Self::read_state) says; `None`
-    /// in a run that keeps none.
+    /// The path of state file `name` ([`read_state`](Self::read_state)); `None` in a run that
+    /// keeps none.
     fn state_path(&self, name: &str) -> Result<Option<PathBuf>> {
         let alone = Path::new(name).file_name() == Some(std::ffi::OsStr::new(name));
         if !alone {
@@ -523,100 +506,95 @@ impl Context {
         Ok(self.state.as_ref().map(|dir| dir.join(name)))
     }
 
-    /// What's held down and where the cursor is, for layers that poll input rather than
-    /// follow events.
+    /// What's held down and where the cursor is, for layers that poll rather than follow events.
     pub fn input(&self) -> &Input {
         &self.input
     }
 
-    /// Notes what `event` holds down or lets go, as the stack does of each event: for tests that
-    /// hand a game's UI its events without a stack.
+    /// Notes what `event` holds down or lets go, for tests that skip the stack.
     #[cfg(test)]
     pub(crate) fn record_input(&mut self, event: &Event<'_>) {
         self.input.record(event);
     }
 
-    /// Whether layers want the cursor grabbed, as [`set_cursor_grabbed`](Self::set_cursor_grabbed)
-    /// last set it, whether or not it's grabbed now.
+    /// Whether layers want the cursor grabbed ([`set_cursor_grabbed`](Self::set_cursor_grabbed)),
+    /// whether or not it's grabbed now.
     pub fn cursor_grabbed(&self) -> bool {
         self.cursor_grabbed
     }
 
-    /// Asks for the cursor grabbed, for looking about with the mouse, as first-person games do, or
-    /// lets it go. Grabbed, it's hidden and held in the window, locked where it is on Windows,
-    /// macOS and Wayland and kept inside the window on X11, so that the mouse's raw motion,
-    /// [`Event::MouseMotion`], looks about however far it goes. It's held while the window has
-    /// focus, and in a dockspace while the view has the keys, let go as either goes and held again
-    /// as it comes back; in a dockspace, a grab that starts with the cursor off the view moves it
-    /// to the view's center first, where the platform can move it. Headless runs have no cursor to
-    /// grab; a game the editor plays has the editor grab its own window's, while Play gives the
-    /// game its input, letting go at Escape or Stop, and grabbing again at a click in the view.
-    /// It's applied as the next frame starts, so that the layer that asks last in a frame has its
-    /// way.
+    /// Grabs the cursor, for looking about with the mouse as first-person games do, or lets it
+    /// go. Grabbed, it's hidden and held in the window (locked in place on Windows, macOS and
+    /// Wayland, kept inside on X11), so the raw motion, [`Event::MouseMotion`], looks about
+    /// however far it goes.
+    ///
+    /// It's held while the window has focus, and in a dockspace while the view has the keys; it
+    /// lets go as either goes and returns with it. In a dockspace, a grab that starts with the
+    /// cursor off the view first moves it to the view's center, where the platform can. Headless
+    /// runs have no cursor. In a game the editor plays, the editor grabs its own window's while
+    /// Play gives the game its input, letting go at Escape or Stop and grabbing again at a click
+    /// in the view. Applied as the next frame starts, so the layer that asks last has its way.
     pub fn set_cursor_grabbed(&mut self, grabbed: bool) {
         self.cursor_grabbed = grabbed;
     }
 
-    /// The most frames a second a windowed run renders, as
-    /// [`set_max_fps`](Self::set_max_fps) last set it; `None` while uncapped.
+    /// The cap on frames a second a windowed run renders ([`set_max_fps`](Self::set_max_fps));
+    /// `None` while uncapped.
     pub fn max_fps(&self) -> Option<NonZeroU32> {
         self.max_fps
     }
 
-    /// Caps a windowed run's frames at `max` a second, or uncaps them with `None`, as a game's own
-    /// settings menu does: before each frame, the main loop waits out the rest of the frame's
-    /// share of a second, counting from when the last was due, so that the rate holds though a
-    /// wait ends late, and from the frame's start once frames have fallen a whole share behind, so
-    /// that no burst follows a slow one. The simulation's ticks go on in real time however fast
-    /// frames come. `--max-fps` sets it as the run starts, and in a development build the title
-    /// bar's settings, as [`Ui::settings`](crate::Ui::settings) says, set it and keep it for the
-    /// user. Headless runs ignore it, as their frames go as fast as they can or `--real-time` paces
-    /// them, and so do embedded ones, which their tool paces by taking frames.
+    /// Caps a windowed run's frames at `max` a second, or uncaps with `None`, as a game's
+    /// settings menu does. Before each frame the main loop waits out the rest of the frame's
+    /// share of a second, counted from when the last was due, so the rate holds though a wait
+    /// ends late. Once frames fall a whole share behind, it counts from the frame's start, so no
+    /// burst follows a slow frame. Ticks go on in real time however fast frames come.
+    ///
+    /// `--max-fps` sets it at the start; in a development build the title bar's settings
+    /// ([`Ui::settings`](crate::Ui::settings)) set it and keep it for the user. Headless runs
+    /// (as fast as they can, or `--real-time`) and embedded ones (paced by their tool taking
+    /// frames) ignore it.
     pub fn set_max_fps(&mut self, max: Option<NonZeroU32>) {
         self.max_fps = max;
     }
 
-    /// Ends the run before its next frame, as closing its window does when no layer handles that:
-    /// a game's own Quit, such as its menu's.
+    /// Ends the run before its next frame, as closing its window does when no layer handles that;
+    /// for a game's Quit.
     pub fn exit(&mut self) {
         self.exiting = true;
     }
 
-    /// Whether a layer has asked the run to end, as [`exit`](Self::exit) and [`fail`](Self::fail)
-    /// say.
+    /// Whether a layer has asked the run to end, by [`exit`](Self::exit) or [`fail`](Self::fail).
     pub fn exiting(&self) -> bool {
         self.exiting
     }
 
-    /// Ends the run before its next frame, as [`exit`](Self::exit) does, but with `error`, which it
-    /// logs as an error, by its code, at once: for what a layer can't go on without, such as a
-    /// script or a scene that doesn't load, in place of a panic. The layers still detach, and the
-    /// run logs `engine.perf` as it ends, but not `Exited cleanly`, and its status is 1. A replay,
-    /// which goes as its recording does, logs the error too, its status saying whether its hashes
-    /// matched.
+    /// Like [`exit`](Self::exit), but logs `error` at once by its code. For what a layer can't go
+    /// on without, such as a script or scene that doesn't load, instead of a panic. The layers
+    /// still detach and the run logs `engine.perf`, but not `Exited cleanly`, and its status is 1.
+    /// A replay logs the error too; its status says whether its hashes matched.
     pub fn fail(&mut self, error: Error) {
         error!(code = error.code(), "{error:#}");
         self.exiting = true;
         self.failed = true;
     }
 
-    /// The paths of the files the run's game's package holds, as
-    /// [`App::from_package`](crate::App::from_package) and a project's game built without `dev`
-    /// read one, each joined to the asset root as layers name files, which
-    /// [`Scripts::load`](crate::Scripts::load), [`load_scene_file`](Self::load_scene_file) and the
-    /// adds, such as [`add_texture`](Self::add_texture), take, in the order of the paths' bytes;
-    /// none for a run that reads the disk. A player loads a game's scripts by them, as the
-    /// reference player does, which runs a game without its code.
+    /// The paths of the files the game's package holds
+    /// ([`App::from_package`](crate::App::from_package), or a project's game built without
+    /// `dev`), in the order of the paths' bytes. Each is joined to the asset root as layers name
+    /// files, for [`Scripts::load`](crate::Scripts::load),
+    /// [`load_scene_file`](Self::load_scene_file) and adds such as
+    /// [`add_texture`](Self::add_texture). None for a run that reads the disk. A player loads a
+    /// game's scripts by them, running a game without its code.
     pub fn package_files(&self) -> Vec<PathBuf> {
         self.files.paths()
     }
 
-    /// Shows `dialog`, a file dialog of the OS's own, over the main window, modal, and returns
-    /// the path chosen as it closes: `None` if it was cancelled, or if there's no window, as in
-    /// headless runs and tests, which show none. For tools' menus, from [`Layer::ui`], as an
-    /// item's click opens it. Frames pause while it's open, the render thread finishing the frame
-    /// it has, and no frame's time counts the pause: the next update gets none, as the first
-    /// after the window is restored from being minimized does.
+    /// Shows `dialog`, the OS's file dialog, modal over the main window, and returns the path
+    /// chosen. `None` if cancelled, or if there's no window (headless runs and tests). For
+    /// tools' menus, from [`Layer::ui`]. Frames pause while it's open, the render thread
+    /// finishing the frame it has. No frame's time counts the pause: the next update gets none,
+    /// as the first after a restore from minimized does.
     #[cfg(feature = "dev")]
     pub fn pick_file(&mut self, dialog: &crate::FileDialog<'_>) -> Option<std::path::PathBuf> {
         let Some(window) = &self.window else {

@@ -14,24 +14,24 @@ use crate::assets::{self, Catalog, Prints};
 use crate::hot_reload::HotReload;
 
 impl Context {
-    /// Scans the assets under the app's root, as [`assets::scan`] says, writing the ID files
-    /// missing if `writes`, and warning of each missing otherwise, and has the worlds share what it
-    /// found: as a test's context is given its root, and as the tool API lists them in a run that
-    /// no thread watches them for. A context without a root has none, nor one that reads a package,
-    /// whose assets have the IDs the package gives them. A texture is named by the ID
-    /// the database holds for it as it's added, so that a scan after names none afresh.
+    /// Scans the assets under the app's root, as [`assets::scan`] says, and has the worlds share
+    /// the result. Missing ID files are written if `writes`, else warned of.
     ///
-    /// Each scan walks the whole root and reads every ID file on the main thread, O(files), and
-    /// clones the catalog, O(assets): about 70 ms for 1,000 assets on Windows, but a few
-    /// milliseconds apiece for ID files just copied in, the first time they're read; and each ID
-    /// file it writes is flushed to the disk, about 6 ms apiece.
+    /// Used by a test's context given a root, and by the tool API in a run no thread watches. A
+    /// context without a root scans nothing, nor does one that reads a package, whose assets have
+    /// the package's IDs. A texture is named by its database ID as it's added, so a later scan
+    /// names none afresh.
+    ///
+    /// Each scan walks the root, reads every ID file and clones the catalog on the main thread:
+    /// O(files + assets), about 70 ms for 1,000 assets on Windows. ID files just copied in take a
+    /// few milliseconds apiece the first time they're read. Each ID file written is flushed, about
+    /// 6 ms apiece.
     #[cfg(feature = "dev")]
     pub(crate) fn scan_assets(&mut self, writes: bool) {
         self.scan_with(&mut Prints::default(), writes);
     }
 
-    /// Scans the assets under the app's root, as [`scan_assets`](Self::scan_assets) does, pairing
-    /// renames by `prints`.
+    /// Like [`scan_assets`](Self::scan_assets), pairing renames by `prints`.
     #[cfg(feature = "dev")]
     fn scan_with(&mut self, prints: &mut Prints, writes: bool) {
         // A run from a package reads its files there alone, and its assets' IDs.
@@ -44,9 +44,8 @@ impl Context {
         }
     }
 
-    /// Has the worlds share `catalog`, the asset database as a scan left it, and the thread that
-    /// reloads assets follow each texture, model, font and prefab whose file it has elsewhere
-    /// since, as [`HotReload::follow`] says.
+    /// Has the worlds share `catalog`, the database a scan left, and the reload thread follow each
+    /// texture, model, font and prefab whose file moved since, as [`HotReload::follow`] says.
     #[cfg(feature = "dev")]
     fn set_catalog(&mut self, catalog: Catalog) {
         self.add_assets(|assets| assets.set_catalog(catalog));
@@ -63,15 +62,18 @@ impl Context {
         }
     }
 
-    /// As a run starts, before the layers load, if a tool API `serves` the run, starts the thread
-    /// that reloads the layers' shaders, textures, models, fonts, prefabs, sounds and music as
-    /// their files change, as `hot_reload` says, warning if it can't; then scans the assets under
-    /// the app's root, as [`scan_assets`](Self::scan_assets) does, writing the ID files missing if
-    /// `writes`, and moving those that renames made since the last run left behind beside their
-    /// assets, by the prints its cache keeps, as [`assets::scanned`] says; then, if the API serves
-    /// the run, starts the thread that keeps the database from then on, as `asset_watch` says,
-    /// warning if it can't, so that the API's `assets` scans on the main thread instead. A context
-    /// without a root has no assets to scan, nor does a run that reads its game's package, which
+    /// As a run starts, before the layers load:
+    ///
+    /// 1. If a tool API `serves` the run, starts the thread that reloads the layers' shaders,
+    ///    textures, models, fonts, prefabs, sounds and music as their files change, as
+    ///    `hot_reload` says. Warns if it can't.
+    /// 2. Scans the assets as [`scan_assets`](Self::scan_assets) does. ID files that renames since
+    ///    the last run left behind are moved beside their assets, by the prints the cache keeps, as
+    ///    [`assets::scanned`] says.
+    /// 3. If the API serves the run, starts the thread that keeps the database from then on, as
+    ///    `asset_watch` says. If it can't, warns, and the API's `assets` scans on the main thread.
+    ///
+    /// A context without a root has nothing to scan, nor does a run that reads its package, which
     /// reloads none.
     #[cfg(feature = "dev")]
     pub(crate) fn start_assets(&mut self, serves: bool, writes: bool) {
@@ -109,8 +111,8 @@ impl Context {
         }
     }
 
-    /// Takes the asset database the thread that watches the asset root sent since, if it changed,
-    /// and has the worlds share it: as a frame starts, before the tool API's requests are answered.
+    /// As a frame starts, before the tool API's requests are answered: takes the database the
+    /// watching thread sent, if it changed, and has the worlds share it.
     #[cfg(feature = "dev")]
     pub(crate) fn take_assets(&mut self) {
         let catalog = self.dev.asset_watch.as_mut().and_then(AssetWatch::take);
@@ -119,21 +121,21 @@ impl Context {
         }
     }
 
-    /// Whether a thread watches the asset root, keeping the database.
+    /// Whether a thread watches the asset root.
     #[cfg(feature = "dev")]
     pub(crate) fn watches_assets(&self) -> bool {
         self.dev.asset_watch.is_some()
     }
 
-    /// Asks the thread that watches the asset root to look now, as the tool API's `assets` does;
-    /// returns the look's number, which [`assets_answered`](Self::assets_answered) reaches once
-    /// it's taken; `None` in a run that no thread watches the root for.
+    /// Asks the watching thread to look now, as the tool API's `assets` does. Returns the look's
+    /// number, which [`assets_answered`](Self::assets_answered) reaches once it's taken. `None` if
+    /// no thread watches.
     #[cfg(feature = "dev")]
     pub(crate) fn ask_assets(&self) -> Option<u64> {
         self.dev.asset_watch.as_ref().map(AssetWatch::ask)
     }
 
-    /// The looks [`ask_assets`](Self::ask_assets) asked for that have been taken: those up to it.
+    /// The number of the last look taken; those up to it are answered.
     #[cfg(feature = "dev")]
     pub(crate) fn assets_answered(&self) -> u64 {
         self.dev
@@ -148,23 +150,24 @@ impl Context {
         self.assets.catalog()
     }
 
-    /// Takes the asset of `kind` the run has just written at `path`, with its ID file holding `id`,
-    /// into the asset database, as [`Catalog::bind`] does, and asks the thread that watches the
-    /// root to look, so that its database takes it too.
+    /// Takes the asset of `kind` just written at `path`, its ID file holding `id`, into the
+    /// database as [`Catalog::bind`] does, and asks the watching thread to look so its copy does
+    /// too.
     #[cfg(feature = "dev")]
     pub(crate) fn bind_asset(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
         self.add_assets(|assets| assets.bind(path, kind, id));
         self.ask_assets();
     }
 
-    /// Adds the prefab of `text`, which the run has just written in a new file at `path` from the
-    /// asset root, with `/` between its parts, named `name`, its asset ID or else its path: as
-    /// [`add_prefab`](Self::add_prefab) adds one it reads, watched as its file changes, but a new
-    /// prefab whatever was loaded from a file there before, as one deleted since, which neither
-    /// `path` nor the file names from now on.
+    /// Adds the prefab of `text`, just written in a new file at `path` (from the asset root, `/`
+    /// separated), named `name`: its asset ID, else its path.
+    ///
+    /// Like [`add_prefab`](Self::add_prefab), it's watched as its file changes. It is always a new
+    /// prefab, whatever was loaded from a file there before: one deleted since is named by neither
+    /// `path` nor the file.
     #[cfg(feature = "dev")]
     pub(crate) fn add_saved_prefab(&mut self, path: &str, name: &str, text: String) -> Prefab {
-        // The file holds the text from now on, as a read begun now would give it.
+        // The file holds the text now, as a read begun now would give it.
         let read_at = SystemTime::now();
         let file = match &self.root {
             Some(root) => root.join(path),
@@ -179,15 +182,15 @@ impl Context {
             self.loaded.prefabs.insert(resolved, prefab);
         }
         self.added("prefab", &path);
-        // What its text names, loaded already, as the entities it was saved from have it.
+        // What its text names is loaded already, by the entities it was saved from.
         let _ = self.load_scene_assets(&text);
         prefab
     }
 
-    /// Whether a layer has added the file at `path` from the app's root, by whatever form of its
-    /// path, as a texture, a sprite sheet or a model, or a texture its asset's ID names is loaded,
-    /// as one loaded from it before it was renamed is, and not removed since: resolving the file,
-    /// some 0.1 ms on Windows.
+    /// Whether a layer has added the file at `path` from the root, by any form of its path, as a
+    /// texture, sprite sheet or model, and not removed it since. Also true if a texture its asset
+    /// ID names is loaded, as one loaded before a rename is. Resolving the file takes some 0.1 ms
+    /// on Windows.
     #[cfg(feature = "dev")]
     pub(crate) fn has_added(&self, path: &str) -> bool {
         let file = (self.root.as_deref()).and_then(|root| assets::file_of(&root.join(path)));

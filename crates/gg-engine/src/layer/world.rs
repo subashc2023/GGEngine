@@ -25,21 +25,19 @@ use crate::{App, MeshDraw, Transform};
 use crate::{Entity, World};
 
 impl Context {
-    /// The world: its entities and their components, as the frame's ticks left it. After the
-    /// layers' updates each frame, the engine draws those with a [`Transform`] and a [`Sprite`], a
-    /// [`Circle`], a [`Text`](crate::Text) or a [`MeshDraw`], after what the layers drew
-    /// themselves: the meshes whose shaders are opaque first, whatever their z's, by shader, then
-    /// mesh, then the rest back to front by their z's in the world, at one z sprites, then circles,
-    /// then text, under meshes, each in the order of their IDs, children where their parents carry
-    /// them; each on its way from where it was as the latest tick started to where the tick left
-    /// it, so up to a tick behind the world here.
+    /// The world, as the frame's ticks left it. After the layers' updates each frame, the engine
+    /// draws what has a [`Transform`] and a [`Sprite`], [`Circle`], [`Text`](crate::Text) or
+    /// [`MeshDraw`], after what the layers drew. Opaque-shader meshes come first, whatever their
+    /// z's, by shader, then mesh. The rest go back to front by z; at one z, sprites, circles,
+    /// then text, under meshes, each in ID order, children where their parents carry them. Each
+    /// is drawn on its way from where the latest tick started it to where the tick left it, so up
+    /// to a tick behind the world here.
     pub fn world(&self) -> &World {
         &self.world
     }
 
-    /// The world, to change as a layer attaches or detaches. At any other time it changes only at
-    /// ticks, which [`Layer::tick`] is given it for, and this panics: a layer queues a command for
-    /// its next tick instead.
+    /// The world, to change as a layer attaches or detaches. Otherwise it changes only at ticks
+    /// ([`Layer::tick`] is given it) and this panics: a layer queues a command for its next tick.
     pub fn world_mut(&mut self) -> &mut World {
         assert!(
             !self.attached,
@@ -49,29 +47,25 @@ impl Context {
         &mut self.world
     }
 
-    /// Loads the scene file at `path` into the world as the layer attaches, as [`World::load_scene`]
-    /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots; first loading
-    /// each texture, model, font and prefab it names, by its ID or its path from the asset root,
-    /// that no layer has added, as [`add_texture`](Self::add_texture),
-    /// [`add_model`](Self::add_model), [`add_font`](Self::add_font) and
-    /// [`add_prefab`](Self::add_prefab) load a file, a model's image with its model. A development
-    /// build watches the file
-    /// from then on: saved while the game runs, it applies to the world as the operations that take
-    /// the world's entities from what the file held to what it holds, between ticks, which keeps
-    /// what the file doesn't change, as where the game has moved an entity; an edit whose author is
-    /// the file's path, as the app's root names it, such as `scenes/level.ron`, which the tool
-    /// API's `undo` takes back. A run restored from a snapshot watches the files its run had
-    /// loaded. The project's start scene, as [`load_start_scene`](Self::load_start_scene) loads it,
-    /// is the open scene too. It logs `scene.loaded`, with how many roots it made and how long it
-    /// took, the loads of what it names among it.
+    /// Loads the scene file at `path` into the world as the layer attaches
+    /// ([`World::load_scene`] of what [`read_scene`](crate::read_scene) reads), and returns its
+    /// roots. It first loads each texture, model, font and prefab the scene names, by ID or path
+    /// from the asset root, that no layer has added ([`add_texture`](Self::add_texture),
+    /// [`add_model`](Self::add_model), [`add_font`](Self::add_font),
+    /// [`add_prefab`](Self::add_prefab)).
     ///
-    /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message, as for
-    /// a texture, a model, a font or a prefab that can't be loaded, `asset.no_texture`,
-    /// `asset.no_model`, `asset.no_font` or `asset.no_prefab`, with why: an image its model hasn't,
-    /// or one named by an absolute path or one leading outside the asset root, by an ID no asset
-    /// has, or by a path to a file that doesn't load as `add_texture`, `add_model` or `add_font`
-    /// loads it. In a replay or a lockstep joiner, which goes as another run went, such an asset
-    /// stands in, warning `asset.stand_in`.
+    /// A development build watches the file. A save while the game runs applies between ticks as
+    /// operations taking the world's entities from what the file held to what it holds, keeping
+    /// what the file doesn't change. The edit's author is the file's path from the app's root,
+    /// such as `scenes/level.ron`; the tool API's `undo` takes it back. A run restored from a
+    /// snapshot watches the files its run had loaded.
+    ///
+    /// Logs `scene.loaded`, with the roots made and the time taken.
+    ///
+    /// Fails as `read_scene` and `load_scene` do, the path beginning the message. An asset that
+    /// can't be loaded gives `asset.no_texture`, `asset.no_model`, `asset.no_font` or
+    /// `asset.no_prefab`, with why. In a replay or a lockstep joiner, which goes as another run
+    /// went, such an asset stands in, warning `asset.stand_in`.
     ///
     /// # Panics
     ///
@@ -81,8 +75,7 @@ impl Context {
         let path = path.as_ref();
         let text = crate::ecs::read_scene_from(path, &self.files)?;
         let mut loaded = self.world_mut().load_scene(&text);
-        // Read again once what it names that isn't loaded is, which is seldom, so that a scene that
-        // names what's loaded is read once.
+        // Seldom: a scene that names what's loaded is read once.
         if loaded.as_ref().is_err_and(|error| {
             matches!(
                 error.code(),
@@ -115,15 +108,14 @@ impl Context {
         Ok(roots)
     }
 
-    /// Loads the project's start scene as the layer attaches, as
-    /// [`load_scene_file`](Self::load_scene_file) loads a scene file, and returns its roots: in a
-    /// development build, watched, its edits' author its path from the asset root, such as
-    /// `scenes/arena.ron`. It's the open scene, which the tool API's `scene` saves, empties and
-    /// opens another scene file in place of, owning the entities its file holds and those clients'
-    /// edits make into it, never those the game's code makes.
+    /// Loads the project's start scene as the layer attaches
+    /// ([`load_scene_file`](Self::load_scene_file)) and returns its roots. It's the open scene,
+    /// which the tool API's `scene` saves, empties and replaces. It owns the entities its file
+    /// holds and those clients' edits make into it, never those the game's code makes. Its edits'
+    /// author is its path from the asset root, such as `scenes/arena.ron`.
     ///
-    /// Fails with `engine.no_project` for a game that isn't a project's, as
-    /// [`App::project`](crate::App::project) makes it, and as `load_scene_file` does.
+    /// Fails with `engine.no_project` for a game that isn't a project's
+    /// ([`App::project`](crate::App::project)), and as `load_scene_file` does.
     ///
     /// # Panics
     ///
@@ -137,10 +129,10 @@ impl Context {
         self.load_scene_file(start)
     }
 
-    /// Drops the scene a layer asked for outside a tick, through [`World::change_scene`], as in its
-    /// `update`, `event` or `attach`, warning `scene.not_in_tick`: as each tick starts, before the
-    /// layers' ticks, so that only what a tick asks for goes in, as a recording and the other
-    /// lockstep peer have it.
+    /// Drops the scene a layer asked for outside a tick ([`World::change_scene`] in its `update`,
+    /// `event` or `attach`), warning `scene.not_in_tick`. It runs as each tick starts, before the
+    /// layers' ticks, so only what a tick asks for goes in, as a recording and the other lockstep
+    /// peer have it.
     pub(crate) fn drop_untimely_scene(&mut self) {
         if let Some(scene) = self.world.take_asked_scene() {
             warn!(
@@ -152,15 +144,12 @@ impl Context {
         }
     }
 
-    /// Puts the scene the world's last tick asked for, through [`World::change_scene`], in place
-    /// of the world's entities, as [`change_scene`](Self::change_scene) does, if it asked for one:
-    /// as each layer's tick returns, before the next layer's, wherever a tick runs, again in a
-    /// rollback or a SyncTest too. Logs, at the debug level, `scene.entered`, with how many roots
-    /// the scene made and how long it took, the loads of what it names among it; or the error,
-    /// the world staying as it was, which the world notes, for
-    /// [`confirm_scene`](Self::confirm_scene) to log once the tick is final, as a tick that may run
-    /// again, a client's or a rollback peer's on the other's inputs predicted, would log it again,
-    /// and one that never does would log a refusal that didn't happen.
+    /// If the world's last tick asked for a scene ([`World::change_scene`]), puts it in place of
+    /// the world's entities ([`change_scene`](Self::change_scene)), as each layer's tick returns,
+    /// in a rollback or a SyncTest too. Logs `scene.entered` at the debug level. On an error the
+    /// world stays as it was and notes it for [`confirm_scene`](Self::confirm_scene) to log once
+    /// the tick is final: a tick that may run again would log it twice, and one that never does
+    /// would log a refusal that didn't happen.
     pub(crate) fn change_asked_scene(&mut self) {
         let Some(scene) = self.world.take_asked_scene() else {
             return;
@@ -185,21 +174,23 @@ impl Context {
         }
     }
 
-    /// Puts the scene file `scene` names, its path from the asset root, `/` between its parts, in
-    /// place of the world's entities, as [`World::change_scene`] says, and returns how many roots
-    /// it made: its text as [`scene_text`](Self::scene_text) keeps it; each model and prefab it
-    /// names that no layer has added loaded first, none standing in, and then each texture and
-    /// font, a stand-in for one that can't be loaded, as a run that follows another stands in, so
-    /// that whether the scene goes in depends on its text and the models and prefabs alone; in a
-    /// server's session, server and clients alike, none, as a client reads its server's states
-    /// only of the assets loaded.
+    /// Puts scene file `scene` (its path from the asset root, `/` between parts) in place of the
+    /// world's entities ([`World::change_scene`]), and returns the roots made. The text is
+    /// [`scene_text`](Self::scene_text)'s. Models and prefabs it names that no layer has added
+    /// load first, none standing in; then textures and fonts, standing in if they can't load. So
+    /// whether the scene goes in depends on its text and its models and prefabs alone. A server's
+    /// session, clients too, loads nothing: a client reads its server's states only of the assets
+    /// loaded.
     ///
-    /// Fails, changing nothing, with `scene.bad_path` for a name that isn't a path inside the asset
-    /// root, as one that's absolute, holds `.`, `..`, `\`, `:` or a control character, or is
-    /// empty; as `scene_text` does; `asset.no_model` or `asset.no_prefab`, saying why, for a model
-    /// or a prefab it names that doesn't load; `net.no_scene_change` in a server's session for a
-    /// scene that names an asset the layers haven't loaded; and as [`World::load_scene`] does into
-    /// the world without its entities, the name beginning the message.
+    /// Fails, changing nothing, with:
+    ///
+    /// - `scene.bad_path` for a name that isn't a path inside the asset root: absolute, empty, or
+    ///   holding `.`, `..`, `\`, `:` or a control character.
+    /// - `asset.no_model` or `asset.no_prefab`, saying why.
+    /// - `net.no_scene_change` in a server's session for a scene that names an asset the layers
+    ///   haven't loaded.
+    /// - The errors of `scene_text` and [`World::load_scene`] into the world without its
+    ///   entities, the name beginning the message.
     pub(crate) fn change_scene(&mut self, scene: &str) -> Result<usize> {
         let _zone = gg_core::zone!();
         if !package::inside(scene) || scene.chars().any(char::is_control) {
@@ -219,14 +210,14 @@ impl Context {
         Ok(roots.len())
     }
 
-    /// Loads what scene `text`, of the scene file `scene` names, names that no layer has added, as
-    /// [`change_scene`](Self::change_scene) says, the world sharing what's loaded; in a server's
-    /// session none, refusing a scene that names what no layer loaded.
+    /// Loads what `text`, of scene `scene`, names that no layer has added
+    /// ([`change_scene`](Self::change_scene)). In a server's session it loads none and refuses a
+    /// scene that names what no layer loaded.
     ///
     /// Fails as `change_scene` does for what the scene names, the name beginning the message.
     pub(crate) fn load_assets_of(&mut self, scene: &str, text: &str) -> Result<()> {
         // A world put in the world's place, as a SyncTest's copy, may share fewer assets than the
-        // layers have added since it was taken, which the scene may name.
+        // layers have added since, which the scene may name.
         self.share_assets();
         let named = |error: Error| {
             let message = format!("{scene}:{error}");
@@ -248,14 +239,13 @@ impl Context {
         Ok(())
     }
 
-    /// Loads what scene `text` names that no layer has added, for a scene change, as
-    /// [`change_scene`](Self::change_scene) says: its models and prefabs first, and those the
-    /// prefabs name, in turn, none standing in, so that a refusal leaves no stand-in behind; and
-    /// then its textures and fonts, standing in for those that can't be loaded.
+    /// Loads what scene `text` names that no layer has added, for
+    /// [`change_scene`](Self::change_scene): models and prefabs first, and those the prefabs name
+    /// in turn, none standing in, so a refusal leaves no stand-in behind; then textures and
+    /// fonts, standing in if they can't be loaded.
     ///
     /// Fails as [`World::load_scene`] does into the world without its entities, but for what it
-    /// names, and with `asset.no_model` or `asset.no_prefab`, saying why, for a model or a prefab
-    /// that doesn't load.
+    /// names, and with `asset.no_model` or `asset.no_prefab`, saying why.
     fn load_change_assets(&mut self, text: &str) -> Result<()> {
         loop {
             let names = self.world.scene_assets(text)?;
@@ -282,17 +272,19 @@ impl Context {
         self.load_scene_assets_as(text, true).map(drop)
     }
 
-    /// The text of the scene file `scene` names, its path from the asset root, for the scene
-    /// changes of the run: as the run read it once, as it started or as a change first named it,
-    /// or as a development build's edit took a save of it since, so that a tick run again, a
-    /// replay and each lockstep peer read the same, as [`World::change_scene`] says; and else read
-    /// now, from the game's package in a run that reads one and from the disk otherwise, and kept.
+    /// The text of scene file `scene` (its path from the asset root) for the run's scene changes:
+    /// as the run read it once, as it started or as a change first named it, or as a development
+    /// build's edit took a save of it since, so a tick run again, a replay and each lockstep peer
+    /// read the same. Otherwise it's read now, from the package if the run reads one, else from
+    /// disk, and kept.
     ///
-    /// Fails with `scene.no_root` in a run without an asset root, as [`App::root`] gives one;
-    /// `scene.not_found`, naming it, for a file that isn't there; `scene.case` for one whose name
-    /// is the file's but in its case, which a package or another OS's disk wouldn't find;
-    /// `asset.outside_root` for a link that leads outside the root; and `scene.file` for one that
-    /// can't be read, is more than 16 MiB or isn't UTF-8.
+    /// Fails with:
+    ///
+    /// - `scene.no_root` in a run without an asset root ([`App::root`]).
+    /// - `scene.not_found` for a file that isn't there.
+    /// - `scene.case` for a name that differs from the file's in case.
+    /// - `asset.outside_root` for a link that leads outside the root.
+    /// - `scene.file` for a file that can't be read, is over 16 MiB or isn't UTF-8.
     ///
     /// [`App::root`]: crate::App::root
     pub(crate) fn scene_text(&mut self, scene: &str) -> Result<String> {
@@ -309,9 +301,9 @@ impl Context {
         Ok(text)
     }
 
-    /// Reads the scene file `scene` names, at `path` under `root`, from `files`, as
-    /// [`scene_text`](Self::scene_text) does, on any thread: checking its name against the disk's,
-    /// part by part, if `named`, for one the disk didn't give.
+    /// Reads scene file `scene`, at `path` under `root`, from `files`, as
+    /// [`scene_text`](Self::scene_text) does, on any thread. If `named`, checks its name against
+    /// the disk's, part by part, for one the disk didn't give.
     pub(crate) fn read_scene_text(
         files: &Files,
         root: &Path,
@@ -386,10 +378,9 @@ impl Context {
     }
 
     /// Reads each scene file in the project's scenes folders, in a development build reading the
-    /// disk, and keeps its text for the scene changes of the run, as
-    /// [`scene_text`](Self::scene_text) keeps one: as the run starts, so that each lockstep peer,
-    /// and a replay, reads them as it starts, as it reads its start scene, rather than at a tick.
-    /// One that can't be read is left for a change to name, which fails as `scene_text` does.
+    /// disk, and keeps its text as [`scene_text`](Self::scene_text) does. It runs as the run
+    /// starts, so each lockstep peer and a replay reads them then, not at a tick. One that can't
+    /// be read is left for a change to name, which fails as `scene_text` does.
     #[cfg(feature = "dev")]
     pub(crate) fn read_scenes(&mut self) {
         let _zone = gg_core::zone!();
@@ -400,8 +391,7 @@ impl Context {
             return;
         }
         let mut found = Vec::new();
-        // Each folder as the disk names it, its files' names the disk's, so that each directory
-        // is listed once.
+        // Each folder as the disk names it, so each directory is listed once.
         let named = |folder: &PathBuf| {
             let name = assets::name_of(Some(&root), folder);
             package::inside(&name) && scene_files::named_exactly(&root, &name).is_ok()
@@ -446,28 +436,28 @@ impl Context {
         }
     }
 
-    /// Once a tick is final, as it is at once in a run alone, a replay, a lockstep session that
-    /// predicts nothing and a server, and in a rollback session once it has run on both peers'
-    /// inputs, and as such a tick starts, the world before it final too: takes what changed the
-    /// world's scene since it last did, as [`World::change_scene`] says, logging `scene.replaced`;
-    /// the scene's file is then the scene file in the world, which a development build applies the
-    /// saves of, in place of those the layers loaded, whose entities went, and in a project's game
-    /// the open scene. And logs the last change refused since, at the error level, with its code
-    /// and how many were. A client's ticks are never final, its server's world the one that is.
+    /// Runs once a tick is final: at once in a run alone, a replay, a lockstep session that
+    /// predicts nothing and a server; in a rollback session once it has run on both peers'
+    /// inputs; and as such a tick starts, the world before it final too. It takes what changed the
+    /// world's scene since it last did ([`World::change_scene`]), logging `scene.replaced`. The
+    /// scene's file is then the scene file in the world (the open scene in a project's game),
+    /// which a development build applies saves of, in place of the layers' loads, whose entities
+    /// went. It also logs the last change refused since, at the error level, with its code and
+    /// count. A client's ticks are never final; its server's world is.
     pub(crate) fn confirm_scene(&mut self) {
         self.confirm_scene_from(None);
     }
 
-    /// Takes the world's scene, and the scene changes refused, as what the run keeps of them
-    /// already, as [`confirm_scene`](Self::confirm_scene) would: as a world comes in from a
-    /// snapshot, a lockstep host, or held aside while a copy played, with its scene files.
+    /// Takes the world's scene and refused changes as already confirmed, for a world that comes
+    /// in from a snapshot or a lockstep host, or held aside while a copy played, with its scene
+    /// files.
     pub(crate) fn seen_scene(&mut self) {
         self.scene_seen = self.world.scene_changes();
         self.refused_seen = self.world.scenes_refused();
     }
 
-    /// As [`confirm_scene`](Self::confirm_scene) does, of `world`, a world that's final, or of the
-    /// context's own, for `None`: allocating nothing while nothing changed.
+    /// [`confirm_scene`](Self::confirm_scene) of `world`, a final world, or the context's own for
+    /// `None`. It allocates nothing while nothing changed.
     pub(crate) fn confirm_scene_from(&mut self, world: Option<&World>) {
         let world = match world {
             Some(world) => world,
@@ -515,9 +505,9 @@ impl Context {
         self.scenes.changed();
     }
 
-    /// Applies `edit`, an author's from outside the layers, to the world, between ticks, unrecorded,
-    /// as a replay does: [`Stack::edit`] records it first. A script's reload, which no author
-    /// undoes, goes to the [`Scripts`](crate::Scripts) that loaded it.
+    /// Applies `edit`, an author's from outside the layers, to the world, between ticks,
+    /// unrecorded, as a replay does ([`Stack::edit`] records it first). A script's reload, which
+    /// no author undoes, goes to the [`Scripts`](crate::Scripts) that loaded it.
     ///
     /// Fails as [`Authors::edit`] does, and as [`Hosts::reload`](crate::luau::Hosts::reload) does.
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> Result<Done> {
@@ -529,7 +519,7 @@ impl Context {
                 Ok(Done::Applied(Vec::new()))
             }
             Edit::Scene { path, text } => {
-                // A cell in came from another text, which it no longer goes out as it came from.
+                // A cell that came in from another text no longer goes out as it came.
                 if let Some(cell) = self.world.cell_of_file(&path) {
                     self.world.forget_came_as(cell);
                 }
@@ -538,8 +528,8 @@ impl Context {
                 self.scenes.cache(file);
                 Ok(Done::Applied(Vec::new()))
             }
-            // Every log goes, the authors' and those of layers, such as the Inspector's, which the
-            // world renewed refuses, freeing nothing twice.
+            // Every log goes, the authors' and layers' (the Inspector's), which the renewed world
+            // refuses, freeing nothing twice.
             Edit::Renew => {
                 let dropped = self.authors.entries(&self.world);
                 self.authors.clear(&mut self.world);
@@ -565,8 +555,7 @@ impl Context {
     }
 }
 
-/// The refusal of the scene `scene` in a run without an asset root, as [`App::root`] gives one
-/// (`scene.no_root`).
+/// The refusal of `scene` in a run without an asset root ([`App::root`]): `scene.no_root`.
 pub(super) fn no_root(scene: &str) -> Error {
     let message = format!(
         "there's no asset root to find the scene {scene} under: `App::root` or `App::project` \
