@@ -969,8 +969,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells" | "ui"
-        | "images" | "snapshot" => call(name, Value::Null),
+        _ if crate::NO_PARAMETERS.contains(&name) || name == "snapshot" => call(name, Value::Null),
         // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
         // names scene files.
         "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"

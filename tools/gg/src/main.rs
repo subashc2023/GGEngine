@@ -1027,6 +1027,12 @@ fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
     Ok([std::slice::from_ref(name), options, rest].concat())
 }
 
+/// The game's methods that gg's commands and MCP's tools of the same name call with no parameters.
+/// Also gg's `quit`, which MCP has no tool for, and MCP's `snapshot`, whose command takes a path.
+const NO_PARAMETERS: [&str; 10] = [
+    "status", "pause", "resume", "play", "stop", "types", "hash", "cells", "ui", "images",
+];
+
 /// The command `args`, the arguments after `gg`, give, in the project gg works in, as
 /// [`Parsed::scope`] finds it.
 ///
@@ -1052,8 +1058,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "debug" => debug_args(&mut parsed)?,
         "mcp" => mcp_args(&mut parsed)?,
         "call" => call_args(&mut parsed)?,
-        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells"
-        | "ui" | "images" | "quit") => {
+        method if NO_PARAMETERS.contains(&method) || method == "quit" => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
         }
