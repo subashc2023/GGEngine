@@ -6,8 +6,7 @@ use super::*;
 
 const ROOM: Room = Room([7; 16]);
 
-/// How long a relay waits for a first line or a host's take in the tests that wait it out, in place
-/// of [`ANSWER`] or [`TAKE`].
+/// [`ANSWER`] or [`TAKE`] in the tests that wait them out.
 const WAITED: Duration = Duration::from_secs(1);
 
 /// The default limits, but at most `most` connections.
@@ -22,7 +21,7 @@ fn relay(limits: Limits) -> Relay {
     serve("127.0.0.1:0", limits).expect("a relay")
 }
 
-/// Waits until `relay` holds nothing, as it keeps nothing of what has gone, failing after 5 s.
+/// Waits until `relay` holds nothing, failing after 5 s.
 fn until_empty(relay: &Relay) {
     let start = Instant::now();
     while relay.holds() != [0; 7] {
@@ -57,8 +56,7 @@ fn bind_at(socket: &UdpSocket, at: SocketAddr, token: &Token) {
     );
 }
 
-/// Has `relay` pair a host of `room` with a joiner, as a host's run and a joiner's do: the joiner's
-/// end, then the host's.
+/// Pairs a host of `room` with a joiner at `relay`: the joiner's end, then the host's.
 fn pair(relay: &Relay, room: Room) -> (Paired, Paired) {
     let at = relay.address();
     let mut hosting = Hosting::start(at, room).expect("hosting");
@@ -87,9 +85,9 @@ fn refusal(error: &io::Error) -> String {
     error.to_string()
 }
 
-/// A host and a joiner of one room are paired, each told a token of its own, and what each writes
-/// reaches the other, in order, the bytes after `paired` among them; one end closing its sending
-/// side ends what the other reads, after what came, and the other can still write back.
+/// Each end gets its own token, and its bytes, those right after `paired` too, reach the other in
+/// order. After one end shuts its writes, the other reads what came, then the end, and can still
+/// write back.
 #[test]
 fn a_host_and_a_joiner_are_paired_and_their_bytes_cross() {
     let relay = relay(most(16));
@@ -117,8 +115,6 @@ fn a_host_and_a_joiner_are_paired_and_their_bytes_cross() {
     relay.stop();
 }
 
-/// A joiner of a room no host holds finds none, and is paired once a host registers it; a second
-/// host of a room held is refused, and takes it once the first has gone.
 #[test]
 fn a_room_is_its_first_host_s_alone_and_a_joiner_finds_none_without_one() {
     let relay = relay(most(16));
@@ -153,9 +149,6 @@ fn a_room_is_its_first_host_s_alone_and_a_joiner_finds_none_without_one() {
     relay.stop();
 }
 
-/// A take of a ticket the relay didn't give is refused, as is one of a joiner its host didn't take
-/// in time, which the relay refuses; and past the most connections, a connection is refused, the
-/// relay full.
 #[test]
 fn a_relay_refuses_tickets_it_didn_t_give_joiners_left_waiting_and_connections_past_its_most() {
     let relay = serve_within("127.0.0.1:0", most(3), ANSWER, WAITED).expect("a relay");
@@ -203,8 +196,8 @@ fn a_relay_refuses_tickets_it_didn_t_give_joiners_left_waiting_and_connections_p
     relay.stop();
 }
 
-/// A connection whose first line doesn't come in time, is too long, isn't one, or speaks another
-/// version of the protocol is closed, answered with why if it speaks the protocol.
+/// A first line that's late, too long, unknown or of another version closes the connection, with
+/// why if it speaks the protocol.
 #[test]
 fn a_connection_whose_first_line_isn_t_one_is_closed() {
     let relay = serve_within("127.0.0.1:0", most(16), WAITED, TAKE).expect("a relay");
@@ -242,9 +235,9 @@ fn a_connection_whose_first_line_isn_t_one_is_closed() {
     relay.stop();
 }
 
-/// A bind is answered with the address it came from; datagrams between a pair's two bound sockets
-/// cross each way, the relay's own aside; one from a socket not bound, or once the pair has ended,
-/// goes nowhere; a bind with a token the relay didn't give gets no answer.
+/// A bind is answered with its sender's address. Datagrams cross between a pair's bound sockets,
+/// but not the relay's own, a stranger's, or any after the pair ends. A bind with an unknown token
+/// gets no answer.
 #[test]
 fn a_pair_s_bound_sockets_datagrams_cross_and_no_one_else_s() {
     let relay = relay(most(16));
@@ -302,8 +295,7 @@ fn a_pair_s_bound_sockets_datagrams_cross_and_no_one_else_s() {
     relay.stop();
 }
 
-/// Past the most connections from one address, a connection is refused, saying why, and once one
-/// of them closes, another is taken; the address's count goes once they have all gone.
+/// The refusal says why. Once one closes, another is taken; the address's count goes once all have.
 #[test]
 fn a_relay_refuses_connections_past_its_most_from_one_address() {
     let relay = relay(Limits {
@@ -340,8 +332,6 @@ fn a_relay_refuses_connections_past_its_most_from_one_address() {
     relay.stop();
 }
 
-/// What a connection counts as toward the most from one address: an IPv4 address itself, or as
-/// IPv6 maps it; an IPv6 address by its /64.
 #[test]
 fn an_address_counts_as_itself_or_its_64() {
     let ip = |text: &str| text.parse::<IpAddr>().expect("an address");
@@ -352,9 +342,8 @@ fn an_address_counts_as_itself_or_its_64() {
     assert_ne!(key(ip("2001:db8:1:3::1")), ip("2001:db8:1:2::"));
 }
 
-/// An end that sends datagrams faster than its rate has its burst forwarded, and then the rate's,
-/// the rest dropped; and the other end's still go, as its rate is its own. Likewise for their
-/// bytes.
+/// The burst passes, then the rate, and the rest drop, for datagrams and for their bytes. The other
+/// end's still go, its rates its own.
 #[test]
 fn a_relay_drops_an_end_s_datagrams_past_its_rates() {
     let rate = |per_second, burst| Rate { per_second, burst };
@@ -377,7 +366,7 @@ fn a_relay_drops_an_end_s_datagrams_past_its_rates() {
         let (ours, theirs) = (socket(), socket());
         bind_at(&ours, at, &joiner.token);
         bind_at(&theirs, at, &host.token);
-        // Paced, so that none are lost on the way to the relay, a few a millisecond.
+        // A few a millisecond, so that none are lost on the way to the relay.
         let datagram = vec![0x80; size];
         let start = Instant::now();
         for sent in 0..500 {
@@ -403,8 +392,7 @@ fn a_relay_drops_an_end_s_datagrams_past_its_rates() {
     }
 }
 
-/// An end that sends its stream faster than its rate has it all arrive, in order, held back to the
-/// rate past its burst.
+/// All of it arrives, in order, held to the rate past the burst.
 #[test]
 fn a_relay_holds_an_end_s_stream_to_its_rate() {
     let stream = Rate {
@@ -449,8 +437,7 @@ fn a_relay_holds_an_end_s_stream_to_its_rate() {
     assert_eq!(error.kind(), ErrorKind::InvalidInput, "{error}");
 }
 
-/// A relay stopped closes the connections it held, and its port, which another relay can then
-/// take.
+/// Another relay can then take the port.
 #[test]
 fn a_relay_stopped_closes_its_connections_and_its_port() {
     let relay = relay(most(16));
@@ -466,8 +453,6 @@ fn a_relay_stopped_closes_its_connections_and_its_port() {
     again.stop();
 }
 
-/// A relay's arguments: where it listens, the most connections it holds, and from one address, and
-/// where it logs.
 #[test]
 fn a_relay_s_arguments() {
     let parsed = |args: &[&str]| parse(args.iter().map(OsString::from));
