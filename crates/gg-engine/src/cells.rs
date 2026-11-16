@@ -62,9 +62,10 @@ fn looked(at: [f64; 3], reach: f64, size: f64, within: (IVec3, IVec3)) -> (IVec3
 /// On an entity of a world's scene: cuts space into cubes `size` units on a side from the origin.
 /// A cell's entities are in `folder`'s scene file named by its grid place: the cube (768, 0, -512)
 /// to (1024, 256, -256) at size 256 is `cells/3_0_-2.ron`. A cell without a file is empty unless
-/// the game [makes it](crate::Context::make_cells). As each tick ends, cells near a [`Viewer`] come
-/// in and cells far from every viewer go out, kept as text ([`Streamed`]). One a world; of several
-/// the lowest ID wins, warning (`cells.tie`). A 2D game's cells have z 0.
+/// the game makes it ([`Context::make_cells`](crate::Context::make_cells)). As each tick ends,
+/// cells near a [`Viewer`] come in and cells far from every viewer go out, kept as text
+/// ([`Streamed`]). One a world; of several the lowest ID wins, warning (`cells.tie`). A 2D game's
+/// cells have z 0.
 ///
 /// Roots come in as the file holds them, each given [`Streamed`]; one placed outside its cell's
 /// cube belongs to the cell it's in. The folder is listed once a run, from the package if the run
