@@ -298,8 +298,9 @@ impl Fonts {
 
     /// The glyphs drawing `text` in `style` with its origin at `transform`: each a transform and
     /// glyph, for entity `id` (0 for none), as [`Context::draw_text`] says. Inter draws if the
-    /// style names no font, or for a stand-in; it bakes the first time, about 50 ms in release and
-    /// 140 ms in debug, its field waiting for [`place`](Self::place).
+    /// style names no font, or for a stand-in; it bakes the first time, unless
+    /// [`bake_inter_ahead`] has, about 50 ms in release and 140 ms in debug, its field waiting for
+    /// [`place`](Self::place).
     ///
     /// # Panics
     ///
@@ -654,6 +655,15 @@ fn shaping(bytes: &[u8]) -> std::result::Result<(ShaperData, ShapePlan), String>
         Ok((shaping, plan))
     }));
     shaping.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
+}
+
+/// Starts baking the engine's font's field on the job system's other threads, where [`field_of`]
+/// keeps it, so that the first text drawn in it doesn't bake it on the main thread. Outside a pool,
+/// it bakes at that first draw.
+pub(crate) fn bake_inter_ahead() {
+    jobs::spawn(|| {
+        field_of(INTER).expect("the engine's font bakes");
+    });
 }
 
 /// Bakes the engine's font like [`bake`].

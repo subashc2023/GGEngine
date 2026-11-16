@@ -219,9 +219,10 @@ impl Context {
     ///   box `style.align` says.
     /// - Glyphs are crisp at any size ([`Glyph`](gg_renderer::Glyph)), by straight alpha.
     ///
-    /// A style with no font draws in Inter, as the UI does. It bakes the first time text is drawn
-    /// in it: about 50 ms in release, 140 ms in debug. Once a text as long has been drawn,
-    /// drawing text allocates nothing.
+    /// A style with no font draws in Inter, as the UI does. A run bakes it on the job system's
+    /// threads as it starts; text drawn in it before that's done bakes it here: about 50 ms in
+    /// release, 140 ms in debug. Once a text as long has been drawn, drawing text allocates
+    /// nothing.
     ///
     /// # Panics
     ///

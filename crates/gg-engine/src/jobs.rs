@@ -52,6 +52,14 @@ where
     }
 }
 
+/// Offers `f` to the pool's other threads and returns at once. Outside a pool, as [`join`] says,
+/// does nothing.
+pub(crate) fn spawn(f: impl FnOnce() + Send + 'static) {
+    if rayon_core::current_thread_index().is_some() {
+        rayon_core::spawn(f);
+    }
+}
+
 /// Runs `f` on a pool of `threads` threads of its own, for tests of multi-threaded simulation. A
 /// pool thread runs `f`, joining its jobs as the ticks' thread does. Each call starts threads and
 /// allocates.

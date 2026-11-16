@@ -753,6 +753,8 @@ fn run_args(
             }
             return main_loop::run_server(&mut app, &args, snapshot);
         }
+        // While the renderer starts and the layers attach.
+        font::bake_inter_ahead();
         // Before the renderer starts, so tools find a run that hangs starting.
         let player = args.net.as_ref().and_then(|net| match net {
             args::Net::Host(_) => Some(0),
