@@ -1,11 +1,9 @@
-//! The workspace's AGENTS.md files, which agents load as they work, against the workspace: each
-//! Markdown link in them leads somewhere, a file or folder that's there, and, with an anchor, to one
-//! of that file's headings, so that the index the root's holds can't point at what's gone.
+//! Checks the workspace's AGENTS.md links: each leads to a file or folder that's there and, with
+//! an anchor, to one of its headings.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The workspace's root, two folders above gg's.
 fn root() -> &'static Path {
     let gg = Path::new(env!("CARGO_MANIFEST_DIR"));
     gg.ancestors()
@@ -13,8 +11,6 @@ fn root() -> &'static Path {
         .expect("gg is at tools/gg in the workspace")
 }
 
-/// The AGENTS.md files: the root's, and those of the members, a folder down from `crates`, `apps`,
-/// `tools` and `games`.
 fn agents_files() -> Vec<PathBuf> {
     let mut files = vec![root().join("AGENTS.md")];
     for group in ["crates", "apps", "tools", "games"] {
@@ -29,7 +25,7 @@ fn agents_files() -> Vec<PathBuf> {
     files
 }
 
-/// The targets of the Markdown links in `text`, `[text](target)`, outside fenced code.
+/// The targets of `[text](target)` links outside fenced code.
 fn links(text: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let mut fenced = false;
@@ -51,8 +47,8 @@ fn links(text: &str) -> Vec<&str> {
     found
 }
 
-/// The anchors of `text`'s headings, outside fenced code, as GitHub makes them: lowercase, a hyphen
-/// for each space, and no punctuation but hyphens and underscores.
+/// Heading anchors outside fenced code, as GitHub makes them: lowercase, `-` for a space, no
+/// punctuation but `-` and `_`.
 fn anchors(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut fenced = false;

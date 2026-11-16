@@ -1,8 +1,6 @@
-//! `gg fetch`: the files a project's fetch list names, `fetch.ron` beside its manifest, as gg-api's
-//! `Fetch` reads it, fetched with curl, each checked against its SHA-256 before it takes its place,
-//! with the ID file of each asset (texture, model, font, prefab or UI) under the asset root:
-//! holding the ID the list gives it, so that every checkout gives it the ID its scenes name, or
-//! else written, as a development run would write it, if it has none.
+//! `gg fetch`: fetches with curl the files of a project's `fetch.ron` (gg-api's `Fetch`), each
+//! checked against its SHA-256 before it takes its place. Each asset under the asset root gets an
+//! ID file with the list's ID, so every checkout has the ID its scenes name, else a fresh one.
 
 use std::fs;
 use std::path::Path;
@@ -14,11 +12,10 @@ use serde_json::json;
 
 use crate::Scope;
 
-/// Fetches what the fetch list of `scope`'s project names, printing a line of JSON for each file,
-/// `fetched` with its bytes or `kept`, with the `id` written beside it if one was, then one for
-/// the list.
+/// Prints a JSON line per file (`fetched` with its bytes, or `kept`; `id` if written), then one
+/// for the list.
 ///
-/// Fails as gg-api's `Fetch::read` and `Project::read` do, and as [`fetch_with`] does.
+/// Fails as `Fetch::read`, `Project::read` and [`fetch_with`] do.
 pub(crate) fn fetch(scope: &Scope) -> Result<(), Failure> {
     let dir = scope.dir();
     let project = Project::read(dir)?;
@@ -30,16 +27,14 @@ pub(crate) fn fetch(scope: &Scope) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Fetches each file `list` names into directory `dir`, by `download`, which writes what's at a URL
-/// to a file, but those there already whose SHA-256 is the list's, each written first beside where
-/// it goes, with `.part` after its name, and put in its place once its SHA-256 is the list's; then
-/// writes the ID file of each that's an asset (a texture, model, font, prefab or UI) under the
-/// asset root, `root`: with the ID the list gives it, unless it holds that, or else a fresh one, if
-/// it has none. Hands `print` a line of JSON for each, and returns how many were fetched and how
-/// many kept.
+/// Fetches into `dir` the files of `list` not there with the list's SHA-256, by `download` (a
+/// URL to a file), through `<name>.part`. Each asset (texture, model, font, prefab or UI) under
+/// `root` gets an ID file: the list's ID unless it holds that, else a fresh one if none. Hands
+/// `print` a JSON line per file; returns the counts fetched and kept.
 ///
-/// Fails with `gg.fetch` for a file that can't be read or written, a download that fails, or one
-/// whose SHA-256 isn't the list's, which it removes, keeping the files fetched before it.
+/// Fails with `gg.fetch` for:
+/// - a file that can't be read or written, or a download that fails;
+/// - a download whose SHA-256 isn't the list's, which it removes, keeping earlier files.
 fn fetch_with(
     list: &Fetch,
     dir: &Path,
@@ -105,10 +100,9 @@ fn fetch_with(
     Ok((fetched, kept))
 }
 
-/// Writes what's at `url` to the file at `to`, with curl, following redirects.
+/// Writes `url` to file `to` with curl, following redirects.
 ///
-/// Fails with `gg.no_curl` if curl doesn't start, and with `gg.fetch` if it fails, with what it
-/// says.
+/// Fails with `gg.no_curl` if curl doesn't start, and `gg.fetch`, with its message, if it fails.
 fn curl(url: &str, to: &Path) -> Result<(), Failure> {
     let output = Command::new("curl")
         .args([
@@ -133,7 +127,7 @@ fn curl(url: &str, to: &Path) -> Result<(), Failure> {
     Err(Failure::new("gg.fetch", message))
 }
 
-/// The SHA-256 of `data`, as FIPS 180-4 defines it, in lowercase hex.
+/// The SHA-256 of `data` (FIPS 180-4), in lowercase hex.
 fn sha256(data: &[u8]) -> String {
     /// The first 32 bits of the fractional parts of the cube roots of the first 64 primes.
     const K: [u32; 64] = [
@@ -153,8 +147,7 @@ fn sha256(data: &[u8]) -> String {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    // The whole blocks, then what's left, padded: a 1 bit, 0s, and the message's length in bits,
-    // 64 of them.
+    // The whole blocks, then the rest padded: a 1 bit, 0s, the message's length in bits (64).
     let (blocks, rest) = data.as_chunks::<64>();
     let mut last = rest.to_vec();
     last.push(0x80);
@@ -207,8 +200,7 @@ mod tests {
 
     use super::*;
 
-    /// FIPS 180-4's examples, from NIST's, and messages whose padding spills into a block of its
-    /// own, or just doesn't.
+    /// NIST's examples, with padding that spills into a block of its own and that doesn't.
     #[test]
     fn sha256_is_fips_180_4s() {
         let cases = [
@@ -240,11 +232,9 @@ mod tests {
         );
     }
 
-    /// Files not there, or there but other than the list's, are fetched into their places; those
-    /// there as the list has them are kept, fetching nothing; textures, models and fonts under the
-    /// asset root get ID files, the ID the list gives one, put back if its ID file holds another,
-    /// and a fresh one for the rest, kept once they have one; and a download that isn't the list's
-    /// is refused, leaving nothing in its place.
+    /// Missing or changed files are fetched, matching ones kept. Assets get ID files: the list's
+    /// ID, restored if another is held, else a fresh one, kept. A wrong download is refused,
+    /// leaving nothing in its place.
     #[test]
     fn fetching_puts_the_lists_files_in_place_and_refuses_others() {
         let dir = std::env::temp_dir().join(format!("gg-fetch-{}", std::process::id()));

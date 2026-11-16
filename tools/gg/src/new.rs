@@ -1,7 +1,6 @@
-//! `gg new`: a new game, as ARCHITECTURE.md's Game code describes: its package, its build script,
-//! its project, an empty start scene, and a main module whose layer loads it. In the engine's
-//! workspace it's a member, at `games/<NAME>`; elsewhere it's a workspace of its own, at `<NAME>`,
-//! which builds against the engine `--engine` names, with copies of the engine's settings.
+//! `gg new`: a new game, as ARCHITECTURE.md's Game code describes. In the engine's workspace it's
+//! a member at `games/<NAME>`; elsewhere a workspace of its own at `<NAME>`, building against the
+//! `--engine` and with copies of the engine's settings.
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -13,7 +12,6 @@ use serde_json::{Value, json};
 
 use crate::build;
 
-/// The game's package's manifest, `{name}` standing for the game's name, as in [`MAIN`].
 const MANIFEST: &str = r#"[package]
 name = "{name}"
 version.workspace = true
@@ -43,9 +41,7 @@ dev = ["gg-engine/dev"]
 workspace = true
 "#;
 
-/// The workspace of a game outside the engine's, which [`MANIFEST`]'s package inherits from, before
-/// it in the game's manifest: `{engine}` standing for the lines [`Source::dependencies`] gives, and
-/// its lints the engine's workspace's.
+/// The workspace [`MANIFEST`] inherits from; `{engine}` is [`Source::dependencies`].
 const WORKSPACE: &str = r#"# The game's own workspace: the crates its members use, the engine's among them, declared once here,
 # each member naming them with `workspace = true`, as in the engine's workspace.
 [workspace]
@@ -70,7 +66,6 @@ undocumented_unsafe_blocks = "warn"
 
 "#;
 
-/// The game's build script.
 const BUILD: &str = r#"//! Tells the game's code the digest of what it's compiled from, `GG_SOURCE`, which its sessions name
 //! its build by, and gives its Windows executable version info, as gg-api's `build` says.
 
@@ -79,7 +74,6 @@ fn main() -> Result<(), gg_api::Failure> {
 }
 "#;
 
-/// The game's main module.
 const MAIN: &str = r#"//! {name}, a game made with GGEngine.
 //!
 //! Its world starts as its project's start scene, `scenes/main.ron`, which a development build
@@ -121,11 +115,11 @@ impl Layer for Game {
 }
 "#;
 
-/// A scene without entities, in its canonical text.
+/// An empty scene, in canonical text.
 const SCENE: &str = "(\n    entities: {},\n)\n";
 
-/// The AGENTS.md of a game outside the engine's workspace, for agents in its repository: `{name}`
-/// standing for the game's name, then `{engine}` and `{install}` for what [`Source`] says.
+/// The AGENTS.md of a game outside the engine's workspace; `{engine}` and `{install}` come from
+/// [`Source`].
 const AGENTS: &str = r#"# {name}
 
 A game made with GGEngine, a workspace of its own, which builds against
@@ -167,8 +161,7 @@ them again as the game moves to another revision of the engine: `gg check` warns
 where `clippy.toml` lacks a method the engine's bans, or `rust-toolchain.toml` pins another release.
 "#;
 
-/// The engine's own files that a game outside its workspace gets copies of, as `gg` was built with
-/// them.
+/// Copied into games outside the engine's workspace, as `gg` was built with them.
 const ENGINE_CONFIG: &str = include_str!("../../../.cargo/config.toml");
 const ENGINE_CLIPPY: &str = include_str!("../../../clippy.toml");
 const ENGINE_TOOLCHAIN: &str = include_str!("../../../rust-toolchain.toml");
@@ -178,8 +171,7 @@ const ENGINE_IGNORE: &str = include_str!("../../../.gitignore");
 const ENGINE_CLAUDE: &str = include_str!("../../../CLAUDE.md");
 const ENGINE_LOCK: &str = include_str!("../../../Cargo.lock");
 
-/// The project of new game `name`: its directory its asset root, its scenes in `scenes`, and its
-/// start scene `scenes/main.ron`.
+/// The project of new game `name`.
 pub(crate) fn project(name: &str) -> Project {
     Project {
         game: name.to_owned(),
@@ -191,20 +183,20 @@ pub(crate) fn project(name: &str) -> Project {
     }
 }
 
-/// The engine a game outside the engine's workspace builds against, as `--engine` names it.
+/// The engine `--engine` names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Engine {
-    /// An engine checkout's directory, from the working directory or absolute.
+    /// A checkout's directory, relative to the working directory or absolute.
     Path(PathBuf),
-    /// An engine's git repository, by its URL, at a revision.
+    /// A git repository at a revision.
     Git { url: String, rev: String },
 }
 
 impl Engine {
-    /// The engine `given`, `--engine`'s value, names: a git repository, `<URL>#<REVISION>`, for a
-    /// URL, which has `://`, as `https://`, `ssh://` and `file://` do; else a checkout's directory.
+    /// Parses `--engine`: `<URL>#<REVISION>` if it has `://` (`https://`, `ssh://`, `file://`),
+    /// else a checkout's directory.
     ///
-    /// Fails, saying why, for nothing given or a URL without its revision.
+    /// Fails for nothing given or a URL without a revision.
     pub(crate) fn parse(given: &str) -> Result<Self, String> {
         if !given.contains("://") {
             if given.is_empty() {
@@ -226,9 +218,7 @@ impl Engine {
         }
     }
 
-    /// What a new game in a folder below `here` writes of the engine.
-    ///
-    /// Fails as [`checkout`] does.
+    /// What a game below `here` writes of the engine; fails as [`checkout`] does.
     fn source(&self, here: &Path) -> Result<Source, Failure> {
         match self {
             Self::Path(given) => checkout(given, here),
@@ -248,10 +238,10 @@ impl Engine {
     }
 }
 
-/// What a new game in a folder below `here` writes of the engine checkout at `given`, from `here`
-/// or absolute: its path from the game's directory, or, absolute, as it is.
+/// The checkout at `given` (from `here` or absolute), by its path from the game's directory, or
+/// as is if absolute.
 ///
-/// Fails with `gg.new` if `given` holds no gg-engine or gg-api, or if its path isn't valid Unicode.
+/// Fails with `gg.new` if `given` lacks gg-engine or gg-api, or its path isn't Unicode.
 fn checkout(given: &Path, here: &Path) -> Result<Source, Failure> {
     let failed = |message: String| Failure::new("gg.new", message);
     for member in ["gg-engine", "gg-api"] {
@@ -280,7 +270,7 @@ fn checkout(given: &Path, here: &Path) -> Result<Source, Failure> {
     };
     let at =
         (at.to_str()).ok_or_else(|| failed(format!("{} isn't valid Unicode", at.display())))?;
-    // Cargo takes `/` on Windows too, and it reads more easily there.
+    // `/` on Windows too: cargo takes it, and it reads better.
     let at = if cfg!(windows) {
         at.replace('\\', "/")
     } else {
@@ -298,26 +288,26 @@ fn checkout(given: &Path, here: &Path) -> Result<Source, Failure> {
     })
 }
 
-/// What a new game outside the engine's workspace writes of the engine it builds against.
 struct Source {
-    /// Its manifest's `[workspace.dependencies]` lines for the engine's crates, gg-engine and
-    /// gg-api.
+    /// `[workspace.dependencies]` lines for gg-engine and gg-api.
     dependencies: String,
-    /// Where its AGENTS.md says the engine is.
+    /// Where AGENTS.md says the engine is.
     engine: String,
-    /// The command its AGENTS.md gives to install gg from the engine.
+    /// AGENTS.md's command to install gg.
     install: String,
 }
 
-/// Writes new game `name`, whose [`project`] checks, and prints a line of JSON naming its directory
-/// and files. In the engine's workspace, the one cargo finds from the working directory if it has
-/// gg-engine as a member, it's a member, in `games`, taking no `engine`; elsewhere, a workspace of
-/// its own in the working directory, building against `engine`, which it then needs.
+/// Writes new game `name`, printing a JSON line of its directory and files. In the engine's
+/// workspace (cargo's from the working directory, if it has gg-engine) it's a member in `games`,
+/// taking no `engine`; elsewhere a workspace in the working directory, building against `engine`.
 ///
-/// Fails with `gg.new` for `engine` given in the engine's workspace or left out elsewhere, if a
-/// package of the engine's workspace or its lock has the name, writing nothing, as [`write_files`]
-/// does, if a game in the workspace doesn't join it, keeping its files, or as [`checkout`] does;
-/// and with `gg.cargo` if a workspace is there that cargo can't say what it is.
+/// Fails with `gg.new` for:
+/// - `engine` given in the engine's workspace, or missing outside it;
+/// - `name` a package of the engine's workspace or lock, writing nothing;
+/// - a game that doesn't join the workspace, keeping its files;
+/// - the failures of [`write_files`] and [`checkout`].
+///
+/// Fails with `gg.cargo` if cargo can't describe a workspace there.
 pub(crate) fn new(name: &str, engine: Option<&Engine>) -> Result<(), Failure> {
     let failed = |message: String| Failure::new("gg.new", message);
     if locked(name) {
@@ -328,8 +318,7 @@ pub(crate) fn new(name: &str, engine: Option<&Engine>) -> Result<(), Failure> {
     }
     let here = std::env::current_dir()
         .map_err(|error| failed(format!("can't tell which directory gg runs in: {error}")))?;
-    // Where no directory up to the root has a manifest, cargo finds no workspace, and says so as an
-    // error.
+    // With no manifest up to the root, cargo finds no workspace and errors.
     let manifest = here.ancestors().any(|dir| dir.join("Cargo.toml").is_file());
     let workspace = manifest.then(|| build::metadata(false, None)).transpose()?;
     let in_engine = workspace.filter(|metadata| has(metadata, "gg-engine"));
@@ -380,15 +369,12 @@ pub(crate) fn new(name: &str, engine: Option<&Engine>) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Whether the workspace that `metadata`, what `cargo metadata` said, describes has package
-/// `name`.
 fn has(metadata: &Value, name: &str) -> bool {
     let packages = metadata["packages"].as_array();
     packages.is_some_and(|packages| packages.iter().any(|package| package["name"] == name))
 }
 
-/// Whether the engine's `Cargo.lock` has a package named `name`: one of its own, or a crate it
-/// builds with, which a game, in the workspace or outside, builds with too.
+/// Whether the engine's `Cargo.lock` has package `name`, its own or a dependency's.
 fn locked(name: &str) -> bool {
     let names = ENGINE_LOCK
         .lines()
@@ -398,9 +384,7 @@ fn locked(name: &str) -> bool {
         .any(|locked| locked == name)
 }
 
-/// New game `name`'s files in the engine's workspace, by their paths from its directory, `/`
-/// between their parts, with their text: its package's manifest, its build script, its project's,
-/// its start scene and its main module.
+/// New game `name`'s files in the engine's workspace, by `/`-separated path from its directory.
 fn files(name: &str) -> Vec<(&'static str, String)> {
     vec![
         ("Cargo.toml", MANIFEST.replace("{name}", name)),
@@ -411,12 +395,11 @@ fn files(name: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// New game `name`'s files outside the engine's workspace, as [`files`] gives them: its manifest
-/// with a workspace of its own before its package, whose dependencies on the engine `source` gives;
-/// copies of the engine's settings, its config without the `cargo gg` alias, which runs gg from the
-/// engine's source and so works in the engine's workspace alone; the engine's `Cargo.lock`, which
-/// the game's starts from, so that the crates under the engine resolve as its tests ran them; the
-/// engine's `.gitignore`; and an AGENTS.md and the engine's CLAUDE.md, which imports it.
+/// New game `name`'s files outside the engine's workspace: [`files`] with a workspace before the
+/// manifest, and copies of the engine's:
+/// - settings, the config without the `cargo gg` alias, which works in the engine's workspace only;
+/// - `Cargo.lock`, so the crates resolve as the engine's tests ran them;
+/// - `.gitignore` and CLAUDE.md, which imports the game's AGENTS.md.
 fn files_outside(name: &str, source: &Source) -> Vec<(&'static str, String)> {
     let workspace = WORKSPACE.replace("{engine}", &source.dependencies);
     let mut files: Vec<(&str, String)> = (files(name).into_iter())
@@ -442,14 +425,13 @@ fn files_outside(name: &str, source: &Source) -> Vec<(&'static str, String)> {
     files
 }
 
-/// The engine's `.cargo/config.toml` but for its first paragraph, the `cargo gg` alias.
+/// The engine's config without its first paragraph, the `cargo gg` alias.
 fn config() -> &'static str {
     let (_alias, rest) = (ENGINE_CONFIG.split_once("\n\n"))
         .expect("the engine's config has more after its alias, as gg's tests check");
     rest
 }
 
-/// `text` as a TOML basic string, quoted, with what TOML needs escaped.
 fn toml_string(text: &str) -> String {
     let mut quoted = String::from('"');
     for c in text.chars() {
@@ -466,10 +448,9 @@ fn toml_string(text: &str) -> String {
     quoted
 }
 
-/// Writes `files`, each a path from directory `dir`, `/` between its parts, and its text, in `dir`,
-/// writing over nothing, and returns their paths.
+/// Writes `files` (by `/`-separated path from `dir`) in `dir`; returns their paths.
 ///
-/// Fails with `gg.new` if `dir` is there, writing nothing, or if a file can't be written, keeping
+/// Fails with `gg.new` if `dir` is there, writing nothing, or a file can't be written, keeping
 /// those written.
 fn write_files(dir: &Path, files: &[(&str, String)]) -> Result<Vec<PathBuf>, Failure> {
     let failed = |message: String| Failure::new("gg.new", message);
@@ -494,7 +475,6 @@ fn write_files(dir: &Path, files: &[(&str, String)]) -> Result<Vec<PathBuf>, Fai
 mod tests {
     use super::*;
 
-    /// The engine's workspace's root, two folders above gg's.
     fn root() -> &'static Path {
         let gg = Path::new(env!("CARGO_MANIFEST_DIR"));
         gg.ancestors()
@@ -502,8 +482,6 @@ mod tests {
             .expect("gg is at tools/gg in the workspace")
     }
 
-    /// The lines that set a key in table `header` of manifest `text`, its comments and blank lines
-    /// left out.
     fn table<'a>(text: &'a str, header: &str) -> Vec<&'a str> {
         let lines = text.lines().skip_while(|&line| line != header).skip(1);
         let lines = lines.take_while(|line| !line.starts_with('['));
@@ -525,7 +503,7 @@ mod tests {
             read("src/main.rs"),
         );
         let project = Project::read(&dir);
-        // Into a directory that's there, nothing is written.
+        // A directory that's there gets nothing.
         let there = games.join("there");
         fs::create_dir_all(&there).expect("a directory");
         let refused = write_files(&there, &super::files("there"))
@@ -536,7 +514,7 @@ mod tests {
         assert_eq!(files.len(), 5);
         assert_eq!(project, Ok(super::project("probe")));
         assert!(manifest.contains("name = \"gg-probe\""), "{manifest}");
-        // Its sessions name its build by its source, as its build script digests it.
+        // Sessions name the build by its source, which the build script digests.
         assert!(
             manifest.contains("[build-dependencies]\n# Digests") && build.contains("emit()"),
             "{manifest}{build}"
@@ -544,8 +522,7 @@ mod tests {
         assert_eq!(scene, SCENE);
         assert!(main.contains("App::new(\"probe\")"), "{main}");
         assert!(main.contains(".source(env!(\"GG_SOURCE\"))"), "{main}");
-        // A start scene that doesn't load ends the run with its error, as runtime failures do,
-        // rather than panicking.
+        // A start scene that fails to load ends the run with its error, not a panic.
         assert!(
             main.contains("cx.fail(error)") && !main.contains("panic!"),
             "{main}"
@@ -554,9 +531,7 @@ mod tests {
         assert!(empty);
     }
 
-    /// Outside the engine's workspace, a new game is a workspace of its own, its package as in the
-    /// workspace, building against the engine by its path from the game, with copies of the
-    /// engine's files as they are, but for the config's `cargo gg` alias.
+    /// Outside the engine's workspace: its own workspace, the engine by path, copies of its files.
     #[test]
     fn a_game_outside_is_a_workspace_of_its_own_with_the_engines_settings() {
         let here = std::env::temp_dir().join(format!("gg-new-outside-{}", std::process::id()));
@@ -599,8 +574,6 @@ mod tests {
         let engine = |file: &str| fs::read_to_string(root().join(file)).expect("the engine's");
         assert_eq!(written.expect("an engine").expect("written").len(), 14);
         assert_eq!(project, Ok(super::project("probe")));
-        // The package as in the engine's workspace, after a workspace of its own, which names the
-        // engine by its path from the game's directory.
         assert!(manifest.starts_with(WORKSPACE.split("{engine}").next().expect("a head")));
         assert!(manifest.ends_with(&MANIFEST.replace("{name}", "probe")));
         assert!(
@@ -610,7 +583,7 @@ mod tests {
             )),
             "{manifest}"
         );
-        // The engine's lints, as each member takes them with `workspace = true`.
+        // The engine's lints, which members take with `workspace = true`.
         for header in ["[workspace.lints.rust]", "[workspace.lints.clippy]"] {
             let engines = engine("Cargo.toml");
             assert_eq!(
@@ -620,7 +593,7 @@ mod tests {
             );
             assert!(!table(&manifest, header).is_empty(), "{header}");
         }
-        // The engine's config but its alias, which runs gg in the engine's workspace alone.
+        // The engine's config but its alias, which works in the engine's workspace alone.
         let engines = engine(".cargo/config.toml");
         let alias = engines.strip_suffix(&config).expect("the config's end");
         assert!(alias.starts_with("[alias]\n"), "{alias}");
@@ -651,9 +624,8 @@ mod tests {
         );
     }
 
-    /// The engine `--engine` names: a checkout, by its path from the game a folder below, as
-    /// written, or absolute; or a git repository at a revision. A checkout without the engine's
-    /// crates is refused.
+    /// `--engine`: a checkout, by path from a game a folder below or absolute, or a git repository
+    /// at a revision. A checkout without the engine's crates is refused.
     #[test]
     fn engines_are_checkouts_by_path_or_git_repositories_at_a_revision() {
         let parsed = |given: &str| Engine::parse(given);
@@ -715,8 +687,7 @@ mod tests {
         assert_eq!(toml_string("a\"b\\c\u{7f}"), "\"a\\\"b\\\\c\\u007F\"");
     }
 
-    /// The names of the engine's crates and those it builds with are taken: `--package` would name
-    /// the game's and theirs alike.
+    /// Names in the engine's lock are taken: `--package` would name both.
     #[test]
     fn the_names_in_the_engines_lock_are_taken() {
         for taken in ["gg", "gg-api", "gg-engine", "glam", "serde"] {
