@@ -1,14 +1,11 @@
-//! Snapshots: the world copied whole, which restores it: the tool API's `play` runs a copy, and
-//! its `stop` goes back to the world it copied; rollback takes the world back to one
-//! ([`rewind`](World::rewind)), and a SyncTest runs each tick again on one. Taken again into a copy
-//! kept from before, a snapshot is copied in that copy's memory, which allocates as little as
-//! [`World`] says.
+//! Snapshots: the world copied whole. The tool API's `play` runs a copy and `stop` returns to
+//! the original; rollback ([`rewind`](World::rewind)) and SyncTest restore one. A snapshot taken
+//! into a kept copy reuses that copy's memory, allocating as [`World`] says.
 
 use super::{World, next_serial};
 
 impl Clone for World {
-    /// A snapshot of the world: all of it, as [`World`] says, but another world, with a serial of
-    /// its own.
+    /// A snapshot of all of the world ([`World`]): another world, with its own serial.
     fn clone(&self) -> Self {
         let _zone = gg_core::zone!();
         let World {
@@ -56,9 +53,8 @@ impl Clone for World {
         }
     }
 
-    /// Makes the world a copy of `source`, in the memory it holds: restores it from a snapshot,
-    /// or takes a snapshot of `source` into one kept from before. It's another world after, as a
-    /// copy is.
+    /// Makes the world a copy of `source` in its own memory: a restore, or a snapshot into a kept
+    /// one. It's another world after.
     fn clone_from(&mut self, source: &Self) {
         let _zone = gg_core::zone!();
         let World {
@@ -83,18 +79,17 @@ impl Clone for World {
             assets,
         } = source;
         if !self.components.same(components) {
-            // Its tables' ids would name other types than `source`'s same ids.
+            // Its tables' ids would name other types than `source`'s.
             self.components.clone_from(components);
             self.tables.clear();
             self.by_signature.clear();
         }
         self.components.mods_loaded = components.mods_loaded;
-        // The map of tables by their types follows from the tables, so it's `source`'s already if
-        // they have the same types in the same order; copying it would allocate each key.
+        // The map of tables by types is `source`'s already if the tables' types match in order;
+        // copying it would allocate each key.
         let ours = self.tables.iter().map(|table| table.components());
         let shaped = ours.eq(tables.iter().map(|table| table.components()));
-        // Cuts away the tables made since, and copies each table into the one in its place, in
-        // its memory.
+        // Cuts away tables made since, and copies each table into its place's memory.
         self.tables.clone_from(tables);
         if !shaped {
             self.by_signature.clone_from(by_signature);
@@ -110,7 +105,7 @@ impl Clone for World {
         self.kept.clone_from(kept);
         self.stream = *stream;
         self.version = *version;
-        // Only ever growing, so that a tick drawing saw is never one the world marks again.
+        // Only grows, so a tick drawing saw is never one the world marks again.
         self.change_tick = self.change_tick.max(*change_tick);
         self.resources.clone_from(resources);
         self.assets.clone_from(assets);
@@ -119,14 +114,13 @@ impl Clone for World {
 }
 
 impl World {
-    /// Takes the world back to `snapshot`, a copy of it taken since a log last changed it, as
-    /// rollback takes it back to a tick it runs again from: as [`clone_from`](Clone::clone_from)
-    /// restores it, but the very world still, its serial its own, so that what's kept of it by its
-    /// serial holds, as its logs, which undo through it as before, since none changed it since; its
-    /// version moves on past both's, so that what's kept by its version, as drawing's order, is
-    /// found again; and every row of every column changes at a change tick past both's, since
-    /// rows have come back as they were, which what's kept by its ticks, as drawing's copies of
-    /// it, takes again.
+    /// Takes the world back to `snapshot`, taken since a log last changed it (rollback's rerun
+    /// point). Like [`clone_from`](Clone::clone_from), but:
+    /// - the serial stays, so its logs still undo through it;
+    /// - the version moves past both worlds', so what's kept by version (drawing's order) is
+    ///   found again;
+    /// - every row of every column is marked changed at a tick past both worlds', so what's kept
+    ///   by ticks (drawing's copies) refreshes.
     pub(crate) fn rewind(&mut self, snapshot: &World) {
         let (serial, version) = (self.serial, self.version.max(snapshot.version));
         self.clone_from(snapshot);
@@ -152,19 +146,17 @@ mod tests {
     use crate::reflect::tests::{Everything, everything, same_snapshots, snapshot};
     use crate::{Entity, Log, Parent, Sprite, Transform};
 
-    /// A type no entity has until a world's snapshot has been taken, so that a table of it is one
-    /// made since.
+    /// A type no entity has until a snapshot is taken, so a table of it is made since.
     #[derive(Clone, Copy, crate::Component)]
     struct Marked;
 
-    /// A type that a world registers only once a snapshot has been taken of it.
+    /// A type registered only after a snapshot is taken.
     #[derive(Clone, Copy, crate::Component)]
     struct Late;
 
-    /// Panics unless `world` is `twin`, but for its serial and its scratch: the same slots, the
-    /// free ones in the same order, the same entities in the same tables and rows, with the same
-    /// IDs, values, what's opaque in them, parents and children, resets of interpolation, the same
-    /// IDs kept for vacant slots, the same stream of IDs to come, and the same component types.
+    /// Panics unless `world` equals `twin` except serial and scratch: slots (free ones in order),
+    /// tables and rows, IDs, values, opaque parts, hierarchy, interpolation resets, IDs kept for
+    /// vacant slots, the ID stream, and component types.
     fn assert_same(world: &World, twin: &World, case: &str) {
         for world in [world, twin] {
             check_ids(world);
@@ -245,10 +237,9 @@ mod tests {
         result.err().map(|error| error.code().to_owned())
     }
 
-    /// Takes a random step in `world`: an operation through `log`, mostly; now and then an undo or
-    /// a redo; a spawn, or a despawn, which frees slots to the top of the free list; or a root
-    /// saved and then loaded again in its place, or placed as a prefab. Two worlds that are the
-    /// same take the same step from the same `rng`, and are refused alike.
+    /// A random step in `world`: mostly an operation through `log`; sometimes an undo, redo,
+    /// spawn, despawn (frees slots to the free list's top), or a root saved and reloaded or
+    /// placed as a prefab. Equal worlds and `rng`s step and are refused alike.
     fn wander(world: &mut World, log: &mut Log, rng: &mut Rng, step: usize) -> Option<String> {
         let living: Vec<Entity> = world.entities(None).expect("every entity").collect();
         match rng.below(16) {
@@ -286,7 +277,7 @@ mod tests {
         }
     }
 
-    /// A world and its log, and its twin and the twin's, which take the same steps.
+    /// A world and its log, and a twin and its log, taking the same steps.
     struct Twins {
         x: World,
         x_log: Log,
@@ -295,7 +286,7 @@ mod tests {
     }
 
     impl Twins {
-        /// Takes the same random step in both worlds, which are the same.
+        /// Takes the same random step in both worlds.
         fn step(&mut self, rng: &mut Rng, step: usize) {
             let mut same = Rng(rng.0);
             let ours = wander(&mut self.x, &mut self.x_log, rng, step);
@@ -310,11 +301,10 @@ mod tests {
         }
     }
 
-    /// Two worlds take the same random steps, and then, round after round, one of them a snapshot,
-    /// and the other stops there while the first goes on alone, through operations, undos, spawns
-    /// and despawns, loads, prefabs, a log cleared, a table made and, every other round, a type
-    /// registered, and is restored: it's then the other, field by field, refuses what its log held,
-    /// and takes the same steps as the other after.
+    /// Two worlds take the same random steps. Each round, one snapshots and then goes on alone
+    /// (edits, loads, prefabs, a log cleared, a table made, and every other round a type
+    /// registered) before restoring. It then equals the other field by field, refuses its log's
+    /// entries, and steps like the other after.
     #[test]
     fn a_restored_snapshot_matches_the_world_it_was_taken_from() {
         let mut worlds = Twins {
@@ -328,7 +318,7 @@ mod tests {
             worlds.step(&mut rng, step);
         }
         worlds.both(|world| world.register::<Marked>().expect("registered"));
-        // Resets of interpolation, so that the snapshots' copies of them show.
+        // Interpolation resets, so the snapshots' copies of them show.
         worlds.both(|world| {
             let some: Vec<Entity> = world.query::<Entity>().step_by(3).collect();
             for entity in some {
@@ -337,14 +327,13 @@ mod tests {
         });
         assert_same(&worlds.x, &worlds.twin, "in step");
         let mut snap = worlds.x.clone();
-        // The slots the snapshots kept, and the entries of the restored world's logs it refused,
-        // which the rounds are to have.
+        // Slots the snapshots kept and log entries the restored world refused: the rounds must
+        // have some.
         let (mut kept, mut refused) = (0, 0);
         for round in 0..4 {
             let step = 1000 * (round + 1);
             match round {
-                // Taken into a snapshot kept from before, over one that held a smaller world, and
-                // a larger one.
+                // Taken into a kept snapshot, over one that held a smaller world, and a larger.
                 2 => {
                     worlds.both(|world| {
                         for _ in 0..40 {
@@ -402,7 +391,7 @@ mod tests {
             let serials = [worlds.twin.serial, snap.serial];
             assert!(!serials.contains(&worlds.x.serial), "{case}");
             assert_eq!(vacated(&worlds.x), vacated(&worlds.twin), "{case}");
-            // The log of the world restored is another world's, which it refuses whole.
+            // The restored world's log is another world's: refused whole.
             let x = &mut worlds.x;
             while worlds.x_log.undoable().is_some() {
                 let error = worlds.x_log.undo(x).expect_err("another world's");
@@ -416,8 +405,8 @@ mod tests {
             }
             worlds.x_log.clear(x);
             assert_same(&worlds.x, &worlds.twin, &format!("{case}, its log refused"));
-            // The twin's log is dropped without being cleared, so that the slots it keeps stay
-            // vacant, as the restored world's do for good.
+            // The twin's log is dropped uncleared, so the slots it keeps stay vacant, as the
+            // restored world's do for good.
             worlds.x_log = Log::default();
             worlds.twin_log = Log::default();
             for at in 100..200 {
@@ -435,10 +424,9 @@ mod tests {
         );
     }
 
-    /// A world taken back to a snapshot of it, as rollback takes it back, after steps that went
-    /// through no log, as ticks' do, holds what the snapshot holds, and is the very world still, its
-    /// serial its own and its version past both's: so that its log undoes and redoes through it as
-    /// its twin's, which never went on, does through the twin.
+    /// A world rewound to its snapshot after steps outside any log (as ticks do) holds the
+    /// snapshot's content, keeps its serial, and has a version past both's. Its log undoes and
+    /// redoes through it as the twin's, which never went on, does through the twin.
     #[test]
     fn a_world_rewound_is_the_same_world_which_its_log_undoes_as_before() {
         let mut worlds = Twins {
@@ -491,8 +479,7 @@ mod tests {
         assert!(undone > 0, "the log held edits to undo");
     }
 
-    /// A world that registered the same types in another order, so that its ids name others, with
-    /// tables and slots of its own.
+    /// Same types registered in another order, so its ids name others; its own tables and slots.
     fn reversed() -> World {
         let mut world = World::seeded(7);
         let registered = [
@@ -504,7 +491,7 @@ mod tests {
         registered
             .into_iter()
             .for_each(|done| done.expect("registered"));
-        // Its first table has the ids of the fixture's first, which are other types.
+        // Its first table has the ids of the fixture's first: other types.
         for count in 0..20 {
             world.spawn(Sealed(count));
         }
@@ -512,9 +499,8 @@ mod tests {
         world
     }
 
-    /// A world that registered the fixture's types in the fixture's order, so that its ids name the
-    /// same types, but made its tables in another order, so that some of its tables' types aren't
-    /// those of the fixture's tables in their places.
+    /// The fixture's types in its order, so ids match, but tables made in another order: some
+    /// tables' types differ from the fixture's in their places.
     fn reordered() -> World {
         let mut world = World::seeded(9);
         let registered = [
@@ -532,10 +518,9 @@ mod tests {
         world
     }
 
-    /// A world of other types restored from a snapshot is the snapshot's world, as a snapshot of a
-    /// world of other types taken into one kept from before is that world, and either goes on as
-    /// its source does; and so is a world of the same types whose tables were made in another
-    /// order, as by another branch from the snapshot.
+    /// Restoring a snapshot over a world of other types, or snapshotting such a world into a kept
+    /// one, yields the source's world, which then steps like it. So does a world of the same
+    /// types with tables made in another order (another branch from the snapshot).
     #[test]
     fn a_snapshot_restores_into_a_world_of_other_types() {
         let x = fixture().world;
@@ -547,7 +532,7 @@ mod tests {
         let from = reordered();
         kept.clone_from(&from);
         assert_same(&kept, &from, "taken over other tables");
-        // Snapshots taken on two branches from one world, which made other tables in one place.
+        // Snapshots on two branches from one world, each making other tables in one place.
         let mut x = fixture().world;
         let before = x.clone();
         x.spawn((Sprite::default(), Sealed(1)));
@@ -574,7 +559,7 @@ mod tests {
         }
         assert_same(&over, &x, "a step after the restore");
         assert_same(&kept, &from, "a step after the snapshot");
-        // One without tables over one with them, which leaves none of them found.
+        // One without tables over one with them: none found.
         let mut empty = World::seeded(1);
         let mut over = reversed();
         over.clone_from(&empty);
@@ -585,8 +570,7 @@ mod tests {
         assert_same(&over, &empty, "a step after the restore without tables");
     }
 
-    /// Where `world`'s buffers are, and how big, which taking a snapshot into it again, or
-    /// restoring it from one, of the same shape, leaves as they were.
+    /// `world`'s buffers' addresses and sizes: unchanged by a same-shape snapshot or restore.
     fn held(world: &World) -> Vec<(usize, usize)> {
         let mut held = vec![
             (world.meta.as_ptr().addr(), world.meta.capacity()),
@@ -606,14 +590,13 @@ mod tests {
                 held.push((column.as_ptr().addr(), column.len()));
             }
         }
-        // In the map's own order, which a copy that keeps the map keeps.
+        // In the map's own order, which a copy keeping the map keeps.
         let keys = world.by_signature.keys();
         held.extend(keys.map(|key| (key.as_ptr().addr(), key.len())));
         held
     }
 
-    /// A snapshot taken again into the one kept, and the world restored from it, while only
-    /// values change, are copied into the memory each holds.
+    /// While only values change, snapshotting again and restoring reuse each world's memory.
     #[test]
     fn taking_and_restoring_again_keep_their_memory() {
         let mut x = fixture();

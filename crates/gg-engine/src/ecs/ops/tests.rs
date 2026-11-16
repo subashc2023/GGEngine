@@ -8,16 +8,17 @@ use crate::ecs::scene::tests::unchanged;
 use crate::reflect::tests::{Everything, Handle, everything, same_snapshots, snapshot};
 use crate::{Reflect, Sprite, Transform};
 
-/// Opaque as a whole, as a [`MeshDraw`](crate::MeshDraw) is: a world keeps one, but no value
-/// makes one.
+/// Opaque as a whole, like [`MeshDraw`](crate::MeshDraw): a world keeps one, no value makes one.
 #[derive(Clone, Debug, PartialEq, crate::Component)]
 #[reflect(opaque)]
 pub(in crate::ecs) struct Sealed(pub(in crate::ecs) u32);
 
-/// A seeded world's entities, the same each time it's made: `r`, a root, whose children are
-/// `a` and then `s`; `a`, with a sprite of a texture of its own, whose children are `b`, `c`
-/// and `d`; `e`, `b`'s child; `f`, a root whose `Everything` targets `e` and keeps
-/// `Handle(99)`; and `g`, a root that's `Sealed` alone.
+/// A seeded world's entities, the same each time:
+/// - `r`, a root, with children `a` then `s`.
+/// - `a`, with a sprite of its own texture and children `b`, `c`, `d`.
+/// - `e`, `b`'s child.
+/// - `f`, a root whose `Everything` targets `e` and keeps `Handle(99)`.
+/// - `g`, a root that's `Sealed` alone.
 pub(in crate::ecs) struct Fixture {
     pub(in crate::ecs) world: World,
     pub(in crate::ecs) r: Entity,
@@ -30,12 +31,11 @@ pub(in crate::ecs) struct Fixture {
     pub(in crate::ecs) f: Entity,
     pub(in crate::ecs) g: Entity,
     pub(in crate::ecs) texture: Texture,
-    /// Each entity's ID, which a dead one's handle no longer gives.
+    /// Each entity's ID, which a dead entity's handle no longer gives.
     ids: Vec<(Entity, EntityId)>,
 }
 
 impl Fixture {
-    /// The ID of `entity`, one of the fixture's, alive or not.
     pub(in crate::ecs) fn id(&self, entity: Entity) -> EntityId {
         let found = self.ids.iter().find(|&&(other, _)| other == entity);
         found.expect("one of the fixture's").1
@@ -96,8 +96,7 @@ pub(in crate::ecs) fn fixture() -> Fixture {
     }
 }
 
-/// Every component of every entity of `world`, by entity and then by component, whichever
-/// tables they're in.
+/// Every component of every entity, by entity then component, whatever the table.
 pub(in crate::ecs) fn sorted(world: &World) -> Vec<(Entity, EntityId, String, Value)> {
     let mut all = snapshot(world);
     all.sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
@@ -112,9 +111,8 @@ fn named(name: &'static str, value: Value) -> (Ident, Value) {
     (name.into(), value)
 }
 
-/// Applies `operation`, then undoes it, redoes it and undoes it again, checking the world
-/// against what it was before it and after it, each entity by its handle; and returns what
-/// redoes it.
+/// Applies `operation`, undoes, redoes and undoes it, checking the world against its state
+/// before and after, by handle. Returns what redoes it.
 fn round_trip(world: &mut World, mut operation: Operation) -> Inverse {
     let said = operation.to_string();
     let before = sorted(world);
@@ -194,7 +192,7 @@ fn each_operation_is_undone_and_redone_exactly() {
         let redo = round_trip(&mut x.world, operation);
         x.world.release(redo);
     }
-    // What's opaque, which no value reads, came back too.
+    // Opaque state, which no value reads, came back too.
     let sprite = x.world.get::<Sprite>(x.a).expect("a sprite");
     assert_eq!(sprite.texture, Some(x.texture));
     let all = x.world.get::<Everything>(x.f).expect("everything");
@@ -202,15 +200,15 @@ fn each_operation_is_undone_and_redone_exactly() {
     assert_eq!(x.world.get::<Sealed>(x.g), Some(&Sealed(5)));
 }
 
-/// A duplicate copies an entity and its descendants, typed, with what's opaque, each under an
-/// ID of its own, written into it: the entity's copy the last of its parent's children, each
-/// other copy under its parent's, in the order of the originals; a reference to one of them
-/// points at its copy, and one to an entity outside stays. Undoing it is refused once one of
-/// its copies has a child it didn't make, and once one is gone, changing nothing.
+/// A duplicate copies an entity and its descendants, opaque state included, each under a new
+/// ID.
+/// - The entity's copy is its parent's last child; other copies sit under their parent's copy,
+///   in the originals' order.
+/// - A reference to a copied entity points at its copy; one outside stays.
+/// - Undo is refused, changing nothing, once a copy has a foreign child or is gone.
 #[test]
 fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
     let mut x = fixture();
-    // `f`, which targets `e`, under `a` with it; `g`, opaque as a whole, too.
     x.world.set_parent(x.f, Some(x.a)).expect("no cycle");
     x.world.set_parent(x.g, Some(x.f)).expect("no cycle");
     let mut duplicate = Operation::Duplicate {
@@ -223,7 +221,7 @@ fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
     };
     let copied = copies.iter().map(|&id| x.world.entity(id).expect("alive"));
     let copied: Vec<Entity> = copied.collect();
-    // Each parent before its children: `a`, then `b`, `c`, `d` and `f`, then `e` and `g`.
+    // Each parent before its children.
     let [a, b, c, d, f, e, g] = copied[..] else {
         panic!("seven copies: {copies:?}");
     };
@@ -246,7 +244,6 @@ fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
     assert_eq!(all.target, Some(x.e));
     check_ids(&x.world);
     check_links(&x.world);
-    // Another target, outside what's copied, stays.
     let mut again = Operation::Duplicate {
         entity: x.id(x.f),
         copies: Vec::new(),
@@ -256,7 +253,6 @@ fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
     let all = x.world.get::<Everything>(again.expect("alive"));
     assert_eq!(all.expect("copied").target, Some(x.e));
     x.world.release(redo);
-    // A child it didn't make, then one of its copies gone: refused, changing nothing.
     let extra = x.world.spawn(Transform::IDENTITY);
     x.world.set_parent(extra, Some(c)).expect("no cycle");
     for (code, case) in [
@@ -274,8 +270,8 @@ fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
     }
 }
 
-/// Refers to entities each way a value holds one, beside what a set refuses: a count above its
-/// max, and a rotation that isn't a unit, in a variant with an entity.
+/// Refers to entities each way a value can, plus what a set refuses: a count above its max, and
+/// a non-unit rotation in a variant with an entity.
 #[derive(Clone, Debug, PartialEq, crate::Component)]
 struct Links {
     to: Option<Entity>,
@@ -290,9 +286,8 @@ enum Tie {
     Turned { to: Entity, turn: Quat },
 }
 
-/// A duplicate points its copies' references to the originals at their copies, wherever a
-/// value holds them, without setting their components again: the rest of each is copied bit
-/// for bit, what a set refuses among it, as code may store it.
+/// A duplicate retargets copies' references to originals at the copies, wherever held, without
+/// setting the components again: the rest is copied bit for bit, even what a set would refuse.
 #[test]
 fn a_duplicate_points_references_at_the_copies_keeping_what_a_set_refuses() {
     let mut x = fixture();
@@ -339,8 +334,7 @@ fn a_duplicate_points_references_at_the_copies_keeping_what_a_set_refuses() {
     check_links(&x.world);
 }
 
-/// A duplicate's copies of an exclusive field are false, so that it stays true on one entity at
-/// most: the original's.
+/// A duplicate's copies of an exclusive field are false: it stays true on the original alone.
 #[test]
 fn a_duplicates_exclusive_fields_are_false() {
     let (mut world, [lit, ..], _) = lamps();
@@ -373,11 +367,11 @@ fn a_delete_undone_gives_back_each_entity_under_its_handle() {
         assert_eq!(x.world.entity(x.id(gone)), None, "{gone}");
     }
     assert_eq!(children(&x.world, x.r), [x.s]);
-    // A reference into it dangles, as after a despawn, so the world doesn't save.
+    // A reference into it dangles, as after a despawn: the world doesn't save.
     let roots = [x.r, x.f, x.g];
     let error = x.world.save_scene(&roots).expect_err("a reference dangles");
     assert_eq!(error.code(), "ecs.no_entity", "{error}");
-    // Kept, its slots are taken by none of the entities spawned meanwhile.
+    // Kept: its slots aren't reused by entities spawned meanwhile.
     let spawned: Vec<Entity> = (0..taken.len()).map(|_| x.world.spawn(())).collect();
     let elsewhere = |new: &Entity| taken.iter().all(|gone| gone.index != new.index);
     assert!(spawned.iter().all(elsewhere), "{spawned:?}");
@@ -398,8 +392,7 @@ fn a_delete_undone_gives_back_each_entity_under_its_handle() {
     assert_eq!(sprite.texture, Some(x.texture));
     check_ids(&x.world);
     check_links(&x.world);
-    // Redone and dropped, its entities are gone for good, their slots free under their next
-    // generation.
+    // Redone and dropped: gone for good, slots free at the next generation.
     x.world.undo(&mut inverse).expect("redone");
     x.world.release(inverse);
     let spawned: Vec<Entity> = (0..taken.len()).map(|_| x.world.spawn(())).collect();
@@ -572,7 +565,6 @@ fn a_refusal_changes_nothing() {
         assert_eq!(operation.to_string(), said, "an ID written in");
         unchanged(&mut world, &mut twin, &said);
     }
-    // Refused, a create says what it would have made, and where.
     let mut unknown = create(vec![
         transform(),
         named("Velocity", Value::Struct(Vec::new())),
@@ -605,7 +597,7 @@ fn fresh() -> EntityId {
 
 #[test]
 fn an_undo_the_world_has_moved_past_is_refused_whole() {
-    // Each an operation, a change code makes after it, and the code that refuses its undo.
+    // Each: an operation, a change code makes after it, and the code refusing its undo.
     type Case = (
         &'static str,
         fn(&Fixture) -> Operation,
@@ -685,7 +677,7 @@ fn an_undo_the_world_has_moved_past_is_refused_whole() {
         let mut inverse = inverse.unwrap_or_else(|error| panic!("{case}: {error}"));
         change(&mut x);
         let (before, version) = (sorted(&x.world), x.world.version());
-        // Twice, since a refusal leaves the inverse as it was too.
+        // Twice: a refusal leaves the inverse as it was.
         for _ in 0..2 {
             let error = x.world.undo(&mut inverse).expect_err(case);
             assert_eq!(error.code(), code, "{case}: {error}");
@@ -718,7 +710,7 @@ fn an_inverse_is_its_worlds_own() {
     check_ids(&other.world);
 }
 
-/// A lamp, of which operations keep one lit at most.
+/// A lamp: operations keep at most one lit.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 pub(in crate::ecs) struct Lamp {
     lit: bool,
@@ -746,8 +738,8 @@ pub(in crate::ecs) fn lit(world: &World, lamps: [Entity; 3]) -> [bool; 3] {
     lamps.map(|lamp| world.get::<Lamp>(lamp).expect("a lamp").lit)
 }
 
-/// A create, an add or a set that lights a lamp puts every other out, and undoes and redoes
-/// exactly, as one operation; one that puts a lamp out, or sets another field, puts none out.
+/// A create, add or set that lights a lamp puts every other out, and undoes and redoes as one
+/// operation. One that puts a lamp out, or sets another field, puts none out.
 #[test]
 fn an_operation_that_makes_an_exclusive_field_true_makes_it_false_on_every_other_entity() {
     let (mut world, lamps, bare) = lamps();
@@ -796,8 +788,7 @@ fn an_operation_that_makes_an_exclusive_field_true_makes_it_false_on_every_other
     }
 }
 
-/// An undo that would light a lamp again that's gone, or that's no lamp, since is refused,
-/// changing nothing.
+/// An undo that would relight a lamp since gone or no longer a lamp is refused, changing nothing.
 #[test]
 fn an_undo_that_would_set_an_exclusive_field_again_where_it_cant_is_refused_whole() {
     type Case = (&'static str, fn(&mut World, Entity), &'static str);
@@ -824,7 +815,7 @@ fn an_undo_that_would_set_an_exclusive_field_again_where_it_cant_is_refused_whol
         let mut inverse = world.apply(&mut light).expect("lit");
         change(&mut world, lamps[0]);
         let (before, version) = (sorted(&world), world.version());
-        // Twice, since a refusal leaves the inverse as it was too.
+        // Twice: a refusal leaves the inverse as it was.
         for _ in 0..2 {
             let error = world.undo(&mut inverse).expect_err(case);
             assert_eq!(error.code(), code, "{case}: {error}");
@@ -835,7 +826,7 @@ fn an_undo_that_would_set_an_exclusive_field_again_where_it_cant_is_refused_whol
     }
 }
 
-/// Naming a field it hasn't its exclusive one.
+/// An exclusive field the component lacks.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Unlit {
     watts: u32,
@@ -847,7 +838,7 @@ impl crate::Component for Unlit {
     }
 }
 
-/// Naming a field that isn't a `bool` its exclusive one.
+/// An exclusive field that isn't a `bool`.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Dimmed {
     lit: u32,
@@ -868,12 +859,12 @@ fn a_components_exclusive_field_is_a_bool_of_its_own() {
         assert_eq!(error.code(), "ecs.bad_exclusive", "{error}");
     }
     assert_eq!(world.component_types().count(), 1, "`Parent` alone");
-    // Nor are their descriptions kept, which would take their names.
+    // Nor are their descriptions kept: they'd take their names.
     assert_eq!(world.types().iter().len(), described);
     world.register::<Lamp>().expect("registered");
 }
 
-/// Naming a field that isn't an `Option<Entity>` one a delete clears.
+/// A delete-clearing field that isn't an `Option<Entity>`.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Leash {
     to: Option<Entity>,
@@ -893,7 +884,7 @@ fn a_field_a_delete_clears_is_an_optional_entity_of_its_own() {
     assert_eq!(error.code(), "ecs.bad_cleared", "{error}");
 }
 
-/// An element of [`Slots`]' list: a number, and a handle of its own, opaque.
+/// An element of [`Slots`]' list: a number and an opaque handle.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Slot {
     at: u32,
@@ -901,7 +892,7 @@ struct Slot {
     handle: Handle,
 }
 
-/// A list of slots, each keeping its handle, and a form that may keep one too.
+/// A list of slots, and a form that may hold a handle.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Slots {
     slots: Vec<Slot>,
@@ -919,11 +910,10 @@ impl crate::Component for Slots {
 
 impl crate::Writable for Slots {}
 
-/// A set that takes an element out of a list leaves each element after it its own opaque
-/// state, not the one before's, and one that puts an element back in, as its undo does, keeps
-/// theirs too; the undo gives back the element taken out, its state too, as it does the
-/// variant a set switched from, whose state the variant switched to hasn't, and its redo
-/// takes them out again.
+/// - A set that takes an element out of a list leaves each later element its own opaque state,
+///   not its predecessor's; one that puts an element back (as an undo does) does too.
+/// - Undo gives back the element taken out, state included, and the variant switched from,
+///   whose state the new variant lacks. Redo takes them out again.
 #[test]
 fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     use crate::reflect::tests::Form;
@@ -950,7 +940,6 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
         slots: slots.to_vec(),
         form: Form::Held(Handle(7)),
     };
-    // The middle one taken out: the last keeps its own.
     let shrunk = vec![slot(1, 10), slot(3, 30)];
     let value = slots(&shrunk).to_value();
     let field = |value: &Value| match value {
@@ -959,7 +948,6 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     };
     let mut inverse = world.apply(&mut set("slots", field(&value))).expect("set");
     assert_eq!(get(&world), slots(&shrunk));
-    // The first one taken out, by a set of the whole component.
     let mut first = world
         .apply(&mut set("", slots(&[slot(3, 30)]).to_value()))
         .expect("set whole");
@@ -967,7 +955,6 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     world.undo(&mut first).expect("undone");
     assert_eq!(get(&world), slots(&shrunk));
     world.release(first);
-    // Undone, the element comes back with its handle; redone, it goes again.
     world.undo(&mut inverse).expect("undone");
     assert_eq!(get(&world), held);
     world.undo(&mut inverse).expect("redone");
@@ -975,15 +962,14 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     world.undo(&mut inverse).expect("undone again");
     assert_eq!(get(&world), held);
     world.release(inverse);
-    // One put in keeps those after it theirs, but can't make its own.
+    // One put in leaves later ones their state but can't make its own.
     let grown = slots(&[slot(1, 10), slot(9, 0), slot(2, 20), slot(3, 30)]);
     let Err(error) = world.apply(&mut set("slots", field(&grown.to_value()))) else {
         panic!("an opaque handle made");
     };
     assert_eq!(error.code(), "reflect.opaque", "{error}");
     assert_eq!(get(&world), held);
-    // The variant switched from comes back, its handle too, though the world has changed
-    // otherwise meanwhile.
+    // The variant switched from comes back with its handle, though the world changed since.
     let mut switched = world
         .apply(&mut set("form", Form::Point.to_value()))
         .expect("switched");
@@ -1001,7 +987,7 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     world.undo(&mut switched).expect("undone again");
     assert_eq!(get(&world).form, Form::Held(Handle(7)));
     world.release(switched);
-    // A set of a field that holds nothing opaque keeps no copy for its undo, which needs none.
+    // A set of a field holding nothing opaque keeps no copy: its undo needs none.
     other = world
         .apply(&mut set("slots[1].at", Value::UInt(6)))
         .expect("set");
@@ -1009,8 +995,7 @@ fn opaque_state_stays_with_its_element_and_comes_back_with_an_undo() {
     world.release(other);
 }
 
-/// A form that may keep a handle, beside a list of slots, a slot alone and a turn, all of
-/// which code changes as it likes.
+/// A form that may hold a handle, a list of slots, a slot and a turn; code changes all freely.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Rigged {
     form: crate::reflect::tests::Form,
@@ -1027,11 +1012,11 @@ impl crate::Component for Rigged {
 
 impl crate::Writable for Rigged {}
 
-/// The undo of a set that switched a variant from one keeping something opaque puts back the
-/// field alone, what's opaque in it too: the rest of the component stays as code left it since,
-/// a handle it swapped in, a list it grew, of elements a value couldn't make, and a turn it
-/// left off unit length, which a set would refuse. A set keeps the component for its undo only
-/// where it may take something opaque out, as a variant switched or a list of another length.
+/// Undoing a set that switched away from a variant with opaque state restores that field alone,
+/// state included. The rest of the component stays as code left it: a swapped-in handle, a
+/// grown list of elements no value could make, a non-unit turn a set would refuse. A set keeps
+/// the component for its undo only where it may drop opaque state: a variant switch or a list
+/// of another length.
 #[test]
 fn an_undo_from_the_component_kept_puts_back_its_field_alone() {
     use crate::reflect::tests::Form;
@@ -1078,7 +1063,7 @@ fn an_undo_from_the_component_kept_puts_back_its_field_alone() {
         Form::Point
     );
     world.release(switched);
-    // Same length, the same variants: nothing opaque can go, so nothing's kept.
+    // Same length and variants: nothing opaque can go, so nothing's kept.
     let slots = vec![slot(3, 0), slot(4, 0)];
     let same = |slots: &[Slot]| Value::List(slots.iter().map(Reflect::to_value).collect());
     let mut kept = world.apply(&mut set("slots", same(&slots))).expect("set");
@@ -1091,7 +1076,7 @@ fn an_undo_from_the_component_kept_puts_back_its_field_alone() {
     let rigged = world.get::<Rigged>(entity).expect("rigged");
     assert_eq!(rigged.slots, [slot(3, 10), slot(4, 20)]);
     assert_eq!(rigged.cursor, slot(5, 77));
-    // Shorter, or a variant switched, keeps it.
+    // Shorter, or a variant switched: kept.
     kept = world
         .apply(&mut set("slots", same(&slots[..1])))
         .expect("set");
@@ -1105,8 +1090,8 @@ fn an_undo_from_the_component_kept_puts_back_its_field_alone() {
         "switched from a variant holding nothing opaque"
     );
     world.release(kept);
-    // Of a list of another length, an element taken out as the one after it changes leaves
-    // its state to that one, as the values can't tell them apart.
+    // In a list of another length, a removed element's state passes to the next: the values
+    // can't tell them apart.
     let list = vec![slot(1, 10), slot(2, 20), slot(3, 30)];
     let set_to = list.with_value(&same(&[slot(1, 0), slot(9, 0)]));
     assert_eq!(set_to.expect("set"), [slot(1, 10), slot(9, 20)]);

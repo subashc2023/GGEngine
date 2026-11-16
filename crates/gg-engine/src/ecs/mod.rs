@@ -1,10 +1,15 @@
-//! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
-//! kept in archetype tables, a table for each set of component types, and found by queries, or by
-//! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
-//! along; scenes, the world's entities as text; operations, the authoring changes made to it, each
-//! with its inverse, and their log; snapshots, the world copied whole, which restore it; the
-//! world's hash, of what it holds and how, which two runs compare at each tick; what tells two
-//! worlds apart, field by field; and resources, what a world holds beside its entities.
+//! The engine's ECS:
+//!
+//! - entities, which are handles, and their components, data of any reflected type, kept in
+//!   archetype tables (a table for each set of component types) and found by queries or by name;
+//! - entities' persistent IDs;
+//! - the hierarchy, in which parents carry their children along;
+//! - scenes, the world's entities as text;
+//! - operations, the authoring changes made to it, each with its inverse, and their log;
+//! - snapshots, the world copied whole, which restore it;
+//! - the world's hash, which two runs compare at each tick;
+//! - what tells two worlds apart, field by field;
+//! - resources, what a world holds beside its entities.
 
 mod by_name;
 mod declared;
@@ -62,59 +67,53 @@ pub(crate) use table::{ComponentId, Table};
 use crate::assets::Assets;
 use crate::reflect::Reflect;
 
-/// Data an entity can have: a struct or an enum that derives it, with `#[derive(Clone,
-/// Component)]`, which describes it to reflection too, as [`Reflect`] says, so that tools reach it
-/// by name. Clone, so that the world can be copied whole, as a snapshot is; and, through
-/// `Reflect`, `Send` and `Sync`, so that it can go to the job system's threads, in the rows
-/// [`par_for_each`](QueryIterMut::par_for_each) hands them. A type registers the first time an
-/// entity has one, or with [`World::register`]. The derive makes it [`Writable`] too, a component
-/// that code changes.
+/// Data an entity can have: a struct or enum with `#[derive(Clone, Component)]`. The derive also
+/// implements [`Reflect`], so tools reach it by name, and [`Writable`]. `Clone` lets snapshots
+/// copy the world; `Send + Sync` lets [`par_for_each`](QueryIterMut::par_for_each) hand rows to
+/// job threads. A type registers when an entity first has one, or through [`World::register`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
 )]
 pub trait Component: Reflect + Clone {
-    /// What a scene's component of the type is built on, which gives it what's opaque, since
-    /// scenes leave that out, as a field marked `#[reflect(opaque)]`: it's made with
-    /// [`with_value`](Reflect::with_value). `None`, the derive's, makes it with
-    /// [`from_value`](Reflect::from_value) alone, which fails where it has something opaque, so
-    /// that a type with an opaque field implements `Component` by hand to load.
+    /// What a scene builds its component on, to supply what's opaque (a field marked
+    /// `#[reflect(opaque)]`, which scenes leave out): it uses
+    /// [`with_value`](Reflect::with_value). `None`, the derive's, uses
+    /// [`from_value`](Reflect::from_value), which fails on an opaque field, so such a type
+    /// implements `Component` by hand to load.
     fn base() -> Option<Self> {
         None
     }
 
-    /// The name of its exclusive field, if it has one: a `bool` field of its own, of a struct with
-    /// named fields, which [`Operation`]s keep true on one entity at most. One that makes it true
-    /// on an entity, as a create, an add or a set of it does, makes it false on every other entity
-    /// with the component, and what undoes the operation makes theirs true again, as one edit;
-    /// code, and a scene loaded, make it true on as many as they do. [`Camera`](crate::Camera)'s
+    /// Its exclusive field, if any: a `bool` field of a struct with named fields that
+    /// [`Operation`]s keep true on at most one entity. An operation that makes it true on an
+    /// entity (a create, an add or a set) makes it false on every other; undoing restores them,
+    /// as one edit. Code and loaded scenes may make several true. [`Camera`](crate::Camera)'s
     /// `primary` is one. `None`, the derive's.
     fn exclusive() -> Option<&'static str> {
         None
     }
 
-    /// The names of its fields that a delete clears, each an `Option<Entity>` field of its own, of
-    /// a struct with named fields: a [`Log`]'s delete of an entity, or of what's under it, sets
-    /// each to `None` on every entity it doesn't delete whose field names one it does, before it
-    /// deletes them, as the same edit, which undoes with it; and to the entity the edit makes
-    /// again under the ID of the one it named, if it does, as a scene file's relink of an instance
-    /// does. So a component that holds two
-    /// entities together, as a [`Joint3D`](crate::Joint3D)'s bodies, names nothing gone once
-    /// either is deleted, which a scene couldn't save (`ecs.no_entity`). None, the derive's.
+    /// Its fields that a delete clears: `Option<Entity>` fields of a struct with named fields. A
+    /// [`Log`]'s delete of an entity, or of what's under it, first sets each to `None` on every
+    /// surviving entity whose field names a deleted one. That is part of the same edit, and the
+    /// undo sets it to the entity remade under the named one's ID, as a scene file's relink of an
+    /// instance does. So a component that holds two entities together, such as a
+    /// [`Joint3D`](crate::Joint3D)'s bodies, never names one gone, which a scene couldn't save
+    /// (`ecs.no_entity`). `None`, the derive's.
     fn cleared() -> &'static [&'static str] {
         &[]
     }
 
-    /// What a snapshot file keeps of a component of a type that's opaque as a whole, as
-    /// [`MeshDraw`](crate::MeshDraw) is, a line of text of its own, which
-    /// [`load_opaque`](Self::load_opaque) makes it again from, in a run restored from the file
-    /// whose layers added the same assets in the same order as the run it was taken from: `None`,
-    /// the derive's, for a type that keeps nothing, which a restart leaves out.
+    /// What a snapshot file keeps of a component whose type is opaque as a whole, such as
+    /// [`MeshDraw`](crate::MeshDraw): a line of text that [`load_opaque`](Self::load_opaque) reads
+    /// back, in a run whose layers added the same assets in the same order as the run it was taken
+    /// from. `None`, the derive's, keeps nothing, which a restart leaves out.
     fn save_opaque(&self) -> Option<String> {
         None
     }
 
-    /// Makes a component again from `text`, which [`save_opaque`](Self::save_opaque) gave.
+    /// Makes a component from `text`, which [`save_opaque`](Self::save_opaque) gave.
     ///
     /// Fails with `snapshot.opaque` by default, for a type that keeps nothing, or as the type
     /// says for text it doesn't take.
@@ -126,11 +125,11 @@ pub trait Component: Reflect + Clone {
     }
 }
 
-/// A component that code changes: gives an entity, takes away and changes in place, through
-/// [`World::spawn`], [`World::insert`], [`World::remove`], [`World::get_mut`] and `&mut T` in
-/// [`World::query_mut`]. `#[derive(Component)]` implements it, and a component implemented by hand
-/// implements it beside `Component`. Each of the engine's components is one but [`Parent`], which
-/// the world keeps, so that the hierarchy stays whole: [`World::set_parent`] alone changes it.
+/// A component code may spawn, insert, remove and edit: through [`World::spawn`],
+/// [`World::insert`], [`World::remove`], [`World::get_mut`] and `&mut T` in
+/// [`World::query_mut`]. The derive implements it; a hand-written component implements it beside
+/// `Component`. Every engine component is one but [`Parent`], which the world keeps so the
+/// hierarchy stays whole: only [`World::set_parent`] changes it.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component that code changes",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`, or with \
@@ -139,12 +138,11 @@ pub trait Component: Reflect + Clone {
 )]
 pub trait Writable: Component {}
 
-/// Makes a struct or an enum a component, one that code changes, describing it to reflection:
-/// [`Component`] says how.
+/// Makes a struct or enum a [`Component`] and [`Writable`].
 pub use gg_macros::Component;
 
-/// Components that an entity is spawned with: a [`Writable`] component, or a tuple of up to 8 of
-/// different types.
+/// What an entity is spawned with: a [`Writable`] component, or a tuple of up to 8 of different
+/// types.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a bundle of components",
     note = "`World::spawn` takes a component, a type that derives `gg_engine::Component`, or \
@@ -153,10 +151,9 @@ pub use gg_macros::Component;
 )]
 pub trait Bundle: seal::Bundle {}
 
-/// An entity: a handle to it, which stays its own as other entities come and go, and never names
-/// another once it's despawned, unless its world is restored from a snapshot taken before it was
-/// spawned. It's printed as its slot and the slot's generation, such as `7v2`.
-/// It's the world's own: files, tools and diagnostics name an entity by its [`EntityId`].
+/// A handle to an entity. It never names another entity once despawned, unless its world is
+/// restored from a snapshot taken before the spawn. It prints as slot and generation, such as
+/// `7v2`. It's the world's own: files, tools and diagnostics use the [`EntityId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
     /// Its slot.
@@ -166,20 +163,19 @@ pub struct Entity {
 }
 
 impl Entity {
-    /// A handle that names no entity in any world, for one that's dead where it's read: its slot is
-    /// the one the hierarchy keeps for none, which no entity takes.
+    /// Names no entity in any world, for one dead where it's read: its slot is the hierarchy's
+    /// "none", which no entity takes.
     pub(crate) const DEAD: Self = Self {
         index: u32::MAX,
         generation: NonZeroU32::MIN,
     };
 
-    /// Its slot, which no other living entity has, as an index.
+    /// Its slot as an index; no other living entity has it.
     pub(crate) fn slot(self) -> usize {
         self.index as usize
     }
 
-    /// It as 64 bits, its slot the low 32, which no entity gives as 0 in the high 32, as its
-    /// generation is never 0: as a script holds it.
+    /// As a script holds it: slot in the low 32 bits, generation (never 0) in the high 32.
     pub(crate) fn to_bits(self) -> u64 {
         u64::from(self.generation.get()) << 32 | u64::from(self.index)
     }
@@ -205,29 +201,32 @@ impl fmt::Debug for Entity {
     }
 }
 
-/// Entities and their components. Each set of component types has a table, whose rows are the
-/// entities with exactly those types, in the order they joined it, and whose columns are each
-/// type's values; despawning an entity, or giving it a component or taking one away, moves the
-/// table's last row into its place. So the order queries find entities in follows from the changes
-/// made, the same every time, but means nothing a game should depend on: anything ordered, such as
-/// what's drawn over what, orders by its components' values, or by its entities' IDs.
+/// Entities and their components. Each set of component types has a table: rows are the entities
+/// with exactly those types, in the order they joined; columns are each type's values.
+/// Despawning an entity, or giving or taking a component, moves the table's last row into its
+/// place. So query order follows from the changes made and is the same every time, but a game
+/// shouldn't depend on it: order anything (such as what's drawn over what) by component values or
+/// entity IDs.
 ///
-/// A copy of the world is a snapshot of it, which restores it: [`clone`](Clone::clone) takes one,
-/// and [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept
-/// from before. A copy is all of the world: each slot under its generation, the free ones in the
-/// order they're taken, and those kept for the entities a [`Log`] can put back still kept, with
-/// their IDs; each entity under its handle and its ID, in its table and row, with its parent and
-/// children, and when its interpolation was last reset; the tables in the order they were made,
-/// those made since a snapshot cut away as it's restored; the stream the IDs come from; the
-/// component types; and its [`Resource`]s. So a world restored goes on as the world the snapshot
-/// was taken from did: given the same changes, it spawns the same handles with the same IDs, and
-/// its queries find the same order, as it gives out again the handles and IDs given out since the
-/// snapshot. But it's another world: drawing sorts its rows again, and doesn't interpolate into it
-/// from the world before, and it refuses what undoes an operation applied before, as another
-/// world's, so that the slots kept when the snapshot was taken stay vacant, with their IDs, until
-/// [`clear`](Self::clear) or [`replace_scene`](Self::replace_scene) frees them. Taken again, or
-/// restored, a snapshot is copied into the memory the world holds, which allocates nothing while
-/// the tables, the component types and the world's size stay as they were, for components and
+/// A copy of the world is a snapshot: [`clone`](Clone::clone) takes one, and
+/// [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept
+/// from before. A copy holds all of the world:
+/// - each slot under its generation, the free ones in the order they're taken, and those kept for
+///   entities a [`Log`] can put back, with their IDs;
+/// - each entity under its handle and ID, in its table and row, with its parent, children and
+///   last interpolation reset;
+/// - the tables in the order made (a restore cuts those made since);
+/// - the ID stream, the component types, and the [`Resource`]s.
+///
+/// So a restored world goes on as the original did: given the same changes, it spawns the same
+/// handles with the same IDs, and its queries find the same order. But it's another world: drawing
+/// sorts its rows again and doesn't interpolate into it from the world before, and it refuses what
+/// undoes an operation applied before. So the slots kept when the snapshot was taken stay vacant,
+/// with their IDs, until [`clear`](Self::clear) or [`replace_scene`](Self::replace_scene) frees
+/// them.
+///
+/// A snapshot taken or restored again copies into the memory the world holds. That allocates
+/// nothing while the tables, component types and world size stay as they were, for components and
 /// resources whose `Clone` allocates nothing.
 ///
 /// ```
@@ -247,71 +246,65 @@ pub struct World {
     meta: Vec<Meta>,
     /// The slots free for new entities, the last freed taken first.
     free: Vec<u32>,
-    /// Each slot's entity's persistent ID, beside its `Meta` rather than in it, since every lookup
-    /// of a handle reads `Meta`, which stays the smaller for it, and IDs are read far less often:
-    /// written as an entity is spawned into the slot and removed from it, and read through
-    /// [`World::id`], which checks the handle first. `None` while the slot is free, vacant or
-    /// retired.
+    /// Each slot's persistent ID. Kept beside `Meta`, which every handle lookup reads, so `Meta`
+    /// stays small. Read through [`World::id`], which checks the handle. `None` while the slot is
+    /// free, vacant or retired.
     entity_ids: Vec<Option<EntityId>>,
-    /// Each slot's entity's last [`reset_interpolation`](World::reset_interpolation), as the count
-    /// of resets it made; 0 if none. Beside `Meta`, as the IDs are, since only drawing reads it,
-    /// once a frame that ticked: neither it nor the count is hashed, saved or recorded.
+    /// Each slot's entity's last [`reset_interpolation`](World::reset_interpolation), as the
+    /// count of resets it made; 0 if none. Beside `Meta` like the IDs: only drawing reads it.
+    /// Neither it nor the count is hashed, saved or recorded.
     resets: Vec<u64>,
-    /// How many times entities' interpolation has been reset, which numbers each reset.
+    /// How many interpolation resets there have been; numbers each reset.
     reset_count: u64,
-    /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
-    /// random, so that IDs from files can't be chosen to collide.
+    /// Each living entity by ID; looked up, never iterated. SipHash with a random key, so IDs from
+    /// files can't be chosen to collide.
     by_id: HashMap<EntityId, Entity>,
-    /// The room `by_id` was given as it last grew, which the entries its removals leave hide from
-    /// its `capacity`: [`find_by_id`](Self::find_by_id) keeps it at most half full.
+    /// The room `by_id` got as it last grew; removals' leftover entries hide it from `capacity`.
+    /// [`find_by_id`](Self::find_by_id) keeps it at most half full.
     id_room: usize,
-    /// How many vacant slots keep each ID: the IDs of the entities a delete took, which no draw
-    /// gives to another entity while an undo can give them back, as it gives back their slots.
-    /// Looked up, never iterated, and hashed as `by_id` is.
+    /// How many vacant slots keep each ID: IDs of entities a delete took, which no draw gives to
+    /// another entity while an undo can give them back. Looked up, never iterated, hashed like
+    /// `by_id`.
     kept: HashMap<EntityId, u32>,
-    /// Where the next entity's ID comes from.
     stream: IdStream,
-    /// Which world this is among the process's, so that the order drawing keeps for one world,
-    /// where it draws the world's entities on from, the entities a pass of scripts listed in it,
-    /// and what undoes an operation applied to it never pass for another's, as when a game
-    /// replaces its world; a world copied takes another, as does a world restored from a copy,
-    /// cleared, renewed, or whose entities a scene replaced.
+    /// Which world this is among the process's, so what's kept per world (drawing's order, a
+    /// pass of scripts' entity list, undo entries) never passes for another's, as when a game
+    /// replaces its world. A copy takes another, as does a world restored, cleared, renewed or
+    /// given a scene's entities.
     serial: u64,
-    /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
-    /// other tables: drawing keeps the order it sorted while it and `serial` stay.
+    /// How many times entities' rows have changed (spawned, despawned, moved to other tables).
+    /// Drawing keeps its sorted order while this and `serial` stay.
     version: u64,
-    /// The world's change tick, which each table marks the rows of its columns with as they
-    /// change, as [`Changed`](table::Changed) says: moved on by the engine as
-    /// [`advance`](Self::advance) says, so that drawing finds what changed since it last drew, and
-    /// a server what changed since a client's state. Neither it nor the marks are hashed, saved or
-    /// recorded.
+    /// What each table marks changed rows with, as [`Changed`](table::Changed) says. The engine
+    /// moves it on as [`advance`](Self::advance) says, so drawing finds what changed since it
+    /// last drew, and a server what changed since a client's state. Neither it nor the marks are
+    /// hashed, saved or recorded.
     change_tick: u64,
-    /// In the order they were made, which is the order queries search them in.
+    /// In the order made, which is the order queries search them.
     tables: Vec<Table>,
-    /// Each table, by its sorted component types; looked up, never iterated, so that its random
-    /// order never shows.
+    /// Each table by sorted component types; looked up, never iterated, so its random order never
+    /// shows.
     by_signature: HashMap<Box<[ComponentId]>, u32>,
     components: Components,
     /// The component types of the table an entity moves to.
     scratch: Vec<ComponentId>,
-    /// Lists of entities, kept for their memory, for what lists entities as it changes the world,
-    /// such as a model spawning or a pass of scripts: as many as were ever taken at once, as a
-    /// pass of scripts run within another takes one of its own.
+    /// Lists of entities kept for their memory, for what lists entities while changing the world
+    /// (a model spawning, a pass of scripts): as many as were ever taken at once, since a pass of
+    /// scripts run within another takes its own.
     lists: Vec<Vec<Entity>>,
-    /// What it holds beside its entities.
     resources: Resources,
-    /// What names the textures its components show, where they cross into text: its context's,
-    /// which its copies share, and which the context gives it again after each layer's tick.
+    /// Names the textures its components show, where they cross into text. It's the context's,
+    /// shared with copies, and the context gives it again after each layer's tick.
     assets: Arc<Assets>,
 }
 
 impl Default for World {
-    /// An empty world, which has registered [`Parent`], so that tools find it and `set_field`
-    /// refuses it by name in any world, and no game's type takes its name; and which draws its
-    /// entities' IDs from a stream seeded at random, so that each world's are its own.
+    /// An empty world with [`Parent`] registered, so tools find it, `set_field` refuses it by name
+    /// in any world, and no game's type takes its name. Its IDs come from a randomly seeded
+    /// stream, so each world's are its own.
     fn default() -> Self {
-        // std seeds its hashers' keys from the OS's randomness, once a thread, and steps them for
-        // each `RandomState`, so that each world gets another seed.
+        // std seeds its hashers' keys from the OS's randomness once a thread and steps them for
+        // each `RandomState`, so each world gets another seed.
         Self::seeded(RandomState::new().hash_one(()))
     }
 }
@@ -319,8 +312,8 @@ impl Default for World {
 /// How many worlds the process has made, which numbers each.
 static WORLDS: AtomicU64 = AtomicU64::new(0);
 
-/// A serial no other world has had, for a world made, copied, restored, cleared, renewed or
-/// replaced; and so for its types' revision as they change, as [`Components::revision`] says.
+/// A serial no other world has had: for a world made, copied, restored, cleared, renewed or
+/// replaced, and for [`Components::revision`].
 ///
 /// [`Components::revision`]: table::Components::revision
 fn next_serial() -> u64 {
@@ -330,10 +323,10 @@ fn next_serial() -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Meta {
     generation: NonZeroU32,
-    /// `None` while the slot is free; vacant, kept for the entity a delete took, which its inverse
-    /// puts back; or retired.
+    /// `None` while the slot is free, vacant (kept for an entity a delete took, which its inverse
+    /// puts back) or retired.
     location: Option<Location>,
-    /// Its entity's parent and children, which a free slot has none of.
+    /// Its entity's parent and children; a free slot has none.
     links: Links,
 }
 
@@ -347,7 +340,7 @@ struct Location {
 const MOST: usize = 8;
 
 impl World {
-    /// An empty world, as [`World::default`] makes one, whose entities' IDs are drawn from `seed`.
+    /// An empty world like [`World::default`], with IDs drawn from `seed`.
     pub(crate) fn seeded(seed: u64) -> Self {
         let mut components = Components::default();
         components
@@ -376,45 +369,41 @@ impl World {
         }
     }
 
-    /// What names the textures its components show.
     pub(crate) fn assets(&self) -> &Assets {
         &self.assets
     }
 
-    /// What names the textures its components show, as it shares them, to share them again.
     pub(crate) fn shared_assets(&self) -> &Arc<Assets> {
         &self.assets
     }
 
-    /// What names the textures its components show, to name another, which its copies from before
-    /// don't see.
+    /// Copies from before don't see the change.
     #[cfg(test)]
     pub(crate) fn assets_mut(&mut self) -> &mut Assets {
         Arc::make_mut(&mut self.assets)
     }
 
-    /// Shares `assets`, its context's, unless it shares them already: a world that took the
-    /// context's world's place may name others, as a new world names none, and a copy taken before
-    /// an asset was added fewer, where the context's are all those the layers added, which only
-    /// grow.
+    /// Shares the context's `assets` unless it does already. The world may be a replacement that
+    /// names others, a new one that names none, or a copy from before an asset was added; the
+    /// context's hold all the layers added, which only grow.
     pub(crate) fn share_assets(&mut self, assets: &Arc<Assets>) {
         if !Arc::ptr_eq(&self.assets, assets) {
             self.assets.clone_from(assets);
         }
     }
 
-    /// Makes an entity with `components`, and returns it.
+    /// Makes an entity with `components`.
     ///
     /// # Panics
     ///
-    /// If `components` has a type twice, since an entity has one of each; and if a type of them
-    /// fails to [`register`](Self::register).
+    /// - If `components` has a type twice: an entity has one of each.
+    /// - If a type fails to [`register`](Self::register).
     pub fn spawn<B: Bundle>(&mut self, components: B) -> Entity {
         self.spawn_as(None, components)
     }
 
-    /// As [`spawn`](Self::spawn), the entity's ID `id`, which no living entity has, if it's given,
-    /// as a model's node's is, and else drawn.
+    /// Like [`spawn`](Self::spawn), with ID `id` (no living entity has it) if given, as a model's
+    /// node's is, else drawn.
     fn spawn_as<B: Bundle>(&mut self, id: Option<EntityId>, components: B) -> Entity {
         let mut ids = [ComponentId::default(); MOST];
         let ids = &mut ids[..B::COUNT];
@@ -452,10 +441,10 @@ impl World {
         entity
     }
 
-    /// An ID for `entity`, drawn from the stream, by which the world now finds it. A draw that meets
-    /// a living entity's ID, as a stream that has walked into the run of the session that saved a
-    /// loaded scene does, or one a delete keeps for its undo, or one of `given`, which a duplicate
-    /// gives the copies it hasn't placed yet, reseeds the stream and draws again.
+    /// Draws an ID for `entity` from the stream, and finds it by it from now on. A draw that meets
+    /// a living entity's ID (as when the stream has walked into the run of the session that saved
+    /// a loaded scene), one a delete keeps for its undo, or one of `given` (a duplicate's
+    /// not-yet-placed copies) reseeds the stream and draws again.
     fn draw_id(&mut self, entity: Entity, given: &[EntityId]) -> EntityId {
         loop {
             let id = self.stream.draw();
@@ -474,9 +463,8 @@ impl World {
         self.by_id.contains_key(&id) || self.kept.contains_key(&id)
     }
 
-    /// Spawns an entity with ID `id`, which no living entity has, and the components in `row`, a
-    /// one-row column each, sorted by their ids, which a scene built: the entity `expected`, the
-    /// handle [`next_slots`](Self::next_slots) predicted for it.
+    /// Spawns an entity with ID `id` (no living entity has it) and the components a scene built in
+    /// `row`. The entity is `expected`, as [`next_slots`](Self::next_slots) predicted.
     fn spawn_built(&mut self, id: EntityId, row: Row, expected: Entity) {
         let entity = self.take_slot();
         assert_eq!(
@@ -491,10 +479,10 @@ impl World {
         self.place(entity, id, row);
     }
 
-    /// A list of entities, empty, in memory kept from one given back through
-    /// [`keep_list`](Self::keep_list), for what lists entities as it changes the world, as
-    /// [`Model::spawn`](crate::Model::spawn) and [`run_scripts`](crate::run_scripts) do: so that
-    /// it allocates nothing once the world has listed as many, in as many lists at once.
+    /// An empty list in memory kept by [`keep_list`](Self::keep_list), for what lists entities
+    /// while changing the world, such as [`Model::spawn`](crate::Model::spawn) and
+    /// [`run_scripts`](crate::run_scripts). It allocates nothing once the world has listed as many
+    /// entities, in as many lists at once.
     pub(crate) fn take_list(&mut self) -> Vec<Entity> {
         let mut list = self.lists.pop().unwrap_or_default();
         list.clear();
@@ -506,8 +494,7 @@ impl World {
         self.lists.push(list);
     }
 
-    /// Puts `entity`, whose slot holds none, with ID `id`, which the world finds it by already,
-    /// into the table of the components in `row`, a one-row column each, sorted by their ids.
+    /// Puts `entity`, found by `id` already, into the table of the components in `row`.
     fn place(&mut self, entity: Entity, id: EntityId, row: Row) {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
@@ -526,15 +513,15 @@ impl World {
         self.version += 1;
     }
 
-    /// Gives `entity` `component`, in place of the one of its type it has.
+    /// Gives `entity` `component`, replacing one of its type.
     ///
-    /// Fails with `ecs.no_entity` if it isn't alive, and as [`register`](Self::register) does if
-    /// `T` hasn't registered.
+    /// Fails with `ecs.no_entity` if it isn't alive, and like [`register`](Self::register) if `T`
+    /// can't register.
     pub fn insert<T: Writable>(&mut self, entity: Entity, component: T) -> Result<()> {
         self.put(entity, component)
     }
 
-    /// As [`insert`](Self::insert), for any component, such as the [`Parent`] the world keeps.
+    /// [`insert`](Self::insert) for any component, such as [`Parent`].
     fn put<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
         let at = self.locate(entity)?;
         let id = self.components.register::<T>()?;
@@ -556,7 +543,7 @@ impl World {
         self.take(entity)
     }
 
-    /// As [`remove`](Self::remove), for any component, such as the [`Parent`] the world keeps.
+    /// [`remove`](Self::remove) for any component, such as [`Parent`].
     fn take<T: Component>(&mut self, entity: Entity) -> Result<Option<T>> {
         let at = self.locate(entity)?;
         let Some(id) = self.components.get(TypeId::of::<T>()) else {
@@ -571,8 +558,8 @@ impl World {
         Ok(Some(component))
     }
 
-    /// Gives `entity`, at `at`, which has no component `id`, the value in `column`, a one-row
-    /// column of it: as [`put`](Self::put) does, for a component whose type isn't known.
+    /// [`put`](Self::put) for an unknown type: gives `entity`, at `at` and without component
+    /// `id`, the value in one-row `column`.
     fn give(
         &mut self,
         entity: Entity,
@@ -587,8 +574,8 @@ impl World {
         into.push_from(position, &mut *column);
     }
 
-    /// Takes `entity`'s component `id` away, at `at`, and returns it in a one-row column of its
-    /// own: as [`take`](Self::take) does, for a component whose type isn't known.
+    /// [`take`](Self::take) for an unknown type: takes `entity`'s component `id`, at `at`, into a
+    /// one-row column.
     fn take_out(&mut self, entity: Entity, at: Location, id: ComponentId) -> Box<dyn AnyColumn> {
         let mut column = self.components.new_column(id);
         let from = &mut self.tables[at.table as usize];
@@ -599,7 +586,7 @@ impl World {
         column
     }
 
-    /// The table of the component types of the entity at `at`, and `id`, which it hasn't.
+    /// The table of the types of the entity at `at` plus `id`, which it lacks.
     fn table_with(&mut self, at: Location, id: ComponentId) -> u32 {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
@@ -611,7 +598,7 @@ impl World {
         to
     }
 
-    /// The table of the component types of the entity at `at`, but `id`.
+    /// The table of the types of the entity at `at` minus `id`.
     fn table_without(&mut self, at: Location, id: ComponentId) -> u32 {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
@@ -644,12 +631,11 @@ impl World {
         self.location(entity).is_some()
     }
 
-    /// Has frames draw `entity`'s own transform where this tick leaves it, rather than on its way
-    /// there from where the tick found it, until its next tick: for a move that jumps, such as a
-    /// teleport or a wrap. Called before or after the move, within the tick; its descendants, which
-    /// it carries, jump with it, and its ancestors still carry it on their way. Only drawing reads
-    /// it, never the simulation: it changes no hash, scene or recording, nor the order drawing
-    /// sorts.
+    /// Draws `entity`'s own transform where this tick leaves it, not interpolated from where the
+    /// tick found it, until its next tick. For a move that jumps, such as a teleport or a wrap;
+    /// call it before or after the move, within the tick. Its descendants jump with it; its
+    /// ancestors still carry it on their way. Only drawing reads it: it changes no hash, scene,
+    /// recording or drawing order.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     pub fn reset_interpolation(&mut self, entity: Entity) -> Result<()> {
@@ -659,11 +645,11 @@ impl World {
         Ok(())
     }
 
-    /// Despawns every entity, and lets go of what logs keep for their undos, the slots and IDs of
-    /// the entities deletes took, so that no handle from before names an entity. The component
-    /// types and the [`Resource`]s stay, and no ID drawn before is drawn again. The world is then
-    /// another, as a restored one is, which refuses what undoes an operation applied before, as
-    /// [`serial`](Self::serial) says; so whoever keeps a [`Log`] of it clears the log too.
+    /// Despawns every entity and lets go of what logs keep for undos (the slots and IDs of
+    /// deleted entities), so no handle from before names an entity. The component types and
+    /// [`Resource`]s stay, and no ID drawn before is drawn again. The world becomes another (see
+    /// [`serial`](Self::serial)) and refuses what undoes an earlier operation: clear any [`Log`]
+    /// of it too.
     pub fn clear(&mut self) {
         let _zone = gg_core::zone!();
         let mut emptied = self.emptied();
@@ -671,16 +657,15 @@ impl World {
         *self = emptied;
     }
 
-    /// Lets go of what logs keep for their undos, as [`clear`](Self::clear) does, but keeps the
-    /// entities and everything else: each slot a log kept for an entity a delete took is freed
-    /// under its next generation, as [`free_slot`](Self::free_slot) frees it, its ID let go. The
-    /// world is then another, as `clear` says, which refuses every log's entries from before,
-    /// freeing nothing; so whoever keeps a log of it drops the log, for history that starts
-    /// afresh, as after the tool API's `scene open` and `scene new`, and on a lockstep host as it
-    /// sends its joiner its world. The slots are freed in slot order, after the free ones, as a
-    /// load of the world's text frees those it names vacant, which no log there gives back: so
-    /// that a host and its joiner give the same slots to the entities spawned after, as code
-    /// ordering by [`Entity`] needs. A retired slot stays retired.
+    /// Like [`clear`](Self::clear), but keeps the entities: each slot a log kept for a deleted
+    /// entity is [freed](Self::free_slot) under its next generation and its ID let go. The world
+    /// becomes another and refuses every earlier log entry, so drop any log of it for a fresh
+    /// history, as after the tool API's `scene open` and `scene new`, and on a lockstep host
+    /// sending its joiner its world.
+    ///
+    /// Slots are freed in slot order, after the free ones, as a load of the world's text frees
+    /// those it names vacant. So a host and its joiner give the same slots to later spawns, as
+    /// code ordering by [`Entity`] needs. A retired slot stays retired.
     pub(crate) fn renew(&mut self) {
         let mut free = vec![false; self.meta.len()];
         for &index in &self.free {
@@ -698,9 +683,9 @@ impl World {
         self.version += 1;
     }
 
-    /// The entities with every component `Q` reads, table by table, as `Q` takes them: such as
-    /// `world.query::<(Entity, &Transform)>()`. It only reads; [`query_mut`](Self::query_mut)
-    /// changes components too.
+    /// The entities with every component `Q` reads, table by table, such as
+    /// `world.query::<(Entity, &Transform)>()`. Read-only; [`query_mut`](Self::query_mut) may
+    /// change components.
     ///
     /// # Panics
     ///
@@ -709,76 +694,71 @@ impl World {
         QueryIter::new(&self.tables, &self.components)
     }
 
-    /// As [`query`](Self::query), with `&mut T` terms too, which change the entities' `T`s: such
-    /// as `world.query_mut::<(&Velocity, &mut Transform)>()`. `for_each` loops over each table's
-    /// columns, the tightest loop.
+    /// Like [`query`](Self::query), with `&mut T` terms too, such as
+    /// `world.query_mut::<(&Velocity, &mut Transform)>()`. `for_each` is the tightest loop,
+    /// over each table's columns.
     ///
     /// # Panics
     ///
-    /// If `Q` names a component twice, since two of its terms would reach the same values.
+    /// If `Q` names a component twice: two terms would reach the same values.
     pub fn query_mut<Q: Query>(&mut self) -> QueryIterMut<'_, Q> {
         QueryIterMut::new(&mut self.tables, &self.components, self.change_tick)
     }
 
-    /// The tables, in the order they were made, for the engine's systems.
+    /// The tables, in the order made.
     pub(crate) fn tables(&self) -> &[Table] {
         &self.tables
     }
 
-    /// `T`'s id, which its tables' columns are found by, if it has registered, as [`Parent`] has in
-    /// every world.
+    /// `T`'s id, if registered ([`Parent`] is in every world).
     pub(crate) fn component<T: Component>(&self) -> Option<ComponentId> {
         self.components.get(TypeId::of::<T>())
     }
 
-    /// Which world this is among the process's: a copy is another, and so is the world after it's
-    /// restored from one, [cleared](Self::clear), or [replaced](Self::replace_scene). Another
-    /// refuses the entries a [`Log`] made before, what undoes each operation, as another world's;
-    /// so whoever keeps a log of a world, or entities picked in it, lets go of them as the serial
-    /// changes.
+    /// Which world this is among the process's. A copy is another, and so is a world restored,
+    /// [cleared](Self::clear) or [replaced](Self::replace_scene). Another world refuses a
+    /// [`Log`]'s earlier entries, so whoever keeps a log, or entities picked, lets go of them when
+    /// the serial changes.
     pub fn serial(&self) -> u64 {
         self.serial
     }
 
-    /// Which world this is, and how many times its entities' rows have changed, for drawing, which
-    /// keeps the order it sorted while both stay, and for a pass of scripts, which ends once the
-    /// world isn't the one it listed.
+    /// The serial, and how many times entities' rows have changed: drawing keeps its sorted order
+    /// while both stay, and a pass of scripts ends once the world isn't the one it listed.
     pub(crate) fn version(&self) -> (u64, u64) {
         (self.serial, self.version)
     }
 
-    /// The world's change tick: what its tables mark the rows of their columns with as they change,
-    /// as [`Changed`](table::Changed) says, from 1 on. It moves on only as
-    /// [`advance`](Self::advance) moves it, so that the marks after one are past those before it.
+    /// The change tick, from 1 on, which tables mark changed rows with (see
+    /// [`Changed`](table::Changed)). Only [`advance`](Self::advance) moves it, so later marks are
+    /// past earlier ones.
     pub(crate) fn change_tick(&self) -> u64 {
         self.change_tick
     }
 
-    /// Moves the world's change tick on: as each tick starts, and as each frame has drawn the
-    /// world, so that drawing tells what changed since it last looked; and, a server's, which
-    /// draws nothing, as each tick ends, so that its clients' states tell what changed since the
-    /// tick each has.
+    /// Moves the change tick on as each tick starts and each frame has drawn the world, so
+    /// drawing sees what changed since it last looked. A server's world, which draws nothing,
+    /// advances as each tick ends, so each client's state sees what changed since its tick.
     pub(crate) fn advance(&mut self) {
         self.change_tick += 1;
     }
 
-    /// How many times entities' interpolation has been reset, which drawing keeps before a tick.
+    /// How many interpolation resets there have been; drawing keeps it before a tick.
     pub(crate) fn resets(&self) -> u64 {
         self.reset_count
     }
 
-    /// Whether `entity`, which is alive, has had its interpolation reset since the world had made
-    /// `count` resets.
+    /// Whether living `entity`'s interpolation was reset after `count` resets.
     pub(crate) fn reset_since(&self, entity: Entity, count: u64) -> bool {
         self.resets[entity.slot()] > count
     }
 
-    /// How many slots it has, free or not: each entity's [`slot`](Entity::slot) is below it.
+    /// How many slots, free or not: every entity's [`slot`](Entity::slot) is below it.
     pub(crate) fn slots(&self) -> usize {
         self.meta.len()
     }
 
-    /// The table and the row `entity` is in, by their indices, if it's alive, for drawing.
+    /// The table and row indices of living `entity`, for drawing.
     pub(crate) fn table_row(&self, entity: Entity) -> Option<(u32, u32)> {
         self.location(entity).map(|at| (at.table, at.row))
     }
@@ -802,7 +782,7 @@ impl World {
         })
     }
 
-    /// The table of the component types `signature`, sorted, which is made if there's none.
+    /// The table of sorted `signature`, made if missing.
     fn table(&mut self, signature: &[ComponentId]) -> u32 {
         if let Some(&table) = self.by_signature.get(signature) {
             return table;
@@ -837,8 +817,8 @@ impl World {
         Entity { index, generation }
     }
 
-    /// The handles the next entities spawned take, in order, as [`take_slot`](Self::take_slot) gives
-    /// them: the free slots, the last freed first, and then new ones.
+    /// The handles the next spawns take, as [`take_slot`](Self::take_slot) gives them: free slots,
+    /// last freed first, then new ones.
     fn next_slots(&self) -> impl Iterator<Item = Entity> + '_ {
         let free = self.free.iter().rev().map(|&index| Entity {
             index,
@@ -854,8 +834,7 @@ impl World {
         free.chain(new)
     }
 
-    /// Removes the entity in slot `index`, which is alive, without parent or children, and its
-    /// components, its table's last row taking its place.
+    /// Removes the living entity in slot `index`, without parent or children, and its components.
     fn remove_slot(&mut self, index: u32) {
         let at = self.meta[index as usize].location;
         let at = at.expect("the slot's entity is alive");
@@ -864,10 +843,9 @@ impl World {
         self.free_slot(index);
     }
 
-    /// As [`remove_slot`](Self::remove_slot), but returns the entity's components, a one-row column
-    /// each, sorted by their ids, and leaves its slot vacant rather than free: its generation as it
-    /// was, and taken by no entity until it's freed, so that the entity can come back into it under
-    /// its handle, as an undone delete does; and keeps its ID from draws until then.
+    /// Like [`remove_slot`](Self::remove_slot), but returns the entity's components and leaves the
+    /// slot vacant, not free: same generation, taken by no entity until freed, so the entity can
+    /// come back under its handle, as an undone delete does. Its ID stays out of draws until then.
     fn vacate(&mut self, index: u32) -> Row {
         let at = self.meta[index as usize].location;
         let at = at.expect("the slot's entity is alive");
@@ -878,8 +856,8 @@ impl World {
         row
     }
 
-    /// The rest of taking slot `index`'s entity, at `at`, out of its table, whose entity `moved`,
-    /// if any, took its row: it goes from the world, and its ID with it, which is returned.
+    /// Finishes taking slot `index`'s entity, at `at`, out of its table, whose row `moved` (if any)
+    /// took. Returns its ID, which goes from the world with it.
     fn leave(&mut self, index: u32, at: Location, moved: Option<Entity>) -> EntityId {
         if let Some(moved) = moved {
             self.meta[moved.index as usize].location = Some(at);
@@ -892,9 +870,9 @@ impl World {
         id
     }
 
-    /// Takes `id` out of one vacant slot's keeping: as its entity comes back under it, or as the
-    /// slot is freed. Another slot may keep it still, if a create or a load gave it to another
-    /// entity meanwhile, which a delete took too.
+    /// Releases one vacant slot's keeping of `id`, as its entity comes back or the slot is freed.
+    /// Another slot may still keep it: a create or load gave it to another entity meanwhile, which
+    /// a delete took too.
     fn free_id(&mut self, id: EntityId) {
         let Entry::Occupied(mut kept) = self.kept.entry(id) else {
             unreachable!("a vacant slot keeps its entity's ID");
@@ -906,25 +884,24 @@ impl World {
         }
     }
 
-    /// Frees slot `index`, which no entity is in, for the next spawned: under its next generation,
-    /// so that the handle of the entity it held never names another.
+    /// Frees slot `index`, which no entity is in, under its next generation, so the old handle
+    /// never names another entity.
     fn free_slot(&mut self, index: u32) {
         let meta = &mut self.meta[index as usize];
-        // A slot whose generation can't go higher retires, so that no handle names another
-        // entity: its `Meta` stays, for every 4 billion entities spawned in the slot.
+        // A slot whose generation can't go higher retires, so no handle names another entity: its
+        // `Meta` stays, for every 4 billion entities spawned in the slot.
         if let Some(next) = meta.generation.checked_add(1) {
             meta.generation = next;
             self.free.push(index);
         }
     }
 
-    /// This world without its entities: each slot that held one, or that a log kept for one a
-    /// delete took, freed under its next generation, as [`free_slot`](Self::free_slot) frees it,
-    /// after the free ones and in slot order, as despawning each in turn would, so that no handle
-    /// from before names an entity in it. It keeps the component types, the stream of IDs, so that
-    /// none is drawn twice, and the count of resets; and has no tables, as a world made hasn't, so
-    /// that it costs the slots, never the components; nor resources, which whoever empties it
-    /// moves over, since copying them would allocate.
+    /// This world without its entities. Each slot that held one, or that a log kept for a deleted
+    /// one, is [freed](Self::free_slot) under its next generation, after the free ones and in slot
+    /// order, as despawning each in turn would, so no old handle names an entity. It keeps the
+    /// component types, ID stream (so none is drawn twice) and reset count. It has no tables, as a
+    /// new world has none, so it costs the slots, not the components; and no resources, which the
+    /// caller moves over, since copying would allocate.
     fn emptied(&self) -> World {
         let slots = self.meta.len();
         let mut was_free = vec![false; slots];
@@ -967,9 +944,9 @@ impl World {
         world
     }
 
-    /// A world of no entities, of this one's component types and its assets, as a prefab's text
-    /// loads into to make its template, and a scene parses in apart from this world, as
-    /// [parse_scene](Self::parse_scene) says: it costs neither this world's slots nor its tables.
+    /// A world of no entities with this one's component types and assets, for a prefab's text to
+    /// load its template into and a scene to parse in (see [parse_scene](Self::parse_scene)). It
+    /// costs neither this world's slots nor tables.
     pub(crate) fn scratch(&self) -> World {
         let mut world = World::seeded(0);
         world.components = self.components.clone();
@@ -977,8 +954,8 @@ impl World {
         world
     }
 
-    /// Moves `entity`, at `at`, to the end of table `to`, with its components that `to` has. Its
-    /// others must have left its row already.
+    /// Moves `entity`, at `at`, to the end of table `to` with the components `to` has. The others
+    /// must have left already.
     fn move_entity(&mut self, entity: Entity, at: Location, to: u32) {
         let [from, into] = self
             .tables
@@ -1092,11 +1069,10 @@ mod tests {
         table.changed(id).expect("it has one").row(at.row as usize)
     }
 
-    /// Each component's rows keep the change tick at which they last changed, as the world reaches
-    /// them to change them: spawned or moved into a table, each of its columns; through `get_mut`,
-    /// `insert` or a set, the row's component alone; through a query's `&mut` term, its column's
-    /// rows, the others' not. A row keeps its ticks as another leaves and it takes that one's
-    /// place, and a rewind changes every row.
+    /// Rows keep the tick they last changed at: on spawn or a move into a table, in every column;
+    /// through `get_mut`, `insert` or a set, in that component alone; through a query's `&mut`
+    /// term, in its column's rows only. A row keeps its ticks when it takes a leaver's place; a
+    /// rewind changes every row.
     #[test]
     fn rows_keep_the_tick_they_last_changed_at() -> Result<()> {
         let mut world = World::default();
@@ -1230,11 +1206,10 @@ mod tests {
         assert_eq!(world.get::<Index>(next), Some(&Index(1)));
     }
 
-    /// Clearing the world despawns every entity, and frees each slot that held one, or that a log
-    /// kept for one a delete took, under its next generation, after the free ones, a slot that
-    /// can't go higher retiring: so no handle from before names an entity after, and no ID drawn
-    /// before is drawn again. The component types stay; and the world is another, which refuses
-    /// the log's entries rather than put their entities back in slots it has let go.
+    /// Clearing frees every slot that held an entity, or that a log kept for a deleted one, under
+    /// its next generation, after the free ones (a slot at its highest generation retires). No old
+    /// handle names an entity after, and no ID is drawn again. The component types stay. The
+    /// world is another and refuses the log's entries.
     #[test]
     fn clearing_the_world_frees_every_slot_and_keeps_the_types() {
         let mut x = fixture();
@@ -1274,8 +1249,8 @@ mod tests {
         assert_eq!(error.code(), "ops.other_world", "{error}");
         log.clear(world);
         assert_eq!(world.free, slots, "freed once");
-        // The slots freed take new entities, under handles and IDs of their own, and then a new
-        // slot does, never the retired one.
+        // The freed slots take new entities, under handles and IDs of their own, then a new slot
+        // does, never the retired one.
         let spawned: Vec<Entity> = (1..11).map(|i| world.spawn(Index(i))).collect();
         assert_eq!(
             spawned.last().map(|entity| entity.index),
@@ -1290,9 +1265,9 @@ mod tests {
         check_links(world);
     }
 
-    /// Renewing the world frees each slot a log kept for an entity a delete took, under its next
-    /// generation, and lets its ID go, keeping the entities as they were; and the world is another,
-    /// whose version has moved on, which refuses the log's entries.
+    /// Renewing frees each slot a log kept for a deleted entity, under its next generation, and
+    /// lets its ID go; entities stay as they were. The world is another, its version moved on, and
+    /// refuses the log's entries.
     #[cfg(feature = "dev")]
     #[test]
     fn renewing_the_world_frees_what_logs_kept_and_keeps_the_entities() {
@@ -1315,7 +1290,7 @@ mod tests {
         let error = log.undo(world).expect_err("another world's");
         assert_eq!(error.code(), "ops.other_world", "{error}");
         assert_eq!(world.entity(a), None);
-        // The slots freed take new entities, under handles of their own.
+        // The freed slots take new entities, under handles of their own.
         let taken = [x.a, x.b, x.c, x.d, x.e];
         let spawned: Vec<Entity> = (0..5).map(|i| world.spawn(Index(i))).collect();
         let mut slots: Vec<u32> = spawned.iter().map(|entity| entity.index).collect();
@@ -1326,9 +1301,9 @@ mod tests {
         check_ids(world);
     }
 
-    /// A reset of an entity's interpolation is its slot's alone, and changes neither the hash nor
-    /// the version, which drawing sorts by; a snapshot keeps it and the count, a world restored
-    /// keeps a reset for each of its slots, and a slot's next entity starts without its last's.
+    /// A reset belongs to its slot alone and changes neither the hash nor the version, which
+    /// drawing sorts by. Snapshots keep it and the count, and a slot's next entity starts without
+    /// its last's.
     #[test]
     fn a_reset_touches_its_slot_alone() {
         let mut world = World::seeded(1);
@@ -1371,7 +1346,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct C;
 
-    /// Not `Copy`, and on the heap, so that a value dropped or cloned where it should move shows.
+    /// Not `Copy`, and on the heap, so a value dropped or cloned where it should move shows.
     #[derive(Clone, Debug, PartialEq, Component)]
     struct D(String);
 
@@ -1399,11 +1374,9 @@ mod tests {
         }
     }
 
-    /// Saves `world`'s every root, as the model has them, and loads the scene into a world of its
-    /// own, whose types registered in another order and whose slots were freed; and checks it
-    /// against the model, each entity by ID, with its components and parent, and its children in
-    /// the order of their IDs; that it has `world`'s content hash; and that it saves again as it
-    /// was.
+    /// Saves every root and loads the scene into another world (types registered in another
+    /// order, slots freed). Checks against the model: each entity by ID with components and parent,
+    /// children in ID order, `world`'s content hash, and a save that matches the first.
     fn scene_matches_the_model(world: &World, live: &[(Entity, Has)], step: usize) {
         let roots = live.iter().filter(|(_, has)| has.parent.is_none());
         let roots: Vec<Entity> = roots.map(|&(entity, _)| entity).collect();
@@ -1467,7 +1440,7 @@ mod tests {
         }
     }
 
-    /// SplitMix64, seeded, so that a test takes the same steps every run.
+    /// SplitMix64, seeded, so a test takes the same steps every run.
     pub(in crate::ecs) struct Rng(pub(in crate::ecs) u64);
 
     impl Rng {
@@ -1477,13 +1450,12 @@ mod tests {
         }
     }
 
-    /// Takes random steps, spawning, despawning, giving and taking components and changing them
-    /// through queries and by name, setting parents, and now and then clearing the world, and
-    /// after each checks the world against a model of it: a list of each living entity's
-    /// components, parent and ID, and when it became its parent's child.
+    /// Takes random steps (spawn, despawn, give, take, change through queries and by name, set
+    /// parents, now and then clear) and checks the world against a model after each: each living
+    /// entity's components, parent and ID, and when it became its parent's child.
     #[test]
     fn the_world_matches_a_model() {
-        // Seeded, so that its IDs are the same every run too.
+        // Seeded, so its IDs are the same every run too.
         let mut world = World::seeded(0x5eed);
         let mut rng = Rng(7);
         let mut live: Vec<(Entity, Has)> = Vec::new();
@@ -1500,8 +1472,8 @@ mod tests {
         let mut joined: HashMap<Entity, usize> = HashMap::new();
         // How many steps cleared the world.
         let mut cleared = 0;
-        // Its types in the order A, C, B, D, so that C's column comes between A's and B's, and a
-        // query of B then A takes them out of their order in the tables.
+        // Order A, C, B, D puts C's column between A's and B's: a query of B then A takes them
+        // out of the tables' order.
         let first = world.spawn((A(0), C, B(0), D("0".to_owned())));
         let all = |n: u32| Has {
             a: Some(A(n)),
@@ -1636,9 +1608,8 @@ mod tests {
                     }
                 }
                 6 => {
-                    // Writes through terms out of the tables' order, with an entity among them,
-                    // in a `for` loop, through `for_each`, or one by one and then the rest through
-                    // `for_each`, which take the rows differently.
+                    // Terms out of the tables' order, with an entity among them, written in a `for`
+                    // loop, `for_each`, or one then `for_each`: each takes rows differently.
                     let mut found = Vec::new();
                     let mut write = |(b, entity, a): (&mut B, Entity, &mut A)| {
                         b.0 += 1;

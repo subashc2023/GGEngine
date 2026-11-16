@@ -8,15 +8,14 @@ use super::table::{AnyColumn, ComponentId, Components, Table};
 use super::{Component, Entity, Writable};
 use crate::jobs;
 
-/// The rows of a table a job takes: a number of its own, never a share of the threads, so that a
-/// query's rows split the same way on every machine. 1,024 of the sandbox's drifters take about
-/// 17 µs in a release build.
+/// Rows per job: a fixed number, never a share of the threads, so rows split the same way on
+/// every machine. 1,024 of the sandbox's drifters take about 17 µs in a release build.
 const CHUNK: usize = 1024;
 
-/// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it, if it's
-/// [`Writable`], and `Entity` is the entity itself; or a tuple of up to 8 of them, each component
-/// named once. [`World::query_mut`](super::World::query_mut) takes any, and
-/// [`World::query`](super::World::query) those that only read.
+/// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it ([`Writable`]
+/// only), `Entity` is the entity; or a tuple of up to 8, each component named once.
+/// [`World::query_mut`](super::World::query_mut) takes any; [`World::query`](super::World::query)
+/// only readers.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a query",
     note = "a query's terms are `&T` and `&mut T` for components `T`, and `Entity`, alone or in a \
@@ -25,8 +24,7 @@ const CHUNK: usize = 1024;
 )]
 pub trait Query: seal::Query {}
 
-/// A [`Query`] that only reads: `&T` and `Entity` terms, which
-/// [`World::query`](super::World::query) takes.
+/// A [`Query`] of `&T` and `Entity` terms only, for [`World::query`](super::World::query).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a query that only reads",
     note = "`World::query` takes `&T` and `Entity` terms, alone or in a tuple of up to 8; \
@@ -37,7 +35,7 @@ pub trait ReadOnlyQuery: Query + seal::ReadOnlyQuery {}
 /// The entities a [`World::query`](super::World::query) finds, table by table.
 pub struct QueryIter<'w, Q: ReadOnlyQuery> {
     tables: slice::Iter<'w, Table>,
-    /// `None` if a component it needs has never been in the world, so that no table matches.
+    /// `None` if a component it needs has never been in the world: no table matches.
     needs: Option<Q::Needs>,
     /// The rows left of the table it's in.
     rows: Option<Q::Fetch<'w>>,
@@ -48,8 +46,7 @@ pub struct QueryIterMut<'w, Q: Query> {
     tables: slice::IterMut<'w, Table>,
     needs: Option<Q::Needs>,
     rows: Option<Q::Fetch<'w>>,
-    /// The world's change tick, which each table it reaches marks the columns its `&mut` terms
-    /// take with, all their rows.
+    /// The tick each reached table marks its `&mut` terms' columns changed with, all rows.
     tick: u64,
 }
 
@@ -90,7 +87,7 @@ impl<'w, Q: ReadOnlyQuery> Iterator for QueryIter<'w, Q> {
         }
     }
 
-    /// A table at a time, so that `for_each` and the like loop over each table's columns.
+    /// A table at a time, so `for_each` and the like loop over each table's columns.
     fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
         let mut acc = match self.rows {
             Some(rows) => rows.fold(init, &mut f),
@@ -122,7 +119,7 @@ impl<'w, Q: Query> Iterator for QueryIterMut<'w, Q> {
         }
     }
 
-    /// A table at a time, so that `for_each` and the like loop over each table's columns.
+    /// A table at a time, so `for_each` and the like loop over each table's columns.
     fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
         let mut acc = match self.rows {
             Some(rows) => rows.fold(init, &mut f),
@@ -141,21 +138,24 @@ impl<'w, Q: Query> Iterator for QueryIterMut<'w, Q> {
 }
 
 impl<'w, Q: Query> QueryIterMut<'w, Q> {
-    /// Calls `f` on each entity found, as `for_each` does, with each table's rows in runs of 1,024
-    /// that the job system's threads take, the calling thread among them; outside the pool, on the
-    /// calling thread, in the order `for_each` takes them. The rows [`next`](Iterator::next) left
-    /// of a table come first, and run on the calling thread, as a table of no more rows than a run
-    /// does; each table's rows finish before the next table's start.
+    /// Calls `f` on each entity found, like `for_each`, with each table's rows in runs of 1,024
+    /// that the job system's threads take, the calling thread included. Outside the pool it runs
+    /// on the calling thread, in `for_each` order.
     ///
-    /// `f` gets its own row's terms and no world, so that what each row becomes can't depend on how
-    /// many threads there are or which takes which rows, as determinism needs; unless `f` writes
-    /// through what it captures, such as a `Mutex` or an atomic, whose writes follow the threads'
-    /// order. In the pool, a thread that waits for rows another took runs other rows
-    /// meanwhile, so `f` mustn't hold a lock that `f` takes, or a `RefCell` it borrows, while it
-    /// calls `par_for_each` or anything else that joins: the thread could run another row's `f`,
-    /// which would wait for the lock the thread holds, or find the `RefCell` borrowed. If `f`
-    /// panics, this panics with its payload, and in the pool other runs of rows may have changed by
-    /// then.
+    /// Rows [`next`](Iterator::next) left of a table come first, on the calling thread, like a
+    /// table of one run or less. Each table finishes before the next starts.
+    ///
+    /// `f` gets its row's terms and no world, so a row's result can't depend on thread count or
+    /// assignment, as determinism needs. Writes through captures, such as a `Mutex` or an atomic,
+    /// follow the threads' order.
+    ///
+    /// In the pool, a thread waiting on another's rows runs other rows meanwhile. So `f` mustn't
+    /// hold a lock `f` takes, or a `RefCell` it borrows, while it joins (`par_for_each` or
+    /// anything else): the thread could run another row's `f`, which would wait on the held lock
+    /// or find the `RefCell` borrowed.
+    ///
+    /// If `f` panics, this panics with its payload, and in the pool other runs may have changed
+    /// by then.
     pub fn par_for_each(self, f: impl Fn(Q::Item<'w>) + Sync) {
         if let Some(rows) = self.rows {
             rows.for_each(&f);
@@ -172,7 +172,7 @@ impl<'w, Q: Query> QueryIterMut<'w, Q> {
     }
 }
 
-/// Calls `f` on each of the `len` rows of `slices`, splitting them in two at a multiple of `CHUNK`,
+/// Calls `f` on each of the `len` rows of `slices`, splitting them in two at a multiple of `CHUNK`
 /// for two jobs, until each run is a chunk or less.
 fn split<'w, Q: Query, F: Fn(Q::Item<'w>) + Sync>(slices: Q::Slices<'w>, len: usize, f: &F) {
     if len <= CHUNK {
@@ -189,7 +189,7 @@ fn split<'w, Q: Query, F: Fn(Q::Item<'w>) + Sync>(slices: Q::Slices<'w>, len: us
     );
 }
 
-/// The traits that only this module implements, which say how each query fetches.
+/// How each query fetches; only this module implements these.
 mod seal {
     use super::*;
 
@@ -198,7 +198,7 @@ mod seal {
         type Item<'w>;
         /// A matching table's rows: its terms' slice iterators, zipped.
         type Fetch<'w>: Iterator<Item = Self::Item<'w>>;
-        /// A matching table's rows as its terms' slices, which split for the jobs that take them.
+        /// A matching table's rows as its terms' slices, which split for jobs.
         type Slices<'w>: Send;
         /// What it needs of a table: the ids of its terms' components.
         type Needs: Copy;
@@ -206,14 +206,13 @@ mod seal {
         /// Panics if it names a component twice.
         fn check();
 
-        /// What it needs in a world that has seen `components`; `None` if one of its components
-        /// isn't among them, so that no table matches.
+        /// `None` if a component hasn't been seen in `components`: no table matches.
         fn needs(components: &Components) -> Option<Self::Needs>;
 
         fn matches(needs: Self::Needs, table: &Table) -> bool;
 
-        /// The rows of `table`, which matches, as slices, its columns that `&mut` terms take
-        /// marked changed at tick `tick`, all their rows.
+        /// The matching `table`'s rows as slices; `&mut` terms' columns are marked changed at
+        /// `tick`, all rows.
         fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table, tick: u64) -> Self::Slices<'w>;
 
         /// The first `mid` rows of `slices`, and the rest.
@@ -224,7 +223,7 @@ mod seal {
 
         fn rows<'w>(slices: Self::Slices<'w>) -> Self::Fetch<'w>;
 
-        /// The rows of `table`, which matches, as [`slices_mut`](Self::slices_mut) marks them.
+        /// The matching `table`'s rows, marked as [`slices_mut`](Self::slices_mut) does.
         fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table, tick: u64) -> Self::Fetch<'w> {
             Self::rows(Self::slices_mut(needs, table, tick))
         }
@@ -260,8 +259,7 @@ mod seal {
         /// Whether the column of component `id` is the one it takes.
         fn takes(need: Self::Need, id: ComponentId) -> bool;
 
-        /// Its rows of a table, from the column it takes, which the table has, and the table's
-        /// entities.
+        /// Its rows of a table, from the column it takes, which the table has, or the entities.
         fn slice_mut<'w>(
             column: Option<&'w mut Box<dyn AnyColumn>>,
             entities: &'w [Entity],
@@ -524,10 +522,9 @@ macro_rules! zipped {
     };
 }
 
-/// A tuple of terms is a query: `$Rows` is its tables' rows, its terms' slice iterators zipped,
-/// each item flattened from the nested tuples zipping makes. Zipped slice iterators take std's
-/// indexed path, so that each row costs one check of the count, whether a `for` loop takes the
-/// rows one by one or `for_each` folds them.
+/// A tuple of terms is a query. `$Rows` is a table's rows: its terms' slice iterators zipped,
+/// items flattened from the nested tuples. Zipped slice iterators take std's indexed path, so
+/// each row costs one count check, in a `for` loop or a `for_each` fold.
 macro_rules! tuple_query {
     ($Rows:ident; $($T:ident $t:ident $i:tt),+) => {
         /// A table's rows, for a query of a tuple of this many terms.
@@ -584,8 +581,8 @@ macro_rules! tuple_query {
             ) -> Self::Slices<'w> {
                 let changes = |id| $(($T::CHANGES && $T::takes(needs.$i, id)))||+;
                 let (components, columns, entities) = table.reach(tick, changes);
-                // Each column goes to the one term that takes it, so that no two terms reach
-                // the same values: the borrow checker sees each reference moved once.
+                // Each column goes to the one term that takes it, so no two terms reach the same
+                // values: the borrow checker sees each reference moved once.
                 $(let mut $t = None;)+
                 for (&id, column) in components.iter().zip(columns.iter_mut()) {
                     $(
@@ -663,8 +660,8 @@ mod tests {
     #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct M3;
 
-    /// A world of six tables, of no row, one, a row short of a chunk, a chunk, a row more and five
-    /// chunks and three rows, and its entities in the order of their `Order`s.
+    /// Six tables of 0, 1, a chunk less 1, a chunk, a chunk and 1, and 5 chunks and 3 rows;
+    /// entities are in `Order` order.
     fn world() -> (World, Vec<Entity>) {
         let mut world = World::default();
         let mut entities = Vec::new();
@@ -689,9 +686,8 @@ mod tests {
         (world, entities)
     }
 
-    /// `par_for_each` gives each row to `f` once, each term of the row its own, whatever the size
-    /// of its table, after the rows `next` took first, on one thread and on four; on one, in the
-    /// order `for_each` takes them.
+    /// `par_for_each` gives each row to `f` once, whatever its table's size, after the rows `next`
+    /// took, on one thread and on four; on one, in the order `for_each` takes them.
     #[test]
     fn par_for_each_gives_each_row_once() {
         for threads in [1, 4] {
@@ -742,13 +738,13 @@ mod tests {
         }
     }
 
-    /// A row whose `f` panics panics `par_for_each`'s caller, with its payload, on one thread and
-    /// on four, whether the calling thread runs the row or another thread can take it.
+    /// A panic in `f` reaches `par_for_each`'s caller with its payload, on one thread and four,
+    /// whether the calling thread runs the row or another can.
     #[test]
     fn a_panic_in_par_for_each_reaches_its_caller() {
         for threads in [1, 4] {
-            // In the first run of the table of a run and a row, which the calling thread runs, and
-            // in the last run of the largest table, which another can take.
+            // The first run of the table of a chunk and a row (the calling thread runs it), and
+            // the last run of the largest table (another thread can take it).
             for row in [3000, 8195] {
                 let (mut world, _) = world();
                 let mut run = || {

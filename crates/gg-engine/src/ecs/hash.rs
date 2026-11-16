@@ -1,6 +1,5 @@
-//! The world's hash, which two runs of a simulation compare at each tick to find where they part:
-//! its content, the entities' components keyed by their IDs, which undoing a log gives back; and
-//! its layout, how the world holds them, which the order queries find entities in follows from.
+//! The world's hash, which two runs compare at each tick to find where they part: its content
+//! (components keyed by entity ID) and its layout (how the world holds them).
 
 use std::fmt;
 
@@ -10,57 +9,53 @@ use crate::cells::{Cell, CellState, Seen};
 use crate::reflect::Reflect;
 use crate::{Font, Model, Prefab, Texture};
 
-// What a type's key, a term of the content and the layout start from: the 64-bit words of π's
-// fraction after the ID stream's (id.rs), as constants that hide nothing, none of them the zero
-// that `mix64` keeps.
+// Starting states of a type's key, a content term and the layout: 64-bit words of π's fraction
+// after the ID stream's (id.rs). None is the zero that `mix64` keeps.
 const TYPE: u64 = 0xa409_3822_299f_31d0;
 const LAYOUT: u64 = 0x082e_fa98_ec4e_6c89;
 const TERM: u64 = 0x4528_21e6_38d0_1377;
 const CELLS: u64 = 0xbe54_66cf_34e9_0c6c;
 const TEXT: u64 = 0xc0ac_29b7_c97c_50dd;
 
-// What every NaN hashes as, since arithmetic leaves a NaN's sign and payload to the platform, and
-// x86's and ARM's differ. Literals, since std doesn't promise `f32::NAN`'s bits.
+// What every NaN hashes as: arithmetic leaves a NaN's sign and payload to the platform, and x86's
+// and ARM's differ. Literals, as std doesn't promise `f32::NAN`'s bits.
 const NAN32: u32 = 0x7fc0_0000;
 const NAN64: u64 = 0x7ff8_0000_0000_0000;
 
-/// A world's hash, which two runs of a simulation that go the same way have the same of at every
-/// tick: what the world holds, and how.
+/// A world's hash: equal at every tick for two runs of a simulation that go the same way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldHash {
-    /// The entities' components, each under its entity's ID and its type's name, and summed, so
-    /// that where the world holds them doesn't count: what reflection reads of them, but for what's
-    /// opaque, with an entity they hold as its ID, or 0 if it's dead. Undoing a log gives it back.
-    /// It leaves out entities without components, which the layout has, slots and handles, and the
-    /// order types registered in.
+    /// The components, each under its entity's ID and type name, summed, so where the world
+    /// holds them doesn't count. Reads what reflection reads, minus opaque fields; an entity a
+    /// field holds counts as its ID, or 0 if dead. Undoing a log restores it. Leaves out
+    /// componentless entities, slots, handles and type registration order.
     pub content: u64,
-    /// How the world holds its entities, which the order queries find them in follows from: its
-    /// tables, in the order they were made, each with its types and its rows' IDs in order; each
-    /// parent's children's IDs, in their order; the state of the stream it draws IDs from; and in
-    /// a world of [cells](crate::Cells), those in, those refused, and what each cell out keeps of
-    /// its entities as text, which a world whose cells never came in leaves out. It leaves out
-    /// slots and handles, and the order types registered in. An undo can change it, and needn't
-    /// give it back: what an undo puts back goes last in its table, and the IDs a create drew stay
-    /// drawn.
+    /// How the world holds its entities, which decides query order:
+    /// - tables in creation order, each with its types and its rows' IDs in order;
+    /// - each parent's children's IDs, in order;
+    /// - the ID stream's state;
+    /// - in a world of [cells](crate::Cells): those in, those refused, and each cell out's kept
+    ///   entity text (omitted while the cells never came in).
+    ///
+    /// Leaves out slots, handles and type registration order. An undo can change it and needn't
+    /// restore it: undone rows go last in their table and drawn IDs stay drawn.
     pub layout: u64,
 }
 
-/// The hash as recordings and the sandbox's `hashes.txt` write it: its content, then its layout,
-/// 16 hex digits each, such as `8c35cd01914c7df5 fb695ce29daa8479`.
+/// As recordings and the sandbox's `hashes.txt` write it: content, then layout, 16 hex digits
+/// each, such as `8c35cd01914c7df5 fb695ce29daa8479`.
 impl fmt::Display for WorldHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:016x} {:016x}", self.content, self.layout)
     }
 }
 
-/// What a value is written into for the world's hash, by [`Reflect::digest`]: word by word, each
-/// mixed into what came before, so that values whose words differ anywhere give other hashes.
+/// What [`Reflect::digest`] writes a value into, word by word, each mixed into the state.
 pub struct Digest<'w> {
     state: u64,
-    /// Whose IDs an entity a value holds is written by.
+    /// Supplies the IDs of entities a value holds.
     world: &'w World,
-    /// The slots whose entities read as dead, as a client's view leaves them out, as `hidden`
-    /// reads them.
+    /// Slots whose entities read as dead, as a client's view leaves them out.
     hidden: &'w [bool],
 }
 
@@ -77,7 +72,7 @@ impl Digest<'_> {
         self.word(u64::from(b));
     }
 
-    /// By its bits, every NaN as one, and -0.0 apart from 0.0, as arithmetic keeps it.
+    /// By its bits: every NaN as one, -0.0 apart from 0.0.
     pub(crate) fn f32(&mut self, x: f32) {
         let bits = if x.is_nan() { NAN32 } else { x.to_bits() };
         self.word(u64::from(bits));
@@ -93,8 +88,7 @@ impl Digest<'_> {
         self.state = absorb_bytes(self.state, bytes);
     }
 
-    /// By its ID, the world's handle being its own, or 0 if it isn't alive or is hidden, as a
-    /// client's load of a view without it finds it dead.
+    /// By its ID; 0 if dead or hidden (a client's load of a view without it finds it dead).
     pub(crate) fn entity(&mut self, entity: Entity) {
         let id = self
             .world
@@ -103,8 +97,8 @@ impl Digest<'_> {
         self.word(id.map_or(0, EntityId::get));
     }
 
-    /// By its name, its ID or else its path, the renderer's handle being its own, or 0 if it has
-    /// none, so that a texture's file renamed with its ID file hashes as it did.
+    /// By its name (ID, else path); 0 if none, so a texture file renamed with its ID file hashes
+    /// as before.
     pub(crate) fn texture(&mut self, texture: Texture) {
         match self.world.assets().name(texture) {
             Some(name) => self.bytes(name.as_bytes()),
@@ -145,28 +139,27 @@ fn absorb_bytes(mut state: u64, bytes: &[u8]) -> u64 {
     state
 }
 
-/// The key a component type is hashed under: from its name, so that it's the same in every build
-/// and every world, whatever order types registered in.
+/// The key a component type is hashed under: from its name, so it's the same in every build and
+/// world, whatever order types registered in.
 pub(super) fn type_key(name: &str) -> u64 {
     absorb_bytes(TYPE, name.as_bytes())
 }
 
-/// The digest of `text`, as of a scene text a cell keeps, which the world's hash reads in its place,
-/// as [`WorldHash::layout`] says: the same of the same bytes on every platform.
+/// The digest of a cell's kept scene text, which the hash reads in its place (see
+/// [`WorldHash::layout`]); platform-independent.
 pub(crate) fn text_digest(text: &str) -> u64 {
     bytes_digest(text.as_bytes())
 }
 
-/// The digest of `bytes`, as [`text_digest`]'s of a text's: a session's hello carries the running
-/// executable's or its package's, so that peers of other builds don't join.
+/// The digest of `bytes`, like [`text_digest`]. A session's hello carries the executable's or
+/// package's, so peers of other builds don't join.
 pub(crate) fn bytes_digest(bytes: &[u8]) -> u64 {
     absorb_bytes(TEXT, bytes)
 }
 
-/// What a world of cells keeps of them, as [`CellState`] holds it, absorbed: the cells in, those
-/// coming, those whose files came, each with its file's digest, those that came as their files
-/// have them, each with the digest of what they came as, those out that keep something, each with
-/// its texts' digests, and those refused, each in order, after its count.
+/// A [`CellState`], absorbed; each list in order after its count: cells in, coming, with files
+/// (plus file digest), came as their files have them (plus digest of what they came as), out and
+/// keeping something (plus texts' digests), refused.
 fn cells(cells: &CellState) -> u64 {
     let cell = |state: u64, cell: &Cell| {
         let [x, y, z] = cell.0.to_array().map(|axis| u64::from(axis as u32));
@@ -195,15 +188,13 @@ fn cells(cells: &CellState) -> u64 {
     cells.refused.iter().fold(state, cell)
 }
 
-/// Whether `entity` is hidden, as `hidden`, by slot, has it, a client's view's [`Seen::hidden`];
-/// none past its end.
+/// Whether `hidden`, by slot (a client's view's [`Seen::hidden`]), has `entity`; none past its end.
 pub(super) fn hidden(hidden: &[bool], entity: Entity) -> bool {
     hidden.get(entity.slot()).copied().unwrap_or(false)
 }
 
-/// The sum of the terms of `values`, components of the type keyed `key`, which are `rows`'s, but
-/// for those `hidden` has, as [`hidden()`] reads it: each from its entity's ID, the key and what the
-/// value writes.
+/// The sum of `values`' terms (components of the type keyed `key` on `rows`), skipping `hidden`
+/// ones ([`hidden()`]); each from the entity's ID, the key and what the value writes.
 pub(super) fn terms<T: Reflect>(
     values: &[T],
     rows: &[Entity],
@@ -219,8 +210,8 @@ pub(super) fn terms<T: Reflect>(
     })
 }
 
-/// The term of the world's hash of `entity`'s component of the type whose key is `key`, whose
-/// value `digest` writes, as [`Reflect::digest`] does, the entities `hidden` has reading as dead.
+/// The term of `entity`'s component of the type keyed `key`, whose value `digest` writes;
+/// `hidden` entities read as dead.
 pub(super) fn term(
     entity: Entity,
     key: u64,
@@ -240,16 +231,15 @@ pub(super) fn term(
 }
 
 impl World {
-    /// The world's hash, which a run that must go as another did compares at each tick: reading
-    /// every component, without allocating.
+    /// The world's hash, compared at each tick by a run that must match another. Doesn't
+    /// allocate.
     pub fn hash(&self) -> WorldHash {
         self.hash_seen(None)
     }
 
-    /// The hash of the world that [`save_seen`](Self::save_seen) writes of what `seen` sees, as
-    /// its load gives it, without allocating: as [`hash`](Self::hash), but for the entities it
-    /// hides, whose rows it skips and which a value naming one reads as dead, and with its cells'
-    /// state in place of the world's, in a world that has one. `None` is the world whole.
+    /// The hash of what [`save_seen`](Self::save_seen) writes for `seen`, as loaded. Doesn't
+    /// allocate. Like [`hash`](Self::hash), but hidden entities' rows are skipped, values naming
+    /// them read as dead, and `seen`'s cell state replaces the world's. `None` sees everything.
     pub(crate) fn hash_seen(&self, seen: Option<&Seen>) -> WorldHash {
         let _zone = gg_core::zone!();
         let hidden = seen.map_or(&[][..], |seen| &seen.hidden[..]);
@@ -258,8 +248,8 @@ impl World {
         let mut content = 0u64;
         let mut layout = absorb(LAYOUT, self.tables.len() as u64);
         for table in &self.tables {
-            // Its types as a set, by their keys, which the order they registered in, which sorts
-            // its columns, doesn't change.
+            // Its types as a set, by key: the registration order that sorts its columns doesn't
+            // change it.
             let mut types = 0u64;
             for (&component, column) in table.components().iter().zip(table.columns()) {
                 let key = self.components.key(component);
@@ -274,7 +264,7 @@ impl World {
                 layout = absorb(layout, id(entity));
             }
         }
-        // A view hides an entity with what's under it, so that a parent shown has its children.
+        // A view hides an entity with what's under it, so a parent shown has its children.
         let entities = self.tables.iter().flat_map(|table| table.entities());
         for &entity in entities.filter(shown) {
             let children = self.children(entity).expect("a table's rows are alive");
@@ -296,7 +286,7 @@ impl World {
             Some(seen) => state.map(|_| &seen.cells),
             None => state,
         };
-        // So that a world whose cells never came in hashes as it did before worlds had cells.
+        // A world whose cells never came in hashes as it did before worlds had cells.
         if let Some(state) = state.filter(|state| !state.is_empty()) {
             layout = absorb(layout, cells(state));
         }
@@ -353,8 +343,7 @@ mod tests {
     }
 
     /// Fields marked `hashed_when_set` leave a component's hash as it was before they were added
-    /// while they hold their defaults, and change it once set, each apart from the others, though
-    /// two set alike write the same words.
+    /// while they hold their defaults, and change it once set, each apart from the others.
     #[test]
     fn fields_hashed_when_set_leave_the_hash_as_it_was_until_set() {
         let hashed = |spawn: &dyn Fn(&mut World)| {
@@ -389,11 +378,11 @@ mod tests {
         }
     }
 
-    /// Where the world holds its entities changes its layout, not its content: a scene's entities
-    /// loaded into other worlds have the content they had, and the same layout as each other
-    /// whatever order their types registered in; in the world they came from, a row moved to the
-    /// end of its table, a table made in passing, a child made its parent's last, and an ID drawn
-    /// each change the layout alone; and so do empty tables of other types.
+    /// Where entities are held changes the layout, not the content. A scene loaded into other
+    /// worlds keeps its content and has one layout whatever the type registration order. In the
+    /// source world, each of a row moved to its table's end, a table made in passing, a child
+    /// made its parent's last, an ID drawn and empty tables of other types changes only the
+    /// layout.
     #[test]
     fn content_ignores_where_entities_are_and_layout_follows_it() {
         let Fixture {
@@ -407,13 +396,13 @@ mod tests {
             g,
             ..
         } = fixture();
-        // Opaque whole, which a scene doesn't save.
+        // Opaque, so a scene doesn't save it.
         world.despawn(g).expect("alive");
         let content = world.hash().content;
         let text = world.save_scene(&[r, f]).expect("saved");
         let loaded = |transform_first: bool| {
             let mut loaded = World::seeded(1);
-            // Its context's, which names the sprite's texture.
+            // Names the sprite's texture.
             loaded.assets = world.assets.clone();
             let registered = if transform_first {
                 [
@@ -449,12 +438,12 @@ mod tests {
             world.insert(entity, Sealed(1)).expect("alive");
             world.remove::<Sealed>(entity).expect("alive");
         };
-        // Onto a table of its own, made in passing, and back to the end of its own.
+        // Through a new table, back to the end of its own.
         through_sealed(&mut world, s);
         held_otherwise(&world, "s through a table of its own");
         through_sealed(&mut world, c);
         held_otherwise(&world, "c moved to the end of its table");
-        // Alone in its table, so that only the table it passed through is new.
+        // Alone in its table, so only the table it passed through is new.
         through_sealed(&mut world, f);
         held_otherwise(&world, "a table made in passing");
         world.set_parent(b, Some(s)).expect("no cycle");
@@ -464,8 +453,8 @@ mod tests {
         world.despawn(spare).expect("alive");
         held_otherwise(&world, "an ID drawn");
 
-        // Tables told apart by their types alone, each left empty by an entity spawned and
-        // despawned: queries will search them in another order.
+        // Tables told apart by type alone, left empty by a spawn and despawn: queries search
+        // them in another order.
         let emptied = |spawn: fn(&mut World) -> Entity| {
             let mut world = World::seeded(2);
             let entity = spawn(&mut world);
@@ -491,11 +480,10 @@ mod tests {
         content
     }
 
-    /// Every field reflection reads reaches the content hash, which setting it back gives back,
-    /// and what's opaque doesn't: each kind of value, a variant whose fields are opaque, and the
-    /// fields of a variant; values moved from one field to the next; the same words of another
-    /// type; NaNs of every sign and payload, which are one, and -0.0, which isn't 0.0; and an
-    /// entity held after its slot was taken again, which hashes as one dead in a free slot does.
+    /// Every field reflection reads changes the content hash (and setting it back restores it);
+    /// opaque ones don't. Covers each value kind, variants with opaque fields, values moved
+    /// between fields, same words of another type, NaNs of any sign and payload (one hash), -0.0
+    /// (not 0.0), and an entity held after its slot was reused (hashes as dead).
     #[test]
     fn every_field_reflection_reads_changes_the_content_hash() {
         let mut world = World::seeded(7);
@@ -572,7 +560,7 @@ mod tests {
             held(&mut world, Handle(2)),
             "an opaque field of a variant"
         );
-        // Neither writes a field, so that only their indices tell them apart.
+        // Neither writes a field: only their indices tell them apart.
         let point = changed(&mut world, all, |e: &mut Everything| e.form = Form::Point);
         assert_ne!(point, first, "a variant, by its index");
         let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);

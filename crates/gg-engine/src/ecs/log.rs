@@ -1,5 +1,4 @@
-//! The log of the edits applied to a world, in order, each its operations with their inverses: what
-//! undo and redo step through.
+//! The log of the edits applied to a world: what undo and redo step through.
 
 use gg_core::{Error, Result};
 use tracing::field::display;
@@ -9,76 +8,71 @@ use super::World;
 use super::ops::{Inverse, Operation};
 use crate::reflect::Value;
 
-/// The edits applied to a world, in order, each its operations with what undoes them: undo and redo,
-/// an edit's operations together, and a gesture's sets of one field, as a drag makes, merged into
+/// The edits applied to a world, in order, each with its operations and what undoes them. An
+/// edit's operations undo and redo together; a gesture's sets of one field (a drag) merge into
 /// one edit.
 ///
-/// An entry whose undo or redo puts entities back, a delete done or a create undone, keeps them,
-/// their components typed, their slots and their IDs, which no draw gives out meanwhile, so that it
-/// gives each back under its handle and ID, as it was, until the entry is dropped: by an edit
-/// applied after an undo, which drops what was undone;
-/// by an undo or a redo the world refuses; or by [`clear`](Self::clear). A log dropped without
-/// `clear` leaves those slots unused for good, so whoever keeps one clears it. A world restored
-/// from a snapshot refuses the entries from before, as another world's, and the slots kept when
-/// the snapshot was taken stay unused in it for good; a world [cleared](World::clear), or whose
-/// entities a scene [replaced](World::replace_scene), refuses them too, having let their slots go
-/// itself. So whoever restores, clears or replaces a world clears its log too.
+/// An entry whose undo or redo puts entities back (a delete done, a create undone) keeps their
+/// typed components, slots and IDs, which no draw gives out meanwhile, and gives each back under
+/// its handle and ID. It does so until the entry is dropped by:
+/// - an edit applied after an undo (drops what was undone);
+/// - an undo or redo the world refuses;
+/// - [`clear`](Self::clear).
 ///
-/// An entry applied before the world's scene changed, as [`World::change_scene`] says, which may
-/// have put entities of the same IDs in place of those it changed, refuses to undo or redo
-/// (`ops.scene_changed`), and stays where it is, keeping what it kept, so that it neither changes
-/// an entity of the scene in its place nor frees a slot that another peer's log holds.
+/// A log dropped without `clear` leaves those slots unused for good, so whoever keeps one clears
+/// it. A world restored from a snapshot, [cleared](World::clear), or with entities
+/// [replaced](World::replace_scene) by a scene refuses older entries as another world's (a
+/// restore leaves the slots kept at snapshot time unused for good). So whoever restores, clears
+/// or replaces a world clears its log.
 ///
-/// The last entry done keeps each component its sets changed, whole, as it was, so that the rest
-/// of its edit, appended and refused, rolls it back exactly, as an edit refused partway rolls back
-/// its own; it lets go of them once another entry is done, or it's undone.
+/// An entry applied before the world's scene changed ([`World::change_scene`]) may find other
+/// entities under its IDs. It refuses to undo or redo (`ops.scene_changed`) and stays, keeping
+/// what it kept, so it neither changes a scene entity nor frees a slot another peer's log holds.
+///
+/// The last entry done keeps each component its sets changed, whole, so a refused append rolls
+/// its edit back exactly. It lets them go once another entry is done or it's undone.
 #[derive(Default)]
 pub struct Log {
     /// Applied and not undone, the first applied first.
     done: Vec<Entry>,
     /// Undone, the last undone last.
     undone: Vec<Entry>,
-    /// Whether the last entry done is a gesture's that goes on, which
-    /// [`amend`](Self::amend) merges a set of its field into.
+    /// Whether the last entry done is a gesture still going, which [`amend`](Self::amend) merges
+    /// sets into.
     open: bool,
 }
 
-/// An edit: its operations, as applied, and what undoes each of them and of the sets a delete
-/// clears with, as [`Log::apply_all`] says, in the order they applied, each with the index of its
-/// operation in `of`: so that what shows the edit, as the Inspector's undo does, shows the
-/// operations its author gave.
+/// An edit: its operations as applied, and the inverses of each and of the sets a delete clears
+/// with ([`Log::apply_all`]), in applied order. `of` maps each inverse to its operation's index,
+/// so the Inspector's undo shows the operations the author gave.
 struct Entry {
     operations: Vec<Operation>,
     inverses: Vec<Inverse>,
     of: Vec<usize>,
-    /// How many scene changes the world had been through as it applied, as
-    /// [`World::scene_changes`] counts them.
+    /// The world's [`scene_changes`](World::scene_changes) when applied.
     scenes: u64,
 }
 
 impl Log {
-    /// Applies `operation` to `world` and logs it, an edit of its own, dropping what was undone; a
-    /// create given no ID is logged with the one it drew. Refused, it changes nothing, and logs
-    /// nothing, as [`Operation`] says.
+    /// Applies `operation` and logs it as its own edit, dropping what was undone. A create
+    /// without an ID is logged with the one it drew. Refused, it changes and logs nothing
+    /// ([`Operation`]).
     pub fn apply(&mut self, world: &mut World, operation: Operation) -> Result<()> {
         self.apply_all(world, vec![operation])
     }
 
-    /// Applies `operations` to `world`, in order, as one edit, which undoes and redoes as a whole,
-    /// and logs it, as [`apply`](Self::apply) does: all of them or none, so that one refused rolls
-    /// back those before it, which changes nothing, and logs nothing; exactly, though code had
-    /// stored in a component a set changed what a set refuses, which goes back as it was. An edit
-    /// of none logs nothing.
+    /// Applies `operations` in order as one edit that undoes and redoes whole, and logs it. All
+    /// or none: a refusal rolls back the earlier ones exactly, even where code had stored in a
+    /// component a set changed what a set refuses, and logs nothing. No operations log nothing.
     ///
-    /// Each delete clears, just before it, the fields that their components'
-    /// [`cleared`](crate::Component::cleared) names on the entities it doesn't delete that name one
-    /// it does, by sets that undo and redo with it, which the log keeps with the delete rather than
-    /// among the operations it shows. One whose entity the edit makes again under its ID, as a
-    /// scene file's relink of an instance does, is set to name that entity once the edit's
-    /// operations have applied, as a scene file names it by its ID.
+    /// Each delete first clears, with sets, the fields its components'
+    /// [`cleared`](crate::Component::cleared) names on surviving entities that name an entity it
+    /// deletes. The log keeps those sets with the delete, outside the operations it shows. A
+    /// field whose entity the edit makes again under its ID (a scene file's relink of an
+    /// instance) is set to it after the edit's operations apply, as a scene file names it.
     ///
-    /// Fails as the first operation refused is, naming it if there are others; a set a delete
-    /// clears with that's refused, as the delete.
+    /// Fails like the first refused operation, naming it if there are others; a refused clearing
+    /// set fails like the delete.
     pub fn apply_all(&mut self, world: &mut World, operations: Vec<Operation>) -> Result<()> {
         if operations.is_empty() {
             return Ok(());
@@ -171,16 +165,14 @@ impl Log {
         Ok(())
     }
 
-    /// Applies `operations` to `world`, in order, as the rest of the last edit applied, just before
-    /// with nothing between, which undoes and redoes with them: for operations whose values hold
-    /// entities that edit made, which have handles once it's applied. Refused, they change nothing,
-    /// and that edit is rolled back, exactly, as `apply_all` rolls back its own, and dropped, so
-    /// that the two are all or nothing too; unless the world has moved on from that edit since, as
-    /// it hasn't with nothing between, and refuses its roll back as it would refuse its undo: it
-    /// then stays applied, and logged. With nothing applied and not undone, they apply as an edit
-    /// of their own.
+    /// Applies `operations` as the rest of the last edit applied, undoing and redoing with it:
+    /// for operations whose values hold entities that edit made, which have handles once it's
+    /// applied. Refused, they change nothing and that edit is rolled back exactly and dropped,
+    /// so the two are all or nothing. If the world has moved on since and refuses that roll
+    /// back, the edit stays applied and logged. With nothing applied and not undone, they apply
+    /// as an edit of their own.
     ///
-    /// Fails as [`apply_all`](Self::apply_all) does.
+    /// Fails like [`apply_all`](Self::apply_all).
     pub(crate) fn append(&mut self, world: &mut World, operations: Vec<Operation>) -> Result<()> {
         let Some(mut last) = self.done.pop() else {
             return self.apply_all(world, operations);
@@ -225,29 +217,27 @@ impl Log {
         }
     }
 
-    /// As [`apply`](Self::apply), but a set of the field the last entry set, while its gesture
-    /// goes on, joins that entry: it takes the new value and keeps its inverse, with the exclusive
-    /// fields each set of the gesture made false, so that undoing it undoes the gesture. A set
-    /// starts a gesture, which [`seal`](Self::seal) ends. A set of a
-    /// [`PrefabRoot`](crate::PrefabRoot) joins none: each relinks its instance, and the first set's
-    /// inverse would take out only the entities its own set spawned.
+    /// Like [`apply`](Self::apply), but during a gesture a set of the field the last entry set
+    /// joins that entry: it takes the new value and keeps the entry's inverse plus the exclusive
+    /// fields each set made false, so one undo undoes the gesture. A set starts a gesture;
+    /// [`seal`](Self::seal) ends it. A [`PrefabRoot`](crate::PrefabRoot) set joins none: each
+    /// relinks its instance, and the first set's inverse would take out only its own spawns.
     ///
-    /// It is [`amend_all`](Self::amend_all) of one operation, as `apply` is of `apply_all`.
+    /// It is [`amend_all`](Self::amend_all) of one operation.
     pub fn amend(&mut self, world: &mut World, operation: Operation) -> Result<()> {
         self.amend_all(world, vec![operation])
     }
 
-    /// As [`amend`](Self::amend) for each of `operations`, but all of them or none. While a
-    /// gesture goes on, its entry is of sets alone, all of one field of one component, of one
-    /// entity or of several, as a drag of several entities' handles makes. If `operations` are all
-    /// sets of that field, they join the entry: a set of an entity the entry already sets takes the
-    /// new value and keeps the entry's inverse, as `amend` does, and a set of another entity is
-    /// added to the entry with its own inverse, so that undoing the entry undoes every entity's
-    /// sets. One refused rolls back those this call applied, and the entry is left as it was.
+    /// [`amend`](Self::amend) for each of `operations`, all or none. A gesture's entry is sets
+    /// of one field of one component, on one entity or several (a drag of several handles). If
+    /// `operations` all set that field, they join it: a set of an entity the entry already sets
+    /// takes the new value and keeps the entry's inverse; a set of another entity is added with
+    /// its own inverse. One undo undoes every entity's sets. A refusal rolls back this call's
+    /// sets and leaves the entry as it was.
     ///
-    /// Otherwise they apply as [`apply_all`](Self::apply_all) does, an entry of their own, and
-    /// refused, they change nothing. That entry starts a gesture if they're sets of one field, no
-    /// two of one entity, which [`seal`](Self::seal) ends. An empty `operations` does nothing.
+    /// Otherwise they apply like [`apply_all`](Self::apply_all), as their own entry, and a
+    /// refusal changes nothing. That entry starts a gesture if they're sets of one field, no two
+    /// of one entity; [`seal`](Self::seal) ends it. Empty `operations` do nothing.
     pub fn amend_all(&mut self, world: &mut World, mut operations: Vec<Operation>) -> Result<()> {
         let field = set_field(&operations);
         let link = world.component::<crate::PrefabRoot>();
@@ -283,7 +273,7 @@ impl Log {
                 }
             }
         }
-        // What undoes an entity's first set in the gesture undoes its later ones too, but for the
+        // What undoes an entity's first set in the gesture undoes its later ones too, except the
         // exclusive fields these made false, which the entry takes on.
         let entry = self.done.last_mut().expect("an entry joined");
         for (operation, later) in operations.into_iter().zip(laters) {
@@ -306,27 +296,27 @@ impl Log {
         Ok(())
     }
 
-    /// Ends the gesture going on, so that the next set is an entry of its own.
+    /// Ends the gesture going on: the next set is an entry of its own.
     pub fn seal(&mut self) {
         self.open = false;
     }
 
-    /// Undoes the last edit applied and not undone, and returns whether there was one: each set
-    /// sets its field back, checked as any set is, so that it keeps what changed the component's
-    /// other fields since.
+    /// Undoes the last edit applied and not undone; returns whether there was one. Each set
+    /// sets its field back, checked like any set, so later changes to the component's other
+    /// fields stay.
     ///
-    /// Refused, as when an entity it changed is gone since, or the entity a create made has
-    /// children since, which the create didn't make, or a field it set held what a set refuses,
-    /// as code may have stored, it changes nothing, and its entry is dropped, with what it kept,
-    /// since the world has moved on from it and it would block the entries before it: the error
-    /// says why, and is logged as `ops.dropped`. An entry applied before the world's scene changed
-    /// is refused too, but stays, as [`Log`] says (`ops.scene_changed`).
+    /// Refused when an entity it changed is gone, a created entity has children the create
+    /// didn't make, or a set field holds what a set refuses (code may have stored it). Refused,
+    /// it changes nothing and its entry is dropped with what it kept: the world has moved on and
+    /// it would block earlier entries. The error says why and is logged as `ops.dropped`. An
+    /// entry from before a scene change is refused too but stays (`ops.scene_changed`, see
+    /// [`Log`]).
     pub fn undo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Undo)
     }
 
-    /// Redoes the last edit undone, and returns whether there was one; refused, as
-    /// [`undo`](Self::undo) is.
+    /// Redoes the last edit undone; returns whether there was one. Refused like
+    /// [`undo`](Self::undo).
     pub fn redo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Redo)
     }
@@ -346,16 +336,15 @@ impl Log {
         self.done.iter().map(|entry| entry.operations.as_slice())
     }
 
-    /// The operations of each edit undone, the last undone last, which redo redoes first.
+    /// The operations of each edit undone, the last undone last (redone first).
     pub fn undone(&self) -> impl ExactSizeIterator<Item = &[Operation]> {
         self.undone.iter().map(|entry| entry.operations.as_slice())
     }
 
-    /// A copy of the log, for a copy of the world it's applied to, as a SyncTest runs a tick again
-    /// on one: its entries keep what the log's keep, as their own, and are the world's still, so
-    /// that it's kept aside, as the log was as the tick started, and [rebound](Self::rebind) to the
-    /// copy of the world taken then, where it undoes and redoes as the log does in the world. It's
-    /// never used in the world itself, where it and the log would each give back what they keep.
+    /// A copy for a copy of the world, as a SyncTest reruns a tick. Its entries keep what the
+    /// log's keep and still belong to the world, so keep it aside as the log was when the tick
+    /// started, and [rebind](Self::rebind) it to the world copy taken then. Never use it in the
+    /// world itself: it and the log would each give back what they keep.
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn copied(&self) -> Log {
         let copied = |entries: &[Entry]| -> Vec<Entry> {
@@ -374,9 +363,8 @@ impl Log {
         }
     }
 
-    /// Has its entries of the world whose serial is `from` be those of the world whose serial is
-    /// `to`, a copy of that world, as [`copied`](Self::copied) says; another world's stay its own,
-    /// refused in both.
+    /// Rebinds entries of the world with serial `from` to `to`, its
+    /// [copy](Self::copied). Another world's stay its own, refused in both.
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn rebind(&mut self, from: u64, to: u64) {
         for entry in self.done.iter_mut().chain(&mut self.undone) {
@@ -394,9 +382,8 @@ impl Log {
         self.open = false;
     }
 
-    /// Undoes or redoes the last entry, its inverses the last first: each one's turns into what
-    /// redoes it, or undoes it again, so that an entry refused partway rolls back those it has
-    /// done, as [`turn`] does.
+    /// Undoes or redoes the last entry, its inverses last first. Each turns into its own
+    /// reverse, so a [`turn`] refused partway rolls back those done.
     fn step(&mut self, world: &mut World, step: Step) -> Result<bool> {
         self.open = false;
         let from = match step {
@@ -421,8 +408,8 @@ impl Log {
         let Some(mut entry) = from.pop() else {
             return Ok(false);
         };
-        // An entry's operations come undone the last first, and redone the first first, so that
-        // each finds the world as the one after it, or before it, left it.
+        // Undone last first, redone first first, so each finds the world as the one after it (or
+        // before it) left it.
         let order: Vec<usize> = match step {
             Step::Undo => (0..entry.inverses.len()).rev().collect(),
             Step::Redo => (0..entry.inverses.len()).collect(),
@@ -455,8 +442,8 @@ impl Log {
         Ok(true)
     }
 
-    /// Pushes `entry`, as the last entry done, which keeps what rolls it back; the one before it,
-    /// which no append rolls back, lets go of it.
+    /// Pushes `entry` as the last done, which keeps its roll-back data; the one before lets its
+    /// own go, as no append rolls it back.
     fn push_done(&mut self, entry: Entry) {
         if let Some(before) = self.done.last_mut() {
             before.inverses.iter_mut().for_each(Inverse::settle);
@@ -465,10 +452,9 @@ impl Log {
     }
 }
 
-/// Applies each of `inverses`, in `order`, through `apply`, [`World::undo`] or
-/// [`World::roll_back`], which leaves in its place what undoes that. Refused partway, it rolls back
-/// those it applied, the last first, each finding the world as it left it, so that the world is
-/// exactly as it was, and fails with the index of the one refused, and why.
+/// Applies `inverses` in `order` through `apply` ([`World::undo`] or [`World::roll_back`]),
+/// which leaves each one's reverse in its place. Refused partway, it rolls back those applied,
+/// last first, leaving the world exactly as it was, and fails with the refused index and why.
 fn turn(
     world: &mut World,
     inverses: &mut [Inverse],
@@ -488,8 +474,7 @@ fn turn(
     Ok(())
 }
 
-/// The component and field that `operations` all set, if there are any and they're sets of one
-/// field alone.
+/// The component and field that `operations` all set, if there are any and all set one field.
 fn set_field(operations: &[Operation]) -> Option<(&str, &str)> {
     let mut field = None;
     for operation in operations {
@@ -507,8 +492,8 @@ fn set_field(operations: &[Operation]) -> Option<(&str, &str)> {
     field
 }
 
-/// Rolls back `inverses`, those of an edit refused partway, in reverse: each puts the world back as
-/// the one before it found it, which a world that nothing else has changed meanwhile takes.
+/// Rolls back the `inverses` of an edit refused partway, in reverse; each restores the world as
+/// the one before it found it.
 fn roll_back(world: &mut World, inverses: Vec<Inverse>) {
     for mut inverse in inverses.into_iter().rev() {
         world
@@ -518,8 +503,8 @@ fn roll_back(world: &mut World, inverses: Vec<Inverse>) {
     }
 }
 
-/// `error`, which refused `operation`, the `i`th of `count`, or a set it clears with, if
-/// `clearing`, said as `operation`'s refusal, naming it if there are others.
+/// `error` as the refusal of `operation` (the `i`th of `count`, or a clearing set if `clearing`),
+/// naming it if there are others.
 fn refused(error: Error, count: usize, i: usize, operation: &Operation, clearing: bool) -> Error {
     // The set's own refusal says which set: `can't set ... of ...: ...`.
     let error = if clearing {
@@ -600,7 +585,7 @@ pub(super) mod tests {
         let f = x.id(x.f);
         let operations = [
             count(f, 1),
-            // -0.0 over 0.0, which `==` calls equal and the scene doesn't: logged all the same.
+            // -0.0 over 0.0: `==` calls them equal, the scene doesn't; logged all the same.
             Operation::Set {
                 entity: x.id(x.r),
                 component: "Transform".into(),
@@ -670,8 +655,8 @@ pub(super) mod tests {
             panic!("{:?}", log.undoable());
         };
         let created = x.world.entity(id).expect("alive");
-        // Undone, a create is a delete, which keeps the entity's slot, so that a redo gives it
-        // back under its handle.
+        // Undone, a create is a delete, which keeps the entity's slot, so a redo gives it back
+        // under its handle.
         log.undo(&mut x.world).expect("undone");
         assert_eq!((log.kept(), vacated(&x.world)), (1, 1));
         assert!(log.redo(&mut x.world).expect("redone"));
@@ -690,9 +675,8 @@ pub(super) mod tests {
         assert!(!x.world.contains(created));
     }
 
-    /// Undoing a create takes out the entity it made alone: refused, and its entry dropped, if it
-    /// has children since, which the log didn't give it; where redoing a delete takes its subtree
-    /// as it stands, a child given since too.
+    /// Undoing a create takes out only its entity: refused, entry dropped, if it has children
+    /// the log didn't give it. Redoing a delete takes its subtree as it stands.
     #[test]
     fn undoing_a_create_takes_only_what_it_made() {
         let mut x = fixture();
@@ -705,7 +689,7 @@ pub(super) mod tests {
             parent: Some(parent),
             components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
         };
-        // Undone and redone, so that the redo's undo is checked as the first was.
+        // Undone and redone, so the redo's undo is checked as the first was.
         let under_b = create(x.id(x.b));
         log.apply(&mut x.world, under_b).expect("created");
         let Some(
@@ -753,13 +737,12 @@ pub(super) mod tests {
         check_links(&x.world);
     }
 
-    /// An ID a delete keeps, for the entity its undo gives back, goes to no entity a draw IDs, as a
-    /// living entity's doesn't: the stream reseeds, the same way every run. It's kept while any
-    /// slot a delete vacated holds it, though a create given the ID took it meanwhile.
+    /// A draw never gives an entity an ID a delete keeps (as with a living entity's): the stream
+    /// reseeds, identically every run. The ID stays kept while any vacated slot holds it, even
+    /// if a create took it meanwhile.
     #[test]
     fn a_draw_never_gives_an_id_a_delete_keeps() {
-        // A scene saved by a world seeded as this one, whose entity has the ID the second draw
-        // gives.
+        // A scene saved by a world seeded alike, whose entity has the second draw's ID.
         let mut first = World::seeded(21);
         first.spawn(());
         let saved = first.spawn(Transform::IDENTITY);
@@ -771,8 +754,8 @@ pub(super) mod tests {
         let mut log = Log::default();
         let delete = Operation::Delete { entity: id };
         log.apply(&mut world, delete).expect("deleted");
-        // Given to another entity by a create, which an undo takes out again: two slots keep it,
-        // and an operation after the undo drops the create, which frees one.
+        // Given to another entity by a create that an undo takes out again: two slots keep it,
+        // and an operation after the undo drops the create, freeing one.
         let create = Operation::Create {
             entity: Some(id),
             parent: None,
@@ -789,7 +772,7 @@ pub(super) mod tests {
         };
         log.apply(&mut world, set).expect("set");
         assert_eq!((log.kept(), vacated(&world)), (1, 1));
-        // The stream's next draw is the ID kept, so the draw reseeds instead.
+        // The stream's next draw is the ID kept: the draw reseeds instead.
         let spawned = world.spawn(());
         let mut stream = IdStream::new(21);
         stream.draw();
@@ -864,7 +847,7 @@ pub(super) mod tests {
         let mut log = Log::default();
         let [r, s] = [x.r, x.s].map(|entity| x.id(entity));
         let before = sorted(&x.world);
-        // Interleaved, as a drag of two entities' handles makes them.
+        // Interleaved, as a drag of two handles makes them.
         for n in [2.0, 3.0] {
             log.amend(&mut x.world, scale_x(r, n)).expect("set");
             log.amend(&mut x.world, scale_x(s, n + 10.0)).expect("set");
@@ -901,13 +884,13 @@ pub(super) mod tests {
         let mut log = Log::default();
         let [r, s] = [x.r, x.s].map(|entity| x.id(entity));
         let gone: EntityId = "0000000000000001".parse().expect("an ID");
-        // A new entry: nothing is applied, nothing logged, and no gesture is open.
+        // A new entry: nothing applied, nothing logged, no gesture open.
         let before = sorted(&x.world);
         let refused = log.amend_all(&mut x.world, vec![scale_x(r, 2.0), scale_x(gone, 2.0)]);
         refused.expect_err("an entity that's gone");
         assert!(same_snapshots(&sorted(&x.world), &before));
         assert_eq!(log.edits().len(), 0);
-        // Joining: the entry stays as it was, and the sets before the refused one are put back.
+        // Joining: the entry stays as it was; sets before the refused one are put back.
         log.amend_all(&mut x.world, vec![scale_x(r, 2.0), scale_x(s, 2.0)])
             .expect("set");
         let joined = sorted(&x.world);
@@ -983,8 +966,8 @@ pub(super) mod tests {
         check_ids(&x.world);
     }
 
-    /// An edit of several operations applies all of them or none, and undoes and redoes whole; an
-    /// undo refused partway turns back what it had undone.
+    /// A multi-operation edit applies all or none, and undoes and redoes whole; an undo refused
+    /// partway turns back what it undid.
     #[test]
     fn an_edits_operations_go_together() {
         let mut x = fixture();
@@ -1017,7 +1000,7 @@ pub(super) mod tests {
         assert!(same_snapshots(&sorted(&x.world), &before));
         assert!(log.redo(&mut x.world).expect("redone"));
         assert!(same_snapshots(&sorted(&x.world), &after));
-        // The scale's entity gone, its undo is refused after the delete's, which comes back out.
+        // The scale's entity gone: its undo is refused after the delete's, which comes back out.
         x.world.despawn(x.s).expect("alive");
         let error = log.undo(&mut x.world).expect_err("s is gone");
         assert_eq!(error.code(), "ecs.no_entity", "{error}");
@@ -1030,8 +1013,8 @@ pub(super) mod tests {
         check_links(&x.world);
     }
 
-    /// A rotation that isn't a unit, which a set refuses, as code may store one: as 2D physics
-    /// leaves a body's long spun.
+    /// A rotation that isn't a unit, which a set refuses but code may store (2D physics leaves a
+    /// body's so when long spun).
     const DRIFTED: Quat = Quat::from_xyzw(0.0, 0.0, 0.6, 0.9);
 
     /// A set of `entity`'s rotation.
@@ -1057,9 +1040,9 @@ pub(super) mod tests {
         bits(transform.rotation) == bits(rotation)
     }
 
-    /// An edit refused partway rolls back those before it exactly, though code stored in the
-    /// components they set what a set refuses, a rotation that isn't a unit and a count above its
-    /// max, which come back bit for bit, so that the world's hash is as it was.
+    /// An edit refused partway rolls back earlier operations exactly, even where code stored what
+    /// a set refuses (a non-unit rotation, a count above its max): bit for bit, so the hash is
+    /// unchanged.
     #[test]
     fn an_edit_refused_partway_rolls_back_what_code_stored_that_a_set_refuses() {
         let mut x = fixture();
@@ -1081,10 +1064,9 @@ pub(super) mod tests {
         assert_eq!(log.edits().len(), 0);
     }
 
-    /// An append refused rolls back the edit before it exactly, as an edit refused partway rolls
-    /// back its own, though code stored in a component it set what a set refuses; but where the
-    /// world has moved on from that edit since, which refuses its roll back, it stays applied and
-    /// logged, as it was.
+    /// A refused append rolls back the edit before it exactly, even where code stored what a set
+    /// refuses. If the world has moved on and refuses that roll back, the edit stays applied and
+    /// logged.
     #[test]
     fn an_append_refused_rolls_back_the_edit_before_it_exactly() {
         let mut x = fixture();
@@ -1100,7 +1082,7 @@ pub(super) mod tests {
         assert_eq!(x.world.hash(), before);
         assert!(rotated(&x.world, x.r, DRIFTED));
         assert_eq!(log.edits().len(), 0, "dropped");
-        // The edit's delete can't be rolled back once the parent of what it took is gone: the set
+        // The edit's delete can't be rolled back once its taken entity's parent is gone: the set
         // rolled back before it is turned back.
         let edit = vec![Operation::Delete { entity: c }, rotate(r, Quat::IDENTITY)];
         log.apply_all(&mut x.world, edit.clone()).expect("applied");
@@ -1117,9 +1099,8 @@ pub(super) mod tests {
         check_links(&x.world);
     }
 
-    /// An undo refused partway turns back what it had undone exactly, though code stored, since
-    /// the edit, what a set refuses in a component it set: the rotation that was there comes back
-    /// bit for bit, which a set of it would refuse.
+    /// An undo refused partway turns back what it undid exactly, even if code has since stored
+    /// what a set refuses: the rotation returns bit for bit.
     #[test]
     fn an_undo_refused_partway_turns_back_what_code_stored_exactly() {
         let mut x = fixture();
@@ -1131,7 +1112,7 @@ pub(super) mod tests {
         ];
         log.apply_all(&mut x.world, edit).expect("applied");
         drift(&mut x.world, x.r);
-        // So that the delete's undo is refused, after the set's.
+        // The delete's undo is refused, after the set's.
         x.world.despawn(x.a).expect("alive");
         let before = x.world.hash();
         let error = log.undo(&mut x.world).expect_err("c's parent is gone");
@@ -1157,8 +1138,8 @@ pub(super) mod tests {
         assert_eq!((log.undoable(), log.redoable()), (None, None));
     }
 
-    /// The scene of every entity of `world`; `None` if one refers to an entity that isn't alive,
-    /// as one whose target a delete took does until the delete is undone.
+    /// The scene of every entity of `world`; `None` if one refers to an entity that isn't alive
+    /// (as one whose target a delete took, until the delete is undone).
     fn saved(world: &World) -> Option<String> {
         let roots = world.entities(None).expect("every entity");
         let roots = roots.filter(|&entity| world.get::<Parent>(entity).is_none());
@@ -1185,12 +1166,12 @@ pub(super) mod tests {
         "reflect.read_only",
     ];
 
-    /// The component types a value gives an entity; and those it never does, which are refused.
+    /// The component types a value gives an entity, and those it never does (refused).
     const MADE: [&str; 3] = ["Transform", "Sprite", "Everything"];
     const UNMADE: [&str; 2] = ["Sealed", "Parent"];
 
-    /// A component of type `name` and its value, which is refused now and then: `Everything`'s
-    /// above its count's max, and those of `UNMADE`.
+    /// A component of type `name` and its value, refused now and then: `Everything`'s above its
+    /// count's max, and those of `UNMADE`.
     fn component(
         name: &'static str,
         rng: &mut Rng,
@@ -1240,9 +1221,9 @@ pub(super) mod tests {
         found.map(|(entity, _)| entity)
     }
 
-    /// A random operation on `world`'s living entities, mostly one that applies. A reference left
-    /// dangling by a delete, which keeps the world from saving, is mostly avoided, and set to
-    /// `None` soon after, so that the scene shows most steps.
+    /// A random operation on `world`'s living entities, mostly one that applies. A reference a
+    /// delete leaves dangling keeps the world from saving: mostly avoided, and set to `None` soon
+    /// after, so the scene shows most steps.
     pub(in crate::ecs) fn random(world: &World, rng: &mut Rng, step: usize) -> Operation {
         let living: Vec<Entity> = world.entities(None).expect("every entity").collect();
         let id = |entity| world.id(entity).expect("alive");
@@ -1331,7 +1312,7 @@ pub(super) mod tests {
                     // Above its max now and then.
                     ("Everything", "count", Value::UInt(rng.below(120) as u64)),
                     ("Sprite", "color", Value::Vec4(Vec4::splat(0.25))),
-                    // Whole, what's opaque in them given as `Opaque`.
+                    // Whole, opaque parts given as `Opaque`.
                     (
                         "Transform",
                         "",
@@ -1365,10 +1346,9 @@ pub(super) mod tests {
         }
     }
 
-    /// Applies random operations through the log, now and then undoing and redoing some of them,
-    /// and then undoes them all: as it goes back, the world's scene and its content hash are as
-    /// they were before each, the scene byte for byte, and in the end as they were at the start,
-    /// and so is every entity, by its handle, with what's opaque.
+    /// Random operations through the log, with some undos and redos, then all undone. Going
+    /// back, the scene (byte for byte) and content hash match their state before each operation,
+    /// and at the end the start, every entity (opaque parts included) by its handle.
     #[test]
     fn undoing_a_log_of_random_operations_gives_back_the_scene_and_its_content_hash() {
         let mut x = fixture();
@@ -1421,7 +1401,7 @@ pub(super) mod tests {
             check_links(world);
             assert_eq!(vacated(world), log.kept(), "step {step}");
         }
-        // So that most steps change the world, rather than being refused.
+        // Most steps change the world rather than being refused.
         assert!(applied > 500, "{applied} applied");
         let last = saved(world);
         while let Some((text, content)) = before.pop() {
@@ -1446,11 +1426,10 @@ pub(super) mod tests {
         check_links(world);
     }
 
-    /// A copy of a log of random operations, some undone, rebound to a copy of its world taken as
-    /// the log held what it holds, undoes, redoes and applies there as the log does in the world:
-    /// after each step the two worlds hash alike, and each keeps the slots its log keeps, which
-    /// clearing each frees in its own; while a copy not rebound is refused there, as another
-    /// world's, and changes nothing.
+    /// A log copy (of random operations, some undone) rebound to a world copy taken at the same
+    /// state steps there as the log does in the world. After each step the worlds hash alike and
+    /// each keeps its log's slots, which clearing frees. An unbound copy is refused there as
+    /// another world's and changes nothing.
     #[test]
     fn a_log_copied_for_a_copy_of_its_world_steps_there_as_the_log_does_in_the_world() {
         let mut x = fixture();

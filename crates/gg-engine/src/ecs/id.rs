@@ -1,6 +1,5 @@
-//! Persistent IDs: what files, operations, diagnostics and the tool API name an entity by, where
-//! its handle is the world's own. Each world draws them from a stream of its own, and finds its
-//! entities by them.
+//! Persistent IDs: what files, operations, diagnostics and the tool API name an entity by. Each
+//! world draws them from a stream of its own, and finds its entities by them.
 
 use std::fmt;
 use std::num::NonZeroU64;
@@ -12,10 +11,11 @@ use super::{Entity, World};
 
 /// An entity's persistent ID: what files, operations, diagnostics and the tool API name it by,
 /// where its [`Entity`] handle is the world's own. A world draws one at random for each entity
-/// code spawns, a loaded scene's entities keep theirs, and a placed prefab's are mixed from
-/// theirs; no two living entities have the same one. It's written as 16 lowercase hex digits,
-/// such as `5f3a9c0e12b47d68`, so that IDs sort as their text does and never read as a handle,
-/// and parsed from them alone.
+/// code spawns; a loaded scene's entities keep theirs; a placed prefab's are mixed from its
+/// own. No two living entities share one.
+///
+/// Written as 16 lowercase hex digits, such as `5f3a9c0e12b47d68`, so IDs sort as text and never
+/// read as a handle. Parsed from those alone.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(NonZeroU64);
 
@@ -32,20 +32,17 @@ impl fmt::Debug for EntityId {
 }
 
 impl EntityId {
-    /// The ID that's `number`, as [`get`](Self::get) gives it, such as one drawing gave a draw;
-    /// `None` for 0, which no entity has.
+    /// The ID with this [`get`](Self::get) number; `None` for 0.
     pub(crate) fn new(number: u64) -> Option<Self> {
         NonZeroU64::new(number).map(Self)
     }
 
-    /// The number it is.
     pub(crate) fn get(self) -> u64 {
         self.0.get()
     }
 }
 
-/// Exactly as `Display` writes one, so that each ID has one text: 16 lowercase hex digits, not all
-/// zero.
+/// Exactly as `Display` writes one, so each ID has one text: 16 lowercase hex digits, not all zero.
 ///
 /// Fails with `ecs.bad_id` for any other text.
 impl FromStr for EntityId {
@@ -72,31 +69,30 @@ impl FromStr for EntityId {
 /// What SplitMix64's state steps by.
 const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 
-/// Steps `state` and returns the next number of its stream: Sebastiano Vigna's SplitMix64
-/// (<https://prng.di.unimi.it/splitmix64.c>). The state steps by an odd constant, so that it
-/// passes through all 2^64 values before it repeats one, and the mix that makes each number of it,
-/// of xorshifts and multiplications by odd constants, is a bijection, so a stream gives 2^64
-/// different numbers before it repeats. The mix can be undone, so one number gives away the rest of
-/// its stream: they're not secrets.
+/// Steps `state` and returns the stream's next number: Sebastiano Vigna's SplitMix64
+/// (<https://prng.di.unimi.it/splitmix64.c>).
+///
+/// The state steps by an odd constant, so it visits all 2^64 values before repeating, and the mix
+/// is a bijection, so a stream gives 2^64 different numbers before repeating. The mix can be
+/// undone, so one number gives away the rest of its stream: they're not secrets.
 pub(super) fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(GAMMA);
     mix64(*state)
 }
 
-/// SplitMix64's mix, of xorshifts and multiplications by odd constants: a bijection of the 64-bit
-/// numbers, which spreads each bit of `z` over all of them.
+/// SplitMix64's mix (xorshifts and odd multiplications): a bijection of the 64-bit numbers that
+/// spreads each bit of `z` over all of them.
 pub(crate) fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(MIX[0]);
     z = (z ^ (z >> 27)).wrapping_mul(MIX[1]);
     z ^ (z >> 31)
 }
 
-/// The odd constants [`mix64`] multiplies by, in turn.
+/// [`mix64`]'s odd multipliers, in order.
 const MIX: [u64; 2] = [0xbf58_476d_1ce4_e5b9, 0x94d0_49bb_1331_11eb];
 
-/// The number [`mix64`] mixes to `z`: each of its steps undone, last first. An xorshift right by
-/// `k`, `y = x ^ (x >> k)`, is undone by `x = y ^ (y >> k) ^ (y >> 2k) ^ ...`, and a multiplication
-/// by an odd constant by one by its inverse modulo 2^64.
+/// The number [`mix64`] mixes to `z`: each step undone, last first. `y = x ^ (x >> k)` is undone
+/// by `x = y ^ (y >> k) ^ (y >> 2k) ^ ...`, and an odd multiplication by the inverse modulo 2^64.
 #[cfg(feature = "dev")]
 fn unmix64(mut z: u64) -> u64 {
     fn unshift(y: u64, k: u32) -> u64 {
@@ -113,8 +109,8 @@ fn unmix64(mut z: u64) -> u64 {
     unshift(z, 30)
 }
 
-/// The inverse of odd `c` modulo 2^64, by Newton's iteration, `x = x(2 - cx)`, each step of which
-/// doubles the bits that are right: `c` is its own inverse modulo 8, which five steps take to 96.
+/// The inverse of odd `c` modulo 2^64, by Newton's iteration `x = x(2 - cx)`, which doubles the
+/// right bits each step: `c` is its own inverse modulo 8, and five steps reach 96 bits.
 #[cfg(feature = "dev")]
 const fn inverse(c: u64) -> u64 {
     let mut x = c;
@@ -126,47 +122,44 @@ const fn inverse(c: u64) -> u64 {
     x
 }
 
-/// What a reseed mixes into the stream's state, what a placement mixes into its instance, and what
-/// a linked instance mixes into its root's ID: each 64 bits of pi's fraction, as constants that
-/// hide nothing; the hash's (hash.rs) are the three after `PLACE`, and `LINK` the one after those.
-/// All are fixed, since seeded worlds reseed the same way every run, and scenes hold the IDs a
-/// copy's and an instance's entities mix to.
+/// Mixed in by a reseed (into the stream's state), a placement (into its instance) and a linked
+/// instance (into its root's ID): 64-bit slices of pi's fraction, constants that hide nothing. The
+/// hash's (hash.rs) are the three after `PLACE`, and `LINK` the one after those. All are fixed:
+/// seeded worlds reseed the same way every run, and scenes hold the IDs copies and instances mix
+/// to.
 const RESEED: u64 = 0x243f_6a88_85a3_08d3;
 const PLACE: u64 = 0x1319_8a2e_0370_7344;
 const LINK: u64 = 0xbe54_66cf_34e9_0c6c;
 
-/// The ID of a prefab's entity `local` in the copy of it placed as `instance`: a permutation of
-/// the local IDs for each instance, so that a copy's IDs are as distinct as its prefab's, and a
-/// mix that spreads each instance's over the 64-bit numbers, so that copies' IDs meet only by
-/// chance. `None` for the one local ID it mixes to zero.
+/// The ID of prefab entity `local` in the copy placed as `instance`. A copy's IDs stay as
+/// distinct as the prefab's (a permutation per instance) and spread over the 64-bit numbers, so
+/// copies meet only by chance. `None` for the one local ID it mixes to zero.
 pub(super) fn placed(instance: EntityId, local: EntityId) -> Option<EntityId> {
     let key = mix64(instance.0.get() ^ PLACE);
     NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
 }
 
-/// The ID of a prefab's entity `local` in the linked instance whose root's ID is `root`, as
-/// [`placed`] mixes a copy's, but by a constant of its own, so that an instance's IDs meet neither
-/// a copy's nor its root's model's nodes', which [`placed`] mixes from the root's too.
+/// The ID of prefab entity `local` in the linked instance whose root has ID `root`. Mixed like
+/// [`placed`] but by its own constant, so an instance's IDs meet neither a copy's nor its root
+/// model's nodes', which [`placed`] also mixes from the root's.
 pub(super) fn linked(root: EntityId, local: EntityId) -> Option<EntityId> {
     let key = mix64(root.0.get() ^ LINK);
     NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
 }
 
-/// The local ID that [`linked`] mixes to `id` under `root`: since [`mix64`] is a bijection, each
-/// ID has one, so that a prefab saved from a subtree, its entities' local IDs these, gives each of
-/// them its ID again in the instance whose root is `root`. `None` for the one ID it would take 0
-/// to mix to.
+/// The local ID that [`linked`] mixes to `id` under `root`. [`mix64`] is a bijection, so each ID
+/// has one: a prefab saved from a subtree with these local IDs gives each entity its ID again in
+/// the instance rooted at `root`. `None` for the one ID that would need 0.
 #[cfg(feature = "dev")]
 pub(super) fn unlinked(root: EntityId, id: EntityId) -> Option<EntityId> {
     let key = mix64(root.0.get() ^ LINK);
     NonZeroU64::new(unmix64(id.0.get()) ^ key).map(EntityId)
 }
 
-/// The stream a world draws its entities' IDs from: SplitMix64, from a seed. A stream never gives
-/// an ID twice until it's reseeded, which moves it to another window on its cycle. Two worlds'
-/// streams, seeded apart, are windows on the one cycle of 2^64 states, which give the same IDs
-/// only where they overlap, as a stream's before and after a reseed do: for n and m IDs, about
-/// (n + m) / 2^64.
+/// A world's stream of entity IDs: SplitMix64 from a seed. It never repeats an ID until reseeded,
+/// which moves it to another window on its cycle. Streams seeded apart are windows on the one
+/// 2^64-state cycle and share IDs only where they overlap, as a stream's windows before and after
+/// a reseed do: for n and m IDs, about (n + m) / 2^64.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct IdStream(u64);
 
@@ -175,7 +168,7 @@ impl IdStream {
         Self(seed)
     }
 
-    /// The next ID: the stream's next number, past the one zero among them.
+    /// The stream's next number, skipping the one zero.
     pub(super) fn draw(&mut self) -> EntityId {
         loop {
             if let Some(id) = NonZeroU64::new(splitmix64(&mut self.0)) {
@@ -184,29 +177,28 @@ impl IdStream {
         }
     }
 
-    /// Moves the stream to another place in its cycle, as one that has walked into another
-    /// session's run, drawing IDs that a loaded scene's entities have, does: the same place for
-    /// the same state, so that a seeded world stays the same every run.
+    /// Moves to another place in the cycle, for a stream that has walked into another session's
+    /// run and draws IDs a loaded scene has. The same state gives the same place, so a seeded
+    /// world stays the same every run.
     pub(super) fn reseed(&mut self) {
         self.0 = mix64(self.0.rotate_left(32) ^ RESEED);
     }
 
-    /// Where it is on its cycle, which the IDs to come follow from.
+    /// Where it is on its cycle: the IDs to come follow from it.
     pub(super) fn state(self) -> u64 {
         self.0
     }
 }
 
 impl World {
-    /// `entity`'s persistent ID, the same from its spawn to its despawn, through every table it
-    /// moves to; `None` if it isn't alive. It's read through the handle, checked as any handle is,
-    /// so that a stale handle never gives the ID of the entity now in its slot.
+    /// `entity`'s persistent ID, constant from spawn to despawn across table moves; `None` if not
+    /// alive. The handle is checked, so a stale one never gives the ID of the slot's new entity.
     pub fn id(&self, entity: Entity) -> Option<EntityId> {
         self.location(entity)?;
         self.entity_ids[entity.index as usize]
     }
 
-    /// The living entity whose ID is `id`; `None` if none has it.
+    /// The living entity with ID `id`.
     ///
     /// ```
     /// use gg_engine::{Transform, World};
@@ -224,14 +216,14 @@ impl World {
         self.by_id.get(&id).copied()
     }
 
-    /// Finds `entity` by `id` from now on, and returns the entity found by `id` before, if any, as
-    /// [`HashMap::insert`](std::collections::HashMap::insert) does.
+    /// Finds `entity` by `id` from now on. Returns the entity `id` found before, like
+    /// [`HashMap::insert`](std::collections::HashMap::insert).
     ///
-    /// The map keeps room for twice as many entities as it finds. Once the entries its removals
-    /// leave have used up its room, std's map rehashes in place if it's at most half full, and
-    /// grows otherwise (hashbrown's `reserve_rehash_inner`), at a time its random keys decide. So
-    /// it grows here alone, as the world comes to hold more than half its room, to room for twice
-    /// as many, and spawning and despawning at a population the world has held never allocates.
+    /// The map keeps room for twice the entities it finds. Once removals' leftover entries use up
+    /// its room, std's map rehashes in place if at most half full, else grows (hashbrown's
+    /// `reserve_rehash_inner`), at a time its random keys decide. So it grows here alone, when the
+    /// world holds over half its room, to twice as many; spawning and despawning at a population
+    /// the world has held never allocates.
     pub(super) fn find_by_id(&mut self, id: EntityId, entity: Entity) -> Option<Entity> {
         let finding = self.by_id.len() + 1;
         if finding > self.id_room / 2 {
@@ -242,14 +234,13 @@ impl World {
         self.by_id.insert(id, entity)
     }
 
-    /// Where the stream the world draws its IDs from is, which a world seeded with it goes on
-    /// from: its seed, until it draws one.
+    /// The ID stream's position: a world seeded with it goes on from there. The seed until a
+    /// draw.
     pub(crate) fn stream_state(&self) -> u64 {
         self.stream.state()
     }
 
-    /// How diagnostics name `entity`: by its ID while it's alive, and by its handle once it isn't,
-    /// since then it has none.
+    /// How diagnostics name `entity`: by its ID while alive, by its handle once not.
     pub(super) fn name_of(&self, entity: Entity) -> Named {
         match self.id(entity) {
             Some(id) => Named::Id(id),
@@ -281,8 +272,7 @@ pub(super) mod tests {
 
     use super::*;
 
-    /// How many of `world`'s slots are vacant, kept for entities a delete took: neither alive,
-    /// free nor retired.
+    /// How many slots are vacant: kept for deleted entities, neither alive, free nor retired.
     pub(in crate::ecs) fn vacated(world: &World) -> usize {
         let mut free = vec![false; world.meta.len()];
         for &index in &world.free {
@@ -296,9 +286,9 @@ pub(super) mod tests {
             .count()
     }
 
-    /// Panics unless the world's IDs agree with its slots: each slot has an ID exactly while its
-    /// entity is alive, by which the world finds that entity, it finds no more entities by ID than
-    /// are alive, and it keeps as many IDs as it has vacant slots.
+    /// Panics unless IDs agree with slots: a slot has an ID exactly while its entity is alive, and
+    /// finds it; no more entities are found by ID than are alive; as many IDs are kept as there
+    /// are vacant slots.
     pub(in crate::ecs) fn check_ids(world: &World) {
         assert_eq!(
             world.entity_ids.len(),
@@ -326,8 +316,8 @@ pub(super) mod tests {
         );
     }
 
-    /// SplitMix64's numbers from a seed of 0, as Vigna's C gives them, so that every platform draws
-    /// the same IDs from a seed, as replays need.
+    /// SplitMix64's numbers from a seed of 0, as Vigna's C gives them: every platform draws the
+    /// same IDs from a seed, as replays need.
     #[test]
     fn a_stream_draws_splitmix64s_numbers() {
         let mut stream = IdStream::new(0);
@@ -389,8 +379,8 @@ pub(super) mod tests {
         }
     }
 
-    /// Pinned, since seeded worlds reseed the same way every run, and scenes hold the IDs copies
-    /// and linked instances mix to.
+    /// Pinned: seeded worlds reseed the same way every run, and scenes hold the IDs copies and
+    /// linked instances mix to.
     #[test]
     fn reseeding_and_placing_mix_as_they_always_have() {
         let mut stream = IdStream::new(0);
@@ -430,8 +420,7 @@ pub(super) mod tests {
         assert_eq!(instance.len(), 1000);
     }
 
-    /// SplitMix64's mix is undone, so that each ID an instance holds has a local ID that links to
-    /// it, and only one.
+    /// The mix is undone: each ID an instance holds has exactly one local ID that links to it.
     #[cfg(feature = "dev")]
     #[test]
     fn the_mix_is_undone() {

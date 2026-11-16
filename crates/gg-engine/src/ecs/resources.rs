@@ -1,6 +1,6 @@
 //! Resources: what a world holds beside its entities, one of each type, such as 2D physics' bodies
-//! and contacts, which snapshots copy and restores bring back with the entities, and snapshot files
-//! hold those that save themselves, but which no scene, hash, recording or dump holds.
+//! and contacts. Snapshots copy them and restores bring them back. Snapshot files hold those that
+//! save themselves. No scene, hash, recording or dump holds any.
 
 use std::any::{Any, TypeId};
 
@@ -10,60 +10,56 @@ use super::{Entity, World};
 use crate::cells::{CellState, Seen};
 
 /// What a world holds beside its entities, one of each type: the rest of the simulation, such as
-/// [`Physics2D`](crate::Physics2D)'s bodies and contacts, so that a snapshot restored goes on as
-/// the world it was taken from did. Clone, so that snapshots copy it, and `Send` and `Sync`, as
-/// components are; any such type is one. No scene, hash, recording or dump holds it, so it's what
-/// can be made again from the entities, or that the simulation carries on from: a world loaded
-/// from a scene starts without it, and its hash, which reads the entities' components, says
-/// nothing of it.
+/// [`Physics2D`](crate::Physics2D)'s bodies and contacts. Any `Clone + Send + Sync` type is one.
+///
+/// No scene, hash, recording or dump holds it: a world loaded from a scene starts without it, and
+/// the hash, which reads components, ignores it. So it's what can be remade from the entities, or
+/// what the simulation carries on from.
 pub trait Resource: Clone + Send + Sync + 'static {}
 
 impl<T: Clone + Send + Sync + 'static> Resource for T {}
 
-/// A resource that snapshot files hold, so that a run restored from one in another process takes it
-/// back as it was, as [`Physics2D`](crate::Physics2D) does: under a name of its own, as a line of
-/// text that [`save`](Self::save) writes and [`load`](Self::load) reads. A world's file holds those
-/// whose types it registered with [`World::register_saved`]; others are left out, made again from
-/// the entities, as after a scene loads.
+/// A resource that snapshot files hold, so a run restored in another process gets it back as it
+/// was, like [`Physics2D`](crate::Physics2D). It has a name and is one line of text, written by
+/// [`save`](Self::save) and read by [`load`](Self::load).
+///
+/// A file holds the types registered with [`World::register_saved`]. Others are left out and
+/// remade from the entities, as after a scene loads.
 pub trait Saved: Resource {
-    /// Its name in snapshot files, which no other saved resource's type has.
+    /// Its name in snapshot files, unique among saved resource types.
     const NAME: &'static str;
 
-    /// Writes it as a line of text, without line breaks, in `world`, whose entities it names by
-    /// their IDs, as [`World::id`] gives them.
+    /// Writes it as one line of text, naming entities by their [`World::id`]s.
     ///
     /// Fails as the type says, for what it can't write.
     fn save(&self, world: &World) -> Result<String>;
 
-    /// Writes it as [`save`](Self::save) does, but as a server's client sees `world`, without the
-    /// entities `hides` says, which the client's world, loaded from the text, doesn't hold: as
-    /// `save` does, unless the type says otherwise, as physics leaves out the hidden entities'
-    /// bodies.
+    /// Like [`save`](Self::save), as a server's client sees `world`: without the entities `hides`
+    /// says, which the client's world lacks. Defaults to `save`; physics leaves out hidden
+    /// entities' bodies.
     ///
-    /// Fails as `save` does.
+    /// Fails like `save`.
     fn save_seen(&self, world: &World, hides: &dyn Fn(Entity) -> bool) -> Result<String> {
         let _ = hides;
         self.save(world)
     }
 
     /// Makes it again from `text`, which [`save`](Self::save) wrote, in `world`, whose entities
-    /// are back, each under its ID.
+    /// are back under their IDs.
     ///
     /// Fails as the type says, for text it doesn't take.
     fn load(text: &str, world: &World) -> Result<Self>;
 }
 
-/// A world's resources, in the order their types first came, which a copy keeps, so that one taken
-/// again into a copy kept from before copies each into the one in its place; and the types that
-/// save themselves.
+/// A world's resources in the order their types first came, which copies keep so a repeated copy
+/// goes resource into resource; plus the types that save themselves.
 #[derive(Default)]
 pub(super) struct Resources {
     slots: Vec<Slot>,
     saved: Vec<SavedType>,
 }
 
-/// A [`Saved`] resource's type: its name, and what writes and reads a resource of it without its
-/// type.
+/// A [`Saved`] resource's type: its name, and what writes and reads it without the type.
 #[derive(Clone, Copy)]
 pub(super) struct SavedType {
     pub(super) type_id: TypeId,
@@ -72,8 +68,7 @@ pub(super) struct SavedType {
     pub(super) load: fn(&str, &World) -> Result<Box<dyn AnyResource>>,
 }
 
-/// What writes a resource without its type, as [`Saved::save_seen`] does, the entities the second
-/// hides left out.
+/// [`Saved::save_seen`], without the type.
 type SaveSeen = fn(&dyn AnyResource, &World, &dyn Fn(Entity) -> bool) -> Result<String>;
 
 fn save_as<T: Saved>(
@@ -90,18 +85,17 @@ fn load_as<T: Saved>(text: &str, world: &World) -> Result<Box<dyn AnyResource>> 
     Ok(Box::new(T::load(text, world)?))
 }
 
-/// A type's resource, or `None` while [`World::resource_scope`] has it out of the world, or since
-/// it was removed.
+/// `None` while [`World::resource_scope`] has the resource out, or after it was removed.
 struct Slot {
     type_id: TypeId,
     resource: Option<Box<dyn AnyResource>>,
 }
 
-/// A resource, of a type the world doesn't know: what copies it.
+/// A resource without its type: what copies it.
 pub(super) trait AnyResource: Any + Send + Sync {
     fn cloned(&self) -> Box<dyn AnyResource>;
 
-    /// Makes `to`, a resource of the same type, a copy of this one, in the memory it holds.
+    /// Makes `to`, of the same type, a copy of this one, in the memory it holds.
     fn copy_to(&self, to: &mut dyn AnyResource);
 }
 
@@ -130,8 +124,8 @@ impl Clone for Resources {
         }
     }
 
-    /// Copies each resource into the one of its type in its place, in the memory it holds, while
-    /// the slots are of the same types in the same order; and copies them whole otherwise.
+    /// Copies each resource into the one in its place, in the memory it holds, while the slots
+    /// are of the same types in the same order; copies them whole otherwise.
     fn clone_from(&mut self, source: &Self) {
         self.saved.clone_from(&source.saved);
         let ours = self.slots.iter().map(|slot| slot.type_id);
@@ -149,7 +143,6 @@ impl Clone for Resources {
 }
 
 impl Resources {
-    /// The slot of `T`'s resource, if `T` has one.
     fn slot<T: Resource>(&self) -> Option<&Slot> {
         self.slots
             .iter()
@@ -162,7 +155,7 @@ impl Resources {
             .find(|slot| slot.type_id == TypeId::of::<T>())
     }
 
-    /// No resources, but the types that save themselves these have.
+    /// No resources, but the same saved types.
     pub(super) fn emptied(&self) -> Self {
         Self {
             slots: Vec::new(),
@@ -170,18 +163,15 @@ impl Resources {
         }
     }
 
-    /// The type that saves its resources under `name`, if one does.
     pub(super) fn saved(&self, name: &str) -> Option<SavedType> {
         self.saved.iter().find(|saved| saved.name == name).copied()
     }
 
-    /// The text of each resource that saves itself, by its name, in `world`, in the order their
-    /// types first came: of what `seen` sees, if it's given, as [`Saved::save_seen`] writes a
-    /// resource for it, and its cells' state in place of the world's, as a client's view has its
-    /// own.
+    /// Each saved resource's text, by name, in type order. With `seen`, as that client sees it:
+    /// [`Saved::save_seen`], and its cells' state in place of the world's.
     ///
-    /// Fails as a resource's [`Saved::save_seen`] does, with `snapshot.bad_name` for a name that
-    /// isn't a word, and with `snapshot.line_break` for text with a line break.
+    /// Fails like [`Saved::save_seen`], with `snapshot.bad_name` for a name that isn't a word and
+    /// `snapshot.line_break` for text with a line break.
     pub(super) fn save(
         &self,
         world: &World,
@@ -212,7 +202,7 @@ impl Resources {
         Ok(texts)
     }
 
-    /// Puts `resource`, of the type `type_id` names, in its type's slot.
+    /// Puts `resource`, of type `type_id`, in its slot.
     pub(super) fn restore(&mut self, type_id: TypeId, resource: Box<dyn AnyResource>) {
         match self.slots.iter_mut().find(|slot| slot.type_id == type_id) {
             Some(slot) => slot.resource = Some(resource),
@@ -223,8 +213,8 @@ impl Resources {
         }
     }
 
-    /// Takes each resource `from` holds of a type it holds none of, after its own, as a world
-    /// loaded from a file keeps those its layers made as they loaded, which the file doesn't hold.
+    /// Takes, after its own, each resource `from` holds of a type it holds none of. A world loaded
+    /// from a file keeps the resources its layers made as they loaded.
     pub(super) fn keep(&mut self, from: Self) {
         for slot in from.slots {
             let ours = self.slots.iter().any(|ours| ours.type_id == slot.type_id);
@@ -236,8 +226,8 @@ impl Resources {
 }
 
 impl World {
-    /// Has snapshot files hold the world's `T`, as [`Saved`] says, and its copies', and the
-    /// worlds a file loads into it. Registering it again changes nothing.
+    /// Has snapshot files hold the world's `T`, as [`Saved`] says, and its copies' and loaded
+    /// worlds'. Registering it again changes nothing.
     ///
     /// Fails with `ecs.name_taken` if another type saves under its name.
     pub fn register_saved<T: Saved>(&mut self) -> Result<()> {
@@ -277,7 +267,7 @@ impl World {
         resource.downcast_mut()
     }
 
-    /// Gives the world `resource`, and returns the `T` it had, if any, which `resource` replaces.
+    /// Gives the world `resource`, and returns the `T` it replaces, if any.
     pub fn insert_resource<T: Resource>(&mut self, resource: T) -> Option<T> {
         let old = self.remove_resource::<T>();
         let boxed: Box<dyn AnyResource> = Box::new(resource);
@@ -298,11 +288,11 @@ impl World {
         Some(*resource.expect("a slot holds its type's resource"))
     }
 
-    /// Runs `f` with the world and its `T` apart, so that it changes both, as a system that steps
-    /// its resource over the entities' components does, and returns what `f` does; or, if the
-    /// world has no `T`, returns `None` without running it. Meanwhile the world has no `T`: a copy
-    /// taken leaves it out, and one that `f` inserts is replaced as the `T` goes back, into the
-    /// world as `f` leaves it. It allocates nothing.
+    /// Runs `f` on the world and its `T` apart, so it can change both, and returns `f`'s result;
+    /// `None`, without running `f`, if there's no `T`.
+    ///
+    /// Meanwhile the world has no `T`: a copy leaves it out, and one `f` inserts is replaced when
+    /// the `T` goes back. It allocates nothing.
     pub fn resource_scope<T: Resource, R>(
         &mut self,
         f: impl FnOnce(&mut World, &mut T) -> R,
@@ -329,7 +319,7 @@ impl World {
 mod tests {
     use crate::{Transform, World};
 
-    /// A resource that counts, in memory of its own, which a copy taken into it keeps.
+    /// Keeps its own memory across a copy taken into it.
     #[derive(Debug, PartialEq)]
     struct Counted(Vec<u32>);
 
@@ -365,9 +355,8 @@ mod tests {
         assert_eq!(world.resource::<Gravity>(), Some(&Gravity(2.0)));
     }
 
-    /// A snapshot copies the resources, and restoring it brings them back as they were, into the
-    /// memory a resource of the same type holds; one the world had that the snapshot hadn't goes,
-    /// and one the snapshot had that the world hadn't comes back.
+    /// Restoring a snapshot brings the resources back as they were, into the memory the same type
+    /// holds; one the snapshot lacked goes, and one the world lacked comes back.
     #[test]
     fn snapshots_copy_the_resources_and_restores_bring_them_back() {
         let mut world = World::default();
@@ -395,7 +384,7 @@ mod tests {
     }
 
     /// Clearing a world, or replacing its entities with a scene's, keeps its resources, as it keeps
-    /// its component types and its stream of IDs: they go with the world, not with its entities.
+    /// its component types and stream of IDs: they belong to the world, not its entities.
     #[test]
     fn clearing_or_replacing_the_entities_keeps_the_resources() {
         let mut world = World::default();
@@ -411,9 +400,8 @@ mod tests {
         assert_eq!(world.resource::<Gravity>(), Some(&Gravity(-9.81)));
     }
 
-    /// A scope has the world and its resource apart, the world without it meanwhile, so that a
-    /// copy leaves it out; it goes back as the scope ends, in place of one inserted meanwhile. A
-    /// world without the resource runs nothing.
+    /// A scope has the world without the resource meanwhile, so a copy leaves it out; it goes back
+    /// at the end, in place of one inserted meanwhile. A world without it runs nothing.
     #[test]
     fn a_scope_has_the_world_and_its_resource_apart() {
         let mut world = World::default();
