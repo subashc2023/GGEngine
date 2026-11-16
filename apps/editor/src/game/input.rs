@@ -9,7 +9,7 @@ use gg_engine::{Event, Key, MouseButton, Scroll, Viewport};
 use crate::handles::Reading;
 use crate::shortcuts::{Does, SHORTCUTS, Shortcut};
 
-use super::{Game, Probing, along, picked};
+use super::{Game, Grab, Probing, along, picked};
 
 impl Game {
     /// Does what `event` does, which the view got, as the editor reads the window, `reading`, with
@@ -39,11 +39,11 @@ impl Game {
             }
         );
         if through && escape {
-            self.escaped = true;
-            self.captured = false;
+            self.grab = Grab::Escaped;
         }
-        if through && matches!(*event, Event::MouseButton { pressed: true, .. }) {
-            self.escaped = false;
+        let press = matches!(*event, Event::MouseButton { pressed: true, .. });
+        if through && press && self.grab == Grab::Escaped {
+            self.grab = Grab::Asks;
         }
         let shortcut = shortcuts_key(event, reading.command);
         let handled = if shortcut || (through && !lets_go(event)) {

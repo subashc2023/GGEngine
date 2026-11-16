@@ -250,12 +250,8 @@ struct Game {
     /// to be answered: one at a time, as the game answers one a frame.
     input: Vec<InputEvent>,
     inputting: bool,
-    /// Whether Escape let go of the cursor grabbed for the game, until a press in the view.
-    escaped: bool,
-    /// Whether Play captured the view's input for the game, the cursor grabbed whether or not the
-    /// game asks: from a click of Play, or of Resume in Play, until Escape, or the view's input
-    /// stopping going to the game, but while a Play clicked waits for the game's answer.
-    captured: bool,
+    /// The cursor's grab for the game, in Play, as Escape and Play have it.
+    grab: Grab,
     run_state: RunState,
     /// Whether the game's simulation is paused, and whether the game is stopped, as it last
     /// answered: stopped until a game that serves answers, so that nothing goes to it before.
@@ -307,6 +303,20 @@ struct Game {
     rates: Rates,
 }
 
+/// The cursor's grab for the game, in Play: one state, as Escape ends a capture and a capture
+/// grabs again what Escape let go of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grab {
+    /// Grabbed as the game asks, as the view's memory says.
+    Asks,
+    /// Play captured the view's input for the game, the cursor grabbed whether or not the game
+    /// asks: from a click of Play, or of Resume in Play, until Escape, or the view's input stopping
+    /// going to the game, but while a Play clicked waits for the game's answer.
+    Captured,
+    /// Escape let go of the cursor grabbed for the game, until a press in the view.
+    Escaped,
+}
+
 impl Game {
     /// The layer of the project in directory `dir`, or of none, through the game's camera until
     /// the editor's adopts where it sees from, whose tools pick and edit through `inspector`, the
@@ -356,8 +366,7 @@ impl Game {
             refused: false,
             input: Vec::new(),
             inputting: false,
-            escaped: false,
-            captured: false,
+            grab: Grab::Asks,
             run_state: RunState::Building(None),
             paused: false,
             stopped: true,
@@ -435,10 +444,13 @@ impl Layer for Game {
         // Stop or Simulate ending what Escape and Play did too, but while a Play clicked waits for
         // its answer; and the editor's camera's, while it looks about, orbits or dollies.
         let through = self.through();
-        self.escaped &= through;
-        self.captured &= through || self.playing > 0;
+        self.grab = match self.grab {
+            Grab::Escaped if !through => Grab::Asks,
+            Grab::Captured if !(through || self.playing > 0) => Grab::Asks,
+            grab => grab,
+        };
         let asked = self.reader.as_ref().is_some_and(Reader::cursor_grabbed);
-        let games = through && !self.escaped && (asked || self.captured);
+        let games = through && self.grab != Grab::Escaped && (asked || self.grab == Grab::Captured);
         cx.set_cursor_grabbed(games || self.view.camera.grabs());
         let picked = picked(&self.view.link);
         self.view.hold(picked.as_ref());
@@ -596,7 +608,7 @@ impl Layer for Game {
         if let Some(clicked) = clicked.flatten() {
             self.click(clicked);
             // A capture gives the view the keys, which the click's press, off the view, took.
-            if self.captured {
+            if self.grab == Grab::Captured {
                 ui.focus_view();
             }
         }

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::overlay::{self, Mode};
 
-use super::{Game, RunState};
+use super::{Game, Grab, RunState};
 
 impl Game {
     /// How the game runs, as the title bar shows it: stopped, or as good as, once the editor's
@@ -31,9 +31,13 @@ impl Game {
     /// the capture.
     pub(super) fn click(&mut self, clicked: overlay::Clicked) {
         let resumes_play = clicked == overlay::Clicked::Resume && self.mode() == Mode::Play;
-        self.captured = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
-        // What Escape let go of, a capture grabs again.
-        self.escaped &= !self.captured;
+        let captures = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
+        // What Escape let go of, a capture grabs again; any other click ends a capture.
+        self.grab = match (captures, self.grab) {
+            (true, _) => Grab::Captured,
+            (false, Grab::Captured) => Grab::Asks,
+            (false, grab) => grab,
+        };
         match clicked {
             overlay::Clicked::To(to) => self.run(to),
             overlay::Clicked::Pause => self.ask("pause"),
