@@ -1,5 +1,5 @@
-//! The view: the look clients set, their input, and what rides with frames (captures, films, picks,
-//! images) and the published view.
+//! The view: clients' look and input, what rides with frames (captures, films, picks, images), and
+//! the published view.
 
 use std::mem;
 use std::path::PathBuf;
@@ -24,12 +24,12 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::{Context, EntityId, Event, Key, MouseButton, Scroll};
 
 /// The longest a `capture` waits for a frame showing every texture and mesh added before it, none
-/// still decoding or streaming to the GPU. Past it, it takes the next frame anyway, saying so.
+/// still decoding or streaming. Then it takes the next frame anyway, saying so.
 pub(super) const CAPTURE_WAIT: Duration = Duration::from_secs(10);
 
-/// A `pick` waiting for its answer: a pixel of the view, the entity whose model it's within, if any
-/// ([`gg_api::Pick::within`]), the ticket the asking frame gave once it has, and whether it answers
-/// the entity's name, as it does for a connection granted `read` of `Name`.
+/// A `pick` awaiting its answer. `within` is [`gg_api::Pick::within`]; `ticket` comes once the
+/// asking frame gives it; `named` answers the entity's name, for a connection granted `read` of
+/// `Name`.
 pub(super) struct Picking {
     pub(super) at: [f64; 2],
     pub(super) within: Option<EntityId>,
@@ -38,10 +38,9 @@ pub(super) struct Picking {
     pub(super) reply: Reply,
 }
 
-/// A `capture` waiting for its frame: where its answer and PNG go, whether it's of the game's own
-/// view (which a bare frame shows), what it shows in place of the view's light, if it asks, and
-/// when it came ([`CAPTURE_WAIT`] counts from it). With `at` and no path it answers the pixel and
-/// writes no PNG.
+/// A `capture` awaiting its frame. `own` is the game's own view, which a bare frame shows; `show`
+/// replaces the view's light; [`CAPTURE_WAIT`] counts from `since`. With `at` and no path it
+/// answers the pixel and writes no PNG.
 pub(super) struct Capturing {
     pub(super) reply: Reply,
     pub(super) path: Option<PathBuf>,
@@ -51,11 +50,10 @@ pub(super) struct Capturing {
     pub(super) since: Instant,
 }
 
-/// A `frames` capturing frames in a row, or waiting to: where its answer and PNGs go, how many
-/// frames, their viewpoints, the part of each kept, what they show in place of the view's light,
-/// and when it came ([`CAPTURE_WAIT`] counts from it). Its frames are those handed off from the
-/// first made after a frame comes back with nothing on its way (`started` from then). `handed`
-/// holds the ticks each handed-off frame shows; `back` the frames returned, in order.
+/// A `frames` capturing consecutive frames, or waiting to. `rect` is the part kept; `show`
+/// replaces the view's light; [`CAPTURE_WAIT`] counts from `since`. For `started`, see
+/// [`Api::film_hands`]. `handed` holds each handed-off frame's ticks; `back` the frames
+/// returned, in order.
 pub(super) struct Filming {
     pub(super) reply: Reply,
     pub(super) dir: PathBuf,
@@ -70,9 +68,8 @@ pub(super) struct Filming {
 }
 
 impl Filming {
-    /// The viewpoint the next frame draws from, if it's the film's: the first until the film
-    /// starts, then each in turn, the last held. `None` without viewpoints, or once every frame is
-    /// handed off.
+    /// The next frame's viewpoint, if it's the film's: the first until the film starts, then each
+    /// in turn, the last held. `None` without viewpoints, or once every frame is handed off.
     pub(super) fn viewpoint(&self) -> Option<Viewpoint> {
         let next = self.handed.len();
         if next >= self.count as usize {
@@ -83,8 +80,8 @@ impl Filming {
     }
 }
 
-/// A frame of a `frames` back from the renderer: its view cropped to the film's rect, the ticks it
-/// shows, whether anything was still on its way to the GPU, and its viewpoint.
+/// A `frames` frame back from the renderer, its view cropped to the film's rect. `streaming` if
+/// anything was still on its way to the GPU.
 pub(super) struct FilmShot {
     pub(super) shot: Arc<Shot>,
     pub(super) ticks: u64,
@@ -93,8 +90,8 @@ pub(super) struct FilmShot {
 }
 
 impl Api {
-    /// Sets the parts of the look `given` sets, as client `client`; a change of any part's value or
-    /// setter is a revision. Hands the look to `cx` for the frames to draw with.
+    /// Sets `given`'s parts of the look as `client`. Any part's change of value or setter is a
+    /// revision. Hands the look to `cx` for frames to draw with.
     pub(super) fn set_look(&mut self, cx: &mut Context, given: gg_api::Look, client: &str) {
         let Looked {
             viewpoint,
@@ -140,20 +137,18 @@ impl Api {
 
     /// With the renderer back from `frame`:
     ///
-    /// - Takes the view it read back, if it rode with captures and rendered, for a thread to write
-    ///   each capture's PNG and answer it. Only if every texture and mesh added before is there,
-    ///   none still decoding or streaming; otherwise only for captures that have waited
-    ///   [`CAPTURE_WAIT`] since they came, saying so. The rest ride on with the next frame.
-    /// - Answers the picks whose answers came back into `cx`, each naming its entity as `cx`'s
-    ///   world does now.
-    /// - Has the next frame handed off (made by `cx`, showing the world after `ticks` ticks) read
-    ///   its view back for the captures of its kind (bare or not) asked since, and for those whose
-    ///   frame had nothing to render into or showed what was still on its way; and publish it to
-    ///   the memory a `view` asked for, unless it's bare. It warns once of an unpublished frame
-    ///   since the view was asked for.
-    /// - Likewise answers the `images` riding with frames handed off with the images `frame`
-    ///   listed, if it rendered, and has the next list them for those asked since and those still
-    ///   riding.
+    /// - Takes the view read back, if it rode with captures and rendered, for a thread to write
+    ///   each capture's PNG and answer. Only if every texture and mesh added before is there, none
+    ///   decoding or streaming; else only for captures that waited [`CAPTURE_WAIT`], saying so.
+    ///   The rest ride on with the next frame.
+    /// - Answers picks whose answers came back into `cx`, naming each entity as `cx`'s world does
+    ///   now.
+    /// - Has the next frame handed off (by `cx`, showing the world after `ticks` ticks) read its
+    ///   view back for captures of its kind (bare or not) asked since, and those whose frame had
+    ///   nothing to render into or showed what was still on its way. Unless bare, it's published
+    ///   to the memory a `view` asked for; an unpublished frame since then warns once.
+    /// - Likewise answers `images` riding with handed-off frames with the images `frame` listed, if
+    ///   it rendered, and has the next frame list them for those asked since or still riding.
     pub(crate) fn frame_back(&mut self, frame: &mut Extracted, cx: &Context, ticks: u64) {
         if let Some(viewing) = self.viewing.take() {
             frame.publish = viewing.map(|writer| Publish {
@@ -240,9 +235,8 @@ impl Api {
         } in back
         {
             let shown = answered(ticket).flatten();
-            // A model's node is picked as its root, which tools pick and change in its place;
-            // within the model it's picked as itself, as an editor that picked the root or a
-            // node goes into it.
+            // A model's node is picked as its root, which tools change in its place. Within the
+            // model it's picked as itself, as an editor goes into a picked root or node.
             let drawn = shown.and_then(|id| world.entity(id));
             let root = drawn.map(|entity| world.node_root(entity));
             let within = within.and_then(|id| world.entity(id));
@@ -282,11 +276,9 @@ impl Api {
         frame.list_images = !self.images_riding.is_empty();
     }
 
-    /// With a frame back (`back` its view, if read; `streaming` if things were on their way to the
-    /// GPU; drawn from `viewpoint`): keeps it as the first film's next frame, cropped to its rect,
-    /// if that film has a frame in flight, which is this one. Once the film has all its frames, the
-    /// PNG thread writes them and answers. A frame back without its view, or with none of its rect,
-    /// fails the film.
+    /// Keeps a frame back (`back`, its view if read) as the first film's next frame, cropped to its
+    /// rect, if that film has a frame in flight. Once the film has all its frames, the PNG thread
+    /// writes them and answers. A frame without its view, or with none of the rect, fails the film.
     fn film_back(
         &mut self,
         back: Option<&Result<Arc<Shot>>>,
@@ -340,10 +332,9 @@ impl Api {
         }
     }
 
-    /// Whether the next frame handed off, made after `ticks` ticks, reads its view back for the
-    /// first film: it was made as the film's ([`serve`](Self::serve)) and the film has started.
-    /// The film starts at the first frame back that showed nothing on its way, unless `streaming`,
-    /// or once it has waited [`CAPTURE_WAIT`].
+    /// Whether the next handed-off frame (after `ticks` ticks) reads its view back for the first
+    /// film: made as the film's ([`serve`](Self::serve)), once the film starts at the first frame
+    /// back not `streaming`, or after [`CAPTURE_WAIT`].
     fn film_hands(&mut self, streaming: bool, ticks: u64) -> bool {
         let film = (self.films.first_mut()).filter(|_| self.film_frame);
         let Some(film) = film else {
@@ -356,15 +347,15 @@ impl Api {
         film.started
     }
 
-    /// While the view is published, the number of the next frame to hand off, as the client will
-    /// take it; `None` while the frame is apart, so unpublished.
+    /// While the view is published, the next handed-off frame's number, as the client takes it.
+    /// `None` while the frame is apart, so unpublished.
     pub(crate) fn handing(&self) -> Option<u64> {
         let pacer = self.pacer.as_ref().filter(|_| !self.apart())?;
         Some(pacer.published().saturating_add(1))
     }
 
-    /// Whether the frame being made is apart from those the view's client is shown, so unpublished:
-    /// bare, or showing what a capture asks in place of the view's light.
+    /// Whether the frame being made is unpublished: bare, or showing what a capture asks in place
+    /// of the view's light.
     fn apart(&self) -> bool {
         self.bare || self.shown.is_some()
     }
@@ -382,8 +373,8 @@ impl Api {
     }
 }
 
-/// Sets look part `part`, whose setter `by` names, as `change` asks, for client `client`. `null`
-/// gives it back to the game, which no client sets. Returns whether its value or setter changed.
+/// Sets look part `part` and its setter `by` as `change` asks, for `client`. `null` gives the part
+/// back to the game, with no setter. Returns whether its value or setter changed.
 fn set_part<T: PartialEq>(
     part: &mut Option<T>,
     by: &mut Option<String>,
@@ -434,7 +425,7 @@ pub fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
     }
 }
 
-/// The viewpoint the tool API's `given` is.
+/// `given` as the engine's viewpoint.
 pub fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
     Viewpoint {
         position: DVec3::from_array(given.position),
@@ -443,7 +434,6 @@ pub fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
     }
 }
 
-/// The projection the tool API's `given` is.
 fn engine_projection(given: gg_api::Projection) -> Projection {
     match given {
         gg_api::Projection::Orthographic { height, near, far } => {
@@ -453,8 +443,8 @@ fn engine_projection(given: gg_api::Projection) -> Projection {
     }
 }
 
-/// `shot` cropped to `rect` (`[x, y, width, height]` from its top left) where they overlap, whole
-/// without one; `None` if they don't overlap.
+/// `shot` cropped to `rect` (`[x, y, width, height]` from its top left), whole without one;
+/// `None` if they don't overlap.
 fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
     let Some([x, y, width, height]) = rect else {
         return Some(shot.clone());
@@ -477,15 +467,14 @@ fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
     }))
 }
 
-/// The look `given`, method `method`'s, checked: the viewpoint's rotation is normalized, and the
-/// passes left out are in [`gg_api::Pass::ALL`]'s order, each once; an empty list becomes `None`.
+/// Checks look `given`, normalizing the viewpoint's rotation. Skipped passes are put in
+/// [`gg_api::Pass::ALL`]'s order, each once; an empty list becomes `None`.
 ///
 /// Fails with `api.bad_params`, saying why, for:
 ///
-/// - a viewpoint that isn't finite, whose rotation has no length, or whose projection can't
-///   project ([`Projection`]);
-/// - an outline with an invalid entity ID, a color that isn't finite, or a width that isn't finite
-///   and positive.
+/// - a viewpoint like [`checked_viewpoint`] refuses;
+/// - an outline with an invalid entity ID, a non-finite color, or a width not finite and positive;
+/// - a `show` that [`shown`] refuses.
 pub(super) fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> {
     if let Some(Some(viewpoint)) = &mut given.viewpoint {
         checked_viewpoint(method, viewpoint)?;
@@ -526,8 +515,8 @@ pub(super) fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look
 
 /// Checks a viewpoint `method` takes, normalizing its rotation.
 ///
-/// Fails with `api.bad_params`, saying why, for one that isn't finite, whose rotation has no
-/// length, or whose projection can't project ([`Projection`]).
+/// Fails with `api.bad_params`, saying why, if it isn't finite, its rotation has no length, or its
+/// projection can't project ([`Projection`]).
 pub(super) fn checked_viewpoint(
     method: &str,
     viewpoint: &mut gg_api::Viewpoint,
@@ -554,8 +543,8 @@ pub(super) fn checked_viewpoint(
     Ok(())
 }
 
-/// Checks what a `look` or `capture` shows in place of the view's light: an image name of 1 to
-/// [`gg_api::MOST_IMAGE_NAME`] bytes.
+/// Checks a `look`'s or `capture`'s `show`: an image name of 1 to [`gg_api::MOST_IMAGE_NAME`]
+/// bytes.
 pub(super) fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
     match show {
         gg_api::Shown::Image(name) if name.is_empty() || name.len() > gg_api::MOST_IMAGE_NAME => {
@@ -570,8 +559,8 @@ pub(super) fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
     }
 }
 
-/// The event `given` is, as the layers get it: a cursor position over the view at `origin` in the
-/// main window becomes the window's. `None` for an unknown key name.
+/// `given` as the layers get it: a cursor position over the view, at `origin` in the main window,
+/// becomes the window's. `None` for an unknown key name.
 pub(super) fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<'_>> {
     let event = match *given {
         InputEvent::Key {

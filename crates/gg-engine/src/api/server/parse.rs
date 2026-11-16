@@ -1,4 +1,4 @@
-//! A request read into the call the main loop answers, its parameters checked.
+//! Reads a request into the main loop's call, checking its parameters.
 
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use super::failure;
 use super::view::{checked_viewpoint, look, shown};
 use crate::{EntityId, Key};
 
-/// The methods, as `api.unknown_method` lists them.
+/// Listed by `api.unknown_method`.
 pub(super) const METHODS: [&str; 35] = [
     "hello",
     "ping",
@@ -58,10 +58,10 @@ pub(super) const METHODS: [&str; 35] = [
 /// The most ticks a `step` runs.
 pub(super) const MOST_STEPS: u64 = 10_000;
 
-/// The most entities or assets a page of `entities` or `assets` lists.
+/// The most items a page of `entities` or `assets` lists.
 const MOST_LISTED: usize = 10_000;
 
-/// The requests the main loop answers, as read.
+/// Requests the main loop answers.
 #[derive(Debug, PartialEq)]
 pub(super) enum Call {
     Status,
@@ -70,18 +70,18 @@ pub(super) enum Call {
     Play,
     Stop,
     Step(u64),
-    /// What to do to the open scene, with the path to open or save it as (checked to be a `.ron`
-    /// file's) and whether to discard its unsaved edits.
+    /// An action on the open scene, its path (a checked `.ron`) and whether to discard unsaved
+    /// edits.
     Scene(Scene),
     Capture {
         path: Option<PathBuf>,
-        /// A pixel of the view to answer the bytes of; finite and not negative.
+        /// A view pixel to answer the bytes of; finite, not negative.
         at: Option<[f64; 2]>,
         own: bool,
         show: Option<gg_api::Shown>,
     },
-    /// Frames in a row: the directory for their PNGs, how many, their viewpoints (each checked,
-    /// its rotation normalized), the part of each kept (of some area), and what they show.
+    /// Consecutive frames: their PNGs' directory, count, viewpoints (checked, rotations
+    /// normalized), the part kept (nonzero area) and what they show.
     Frames {
         dir: PathBuf,
         count: u32,
@@ -89,13 +89,13 @@ pub(super) enum Call {
         rect: Option<[u32; 4]>,
         show: Option<gg_api::Shown>,
     },
-    /// The name of the memory to publish the view to, or `None` to stop.
+    /// The shared memory to publish the view to; `None` stops.
     View(Option<String>),
     /// Events to hand the layers; each key event names a real key.
     Input(Vec<InputEvent>),
-    /// The parts of the look to set, each checked, the viewpoint's rotation normalized.
+    /// The look's parts to set, checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
-    /// The pixel of the view to pick at, and the entity whose model to pick within, if any.
+    /// The view pixel to pick at, and optionally the entity whose model to pick within.
     Pick([f64; 2], Option<EntityId>),
     Images,
     Entities {
@@ -118,21 +118,20 @@ pub(super) enum Call {
         take: usize,
     },
     Ui,
-    /// A snapshot at the path, if given, and whether the run ends once it's written.
+    /// A snapshot at the optional path; whether the run ends once it's written.
     Snapshot {
         path: Option<PathBuf>,
         quit: bool,
     },
     Patch(JumpTable),
-    /// An edit's operations, and the gesture it's part of, if it's sets of one field.
+    /// An edit's operations, and its gesture if it sets one field.
     Apply(Vec<gg_api::Operation>, Option<u64>),
-    /// The entity to save as a prefab and link to it, and the prefab file's path (checked to be a
-    /// `.prefab` file's).
+    /// The entity to save as a prefab and link, and the prefab's path (a checked `.prefab`).
     SavePrefab {
         id: EntityId,
         path: Option<PathBuf>,
     },
-    /// An undo or redo of the named author's edits, else the client's own.
+    /// Undoes or redoes the named author's edits, else the client's.
     Undo {
         author: Option<String>,
         redo: bool,
@@ -141,17 +140,16 @@ pub(super) enum Call {
     Quit,
 }
 
-/// The call `request` makes of the main loop.
+/// The main loop's call for `request`.
 ///
 /// Fails with:
 ///
-/// - `api.unknown_method`: an unknown method.
+/// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); a `scene`
-///   whose path is missing, given where none is taken, or not a `.ron` file's, or whose `discard`
-///   is given to `save`; a `save_prefab` whose path isn't a `.prefab` file's; a `frames` whose
-///   `dir` isn't an absolute path to a directory, whose `count` is 0 or past
-///   [`gg_api::MOST_FRAMES`], or whose viewpoints or `rect` (of no area) are invalid.
-/// - `api.bad_request`: a `hello` after the first.
+///   path missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
+///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
+///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
+/// - `api.bad_request`: a second `hello`.
 /// - `ecs.bad_id`: an invalid ID.
 pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
@@ -417,7 +415,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
     Ok(call)
 }
 
-/// Method `method`'s parameters, `params`, as a `T`; its defaults stand for what isn't given.
+/// `params` as a `T`; defaults fill what isn't given.
 pub(super) fn take<T: DeserializeOwned>(method: &str, params: &Value) -> Result<T, Failure> {
     let params = match params {
         Value::Null => Value::Object(serde_json::Map::new()),
@@ -426,7 +424,7 @@ pub(super) fn take<T: DeserializeOwned>(method: &str, params: &Value) -> Result<
     serde_json::from_value(params).map_err(|error| bad_params(method, format!("takes {error}")))
 }
 
-/// Checks that `method`, which takes nothing, is given nothing: no parameters, `null` or `{}`.
+/// Checks a method that takes nothing got no parameters, `null` or `{}`.
 fn none(method: &str, params: &Value) -> Result<(), Failure> {
     match params {
         Value::Null => Ok(()),
@@ -439,9 +437,7 @@ pub(super) fn bad_params(method: &str, what: impl Display) -> Failure {
     Failure::new("api.bad_params", format!("`{method}` {what}"))
 }
 
-/// The entity ID `text` gives.
-///
-/// Fails with `ecs.bad_id` if it gives none.
+/// The entity ID in `text`; `ecs.bad_id` if none.
 fn entity_id(text: &str) -> Result<EntityId, Failure> {
     text.parse().map_err(|error| failure(&error))
 }

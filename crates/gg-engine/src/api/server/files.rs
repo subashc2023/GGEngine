@@ -1,4 +1,4 @@
-//! The threads that write captures' PNGs and snapshots, and prune their directories.
+//! Threads writing captures' PNGs and snapshots, and pruning their directories.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,17 +16,15 @@ use crate::render_thread::Shot;
 use crate::scene_files::{Open, SceneFile};
 use crate::snapshot::{self, Run};
 
-/// How many of the newest PNGs the `captures` directory beside the executable keeps, as each
-/// capture without a path is written there. Older ones, including earlier runs', go.
+/// How many newest PNGs the `captures` directory beside the executable keeps. Captures without a
+/// path go there; older ones go, earlier runs' too.
 const KEPT_CAPTURES: usize = 32;
 
-/// How many of the newest snapshots the `snapshots` directory beside the executable keeps, as each
-/// snapshot without a path is written there. Those `gg run` takes, in a directory of its own
-/// inside it, are its to remove.
+/// How many newest snapshots the `snapshots` directory beside the executable keeps. Snapshots
+/// without a path go there. `gg run` removes its own, in a subdirectory of its own.
 const KEPT_SNAPSHOTS: usize = 8;
 
-/// A snapshot for the thread that writes them: the copy of the world, the ticks run when it was
-/// taken, where it goes, and where the answer goes.
+/// A snapshot for the writing thread. `ticks` is when it was taken.
 pub(super) struct Taken {
     pub(super) world: World,
     /// The scene files the layers loaded, which the restored run watches.
@@ -37,38 +35,35 @@ pub(super) struct Taken {
     /// The scripts the layers loaded, each a path and its text as last applied.
     pub(super) scripts: Vec<(String, String)>,
     pub(super) mods: Vec<crate::luau::ModText>,
-    /// What the run was doing, with its copy of the world as edited, if any; the restored run
-    /// goes on doing it.
+    /// What the run was doing, with any world as edited it held; the restored run goes on.
     pub(super) run: Run,
     /// Whether the simulation was paused; the restored run then is.
     pub(super) paused: bool,
     pub(super) ticks: u64,
     pub(super) path: PathBuf,
-    /// Whether the engine named the path (the request gave none), which prunes the directory.
+    /// Whether the engine named the path (none given); then the directory is pruned.
     pub(super) named: bool,
     pub(super) reply: Reply,
     /// Told after the answer whether the snapshot was written, for a snapshot the run waits for.
     pub(super) written: Option<Sender<bool>>,
 }
 
-/// A capture's PNG for the thread that writes them: the view, where it goes, the ticks run by the
-/// frame that shows it, whether textures or meshes were still streaming in, and where the answer
-/// goes.
+/// A capture for the PNG thread. `ticks` and `streaming` are its frame's.
 pub(super) struct Png {
     pub(super) shot: Arc<Shot>,
-    /// Where it goes; `None` for a capture of a pixel alone, which writes nothing.
+    /// `None` for a pixel-only capture, which writes nothing.
     pub(super) path: Option<PathBuf>,
     /// The pixel whose bytes the answer gives.
     pub(super) at: Option<[f64; 2]>,
-    /// Whether the engine named the path (the request gave none), which prunes the directory.
+    /// Whether the engine named the path (none given); then the directory is pruned.
     pub(super) named: bool,
     pub(super) ticks: u64,
     pub(super) streaming: bool,
     pub(super) reply: Reply,
 }
 
-/// What the PNG thread writes: a capture, or every frame of a `frames` into its directory,
-/// numbered from 1, answered once all are written.
+/// A capture, or a `frames`' frames into its directory, numbered from 1 and answered once all
+/// are written.
 pub(super) enum Writing {
     Capture(Png),
     Frames {
@@ -78,9 +73,8 @@ pub(super) enum Writing {
     },
 }
 
-/// Writes the captures `pngs` brings as PNGs, and each `frames`' frames as PNGs numbered from 1
-/// (`frame-0001.png` and on). Answers each once its PNGs are written, or as the first fails, until
-/// the API drops.
+/// Writes `pngs`' captures and frames as PNGs, frames numbered from 1 (`frame-0001.png` on).
+/// Answers each once written, or at its first failure, until the API drops.
 pub(super) fn write_pngs(pngs: &Receiver<Writing>) {
     for writing in pngs {
         let png = match writing {
@@ -126,8 +120,8 @@ pub(super) fn write_pngs(pngs: &Receiver<Writing>) {
     }
 }
 
-/// The RGBA bytes of the pixel `at` (`[x, y]` from the top left of `shot`'s view) falls in, as the
-/// PNG has them; `None` outside the view.
+/// The PNG's RGBA bytes of the pixel `at` falls in (`[x, y]` from the view's top left); `None`
+/// outside.
 fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
     let [width, height] = shot.size;
     let [x, y] = at.map(f64::floor);
@@ -139,9 +133,8 @@ fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
     shot.pixels.as_chunks::<4>().0.get(index).copied()
 }
 
-/// Writes the snapshots `taken` brings, each of app `app` with layers `layers`, as
-/// [`snapshot::write`] does, whole or not at all, making the `snapshots` directory beside the
-/// executable if it goes there. Answers each, until the API drops.
+/// Writes `taken`'s snapshots of app `app` with `layers` ([`snapshot::write`]), whole or not at
+/// all, making the `snapshots` directory if needed. Answers each, until the API drops.
 pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
     for Taken {
@@ -200,10 +193,10 @@ pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[Stri
 }
 
 /// Writes `shot` as an 8-bit RGB PNG at `path`, whole or not at all, making the `captures`
-/// directory beside the executable if it goes there. The view's pixels are sRGB-encoded, as a PNG's
-/// are taken to be absent a chunk saying otherwise; alpha is dropped, as the view shows opaque.
+/// directory if needed. The pixels are sRGB, as a PNG without a chunk saying otherwise is taken to
+/// be. Alpha is dropped: the view shows opaque.
 ///
-/// Fails with `api.capture_file` if it can't.
+/// Fails with `api.capture_file`.
 fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
     let failed = |error: Box<dyn std::error::Error + Send + Sync>| {
         let message = format!("can't write the capture {}", path.display());
@@ -234,9 +227,9 @@ fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
     Ok(())
 }
 
-/// Removes the files of `dir` the engine named ([`engine_named`]) with `extension`, except the
-/// newest `keep` by last write. Files a client named and subdirectories are left alone. A file
-/// that can't be removed, as one a client reads on Windows, stays for the next prune.
+/// Removes `dir`'s engine-named files ([`engine_named`]) with `extension`, but the newest `keep` by
+/// last write. Client-named files and subdirectories stay. A file that can't be removed, such as
+/// one a client reads on Windows, waits for the next prune.
 pub(super) fn prune(dir: &Path, extension: &str, keep: usize) {
     let entries = fs::read_dir(dir).into_iter().flatten().flatten();
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
@@ -251,8 +244,8 @@ pub(super) fn prune(dir: &Path, extension: &str, keep: usize) {
     }
 }
 
-/// Whether `name` is a file the engine named, with `extension`, for a capture or snapshot given no
-/// path: the session file's stem (app and process), then the number, as `sandbox-4242-7.png`.
+/// Whether `name`, with `extension`, is one the engine gives a capture or snapshot without a path:
+/// the session file's stem (app and process), then the number, as in `sandbox-4242-7.png`.
 pub(super) fn engine_named(name: &str, extension: &str) -> bool {
     let Some(stem) = name
         .strip_suffix(extension)
