@@ -2,20 +2,23 @@
 //! and from its File menu's Open Project, which goes back to the project open: the projects it
 //! knows, those opened lately, the latest first, then the rest of those in the engine's workspace,
 //! each a card that a click opens in the editor; a search through them; Open, whose dialog picks a
-//! project elsewhere by its manifest; New Project, which `gg new` makes in the workspace; and
-//! whether the editor opens the latest project as it starts, skipping the hub. The editor keeps the
-//! projects opened, and that choice, for the user from run to run.
+//! project elsewhere by its manifest; New Project, which `gg new` makes in a folder the OS's
+//! dialog picks, the workspace's games as it starts: a member of the workspace in its games folder,
+//! for a folder in the engine's workspace, and elsewhere a game of its own, which builds against
+//! the engine typed, the one the editor is built from as it starts; and whether the editor opens
+//! the latest project as it starts, skipping the hub. The editor keeps the projects opened, and
+//! that choice, for the user from run to run.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::{Failure, Project};
 use gg_engine::egui::{
-    self, Align, Button, Color32, CornerRadius, CursorIcon, FontFamily, Key, Layout, Rect,
+    self, Align, Button, Color32, CornerRadius, CursorIcon, FontFamily, Key, Label, Layout, Rect,
     RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, TextWrapMode, UiBuilder,
     WidgetText, pos2, vec2,
 };
@@ -57,6 +60,9 @@ pub enum Chosen {
     Open(PathBuf),
     /// Pick a project's manifest with the OS's dialog, whose folder opens.
     Browse,
+    /// Pick the folder New Project makes its game in with the OS's dialog, starting in this one,
+    /// and hand it to [`Hub::make_in`].
+    Folder(Option<PathBuf>),
     /// Go back to the project open, hiding the hub.
     Back,
 }
@@ -118,13 +124,76 @@ struct Shown {
     opened: Option<u64>,
 }
 
-/// The New Project form: the name typed, and while `gg new` makes it, what its run will send, the
-/// folder it made or why it made none; and why the last made none.
-#[derive(Default)]
+/// The New Project form: the name typed, where the game is made, if that's chosen, and the engine
+/// typed, which a game of its own builds against; and while `gg new` makes it, what its run will
+/// send, the folder it made or why it made none; and why the last made none.
 struct Making {
     name: String,
+    place: Option<Place>,
+    /// As `gg new --engine` takes it: an engine checkout's folder, or a git URL at a revision.
+    engine: String,
     run: Option<Receiver<Result<PathBuf, String>>>,
     failed: Option<String>,
+}
+
+/// Where New Project makes its game: the folder picked, and the engine's workspace that's in, if
+/// it is, as [`workspace`] finds it, found once as the folder's picked. In a workspace, `gg new`
+/// makes a member in its games folder, whichever of its folders was picked; elsewhere, a game of
+/// its own in the folder.
+struct Place {
+    folder: PathBuf,
+    workspace: Option<PathBuf>,
+}
+
+impl Making {
+    /// The form as it shows: no name, the game made in `workspace`'s games folder, if the editor
+    /// runs in one, and the engine the editor is built from.
+    fn new(workspace: Option<&Path>) -> Self {
+        let games = workspace.map(|workspace| workspace.join("games"));
+        Self {
+            name: String::new(),
+            place: games.map(Place::new),
+            engine: crate::engine().display().to_string(),
+            run: None,
+            failed: None,
+        }
+    }
+
+    /// Whether the form has what `gg new` needs but the name: a folder, and for a game of its own,
+    /// an engine.
+    fn ready(&self) -> bool {
+        let place = self.place.as_ref();
+        place.is_some_and(|place| place.workspace.is_some() || !self.engine.trim().is_empty())
+    }
+
+    /// `gg new` making the game the form describes, run as [`crate::gg`] runs gg, in the folder
+    /// picked: a member of the workspace that's in, if it is; else a game of its own there, which
+    /// builds against the engine typed. `None` while no folder is picked.
+    fn command(&self) -> Option<Command> {
+        let place = self.place.as_ref()?;
+        let mut command = crate::gg(&place.folder);
+        command.args(["new", &self.name]).stdin(Stdio::null());
+        if place.workspace.is_none() {
+            command.args(["--engine", self.engine.trim()]);
+        }
+        Some(command)
+    }
+}
+
+impl Place {
+    /// The place of a game made in `folder`.
+    fn new(folder: PathBuf) -> Self {
+        let workspace = workspace(Some(&folder), None);
+        Self { folder, workspace }
+    }
+
+    /// The folder the game's own folder is made in: its workspace's games, or the folder picked.
+    fn dir(&self) -> PathBuf {
+        match &self.workspace {
+            Some(workspace) => workspace.join("games"),
+            None => self.folder.clone(),
+        }
+    }
 }
 
 impl Kept {
@@ -236,6 +305,15 @@ impl Hub {
         self.refused = Some(why);
     }
 
+    /// Has New Project make its game in `folder`, as the OS's dialog picked it, while its form
+    /// shows.
+    pub fn make_in(&mut self, folder: PathBuf) {
+        if let Some(making) = &mut self.making {
+            making.place = Some(Place::new(folder));
+            making.failed = None;
+        }
+    }
+
     /// The workspace's `games` folder, if the editor runs in one.
     pub fn games(&self) -> Option<PathBuf> {
         self.workspace
@@ -273,7 +351,7 @@ impl Hub {
             }
             chosen = self.header(ui).or(chosen.take());
             ui.add_space(16.0);
-            self.forms(ui);
+            chosen = self.forms(ui).or(chosen.take());
             let field = TextEdit::singleline(&mut self.search)
                 .hint_text("Search projects")
                 .desired_width(f32::INFINITY)
@@ -358,13 +436,11 @@ impl Hub {
                 let new = Button::new(RichText::new("New Project").color(Color32::WHITE))
                     .fill(accent)
                     .min_size(vec2(0.0, 32.0));
-                let new = ui.add_enabled(self.workspace.is_some() && self.making.is_none(), new);
-                let tip = "Make a game of its own in the workspace's games folder, with `gg new`";
-                let new = new.on_hover_text(tip).on_disabled_hover_text(
-                    "Start the editor in GGEngine's workspace to make a project there",
-                );
-                if new.clicked() {
-                    self.making = Some(Making::default());
+                let new = ui.add_enabled(self.making.is_none(), new);
+                let tip = "Make a game with `gg new`: in the workspace's games folder, or a game \
+                           of its own in a folder you choose";
+                if new.on_hover_text(tip).clicked() {
+                    self.making = Some(Making::new(self.workspace.as_deref()));
                 }
                 let open = ui.add(Button::new("Open...").min_size(vec2(0.0, 32.0)));
                 if open
@@ -379,9 +455,11 @@ impl Hub {
     }
 
     /// Draws why the last project picked couldn't open, while it can't, and the New Project form,
-    /// while it shows: the name, why it isn't a game's, if it isn't, and Create, which has `gg new`
-    /// make the game, and Cancel; or while `gg new` makes it, a spinner.
-    fn forms(&mut self, ui: &mut egui::Ui) {
+    /// while it shows: the name, why it isn't a game's, if it isn't, Create, which has `gg new`
+    /// make the game, and Cancel; the folder it's made in, and Choose, which picks another; for a
+    /// game of its own, the engine; or while `gg new` makes it, a spinner. Returns Folder for
+    /// Choose's click.
+    fn forms(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
         let error = ui.visuals().error_fg_color;
         if let Some(why) = &self.refused {
             let mut dismissed = false;
@@ -398,10 +476,9 @@ impl Hub {
             }
             ui.add_space(12.0);
         }
-        let (Some(making), Some(workspace)) = (&mut self.making, &self.workspace) else {
-            return;
-        };
+        let making = self.making.as_mut()?;
         let mut cancelled = false;
+        let mut chosen = None;
         card_frame(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
@@ -418,29 +495,70 @@ impl Hub {
                 return;
             }
             let fine = new_project(&making.name);
+            let ready = fine.is_ok() && making.ready();
             ui.horizontal(|ui| {
                 let field = TextEdit::singleline(&mut making.name)
                     .hint_text("Name, such as my_game")
                     .desired_width(240.0);
                 let typed = ui.add(field);
                 let entered = typed.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                let create = ui.add_enabled(fine.is_ok(), Button::new("Create"));
-                if (create.clicked() || entered) && fine.is_ok() {
+                let create = ui.add_enabled(ready, Button::new("Create"));
+                if (create.clicked() || entered)
+                    && ready
+                    && let Some(command) = making.command()
+                {
                     making.failed = None;
-                    making.run = Some(make(workspace, &making.name));
+                    making.run = Some(make(command));
                 }
                 cancelled = ui.button("Cancel").clicked();
             });
-            let games = workspace.join("games");
-            match (&fine, &making.failed) {
-                (_, Some(failed)) => {
+            ui.horizontal(|ui| {
+                ui.label("In");
+                let choose = ui.button("Choose...");
+                let tip = "Choose the folder to make the game in, with the OS's dialog";
+                if choose.on_hover_text(tip).clicked() {
+                    let start = making.place.as_ref().map(|place| place.folder.clone());
+                    chosen = Some(Chosen::Folder(start));
+                }
+                // Cut short, the whole folder showing as the pointer's over it, rather than widening
+                // the hub's column.
+                match &making.place {
+                    Some(place) => {
+                        ui.add(Label::new(place.folder.display().to_string()).truncate())
+                    }
+                    None => ui.weak("no folder chosen"),
+                };
+            });
+            let outside = (making.place.as_ref()).is_some_and(|place| place.workspace.is_none());
+            if outside {
+                ui.horizontal(|ui| {
+                    ui.label("Engine");
+                    let field = TextEdit::singleline(&mut making.engine)
+                        .hint_text("An engine checkout's folder, or <git URL>#<revision>")
+                        .desired_width(f32::INFINITY);
+                    let tip = "The engine the game builds against, as `gg new --engine` takes it";
+                    ui.add(field).on_hover_text(tip);
+                });
+            }
+            match (&fine, &making.failed, &making.place) {
+                (_, Some(failed), _) => {
                     ui.colored_label(error, failed.as_str());
                 }
-                (Err(why), None) if !making.name.is_empty() => {
+                (Err(why), None, _) if !making.name.is_empty() => {
                     ui.colored_label(error, why.as_str());
                 }
-                _ => {
-                    ui.weak(format!("Made in {} by `gg new`", games.display()));
+                (_, None, None) => {
+                    ui.weak("Choose the folder to make the game in");
+                }
+                (_, None, Some(place)) if outside => {
+                    ui.weak(format!(
+                        "Made in {} by `gg new`, a game of its own, a workspace that builds \
+                         against the engine",
+                        place.dir().display()
+                    ));
+                }
+                (_, None, Some(place)) => {
+                    ui.weak(format!("Made in {} by `gg new`", place.dir().display()));
                 }
             }
         });
@@ -448,6 +566,7 @@ impl Hub {
             self.making = None;
         }
         ui.add_space(12.0);
+        chosen
     }
 
     /// Draws the projects whose names or folders' names hold the search, whatever their case,
@@ -753,12 +872,10 @@ fn new_project(name: &str) -> Result<(), String> {
     project.check().map_err(|failure| failure.message)
 }
 
-/// Runs `gg new <name>` in `workspace`, as [`crate::gg`] runs gg, on a thread of its own, whose
-/// result comes back as [`made`] reads it.
-fn make(workspace: &Path, name: &str) -> Receiver<Result<PathBuf, String>> {
+/// Runs `command`, `gg new` as [`Making::command`] gives it, on a thread of its own, whose result
+/// comes back as [`made`] reads it.
+fn make(mut command: Command) -> Receiver<Result<PathBuf, String>> {
     let (send, made_it) = mpsc::channel();
-    let mut command = crate::gg(workspace);
-    command.args(["new", name]).stdin(Stdio::null());
     thread::spawn(move || {
         let output = command.output();
         let result = output
@@ -945,6 +1062,25 @@ mod tests {
         (chosen, texts(&output.shapes))
     }
 
+    /// A click at `at` on `hub`, over the project in `current`, as three frames give it: the
+    /// pointer moving there, pressing and letting go; and what the last chose.
+    fn click(
+        ctx: &egui::Context,
+        hub: &mut Hub,
+        current: Option<&Path>,
+        at: Pos2,
+    ) -> Option<Chosen> {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(ctx, hub, current, vec![Event::PointerMoved(at)]);
+        frame(ctx, hub, current, vec![button(true)]);
+        frame(ctx, hub, current, vec![button(false)]).0
+    }
+
     /// A click on a project's card opens it, and on the open project's goes back to it, as Back
     /// does, and Escape; Open asks for the dialog; and the search shows only the projects that
     /// match it.
@@ -956,17 +1092,7 @@ mod tests {
         let ctx = egui::Context::default();
         let a = scratch.0.join("games/a");
         let b = scratch.0.join("games/b");
-        let click = |hub: &mut Hub, current: Option<&Path>, at: Pos2| {
-            let button = |pressed| Event::PointerButton {
-                pos: at,
-                button: PointerButton::Primary,
-                pressed,
-                modifiers: Modifiers::NONE,
-            };
-            frame(&ctx, hub, current, vec![Event::PointerMoved(at)]);
-            frame(&ctx, hub, current, vec![button(true)]);
-            frame(&ctx, hub, current, vec![button(false)]).0
-        };
+        let click = |hub: &mut Hub, current: Option<&Path>, at: Pos2| click(&ctx, hub, current, at);
         let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
         assert_eq!(
             click(&mut hub, None, find(&shown, "b").center()),
@@ -1026,6 +1152,91 @@ mod tests {
             made(&output(101, "", "error: no such command")),
             Err("error: no such command".to_owned())
         );
+    }
+
+    /// New Project makes its game in the folder chosen. Outside a workspace, the form starts with
+    /// none, Create off until Choose's dialog picks one, and then makes a game of its own there,
+    /// `gg new <NAME> --engine <ENGINE>`, the engine the editor is built from as the form starts,
+    /// none typed leaving Create off; a folder of a long name keeps to the hub's column. In a
+    /// workspace, it starts in the workspace's games folder and makes a member there, `gg new
+    /// <NAME>`, whichever of the workspace's folders is chosen.
+    #[test]
+    fn new_project_makes_its_game_in_the_folder_chosen() {
+        let elsewhere = Scratch::new("hub-new-outside");
+        let outside = elsewhere.0.join("a".repeat(120));
+        fs::create_dir(&outside).expect("made");
+        let ctx = egui::Context::default();
+        let args = |command: &Command| -> Vec<String> {
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned());
+            args.skip_while(|arg| arg != "--").skip(1).collect()
+        };
+        let says = |shown: &[(String, Rect)], start: &str| {
+            assert!(
+                shown.iter().any(|(text, _)| text.starts_with(start)),
+                "{start}: {shown:?}"
+            );
+        };
+        let mut hub = Hub::new(None);
+        let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
+        assert_eq!(
+            click(&ctx, &mut hub, None, find(&shown, "New Project").center()),
+            None
+        );
+        let making = hub.making.as_mut().expect("the form shows");
+        making.name = "probe".to_owned();
+        assert!(!making.ready() && making.command().is_none(), "no folder");
+        let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
+        find(&shown, "no folder chosen");
+        let choose = click(&ctx, &mut hub, None, find(&shown, "Choose...").center());
+        assert_eq!(choose, Some(Chosen::Folder(None)));
+        hub.make_in(outside.clone());
+        let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
+        let engine = crate::engine().display().to_string();
+        find(&shown, &engine);
+        says(
+            &shown,
+            &format!(
+                "Made in {} by `gg new`, a game of its own",
+                outside.display()
+            ),
+        );
+        let column = 800.0 - MARGIN;
+        let wide = shown.iter().find(|(_, rect)| rect.max.x > column);
+        assert!(wide.is_none(), "past the column: {wide:?}");
+        let making = hub.making.as_mut().expect("the form shows");
+        let command = making.command().expect("a folder");
+        assert_eq!(
+            args(&command),
+            ["new", "probe", "--engine", engine.as_str()]
+        );
+        assert_eq!(command.get_current_dir(), Some(outside.as_path()));
+        making.engine = " ".to_owned();
+        assert!(!making.ready(), "no engine");
+
+        let scratch = Scratch::new("hub-new");
+        workspace_in(&scratch.0);
+        let games = scratch.0.join("games");
+        let mut hub = Hub::new(Some(scratch.0.clone()));
+        let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
+        click(&ctx, &mut hub, None, find(&shown, "New Project").center());
+        hub.making.as_mut().expect("the form shows").name = "probe".to_owned();
+        let (_, shown) = frame(&ctx, &mut hub, None, Vec::new());
+        says(&shown, &format!("Made in {} by `gg new`", games.display()));
+        assert!(!shown.iter().any(|(text, _)| text == "Engine"), "{shown:?}");
+        let inside = games.join("a").join("src");
+        fs::create_dir_all(&inside).expect("made");
+        for folder in [&games, &inside] {
+            hub.make_in(folder.clone());
+            let making = hub.making.as_ref().expect("the form shows");
+            assert!(making.ready());
+            let command = making.command().expect("a folder");
+            assert_eq!(args(&command), ["new", "probe"]);
+            assert_eq!(command.get_current_dir(), Some(folder.as_path()));
+            let place = making.place.as_ref().expect("a folder");
+            assert_eq!(place.dir(), games);
+        }
     }
 
     /// An exit status of `code`, as a process that ended so gives.

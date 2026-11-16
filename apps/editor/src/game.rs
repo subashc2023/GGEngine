@@ -122,7 +122,7 @@ use gg_engine::math::{DVec3, Quat, Vec2};
 use gg_engine::reflect::{self, Reflect};
 use gg_engine::{
     App, Context, Docked, EntityId, Event, FileDialog, Inspector, InspectorLink, Key, Layer,
-    MouseButton, Name, PerfPanel, Projection, Scroll, Transform, Ui, Viewpoint, Viewport,
+    MouseButton, Name, PerfPanel, Picks, Projection, Scroll, Transform, Ui, Viewpoint, Viewport,
 };
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -1153,7 +1153,7 @@ impl Game {
         let games = self.hub_games();
         let picked = cx.pick_file(&FileDialog {
             title: "Open a project's manifest",
-            save: false,
+            picks: Picks::Open,
             filter: Some(("Project manifests", &["ron"])),
             directory: games.as_deref(),
             file_name: Some(gg_api::Project::FILE),
@@ -1173,6 +1173,21 @@ impl Game {
             Err(failure) => self
                 .hub
                 .refuse(format!("[{}] {}", failure.code, failure.message)),
+        }
+    }
+
+    /// Picks the folder the hub's New Project makes its game in with the OS's dialog, from
+    /// [`Layer::ui`], starting in `start`, and has the form make it there.
+    fn pick_folder(&mut self, cx: &mut Context, start: Option<&Path>) {
+        let picked = cx.pick_file(&FileDialog {
+            title: "Choose the folder to make the project in",
+            picks: Picks::Folder,
+            filter: None,
+            directory: start,
+            file_name: None,
+        });
+        if let Some(folder) = picked {
+            self.hub.make_in(folder);
         }
     }
 
@@ -1219,7 +1234,7 @@ impl Game {
             } else {
                 "Open a scene"
             },
-            save,
+            picks: if save { Picks::Save } else { Picks::Open },
             filter: Some(("Scenes", &["ron"])),
             directory: directory.or(folders.scenes.first().map(PathBuf::as_path)),
             file_name: file_name.and_then(OsStr::to_str),
@@ -2334,6 +2349,7 @@ impl Layer for Game {
             match ui.cover(|ui| hub.show(ui, current.as_deref())) {
                 Some(hub::Chosen::Open(dir)) => self.switch_to(dir),
                 Some(hub::Chosen::Browse) => self.browse(cx),
+                Some(hub::Chosen::Folder(start)) => self.pick_folder(cx, start.as_deref()),
                 Some(hub::Chosen::Back) => self.hub.asked = false,
                 None => {}
             }

@@ -62,17 +62,22 @@ fn app(release_game: bool) -> App {
     game::app(project, workspace, release_game)
 }
 
+/// The engine the editor is built from: the directory of its checkout, two folders above the
+/// editor's.
+fn engine() -> &'static Path {
+    let editor = Path::new(env!("CARGO_MANIFEST_DIR"));
+    (editor.ancestors().nth(2)).expect("the editor is at apps/editor in the engine")
+}
+
 /// Cargo running gg in directory `dir`, whose cargo config and toolchain apply, gg's arguments to
-/// follow: gg built from the source of the engine the editor is built from, by its manifest, as
+/// follow: gg built from the source of the [`engine`] the editor is built from, by its manifest, as
 /// `cargo gg` builds it in the engine's workspace, and as no alias can in a game's own workspace.
 /// Cargo is the one `CARGO` names, as cargo sets it for what it runs, else the first on the `PATH`.
 fn gg(dir: &Path) -> Command {
-    let editor = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let engine = (editor.ancestors().nth(2)).expect("the editor is at apps/editor in the engine");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
     command.args(["run", "--quiet", "--manifest-path"]);
-    command.arg(engine.join("tools").join("gg").join("Cargo.toml"));
+    command.arg(engine().join("tools").join("gg").join("Cargo.toml"));
     command.arg("--").current_dir(dir);
     command
 }

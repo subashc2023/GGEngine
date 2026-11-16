@@ -186,7 +186,7 @@ pub use camera::{
 pub use canvas::{CANVAS_HEIGHT, Canvas};
 pub use cells::{Cell, Cells, Streamed, Viewer};
 #[cfg(feature = "dev")]
-pub use dialog::FileDialog;
+pub use dialog::{FileDialog, Picks};
 pub use dock::{Docked, Ui};
 pub use ecs::{
     Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Pose, Query,

@@ -10380,7 +10380,7 @@ mod tests {
         let mut cx = Context::seeded(0);
         let dialog = crate::FileDialog {
             title: "Save the scene as",
-            save: true,
+            picks: crate::Picks::Save,
             filter: Some(("Scenes", &["ron"])),
             directory: Some(Path::new("scenes")),
             file_name: Some("grid.ron"),
